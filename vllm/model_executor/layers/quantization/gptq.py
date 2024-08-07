@@ -211,12 +211,16 @@ class GPTQLinearMethod(LinearMethodBase):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        qweight = layer.qweight
-        scales = layer.scales
-        qzeros = layer.qzeros
-        out_shape = x.shape[:-1] + (qweight.shape[-1], )
-        reshaped_x = x.reshape(-1, x.shape[-1])
+        # qweight = layer.qweight
+        # scales = layer.scales
+        # qzeros = layer.qzeros
+        # out_shape = x.shape[:-1] + (qweight.shape[-1], )
+        # reshaped_x = x.reshape(-1, x.shape[-1])
         if not hasattr(layer,"ipex_qlinear") :
+            self.weight_shape = layer.qweight.shape
+            qweight = layer.qweight
+            scales = layer.scales
+            qzeros = layer.qzeros
             from intel_extension_for_pytorch.quantization import WoqWeightDtype
             from intel_extension_for_pytorch.utils.weight_only_quantization import (
                 _woq_enable_weight_cache_for_large_batch,
@@ -247,7 +251,13 @@ class GPTQLinearMethod(LinearMethodBase):
                 qconfig
             )
 
-            layer.ipex_qlinear = ipex.nn.modules.weight_only_quantization.WeightOnlyQuantizedLinear.from_int4_weight(qweight, scales, qzeros, x.shape[-1], out_shape[-1], qconfig=qconfig, bias=bias, group_size=self.quant_config.group_size, is_gptq=True, is_intel_autoround=self.quant_config.is_intel_autoround)
+            layer.ipex_qlinear = ipex.nn.modules.weight_only_quantization.WeightOnlyQuantizedLinear.from_int4_weight(qweight, scales, qzeros, x.shape[-1], self.weight_shape[-1], qconfig=qconfig, bias=bias, group_size=self.quant_config.group_size, is_gptq=True, is_intel_autoround=self.quant_config.is_intel_autoround)
+            layer.qweight = None
+            layer.scales = None
+            layer.qzeros = None
+            layer.g_idx = None
+        out_shape = x.shape[:-1] + (self.weight_shape[-1], )
+        reshaped_x = x.reshape(-1, x.shape[-1])
         out = layer.ipex_qlinear(reshaped_x)
 
         return out.reshape(out_shape)
