@@ -435,7 +435,7 @@ def gguf_quant_weights_iterator(
     reader = gguf.GGUFReader(gguf_file)
 
     for tensor in reader.tensors:
-        if tensor.name in gguf_to_hf_name_map.keys():
+        if tensor.name in gguf_to_hf_name_map:
             weight_type = tensor.tensor_type
             name = gguf_to_hf_name_map[tensor.name]
 
@@ -445,7 +445,7 @@ def gguf_quant_weights_iterator(
                 yield weight_type_name, weight_type
 
     for tensor in reader.tensors:
-        if tensor.name in gguf_to_hf_name_map.keys():
+        if tensor.name in gguf_to_hf_name_map:
             weight = tensor.data
             weight_type = tensor.tensor_type
             name = gguf_to_hf_name_map[tensor.name]
