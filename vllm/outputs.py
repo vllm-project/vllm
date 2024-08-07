@@ -1,13 +1,11 @@
 import time
-from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Union
 
 from vllm.lora.request import LoRARequest
 from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
                            SequenceGroup, SequenceStatus)
 
 
-@dataclass
 class CompletionOutput:
     """The output data of one completion output of a request.
 
@@ -26,14 +24,25 @@ class CompletionOutput:
         lora_request: The LoRA request that was used to generate the output.
     """
 
-    index: int
-    text: str
-    token_ids: Tuple[int, ...]
-    cumulative_logprob: Optional[float]
-    logprobs: Optional[SampleLogprobs]
-    finish_reason: Optional[str] = None
-    stop_reason: Union[int, str, None] = None
-    lora_request: Optional[LoRARequest] = None
+    def __init__(
+        self,
+        index: int,
+        text: str,
+        token_ids: List[int],
+        cumulative_logprob: float,
+        logprobs: Optional[SampleLogprobs],
+        finish_reason: Optional[str] = None,
+        stop_reason: Union[int, str, None] = None,
+        lora_request: Optional[LoRARequest] = None,
+    ) -> None:
+        self.index = index
+        self.text = text
+        self.token_ids = token_ids
+        self.cumulative_logprob = cumulative_logprob
+        self.logprobs = logprobs
+        self.finish_reason = finish_reason
+        self.stop_reason = stop_reason
+        self.lora_request = lora_request
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -48,7 +57,6 @@ class CompletionOutput:
                 f"stop_reason={self.stop_reason})")
 
 
-@dataclass
 class EmbeddingOutput:
     """The output data of one completion output of a request.
 
@@ -57,11 +65,15 @@ class EmbeddingOutput:
         length of vector depends on the model as listed in the embedding guide.
     """
 
-    embedding: List[float]
+    def __init__(
+        self,
+        embedding: List[float],
+    ) -> None:
+        self.embedding = embedding
 
     def __repr__(self) -> str:
         return (f"EmbeddingOutput("
-                f"embedding={len(self.embedding)})")
+                f"embedding={len(self.embedding)}")
 
 
 class RequestOutput:
@@ -70,34 +82,24 @@ class RequestOutput:
     Args:
         request_id: The unique ID of the request.
         prompt: The prompt string of the request.
-                For encoder/decoder models, this is the
-                decoder input prompt.
         prompt_token_ids: The token IDs of the prompt.
-                          For encoder/decoder models, this is the
-                          decoder input prompt token ids.
         prompt_logprobs: The log probabilities to return per prompt token.
         outputs: The output sequences of the request.
         finished: Whether the whole request is finished.
         metrics: Metrics associated with the request.
         lora_request: The LoRA request that was used to generate the output.
-        encoder_prompt: The encoder prompt string of the request; 
-                        None if decoder-only
-        encoder_prompt_token_ids: The token IDs of the encoder prompt;
-                                  None if decoder-only
     """
 
     def __init__(
         self,
         request_id: str,
-        prompt: Optional[str],
+        prompt: str,
         prompt_token_ids: List[int],
         prompt_logprobs: Optional[PromptLogprobs],
         outputs: List[CompletionOutput],
         finished: bool,
         metrics: Optional[RequestMetrics] = None,
         lora_request: Optional[LoRARequest] = None,
-        encoder_prompt: Optional[str] = None,
-        encoder_prompt_token_ids: Optional[List[int]] = None,
     ) -> None:
         self.request_id = request_id
         self.prompt = prompt
@@ -107,8 +109,6 @@ class RequestOutput:
         self.finished = finished
         self.metrics = metrics
         self.lora_request = lora_request
-        self.encoder_prompt = encoder_prompt
-        self.encoder_prompt_token_ids = encoder_prompt_token_ids
 
     @classmethod
     def from_seq_group(cls, seq_group: SequenceGroup) -> "RequestOutput":
@@ -136,21 +136,18 @@ class RequestOutput:
         include_logprobs = seq_group.sampling_params.logprobs is not None
         text_buffer_length = seq_group.sampling_params.output_text_buffer_length
         outputs = [
-            CompletionOutput(
-                seqs.index(seq),
-                seq.get_output_text_to_return(text_buffer_length),
-                seq.get_output_token_ids(),
-                seq.get_cumulative_logprob() if include_logprobs else None,
-                seq.output_logprobs if include_logprobs else None,
-                SequenceStatus.get_finished_reason(seq.status),
-                seq.stop_reason) for seq in top_n_seqs
+            CompletionOutput(seqs.index(seq),
+                             seq.get_output_text_to_return(text_buffer_length),
+                             seq.get_output_token_ids(),
+                             seq.get_cumulative_logprob(),
+                             seq.output_logprobs if include_logprobs else None,
+                             SequenceStatus.get_finished_reason(seq.status),
+                             seq.stop_reason) for seq in top_n_seqs
         ]
 
         # Every sequence in the sequence group should have the same prompt.
         prompt = seq_group.prompt
         prompt_token_ids = seq_group.prompt_token_ids
-        encoder_prompt = seq_group.encoder_prompt
-        encoder_prompt_token_ids = seq_group.encoder_prompt_token_ids
         prompt_logprobs = seq_group.prompt_logprobs
         finished = seq_group.is_finished()
         finished_time = time.time() if finished else None
@@ -162,16 +159,12 @@ class RequestOutput:
                    outputs,
                    finished,
                    seq_group.metrics,
-                   lora_request=seq_group.lora_request,
-                   encoder_prompt=encoder_prompt,
-                   encoder_prompt_token_ids=encoder_prompt_token_ids)
+                   lora_request=seq_group.lora_request)
 
     def __repr__(self) -> str:
         return (f"RequestOutput(request_id={self.request_id}, "
                 f"prompt={self.prompt!r}, "
                 f"prompt_token_ids={self.prompt_token_ids}, "
-                f"encoder_prompt={self.encoder_prompt!r}, "
-                f"encoder_prompt_token_ids={self.encoder_prompt_token_ids}, "
                 f"prompt_logprobs={self.prompt_logprobs}, "
                 f"outputs={self.outputs}, "
                 f"finished={self.finished}, "
@@ -190,7 +183,7 @@ class EmbeddingRequestOutput:
         finished (bool): A flag indicating whether the embedding is completed.
     """
 
-    def __init__(self, request_id: str, outputs: "EmbeddingOutput",
+    def __init__(self, request_id: str, outputs: 'EmbeddingOutput',
                  prompt_token_ids: List[int], finished: bool):
         self.request_id = request_id
         self.prompt_token_ids = prompt_token_ids

@@ -149,7 +149,7 @@ def test_complex():
     # Only the first seq group has a new token appended.
     append_new_token(running[0], 1)
 
-    # Add 2 more requests.
+    # Add 2 more requsets.
     for i in range(2, 4):
         _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
         scheduler.add_seq_group(seq_group)
@@ -483,11 +483,11 @@ def test_chunked_prefill_preempt():
     # The request should be preempted.
     scheduler.block_manager.can_append_slots = MagicMock()
 
-    def cannot_append_second_group1(seq_group, num_lookahead_slots):
+    def cannot_append_second_group(seq_group, num_lookahead_slots):
         return seq_group.request_id != "1"
 
     scheduler.block_manager.can_append_slots.side_effect = (
-        cannot_append_second_group1)
+        cannot_append_second_group)
 
     # The running prefill is now preempted.
     _, out = schedule_and_update_computed_tokens(scheduler)
@@ -505,11 +505,11 @@ def test_chunked_prefill_preempt():
     assert seq_group.get_num_uncomputed_tokens() == 30
 
     # We should be able to run prefill twice as it is chunked.
-    def cannot_append_second_group2(seq_group, num_lookahead_slots):
+    def cannot_append_second_group(seq_group, num_lookahead_slots):
         return True
 
     scheduler.block_manager.can_append_slots.side_effect = (
-        cannot_append_second_group2)
+        cannot_append_second_group)
     _, out = schedule_and_update_computed_tokens(scheduler)
     assert len(out.scheduled_seq_groups) == 1
     assert out.num_prefill_groups == 1
@@ -530,7 +530,7 @@ def test_chunked_prefill_max_seqs():
     cache_config.num_cpu_blocks = 8
     cache_config.num_gpu_blocks = 8
     scheduler = Scheduler(scheduler_config, cache_config, None)
-    running: List[SequenceGroup] = []
+    running = []
 
     _, seq_group = create_dummy_prompt("1", prompt_length=65)
     scheduler.add_seq_group(seq_group)

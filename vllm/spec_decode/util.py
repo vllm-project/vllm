@@ -1,14 +1,26 @@
-import time
 from contextlib import contextmanager
-from typing import Dict, List, Optional, Tuple
+from itertools import chain
+from typing import Dict, List, Tuple
 
 import torch
 
 from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
                            SamplerOutput, SequenceGroupMetadata,
-                           SequenceOutput)
+                           SequenceGroupOutput, SequenceOutput)
 
 SeqId = int
+
+
+def get_all_seq_ids(
+        seq_group_metadata_list: List[SequenceGroupMetadata]) -> List[SeqId]:
+    """Given a list of SequenceGroupMetadata, create a list of all
+    sequence ids.
+    """
+    return list(
+        chain.from_iterable([
+            seq_group_metadata.seq_data.keys()
+            for seq_group_metadata in seq_group_metadata_list
+        ]))
 
 
 def get_all_num_logprobs(
@@ -19,10 +31,10 @@ def get_all_num_logprobs(
     sequence.
     """
 
-    all_num_logprobs: List[int] = []
+    all_num_logprobs = []
     for seq_group_metadata in seq_group_metadata_list:
         num_logprobs = seq_group_metadata.sampling_params.logprobs
-        if num_logprobs is None:
+        if seq_group_metadata.sampling_params.logprobs is None:
             num_logprobs = 0
         all_num_logprobs.append(num_logprobs)
 
@@ -54,9 +66,9 @@ def create_sequence_group_output(
     token_id_logprob_rank: int,
     token_id_logprob: float,
     seq_id: SeqId,
-    topk_token_ids: List[Optional[int]],
-    topk_logprobs: List[Optional[float]],
-) -> CompletionSequenceGroupOutput:
+    topk_token_ids: List[int],
+    topk_logprobs: List[float],
+) -> SequenceGroupOutput:
     """Create a SequenceGroupOutput given the sampling results.
 
     Args:
@@ -69,7 +81,7 @@ def create_sequence_group_output(
     """
     # vLLM logprobs always include the sampled token. In addition, the user may
     # request topk-logprobs (where top-k varies per user up to max_logprobs).
-    logprobs: Dict[Optional[int], Logprob] = {
+    logprobs: Dict[int, Logprob] = {
         token_id: Logprob(
             logprob=token_id_logprob,
             rank=token_id_logprob_rank,
@@ -215,17 +227,3 @@ def nvtx_range(msg, *args, **kwargs):
         yield
     finally:
         torch.cuda.nvtx.range_pop()
-
-
-class Timer:
-    """Basic timer context manager for measuring CPU time.
-    """
-
-    def __enter__(self):
-        self.start_time = time.time()
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.end_time = time.time()
-        self.elapsed_time_s = self.end_time - self.start_time
-        self.elapsed_time_ms = self.elapsed_time_s * 1000

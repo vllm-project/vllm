@@ -1,22 +1,13 @@
 from abc import ABC, abstractmethod
-from typing import List, Optional, Union
+from typing import List, Optional
 
-from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+from transformers import PreTrainedTokenizer
 
-from vllm.config import TokenizerPoolConfig
 from vllm.lora.request import LoRARequest
-
-AnyTokenizer = Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
 
 
 class BaseTokenizerGroup(ABC):
     """A group of tokenizers that can be used for LoRA adapters."""
-
-    @classmethod
-    @abstractmethod
-    def from_config(cls, tokenizer_pool_config: Optional[TokenizerPoolConfig],
-                    **init_kwargs) -> "BaseTokenizerGroup":
-        pass
 
     @abstractmethod
     def ping(self) -> bool:
@@ -49,20 +40,16 @@ class BaseTokenizerGroup(ABC):
 
     @abstractmethod
     def get_lora_tokenizer(
-        self,
-        lora_request: Optional[LoRARequest] = None,
-    ) -> AnyTokenizer:
+            self,
+            lora_request: Optional[LoRARequest] = None
+    ) -> "PreTrainedTokenizer":
         """Get a tokenizer for a LoRA request."""
         pass
 
     @abstractmethod
     async def get_lora_tokenizer_async(
-        self,
-        lora_request: Optional[LoRARequest] = None,
-    ) -> AnyTokenizer:
+            self,
+            lora_request: Optional[LoRARequest] = None
+    ) -> "PreTrainedTokenizer":
         """Get a tokenizer for a LoRA request."""
         pass
-
-    def check_health(self):
-        """Raise exception if the tokenizer group is unhealthy."""
-        return

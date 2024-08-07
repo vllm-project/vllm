@@ -4,7 +4,6 @@ Run `pytest tests/quantization/test_configs.py --forked`.
 """
 
 from dataclasses import dataclass
-from typing import Tuple
 
 import pytest
 
@@ -44,15 +43,15 @@ MODEL_ARG_EXPTYPES = [
     ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", "awq", "ERROR"),
 
     # AUTOAWQ
-    ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", None, "awq_marlin"),
+    ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", None, "awq"),
     ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", "awq", "awq"),
-    ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", "marlin", "awq_marlin"),
+    ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", "marlin", "ERROR"),
     ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", "gptq", "ERROR"),
 ]
 
 
 @pytest.mark.parametrize("model_arg_exptype", MODEL_ARG_EXPTYPES)
-def test_auto_gptq(model_arg_exptype: Tuple[str, None, str]) -> None:
+def test_auto_gptq(model_arg_exptype: str) -> None:
     model_path, quantization_arg, expected_type = model_arg_exptype
 
     try:

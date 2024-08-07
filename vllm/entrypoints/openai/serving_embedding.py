@@ -1,17 +1,14 @@
-import asyncio
-import base64
 import time
-from typing import AsyncGenerator, AsyncIterator, List, Optional, Tuple, cast
+from typing import AsyncIterator, List, Tuple
 
-import numpy as np
 from fastapi import Request
 
 from vllm.config import ModelConfig
-from vllm.engine.protocol import AsyncEngineClient
-from vllm.entrypoints.logger import RequestLogger
+from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (EmbeddingRequest,
                                               EmbeddingResponse,
                                               EmbeddingResponseData, UsageInfo)
+from vllm.entrypoints.openai.serving_completion import parse_prompt_format
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.logger import init_logger
 from vllm.outputs import EmbeddingRequestOutput
@@ -23,18 +20,19 @@ TypeTokenIDs = List[int]
 
 
 def request_output_to_embedding_response(
-        final_res_batch: List[EmbeddingRequestOutput], request_id: str,
-        created_time: int, model_name: str,
-        encoding_format: str) -> EmbeddingResponse:
-    data: List[EmbeddingResponseData] = []
+    final_res_batch: List[EmbeddingRequestOutput],
+    request_id: str,
+    created_time: int,
+    model_name: str,
+) -> EmbeddingResponse:
+    data = []
     num_prompt_tokens = 0
     for idx, final_res in enumerate(final_res_batch):
+        assert final_res is not None
         prompt_token_ids = final_res.prompt_token_ids
-        embedding = final_res.outputs.embedding
-        if encoding_format == "base64":
-            embedding_bytes = np.array(embedding).tobytes()
-            embedding = base64.b64encode(embedding_bytes).decode("utf-8")
-        embedding_data = EmbeddingResponseData(index=idx, embedding=embedding)
+
+        embedding_data = EmbeddingResponseData(
+            index=idx, embedding=final_res.outputs.embedding)
         data.append(embedding_data)
 
         num_prompt_tokens += len(prompt_token_ids)
@@ -55,20 +53,12 @@ def request_output_to_embedding_response(
 
 class OpenAIServingEmbedding(OpenAIServing):
 
-    def __init__(
-        self,
-        async_engine_client: AsyncEngineClient,
-        model_config: ModelConfig,
-        served_model_names: List[str],
-        *,
-        request_logger: Optional[RequestLogger],
-    ):
-        super().__init__(async_engine_client=async_engine_client,
+    def __init__(self, engine: AsyncLLMEngine, model_config: ModelConfig,
+                 served_model_names: List[str]):
+        super().__init__(engine=engine,
                          model_config=model_config,
                          served_model_names=served_model_names,
-                         lora_modules=None,
-                         prompt_adapters=None,
-                         request_logger=request_logger)
+                         lora_modules=None)
         self._check_embedding_mode(model_config.embedding_mode)
 
     async def create_embedding(self, request: EmbeddingRequest,
@@ -82,87 +72,57 @@ class OpenAIServingEmbedding(OpenAIServing):
         if error_check_ret is not None:
             return error_check_ret
 
-        encoding_format = (request.encoding_format
-                           if request.encoding_format else "float")
+        # Return error for unsupported features.
+        if request.encoding_format == "base64":
+            return self.create_error_response(
+                "base64 encoding is not currently supported")
         if request.dimensions is not None:
             return self.create_error_response(
                 "dimensions is currently not supported")
 
         model_name = request.model
-        request_id = f"embd-{random_uuid()}"
+        request_id = f"cmpl-{random_uuid()}"
         created_time = int(time.monotonic())
 
         # Schedule the request and get the result generator.
-        generators: List[AsyncGenerator[EmbeddingRequestOutput, None]] = []
+        generators = []
         try:
-            (
-                lora_request,
-                prompt_adapter_request,
-            ) = self._maybe_get_adapters(request)
-
-            tokenizer = await self.async_engine_client.get_tokenizer(
-                lora_request)
-
+            prompt_is_tokens, prompts = parse_prompt_format(request.input)
             pooling_params = request.to_pooling_params()
 
-            prompts = list(
-                self._tokenize_prompt_input_or_inputs(
-                    request,
-                    tokenizer,
-                    request.input,
-                ))
+            for i, prompt in enumerate(prompts):
+                if prompt_is_tokens:
+                    prompt_formats = self._validate_prompt_and_tokenize(
+                        request, prompt_ids=prompt)
+                else:
+                    prompt_formats = self._validate_prompt_and_tokenize(
+                        request, prompt=prompt)
 
-            for i, prompt_inputs in enumerate(prompts):
-                request_id_item = f"{request_id}-{i}"
+                prompt_ids, prompt_text = prompt_formats
 
-                self._log_inputs(request_id_item,
-                                 prompt_inputs,
-                                 params=pooling_params,
-                                 lora_request=lora_request,
-                                 prompt_adapter_request=prompt_adapter_request)
-
-                if prompt_adapter_request is not None:
-                    raise NotImplementedError(
-                        "Prompt adapter is not supported "
-                        "for embedding models")
-
-                generator = self.async_engine_client.encode(
-                    {"prompt_token_ids": prompt_inputs["prompt_token_ids"]},
-                    pooling_params,
-                    request_id_item,
-                    lora_request=lora_request,
-                )
-
-                generators.append(generator)
+                generators.append(
+                    self.engine.generate(prompt_text,
+                                         pooling_params,
+                                         f"{request_id}-{i}",
+                                         prompt_token_ids=prompt_ids))
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
         result_generator: AsyncIterator[Tuple[
-            int, EmbeddingRequestOutput]] = merge_async_iterators(
-                *generators, is_cancelled=raw_request.is_disconnected)
+            int, EmbeddingRequestOutput]] = merge_async_iterators(*generators)
 
         # Non-streaming response
-        final_res_batch: List[Optional[EmbeddingRequestOutput]]
-        final_res_batch = [None] * len(prompts)
-        try:
-            async for i, res in result_generator:
-                final_res_batch[i] = res
-
-            for final_res in final_res_batch:
-                assert final_res is not None
-
-            final_res_batch_checked = cast(List[EmbeddingRequestOutput],
-                                           final_res_batch)
-
-            response = request_output_to_embedding_response(
-                final_res_batch_checked, request_id, created_time, model_name,
-                encoding_format)
-        except asyncio.CancelledError:
-            return self.create_error_response("Client disconnected")
-        except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+        final_res_batch: EmbeddingRequestOutput = [None] * len(prompts)
+        async for i, res in result_generator:
+            if await raw_request.is_disconnected():
+                # Abort the request if the client disconnects.
+                await self.engine.abort(f"{request_id}-{i}")
+                # TODO: Use a vllm-specific Validation Error
+                return self.create_error_response("Client disconnected")
+            final_res_batch[i] = res
+        response = request_output_to_embedding_response(
+            final_res_batch, request_id, created_time, model_name)
 
         return response
 

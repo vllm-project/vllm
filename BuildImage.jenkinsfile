@@ -1,0 +1,137 @@
+pipeline {
+
+  options {
+    ansiColor('xterm')
+  }
+
+  agent {
+    kubernetes {
+    yaml '''
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      namespace: jenkins
+    spec:
+      tolerations:
+        - effect: NoExecute
+          key: node.kubernetes.io/not-ready
+          operator: Exists
+          tolerationSeconds: 30
+        - effect: NoExecute
+          key: node.kubernetes.io/unreachable
+          operator: Exists
+          tolerationSeconds: 30
+        - key: dedicated
+          operator: Equal
+          value: jnlp
+          effect: NoSchedule
+      nodeSelector:
+          pool-group: jenkins-llm-workers-pool
+      volumes:
+        -   name: docker-sock
+            hostPath:
+                path: /var/run/docker.sock
+      containers:
+      - name: kubectl
+        image: gcr.io/aui-production/utilites/kubectl:latest
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          privileged: true
+        tty: true
+        command: ["/bin/sh"]
+        args: ["-c", "cat"]
+        resources:
+          requests:
+            memory: "100Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+      - name: busybox
+        image: busybox:latest
+        imagePullPolicy: IfNotPresent
+        tty: true
+        command: ["/bin/sh"]
+        args: ["-c", "cat"]
+        resources:
+          requests:
+            memory: "500Mi"
+            cpu: "500m"
+          limits:
+            memory: "1000Mi"
+            cpu: "1000m"
+      - name: docker
+        image: docker:24.0.0-rc.1-dind
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          privileged: true
+        tty: true
+        volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+        command: ["/bin/sh"]
+        args: ["-c", "cat"]
+        resources:
+          requests:
+            memory: "100Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+    '''
+    }
+  }
+
+  environment {
+      CI = 'true'
+      // ENVIRONMENT --> read it from jenkins parameters
+      // IMAGE_TAG --> read it from jenkins parameters
+      CLUSTER = "aui-data-$ENVIRONMENT"
+      REGION = "us-central1"
+      IMAGE_GROUP = 'llm-inference'
+      PROJECT = "aui-${ENVIRONMENT}"
+      REGISTRY = "us-docker.pkg.dev/aui-${ENVIRONMENT}/gcr.io"
+      REGISTRY_CREDENTIAL = "docker-gcr-aui-${ENVIRONMENT}"
+  }
+
+  stages {
+
+    stage('General Information') {
+      steps {
+        container('busybox') {
+          script {
+            sh '''
+              set $DEBUG_MODE
+              echo "ENVIRONMENT: $ENVIRONMENT"
+              echo "BUILDING IMAGE: VLLM TO GOOGLE PROJECT: $PROJECT UNDER GROUP: llm-inference"
+              echo "DEPLOYING: $CRONJOB_NAME TO KUBERNETES CLUSTER: $CLUSTER IN GOOGLE PROJECT: $PROJECT TO NAMESPACE: $NAMESPACE"
+            '''
+          }
+        }
+      }
+    }
+
+    stage('Build & Push Service Image to Google') {
+      steps {
+        container('docker') {
+          script {
+            withCredentials([file(credentialsId: env.REGISTRY_CREDENTIAL, variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
+              sh '''
+              docker login -u _json_key -p "$(cat ${GOOGLE_APPLICATION_CREDENTIALS})" https://us-docker.pkg.dev
+              DOCKER_BUILDKIT=1 docker build -t ${REGISTRY}/llm-inference/vllm:${IMAGE_TAG} -f ${PWD}/Dockerfile .
+              docker push ${REGISTRY}/llm-inference/vllm:${IMAGE_TAG}
+              docker rmi ${REGISTRY}/llm-inference/vllm:${IMAGE_TAG}
+              '''
+            }
+          }
+        }
+      }
+    }
+
+  }
+  post {
+    always {
+      cleanWs()
+    }
+  }
+}

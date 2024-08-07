@@ -13,14 +13,11 @@ client = OpenAI(
 models = client.models.list()
 model = models.data[0].id
 
-responses = client.embeddings.create(
-    input=[
-        "Hello my name is",
-        "The best thing about vLLM is that it supports many different models"
-    ],
-    model=model,
-    encoding_format="float",
-)
+responses = client.embeddings.create(input=[
+    "Hello my name is",
+    "The best thing about vLLM is that it supports many different models"
+],
+                                     model=model)
 
 for data in responses.data:
     print(data.embedding)  # list of float of len 4096

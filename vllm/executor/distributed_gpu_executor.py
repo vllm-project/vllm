@@ -69,19 +69,17 @@ class DistributedGPUExecutor(GPUExecutor):
         if self.parallel_worker_tasks is None:
             self.parallel_worker_tasks = self._run_workers(
                 "start_worker_execution_loop",
-                async_run_tensor_parallel_workers_only=True,
+                async_run_remote_workers_only=True,
                 **self.extra_execute_model_run_workers_kwargs)
 
         # Only the driver worker returns the sampling results.
-        driver_outputs = self._driver_execute_model(execute_model_req)
-        assert driver_outputs is not None
-        return driver_outputs
+        return self._driver_execute_model(execute_model_req)
 
     def stop_remote_worker_execution_loop(self) -> None:
         if self.parallel_worker_tasks is None:
             return
 
-        self._driver_execute_model(execute_model_req=None)
+        self._driver_execute_model()
         parallel_worker_tasks = self.parallel_worker_tasks
         self.parallel_worker_tasks = None
         # Ensure that workers exit model loop cleanly
@@ -102,13 +100,6 @@ class DistributedGPUExecutor(GPUExecutor):
             lora_id=lora_id,
         )
 
-    def pin_lora(self, lora_id: int) -> bool:
-        assert lora_id > 0, "lora_id must be greater than 0."
-        return self._run_workers(
-            "pin_lora",
-            lora_id=lora_id,
-        )
-
     def list_loras(self) -> Set[int]:
         return self._run_workers("list_loras")
 
@@ -125,13 +116,13 @@ class DistributedGPUExecutor(GPUExecutor):
 
     @abstractmethod
     def _driver_execute_model(
-        self, execute_model_req: Optional[ExecuteModelRequest]
-    ) -> Optional[List[SamplerOutput]]:
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> List[SamplerOutput]:
         """Run execute_model in the driver worker.
 
-        Passing None will cause the driver to stop the model execution loop
-        running in each of the remote workers. In this case, this method
-        returns None. Otherwise, this method returns the model output.
+        Passing None will cause the driver to stop the model execution
+        loop running in each of the remote workers.
         """
         raise NotImplementedError
 
@@ -140,17 +131,17 @@ class DistributedGPUExecutor(GPUExecutor):
         self,
         method: str,
         *args,
-        async_run_tensor_parallel_workers_only: bool = False,
+        async_run_remote_workers_only: bool = False,
         max_concurrent_workers: Optional[int] = None,
         **kwargs,
     ) -> Any:
         """Runs the given method on all workers.
 
         Args:
-            async_run_tensor_parallel_workers_only: If True the method will be
-                run only in the remote TP workers, not the driver worker.
-                It will also be run asynchronously and return a list of futures
-                rather than blocking on the results.
+            async_run_remote_workers_only: If True the method will be run only
+                in the remote workers, not the driver worker. It will also be
+                run asynchronously and return a list of futures rather than
+                blocking on the results.
         """
         raise NotImplementedError
 

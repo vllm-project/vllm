@@ -21,23 +21,16 @@
 #include "cuda_compat.h"
 
 namespace vllm {
-
-namespace detail {
-
-template <typename T>
-__inline__ __device__ T _max(T a, T b) {
-  return max(a, b);
+template <typename T, int numLanes = WARP_SIZE>
+__inline__ __device__ T warpReduceSum(T val) {
+  static_assert(numLanes > 0 && (numLanes & (numLanes - 1)) == 0,
+                "numLanes is not a positive power of 2!");
+  static_assert(numLanes <= WARP_SIZE);
+#pragma unroll
+  for (int mask = numLanes >> 1; mask > 0; mask >>= 1)
+    val += VLLM_SHFL_XOR_SYNC(val, mask);
+  return val;
 }
-
-template <typename T>
-__inline__ __device__ T _sum(T a, T b) {
-  return a + b;
-}
-
-}  // namespace detail
-
-template <typename T>
-using ReduceFnType = T (*)(T, T);
 
 // Helper function to return the next largest power of 2
 static constexpr int _nextPow2(unsigned int num) {
@@ -45,23 +38,12 @@ static constexpr int _nextPow2(unsigned int num) {
   return 1 << (CHAR_BIT * sizeof(num) - __builtin_clz(num - 1));
 }
 
-template <typename T, int numLanes = WARP_SIZE>
-__inline__ __device__ T warpReduce(T val, ReduceFnType<T> fn) {
-  static_assert(numLanes > 0 && (numLanes & (numLanes - 1)) == 0,
-                "numLanes is not a positive power of 2!");
-  static_assert(numLanes <= WARP_SIZE);
-#pragma unroll
-  for (int mask = numLanes >> 1; mask > 0; mask >>= 1)
-    val = fn(val, VLLM_SHFL_XOR_SYNC(val, mask));
-
-  return val;
-}
-
+/* Calculate the sum of all elements in a block */
 template <typename T, int maxBlockSize = 1024>
-__inline__ __device__ T blockReduce(T val, ReduceFnType<T> fn) {
+__inline__ __device__ T blockReduceSum(T val) {
   static_assert(maxBlockSize <= 1024);
   if constexpr (maxBlockSize > WARP_SIZE) {
-    val = warpReduce<T>(val, fn);
+    val = warpReduceSum<T>(val);
     // Calculates max number of lanes that need to participate in the last
     // warpReduce
     constexpr int maxActiveLanes = (maxBlockSize + WARP_SIZE - 1) / WARP_SIZE;
@@ -74,22 +56,12 @@ __inline__ __device__ T blockReduce(T val, ReduceFnType<T> fn) {
 
     val = (threadIdx.x < blockDim.x / float(WARP_SIZE)) ? shared[lane]
                                                         : (T)(0.0f);
-    val = warpReduce<T, _nextPow2(maxActiveLanes)>(val, fn);
+    val = warpReduceSum<T, _nextPow2(maxActiveLanes)>(val);
   } else {
     // A single warpReduce is equal to blockReduce
-    val = warpReduce<T, _nextPow2(maxBlockSize)>(val, fn);
+    val = warpReduceSum<T, _nextPow2(maxBlockSize)>(val);
   }
   return val;
-}
-
-template <typename T, int maxBlockSize = 1024>
-__inline__ __device__ T blockReduceMax(T val) {
-  return blockReduce<T, maxBlockSize>(val, detail::_max<T>);
-}
-
-template <typename T, int maxBlockSize = 1024>
-__inline__ __device__ T blockReduceSum(T val) {
-  return blockReduce<T, maxBlockSize>(val, detail::_sum<T>);
 }
 
 }  // namespace vllm

@@ -1,4 +1,4 @@
-from typing import Callable, List, Optional
+from typing import Callable, List
 
 import torch
 import torch.nn.functional as F
@@ -18,14 +18,6 @@ class CompressedTensorsUnquantized(CompressedTensorsScheme):
     in a linear transformation.
     """
 
-    @classmethod
-    def get_min_capability(cls) -> int:
-        # volta and up
-        return 70
-
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        pass
-
     def create_weights(self, layer: torch.nn.Module,
                        output_partition_sizes: List[int],
                        input_size_per_partition: int,
@@ -34,6 +26,7 @@ class CompressedTensorsUnquantized(CompressedTensorsScheme):
 
         weight = Parameter(torch.empty(sum(output_partition_sizes),
                                        input_size_per_partition,
+                                       device="cuda",
                                        dtype=params_dtype),
                            requires_grad=False)
 
@@ -41,7 +34,6 @@ class CompressedTensorsUnquantized(CompressedTensorsScheme):
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, {"weight_loader": weight_loader})
 
-    def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,
-                      bias: Optional[torch.Tensor]) -> torch.Tensor:
-
-        return F.linear(x, layer.weight, bias)
+    def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor):
+        weight = layer.weight
+        return F.linear(x, weight)

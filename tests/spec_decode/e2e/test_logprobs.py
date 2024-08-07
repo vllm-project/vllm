@@ -22,12 +22,10 @@ from .conftest import get_logprobs_from_llm_generator
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize("test_llm_kwargs",
-                         [{
-                             "speculative_model": "JackFram/llama-160m",
-                             "num_speculative_tokens": 3,
-                             "disable_logprobs_during_spec_decoding": False,
-                         }])
+@pytest.mark.parametrize("test_llm_kwargs", [{
+    "speculative_model": "JackFram/llama-160m",
+    "num_speculative_tokens": 3,
+}])
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize(
     "output_len",
@@ -61,12 +59,10 @@ def test_logprobs_equality(baseline_llm_generator, test_llm_generator,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize("test_llm_kwargs",
-                         [{
-                             "speculative_model": "JackFram/llama-160m",
-                             "num_speculative_tokens": 3,
-                             "disable_logprobs_during_spec_decoding": False,
-                         }])
+@pytest.mark.parametrize("test_llm_kwargs", [{
+    "speculative_model": "JackFram/llama-160m",
+    "num_speculative_tokens": 3,
+}])
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("num_logprobs", [6])
 @pytest.mark.parametrize(
@@ -103,16 +99,13 @@ def test_diff_num_logprobs(baseline_llm_generator, test_llm_generator,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize("test_llm_kwargs",
-                         [{
-                             "speculative_model": "JackFram/llama-160m",
-                             "num_speculative_tokens": 3,
-                             "disable_logprobs_during_spec_decoding": False,
-                         }, {
-                             "speculative_model": "JackFram/llama-160m",
-                             "num_speculative_tokens": 6,
-                             "disable_logprobs_during_spec_decoding": False,
-                         }])
+@pytest.mark.parametrize("test_llm_kwargs", [{
+    "speculative_model": "JackFram/llama-160m",
+    "num_speculative_tokens": 3,
+}, {
+    "speculative_model": "JackFram/llama-160m",
+    "num_speculative_tokens": 6,
+}])
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize(
     "output_len",
@@ -150,7 +143,6 @@ def test_logprobs_different_k(baseline_llm_generator, test_llm_generator,
     [{
         "speculative_model": "JackFram/llama-160m",
         "num_speculative_tokens": 3,
-        "disable_logprobs_during_spec_decoding": False,
 
         # Artificially limit the draft model max model len; this forces vLLM
         # to skip speculation once the sequences grow beyond 32-k tokens.
@@ -189,12 +181,10 @@ def test_logprobs_when_skip_speculation(baseline_llm_generator,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize("test_llm_kwargs",
-                         [{
-                             "speculative_model": "JackFram/llama-160m",
-                             "num_speculative_tokens": 3,
-                             "disable_logprobs_during_spec_decoding": False,
-                         }])
+@pytest.mark.parametrize("test_llm_kwargs", [{
+    "speculative_model": "JackFram/llama-160m",
+    "num_speculative_tokens": 3,
+}])
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize(
     "output_len",

@@ -4,35 +4,9 @@
 
 from functools import lru_cache
 
-import numpy as np
 import torch
 import triton
-
-
-class csr_matrix:
-    """Simple implementation of CSR matrix conversion without scipy.
-    This replaced scipy.sparse.csr_matrix() previously used."""
-
-    def __init__(self, input_array):
-        if not isinstance(input_array, np.ndarray):
-            raise ValueError("Input must be a NumPy array")
-
-        self.shape = input_array.shape
-        rows, cols = self.shape
-        data = []
-        indices = []
-        indptr = [0]
-
-        for i in range(rows):
-            for j in range(cols):
-                if input_array[i, j]:
-                    data.append(input_array[i, j])
-                    indices.append(j)
-            indptr.append(len(indices))
-
-        self.data = np.array(data)
-        self.indices = np.array(indices)
-        self.indptr = np.array(indptr)
+from scipy import sparse
 
 
 def dense_to_crow_col(x: torch.Tensor):
@@ -45,7 +19,7 @@ def dense_to_crow_col(x: torch.Tensor):
     assert x.dim() in (2, 3)
     if x.dim() == 2:
         x = x[None]
-    x = [csr_matrix(xi.bool().cpu().numpy()) for xi in x]
+    x = [sparse.csr_matrix(xi.bool().cpu().numpy()) for xi in x]
     crows = torch.vstack([torch.from_numpy(xi.indptr) for xi in x])
     cols = [torch.from_numpy(xi.indices) for xi in x]
     max_cols = max(len(xi) for xi in cols)
@@ -103,11 +77,11 @@ def _get_sparse_attn_mask_homo_head(
 ):
     """
     :return: a tuple of 3:
-        - tuple of crow_indices, col_indices representation
+        - tuple of crow_indices, col_indices representation 
             of CSR format.
         - block dense mask
-        - all token dense mask (be aware that it can be
-            OOM if it is too big) if `return_dense==True`,
+        - all token dense mask (be aware that it can be 
+            OOM if it is too big) if `return_dense==True`, 
             otherwise, None
     """
     with torch.no_grad():
@@ -174,10 +148,10 @@ def get_sparse_attn_mask(
     :param dense_mask_type: "binary" (0 for skip token, 1 for others)
         or "bias" (-inf for skip token, 0 or others)
     :return: a tuple of 3:
-        - tuple of crow_indices, col_indices representation
+        - tuple of crow_indices, col_indices representation 
             of CSR format.
         - block dense mask
-        - all token dense mask (be aware that it can be OOM if it
+        - all token dense mask (be aware that it can be OOM if it 
             is too big) if `return_dense==True`, otherwise, None
     """
     assert dense_mask_type in ("binary", "bias")

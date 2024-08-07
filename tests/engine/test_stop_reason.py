@@ -19,8 +19,9 @@ MAX_TOKENS = 1024
 
 @pytest.fixture
 def vllm_model(vllm_runner):
-    with vllm_runner(MODEL) as vllm_model:
-        yield vllm_model
+    vllm_model = vllm_runner(MODEL)
+    yield vllm_model
+    del vllm_model
 
 
 def test_stop_reason(vllm_model, example_prompts):
