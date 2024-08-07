@@ -14,8 +14,9 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsWNA16)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target, is_activation_quantization_format, should_ignore_layer)
-from compressed_tensors import (
-    CompressionFormat, QuantizationArgs, QuantizationStrategy, QuantizationType)
+from compressed_tensors.config import CompressionFormat
+from compressed_tensors.quantization import (
+    QuantizationType, QuantizationStrategy, QuantizationArgs)
 
 
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod

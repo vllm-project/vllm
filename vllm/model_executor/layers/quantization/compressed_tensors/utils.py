@@ -1,8 +1,6 @@
 import re
-from enum import Enum
-from typing import Any, Dict, Iterable, Optional
+from typing import Iterable, Optional
 
-from pydantic import BaseModel, Field
 from torch.nn import Module
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
