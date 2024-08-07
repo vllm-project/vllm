@@ -15,7 +15,8 @@ async def forward_request(url, data):
         }
         async with session.post(url=url, json=data, headers=headers) as response:
             if response.status == 200:
-                if response.headers.get('Transfer-Encoding') == 'chunked':
+                # if response.headers.get('Transfer-Encoding') == 'chunked':
+                if True:
                     async for chunk_bytes in response.content.iter_chunked(1024):
                         yield chunk_bytes
                 else:
@@ -30,9 +31,7 @@ async def handle_request():
         prefill_request = original_request_data.copy()
         # change max_tokens = 1 to let it only do prefill
         prefill_request['max_tokens'] = 1
-        # avoid sampling overhead by setting detokenize = False
-        prefill_request['detokenize'] = False
-
+        
         # finish prefill
         async for _ in forward_request('http://localhost:8100/v1/completions', prefill_request):
             continue
