@@ -3,8 +3,6 @@ import heapq
 from abc import ABC, abstractmethod
 from typing import Dict, List, Tuple
 
-CLEANUP_THRESHOLD = 50
-
 
 class EvictionPolicy(enum.Enum):
     """Enum for eviction policy used by make_evictor to instantiate the correct
@@ -78,6 +76,8 @@ class LRUEvictor(Evictor):
     highest num_hashed_tokens value, then one will be chose arbitrarily
     """
 
+    CLEANUP_THRESHOLD = 50
+
     def __init__(self):
         self.free_table: Dict[int, BlockMetaData] = {}
         self.priority_queue = []
@@ -114,7 +114,7 @@ class LRUEvictor(Evictor):
         self.free_table[block_id].last_accessed = last_accessed
 
     def _cleanup_if_necessary(self):
-        if len(self.priority_queue) > CLEANUP_THRESHOLD * len(self.free_table):
+        if len(self.priority_queue) > LRUEvictor.CLEANUP_THRESHOLD * len(self.free_table):
             self._cleanup()
 
     def _cleanup(self):
