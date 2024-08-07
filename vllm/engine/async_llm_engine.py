@@ -132,7 +132,9 @@ class RequestTracker:
             self._request_streams[request_id].put(exc)
             self.abort_request(request_id)
         else:
-            for rid, stream in self._request_streams.items():
+            # NB: list() used here because self.abort_request pops the stream
+            # out of self._request_streams, so we can't iterate on it directly
+            for rid, stream in list(self._request_streams.items()):
                 stream.put(exc)
                 self.abort_request(rid)
 
