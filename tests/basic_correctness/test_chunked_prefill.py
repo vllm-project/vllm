@@ -51,8 +51,9 @@ def test_models(
         enable_chunked_prefill = True
         max_num_batched_tokens = chunked_prefill_token_size
 
-    with hf_runner(model, dtype=dtype) as hf_model:
-        hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
+    if not model_is_fp8:  # fp8 model unsupported in huggingface
+        with hf_runner(model, dtype=dtype) as hf_model:
+            hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
 
     extra_kwargs = {"kv_cache_dtype": kv_cache_dtype} if kv_cache_dtype else {}
 
