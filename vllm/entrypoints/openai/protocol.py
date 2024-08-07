@@ -683,21 +683,11 @@ class FunctionCall(OpenAIBaseModel):
     name: str
     arguments: str
 
-    def to_dict(self):
-        return {"name": self.name, "arguments": self.arguments}
-
 
 class ToolCall(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"chatcmpl-tool-{random_uuid()}")
     type: Literal["function"] = "function"
     function: FunctionCall
-
-    def to_dict(self):
-        return {
-            "id": self.id,
-            "type": self.type,
-            "function": self.function.to_dict()
-        }
 
 
 class DeltaFunctionCall(BaseModel):
@@ -711,13 +701,6 @@ class DeltaToolCall(OpenAIBaseModel):
     type: Literal["function"] = "function"
     index: int
     function: Optional[DeltaFunctionCall] = None
-
-    def to_dict(self):
-        return {
-            "id": self.id,
-            "type": self.type,
-            "function": self.function.to_dict() if self.function else None
-        }
 
 
 # the initial delta that gets sent once a new tool call is started;
