@@ -18,6 +18,7 @@ from platform import uname
 from typing import (Any, AsyncGenerator, Awaitable, Callable, Dict, Generic,
                     Hashable, List, Literal, Optional, OrderedDict, Set, Tuple,
                     Type, TypeVar, Union, overload)
+from uuid import uuid4
 
 import numpy as np
 import numpy.typing as npt
@@ -483,10 +484,13 @@ def get_distributed_init_method(ip: str, port: int) -> str:
     return f"tcp://[{ip}]:{port}" if ":" in ip else f"tcp://{ip}:{port}"
 
 
-def get_open_port(port: Optional[int] = None) -> int:
-    if port is None:
-        # Default behavior here is to return a port for multi-gpu communication
-        port = envs.VLLM_PORT
+def get_open_zmq_ipc_path() -> str:
+    base_rpc_path = envs.VLLM_RPC_BASE_PATH
+    return f"ipc://{base_rpc_path}/{uuid4()}"
+
+
+def get_open_port() -> int:
+    port = envs.VLLM_PORT
     if port is not None:
         while True:
             try:
@@ -1023,56 +1027,6 @@ def cuda_device_count_stateless() -> int:
     # This can be removed and simply replaced with torch.cuda.get_device_count
     # after https://github.com/pytorch/pytorch/pull/122815 is released.
     return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
-
-
-# NVML utils
-# Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
-# all the related functions work on real physical device ids.
-# the major benefit of using NVML is that it will not initialize CUDA
-
-try:
-    import pynvml
-except ImportError:
-    # For non-NV devices
-    pynvml = None
-
-
-def with_nvml_context(fn):
-
-    @wraps(fn)
-    def wrapper(*args, **kwargs):
-        if pynvml is not None:
-            pynvml.nvmlInit()
-        try:
-            return fn(*args, **kwargs)
-        finally:
-            if pynvml is not None:
-                pynvml.nvmlShutdown()
-
-    return wrapper
-
-
-@with_nvml_context
-def is_full_nvlink(device_ids: List[int]) -> bool:
-    """
-    query if the set of gpus are fully connected by nvlink (1 hop)
-    """
-    handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in device_ids]
-    for i, handle in enumerate(handles):
-        for j, peer_handle in enumerate(handles):
-            if i < j:
-                try:
-                    p2p_status = pynvml.nvmlDeviceGetP2PStatus(
-                        handle, peer_handle, pynvml.NVML_P2P_CAPS_INDEX_NVLINK)
-                    if p2p_status != pynvml.NVML_P2P_STATUS_OK:
-                        return False
-                except pynvml.NVMLError as error:
-                    logger.error(
-                        "NVLink detection failed. This is normal if your"
-                        " machine has no NVLink equipped.",
-                        exc_info=error)
-                    return False
-    return True
 
 
 #From: https://stackoverflow.com/a/4104188/2749989
