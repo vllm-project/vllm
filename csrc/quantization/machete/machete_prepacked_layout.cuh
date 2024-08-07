@@ -5,7 +5,7 @@
 #include <torch/all.h>
 
 // clang-format off
-// The cutlass inlcude order 
+// The cutlass include order 
 #include "cutlass/cutlass.h"
 
 #include "cute/tensor.hpp"
@@ -41,8 +41,8 @@ struct PrepackedLayoutBBTemplate {
   // TODO (Lucas): compare the performance for other sizes
   using PPBlockShape_MK = Shape<_128, _64>;
 
-  // The N here doesnt actually impact the shape of the stored tile directly but
-  // may impact the op selected by rs_op_selector
+  // The N here doesn't actually impact the shape of the stored tile directly
+  // but may impact the op selected by rs_op_selector
   using PPBlockShape_MNK = decltype(make_shape(
       size<0>(PPBlockShape_MK{}), _128{}, size<1>(PPBlockShape_MK{})));
 
