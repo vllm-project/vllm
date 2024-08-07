@@ -20,7 +20,8 @@ from vllm.entrypoints.launcher import serve_http
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser, random_uuid
+from vllm.utils import (FlexibleArgumentParser, iterate_with_cancellation,
+                        random_uuid)
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger("vllm.entrypoints.api_server")
@@ -53,6 +54,8 @@ async def generate(request: Request) -> Response:
 
     assert engine is not None
     results_generator = engine.generate(prompt, sampling_params, request_id)
+    results_generator = iterate_with_cancellation(
+        results_generator, is_cancelled=request.is_disconnected)
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
@@ -69,12 +72,11 @@ async def generate(request: Request) -> Response:
 
     # Non-streaming case
     final_output = None
-    async for request_output in results_generator:
-        if await request.is_disconnected():
-            # Abort the request if the client disconnects.
-            await engine.abort(request_id)
-            return Response(status_code=499)
-        final_output = request_output
+    try:
+        async for request_output in results_generator:
+            final_output = request_output
+    except asyncio.CancelledError:
+        return Response(status_code=499)
 
     assert final_output is not None
     prompt = final_output.prompt
