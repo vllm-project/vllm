@@ -10,11 +10,10 @@ import jinja2
 from vllm_cutlass_library_extension import (DataType, EpilogueScheduleTag,
                                             EpilogueScheduleType,
                                             MixedInputKernelScheduleType,
+                                            TileSchedulerTag,
                                             TileSchedulerType, VLLMDataType,
                                             VLLMDataTypeNames, VLLMDataTypeTag,
-                                            VLLMKernelScheduleTag,
-                                            VLLMTileSchedulerTag,
-                                            VLLMTileSchedulerType)
+                                            VLLMKernelScheduleTag)
 
 #
 #   Generator templating
@@ -160,7 +159,7 @@ class ScheduleConfig:
     cluster_shape_mnk: Tuple[int, int, int]
     kernel_schedule: MixedInputKernelScheduleType
     epilogue_schedule: EpilogueScheduleType
-    tile_scheduler: Union[TileSchedulerType, VLLMTileSchedulerType]
+    tile_scheduler: TileSchedulerType
 
 
 @dataclass
@@ -199,7 +198,7 @@ def generate_schedule_name(schedule_config: ScheduleConfig) -> str:
         .split("::")[-1]
     epilogue_schedule = EpilogueScheduleTag[
         schedule_config.epilogue_schedule].split("::")[-1]
-    tile_scheduler = VLLMTileSchedulerTag[schedule_config.tile_scheduler]\
+    tile_scheduler = TileSchedulerTag[schedule_config.tile_scheduler]\
         .split("::")[-1]
 
     return (f"{tile_shape}_{cluster_shape}_{kernel_schedule}" +
@@ -211,7 +210,7 @@ def generate_terse_schedule_name(schedule_config: ScheduleConfig) -> str:
     kernel_terse_names_replace = {
         "KernelTmaWarpSpecializedCooperativeMixedInput_": "TmaMI_",
         "TmaWarpSpecializedCooperative_": "TmaCoop_",
-        "VLLMStreamKScheduler": "VLLMstreamK",
+        "StreamKScheduler": "streamK",
     }
 
     schedule_name = generate_schedule_name(schedule_config)
@@ -264,7 +263,7 @@ template_globals = {
     "DataTypeTag": VLLMDataTypeTag,
     "KernelScheduleTag": VLLMKernelScheduleTag,
     "EpilogueScheduleTag": EpilogueScheduleTag,
-    "TileSchedulerTag": VLLMTileSchedulerTag,
+    "TileSchedulerTag": TileSchedulerTag,
     "to_cute_constant": to_cute_constant,
     "gen_sch_name": generate_terse_schedule_name,
 }
@@ -337,7 +336,7 @@ def generate():
             ((128, 128), (1, 1, 1)),
             # ((128, 256), (1, 1, 1)),
         ) for kernel_schedule in (TmaMI, ) for epilogue_schedule in (TmaCoop, )
-        for tile_scheduler in (VLLMTileSchedulerType.StreamK, )
+        for tile_scheduler in (TileSchedulerType.StreamK, )
     ]
 
     # For now we use the same heuristic for all types
@@ -348,7 +347,7 @@ def generate():
              cluster_shape_mnk=(1, 1, 1),
              kernel_schedule=TmaMI,
              epilogue_schedule=TmaCoop,
-             tile_scheduler=VLLMTileSchedulerType.StreamK,
+             tile_scheduler=TileSchedulerType.StreamK,
          )),
         ("M > 32",
          ScheduleConfig(
@@ -356,7 +355,7 @@ def generate():
              cluster_shape_mnk=(1, 1, 1),
              kernel_schedule=TmaMI,
              epilogue_schedule=TmaCoop,
-             tile_scheduler=VLLMTileSchedulerType.StreamK,
+             tile_scheduler=TileSchedulerType.StreamK,
          )),
         ("M > 16",
          ScheduleConfig(
@@ -364,14 +363,14 @@ def generate():
              cluster_shape_mnk=(1, 1, 1),
              kernel_schedule=TmaMI,
              epilogue_schedule=TmaCoop,
-             tile_scheduler=VLLMTileSchedulerType.StreamK,
+             tile_scheduler=TileSchedulerType.StreamK,
          )),
         (None,
          ScheduleConfig(tile_shape_mn=(128, 16),
                         cluster_shape_mnk=(1, 1, 1),
                         kernel_schedule=TmaMI,
                         epilogue_schedule=TmaCoop,
-                        tile_scheduler=VLLMTileSchedulerType.StreamK))
+                        tile_scheduler=TileSchedulerType.StreamK))
     ]
 
     impl_configs = []
