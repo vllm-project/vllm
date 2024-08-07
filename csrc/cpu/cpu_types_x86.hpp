@@ -24,8 +24,8 @@ namespace vec_op {
 #define CPU_KERNEL_GUARD_OUT(NAME)
 #else
 #define CPU_KERNEL_GUARD_IN(NAME)                                              \
-  std::cout << #NAME << " invoked." << std::endl;
-#define CPU_KERNEL_GUARD_OUT(NAME) std::cout << #NAME << " exit." << std::endl;
+  RECORD_FUNCTION(#NAME, c10::ArrayRef<c10::IValue>({}));
+#define CPU_KERNEL_GUARD_OUT(NAME)
 #endif
 
 #define FORCE_INLINE __attribute__((always_inline)) inline

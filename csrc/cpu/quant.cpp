@@ -122,6 +122,7 @@ template <bool Bias, typename scalar_t>
 void dynamic_output_scale_impl(const float* input, scalar_t* output,
                                const float* scale, const scalar_t* bias,
                                const int num_tokens, const int hidden_size) {
+  CPU_KERNEL_GUARD_IN(dynamic_output_scale_impl)
   using load_vec_t = typename KernelVecType<scalar_t>::load_vec_type;
   using cvt_vec_t = typename KernelVecType<scalar_t>::cvt_vec_type;
   constexpr int vec_elem_num = load_vec_t::VEC_ELEM_NUM;
@@ -191,6 +192,7 @@ void cutlass_scaled_mm(torch::Tensor& c,               // [M, OC], row-major
                        const torch::Tensor& b_scales,  // [1] or [OC]
                        const c10::optional<torch::Tensor>& bias  // [OC]
 ) {
+  CPU_KERNEL_GUARD_IN(cutlass_scaled_mm)
   // Checks for conformality
   TORCH_CHECK(a.dim() == 2 && b.dim() == 2 && c.dim() == 2);
   TORCH_CHECK(c.size(0) == a.size(0) && a.size(1) == b.size(0) &&
@@ -254,6 +256,7 @@ void cutlass_scaled_mm(torch::Tensor& c,               // [M, OC], row-major
 void static_scaled_int8_quant(torch::Tensor& out,          // [..., hidden_size]
                               const torch::Tensor& input,  // [..., hidden_size]
                               const torch::Tensor& scale) {
+  CPU_KERNEL_GUARD_IN(static_scaled_int8_quant)
   TORCH_CHECK(input.is_contiguous());
   TORCH_CHECK(out.is_contiguous());
   TORCH_CHECK(scale.numel() == 1);
@@ -274,6 +277,7 @@ void dynamic_scaled_int8_quant(
     const torch::Tensor& input,  // [..., hidden_size]
     torch::Tensor& scale         // [..., 1]
 ) {
+  CPU_KERNEL_GUARD_IN(dynamic_scaled_int8_quant)
   TORCH_CHECK(input.is_contiguous());
   TORCH_CHECK(out.is_contiguous());
 
