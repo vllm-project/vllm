@@ -89,6 +89,8 @@ def test_fp8_kv_cache(
     enforce_eager: bool,
     tensor_parallel_size: int,
 ) -> None:
+    NUM_LOG_PROBS = 4
+
     max_num_seqs = min(chunked_prefill_token_size, 256)
     enable_chunked_prefill = False
     max_num_batched_tokens = None
@@ -104,7 +106,7 @@ def test_fp8_kv_cache(
             kv_cache_dtype=kv_cache_dtype,
     ) as vllm_model:
         decode_outputs = vllm_model.generate_greedy_logprobs(example_prompts,
-                                                    max_tokens)
+                                                    max_tokens, NUM_LOG_PROBS)
 
     with vllm_runner(
             model,
@@ -116,7 +118,7 @@ def test_fp8_kv_cache(
             kv_cache_dtype=kv_cache_dtype,
     ) as vllm_model:
         chunked_prefill_outputs = vllm_model.generate_greedy_logprobs(
-            example_prompts, max_tokens)
+            example_prompts, max_tokens, NUM_LOG_PROBS)
 
     check_logprobs_close(
         outputs_0_lst=decode_outputs,
