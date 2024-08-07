@@ -86,7 +86,7 @@ class TPUInt8LinearMethod(LinearMethodBase):
             "output_dim": 0,
         })
 
-    def quantize_weight(
+    def _quantize_weight(
             self, weight: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         weight_dtype = weight.dtype
         weight = weight.cpu().to(torch.float32)
@@ -104,7 +104,7 @@ class TPUInt8LinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer: Module) -> None:
         device = layer.weight.device
-        qweight, qscale = self.quantize_weight(layer.weight)
+        qweight, qscale = self._quantize_weight(layer.weight)
         qweight = qweight.to(device)
         qscale = qscale.to(device)
         layer.weight = Parameter(qweight, requires_grad=False)
