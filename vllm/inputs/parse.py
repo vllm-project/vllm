@@ -71,5 +71,6 @@ def is_explicit_encoder_decoder_prompt(
 
 
 def is_valid_encoder_decoder_llm_inputs(
-        inputs: LLMInputs) -> TypeIs[EncoderDecoderLLMInputs]:
+    inputs: Union[LLMInputs, EncoderDecoderLLMInputs],
+) -> TypeIs[EncoderDecoderLLMInputs]:
     return "encoder_prompt_token_ids" in inputs
