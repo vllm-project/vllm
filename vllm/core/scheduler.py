@@ -1051,10 +1051,11 @@ class Scheduler:
         # running. This will help estimate if the scheduler is a significant
         # component in the e2e latency.
         for seq_group in self.running:
-            if seq_group.metrics.scheduler_time is not None:
-                seq_group.metrics.scheduler_time += scheduler_time
-            else:
-                seq_group.metrics.scheduler_time = scheduler_time
+            if seq_group is not None and seq_group.metrics is not None:
+                if seq_group.metrics.scheduler_time is not None:
+                    seq_group.metrics.scheduler_time += scheduler_time
+                else:
+                    seq_group.metrics.scheduler_time = scheduler_time
 
         return seq_group_metadata_list, scheduler_outputs
 
