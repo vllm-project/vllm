@@ -145,7 +145,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # used when the frontend api server is running in multi-processing mode,
     # to communicate with the backend engine process over ZMQ.
     'VLLM_RPC_PORT':
-    lambda: int(os.getenv('VLLM_PORT', '5570')),
+    lambda: int(os.getenv('VLLM_RPC_PORT', '5570')),
 
     # If true, will load models from ModelScope instead of Hugging Face Hub.
     # note that the value is true or false, not numbers
