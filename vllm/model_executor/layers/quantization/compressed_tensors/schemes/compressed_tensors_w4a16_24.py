@@ -8,7 +8,10 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
     GPTQ_MARLIN_24_MAX_PARALLEL, GPTQ_MARLIN_24_MIN_THREAD_N)
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.parameter import (BasevLLMParameter,
+                                           ChannelQuantScaleParameter,
+                                           GroupQuantScaleParameter,
+                                           PackedvLLMParameter)
 from vllm.scalar_type import scalar_types
 
 __all__ = ["CompressedTensorsW4A16Sparse24"]
@@ -45,7 +48,12 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
         return 80
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        pass
+        # required by torch.compile to be torch.nn.Parameter
+        layer.weight_packed = Parameter(layer.weight_packed.data,
+                                        requires_grad=False)
+        layer.scale_packed = Parameter(layer.scale_packed.data,
+                                       requires_grad=False)
+        layer.meta = Parameter(layer.meta.data, requires_grad=False)
 
     def create_weights(self, layer: torch.nn.Module, input_size: int,
                        output_partition_sizes: List[int],
@@ -56,79 +64,65 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
         pack_factor = 32 // self.quant_type.size_bits
         output_size_per_partition = sum(output_partition_sizes)
 
-        qweight = Parameter(
-            torch.empty(
-                input_size_per_partition // self.tile_size // 2,
-                output_size_per_partition * self.tile_size // pack_factor,
-                dtype=torch.int32,
-            ),
-            requires_grad=False,
-        )
-        set_weight_attrs(
-            qweight,
-            {
-                "input_dim": 0,
-                "output_dim": 1,
-                "packed_dim": 1,
-                "pack_factor": pack_factor,
-                "marlin_tile_size": self.tile_size,
-                "weight_loader": weight_loader
-            },
-        )
-
-        layer.register_parameter("weight_packed", qweight)
+        qweight = PackedvLLMParameter(data=torch.empty(
+            input_size_per_partition // self.tile_size // 2,
+            output_size_per_partition * self.tile_size // pack_factor,
+            dtype=torch.int32,
+        ),
+                                      input_dim=0,
+                                      output_dim=1,
+                                      packed_dim=1,
+                                      packed_factor=pack_factor,
+                                      marlin_tile_size=self.tile_size,
+                                      weight_loader=weight_loader)
 
         input_groups = (1 if self.group_size is None else
                         input_size_per_partition // self.group_size)
 
-        scales = Parameter(
+        weight_scale_args = {
+            "data":
             torch.empty(
                 input_groups,
                 output_size_per_partition,
                 dtype=params_dtype,
             ),
-            requires_grad=False,
-        )
-        set_weight_attrs(
-            scales,
-            {
-                "output_dim": 1,
-                "input_dim": None if input_groups == 1 else 0,
-                "weight_loader": weight_loader
-            },
-        )
-        layer.register_parameter("scale_packed", scales)
+            "weight_loader":
+            weight_loader
+        }
 
-        weight_shape = Parameter(torch.empty(2, dtype=torch.int64),
-                                 requires_grad=False)
+        if self.group_size is not None:
+            scales = GroupQuantScaleParameter(output_dim=1,
+                                              input_dim=0,
+                                              **weight_scale_args)
+        else:
+            scales = ChannelQuantScaleParameter(output_dim=1,
+                                                **weight_scale_args)
 
+        weight_shape = BasevLLMParameter(data=torch.empty(2,
+                                                          dtype=torch.int64),
+                                         weight_loader=weight_loader)
+
+        meta = PackedvLLMParameter(data=torch.empty(
+            input_size_per_partition // 8 // 2 // 2,
+            output_size_per_partition * 2,
+            dtype=torch.int16,
+        ),
+                                   input_dim=0,
+                                   output_dim=1,
+                                   packed_dim=1,
+                                   packed_factor=1,
+                                   marlin_tile_size=2,
+                                   weight_loader=weight_loader)
+
+        layer.register_parameter("weight_packed", qweight)
         layer.register_parameter("weight_shape", weight_shape)
-        set_weight_attrs(weight_shape, {"weight_loader": weight_loader})
-
-        meta = Parameter(
-            torch.empty(
-                input_size_per_partition // 8 // 2 // 2,
-                output_size_per_partition * 2,
-                dtype=torch.int16,
-            ),
-            requires_grad=False,
-        )
-        set_weight_attrs(
-            meta,
-            {
-                "input_dim": 0,
-                "packed_dim": 1,
-                "pack_factor": 1,
-                "output_dim": 1,
-                "marlin_tile_size": 2,
-                "weight_loader": weight_loader
-            },
-        )
+        layer.register_parameter("scale_packed", scales)
         layer.register_parameter("meta", meta)
 
         max_workspace_size = (
             output_size_per_partition //
             GPTQ_MARLIN_24_MIN_THREAD_N) * GPTQ_MARLIN_24_MAX_PARALLEL
+
         workspace = Parameter(torch.zeros(max_workspace_size, dtype=torch.int),
                               requires_grad=False)
         layer.workspace = workspace
