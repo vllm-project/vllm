@@ -22,8 +22,8 @@ from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.ray_utils import initialize_ray_cluster
-from vllm.inputs import (INPUT_REGISTRY, InputRegistry, LLMInputs, PromptInputs,
-                         get_prompt_type)
+from vllm.inputs import (INPUT_REGISTRY, InputRegistry, LLMInputs,
+                         PromptInputs, get_prompt_type)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
