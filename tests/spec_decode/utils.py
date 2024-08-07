@@ -12,6 +12,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
                            SamplerOutput, SequenceData, SequenceGroupMetadata,
                            SequenceOutput)
+from vllm.spec_decode.spec_decode_params import SpecDecodeParams
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
@@ -113,6 +114,7 @@ def create_seq_group_metadata_from_prompts(
     final_prompt_lens: List[int],
     continuations: Optional[List[List[int]]] = None,
     seq_ids: Optional[List[int]] = None,
+    spec_decode_params: Optional[SpecDecodeParams] = None,
 ) -> List[SequenceGroupMetadata]:
 
     if continuations is None:
@@ -144,6 +146,7 @@ def create_seq_group_metadata_from_prompts(
             },
             sampling_params=SamplingParams(temperature=0.0, ),
             block_tables={i: block_allocations[i][:]},
+            spec_decode_params=spec_decode_params,
         ) for i, (prompt_token_ids,
                   cont_token_ids) in enumerate(zip(prompts, continuations))
     ]
