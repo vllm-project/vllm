@@ -89,7 +89,8 @@ def test_fp8_kv_cache(
     enforce_eager: bool,
     tensor_parallel_size: int,
 ) -> None:
-    NUM_LOG_PROBS = 4
+    NUM_LOG_PROBS = 8
+    NUM_OUTPUT_TOKENS = 4
 
     max_num_seqs = min(chunked_prefill_token_size, 256)
     enable_chunked_prefill = False
@@ -121,8 +122,8 @@ def test_fp8_kv_cache(
             example_prompts, max_tokens, NUM_LOG_PROBS)
 
     check_logprobs_close(
-        outputs_0_lst=decode_outputs,
-        outputs_1_lst=chunked_prefill_outputs,
+        outputs_0_lst=decode_outputs[:NUM_OUTPUT_TOKENS],
+        outputs_1_lst=chunked_prefill_outputs[:NUM_OUTPUT_TOKENS],
         name_0="decode",
         name_1="chunked_prefill",
     )

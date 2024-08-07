@@ -57,6 +57,7 @@ def test_contexted_kv_attention(
     ctx_lens = [random.randint(16, MAX_CTX_LEN) for _ in range(BS)]
     seq_lens = [a + b for a, b in zip(query_lens, ctx_lens)]
     num_kv_heads = num_heads // num_queries_per_kv
+    kv_cache_dtype = "auto"
 
     num_tokens = sum(query_lens)
     query = torch.empty(num_tokens, num_heads, head_size, dtype=dtype)
@@ -132,6 +133,7 @@ def test_contexted_kv_attention(
                           k,
                           v,
                           output,
+                          kv_cache_dtype,
                           k_cache,
                           v_cache,
                           block_table,
@@ -146,6 +148,7 @@ def test_contexted_kv_attention(
                           k,
                           v,
                           output,
+                          kv_cache_dtype,
                           k_cache,
                           v_cache,
                           block_table,
@@ -273,6 +276,7 @@ def test_contexted_kv_attention_alibi(
     ctx_lens = [random.randint(16, MAX_CTX_LEN) for _ in range(BS)]
     seq_lens = [a + b for a, b in zip(query_lens, ctx_lens)]
     num_kv_heads = num_heads // num_queries_per_kv
+    kv_cache_dtype = "auto"
 
     num_tokens = sum(query_lens)
     query = torch.empty(num_tokens, num_heads, head_size, dtype=dtype)
@@ -348,6 +352,7 @@ def test_contexted_kv_attention_alibi(
                           k,
                           v,
                           output,
+                          kv_cache_dtype,
                           k_cache,
                           v_cache,
                           block_table,
@@ -362,6 +367,7 @@ def test_contexted_kv_attention_alibi(
                           k,
                           v,
                           output,
+                          kv_cache_dtype,
                           k_cache,
                           v_cache,
                           block_table,
