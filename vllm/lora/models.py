@@ -261,7 +261,8 @@ class LoRAModel(AdapterModel):
                                     map_location=device)
 
         rank = config["r"]
-        lora_alpha = config["lora_alpha"]
+        lora_alpha = config["lora_alpha"] * math.sqrt(rank) if config.get(
+            "use_rslora", False) else config["lora_alpha"]
         context_length = config.get("context_length", None)
         scaling_factor = None
         if context_length:
