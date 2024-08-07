@@ -450,7 +450,7 @@ class HfRunner:
 
     def generate_encoder_decoder_greedy_logprobs_limit(
         self,
-        encoder_decoder_prompts: List[ExplicitEncoderDecoderPrompt[str]],
+        encoder_decoder_prompts: List[ExplicitEncoderDecoderPrompt[str, str]],
         max_tokens: int,
         num_logprobs: int,
         **kwargs: Any,
@@ -614,7 +614,7 @@ class VllmRunner:
 
     def generate_encoder_decoder_w_logprobs(
         self,
-        encoder_decoder_prompts: List[ExplicitEncoderDecoderPrompt[str]],
+        encoder_decoder_prompts: List[ExplicitEncoderDecoderPrompt[str, str]],
         sampling_params: SamplingParams,
     ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
         '''
@@ -659,7 +659,7 @@ class VllmRunner:
 
     def generate_encoder_decoder_greedy_logprobs(
         self,
-        encoder_decoder_prompts: List[ExplicitEncoderDecoderPrompt[str]],
+        encoder_decoder_prompts: List[ExplicitEncoderDecoderPrompt[str, str]],
         max_tokens: int,
         num_logprobs: int,
     ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
