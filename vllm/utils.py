@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import contextlib
 import datetime
 import enum
 import gc
@@ -11,10 +12,11 @@ import tempfile
 import threading
 import uuid
 import warnings
+from asyncio import FIRST_COMPLETED, ensure_future
 from collections import defaultdict
 from functools import lru_cache, partial, wraps
 from platform import uname
-from typing import (Any, AsyncIterator, Awaitable, Callable, Dict, Generic,
+from typing import (Any, AsyncGenerator, Awaitable, Callable, Dict, Generic,
                     Hashable, List, Optional, OrderedDict, Set, Tuple, TypeVar,
                     Union, overload)
 
@@ -27,9 +29,92 @@ from typing_extensions import ParamSpec
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.inputs import (ExplicitEncoderDecoderPrompt, PromptInputs,
+                         SingletonPromptInputs)
 from vllm.logger import enable_trace_function_call, init_logger
 
 logger = init_logger(__name__)
+
+# Exception strings for non-implemented encoder/decoder scenarios
+
+STR_NOT_IMPL_ENC_DEC_SWA = \
+    "Sliding window attention for encoder/decoder models " + \
+                    "is not currently supported."
+
+STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE = \
+    "Prefix caching for encoder/decoder models " + \
+                    "is not currently supported."
+
+STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL = \
+    "Chunked prefill for encoder/decoder models " + \
+                    "is not currently supported."
+
+STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP = (
+    "Models with logits_soft_cap "
+    "require FlashInfer backend, which is "
+    "currently not supported for encoder/decoder "
+    "models.")
+
+STR_NOT_IMPL_ENC_DEC_LORA = ("LoRA is currently not currently "
+                             "supported with encoder/decoder "
+                             "models.")
+
+STR_NOT_IMPL_ENC_DEC_PP = ("Pipeline parallelism is not "
+                           "currently supported with "
+                           "encoder/decoder models.")
+
+STR_NOT_IMPL_ENC_DEC_MM = ("Multimodal is not currently "
+                           "supported with encoder/decoder "
+                           "models.")
+
+STR_NOT_IMPL_ENC_DEC_SPEC_DEC = ("Speculative decoding is not "
+                                 "currently supported with encoder/"
+                                 "decoder models.")
+
+STR_NOT_IMPL_ENC_DEC_CUDAGRAPH = ("CUDAGraph is not "
+                                  "currently supported with encoder/"
+                                  "decoder models.")
+
+STR_NOT_IMPL_ENC_DEC_BACKEND = ("XFormers is the only backend "
+                                "currently supported with encoder/"
+                                "decoder models.")
+
+STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER = ("Prompt adapters are not "
+                                       "currently supported with encoder/"
+                                       "decoder models.")
+
+# Efficiently import all enc/dec error strings
+# rather than having to import all of the above
+STR_NOT_IMPL_ENC_DEC_ERR_STRS = {
+    "STR_NOT_IMPL_ENC_DEC_SWA": STR_NOT_IMPL_ENC_DEC_SWA,
+    "STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE": STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE,
+    "STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL":
+    STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL,
+    "STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP": STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP,
+    "STR_NOT_IMPL_ENC_DEC_LORA": STR_NOT_IMPL_ENC_DEC_LORA,
+    "STR_NOT_IMPL_ENC_DEC_PP": STR_NOT_IMPL_ENC_DEC_PP,
+    "STR_NOT_IMPL_ENC_DEC_MM": STR_NOT_IMPL_ENC_DEC_MM,
+    "STR_NOT_IMPL_ENC_DEC_SPEC_DEC": STR_NOT_IMPL_ENC_DEC_SPEC_DEC,
+    "STR_NOT_IMPL_ENC_DEC_CUDA_GRAPH": STR_NOT_IMPL_ENC_DEC_CUDAGRAPH,
+    "STR_NOT_IMPL_ENC_DEC_BACKEND": STR_NOT_IMPL_ENC_DEC_BACKEND,
+    "STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER": STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER,
+}
+
+# Constants related to forcing the attention backend selection
+
+# String name of register which may be set in order to
+# force auto-selection of attention backend by Attention
+# wrapper
+STR_BACKEND_ENV_VAR: str = "VLLM_ATTENTION_BACKEND"
+
+# Possible string values of STR_BACKEND_ENV_VAR
+# register, corresponding to possible backends
+STR_FLASHINFER_ATTN_VAL: str = "FLASHINFER"
+STR_TORCH_SDPA_ATTN_VAL: str = "TORCH_SDPA"
+STR_ROCM_FLASH_ATTN_VAL: str = "ROCM_FLASH"
+STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
+STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
+STR_INVALID_VAL: str = "INVALID"
 
 STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.half,
@@ -290,63 +375,74 @@ def make_async(func: Callable[P, T]) -> Callable[P, Awaitable[T]]:
     return _async_wrapper
 
 
-class ProducerFinished:
-    pass
+async def iterate_with_cancellation(
+    iterator: AsyncGenerator[T, None],
+    is_cancelled: Callable[[], Awaitable[bool]],
+) -> AsyncGenerator[T, None]:
+    """Convert async iterator into one that polls the provided function
+    at least once per second to check for client cancellation.
+    """
+
+    # Can use anext() in python >= 3.10
+    awaits = [ensure_future(iterator.__anext__())]
+    while True:
+        done, pending = await asyncio.wait(awaits, timeout=1)
+        if await is_cancelled():
+            with contextlib.suppress(BaseException):
+                awaits[0].cancel()
+                await iterator.aclose()
+            raise asyncio.CancelledError("client cancelled")
+        if done:
+            try:
+                item = await awaits[0]
+                awaits[0] = ensure_future(iterator.__anext__())
+                yield item
+            except StopAsyncIteration:
+                # we are done
+                return
 
 
-def merge_async_iterators(
-        *iterators: AsyncIterator[T]) -> AsyncIterator[Tuple[int, T]]:
+async def merge_async_iterators(
+    *iterators: AsyncGenerator[T, None],
+    is_cancelled: Callable[[], Awaitable[bool]],
+) -> AsyncGenerator[Tuple[int, T], None]:
     """Merge multiple asynchronous iterators into a single iterator.
 
     This method handle the case where some iterators finish before others.
     When it yields, it yields a tuple (i, item) where i is the index of the
     iterator that yields the item.
+
+    It also polls the provided function at least once per second to check
+    for client cancellation.
     """
-    queue: asyncio.Queue[Union[Tuple[int, T], ProducerFinished,
-                               Exception]] = asyncio.Queue()
 
-    producers = len(iterators)
-
-    async def producer(i: int, iterator: AsyncIterator[T]):
-        try:
-            async for item in iterator:
-                await queue.put((i, item))
-        except Exception as e:
-            await queue.put(e)
-        # Signal to the consumer that we've finished
-        await queue.put(ProducerFinished())
-
-    _tasks = [
-        asyncio.create_task(producer(i, iterator))
-        for i, iterator in enumerate(iterators)
-    ]
-
-    async def consumer():
-        remaining = producers
-        try:
-            while remaining or not queue.empty():
-                # we think there is a race condition here
-                item = await queue.get()
-
-                if isinstance(item, ProducerFinished):
-                    # Signal that a producer finished- not a real item
-                    remaining -= 1
-                    continue
-
-                if isinstance(item, Exception):
-                    raise item
-                yield item
-        except (Exception, asyncio.CancelledError) as e:
-            for task in _tasks:
-                if sys.version_info >= (3, 9):
-                    # msg parameter only supported in Python 3.9+
-                    task.cancel(e)
-                else:
-                    task.cancel()
-            raise e
-        await asyncio.gather(*_tasks)
-
-    return consumer()
+    # Can use anext() in python >= 3.10
+    awaits = {
+        ensure_future(pair[1].__anext__()): pair
+        for pair in enumerate(iterators)
+    }
+    try:
+        while awaits:
+            done, pending = await asyncio.wait(awaits.keys(),
+                                               return_when=FIRST_COMPLETED,
+                                               timeout=1)
+            if await is_cancelled():
+                raise asyncio.CancelledError("client cancelled")
+            for d in done:
+                pair = awaits.pop(d)
+                try:
+                    item = await d
+                    i, it = pair
+                    awaits[ensure_future(it.__anext__())] = pair
+                    yield i, item
+                except StopAsyncIteration:
+                    pass
+    finally:
+        # Cancel any remaining iterators
+        for f, (_, it) in awaits.items():
+            with contextlib.suppress(BaseException):
+                f.cancel()
+                await it.aclose()
 
 
 def get_ip() -> str:
@@ -1029,3 +1125,50 @@ async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
     """Utility function to run async task in a lock"""
     async with lock:
         return await task(*args, **kwargs)
+
+
+def is_encoder_decoder_model_config(model_config) -> bool:
+    '''
+    Extract the HF encoder/decoder model flag from the ModelConfig instance.
+    Return False if model_config is None.
+    '''
+    return model_config is not None and \
+                getattr(model_config.hf_config,
+                        "is_encoder_decoder",
+                        False)
+
+
+def is_embedding_model_config(model_config) -> bool:
+    '''
+    Extract the embedding model flag from the ModelConfig instance.
+    Return False if model_config is None.
+    '''
+    return model_config is not None and \
+                model_config.embedding_mode
+
+
+def build_explicit_enc_dec_prompt(
+    encoder_prompt: SingletonPromptInputs,
+    decoder_prompt: SingletonPromptInputs,
+) -> ExplicitEncoderDecoderPrompt:
+    return ExplicitEncoderDecoderPrompt(encoder_prompt=encoder_prompt,
+                                        decoder_prompt=decoder_prompt)
+
+
+def zip_enc_dec_prompt_lists(
+    enc_prompt_list: List[SingletonPromptInputs],
+    dec_prompt_list: List[SingletonPromptInputs],
+) -> List[ExplicitEncoderDecoderPrompt]:
+    return [
+        build_explicit_enc_dec_prompt(encoder_prompt, decoder_prompt)
+        for (encoder_prompt,
+             decoder_prompt) in zip(enc_prompt_list, dec_prompt_list)
+    ]
+
+
+def to_enc_dec_tuple_list(
+    enc_dec_prompts: List[ExplicitEncoderDecoderPrompt],
+) -> List[Tuple[PromptInputs, PromptInputs]]:
+    return [(enc_dec_prompt['encoder_prompt'],
+             enc_dec_prompt['decoder_prompt'])
+            for enc_dec_prompt in enc_dec_prompts]
