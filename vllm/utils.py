@@ -29,9 +29,6 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import enable_trace_function_call, init_logger
 
-global flag_for_callback_fn
-flag_for_callback_fn = False
-
 logger = init_logger(__name__)
 
 STR_DTYPE_TO_TORCH_DTYPE = {

@@ -237,6 +237,9 @@ class _AsyncLLMEngine(LLMEngine):
         and updates the scheduler with the model outputs. Finally, it decodes
         the sequences and returns the newly generated results.
         """
+        if (self.parallel_config.pipeline_parallel_size > 1) and (self.model_config.use_output_proc_callback):
+            raise NotImplementedError(
+                "Output processor callback is not supported with pipeline parallelism currently.")
         seq_group_metadata_list, scheduler_outputs = self.scheduler[
             virtual_engine].schedule()
 
@@ -254,12 +257,11 @@ class _AsyncLLMEngine(LLMEngine):
                 running_queue_size=scheduler_outputs.running_queue_size,
                 finished_requests_ids=finished_requests_ids)
             output = await self.model_executor.execute_model_async(
-                execute_model_req, callback_fn=self._process_model_outputs)
+                execute_model_req)
         else:
             output = []
             
         # hack to avoid callback function for first step
-        utils.flag_for_callback_fn = True
         self.previous_output = output
         self.previous_scheduler_outputs = scheduler_outputs
         self.previous_seq_group_metadata_list = seq_group_metadata_list

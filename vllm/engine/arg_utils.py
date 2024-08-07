@@ -117,6 +117,7 @@ class EngineArgs:
     disable_logprobs_during_spec_decoding: Optional[bool] = None
 
     otlp_traces_endpoint: Optional[str] = None
+    use_output_proc_callback: Optional[bool] = False
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -661,6 +662,11 @@ class EngineArgs:
             default=None,
             help='Target URL to which OpenTelemetry traces will be sent.')
 
+        parser.add_argument('--use-output-proc-callback',
+                            action='store_true',
+                            help="Use output processing callback to remove "
+                            "python overheads in decoding. If False, "
+                            "will default to older version.")
         return parser
 
     @classmethod
@@ -718,7 +724,8 @@ class EngineArgs:
             disable_sliding_window=self.disable_sliding_window,
             skip_tokenizer_init=self.skip_tokenizer_init,
             served_model_name=self.served_model_name,
-            multimodal_config=multimodal_config)
+            multimodal_config=multimodal_config,
+            use_output_proc_callback=self.use_output_proc_callback)
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,

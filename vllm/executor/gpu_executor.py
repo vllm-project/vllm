@@ -107,7 +107,7 @@ class GPUExecutor(ExecutorBase):
     def execute_model(
         self, execute_model_req: ExecuteModelRequest
     ) -> Optional[List[Union[SamplerOutput, PoolerOutput]]]:
-        output = self.driver_worker.execute_model(execute_model_req)
+        output = self.driver_worker.execute_model(execute_model_req, self.callback_fn)
         return output
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
@@ -155,8 +155,7 @@ class GPUExecutorAsync(GPUExecutor, ExecutorAsyncBase):
     async def execute_model_async(
         self,
         execute_model_req: ExecuteModelRequest,
-        callback_fn=None
     ) -> List[Union[SamplerOutput, PoolerOutput]]:
         output = await make_async(self.driver_worker.execute_model
-                                  )(execute_model_req=execute_model_req, callback_fn=callback_fn)
+                                  )(execute_model_req=execute_model_req,callback_fn=self.callback_fn)
         return output

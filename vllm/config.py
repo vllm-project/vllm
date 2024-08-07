@@ -129,6 +129,7 @@ class ModelConfig:
         skip_tokenizer_init: bool = False,
         served_model_name: Optional[Union[str, List[str]]] = None,
         multimodal_config: Optional["MultiModalConfig"] = None,
+        use_output_proc_callback: Optional[bool] = False,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -159,7 +160,7 @@ class ModelConfig:
                                     code_revision, rope_scaling, rope_theta)
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
-
+        self.use_output_proc_callback = use_output_proc_callback
         if (not self.disable_sliding_window
                 and self.hf_text_config.model_type == "gemma2"
                 and self.hf_text_config.sliding_window is not None):
@@ -184,6 +185,7 @@ class ModelConfig:
         self._verify_embedding_mode()
         self._verify_quantization()
         self._verify_cuda_graph()
+        self._verify_output_proc_callback()
 
     def _verify_tokenizer_mode(self) -> None:
         tokenizer_mode = self.tokenizer_mode.lower()
@@ -261,6 +263,14 @@ class ModelConfig:
             self.max_seq_len_to_capture = self.max_model_len
         self.max_seq_len_to_capture = min(self.max_seq_len_to_capture,
                                           self.max_model_len)
+
+    def _verify_output_proc_callback(self) -> None:
+        if self.use_output_proc_callback:
+            assert not self.enforce_eager, "To see benefits of output processor callback, enable CUDA graph."
+            # TO DO: assert no beam search
+            # TO DO: assert no pipeline parallelism
+            # TO DO: assert no spec decoding
+            # TO DO: assert mp backend
 
     def verify_with_parallel_config(
         self,

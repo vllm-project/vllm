@@ -32,6 +32,7 @@ class ExecutorBase(ABC):
         multimodal_config: Optional[MultiModalConfig],
         speculative_config: Optional[SpeculativeConfig],
         prompt_adapter_config: Optional[PromptAdapterConfig],
+        callback_fn = None
     ) -> None:
         self.model_config = model_config
         self.cache_config = cache_config
@@ -43,7 +44,7 @@ class ExecutorBase(ABC):
         self.multimodal_config = multimodal_config
         self.speculative_config = speculative_config
         self.prompt_adapter_config = prompt_adapter_config
-
+        self.callback_fn = callback_fn
         self._init_executor()
 
     @abstractmethod
@@ -75,8 +76,7 @@ class ExecutorBase(ABC):
 
     @abstractmethod
     def execute_model(
-        self, execute_model_req: ExecuteModelRequest,
-        callback_fn = None
+        self, execute_model_req: ExecuteModelRequest
     ) -> Optional[List[SamplerOutput]]:
         """Executes at least one model step on the given sequences."""
         raise NotImplementedError
@@ -137,7 +137,8 @@ class ExecutorAsyncBase(ExecutorBase):
     @abstractmethod
     async def execute_model_async(
             self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+            execute_model_req: ExecuteModelRequest,
+            callback_fn = None) -> List[SamplerOutput]:
         """Executes one model step on the given sequences."""
         raise NotImplementedError
 

@@ -184,7 +184,7 @@ class LLMEngine:
             "quantization_param_path=%s, device_config=%s, "
             "decoding_config=%r, observability_config=%r, "
             "seed=%d, served_model_name=%s, use_v2_block_manager=%s, "
-            "enable_prefix_caching=%s)",
+            "enable_prefix_caching=%s use_output_proc_callback=%s)",
             VLLM_VERSION,
             model_config.model,
             speculative_config,
@@ -214,6 +214,7 @@ class LLMEngine:
             model_config.served_model_name,
             scheduler_config.use_v2_block_manager,
             cache_config.enable_prefix_caching,
+            model_config.use_output_proc_callback,
         )
         # TODO(woosuk): Print more configs in debug mode.
 
@@ -257,6 +258,7 @@ class LLMEngine:
             speculative_config=speculative_config,
             load_config=load_config,
             prompt_adapter_config=prompt_adapter_config,
+            callback_fn=self._process_model_outputs if model_config.use_output_proc_callback else None,
         )
 
         if not self.model_config.embedding_mode:
@@ -352,8 +354,7 @@ class LLMEngine:
                 ),
             ))
 
-        # Async output processing pointers
-        # TO DO: move it to asyncllmengine
+        # Output processing callback pointers
         self.previous_output = None
         self.previous_scheduler_outputs = None
         self.previous_seq_group_metadata_list = None
@@ -815,32 +816,26 @@ class LLMEngine:
 
         scheduled_seq_groups = self.previous_scheduler_outputs.scheduled_seq_groups
         ignored_seq_groups = self.previous_scheduler_outputs.ignored_seq_groups
-        output = self.previous_output
+        outputs = self.previous_output
         seq_group_metadata_list = self.previous_seq_group_metadata_list
 
-        # Organize outputs by [sequence group][step] instead of
-        # [step][sequence group].
-        output_by_sequence_group = create_output_by_sequence_group(
-            output, num_seq_groups=len(scheduled_seq_groups))
+        # Organize outputs by [step][sequence group] instead of
+        # [sequence group][step].
+        outputs = create_output_by_sequence_group(
+            outputs, num_seq_groups=len(scheduled_seq_groups))
 
         # Update the scheduled sequence groups with the model outputs.
-        for scheduled_seq_group, outputs, seq_group_meta in zip(
-                scheduled_seq_groups, output_by_sequence_group,
+        for scheduled_seq_group, output, seq_group_meta in zip(
+                scheduled_seq_groups, outputs,
                 seq_group_metadata_list):
             seq_group = scheduled_seq_group.seq_group
-            # seq_group.update_num_computed_tokens(
-            #     scheduled_seq_group.token_chunk_size)
             if self.model_config.embedding_mode:
-                self._process_sequence_group_outputs(seq_group, outputs)
+                self._process_sequence_group_outputs(seq_group, output)
                 continue
 
-            self.output_processor.process_prompt_logprob(seq_group, outputs)
+            self.output_processor.process_prompt_logprob(seq_group, output)
             if seq_group_meta.do_sample:
-                self.output_processor.process_outputs(seq_group, outputs)
-
-        # # Free the finished sequence groups.
-        # for scheduler in self.scheduler:
-        #     scheduler.free_finished_seq_groups()
+                self.output_processor.process_outputs(seq_group, output)
 
         # Create the outputs.
         request_outputs: List[Union[RequestOutput,
@@ -861,8 +856,8 @@ class LLMEngine:
         output: List[SamplerOutput],
         seq_group_metadata_list: List[SequenceGroupMetadata]) -> None:
         """Given model output from a single run, append the tokens to the
-        sequences. This is normally done outside of the worker, but it is
-        required if the worker is to perform async forward passes to next step.
+        sequences. This is normally done inside output processor, but it is
+        required if the worker is to perform async forward pass to next step.
         """
         for seq_group_metadata, sequence_group_outputs in zip(
                 seq_group_metadata_list, output):
@@ -949,20 +944,20 @@ class LLMEngine:
                 running_queue_size=scheduler_outputs.running_queue_size,
                 finished_requests_ids=finished_requests_ids)
             output = self.model_executor.execute_model(
-                execute_model_req=execute_model_req, callback_fn=self._process_model_outputs)
+                execute_model_req=execute_model_req)
         else:
             output = []
 
-        # hack to avoid callback function for first step
-        utils.flag_for_callback_fn = True
+        # Cache results in engine
         self.previous_output = output
         self.previous_scheduler_outputs = scheduler_outputs
         self.previous_seq_group_metadata_list = seq_group_metadata_list
 
-        # HACK: only supports single step
         if len(output) > 0:
             self._advance_to_next_step(output[0], seq_group_metadata_list)
 
+        if not self.model_config.use_output_proc_callback:
+            self._process_model_outputs()
         # Log stats.
         # self.do_log_stats(scheduler_outputs, output)
 
