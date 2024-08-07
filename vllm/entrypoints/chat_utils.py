@@ -146,17 +146,17 @@ def _parse_chat_message_content(
 ) -> ChatMessageParseResult:
     role = message["role"]
     content = message.get("content")
-    tool_call_id = message.get('tool_call_id')
-    tool_calls = message.get('tool_calls')
+    tool_call_id = message.get("tool_call_id")
+    tool_calls = message.get("tool_calls")
     # no longer used by OpenAI, but some models still use it for tool calls.
-    name = message.get('name', '')
+    name = message.get("name", "")
 
     # empty case
     if content is None and tool_calls is None:
         return ChatMessageParseResult(messages=[], mm_futures=[])
 
     # special case - assistant message where tool calls are provided.
-    if role == 'assistant' and tool_calls is not None:
+    if role == "assistant" and tool_calls is not None:
         messages = [
             ConversationMessage(role=role,
                                 content=cast(Optional[str], content),
@@ -165,7 +165,7 @@ def _parse_chat_message_content(
         return ChatMessageParseResult(messages=messages, mm_futures=[])
 
     # special case - tool call result message
-    elif role == 'tool':
+    elif role == "tool":
         messages = [
             ConversationMessage(role=role,
                                 name=name,
