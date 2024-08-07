@@ -9,7 +9,7 @@ from vllm.model_executor.models.opt import OPTForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.utils import get_open_port
 
-from ...utils import VLLM_PATH
+from ...utils import RemoteOpenAIServer, VLLM_PATH
 
 chatml_jinja_path = VLLM_PATH / "examples/template_chatml.jinja"
 assert chatml_jinja_path.exists()
@@ -54,34 +54,37 @@ def test_oot_registration_for_api_server():
     ctx = torch.multiprocessing.get_context()
     server = ctx.Process(target=server_function, args=(port, ))
     server.start()
-    MAX_SERVER_START_WAIT_S = 60
-    client = OpenAI(
-        base_url=f"http://localhost:{port}/v1",
-        api_key="token-abc123",
-    )
-    now = time.time()
-    while True:
-        try:
-            completion = client.chat.completions.create(
-                model="facebook/opt-125m",
-                messages=[{
-                    "role": "system",
-                    "content": "You are a helpful assistant."
-                }, {
-                    "role": "user",
-                    "content": "Hello!"
-                }],
-                temperature=0,
-            )
-            break
-        except OpenAIError as e:
-            if "Connection error" in str(e):
-                time.sleep(3)
-                if time.time() - now > MAX_SERVER_START_WAIT_S:
-                    raise RuntimeError("Server did not start in time") from e
-            else:
-                raise e
-    server.terminate()
+
+    try:
+        client = OpenAI(
+            base_url=f"http://localhost:{port}/v1",
+            api_key="token-abc123",
+        )
+        now = time.time()
+        while True:
+            try:
+                completion = client.chat.completions.create(
+                    model="facebook/opt-125m",
+                    messages=[{
+                        "role": "system",
+                        "content": "You are a helpful assistant."
+                    }, {
+                        "role": "user",
+                        "content": "Hello!"
+                    }],
+                    temperature=0,
+                )
+                break
+            except OpenAIError as e:
+                if "Connection error" in str(e):
+                    time.sleep(3)
+                    if time.time() - now > RemoteOpenAIServer.MAX_START_WAIT_S:
+                        msg = "Server did not start in time"
+                        raise RuntimeError(msg) from e
+                else:
+                    raise e
+    finally:
+        server.terminate()
 
     generated_text = completion.choices[0].message.content
     assert generated_text is not None
