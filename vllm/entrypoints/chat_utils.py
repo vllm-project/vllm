@@ -1,5 +1,5 @@
 import codecs
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import (Any, Awaitable, Iterable, List, Optional, Sequence, Tuple,
@@ -124,8 +124,8 @@ ConversationMessage = Union[TextConversationMessage,
 
 @dataclass(frozen=True)
 class ChatMessageParseResult:
-    messages: List[ConversationMessage]
-    mm_futures: List[Awaitable[MultiModalDataDict]]
+    messages: Sequence[ConversationMessage]
+    mm_futures: Sequence[Awaitable[MultiModalDataDict]]
 
 
 def load_chat_template(
