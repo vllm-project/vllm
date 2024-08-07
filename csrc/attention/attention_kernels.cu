@@ -894,7 +894,7 @@ template <typename T, int NUM_THREADS = 128, int PARTITION_SIZE = 8192>
 void sequence_block_reducer_launcher(torch::Tensor& out,
                                      torch::Tensor& exp_sums,
                                      torch::Tensor& max_logits,
-                                     torch::Tensor& tmp_out, int max_seq_len) {
+                                     torch::Tensor& tmp_out) {
   int num_seqs = tmp_out.size(0);
   int num_heads = tmp_out.size(1);
   int head_size = tmp_out.size(3);
@@ -944,7 +944,7 @@ void sequence_block_reducer_launcher(torch::Tensor& out,
 
 #define CALL_SEQUENCE_BLOCK_REDUCER_LAUNCHER(T)                          \
   sequence_block_reducer_launcher<T>(out, exp_sums, max_logits, tmp_out, \
-                                     query, seq_lens);
+                                     seq_lens);
 
 // [num_seqs, num_heads, head_size]
 // [num_seqs, num_heads, float]
