@@ -119,7 +119,7 @@ class Fp8LinearMethod(LinearMethodBase):
         # kernel for fast weight-only FP8 quantization
         capability = current_platform.get_device_capability()
         capability = capability[0] * 10 + capability[1]
-        self.use_marlin = capability < 89 or envs.VLLM_FORCE_FP8_MARLIN
+        self.use_marlin = capability < 89 or envs.VLLM_TEST_FORCE_FP8_MARLIN
 
     def create_weights(
         self,

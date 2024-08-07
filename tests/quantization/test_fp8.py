@@ -25,7 +25,7 @@ MODELS = [
 def test_model_load_and_run(vllm_runner, model_id: str, force_marlin: bool,
                             monkeypatch) -> None:
     if force_marlin:
-        monkeypatch.setenv("VLLM_FORCE_FP8_MARLIN", "1")
+        monkeypatch.setenv("VLLM_TEST_FORCE_FP8_MARLIN", "1")
 
     with vllm_runner(model_id) as llm:
         # note: this does not test accuracy, just that we can run through
@@ -71,7 +71,7 @@ def test_kv_cache_model_load_and_run(vllm_runner, model_id: str):
 def test_load_fp16_model(vllm_runner, kv_cache_dtype: str, force_marlin: bool,
                          monkeypatch) -> None:
     if force_marlin:
-        monkeypatch.setenv("VLLM_FORCE_FP8_MARLIN", "1")
+        monkeypatch.setenv("VLLM_TEST_FORCE_FP8_MARLIN", "1")
 
     with vllm_runner("facebook/opt-125m",
                      quantization="fp8",
