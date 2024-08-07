@@ -38,9 +38,6 @@ from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
 from vllm.utils import iterate_with_cancellation, random_uuid
 
-env = Environment(loader=FileSystemLoader("./"),
-                  autoescape=select_autoescape())
-
 logger = init_logger(__name__)
 
 
