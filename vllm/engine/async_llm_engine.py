@@ -299,7 +299,7 @@ class _AsyncLLMEngine(LLMEngine):
         self,
         prompt: str,
         request_id: str,
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: Optional[LoRARequest],
     ) -> List[int]:
         """Async version of :meth:`_tokenize_prompt`."""
         tokenizer = self.get_tokenizer_group("prompts must be None if "

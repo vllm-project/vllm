@@ -625,7 +625,7 @@ class LLMEngine:
 
     def _prepare_decoder_input_ids_for_generation(
         self,
-        decoder_input_ids: Optional[List[int]] = None,
+        decoder_input_ids: Optional[List[int]],
     ) -> List[int]:
         """
         Prepares `decoder_input_ids` for generation with encoder-decoder models.
@@ -665,7 +665,7 @@ class LLMEngine:
         self,
         prompt: str,
         request_id: str,
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: Optional[LoRARequest],
     ) -> List[int]:
         '''
         Wrapper around application of the model's tokenizer.
@@ -740,7 +740,7 @@ class LLMEngine:
     def _apply_prompt_adapter(
         self,
         prompt_token_ids: List[int],
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest],
     ) -> List[int]:
         if prompt_adapter_request:
             prompt_token_ids = (
@@ -874,7 +874,7 @@ class LLMEngine:
     def _build_decoder_only_llm_inputs(
         self,
         prompt_comps: PromptComponents,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest],
     ) -> LLMInputs:
         prompt, prompt_token_ids, multi_modal_data = prompt_comps
 
