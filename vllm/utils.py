@@ -17,15 +17,15 @@ from collections import defaultdict
 from functools import lru_cache, partial, wraps
 from platform import uname
 from typing import (Any, AsyncGenerator, Awaitable, Callable, Dict, Generic,
-                    Hashable, List, Optional, OrderedDict, Set, Tuple, TypeVar,
-                    Union, overload)
+                    Hashable, List, Literal, Optional, OrderedDict, Set, Tuple,
+                    Type, TypeVar, Union, overload)
 
 import numpy as np
 import numpy.typing as npt
 import psutil
 import torch
 import torch.types
-from typing_extensions import ParamSpec
+from typing_extensions import ParamSpec, TypeGuard, assert_never
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -807,6 +807,24 @@ def get_dtype_size(dtype: torch.dtype) -> int:
     return torch.tensor([], dtype=dtype).element_size()
 
 
+# `collections` helpers
+def is_list_of(
+    value: object,
+    typ: Type[T],
+    *,
+    check: Literal["first", "all"] = "first",
+) -> TypeGuard[List[T]]:
+    if not isinstance(value, list):
+        return False
+
+    if check == "first":
+        return len(value) == 0 or isinstance(value[0], typ)
+    elif check == "all":
+        return all(isinstance(v, typ) for v in value)
+
+    assert_never(check)
+
+
 def merge_dicts(dict1: Dict[K, List[T]],
                 dict2: Dict[K, List[T]]) -> Dict[K, List[T]]:
     """Merge 2 dicts that have key -> List of items.
@@ -954,6 +972,7 @@ def enable_trace_function_call_for_thread() -> None:
         enable_trace_function_call(log_path)
 
 
+# `functools` helpers
 def identity(value: T) -> T:
     return value
 
