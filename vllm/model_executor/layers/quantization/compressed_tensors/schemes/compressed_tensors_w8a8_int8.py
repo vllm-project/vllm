@@ -8,9 +8,11 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     QuantizationStrategy)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    apply_int8_linear, convert_to_channelwise, create_per_channel_scale_param,
-    create_per_tensor_scale_param)
-from vllm.model_executor.utils import set_weight_attrs
+    apply_int8_linear, convert_to_channelwise)
+from vllm.model_executor.parameter import (BasevLLMParameter,
+                                           ChannelQuantScaleParameter,
+                                           ModelWeightParameter,
+                                           PerTensorScaleParameter)
 
 
 class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
@@ -39,7 +41,9 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
             ws_channelwise = convert_to_channelwise(layer.weight_scale,
                                                     self.logical_widths)
             layer.weight_scale = Parameter(ws_channelwise, requires_grad=False)
-
+        else:
+            layer.weight_scale = Parameter(layer.weight_scale.data,
+                                           requires_grad=False)
         # INPUT SCALE
         if self.is_static_input_scheme:
             layer.input_scale = Parameter(layer.input_scale.max(),
@@ -55,32 +59,35 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
         self.logical_widths = output_partition_sizes
 
         # WEIGHT
-        weight = Parameter(torch.empty(sum(output_partition_sizes),
-                                       input_size_per_partition,
-                                       dtype=torch.int8),
-                           requires_grad=False)
+        weight = ModelWeightParameter(data=torch.empty(
+            sum(output_partition_sizes),
+            input_size_per_partition,
+            dtype=torch.int8),
+                                      input_dim=1,
+                                      output_dim=0,
+                                      weight_loader=weight_loader)
+
         layer.register_parameter("weight", weight)
-        set_weight_attrs(weight, {
-            "input_dim": 1,
-            "output_dim": 0,
-            "weight_loader": weight_loader,
-        })
 
         # WEIGHT SCALE
-        layer_kwargs = {"weight_loader": weight_loader}
         if self.strategy == QuantizationStrategy.CHANNEL:
-            weight_scale = create_per_channel_scale_param(
-                output_partition_sizes, **layer_kwargs)
+            weight_scale = ChannelQuantScaleParameter(
+                data=torch.empty((sum(output_partition_sizes), 1),
+                                 dtype=torch.float32),
+                output_dim=0,
+                weight_loader=weight_loader)
         else:
             assert self.strategy == QuantizationStrategy.TENSOR
-            weight_scale = create_per_tensor_scale_param(
-                output_partition_sizes, **layer_kwargs)
+            weight_scale = PerTensorScaleParameter(data=torch.empty(
+                len(output_partition_sizes), dtype=torch.float32),
+                                                   weight_loader=weight_loader)
         layer.register_parameter("weight_scale", weight_scale)
 
         # INPUT SCALE
         if self.is_static_input_scheme:
-            input_scale = create_per_tensor_scale_param(
-                output_partition_sizes, **layer_kwargs)
+            input_scale = BasevLLMParameter(data=torch.empty(
+                1, dtype=torch.float32),
+                                            weight_loader=weight_loader)
             layer.register_parameter("input_scale", input_scale)
 
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,
