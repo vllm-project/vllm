@@ -232,12 +232,6 @@ class OpenAIServingCompletion(OpenAIServing):
                 prompt_text = res.prompt
                 assert prompt_text is not None
 
-                prompt_token_ids = res.prompt_token_ids
-                assert prompt_token_ids is not None
-
-                prompt_logprobs = res.prompt_logprobs
-                assert prompt_logprobs is not None
-
                 delta_token_ids: GenericSequence[int]
                 out_logprobs: Optional[GenericSequence[Optional[Dict[
                     int, Logprob]]]]
@@ -251,18 +245,19 @@ class OpenAIServingCompletion(OpenAIServing):
                     if request.echo and request.max_tokens == 0:
                         # only return the prompt
                         delta_text = prompt_text
-                        delta_token_ids = prompt_token_ids
-                        out_logprobs = prompt_logprobs
+                        delta_token_ids = res.prompt_token_ids
+                        out_logprobs = res.prompt_logprobs
                         has_echoed[i] = True
                     elif (request.echo and request.max_tokens > 0
                           and not has_echoed[i]):
+                        assert res.prompt_logprobs is not None
                         # echo the prompt and first token
                         delta_text = prompt_text + output.text
                         delta_token_ids = [
-                            *prompt_token_ids, *output.token_ids
+                            *res.prompt_token_ids, *output.token_ids
                         ]
                         out_logprobs = [
-                            *prompt_logprobs, *(output.logprobs or [])
+                            *res.prompt_logprobs, *(output.logprobs or []),
                         ]
                         has_echoed[i] = True
                     else:
@@ -308,7 +303,7 @@ class OpenAIServingCompletion(OpenAIServing):
                             and request.stream_options.include_usage):
                         if (request.stream_options.continuous_usage_stats
                                 or output.finish_reason is not None):
-                            prompt_tokens = len(prompt_token_ids)
+                            prompt_tokens = len(res.prompt_token_ids)
                             completion_tokens = len(output.token_ids)
                             usage = UsageInfo(
                                 prompt_tokens=prompt_tokens,
@@ -356,11 +351,6 @@ class OpenAIServingCompletion(OpenAIServing):
         num_generated_tokens = 0
 
         for final_res in final_res_batch:
-            prompt_token_ids = final_res.prompt_token_ids
-
-            prompt_logprobs = final_res.prompt_logprobs
-            assert prompt_logprobs is not None
-
             prompt_text = final_res.prompt
             assert prompt_text is not None
 
@@ -371,17 +361,23 @@ class OpenAIServingCompletion(OpenAIServing):
             for output in final_res.outputs:
                 assert request.max_tokens is not None
                 if request.echo and request.max_tokens == 0:
-                    token_ids = prompt_token_ids
-                    out_logprobs = prompt_logprobs
+                    token_ids = final_res.prompt_token_ids
+                    out_logprobs = final_res.prompt_logprobs
                     output_text = prompt_text
                 elif request.echo and request.max_tokens > 0:
-                    token_ids = [*prompt_token_ids, *output.token_ids]
+                    token_ids = [
+                        *final_res.prompt_token_ids, *output.token_ids
+                    ]
 
                     if request.logprobs is None:
                         out_logprobs = None
                     else:
+                        assert final_res.prompt_logprobs is not None
                         assert output.logprobs is not None
-                        out_logprobs = [*prompt_logprobs, *output.logprobs]
+                        out_logprobs = [
+                            *final_res.prompt_logprobs,
+                            *output.logprobs,
+                        ]
 
                     output_text = prompt_text + output.text
                 else:
@@ -409,7 +405,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 )
                 choices.append(choice_data)
 
-            num_prompt_tokens += len(prompt_token_ids)
+            num_prompt_tokens += len(final_res.prompt_token_ids)
             num_generated_tokens += sum(
                 len(output.token_ids) for output in final_res.outputs)
 
