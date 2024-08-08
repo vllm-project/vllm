@@ -435,23 +435,25 @@ def gguf_quant_weights_iterator(
     reader = gguf.GGUFReader(gguf_file)
 
     for tensor in reader.tensors:
-        weight_type = tensor.tensor_type
-        name = gguf_to_hf_name_map[tensor.name]
+        if tensor.name in gguf_to_hf_name_map:
+            weight_type = tensor.tensor_type
+            name = gguf_to_hf_name_map[tensor.name]
 
-        if weight_type.name != "F32":
-            weight_type_name = name.replace("weight", "qweight_type")
-            weight_type = torch.tensor(weight_type)
-            yield weight_type_name, weight_type
+            if weight_type.name != "F32":
+                weight_type_name = name.replace("weight", "qweight_type")
+                weight_type = torch.tensor(weight_type)
+                yield weight_type_name, weight_type
 
     for tensor in reader.tensors:
-        weight = tensor.data
-        weight_type = tensor.tensor_type
-        name = gguf_to_hf_name_map[tensor.name]
+        if tensor.name in gguf_to_hf_name_map:
+            weight = tensor.data
+            weight_type = tensor.tensor_type
+            name = gguf_to_hf_name_map[tensor.name]
 
-        if weight_type.name != "F32":
-            name = name.replace("weight", "qweight")
-        param = torch.tensor(weight)
-        yield name, param
+            if weight_type.name != "F32":
+                name = name.replace("weight", "qweight")
+            param = torch.tensor(weight)
+            yield name, param
 
 
 def kv_cache_scales_loader(
