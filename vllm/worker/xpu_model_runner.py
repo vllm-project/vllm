@@ -49,6 +49,8 @@ class ModelInputForXPU(ModelRunnerInputBase):
     attn_metadata: Optional["AttentionMetadata"] = None
     sampling_metadata: Optional["SamplingMetadata"] = None
     multi_modal_kwargs: Optional[Mapping[str, BatchedTensorInputs]] = None
+    virtual_engine: int = 0
+
 
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:
@@ -262,7 +264,8 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
                                 input_positions=input_positions,
                                 attn_metadata=attn_metadata,
                                 sampling_metadata=sampling_metadata,
-                                multi_modal_kwargs=multi_modal_kwargs)
+                                multi_modal_kwargs=multi_modal_kwargs,
+                                virtual_engine=virtual_engine)
 
     def _prepare_decode(
         self,
