@@ -57,8 +57,6 @@ openai_serving_completion: OpenAIServingCompletion
 openai_serving_embedding: OpenAIServingEmbedding
 openai_serving_tokenization: OpenAIServingTokenization
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
-prometheus_multiproc_dir = tempfile.TemporaryDirectory()
-os.environ["PROMETHEUS_MULTIPROC_DIR"] = prometheus_multiproc_dir.name
 
 logger = init_logger('vllm.entrypoints.openai.api_server')
 
@@ -111,14 +109,9 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
 
     # Otherwise, use the multiprocessing AsyncLLMEngine.
     else:
-        # Create a tmp dir to be used for Prometheus Multiprocessing.
-        # See: https://prometheus.github.io/client_python/multiprocess/
-        # Note: TemporaryDirectory manages the lifecycle of the 
-        #   /tmp/xxx directory which is created. We use a global 
-        #   variable such that the tmp dir will exist for the life 
-        #   of server and get cleaned up at exit.
-        # global prometheus_multiproc_dir
-        
+        global prometheus_multiproc_dir
+        prometheus_multiproc_dir = tempfile.TemporaryDirectory()
+        os.environ["PROMETHEUS_MULTIPROC_DIR"] = prometheus_multiproc_dir.name
 
         # Select random path for IPC.
         rpc_path = get_open_zmq_ipc_path()
@@ -166,13 +159,7 @@ def mount_metrics(app: FastAPI):
     # before prometheus_client is imported in case of multiprocessing.
     from prometheus_client import make_asgi_app, multiprocess, CollectorRegistry
 
-    prometheus_multiproc_dir_path = os.getenv("PROMETHEUS_MULTIPROC_DIR", None)
-
-    # If set, we will use multiprocessing mode.
-    if prometheus_multiproc_dir_path is not None:
-        logger.info("Prometheus client using multiprocessing mode with "
-                    "PROMETHEUS_MULTIPROC_DIR=%s", prometheus_multiproc_dir_path)
-        # See https://prometheus.github.io/client_python/exporting/http/fastapi-gunicorn/
+    if "PROMETHEUS_MULTIPROC_DIR" in os.environ:
         registry = CollectorRegistry()
         multiprocess.MultiProcessCollector(registry)
     else:
