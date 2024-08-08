@@ -341,7 +341,7 @@ class _AsyncLLMEngine(LLMEngine):
                 execute_model_req)
             # we need to do this here so that last step's sampled_token_ids can
             # be passed to the next iteration.
-            if self.parallel_config.pipeline_parallel_size > 1:
+            if self.scheduler_config.is_multi_step and self.parallel_config.pipeline_parallel_size > 1:
                 if len(output) > 0 and output[0] is not None:
                     last_output = output[-1]
                     assert last_output.sampled_token_ids is None
