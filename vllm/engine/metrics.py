@@ -37,9 +37,6 @@ class Metrics:
         # Unregister any existing vLLM collectors
         self._unregister_vllm_metrics()
 
-        # Config Information
-        self._create_info_cache_config()
-
         # System stats
         #   Scheduler State
         self.gauge_scheduler_running = self._gauge_cls(
@@ -167,12 +164,6 @@ class Metrics:
             labelnames=labelnames,
         )
 
-    def _create_info_cache_config(self) -> None:
-        # Config Information
-        self.info_cache_config = prometheus_client.Info(
-            name='vllm:cache_config',
-            documentation='information of cache_config')
-
     def _unregister_vllm_metrics(self) -> None:
         for collector in list(prometheus_client.REGISTRY._collector_to_names):
             if hasattr(collector, "_name") and "vllm" in collector._name:
@@ -264,10 +255,6 @@ class RayMetrics(Metrics):
         super().__init__(labelnames, max_model_len)
 
     def _unregister_vllm_metrics(self) -> None:
-        # No-op on purpose
-        pass
-
-    def _create_info_cache_config(self) -> None:
         # No-op on purpose
         pass
 
@@ -385,10 +372,6 @@ class PrometheusStatLogger(StatLoggerBase):
         self.labels = labels
         self.metrics = self._metrics_cls(labelnames=list(labels.keys()),
                                          max_model_len=max_model_len)
-
-    def info(self, type: str, obj: SupportsMetricsInfo) -> None:
-        if type == "cache_config":
-            self.metrics.info_cache_config.info(obj.metrics_info())
 
     def _log_gauge(self, gauge, data: Union[int, float]) -> None:
         # Convenience function for logging to gauge.
@@ -523,6 +506,3 @@ class PrometheusStatLogger(StatLoggerBase):
 class RayPrometheusStatLogger(PrometheusStatLogger):
     """RayPrometheusStatLogger uses Ray metrics instead."""
     _metrics_cls = RayMetrics
-
-    def info(self, type: str, obj: SupportsMetricsInfo) -> None:
-        return None

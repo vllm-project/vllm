@@ -336,8 +336,6 @@ class LLMEngine:
                         labels=dict(model_name=model_config.served_model_name),
                         max_model_len=self.model_config.max_model_len),
                 }
-                self.stat_loggers["prometheus"].info("cache_config",
-                                                     self.cache_config)
 
         self.tracer = None
         if self.observability_config.otlp_traces_endpoint:
