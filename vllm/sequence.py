@@ -955,11 +955,11 @@ class SamplerOutput:
     # Optional last hidden states from the model.
     hidden_states: Optional[torch.Tensor] = None
 
-    # Total time spent in the forward pass for this across all workers
+    # Time taken in the forward pass for this across all workers
     model_forward_time: Optional[float] = None
 
-    # Total time spent in the model execute function. This will include model
-    # forward, block/sync across workers, cpu-gpu sync time and sampling time.
+    # Time taken in the model execute function. This will include model forward,
+    # block/sync across workers, cpu-gpu sync time and sampling time.
     model_execute_time: Optional[float] = None
 
     def __getitem__(self, idx: int):
