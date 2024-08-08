@@ -112,4 +112,7 @@ class TPUInt8LinearMethod(LinearMethodBase):
                 "to run vLLM on TPU.") from err
         weight = layer.weight
         scale = layer.scale
-        return torch.ops.xla.quantized_matmul(x, weight, scale)
+        out = torch.ops.xla.quantized_matmul(x, weight, scale)
+        if bias is not None:
+            out = out + bias
+        return out
