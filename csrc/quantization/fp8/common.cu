@@ -10,8 +10,8 @@
 #include "../../reduction_utils.cuh"
 
 #ifndef USE_ROCM
-using FP8_TYPE = c10::Float8_e4m3fn;
-constexpr auto FP8_E4M3_MAX = std::numeric_limits<FP8_TYPE>::max();
+  #define FP8_TYPE c10::Float8_e4m3fn
+  #define FP8_E4M3_MAX std::numeric_limits<FP8_TYPE>::max()
 #else
   #include "amd/hip_float8.h"
 using FP8_TYPE = c10::Float8_e4m3fnuz;
