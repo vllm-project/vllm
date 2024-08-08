@@ -58,7 +58,7 @@ def _log_task_completion(task: asyncio.Task,
         error_callback(exception)
         raise AsyncEngineDeadError(
             "Task finished unexpectedly. This should never happen! "
-            "Please open an issue on Github. See stack trace above for the"
+            "Please open an issue on Github. See stack trace above for the "
             "actual cause.") from e
 
 
@@ -132,7 +132,9 @@ class RequestTracker:
             self._request_streams[request_id].put(exc)
             self.abort_request(request_id)
         else:
-            for rid, stream in self._request_streams.items():
+            # NB: list() used here because self.abort_request pops the stream
+            # out of self._request_streams, so we can't iterate on it directly
+            for rid, stream in list(self._request_streams.items()):
                 stream.put(exc)
                 self.abort_request(rid)
 
