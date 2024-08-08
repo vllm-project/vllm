@@ -3,7 +3,6 @@ import importlib
 import inspect
 import os
 import re
-import tempfile
 from argparse import Namespace
 from contextlib import asynccontextmanager
 from http import HTTPStatus
@@ -55,7 +54,6 @@ openai_serving_chat: OpenAIServingChat
 openai_serving_completion: OpenAIServingCompletion
 openai_serving_embedding: OpenAIServingEmbedding
 openai_serving_tokenization: OpenAIServingTokenization
-# prometheus_multiproc_dir: tempfile.TemporaryDirectory
 
 logger = init_logger('vllm.entrypoints.openai.api_server')
 
@@ -108,9 +106,6 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
 
     # Otherwise, use the multiprocessing AsyncLLMEngine.
     else:
-        # global prometheus_multiproc_dir
-        # prometheus_multiproc_dir = tempfile.TemporaryDirectory()
-        # os.environ["PROMETHEUS_MULTIPROC_DIR"] = prometheus_multiproc_dir.name
         os.environ["PROMETHEUS_MULTIPROC_DIR"] = "/tmp/testit"
 
         # Select random path for IPC.
@@ -155,8 +150,6 @@ router = APIRouter()
 
 
 def mount_metrics(app: FastAPI):
-    # Lazy import such that we can set PROMETHEUS_MULTIPROC_DIR
-    # before prometheus_client is imported in case of multiprocessing.
     from prometheus_client import make_asgi_app, multiprocess, CollectorRegistry
 
     if "PROMETHEUS_MULTIPROC_DIR" in os.environ:
