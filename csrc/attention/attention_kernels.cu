@@ -890,11 +890,14 @@ __global__ void sequence_block_reduce_kernel(
           out_ptr, exp_sums_ptr, max_logits_ptr, tmp_out_ptr,   \
           max_num_partitions);
 
-template <typename T, int NUM_THREADS = 128, int PARTITION_SIZE = 8192>
+template <typename T>
 void sequence_block_reducer_launcher(torch::Tensor& out,
                                      torch::Tensor& exp_sums,
                                      torch::Tensor& max_logits,
                                      torch::Tensor& tmp_out) {
+  int NUM_THREADS = 128;
+  int PARTITION_SIZE = 8192;
+
   int num_seqs = tmp_out.size(0);
   int num_heads = tmp_out.size(1);
   int head_size = tmp_out.size(3);
@@ -952,10 +955,8 @@ void sequence_block_reducer(
     torch::Tensor&
         tmp_out  // [num_seqs, num_heads, max_num_partitions, head_size]
 ) {
-  const int NUM_THREADS = 128;
-  const int PARTITION_SIZE = 8192;
-  sequence_block_reducer_launcher<tmp_out.dtype(), NUM_THREADS, PARTITION_SIZE>(
-      out, exp_sums, max_logits, tmp_out);
+  sequence_block_reducer_launcher<tmp_out.dtype()>(out, exp_sums, max_logits,
+                                                   tmp_out);
 }
 #define LAUNCH_PAGED_ATTENTION_V1(HEAD_SIZE)                                \
   VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize(                     \
