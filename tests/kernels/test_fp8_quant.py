@@ -3,7 +3,7 @@ import torch
 
 import vllm._custom_ops as ops
 from tests.kernels.quant_utils import (ref_dynamic_per_tensor_fp8_quant,
-                                       ref_dynamic_per_token_quant)
+                                       ref_dynamic_per_token_quant, FP8_DTYPE)
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 HIDDEN_SIZES = [1, 2, 3, 4, 16, 67, 768, 2048, 5120, 5137, 8192,
@@ -31,7 +31,7 @@ def test_dynamic_per_token_fp8_quant(num_tokens: int, hidden_size: int,
 
     scale_ub = torch.mean(x).to(dtype=torch.float32, device='cuda') \
             if scale_ub else None
-    ref_out, ref_scales = ref_dynamic_per_token_quant(x, torch.float8_e4m3fn,
+    ref_out, ref_scales = ref_dynamic_per_token_quant(x, FP8_DTYPE,
                                                       scale_ub)
     ops_out, ops_scales = ops.scaled_fp8_quant(x,
                                                scale_ub=scale_ub,
