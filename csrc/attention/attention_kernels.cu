@@ -889,7 +889,7 @@ __global__ void sequence_block_reduce_kernel(
           out_ptr, exp_sums_ptr, max_logits_ptr, tmp_out_ptr,   \
           max_num_partitions);
 
-template <typename T,>
+template <typename T>
 void sequence_block_reducer_launcher(torch::Tensor& out,
                                      torch::Tensor& exp_sums,
                                      torch::Tensor& max_logits,
