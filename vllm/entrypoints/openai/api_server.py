@@ -43,7 +43,7 @@ from vllm.entrypoints.openai.serving_tokenization import (
     OpenAIServingTokenization)
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser, get_open_port
+from vllm.utils import FlexibleArgumentParser, get_open_zmq_ipc_path
 from vllm.version import __version__ as VLLM_VERSION
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
@@ -106,19 +106,32 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
 
     # Otherwise, use the multiprocessing AsyncLLMEngine.
     else:
+        # Select random path for IPC.
+        rpc_path = get_open_zmq_ipc_path()
+        logger.info("Multiprocessing frontend to use %s for RPC Path.",
+                    rpc_path)
+
         # Start RPCServer in separate process (holds the AsyncLLMEngine).
-        port = get_open_port(envs.VLLM_RPC_PORT)
         rpc_server_process = Process(target=run_rpc_server,
                                      args=(engine_args,
                                            UsageContext.OPENAI_API_SERVER,
-                                           port))
+                                           rpc_path))
         rpc_server_process.start()
 
         # Build RPCClient, which conforms to AsyncEngineClient Protocol.
-        async_engine_client = AsyncEngineRPCClient(port)
-        await async_engine_client.setup()
+        async_engine_client = AsyncEngineRPCClient(rpc_path)
 
         try:
+            while True:
+                try:
+                    await async_engine_client.setup()
+                    break
+                except TimeoutError as e:
+                    if not rpc_server_process.is_alive():
+                        raise RuntimeError(
+                            "The server process died before "
+                            "responding to the readiness probe") from e
+
             yield async_engine_client
         finally:
             # Ensure rpc server process was terminated
@@ -344,6 +357,7 @@ async def run_server(args, **uvicorn_kwargs) -> None:
 
         shutdown_task = await serve_http(
             app,
+            engine=async_engine_client,
             host=args.host,
             port=args.port,
             log_level=args.uvicorn_log_level,
