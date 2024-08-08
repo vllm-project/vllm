@@ -197,15 +197,15 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
 
         # Quantized weights
         qweight = PackedvLLMParameter(
-            input_dim=0,
-            output_dim=1,
-            packed_dim=0,
-            packed_factor=self.quant_config.pack_factor,
             data=torch.empty(
                 input_size_per_partition // self.quant_config.pack_factor,
                 output_size_per_partition,
                 dtype=torch.int32,
             ),
+            input_dim=0,
+            output_dim=1,
+            packed_dim=0,
+            packed_factor=self.quant_config.pack_factor,
             weight_loader=weight_loader)
 
         # Activation order
