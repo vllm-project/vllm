@@ -121,9 +121,9 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.half,
     "bfloat16": torch.bfloat16,
     "float": torch.float,
-    "fp8": torch.uint8,
-    "fp8_e4m3": torch.uint8,
-    "fp8_e5m2": torch.uint8,
+    "fp8": torch.float8_e4m3fn,
+    "fp8_e4m3": torch.float8_e4m3fn,
+    "fp8_e5m2": torch.float8_e5m2,
 }
 
 TORCH_DTYPE_TO_NUMPY_DTYPE = {
@@ -556,7 +556,7 @@ def _generate_random_fp8(
 
 
 def get_kv_cache_torch_dtype(
-        cache_dtype: Optional[Union[str, torch.dtype]],
+        cache_dtype: str,
         model_dtype: Optional[Union[str, torch.dtype]] = None) -> torch.dtype:
     if isinstance(cache_dtype, str):
         if cache_dtype == "auto":
@@ -566,10 +566,9 @@ def get_kv_cache_torch_dtype(
                 torch_dtype = model_dtype
             else:
                 raise ValueError(f"Invalid model dtype: {model_dtype}")
-        elif cache_dtype in ["half", "bfloat16", "float"]:
+        elif cache_dtype in ["half", "bfloat16", "float"
+                             ] or "fp8" in cache_dtype:
             torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype]
-        elif cache_dtype == "fp8":
-            torch_dtype = torch.uint8
         else:
             raise ValueError(f"Invalid kv cache dtype: {cache_dtype}")
     elif isinstance(cache_dtype, torch.dtype):
@@ -585,7 +584,7 @@ def create_kv_caches_with_random_flash(
     num_layers: int,
     num_heads: int,
     head_size: int,
-    cache_dtype: Optional[Union[str, torch.dtype]],
+    cache_dtype: str,
     model_dtype: Optional[Union[str, torch.dtype]] = None,
     seed: int = 0,
     device: Optional[str] = "cuda",
@@ -607,7 +606,7 @@ def create_kv_caches_with_random_flash(
                                       device=device)
         if cache_dtype in ["auto", "half", "bfloat16", "float"]:
             key_value_cache.uniform_(-scale, scale)
-        elif cache_dtype == 'fp8':
+        elif 'fp8' in cache_dtype:
             _generate_random_fp8(key_value_cache, -scale, scale)
         else:
             raise ValueError(
@@ -623,7 +622,7 @@ def create_kv_caches_with_random(
     num_layers: int,
     num_heads: int,
     head_size: int,
-    cache_dtype: Optional[Union[str, torch.dtype]],
+    cache_dtype: str,
     model_dtype: Optional[Union[str, torch.dtype]] = None,
     seed: int = 0,
     device: Optional[str] = "cuda",
@@ -650,7 +649,7 @@ def create_kv_caches_with_random(
                                 device=device)
         if cache_dtype in ["auto", "half", "bfloat16", "float"]:
             key_cache.uniform_(-scale, scale)
-        elif cache_dtype == 'fp8':
+        elif 'fp8' in cache_dtype:
             _generate_random_fp8(key_cache, -scale, scale)
         else:
             raise ValueError(
