@@ -110,16 +110,18 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
     else:
         if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
             # Make TemporaryDirectory for prometheus multiprocessing
-            # Note: global TemporaryDirectory will be automatically 
+            # Note: global TemporaryDirectory will be automatically
             #   cleaned up upon exit.
             global prometheus_multiproc_dir
             prometheus_multiproc_dir = tempfile.TemporaryDirectory()
-            os.environ["PROMETHEUS_MULTIPROC_DIR"] = prometheus_multiproc_dir.name
+            os.environ[
+                "PROMETHEUS_MULTIPROC_DIR"] = prometheus_multiproc_dir.name
         else:
-            logger.warning("Found PROMETHEUS_MULTIPROC_DIR was set by user. "
-                           "This directory must be wiped between vLLM runs or "
-                           "you will find inaccurate metrics. Unset the variable "
-                           "and vLLM will properly handle cleanup.")
+            logger.warning(
+                "Found PROMETHEUS_MULTIPROC_DIR was set by user. "
+                "This directory must be wiped between vLLM runs or "
+                "you will find inaccurate metrics. Unset the variable "
+                "and vLLM will properly handle cleanup.")
 
         # Select random path for IPC.
         rpc_path = get_open_zmq_ipc_path()
@@ -163,15 +165,16 @@ router = APIRouter()
 
 
 def mount_metrics(app: FastAPI):
-    # PROMETHEUS_MULTIPROC_DIR needs to be set before we import
-    # the prometheus_client. So lazy import here.
-    # see: https://prometheus.github.io/client_python/multiprocess/
+    # Lazy import for prometheus multiprocessing.
+    # We need to set PROMETHEUS_MULTIPROC_DIR environment variable
+    # before prometheus_client is imported.
+    # See https://prometheus.github.io/client_python/multiprocess/
     from prometheus_client import (CollectorRegistry, make_asgi_app,
                                    multiprocess)
 
     prometheus_multiproc_dir_path = os.getenv("PROMETHEUS_MULTIPROC_DIR", None)
     if prometheus_multiproc_dir_path is not None:
-        logger.info("vLLM to use %s as PROMETHEUS_MULTIPROC_DIR", 
+        logger.info("vLLM to use %s as PROMETHEUS_MULTIPROC_DIR",
                     prometheus_multiproc_dir_path)
         registry = CollectorRegistry()
         multiprocess.MultiProcessCollector(registry)
