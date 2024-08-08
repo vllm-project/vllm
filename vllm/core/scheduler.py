@@ -813,8 +813,8 @@ class Scheduler:
                     running_scheduled.swapped_out) == 0:
                 swapped_in = self._schedule_swapped(budget, curr_loras)
 
-        assert (budget.num_batched_tokens
-                <= self.scheduler_config.max_num_batched_tokens)
+        assert (budget.num_batched_tokens <=
+                self.scheduler_config.max_num_batched_tokens)
         assert budget.num_curr_seqs <= self.scheduler_config.max_num_seqs
 
         # Update waiting requests.
@@ -890,8 +890,8 @@ class Scheduler:
                                            curr_loras,
                                            enable_chunking=True)
 
-        assert (budget.num_batched_tokens
-                <= self.scheduler_config.max_num_batched_tokens)
+        assert (budget.num_batched_tokens <=
+                self.scheduler_config.max_num_batched_tokens)
         assert budget.num_curr_seqs <= self.scheduler_config.max_num_seqs
 
         # Update waiting requests.
@@ -960,9 +960,9 @@ class Scheduler:
         # Schedule sequence groups.
         # This function call changes the internal states of the scheduler
         # such as self.running, self.swapped, and self.waiting.
-        scheduler_start_time = time.perf_counter()
         scheduler_outputs = self._schedule()
         now = time.time()
+        scheduler_start_time = time.perf_counter()
 
         # Create input data structures.
         seq_group_metadata_list: List[SequenceGroupMetadata] = []
@@ -1008,8 +1008,8 @@ class Scheduler:
                 # NOTE: We use get_len instead of get_prompt_len because when
                 # a sequence is preempted, prefill includes previous generated
                 # output tokens.
-                if (token_chunk_size + seqs[0].data.get_num_computed_tokens()
-                        < seqs[0].data.get_len()):
+                if (token_chunk_size + seqs[0].data.get_num_computed_tokens() <
+                        seqs[0].data.get_len()):
                     do_sample = False
 
             # It assumes the scheduled_seq_groups is ordered by
@@ -1205,9 +1205,10 @@ class Scheduler:
         if self.scheduler_config.delay_factor > 0 and self.waiting:
             earliest_arrival_time = min(
                 [e.metrics.arrival_time for e in self.waiting])
-            passed_delay = ((now - earliest_arrival_time)
-                            > (self.scheduler_config.delay_factor *
-                               self.last_prompt_latency) or not self.running)
+            passed_delay = (
+                (now - earliest_arrival_time) >
+                (self.scheduler_config.delay_factor * self.last_prompt_latency)
+                or not self.running)
         else:
             passed_delay = True
         return passed_delay
