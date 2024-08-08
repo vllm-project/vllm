@@ -1,14 +1,17 @@
 FROM intel/intel-extension-for-pytorch:2.1.30-xpu
 
-RUN apt-get update  -y \
-&& apt-get install -y vim numactl
-
-COPY ./ /workspace/vllm
+RUN rm /etc/apt/sources.list.d/intel-graphics.list /etc/apt/sources.list.d/oneAPI.list && \
+    apt-get update -y && \
+    apt-get install -y --no-install-recommends --fix-missing \
+    vim \
+    numactl
 
 WORKDIR /workspace/vllm
+COPY ./ /workspace/vllm
 
-RUN pip install -v -r requirements-xpu.txt
+RUN pip install --no-cache-dir -v -r requirements-xpu.txt
 
-RUN VLLM_TARGET_DEVICE=xpu python3 setup.py install
+ENV VLLM_TARGET_DEVICE=xpu
+RUN python3 setup.py install
 
 CMD ["/bin/bash"]
