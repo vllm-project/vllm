@@ -20,13 +20,18 @@ def default_server_args():
         "--enforce-eager",
         "--max-num-seqs",
         "128",
+        "--disable-frontend-multiprocessing"
     ]
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="module",
+                params=["", "--disable-frontend-multiprocessing"])
 def client(default_server_args, request):
+    if request.param:
+        default_server_args.append(request.param)
     with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
         yield remote_server.get_async_client()
+
 
 EXPECTED_METRICS = [
     "vllm:num_requests_running",
@@ -64,6 +69,7 @@ EXPECTED_METRICS = [
 async def test_metrics_exist(client: openai.AsyncOpenAI):
     base_url = str(client.base_url)[:-3].strip("/")
 
+    # sending a request triggers the metrics to be logged.
     await client.completions.create(model=MODEL_NAME,
                                     prompt="Hello, my name is",
                                     max_tokens=5,
