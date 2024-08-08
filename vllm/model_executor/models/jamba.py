@@ -688,9 +688,9 @@ class JambaForCausalLM(nn.Module, HasInnerState):
             }
         elif seq_id not in (seq_ids2indices :=
                             self.mamba_cache_indices_mapping[cur_rid]):
-            # parallel sampling , where n > 1, assume prefill already happend
-            # now we only need to copy the already existing cache into the
-            # siblings seq_ids caches
+            # parallel sampling , where n > 1, assume prefill have
+            # already happened now we only need to copy the already
+            # existing cache into the siblings seq_ids caches
             self._move_out_if_already_occupied(
                 index=destination_index,
                 all_occupied_indices=all_occupied_indices)
