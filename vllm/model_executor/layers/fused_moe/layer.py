@@ -54,15 +54,9 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     """MoE method without quantization."""
 
-    def create_weights(
-        self,
-        layer: torch.nn.Module,
-        num_experts: int,
-        hidden_size: int,
-        intermediate_size: int,
-        params_dtype: torch.dtype,
-        **extra_weight_attrs,
-    ):
+    def create_weights(self, layer: torch.nn.Module, num_experts: int,
+                    hidden_size: int, intermediate_size: int,
+                    params_dtype: torch.dtype, **extra_weight_attrs):
         # Fused gate_up_proj (column parallel)
         w13_weight = torch.nn.Parameter(
             torch.empty(num_experts,
@@ -158,11 +152,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         assert topk_group is None
         return fused_moe(x, w1, w2, router_logits, top_k, renormalize)
 
-
 class FusedMoE(torch.nn.Module):
     """FusedMoE layer for MoE models.
 
-    This layer contains both MergedColumnParallel weights (gate_up_proj /
+    This layer contains both MergedColumnParallel weights (gate_up_proj / 
     w13) and RowParallelLinear weights (down_proj/ w2).
 
     Note: Mixtral uses w1, w2, and w3 for gate, up, and down_proj. We
@@ -267,8 +260,8 @@ class FusedMoE(torch.nn.Module):
         else:
             # Input scales can be loaded directly and should be equal.
             if "input_scale" in weight_name:
-                if (param_data[expert_id] != 1 and
-                    (param_data[expert_id] - loaded_weight).abs() > 1e-5):
+                if (param_data[expert_id] != 1 and (param_data[expert_id] - 
+                                                    loaded_weight).abs() > 1e-5):
                     raise ValueError(
                         "input_scales of w1 and w3 of a layer "
                         f"must be equal. But got {param_data[expert_id]} "
@@ -322,8 +315,7 @@ class FusedMoE(torch.nn.Module):
             renormalize=self.renormalize,
             use_grouped_topk=self.use_grouped_topk,
             num_expert_group=self.num_expert_group,
-            topk_group=self.topk_group,
-        )
+            topk_group=self.topk_group)
 
         if self.reduce_results and self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(
@@ -333,12 +325,9 @@ class FusedMoE(torch.nn.Module):
 
     @classmethod
     def make_expert_params_mapping(
-        cls,
-        ckpt_gate_proj_name: str,
-        ckpt_down_proj_name: str,
-        ckpt_up_proj_name: str,
-        num_experts: int,
-    ) -> List[Tuple[str, str, int, int]]:
+            cls, ckpt_gate_proj_name: str, ckpt_down_proj_name: str,
+            ckpt_up_proj_name: str,
+            num_experts: int) -> List[Tuple[str, str, int, str]]:
         gate_up = [ckpt_gate_proj_name, ckpt_up_proj_name]
         gate_down_up = [
             ckpt_gate_proj_name, ckpt_down_proj_name, ckpt_up_proj_name
