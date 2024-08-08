@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union, Mapping
 
 import torch
 import torch.nn as nn
@@ -48,8 +48,7 @@ class ModelInputForXPU(ModelRunnerInputBase):
     input_positions: Optional[torch.Tensor] = None
     attn_metadata: Optional["AttentionMetadata"] = None
     sampling_metadata: Optional["SamplingMetadata"] = None
-    multi_modal_kwargs: Optional[Mapping[str, BatchedTensors]] = None
-    virtual_engine: int = 0
+    multi_modal_kwargs: Optional[Mapping[str, BatchedTensorInputs]] = None
 
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:
@@ -263,8 +262,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
                                 input_positions=input_positions,
                                 attn_metadata=attn_metadata,
                                 sampling_metadata=sampling_metadata,
-                                multi_modal_kwargs=multi_modal_kwargs,
-                                virtual_engine=virtual_engine)
+                                multi_modal_kwargs=multi_modal_kwargs)
 
     def _prepare_decode(
         self,

@@ -53,7 +53,7 @@ define_gpu_extension_target(
     WITH_SOABI
 )
 
-add_custom_target(default)
+add_custom_target(default_xpu)
 message(STATUS "Enabling C extension.")
-add_dependencies(default _C)
+add_dependencies(default_xpu _C)
 

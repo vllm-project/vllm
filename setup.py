@@ -161,6 +161,7 @@ class cmake_build_ext(build_ext):
             '-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={}'.format(outdir),
             '-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY={}'.format(self.build_temp),
             '-DVLLM_TARGET_DEVICE={}'.format(VLLM_TARGET_DEVICE),
+            "-DCMAKE_CXX_STANDARD=17",
         ]
 
 
@@ -280,7 +281,7 @@ def _build_custom_ops() -> bool:
 
 
 def _build_core_ext() -> bool:
-    return not _is_neuron() and not _is_tpu()
+    return not _is_neuron() and not _is_tpu() and not _is_xpu()
 
 
 def get_hipcc_rocm_version():
