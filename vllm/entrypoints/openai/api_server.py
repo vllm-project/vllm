@@ -98,12 +98,19 @@ async def health() -> Response:
 async def get_readiness() -> Response:
     """Readiness probe for k8s"""
     try :
-        d_worker = openai_serving_chat.engine.engine.model_executor.driver_worker
-        model_weights = d_worker.model_runner.model_memory_usage
+        model_executor = openai_serving_chat.engine.engine.model_executor
+        model_runner = model_executor.driver_worker.model_runner
+        
+        # check if model weight are loaded in gpu memory
+        model_weights = model_runner.model_memory_usage
 
-        if model_weights > 0:
+        # check if KV cache has been set up
+        num_cpu_blocks = model_runner.num_cpu_blocks
+        num_gpu_blocks = model_runner.num_gpu_blocks
+
+        if model_weights > 0 and num_cpu_blocks > 0  and num_gpu_blocks > 0 :
             return Response(status_code=200)
-    except: HTTPException(status_code=500, detail="Model not loaded yet")
+    except: HTTPException(status_code=500, detail="Model not loaded yet or KV cache not setup yet")
 
 
 @router.post("/tokenize")
