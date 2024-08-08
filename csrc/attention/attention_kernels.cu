@@ -21,7 +21,6 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <algorithm>
-
 #include "attention_dtypes.h"
 #include "attention_utils.cuh"
 
@@ -890,11 +889,14 @@ __global__ void sequence_block_reduce_kernel(
           out_ptr, exp_sums_ptr, max_logits_ptr, tmp_out_ptr,   \
           max_num_partitions);
 
-template <typename T, int NUM_THREADS = 128, int PARTITION_SIZE = 8192>
+template <typename T>
 void sequence_block_reducer_launcher(torch::Tensor& out,
                                      torch::Tensor& exp_sums,
                                      torch::Tensor& max_logits,
                                      torch::Tensor& tmp_out) {
+  const int NUM_THREADS = 128;
+  const int PARTITION_SIZE = 8192;
+
   int num_seqs = tmp_out.size(0);
   int num_heads = tmp_out.size(1);
   int head_size = tmp_out.size(3);
@@ -941,6 +943,8 @@ void sequence_block_reducer_launcher(torch::Tensor& out,
       break;
   }
 }
+#define CALL_SEQUENCE_BLOCK_REDUCER(T) \
+  sequence_block_reducer_launcher<T>(out, exp_sums, max_logits, tmp_out);
 
 // [num_seqs, num_heads, head_size]
 // [num_seqs, num_heads, float]
@@ -951,10 +955,7 @@ void sequence_block_reducer(
     torch::Tensor& max_logits,  // [num_seqs, num_heads, max_num_partitions]
     torch::Tensor&
         tmp_out  // [num_seqs, num_heads, max_num_partitions, head_size]
-) {
-  sequence_block_reducer_launcher<tmp_out.dtype()>(out, exp_sums, max_logits,
-                                                   tmp_out);
-}
+){DISPATCH_BY_DTYPE(tmp_out.dtype(), CALL_SEQUENCE_BLOCK_REDUCER)}
 #define LAUNCH_PAGED_ATTENTION_V1(HEAD_SIZE)                                \
   VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize(                     \
       ((void*)vllm::paged_attention_v1_kernel<T, CACHE_T, HEAD_SIZE,        \
@@ -1610,7 +1611,6 @@ void paged_attention_remote(
     const int64_t blocksparse_local_blocks,
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
     const int64_t blocksparse_head_sliding_step) {
-  const bool is_block_sparse = (blocksparse_vert_stride > 1);
   DISPATCH_BY_KV_CACHE_DTYPE(query.dtype(), kv_cache_dtype,
                              CALL_REMOTE_LAUNCHER_BLOCK_SIZE)
 }
