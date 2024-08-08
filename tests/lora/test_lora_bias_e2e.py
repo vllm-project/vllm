@@ -29,14 +29,16 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
 
 
 @pytest.mark.parametrize("lora_bias", [True, False])
-def test_lora_bias(lora_bias_files: str, lora_bias: bool):
+@pytest.mark.parametrize("fully_sharded", [True, False])
+def test_lora_bias(lora_bias_files: str, lora_bias: bool, fully_sharded: bool):
     llm = vllm.LLM(MODEL_PATH,
                    enable_lora=True,
                    max_num_seqs=16,
                    max_lora_rank=8,
                    max_loras=1,
                    enable_lora_bias=lora_bias,
-                   tensor_parallel_size=1)
+                   tensor_parallel_size=1,
+                   fully_sharded_loras=fully_sharded)
 
     print("lora adapter created")
     output1 = do_sample(llm, lora_bias_files, lora_id=0)

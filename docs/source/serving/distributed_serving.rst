@@ -50,7 +50,7 @@ You can also additionally specify :code:`--pipeline-parallel-size` to enable pip
     $     --pipeline-parallel-size 2
 
 .. note::
-    Pipeline parallel is a beta feature. It is only supported for online serving as well as LLaMa, GPT2, and Mixtral style models.
+    Pipeline parallel is a beta feature. It is only supported for online serving as well as LLaMa, GPT2, Mixtral, Qwen, Qwen2, and Nemotron style models.
 
 Multi-Node Inference and Serving
 --------------------------------

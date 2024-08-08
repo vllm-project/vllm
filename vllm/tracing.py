@@ -15,7 +15,7 @@ try:
         OTEL_EXPORTER_OTLP_TRACES_PROTOCOL)
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
-    from opentelemetry.semconv.ai import SpanAttributes as BaseSpanAttributes
+    from opentelemetry.semconv_ai import SpanAttributes as BaseSpanAttributes
     from opentelemetry.trace import SpanKind, Tracer, set_tracer_provider
     from opentelemetry.trace.propagation.tracecontext import (
         TraceContextTextMapPropagator)
@@ -60,7 +60,7 @@ def get_span_exporter(endpoint):
             OTLPSpanExporter)
     elif protocol == "http/protobuf":
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
-            OTLPSpanExporter)
+            OTLPSpanExporter)  # type: ignore
     else:
         raise ValueError(
             f"Unsupported OTLP protocol '{protocol}' is configured")

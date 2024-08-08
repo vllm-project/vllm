@@ -4,6 +4,7 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 
+from vllm._core_ext import ScalarType
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -14,11 +15,8 @@ except ImportError as e:
     logger.warning("Failed to import from vllm._C with %r", e)
 
 with contextlib.suppress(ImportError):
-    import vllm._moe_C
-
-with contextlib.suppress(ImportError):
     # ruff: noqa: F401
-    import vllm._punica_C
+    import vllm._moe_C
 
 
 def is_custom_op_supported(op_name: str) -> bool:
@@ -223,10 +221,10 @@ def marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
 # marlin_24
 def gptq_marlin_24_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                         b_meta: torch.Tensor, b_scales: torch.Tensor,
-                        workspace: torch.Tensor, num_bits: int, size_m: int,
-                        size_n: int, size_k: int) -> torch.Tensor:
+                        workspace: torch.Tensor, b_q_type: ScalarType,
+                        size_m: int, size_n: int, size_k: int) -> torch.Tensor:
     return torch.ops._C.gptq_marlin_24_gemm(a, b_q_weight, b_meta, b_scales,
-                                            workspace, num_bits, size_m,
+                                            workspace, b_q_type, size_m,
                                             size_n, size_k)
 
 
@@ -243,6 +241,8 @@ def cutlass_scaled_mm(a: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
     assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
+    assert bias is None or bias.shape[0] == b.shape[
+        1] and bias.dtype == out_dtype
 
     m = a.shape[0]
     n = b.shape[1]
@@ -250,6 +250,28 @@ def cutlass_scaled_mm(a: torch.Tensor,
 
     torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
 
+    return out
+
+
+def cutlass_scaled_mm_azp(a: torch.Tensor,
+                          b: torch.Tensor,
+                          scale_a: torch.Tensor,
+                          scale_b: torch.Tensor,
+                          out_dtype: torch.dtype,
+                          azp_adj: torch.Tensor,
+                          azp: Optional[torch.Tensor] = None,
+                          bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
+    assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
+    assert bias is None or bias.numel(
+    ) == b.shape[1] and bias.dtype == out_dtype
+
+    m = a.shape[0]
+    n = b.shape[1]
+    out = torch.empty((m, n), dtype=out_dtype, device=a.device)
+
+    torch.ops._C.cutlass_scaled_mm_azp(out, a, b, scale_a, scale_b, azp_adj,
+                                       azp, bias)
     return out
 
 
@@ -282,14 +304,22 @@ def awq_marlin_repack(b_q_weight: torch.Tensor, size_k: int, size_n: int,
     return torch.ops._C.awq_marlin_repack(b_q_weight, size_k, size_n, num_bits)
 
 
-def gptq_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
-                     b_scales: torch.Tensor, b_zeros: torch.Tensor,
-                     g_idx: torch.Tensor, perm: torch.Tensor,
-                     workspace: torch.Tensor, num_bits: int, size_m: int,
-                     size_n: int, size_k: int, is_k_full: bool, has_zp: bool,
-                     use_fp32_reduce: bool) -> torch.Tensor:
+def gptq_marlin_gemm(a: torch.Tensor,
+                     b_q_weight: torch.Tensor,
+                     b_scales: torch.Tensor,
+                     b_zeros: torch.Tensor,
+                     g_idx: torch.Tensor,
+                     perm: torch.Tensor,
+                     workspace: torch.Tensor,
+                     b_q_type: ScalarType,
+                     size_m: int,
+                     size_n: int,
+                     size_k: int,
+                     is_k_full: bool,
+                     has_zp: bool = False,
+                     use_fp32_reduce: bool = False) -> torch.Tensor:
     return torch.ops._C.gptq_marlin_gemm(a, b_q_weight, b_scales, b_zeros,
-                                         g_idx, perm, workspace, num_bits,
+                                         g_idx, perm, workspace, b_q_type,
                                          size_m, size_n, size_k, is_k_full,
                                          has_zp, use_fp32_reduce)
 
@@ -396,6 +426,38 @@ def marlin_qqq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                     size_m: int, size_n: int, size_k: int) -> torch.Tensor:
     return torch.ops._C.marlin_qqq_gemm(a, b_q_weight, s_tok, s_ch, s_group,
                                         workspace, size_m, size_n, size_k)
+
+
+# gguf
+def ggml_dequantize(W: torch.Tensor, quant_type: int, m: int, n: int):
+    return torch.ops._C.ggml_dequantize(W, quant_type, m, n)
+
+
+def ggml_mul_mat_vec(
+    W: torch.Tensor,
+    X: torch.Tensor,
+    quant_type: int,
+    row: int,
+):
+    return torch.ops._C.ggml_mul_mat_vec(W, X, quant_type, row)
+
+
+def ggml_mul_mat_vec_a8(
+    W: torch.Tensor,
+    X: torch.Tensor,
+    quant_type: int,
+    row: int,
+):
+    return torch.ops._C.ggml_mul_mat_vec_a8(W, X, quant_type, row)
+
+
+def ggml_mul_mat_a8(
+    W: torch.Tensor,
+    X: torch.Tensor,
+    quant_type: int,
+    row: int,
+):
+    return torch.ops._C.ggml_mul_mat_a8(W, X, quant_type, row)
 
 
 # moe
@@ -519,43 +581,6 @@ def register_graph_buffers(fa: int, handles: List[str],
     torch.ops._C_custom_ar.register_graph_buffers(fa, handles, offsets)
 
 
-# punica
-def dispatch_bgmv(
-    y: torch.Tensor,
-    x: torch.Tensor,
-    w_t_all: torch.Tensor,
-    indicies: torch.Tensor,
-    layer_idx: int,
-    scale: float,
-) -> None:
-    torch.ops._punica_C.dispatch_bgmv(y, x, w_t_all, indicies, layer_idx,
-                                      scale)
-
-
-def dispatch_bgmv_low_level(
-    y: torch.Tensor,
-    x: torch.Tensor,
-    w_t_all: torch.Tensor,
-    indicies: torch.Tensor,
-    layer_idx: int,
-    scale: float,
-    h_in: int,
-    h_out: int,
-    y_offset: int,
-) -> None:
-    torch.ops._punica_C.dispatch_bgmv_low_level(
-        y,
-        x,
-        w_t_all,
-        indicies,
-        layer_idx,
-        scale,
-        h_in,
-        h_out,
-        y_offset,
-    )
-
-
 # temporary fix for https://github.com/vllm-project/vllm/issues/5456
 # TODO: remove this in v0.6.0
 names_and_values = globals()
@@ -571,7 +596,7 @@ for k, v in names_and_values.items():
     if isinstance(v, fn_type) \
         and v.__code__.co_filename == __file__ \
         and any(arg is torch.Tensor or arg == "torch.Tensor"
-                   for arg in v.__annotations__.values()):
+                for arg in v.__annotations__.values()):
         names_and_values_to_update[k] = hint_on_error(v)
 
 names_and_values.update(names_and_values_to_update)

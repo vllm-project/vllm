@@ -1,3 +1,4 @@
+import asyncio
 import time
 from typing import (AsyncGenerator, AsyncIterator, Callable, Dict, List,
                     Optional)
@@ -8,7 +9,7 @@ from fastapi import Request
 from transformers import PreTrainedTokenizer
 
 from vllm.config import ModelConfig
-from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.engine.protocol import AsyncEngineClient
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -24,8 +25,6 @@ from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing,
                                                     PromptAdapterPath)
 from vllm.logger import init_logger
-from vllm.model_executor.guided_decoding import (
-    get_guided_decoding_logits_processor)
 from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
@@ -44,7 +43,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
     def __init__(
         self,
-        engine: AsyncLLMEngine,
+        async_engine_client: AsyncEngineClient,
         model_config: ModelConfig,
         served_model_names: List[str],
         *,
@@ -53,7 +52,7 @@ class OpenAIServingCompletion(OpenAIServing):
         request_logger: Optional[RequestLogger],
         return_tokens_as_token_ids: bool = False,
     ):
-        super().__init__(engine=engine,
+        super().__init__(async_engine_client=async_engine_client,
                          model_config=model_config,
                          served_model_names=served_model_names,
                          lora_modules=lora_modules,
@@ -86,40 +85,34 @@ class OpenAIServingCompletion(OpenAIServing):
         created_time = int(time.time())
 
         # Schedule the request and get the result generator.
-        generators: List[AsyncIterator[RequestOutput]] = []
+        generators: List[AsyncGenerator[RequestOutput, None]] = []
         try:
             (
                 lora_request,
                 prompt_adapter_request,
             ) = self._maybe_get_adapters(request)
 
-            tokenizer = await self.engine.get_tokenizer(lora_request)
+            tokenizer = await self.async_engine_client.get_tokenizer(
+                lora_request)
 
-            sampling_params = request.to_sampling_params(tokenizer)
-            decoding_config = await self.engine.get_decoding_config()
-            guided_decoding_backend = request.guided_decoding_backend \
-                or decoding_config.guided_decoding_backend
-            guided_decode_logit_processor = (
-                await
-                get_guided_decoding_logits_processor(guided_decoding_backend,
-                                                     request, tokenizer))
-            if guided_decode_logit_processor is not None:
-                if sampling_params.logits_processors is None:
-                    sampling_params.logits_processors = []
-                sampling_params.logits_processors.append(
-                    guided_decode_logit_processor)
-
+            guided_decode_logits_processor = (
+                await self._guided_decode_logits_processor(request, tokenizer))
             prompts = list(
                 self._tokenize_prompt_input_or_inputs(
                     request,
                     tokenizer,
                     request.prompt,
-                    truncate_prompt_tokens=sampling_params.
-                    truncate_prompt_tokens,
+                    truncate_prompt_tokens=request.truncate_prompt_tokens,
                     add_special_tokens=request.add_special_tokens,
                 ))
 
             for i, prompt_inputs in enumerate(prompts):
+                sampling_params = request.to_sampling_params(
+                    tokenizer,
+                    guided_decode_logits_processor,
+                    default_max_tokens=self.max_model_len -
+                    len(prompt_inputs["prompt_token_ids"]))
+
                 request_id_item = f"{request_id}-{i}"
 
                 self._log_inputs(request_id_item,
@@ -128,7 +121,8 @@ class OpenAIServingCompletion(OpenAIServing):
                                  lora_request=lora_request,
                                  prompt_adapter_request=prompt_adapter_request)
 
-                is_tracing_enabled = await self.engine.is_tracing_enabled()
+                is_tracing_enabled = (
+                    await self.async_engine_client.is_tracing_enabled())
                 trace_headers = None
                 if is_tracing_enabled:
                     trace_headers = extract_trace_headers(raw_request.headers)
@@ -136,7 +130,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         raw_request.headers):
                     log_tracing_disabled_warning()
 
-                generator = self.engine.generate(
+                generator = self.async_engine_client.generate(
                     {"prompt_token_ids": prompt_inputs["prompt_token_ids"]},
                     sampling_params,
                     request_id_item,
@@ -151,7 +145,8 @@ class OpenAIServingCompletion(OpenAIServing):
             return self.create_error_response(str(e))
 
         result_generator: AsyncIterator[Tuple[
-            int, RequestOutput]] = merge_async_iterators(*generators)
+            int, RequestOutput]] = merge_async_iterators(
+                *generators, is_cancelled=raw_request.is_disconnected)
 
         # Similar to the OpenAI API, when n != best_of, we do not stream the
         # results. In addition, we do not stream the results when use
@@ -163,7 +158,6 @@ class OpenAIServingCompletion(OpenAIServing):
         # Streaming response
         if stream:
             return self.completion_stream_generator(request,
-                                                    raw_request,
                                                     result_generator,
                                                     request_id,
                                                     created_time,
@@ -175,10 +169,6 @@ class OpenAIServingCompletion(OpenAIServing):
         final_res_batch: List[Optional[RequestOutput]] = [None] * len(prompts)
         try:
             async for i, res in result_generator:
-                if await raw_request.is_disconnected():
-                    # Abort the request if the client disconnects.
-                    await self.engine.abort(f"{request_id}-{i}")
-                    return self.create_error_response("Client disconnected")
                 final_res_batch[i] = res
 
             for i, final_res in enumerate(final_res_batch):
@@ -201,6 +191,8 @@ class OpenAIServingCompletion(OpenAIServing):
                 model_name,
                 tokenizer,
             )
+        except asyncio.CancelledError:
+            return self.create_error_response("Client disconnected")
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
@@ -221,7 +213,6 @@ class OpenAIServingCompletion(OpenAIServing):
     async def completion_stream_generator(
         self,
         request: CompletionRequest,
-        raw_request: Request,
         result_generator: AsyncIterator[Tuple[int, RequestOutput]],
         request_id: str,
         created_time: int,
@@ -236,11 +227,6 @@ class OpenAIServingCompletion(OpenAIServing):
 
         try:
             async for prompt_idx, res in result_generator:
-
-                # Abort the request if the client disconnects.
-                if await raw_request.is_disconnected():
-                    await self.engine.abort(f"{request_id}-{prompt_idx}")
-                    raise StopAsyncIteration()
 
                 for output in res.outputs:
                     i = output.index + prompt_idx * num_choices

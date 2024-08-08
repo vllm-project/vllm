@@ -10,11 +10,13 @@ from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from typing import Any, Dict, Generator, List, Optional, Tuple, Type
 
+import gguf
 import huggingface_hub
 import numpy as np
 import torch
 from huggingface_hub import HfApi, hf_hub_download
 from torch import nn
+from transformers import AutoModelForCausalLM, PretrainedConfig
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoadFormat,
                          LoRAConfig, ModelConfig, MultiModalConfig,
@@ -31,8 +33,9 @@ from vllm.model_executor.model_loader.utils import (get_model_architecture,
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
     filter_duplicate_safetensors_files, filter_files_not_needed_for_inference,
-    get_quant_config, initialize_dummy_weights, np_cache_weights_iterator,
-    pt_weights_iterator, safetensors_weights_iterator)
+    get_gguf_extra_tensor_names, get_quant_config, gguf_quant_weights_iterator,
+    initialize_dummy_weights, np_cache_weights_iterator, pt_weights_iterator,
+    safetensors_weights_iterator)
 from vllm.model_executor.models.interfaces import (has_inner_state,
                                                    supports_lora,
                                                    supports_vision)
@@ -140,6 +143,22 @@ def _get_model_initialization_kwargs(
     return extra_kwargs
 
 
+def build_model(model_class: Type[nn.Module], hf_config: PretrainedConfig,
+                cache_config: Optional[CacheConfig],
+                quant_config: Optional[QuantizationConfig], *,
+                lora_config: Optional[LoRAConfig],
+                multimodal_config: Optional[MultiModalConfig],
+                scheduler_config: Optional[SchedulerConfig]) -> nn.Module:
+    extra_kwargs = _get_model_initialization_kwargs(model_class, lora_config,
+                                                    multimodal_config,
+                                                    scheduler_config)
+
+    return model_class(config=hf_config,
+                       cache_config=cache_config,
+                       quant_config=quant_config,
+                       **extra_kwargs)
+
+
 def _initialize_model(
         model_config: ModelConfig,
         load_config: LoadConfig,
@@ -148,15 +167,17 @@ def _initialize_model(
         cache_config: CacheConfig,
         scheduler_config: Optional[SchedulerConfig] = None) -> nn.Module:
     """Initialize a model with the given configurations."""
-    model_class = get_model_architecture(model_config)[0]
-    quant_config = _get_quantization_config(model_config, load_config)
+    model_class, _ = get_model_architecture(model_config)
 
-    return model_class(config=model_config.hf_config,
-                       cache_config=cache_config,
-                       quant_config=quant_config,
-                       **_get_model_initialization_kwargs(
-                           model_class, lora_config, multimodal_config,
-                           scheduler_config))
+    return build_model(
+        model_class,
+        model_config.hf_config,
+        quant_config=_get_quantization_config(model_config, load_config),
+        lora_config=lora_config,
+        multimodal_config=multimodal_config,
+        cache_config=cache_config,
+        scheduler_config=scheduler_config,
+    )
 
 
 class BaseModelLoader(ABC):
@@ -948,6 +969,90 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         return model.eval()
 
 
+class GGUFModelLoader(BaseModelLoader):
+    """
+    Model loader that can load GGUF files. This is useful for loading models
+    that are quantized with GGUF and saved in the GGUF format. This loader
+    supports loading both full models and sharded models.
+    """
+
+    def __init__(self, load_config: LoadConfig):
+        super().__init__(load_config)
+        if load_config.model_loader_extra_config:
+            raise ValueError(f"Model loader extra config is not supported for "
+                             f"load format {load_config.load_format}")
+
+    def _prepare_weights(self, model_name_or_path: str):
+        if os.path.isfile(model_name_or_path):
+            return model_name_or_path
+        else:
+            raise ValueError(f"{model_name_or_path} is not a file.")
+
+    def _get_gguf_weights_map(self, model_config: ModelConfig):
+        """
+        GGUF uses this naming convention for their tensors from HF checkpoint:
+        `blk.N.BB.weight` and `blk.N.BB.bias`
+        where N signifies the block number of a layer, and BB signifies the
+        attention/mlp layer components.
+        See "Standardized tensor names" in
+        https://github.com/ggerganov/ggml/blob/master/docs/gguf.md for details.
+        """
+        config = model_config.hf_config
+        model_type = config.model_type
+        # hack: ggufs have a different name than transformers
+        if model_type == "cohere":
+            model_type = "command-r"
+        arch = None
+        for key, value in gguf.MODEL_ARCH_NAMES.items():
+            if value == model_type:
+                arch = key
+                break
+        if arch is None:
+            raise RuntimeError(f"Unknown gguf model_type: {model_type}")
+        num_layers = config.num_hidden_layers
+        name_map = gguf.get_tensor_name_map(arch, num_layers)
+        with torch.device("meta"):
+            dummy_model = AutoModelForCausalLM.from_config(config)
+        state_dict = dummy_model.state_dict()
+
+        gguf_to_hf_name_map = {}
+        for hf_name in state_dict:
+            name, suffix = hf_name.rsplit(".", 1)
+            gguf_name = name_map.get_name(name)
+            gguf_to_hf_name_map[f"{gguf_name}.{suffix}"] = hf_name
+        return gguf_to_hf_name_map
+
+    def _get_weights_iterator(
+        self, model_name_or_path: str, gguf_to_hf_name_map: Dict[str, str]
+    ) -> Generator[Tuple[str, torch.Tensor], None, None]:
+        return gguf_quant_weights_iterator(model_name_or_path,
+                                           gguf_to_hf_name_map)
+
+    def load_model(self, *, model_config: ModelConfig,
+                   device_config: DeviceConfig,
+                   lora_config: Optional[LoRAConfig],
+                   multimodal_config: Optional[MultiModalConfig],
+                   parallel_config: ParallelConfig,
+                   scheduler_config: SchedulerConfig,
+                   cache_config: CacheConfig) -> nn.Module:
+
+        local_model_path = self._prepare_weights(model_config.model)
+        gguf_weights_map = self._get_gguf_weights_map(model_config)
+        # we can only know if tie word embeddings after mapping weights
+        if "lm_head.weight" in get_gguf_extra_tensor_names(
+                local_model_path, gguf_weights_map):
+            model_config.hf_config.update({"tie_word_embeddings": True})
+
+        with set_default_torch_dtype(model_config.dtype):
+            with torch.device(device_config.device):
+                model = _initialize_model(model_config, self.load_config,
+                                          lora_config, multimodal_config,
+                                          cache_config)
+            model.load_weights(
+                self._get_weights_iterator(local_model_path, gguf_weights_map))
+        return model
+
+
 def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
     """Get a model loader based on the load format."""
 
@@ -965,5 +1070,8 @@ def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
 
     if load_config.load_format == LoadFormat.BITSANDBYTES:
         return BitsAndBytesModelLoader(load_config)
+
+    if load_config.load_format == LoadFormat.GGUF:
+        return GGUFModelLoader(load_config)
 
     return DefaultModelLoader(load_config)
