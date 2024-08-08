@@ -1,4 +1,5 @@
-// Based off of: cutlass/numeric_conversion.h
+// Based off of: 
+//   https://github.com/NVIDIA/cutlass/blob/cutlass-3.5.0/include/cutlass/numeric_conversion.h
 
 #pragma once
 
@@ -28,7 +29,9 @@ struct NumericArrayConverter<cutlass::half_t, vllm_uint4b8_t, N, Round> {
   using source_type_packed_4 = Array<vllm_uint4b8_t, 4>;
   using source_type_packed_2 = Array<vllm_uint4b8_t, 2>;
 
-  // Not Valid, not supported
+  // Not Valid, not supported, only here to satisfy the interface and to avoid
+  //  a compile error. ScalarConverter will not actually work until
+  //  NumericConverter<cutlass::half_t, vllm_uint4b8_t, Round> is implemented
   using ScalarConverter =
       NumericConverter<cutlass::half_t, vllm_uint4b8_t, Round>;
 
@@ -170,7 +173,9 @@ struct NumericArrayConverter<cutlass::half_t, vllm_uint8b128_t, N, Round> {
   using source_type_packed_4 = Array<vllm_uint8b128_t, 4>;
   using source_type_packed_2 = Array<vllm_uint8b128_t, 2>;
 
-  // Not Valid, not supported
+  // Not Valid, not supported, only here to satisfy the interface and to avoid
+  //  a compile error. ScalarConverter will not actually work until
+  //  NumericConverter<cutlass::half_t, vllm_uint8b128_t, Round> is implemented
   using ScalarConverter =
       NumericConverter<cutlass::half_t, vllm_uint8b128_t, Round>;
 
@@ -259,7 +264,10 @@ struct NumericArrayConverter<float, vllm_uint8b128_t, N, Round> {
   using source_type_packed_4 = Array<vllm_uint8b128_t, 4>;
   using source_type_packed_2 = Array<vllm_uint8b128_t, 2>;
 
-  // Not Valid, not supported
+
+  // Not Valid, not supported, only here to satisfy the interface and to avoid
+  //  a compile error. ScalarConverter will not actually work until
+  //  NumericConverter<cutlass::float, vllm_uint8b128_t, Round> is implemented
   using ScalarConverter = NumericConverter<float, vllm_uint8b128_t, Round>;
 
   CUTLASS_DEVICE
@@ -340,7 +348,10 @@ struct NumericArrayConverter<cutlass::bfloat16_t, vllm_uint4b8_t, N, Round> {
   using source_type_packed_4 = Array<vllm_uint4b8_t, 4>;
   using source_type_packed_2 = Array<vllm_uint4b8_t, 2>;
 
-  // Not Valid, not supported
+  // Not Valid, not supported, only here to satisfy the interface and to avoid
+  //  a compile error. ScalarConverter will not actually work until
+  //  NumericConverter<cutlass::bfloat16_t, vllm_uint4b8_t, Round> is 
+  //  implemented
   using ScalarConverter =
       NumericConverter<cutlass::bfloat16_t, vllm_uint4b8_t, Round>;
 
@@ -473,7 +484,10 @@ struct NumericArrayConverter<cutlass::bfloat16_t, vllm_uint8b128_t, N, Round> {
   using source_type_packed_4 = Array<vllm_uint8b128_t, 4>;
   using source_type_packed_2 = Array<vllm_uint8b128_t, 2>;
 
-  // Not Valid, not supported
+  // Not Valid, not supported, only here to satisfy the interface and to avoid
+  //  a compile error. ScalarConverter will not actually work until
+  //  NumericConverter<cutlass::bfloat16_t, vllm_uint8b128_t, Round> is 
+  //  implemented  
   using ScalarConverter =
       NumericConverter<cutlass::bfloat16_t, vllm_uint8b128_t, Round>;
 
