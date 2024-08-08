@@ -277,6 +277,7 @@ def run_large_model_test(
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
                      gpu_memory_utilization=1.0,
+                     cpu_offload_gb=4,
                      enforce_eager=True) as vllm_model:
         outputs_per_image = [
             vllm_model.generate_greedy(prompts, max_tokens, images=images)
