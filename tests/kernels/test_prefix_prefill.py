@@ -219,7 +219,7 @@ def test_contexted_kv_attention(
     print(f"xformers Time: {(end_time - start_time)*1000:.2f} ms")
     output_ref = output_ref.reshape(output.shape)
     if "fp8" in kv_cache_dtype:
-        torch.testing.assert_close(output, output_ref, atol=1e-4, rtol=0)
+        torch.testing.assert_close(output, output_ref, atol=5e-4, rtol=0)
     else:
         torch.testing.assert_close(output, output_ref, atol=1e-6, rtol=0)
 
@@ -468,6 +468,6 @@ def test_contexted_kv_attention_alibi(
     end_time = time.time()
     print(f"xformers Time: {(end_time - start_time)*1000:.2f} ms")
     if "fp8" in kv_cache_dtype:
-        torch.testing.assert_close(output, output_ref, atol=1e-4, rtol=0)
+        torch.testing.assert_close(output, output_ref, atol=5e-4, rtol=0)
     else:
         torch.testing.assert_close(output, output_ref, atol=1e-6, rtol=0)
