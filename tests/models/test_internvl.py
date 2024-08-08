@@ -68,7 +68,6 @@ class InternVLProcessor:
         return prompt
 
 
-
 # adapted from https://huggingface.co/OpenGVLab/InternVL2-1B/blob/main/modeling_internvl_chat.py
 def generate(
     self,
