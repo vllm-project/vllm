@@ -4,7 +4,7 @@ import torch
 
 
 def as_float32_tensor(x: Union[float, torch.tensor]) -> torch.tensor:
-    return torch.as_tensor(x, dtype=torch.float32, device='cuda')
+    return torch.as_tensor(x, dtype=torch.float32, device='cpu')
 
 def ref_dynamic_per_token_quant(x: torch.tensor,
                                 quant_dtype: torch.dtype,
