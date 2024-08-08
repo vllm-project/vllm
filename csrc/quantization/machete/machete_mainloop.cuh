@@ -1,5 +1,5 @@
 // Based off of:
-//   cutlass/gemm/collective/sm90_mma_tma_gmma_rs_warpspecialized_mixed_input.hpp
+//   https://github.com/NVIDIA/cutlass/blob/cutlass-3.5.0/include/cutlass/gemm/collective/sm90_mma_tma_gmma_rs_warpspecialized_mixed_input.hpp
 #pragma once
 
 // clang-format off
