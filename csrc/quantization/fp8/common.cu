@@ -10,14 +10,14 @@
 #include "../../reduction_utils.cuh"
 
 #ifndef USE_ROCM
-  #define FP8_TYPE c10::Float8_e4m3fn
-  #define FP8_E4M3_MAX std::numeric_limits<FP8_TYPE>::max()
+using FP8_TYPE = c10::Float8_e4m3fn;
+constexpr auto FP8_E4M3_MAX = std::numeric_limits<FP8_TYPE>::max();
 #else
   #include "amd/hip_float8.h"
-  #define FP8_TYPE c10::Float8_e4m3fnuz
-  // Using the default max value from pytorch (240.0) will cause accuracy
-  // issue when running dynamic quantization. Here use 224.0f for rocm.
-  #define FP8_E4M3_MAX 224.0f
+using FP8_TYPE = c10::Float8_e4m3fnuz;
+// Using the default max value from pytorch (240.0) will cause accuracy
+// issue when running dynamic quantization. Here use 224.0f for rocm.
+constexpr auto FP8_E4M3_MAX = 224.0f;
 #endif
 
 namespace vllm {
