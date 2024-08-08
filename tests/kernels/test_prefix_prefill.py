@@ -71,7 +71,10 @@ def test_contexted_kv_attention(
     kv.uniform_(-1e-3, 1e-3)
     key, value = kv.unbind(dim=1)
 
-    cache_dtype = dtype if kv_cache_dtype == "auto" else STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
+    if kv_cache_dtype == "auto":
+        cache_dtype = dtype
+    else:
+        cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
     k_cache = torch.zeros(cache_size,
                           block_size,
                           num_kv_heads,
@@ -285,7 +288,6 @@ def test_contexted_kv_attention_alibi(
     ctx_lens = [random.randint(16, MAX_CTX_LEN) for _ in range(BS)]
     seq_lens = [a + b for a, b in zip(query_lens, ctx_lens)]
     num_kv_heads = num_heads // num_queries_per_kv
-    kv_cache_dtype = "auto"
 
     num_tokens = sum(query_lens)
     query = torch.empty(num_tokens, num_heads, head_size, dtype=dtype)
@@ -295,8 +297,10 @@ def test_contexted_kv_attention_alibi(
     kv = torch.empty(sum(seq_lens), 2, num_kv_heads, head_size, dtype=dtype)
     kv.uniform_(-1e-3, 1e-3)
     key, value = kv.unbind(dim=1)
-
-    cache_dtype = dtype if kv_cache_dtype == "auto" else STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
+    if kv_cache_dtype == "auto":
+        cache_dtype = dtype
+    else:
+        cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
     k_cache = torch.zeros(cache_size,
                           block_size,
                           num_kv_heads,
