@@ -595,31 +595,3 @@ torch::Tensor aqlm_dequant(
               " entries is not currently supported.")
   return {};
 }
-
-torch::Tensor aqlm_gemm_meta(
-    const torch::Tensor& input, const torch::Tensor& codes,
-    const torch::Tensor& codebooks, const torch::Tensor& scales,
-    const std::vector<int64_t>& codebook_partition_sizes,
-    const std::optional<torch::Tensor>& bias) {
-  auto out_features = codes.size(0) * codebooks.size(2);
-  auto flat_input = input.reshape({-1, input.size(-1)});
-  auto flat_output = torch::empty(
-      {flat_input.size(0), out_features},
-      torch::TensorOptions().dtype(input.dtype()).device(input.device()));
-
-  auto output_sizes = input.sizes().vec();
-  output_sizes.pop_back();
-  output_sizes.push_back(-1);
-  return flat_output.reshape(output_sizes);
-}
-
-torch::Tensor aqlm_dequant_meta(
-    const torch::Tensor& codes, const torch::Tensor& codebooks,
-    const std::vector<int64_t>& codebook_partition_sizes) {
-  auto in_features = codes.size(1) * 8;
-  auto out_features = codes.size(0);
-  return torch::empty({out_features, in_features},
-                      torch::TensorOptions()
-                          .dtype(codebooks.dtype())
-                          .device(codebooks.device()));
-}

@@ -1241,16 +1241,3 @@ torch::Tensor marlin_qqq_gemm(torch::Tensor const& a,
 
   return d;
 }
-
-torch::Tensor marlin_qqq_gemm_meta(torch::Tensor const& a,
-                                   torch::Tensor const& b_q_weight,
-                                   torch::Tensor const& s_tok,
-                                   torch::Tensor const& s_ch,
-                                   torch::Tensor const& s_group,
-                                   torch::Tensor& workspace, int64_t size_m,
-                                   int64_t size_n, int64_t size_k) {
-  // Alloc D matrix
-  auto options_d =
-      torch::TensorOptions().dtype(torch::kFloat16).device(a.device());
-  return torch::empty({size_m, size_n}, options_d);
-}
