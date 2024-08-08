@@ -120,6 +120,9 @@ class Fp8LinearMethod(LinearMethodBase):
         capability = current_platform.get_device_capability()
         capability = capability[0] * 10 + capability[1]
         self.use_marlin = capability < 89 or envs.VLLM_TEST_FORCE_FP8_MARLIN
+        # Disable marlin for rocm
+        if is_hip():
+            self.use_marlin = False
 
     def create_weights(
         self,
