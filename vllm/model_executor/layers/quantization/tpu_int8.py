@@ -55,9 +55,7 @@ class Int8TpuConfig(QuantizationConfig):
 
 
 class TPUInt8LinearMethod(LinearMethodBase):
-    """Int8 Linear method for TPU Quant.
-
-    """
+    """Int8 Linear method for TPU Quant. """
 
     def __init__(self, quant_config: Int8TpuConfig):
         self.quant_config = quant_config
