@@ -55,7 +55,7 @@ openai_serving_chat: OpenAIServingChat
 openai_serving_completion: OpenAIServingCompletion
 openai_serving_embedding: OpenAIServingEmbedding
 openai_serving_tokenization: OpenAIServingTokenization
-prometheus_multiproc_dir: tempfile.TemporaryDirectory
+# prometheus_multiproc_dir: tempfile.TemporaryDirectory
 
 logger = init_logger('vllm.entrypoints.openai.api_server')
 
@@ -108,9 +108,10 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
 
     # Otherwise, use the multiprocessing AsyncLLMEngine.
     else:
-        global prometheus_multiproc_dir
-        prometheus_multiproc_dir = tempfile.TemporaryDirectory()
-        os.environ["PROMETHEUS_MULTIPROC_DIR"] = prometheus_multiproc_dir.name
+        # global prometheus_multiproc_dir
+        # prometheus_multiproc_dir = tempfile.TemporaryDirectory()
+        # os.environ["PROMETHEUS_MULTIPROC_DIR"] = prometheus_multiproc_dir.name
+        os.environ["PROMETHEUS_MULTIPROC_DIR"] = "/tmp/testit"
 
         # Select random path for IPC.
         rpc_path = get_open_zmq_ipc_path()
