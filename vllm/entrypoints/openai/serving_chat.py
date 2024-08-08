@@ -31,7 +31,7 @@ from vllm.entrypoints.openai.tool_parsers import (Hermes2ProToolParser,
 from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalDataDict
-from vllm.outputs import RequestOutput
+from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sequence import Logprob
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
@@ -361,7 +361,7 @@ class OpenAIServingChat(OpenAIServing):
                     delta_text = output.text[len(previous_texts[i]):]
                     delta_message: Optional[DeltaMessage] = None
 
-                    # handle streaming deltas for tools with tool_choice
+                    # handle streaming deltas for tools with named tool_choice
                     if (request.tool_choice and type(request.tool_choice) is
                             ChatCompletionNamedToolChoiceParam):
                         delta_message = DeltaMessage(tool_calls=[
@@ -371,25 +371,28 @@ class OpenAIServingChat(OpenAIServing):
                                           index=i)
                         ])
 
-                    # handle streaming deltas for tools with tool_choice
-                    elif (request.tools and tool_parser
-                          and (request.tool_choice is None
-                               or request.tool_choice == "auto")
-                          and self.enable_auto_tools):
-
+                    # handle streaming deltas for tools with "auto" tool choice
+                    elif (self._should_stream_with_auto_tool_parsing(request)
+                          and tool_parser):
                         delta_message = (
                             tool_parser.extract_tool_calls_streaming(
                                 previous_text=previous_texts[i],
                                 current_text=output.text,
                                 delta_text=delta_text,
-                                previous_token_ids=output.
-                                token_ids[:-1 * len(delta_token_ids)],
+                                previous_token_ids= \
+                                    output.token_ids[
+                                    :-1 * len(delta_token_ids)
+                                    ],
                                 current_token_ids=output.token_ids,
-                                delta_token_ids=delta_token_ids))
+                                delta_token_ids=delta_token_ids
+                            )
+                        )
+
+                    # handle streaming just a content delta
                     else:
                         delta_message = DeltaMessage(content=delta_text)
 
-                    # handle setting the previous values for the next iteration
+                    # set the previous values for the next iteration
                     previous_texts[i] = output.text
                     previous_num_tokens[i] = len(output.token_ids)
 
@@ -431,6 +434,8 @@ class OpenAIServingChat(OpenAIServing):
 
                         data = chunk.model_dump_json(exclude_unset=True)
                         yield f"data: {data}\n\n"
+
+                    # if the model is finished generating
                     else:
                         # check to make sure we haven't "forgotten" to stream
                         #   any tokens that were generated but previously
@@ -442,29 +447,33 @@ class OpenAIServingChat(OpenAIServing):
                                     tool_parser.prev_tool_call_arr) > 0 else 0
                         else:
                             index = 0
-                        if (delta_message.tool_calls
-                                and delta_message.tool_calls[0]
-                                and delta_message.tool_calls[0].function and
-                            (delta_message.tool_calls[0].function.arguments
-                             == "" or
-                             delta_message.tool_calls[0].function.arguments and
-                             (output.finish_reason == "stop"
-                              or output.finish_reason == "tool_calls"))
-                                and tool_parser
-                                and request.tool_choice == "auto"):
+
+                        if self._should_check_for_unstreamed_tool_arg_tokens(
+                                delta_message, output) and tool_parser:
+
+                            # get the expected call based on partial JSON
+                            # parsing which "autocompletes" the JSON
                             expected_call = json.dumps(
                                 tool_parser.prev_tool_call_arr[index].get(
                                     "arguments", {}))
+
+                            # get what we've streamed so for for arguments
+                            # for the current tool
                             actual_call = tool_parser.streamed_args_for_tool[
                                 index]
+
+                            # check to see if there's anything left to stream
                             remaining_call = expected_call.replace(
                                 actual_call, "", 1)
+
+                            # set that as a delta message
                             delta_message = DeltaMessage(tool_calls=[
                                 DeltaToolCall(index=index,
                                               function=DeltaFunctionCall(
                                                   arguments=remaining_call).
                                               model_dump(exclude_none=True))
                             ])
+
                         # Send the finish response for each request.n only once
                         prompt_tokens = len(res.prompt_token_ids)
                         choice_data = ChatCompletionResponseStreamChoice(
@@ -524,6 +533,7 @@ class OpenAIServingChat(OpenAIServing):
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             logger.error("error in chat completion stream generator: %s", e)
+            print(e)
             data = self.create_streaming_error_response(str(e))
             yield f"data: {data}\n\n"
         # Send the final done message after all response.n are finished
@@ -717,3 +727,38 @@ class OpenAIServingChat(OpenAIServing):
                             tokenizer)))
 
         return ChatCompletionLogProbs(content=logprobs_content)
+
+    def _should_stream_with_auto_tool_parsing(self,
+                                              request: ChatCompletionRequest):
+        """
+        Utility function to check if streamed tokens should go through the tool
+        call parser that was configured.
+
+        We only want to do this IF user-provided tools are set, a tool parser
+        is configured, "auto" tool choice is enabled, and the request's tool
+        choice field indicates that "auto" tool choice should be used.
+        """
+        return (request.tools and self.tool_parser and self.enable_auto_tools
+                and request.tool_choice in ['auto', None])
+
+    def _should_check_for_unstreamed_tool_arg_tokens(
+        self,
+        delta_message: Optional[DeltaMessage],
+        output: CompletionOutput,
+    ) -> bool:
+        """
+        Check to see if we should check for unstreamed tool arguments tokens.
+        This is only applicable when auto tool parsing is enabled, the delta
+        is a tool call with arguments.
+        """
+
+        # yapf: disable
+        return bool(
+                # if there is a delta message that includes tool calls which
+                # include a function that has arguments
+                self.enable_auto_tools and self.tool_parser and delta_message
+                and delta_message.tool_calls and delta_message.tool_calls[0]
+                and delta_message.tool_calls[0].function
+                and delta_message.tool_calls[0].function.arguments is not None
+                and output.finish_reason is not None
+        )
