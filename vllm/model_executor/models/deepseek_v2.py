@@ -50,7 +50,8 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
-from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers, get_inputs_embeds
+from .utils import (
+    PPMissingLayer, is_pp_missing_parameter, make_layers, get_inputs_embeds)
 
 
 class DeepseekV2MLP(nn.Module):
