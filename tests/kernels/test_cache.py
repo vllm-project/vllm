@@ -162,8 +162,6 @@ def test_reshape_and_cache(
     k_scale = v_scale = 1.0
 
     # Call the reshape_and_cache kernel.
-    # torch.library.opcheck(torch.ops._C_cache_ops.reshape_and_cache, (key, value, key_cache, value_cache, slot_mapping,
-    #                       kv_cache_dtype, k_scale, v_scale))
     ops.reshape_and_cache(key, value, key_cache, value_cache, slot_mapping,
                           kv_cache_dtype, k_scale, v_scale)
 
@@ -271,8 +269,6 @@ def test_reshape_and_cache_flash(
     k_scale = v_scale = 1.0
 
     # Call the reshape_and_cache kernel.
-    # torch.library.opcheck(torch.ops._C_cache_ops.reshape_and_cache_flash, (key, value, key_cache, value_cache,
-    #                             slot_mapping, kv_cache_dtype, k_scale, v_scale))
     ops.reshape_and_cache_flash(key, value, key_cache, value_cache,
                                 slot_mapping, kv_cache_dtype, k_scale, v_scale)
 
@@ -370,11 +366,6 @@ def test_swap_blocks(
     src_value_caches_clone = src_value_caches[0].clone()
 
     # Call the swap_blocks kernel.
-    # torch.library.opcheck(torch.ops._C_cache_ops.swap_blocks, (src_key_caches[0], dist_key_caches[0],
-    #                 block_mapping_tensor))
-    # torch.library.opcheck(torch.ops._C_cache_ops.swap_blocks, (src_value_caches[0], dist_value_caches[0],
-    #                 block_mapping_tensor))
-
     ops.swap_blocks(src_key_caches[0], dist_key_caches[0],
                     block_mapping_tensor)
     ops.swap_blocks(src_value_caches[0], dist_value_caches[0],

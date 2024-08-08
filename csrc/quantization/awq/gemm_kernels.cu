@@ -524,30 +524,3 @@ torch::Tensor awq_gemm(torch::Tensor _in_feats, torch::Tensor _kernel,
   }
   return _out_feats.sum(0);
 }
-
-torch::Tensor awq_gemm_meta(torch::Tensor _in_feats, torch::Tensor _kernel,
-                            torch::Tensor _scaling_factors,
-                            torch::Tensor _zeros, int64_t split_k_iters) {
-  auto num_in_feats = _in_feats.size(0);
-  auto options = torch::TensorOptions()
-                     .dtype(_in_feats.dtype())
-                     .device(_in_feats.device());
-  return torch::empty({split_k_iters, num_in_feats, _kernel.size(1) * 8},
-                      options)
-      .sum(0);
-}
-
-torch::Tensor awq_dequantize_meta(torch::Tensor _kernel,
-                                  torch::Tensor _scaling_factors,
-                                  torch::Tensor _zeros, int64_t split_k_iters,
-                                  int64_t thx, int64_t thy) {
-  auto in_c = _kernel.size(0);
-  auto qout_c = _kernel.size(1);
-  auto out_c = qout_c * 8;
-
-  auto options = torch::TensorOptions()
-                     .dtype(_scaling_factors.dtype())
-                     .device(_scaling_factors.device());
-
-  return torch::empty({in_c, out_c}, options);
-}
