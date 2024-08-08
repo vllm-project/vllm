@@ -173,7 +173,7 @@ class ModelWeightParameter(_ColumnvLLMParameter, RowvLLMParameter):
 class GroupQuantScaleParameter(_ColumnvLLMParameter, RowvLLMParameter):
     """
     Parameter class for weight scales loaded for weights with
-    grouped quantization.  Uses both column and row parallelism.
+    grouped quantization. Uses both column and row parallelism.
     """
     pass
 
@@ -245,7 +245,7 @@ class PerTensorScaleParameter(BasevLLMParameter):
 class PackedColumnParameter(_ColumnvLLMParameter):
     """
     Parameter for model parameters which are packed on disk
-    and support column parllelism only. See PackedvLLMParameter
+    and support column parallelism only. See PackedvLLMParameter
     for more details on the packed properties.
     """
 
@@ -256,7 +256,7 @@ class PackedColumnParameter(_ColumnvLLMParameter):
                  **kwargs):
         self._packed_factor = packed_factor
         self._packed_dim = packed_dim
-        self._marlin_tile = marlin_tile_size
+        self._marlin_tile_size = marlin_tile_size
         super().__init__(**kwargs)
 
     @property
@@ -268,15 +268,15 @@ class PackedColumnParameter(_ColumnvLLMParameter):
         return self._packed_factor
 
     @property
-    def marlin_tile(self):
-        return self._marlin_tile
+    def marlin_tile_size(self):
+        return self._marlin_tile_size
 
     def adjust_shard_indexes_for_packing(self, shard_size, shard_offset):
         return _adjust_shard_indexes_for_packing(
             shard_size=shard_size,
             shard_offset=shard_offset,
             packed_factor=self.packed_factor,
-            marlin_tile=self.marlin_tile)
+            marlin_tile_size=self.marlin_tile_size)
 
 
 class PackedvLLMParameter(ModelWeightParameter):
@@ -297,7 +297,7 @@ class PackedvLLMParameter(ModelWeightParameter):
                  **kwargs):
         self._packed_factor = packed_factor
         self._packed_dim = packed_dim
-        self._marlin_tile = marlin_tile_size
+        self._marlin_tile_size = marlin_tile_size
         super().__init__(**kwargs)
 
     @property
@@ -309,27 +309,29 @@ class PackedvLLMParameter(ModelWeightParameter):
         return self._packed_factor
 
     @property
-    def marlin_tile(self):
-        return self._marlin_tile
+    def marlin_tile_size(self):
+        return self._marlin_tile_size
 
     def adjust_shard_indexes_for_packing(self, shard_size, shard_offset):
         return _adjust_shard_indexes_for_packing(
             shard_size=shard_size,
             shard_offset=shard_offset,
             packed_factor=self.packed_factor,
-            marlin_tile=self.marlin_tile)
+            marlin_tile_size=self.marlin_tile_size)
 
 
-def _adjust_shard_indexes_for_marlin(shard_size, shard_offset, marlin_tile):
-    return shard_size * marlin_tile, shard_offset * marlin_tile
+def _adjust_shard_indexes_for_marlin(shard_size, shard_offset,
+                                     marlin_tile_size):
+    return shard_size * marlin_tile_size, shard_offset * marlin_tile_size
 
 
 def _adjust_shard_indexes_for_packing(shard_size, shard_offset, packed_factor,
-                                      marlin_tile):
+                                      marlin_tile_size):
     shard_size = shard_size // packed_factor
     shard_offset = shard_offset // packed_factor
-    if marlin_tile is not None:
-        return _adjust_shard_indexes_for_marlin(shard_size=shard_size,
-                                                shard_offset=shard_offset,
-                                                marlin_tile=marlin_tile)
+    if marlin_tile_size is not None:
+        return _adjust_shard_indexes_for_marlin(
+            shard_size=shard_size,
+            shard_offset=shard_offset,
+            marlin_tile_size=marlin_tile_size)
     return shard_size, shard_offset
