@@ -13,8 +13,7 @@ ACTIVATION_SCHEMES = ["none"]
 
 
 class Int8TpuConfig(QuantizationConfig):
-    """Int8 Quantization Config class for TPU Backend.
-    """
+    """Int8 Quantization Config class for TPU Backend."""
 
     def __init__(
         self,
