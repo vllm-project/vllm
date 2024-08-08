@@ -2,8 +2,9 @@ import pytest
 import torch
 
 import vllm._custom_ops as ops
-from tests.kernels.quant_utils import (ref_dynamic_per_tensor_fp8_quant,
-                                       ref_dynamic_per_token_quant, FP8_DTYPE)
+from tests.kernels.quant_utils import (FP8_DTYPE,
+                                       ref_dynamic_per_tensor_fp8_quant,
+                                       ref_dynamic_per_token_quant)
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 HIDDEN_SIZES = [1, 2, 3, 4, 16, 67, 768, 2048, 5120, 5137, 8192,

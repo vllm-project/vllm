@@ -10,10 +10,15 @@
 #include "../../reduction_utils.cuh"
 
 #ifndef USE_ROCM
-using FP8_TYPE = c10::Float8_e4m3fn;
+  #define FP8_TYPE c10::Float8_e4m3fn
+  #define FP8_E4M3_MAX std::numeric_limits<FP8_TYPE>::max()
 #else
   #include "amd/hip_float8.h"
-using FP8_TYPE = c10::Float8_e4m3fnuz;
+  #define FP8_TYPE c10::Float8_e4m3fnuz
+  // Amd GPU hardware only supports up to 224.0 for fp8 value.
+  // Using the default max value from pytorch (240.0) will cause accuracy
+  // issue when running dynamic quantization.
+  #define FP8_E4M3_MAX 224.0f
 #endif
 
 namespace vllm {
@@ -28,8 +33,6 @@ __device__ __forceinline__ float atomicMaxFloat(float* addr, float value) {
   return old;
 }
 
-#define FP8_E4M3_MAX std::numeric_limits<FP8_TYPE>::max()
-
 template <bool is_scale_inverted>
 __device__ __forceinline__ FP8_TYPE scaled_fp8_conversion(float const val,
                                                           float const scale) {
@@ -40,12 +43,12 @@ __device__ __forceinline__ FP8_TYPE scaled_fp8_conversion(float const val,
     x = val / scale;
   }
 
-#ifndef USE_ROCM
   float r = fmax(-FP8_E4M3_MAX, fmin(x, FP8_E4M3_MAX));
+#ifndef USE_ROCM
   return static_cast<c10::Float8_e4m3fn>(r);
 #else
   // Use hardware cvt instruction for fp8 on rocm
-  return c10::Float8_e4m3fnuz(hip_fp8(x).data,
+  return c10::Float8_e4m3fnuz(hip_fp8(r).data,
                               c10::Float8_e4m3fnuz::from_bits());
 #endif
 }
@@ -87,7 +90,7 @@ __global__ void segmented_max_reduction(float* __restrict__ scale,
   // Finally, since cache[0] contains the maximum for this thread block,
   // atomically write the max to the target location
   if (threadIdx.x == 0) {
-    atomicMaxFloat(scale, cache[0] / std::numeric_limits<FP8_TYPE>::max());
+    atomicMaxFloat(scale, cache[0] / FP8_E4M3_MAX);
   }
 }
 

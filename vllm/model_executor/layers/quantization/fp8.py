@@ -18,8 +18,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d, apply_fp8_linear, convert_to_channelwise,
-    create_per_tensor_scale_param, cutlass_fp8_supported,
-    per_tensor_dequantize, requantize_with_max_scale, convert_to_e4m3fnuz)
+    convert_to_e4m3fnuz, create_per_tensor_scale_param, cutlass_fp8_supported,
+    per_tensor_dequantize, requantize_with_max_scale)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils import is_hip, print_warning_once
