@@ -1,6 +1,6 @@
 FROM intel/intel-extension-for-pytorch:2.1.30-xpu
 
-RUN rm /etc/apt/sources.list.d/intel-graphics.list /etc/apt/sources.list.d/oneAPI.list && \
+RUN rm /etc/apt/sources.list.d/intel-gpu-jammy.list /etc/apt/sources.list.d/oneAPI.list && \
     apt-get update -y && \
     apt-get install -y --no-install-recommends --fix-missing \
     vim \
