@@ -119,9 +119,11 @@ class SequenceData:
     def __init__(
         self,
         prompt_token_ids: List[int],
+        prompt_embeds: Optional[torch.Tensor] = None,
         output_token_ids: Optional[List[int]] = None,
     ) -> None:
         self._prompt_token_ids = array('l', prompt_token_ids)
+        self._prompt_embeds: Optional[List[torch.Tensor]] = prompt_embeds
         self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(prompt_token_ids)
         self._output_token_ids = array(
             'l', output_token_ids if output_token_ids is not None else [])
@@ -148,6 +150,13 @@ class SequenceData:
         self._update_cached_all_tokens()
 
     @property
+    def prompt_embeds(self) -> Optional[torch.Tensor]:
+        return self._prompt_embeds
+
+    @prompt_embeds.setter
+    def prompt_embeds(self, new_prompt_embeds: Optional[torch.Tensor]) -> None:
+        self._prompt_embeds = new_prompt_embeds
+
     def prompt_token_ids_array(self) -> array:
         return self._prompt_token_ids
 
@@ -170,7 +179,10 @@ class SequenceData:
         self.cumulative_logprob += logprob
 
     def get_len(self) -> int:
-        return len(self._output_token_ids) + len(self._prompt_token_ids)
+        if self._prompt_embeds is None:
+            return len(self._output_token_ids) + len(self._prompt_token_ids)
+        else:
+            return len(self._output_token_ids) + len(self._prompt_embeds)
 
     def get_prompt_len(self) -> int:
         return len(self._prompt_token_ids)
@@ -315,7 +327,7 @@ class Sequence:
                              f"invalid input {inputs}; did you forget the "
                              "encoder input prompt fields?")
 
-        self.data = SequenceData(self.prompt_token_ids)
+        self.data = SequenceData(self.prompt_token_ids, self.prompt_embeds)
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
 
@@ -363,6 +375,10 @@ class Sequence:
         self._prompt_token_ids = cast(List[int],
                                       self.inputs.get(prompt_token_ids_key))
         return self._prompt_token_ids
+
+    @property
+    def prompt_embeds(self) -> Optional[torch.Tensor]:
+        return self.inputs.get("prompt_embeds")
 
     @property
     def multi_modal_data(self) -> "MultiModalDataDict":
@@ -540,6 +556,12 @@ class SequenceGroup:
         # All sequences in the group should have the same prompt.
         # We use the prompt of an arbitrary sequence.
         return self.seqs[0].prompt_token_ids
+
+    @property
+    def prompt_embeds(self) -> Optional[torch.Tensor]:
+        # All sequences in the group should have the same prompt.
+        # We use the prompt of an arbitrary sequence.
+        return self.seqs[0].prompt_embeds
 
     @property
     def encoder_prompt(self) -> Optional[str]:
@@ -726,7 +748,7 @@ class SequenceGroupMetadata:
             used in prefix caching.
         multi_modal_data: Multi modal data.
         encoder_seq_data: Optional sequence data for encoder prompt
-                          (SequenceGroup.encoder_seq). Should be None 
+                          (SequenceGroup.encoder_seq). Should be None
                           unless you are working with an encoder/decoder
                           model.
         cross_block_table: Optional cross-attention block table associated

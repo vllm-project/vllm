@@ -1,6 +1,7 @@
 from typing import (TYPE_CHECKING, List, Literal, Optional, Sequence,
                     TypedDict, Union, cast, overload)
 
+import torch
 from typing_extensions import NotRequired
 
 if TYPE_CHECKING:
@@ -33,6 +34,9 @@ def parse_and_batch_prompt(
 def parse_and_batch_prompt(
     prompt: Union[str, List[str], List[int], List[List[int]]],
 ) -> Union[Sequence[ParsedText], Sequence[ParsedTokens]]:
+    if len(prompt) == 0:
+        return []
+
     if isinstance(prompt, str):
         # case 1: a string
         return [ParsedText(content=prompt, is_tokens=False)]
@@ -92,12 +96,26 @@ class TokensPrompt(TypedDict):
     """
 
 
-SingletonPromptInputs = Union[str, TextPrompt, TokensPrompt]
+class EmbedsPrompt(TypedDict):
+    """Schema for a tokenized prompt."""
+
+    prompt_embeds: torch.Tensor
+    """Embeddings of the prompt to pass to the model."""
+
+    multi_modal_data: NotRequired["MultiModalDataDict"]
+    """
+    Optional multi-modal data to pass to the model,
+    if the model supports it.
+    """
+
+
+SingletonPromptInputs = Union[str, TextPrompt, TokensPrompt, EmbedsPrompt]
 """
 Set of possible schemas for a single LLM input:
 
 - A text prompt (:class:`str` or :class:`TextPrompt`)
 - A tokenized prompt (:class:`TokensPrompt`)
+- Embeddings of a prompt (:class:`EmbedsPrompt`)
 
 Note that "singleton" is as opposed to a data structure
 which encapsulates multiple prompts, i.e. of the sort
@@ -116,7 +134,7 @@ more than one prompt, i.e. ExplicitEncoderDecoderPrompt
 
 class ExplicitEncoderDecoderPrompt(TypedDict):
     """Represents an encoder/decoder model input prompt,
-    comprising an explicit encoder prompt and a 
+    comprising an explicit encoder prompt and a
     decoder prompt.
 
     The encoder and decoder prompts, respectively,
@@ -211,6 +229,11 @@ class LLMInputs(TypedDict):
     prompt: NotRequired[Optional[str]]
     """
     The original prompt text corresponding to the token IDs, if available.
+    """
+
+    prompt_embeds: NotRequired[Optional[torch.Tensor]]
+    """
+    The embeddings of the prompt, if available.
     """
 
     encoder_prompt_token_ids: NotRequired[List[int]]

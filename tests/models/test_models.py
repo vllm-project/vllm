@@ -39,15 +39,37 @@ def test_models(
 
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
+        prompt_embeds = []
+        prompt_token_ids = []
+        for prompt in example_prompts:
+            token_ids = hf_model.tokenizer(prompt,
+                                           return_tensors="pt").input_ids.to(
+                                               hf_model.model.device)
+            prompt_token_ids.append(token_ids)
+            prompt_embeds.append(
+                hf_model.model.get_input_embeddings()(token_ids).squeeze(0))
 
     with vllm_runner(model, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
+        vllm_outputs_from_embeds = vllm_model.generate_greedy(
+            prompt_embeds, max_tokens)
 
     check_outputs_equal(
         outputs_0_lst=hf_outputs,
         outputs_1_lst=vllm_outputs,
         name_0="hf",
         name_1="vllm",
+    )
+
+    check_outputs_equal(
+        outputs_0_lst=vllm_outputs,
+        outputs_1_lst=[
+            (prompt_ids.squeeze().tolist() + output_ids, prompt + output_str)
+            for (output_ids, output_str), prompt_ids, prompt in zip(
+                vllm_outputs_from_embeds, prompt_token_ids, example_prompts)
+        ],
+        name_0="vllm",
+        name_1="vllm_from_embeds",
     )
 
 

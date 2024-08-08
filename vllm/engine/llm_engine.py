@@ -46,6 +46,7 @@ from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
 from vllm.utils import (Counter, is_embedding_model_config,
                         is_encoder_decoder_model_config)
 from vllm.version import __version__ as VLLM_VERSION
+from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -91,13 +92,13 @@ class LLMEngine:
         scheduler_config: The configuration related to the request scheduler.
         device_config: The configuration related to the device.
         lora_config (Optional): The configuration related to serving multi-LoRA.
-        multimodal_config (Optional): The configuration related to multimodal 
+        multimodal_config (Optional): The configuration related to multimodal
             models.
         speculative_config (Optional): The configuration related to speculative
             decoding.
         executor_class: The model executor class for managing distributed
             execution.
-        prompt_adapter_config (Optional): The configuration related to serving 
+        prompt_adapter_config (Optional): The configuration related to serving
             prompt adapters.
         log_stats: Whether to log statistics.
         usage_context: Specified entry point, used for usage info collection.
@@ -780,7 +781,7 @@ class LLMEngine:
         "default" decoder prompt be <BOS>.
 
         However, it is possible that in the future
-        other models may have different or more 
+        other models may have different or more
         complex logic for the default decoder prompt.
         This motivates having a special helper method
         for default decoder prompts.
@@ -822,7 +823,7 @@ class LLMEngine:
         have any possible singleton type; thus this
         method relies on helper functions to obtain
         token ids for the sub-prompts.
-        
+
         Arguments:
 
         * inputs: an input prompt
@@ -924,8 +925,21 @@ class LLMEngine:
         if isinstance(inputs, str):
             inputs = {"prompt": inputs}
         prompt = inputs.get("prompt")
-
-        if "prompt_token_ids" not in inputs:
+        prompt_embeds = inputs.get("prompt_embeds")
+        driver_worker = self.model_executor.driver_worker
+        if prompt_embeds is not None:
+            if self.speculative_config is not None:
+                raise ValueError(
+                    "Speculative decoding does not support prompt_embeds.")
+            model_runner = driver_worker.worker.model_runner if isinstance(
+                driver_worker,
+                WorkerWrapperBase) else driver_worker.model_runner
+            if not model_runner.model_supports_input_embeds:
+                raise ValueError(
+                    f"Model {self.model_config.model} does not support input "
+                    "embeddings, but prompt_embeds was provided.")
+            prompt_token_ids = []
+        elif "prompt_token_ids" not in inputs:
             prompt_token_ids = self._tokenize_prompt(
                 prompt,
                 request_id=request_id,
@@ -941,6 +955,7 @@ class LLMEngine:
 
         return LLMInputs(prompt_token_ids=prompt_token_ids,
                          prompt=prompt,
+                         prompt_embeds=prompt_embeds,
                          multi_modal_data=inputs.get("multi_modal_data"))
 
     def process_model_inputs(
