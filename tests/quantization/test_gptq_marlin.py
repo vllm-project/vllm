@@ -1,7 +1,6 @@
 import pytest
 
 from tests.quantization.utils import is_quant_method_supported
-from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
 
 MAX_MODEL_LEN = 1024
 
@@ -39,5 +38,3 @@ def test_model_weight_loading(vllm_runner, model) -> None:
         output = gptq_marlin_model.generate_greedy("Hello world!",
                                                    max_tokens=20)
         assert output
-
-    _ROPE_DICT.clear()  # clear rope cache to avoid rope dtype error
