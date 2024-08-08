@@ -814,6 +814,9 @@ class LLMEngine:
 
         now = time.time()
 
+        if not self.previous_output:
+            return
+
         scheduled_seq_groups = self.previous_scheduler_outputs.scheduled_seq_groups
         ignored_seq_groups = self.previous_scheduler_outputs.ignored_seq_groups
         outputs = self.previous_output
@@ -864,19 +867,20 @@ class LLMEngine:
         """
         for seq_group_metadata, sequence_group_outputs in zip(
                 seq_group_metadata_list, output):
-            seq_group_metadata.is_prompt = False
-            assert len(sequence_group_outputs.samples) == 1, \
+            assert len(sequence_group_outputs.samples) <= 1, \
                 "sampling_params.n > 1 and sampling_params.best_of > 1 not supported with output proc callback"
-            seq_output = sequence_group_outputs.samples[0]
-            # NOTE: Beam search is not supported, so we can assume that
-            # parent_seq_id == seq_id.
-            seq = seq_group_metadata.seq_data[seq_output.parent_seq_id]
+            if len(sequence_group_outputs.samples) == 1:
+                seq_group_metadata.is_prompt = False
+                seq_output = sequence_group_outputs.samples[0]
+                # NOTE: Beam search is not supported, so we can assume that
+                # parent_seq_id == seq_id.
+                seq = seq_group_metadata.seq_data[seq_output.parent_seq_id]
 
-            token_id = seq_output.output_token
-            token_logprob = seq_output.logprobs[token_id]
+                token_id = seq_output.output_token
+                token_logprob = seq_output.logprobs[token_id]
 
-            seq.update_num_computed_tokens(seq_group_metadata.token_chunk_size)
-            seq.append_token_id(token_id, token_logprob.logprob)
+                seq.update_num_computed_tokens(seq_group_metadata.token_chunk_size)
+                seq.append_token_id(token_id, token_logprob.logprob)
 
     def step(self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.

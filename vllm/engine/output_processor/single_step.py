@@ -101,9 +101,6 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                 sampling_params,
                 lora_req=seq_group.lora_request,
             )
-            if seq.is_finished():
-                for scheduler in self.scheduler:
-                    scheduler.free_seq(seq)
             return
 
         # Process samples
