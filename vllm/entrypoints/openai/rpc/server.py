@@ -20,7 +20,7 @@ logger = init_logger(__name__)
 class AsyncEngineRPCServer:
 
     def __init__(self, async_engine_args: AsyncEngineArgs,
-                 usage_context: UsageContext, port: int):
+                 usage_context: UsageContext, rpc_path: str):
         # Initialize engine first.
         self.engine = AsyncLLMEngine.from_engine_args(async_engine_args,
                                                       usage_context)
@@ -30,7 +30,7 @@ class AsyncEngineRPCServer:
 
         # Init socket for readiness state.
         self.socket = self.context.socket(zmq.constants.ROUTER)
-        self.socket.bind(f"tcp://localhost:{port}")
+        self.socket.bind(rpc_path)
 
     def cleanup(self):
         """Cleanup all resources."""
@@ -211,6 +211,6 @@ async def run_server(server: AsyncEngineRPCServer):
 
 
 def run_rpc_server(async_engine_args: AsyncEngineArgs,
-                   usage_context: UsageContext, port: int):
-    server = AsyncEngineRPCServer(async_engine_args, usage_context, port)
+                   usage_context: UsageContext, rpc_path: str):
+    server = AsyncEngineRPCServer(async_engine_args, usage_context, rpc_path)
     asyncio.run(run_server(server))

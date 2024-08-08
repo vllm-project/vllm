@@ -18,7 +18,6 @@ from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.intern_vit import InternVisionModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -29,7 +28,8 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
                    get_clip_num_patches)
 from .interfaces import SupportsVision
-from .utils import merge_vision_embeddings
+from .utils import (filter_weights, init_vllm_registered_model,
+                    merge_vision_embeddings)
 
 IMG_START = '<img>'
 IMG_END = '</img>'
@@ -37,9 +37,6 @@ IMG_CONTEXT = '<IMG_CONTEXT>'
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
-
-MAX_IMAGE_FEATURE_SIZE_WIDTH = 3000
-MAX_IMAGE_FEATURE_SIZE_HEIGHT = 500
 
 
 class InternVLImagePixelInputs(TypedDict):
@@ -84,11 +81,9 @@ def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height,
     return best_ratio
 
 
-def calculate_num_blocks(orig_width: int,
-                         orig_height: int,
-                         min_num=1,
-                         max_num=6,
-                         image_size=448):
+def calculate_num_blocks(orig_width: int, orig_height: int, min_num: int,
+                         max_num: int,
+                         image_size: int) -> Tuple[int, int, int]:
     aspect_ratio = orig_width / orig_height
 
     # calculate the existing image aspect ratio
@@ -110,11 +105,9 @@ def calculate_num_blocks(orig_width: int,
 
 
 # adapted from https://huggingface.co/OpenGVLab/InternVL2-1B
-def dynamic_preprocess(image,
-                       min_num=1,
-                       max_num=6,
-                       image_size=448,
-                       use_thumbnail=False):
+def dynamic_preprocess(image: Image.Image, min_num: int, max_num: int,
+                       image_size: int,
+                       use_thumbnail: int) -> List[Image.Image]:
     orig_width, orig_height = image.size
 
     blocks, target_width, target_height = calculate_num_blocks(
@@ -138,12 +131,14 @@ def dynamic_preprocess(image,
 
 
 # adapted from https://huggingface.co/OpenGVLab/InternVL2-1B
-def image_to_pixel_values(image: Image.Image, input_size=448, max_num=6):
+def image_to_pixel_values(image: Image.Image, input_size: int, min_num: int,
+                          max_num: int, use_thumbnail: bool) -> torch.Tensor:
     transform = build_transform(input_size=input_size)
     images = dynamic_preprocess(image,
+                                min_num=min_num,
+                                max_num=max_num,
                                 image_size=input_size,
-                                use_thumbnail=True,
-                                max_num=max_num)
+                                use_thumbnail=use_thumbnail)
     pixel_values = [transform(image) for image in images]
     pixel_values = torch.stack(pixel_values)
     return pixel_values
@@ -159,12 +154,18 @@ def get_internvl_num_patches(image_size: int, patch_size: int,
 def get_max_internvl_image_tokens(ctx: InputContext):
     hf_config = ctx.get_hf_config(PretrainedConfig)
     vision_config = hf_config.vision_config
+
+    use_thumbnail = hf_config.use_thumbnail
+    max_dynamic_patch = hf_config.max_dynamic_patch
+    if use_thumbnail:
+        max_dynamic_patch += 1
+    downsample_ratio = hf_config.downsample_ratio
+
     image_size = vision_config.image_size
     patch_size = vision_config.patch_size
-    downsample_ratio = hf_config.downsample_ratio
     num_patches = get_internvl_num_patches(image_size, patch_size,
                                            downsample_ratio)
-    return num_patches * 7
+    return num_patches * max_dynamic_patch
 
 
 def input_processor_for_internvl(ctx: InputContext, llm_inputs: LLMInputs):
@@ -176,20 +177,26 @@ def input_processor_for_internvl(ctx: InputContext, llm_inputs: LLMInputs):
     hf_config = ctx.get_hf_config(PretrainedConfig)
     vision_config = hf_config.vision_config
 
-    image_data = multi_modal_data["image"]
-    if isinstance(image_data, Image.Image):
-        width, height = image_data.size
-        num_blocks, _, _ = calculate_num_blocks(width, height)
-    elif isinstance(image_data, torch.Tensor):
-        raise NotImplementedError("Embeddings input is not supported yet")
-    else:
-        raise TypeError(f"Invalid image type: {type(image_data)}")
-
     image_size = vision_config.image_size
     patch_size = vision_config.patch_size
     downsample_ratio = hf_config.downsample_ratio
     num_patches = get_internvl_num_patches(image_size, patch_size,
                                            downsample_ratio)
+
+    image_data = multi_modal_data["image"]
+    if isinstance(image_data, Image.Image):
+        width, height = image_data.size
+        min_num = hf_config.min_dynamic_patch
+        max_num = hf_config.max_dynamic_patch
+        num_blocks, _, _ = calculate_num_blocks(width, height, min_num,
+                                                max_num, image_size)
+        # add thumbnail image if num_blocks > 1
+        if hf_config.use_thumbnail and num_blocks > 1:
+            num_blocks += 1
+    elif isinstance(image_data, torch.Tensor):
+        raise NotImplementedError("Embeddings input is not supported yet")
+    else:
+        raise TypeError(f"Invalid image type: {type(image_data)}")
 
     tokenizer = cached_get_tokenizer(model_config.tokenizer,
                                      trust_remote_code=True)
@@ -198,8 +205,7 @@ def input_processor_for_internvl(ctx: InputContext, llm_inputs: LLMInputs):
     prompt_token_ids = llm_inputs["prompt_token_ids"]
     if prompt is None:
         prompt = tokenizer.decode(prompt_token_ids)
-    image_prompt = IMG_START + IMG_CONTEXT * (num_blocks +
-                                              1) * num_patches + IMG_END
+    image_prompt = IMG_START + IMG_CONTEXT * num_blocks * num_patches + IMG_END
     new_prompt = prompt.replace('<image>', image_prompt, 1)
     new_prompt_token_ids = tokenizer.encode(new_prompt)
 
@@ -209,8 +215,19 @@ def input_processor_for_internvl(ctx: InputContext, llm_inputs: LLMInputs):
 
 
 def input_mapper_for_internvl(ctx: InputContext, data: object):
+    hf_config = ctx.get_hf_config(PretrainedConfig)
+
+    use_thumbnail = hf_config.use_thumbnail
+    min_num = hf_config.min_dynamic_patch
+    max_num = hf_config.max_dynamic_patch
+    image_size = hf_config.vision_config.image_size
+
     if isinstance(data, Image.Image):
-        data = image_to_pixel_values(data)
+        data = image_to_pixel_values(data,
+                                     image_size,
+                                     min_num,
+                                     max_num,
+                                     use_thumbnail=use_thumbnail)
     model_config = ctx.model_config
     tokenizer = cached_get_tokenizer(model_config.tokenizer,
                                      trust_remote_code=True)
@@ -240,10 +257,17 @@ def dummy_data_for_internvl(ctx: InputContext, seq_len: int):
                                         add_special_tokens=False)[0],
         image_feature_size_override=image_feature_size,
     )
+
+    image_size = vision_config.image_size
+    min_num = hf_config.min_dynamic_patch
+    max_num = hf_config.max_dynamic_patch
+    max_image_width = max_num * image_size
+    max_image_height = min_num * image_size
+
     mm_data = dummy_image_for_clip(
         vision_config,
-        image_width_override=MAX_IMAGE_FEATURE_SIZE_WIDTH,
-        image_height_override=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
+        image_width_override=max_image_width,
+        image_height_override=max_image_height,
     )
 
     return seq_data, mm_data
@@ -283,10 +307,8 @@ class InternVLChatModel(nn.Module, SupportsVision):
         self.vision_model = InternVisionModel(
             config.vision_config, num_hidden_layers_override=num_hidden_layers)
 
-        llm_class = ModelRegistry.load_model_cls(
-            config.text_config.architectures[0])
-        self.language_model = llm_class(config.text_config, cache_config,
-                                        quant_config)
+        self.language_model = init_vllm_registered_model(
+            config.text_config, cache_config, quant_config)
 
         vit_hidden_size = config.vision_config.hidden_size
         llm_hidden_size = config.text_config.hidden_size
@@ -415,24 +437,16 @@ class InternVLChatModel(nn.Module, SupportsVision):
     ) -> Optional[SamplerOutput]:
         return self.language_model.sample(logits, sampling_metadata)
 
-    def _filter_weights(self, weights: Iterable[Tuple[str, torch.Tensor]],
-                        prefix: str):
-        for name, loaded_weight in weights:
-            name = name.split(".")
-            if prefix == name.pop(0):
-                name = ".".join(name)
-                yield name, loaded_weight
-
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         # prepare weight iterators for components
         vit_weights, mlp_weights, llm_weights = itertools.tee(weights, 3)
 
         # load vision encoder
-        vit_weights = self._filter_weights(vit_weights, "vision_model")
+        vit_weights = filter_weights(vit_weights, "vision_model")
         self.vision_model.load_weights(vit_weights)
 
         # load mlp projector
-        mlp_weights = self._filter_weights(mlp_weights, "mlp1")
+        mlp_weights = filter_weights(mlp_weights, "mlp1")
         mlp_params_dict = dict(self.mlp1.named_parameters())
         for name, loaded_weight in mlp_weights:
             param = mlp_params_dict[name]
@@ -441,5 +455,5 @@ class InternVLChatModel(nn.Module, SupportsVision):
             weight_loader(param, loaded_weight)
 
         # load llm backbone
-        llm_weights = self._filter_weights(llm_weights, "language_model")
+        llm_weights = filter_weights(llm_weights, "language_model")
         self.language_model.load_weights(llm_weights)
