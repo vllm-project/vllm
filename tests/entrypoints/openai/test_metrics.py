@@ -133,10 +133,13 @@ async def test_metrics_counts(client: openai.AsyncOpenAI):
 
     for metric_family, suffix_values_list in EXPECTED_VALUES.items():
         found_metric = False
+
+        # Check to see if the metric_family is found in the prom endpoint.
         for family in text_string_to_metric_families(response.text):
             if family.name == metric_family:
                 found_metric = True
 
+                # Check that each suffix is found in the prom endpoint.
                 for suffix, expected_value in suffix_values_list:
                     metric_name_w_suffix = f"{metric_family}{suffix}"
                     found_suffix = False
@@ -144,6 +147,9 @@ async def test_metrics_counts(client: openai.AsyncOpenAI):
                     for sample in family.samples:
                         if sample.name == metric_name_w_suffix:
                             found_suffix = True
+                            
+                            # For each suffix, value sure the value matches
+                            # what we expect.
                             assert sample.value == expected_value, (
                                 f"{metric_name_w_suffix} expected value of {expected_value}"
                                 f"did not match found value {sample.value}"
