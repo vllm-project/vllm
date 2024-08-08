@@ -40,7 +40,7 @@ class Metrics:
 
     def __init__(self, labelnames: List[str], max_model_len: int):
         # Unregister any existing vLLM collectors
-        self._unregister_vllm_metrics()
+        # self._unregister_vllm_metrics()
 
         # System stats
         #   Scheduler State
@@ -178,10 +178,10 @@ class Metrics:
             multiprocess_mode="sum",
         )
 
-    def _unregister_vllm_metrics(self) -> None:
-        for collector in list(prometheus_client.REGISTRY._collector_to_names):
-            if hasattr(collector, "_name") and "vllm" in collector._name:
-                prometheus_client.REGISTRY.unregister(collector)
+    # def _unregister_vllm_metrics(self) -> None:
+    #     for collector in list(prometheus_client.REGISTRY._collector_to_names):
+    #         if hasattr(collector, "_name") and "vllm" in collector._name:
+    #             prometheus_client.REGISTRY.unregister(collector)
 
 
 # end-metrics-definitions

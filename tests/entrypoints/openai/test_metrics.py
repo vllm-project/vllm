@@ -4,7 +4,10 @@ import openai
 import pytest
 import requests
 
+from prometheus_client.parser import text_string_to_metric_families
+from transformers import AutoTokenizer
 from ...utils import RemoteOpenAIServer
+
 
 MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
@@ -24,7 +27,7 @@ def default_server_args():
 
 
 @pytest.fixture(scope="module",
-                params=["", "--disable-frontend-multiprocessing"])
+                params=["", "--disable-frontend-multiprocessing", "--enable-chunked-prefill"])
 def client(default_server_args, request):
     if request.param:
         default_server_args.append(request.param)
@@ -81,3 +84,74 @@ async def test_metrics_exist(client: openai.AsyncOpenAI):
 
     for metric in EXPECTED_METRICS:
         assert metric in response.text
+
+
+_PROMPT = "Hello my name is Robert and I love doing magic because"
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+_TOKENIZED_PROMPT = tokenizer(_PROMPT)
+
+_NUM_REQUESTS = 10
+_NUM_PROMPT_TOKENS_PER_REQUEST = len(_TOKENIZED_PROMPT)
+_NUM_GENERATION_TOKENS_PER_REQUEST = 10
+
+# {metric_family: [(suffix, expected_value)]}
+EXPECTED_VALUES = {
+    "vllm:time_to_first_token_seconds": [("_count", _NUM_REQUESTS)],
+    "vllm:time_per_output_token_seconds": [("_count", _NUM_REQUESTS)],
+    "vllm:e2e_request_latency_seconds": [("_count", _NUM_REQUESTS)],
+    "vllm:request_prompt_tokens": [
+        ("_sum", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST),
+        ("_count", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST)],
+    "vllm:request_generation_tokens": [
+        ("_sum", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST),
+        ("_count", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST)],
+    "vllm:request_params_n": [("_count", _NUM_REQUESTS)],
+    "vllm:request_params_best_of": [("_count", _NUM_REQUESTS)],
+    "vllm:prompt_tokens": [
+        ("_total", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST)],
+    "vllm:generation_tokens": [
+        ("_total", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST)],
+    "vllm:request_success": [("_total", _NUM_REQUESTS)],
+}
+
+
+@pytest.mark.asyncio
+async def test_metrics_counts(client: openai.AsyncOpenAI):
+    base_url = str(client.base_url)[:-3].strip("/")
+
+    for _ in range(_NUM_REQUESTS):
+        # sending a request triggers the metrics to be logged.
+        await client.completions.create(
+            model=MODEL_NAME,
+            prompt=_TOKENIZED_PROMPT,
+            max_tokens=_NUM_GENERATION_TOKENS_PER_REQUEST,
+            temperature=0.0)
+    
+
+    response = requests.get(base_url + "/metrics")
+    assert response.status_code == HTTPStatus.OK
+
+    for metric_family, suffix_values_list in EXPECTED_VALUES.items():
+        found_metric = False
+        for family in text_string_to_metric_families(response.text):
+            if family.name == metric_family:
+                found_metric = True
+
+                for suffix, expected_value in suffix_values_list:
+                    metric_name_w_suffix = f"{metric_family}{suffix}"
+                    found_suffix = False
+
+                    for sample in family.samples:
+                        if sample.name == metric_name_w_suffix:
+                            found_suffix = True
+                            assert sample.value == expected_value, (
+                                f"{metric_name_w_suffix} expected value of {expected_value}"
+                                f"did not match found value {sample.value}"
+                            )
+                            break
+                    assert found_suffix, (
+                        f"Could not find {metric_name_w_suffix} in Prometheus endpoint")    
+                break
+        
+        assert found_metric, (
+            f"Could not find {metric_family} in Prometheus endpoint")
