@@ -955,8 +955,17 @@ void sequence_block_reducer(
     torch::Tensor&
         tmp_out  // [num_seqs, num_heads, max_num_partitions, head_size]
 ) {
-  sequence_block_reducer_launcher<tmp_out.dtype()>(out, exp_sums, max_logits,
+  if (tmp_out.dtype() == at::ScalarType::Float) {
+    sequence_block_reducer_launcher<float>(out, exp_sums, max_logits, tmp_out);
+  } else if (tmp_out.dtype() == at::ScalarType::Half) {
+    sequence_block_reducer_launcher<uint16_t>(out, exp_sums, max_logits,
+                                              tmp_out);
+  } else if (tmp_out.dtype() == at::ScalarType::BFloat16) {
+    sequence_block_reducer_launcher<__nv_bfloat16>(out, exp_sums, max_logits,
                                                    tmp_out);
+  } else {
+    TORCH_CHECK(false, "Unsupported input type of kv cache: ", tmp_out.dtype());
+  }
 }
 #define LAUNCH_PAGED_ATTENTION_V1(HEAD_SIZE)                                \
   VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize(                     \
