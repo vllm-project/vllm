@@ -204,14 +204,20 @@ def gptq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                                   b_g_idx, use_exllama, bit)
 
 
-@torch.library.register_fake("_C::gptq_gemm")
-def _gptq_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
-                    b_gptq_qzeros: torch.Tensor, b_gptq_scales: torch.Tensor,
-                    b_g_idx: torch.Tensor, use_exllama: bool,
-                    bit: int) -> torch.Tensor:
-    return torch.empty((a.size(0), b_q_weight.size(1)),
-                       dtype=a.dtype,
-                       device=a.device)
+# TODO: has to be a better way to do this
+try:
+    torch.ops._C.gptq_gemm  # noqa B018
+
+    @torch.library.register_fake("_C::gptq_gemm")
+    def _gptq_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
+                        b_gptq_qzeros: torch.Tensor,
+                        b_gptq_scales: torch.Tensor, b_g_idx: torch.Tensor,
+                        use_exllama: bool, bit: int) -> torch.Tensor:
+        return torch.empty((a.size(0), b_q_weight.size(1)),
+                           dtype=a.dtype,
+                           device=a.device)
+except Exception:
+    pass
 
 
 def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor,
@@ -240,6 +246,7 @@ def gptq_marlin_24_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                                             size_n, size_k)
 
 
+# TODO: has to be a better way to do this
 try:
     torch.ops._C.gptq_marlin_24_gemm  # noqa B018
 
