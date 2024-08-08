@@ -319,6 +319,16 @@ steps:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s -x lora/test_long_context.py
 
+- label: Weight Loading Multiple GPU Test
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 4
+  source_file_dependencies:
+  - vllm/
+  - tests/quantization
+  commands:
+    - pytest tests/quantization/test_gptq_marlin.py
+
+
 ##### multi gpus test #####
 ##### A100 test #####
 
