@@ -521,7 +521,16 @@ __inline__ __device__ Tout scaled_convert(const Tin& x, const float scale) {
   #endif
   assert(false);
 }
-
+  #define DISPATCH_BY_DTYPE(SRC_DTYPE,FN)                                       \
+    if (SRC_DTYPE == at::ScalarType::Float) {                                \
+      FN(float);                                                             \
+    } else if (SRC_DTYPE == at::ScalarType::Half) {                          \
+      FN(uint16_t);                                                          \
+    } else if (SRC_DTYPE == at::ScalarType::BFloat16) {                      \
+      FN(__nv_bfloat16);                                                     \
+    } else {                                                                 \
+      TORCH_CHECK(false, "Unsupported input type of kv cache: ", SRC_DTYPE); \
+    }
   // The following macro is used to dispatch the conversion function based on
   // the data type of the key and value cache. The FN is a macro that calls a
   // function with template<typename scalar_t, typename cache_t,

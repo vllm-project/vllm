@@ -21,7 +21,6 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <algorithm>
-#include <hip/hip_bfloat16.h>
 #include "attention_dtypes.h"
 #include "attention_utils.cuh"
 
@@ -944,6 +943,8 @@ void sequence_block_reducer_launcher(torch::Tensor& out,
       break;
   }
 }
+#define CALL_SEQUENCE_BLOCK_REDUCER(T) \
+  sequence_block_reducer_launcher<T>(out, exp_sums, max_logits, tmp_out);
 
 // [num_seqs, num_heads, head_size]
 // [num_seqs, num_heads, float]
@@ -954,19 +955,7 @@ void sequence_block_reducer(
     torch::Tensor& max_logits,  // [num_seqs, num_heads, max_num_partitions]
     torch::Tensor&
         tmp_out  // [num_seqs, num_heads, max_num_partitions, head_size]
-) {
-  if (tmp_out.dtype() == at::ScalarType::Float) {
-    sequence_block_reducer_launcher<float>(out, exp_sums, max_logits, tmp_out);
-  } else if (tmp_out.dtype() == at::ScalarType::Half) {
-    sequence_block_reducer_launcher<uint16_t>(out, exp_sums, max_logits,
-                                              tmp_out);
-  } else if (tmp_out.dtype() == at::ScalarType::BFloat16) {
-    sequence_block_reducer_launcher<__hip_bfloat16>(out, exp_sums, max_logits,
-                                                    tmp_out);
-  } else {
-    TORCH_CHECK(false, "Unsupported input type of kv cache: ", tmp_out.dtype());
-  }
-}
+){DISPATCH_BY_DTYPE(tmp_out.dtype(), CALL_SEQUENCE_BLOCK_REDUCER)}
 #define LAUNCH_PAGED_ATTENTION_V1(HEAD_SIZE)                                \
   VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize(                     \
       ((void*)vllm::paged_attention_v1_kernel<T, CACHE_T, HEAD_SIZE,        \
