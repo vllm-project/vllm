@@ -24,22 +24,18 @@ logger = init_logger(__name__)
 class MistralToolParser(ToolParser):
     """
     Tool call parser for Mistral 7B Instruct v0.3, intended for use with the
-    examples/tool_chat_template_mistral.jinja template. There are several
-    IMPORTANT CAVEATS for this parser:
-        - The chat template is NOT official and does not work well if you try to
-         get the model to call 2+ tools at once without temperature=0.
-            Stick to only one tool call per generation, or set temp to 0
-            as the chat template is not reliable with > 1 and the model
-            Will lose coherence.
-        - Mistral's tool call format, that this translates into an OpenAI
-            format, uses SINGLE QUOTES which cannot be parsed to JSON. To enable
-            JSON parsing and serialization, we find-and-replace these with
-            DOUBLE QUOTES. To prevent tool call corruption / deserialization
-            failure, ensure that your tool calls and in particular your
-            ARGUMENTS never contain single or double quotes except as JSON
-            control characters.
+    examples/tool_chat_template_mistral.jinja template. There is an
+    IMPORTANT CAVEAT for this parser:
 
-    Used when --enable-api-tools --enable-auto-tool-choice --tool-call-parser
+    NOTE: Mistral's tool call format, that this translates into an OpenAI
+        format, uses SINGLE QUOTES which cannot be parsed to JSON. To enable
+        JSON parsing and serialization, we find-and-replace these with
+        DOUBLE QUOTES. To prevent tool call corruption / deserialization
+        failure, ensure that your tool calls and in particular your
+        ARGUMENTS never contain single or double quotes except as JSON
+        control characters.
+
+    Used when --enable-auto-tool-choice --tool-call-parser
     mistral are all set
     """
 
@@ -58,58 +54,60 @@ class MistralToolParser(ToolParser):
         make sure your tool call arguments don't ever include quotes!
         """
 
-        logger.debug(
-            "Trying to extract mistral tool calls from the following:")
+        logger.debug("Trying to extract mistral tool calls from the following:")
         logger.debug(model_output)
-        # Get the tool call token from the tokenizer
+
+        # case -- if a tool call token is not present, return a text response
         if MistralToolParser.bot_token not in model_output:
+            return ExtractedToolCallInformation(
+                tools_called=False,
+                tool_calls=[],
+                content=model_output
+            )
+        try:
+
+            # use a regex to find the tool call. remove the BOT token
+            #   and make sure to replace single quotes with double quotes
+            raw_tool_call = MistralToolParser.tool_call_regex.findall(
+                model_output.replace(MistralToolParser.bot_token, "")
+                .replace("'", "\"")
+            )[0]
+
+            # load the JSON, and then use it to build the Function and
+            # Tool Call
+            function_call_arr = json.loads(raw_tool_call)
+            tool_calls: List[ToolCall] = [
+                ToolCall(
+                    type="function",
+                    function=FunctionCall(
+                        name=raw_function_call["name"],
+                        # function call args are JSON but as a string
+                        arguments=json.dumps(
+                            raw_function_call["arguments"])))
+                for raw_function_call in function_call_arr
+            ]
+
+            # get any content before  the tool call
+            content = model_output.split(MistralToolParser.bot_token)[0]
+            return ExtractedToolCallInformation(
+                tools_called=True,
+                tool_calls=tool_calls,
+                content=content if len(content) > 0 else None)
+
+        except Exception as e:
+            logger.error("Error in extracting tool call from response: %s",
+                         e)
+            print("ERROR", e)
+            # return information to just treat the tool call as regular JSON
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
                                                 content=model_output)
-        else:
-            try:
-
-                # this will throw an exception if we can't find the tool call
-                # properly
-                raw_tool_call = MistralToolParser.tool_call_regex.findall(
-                    model_output.replace(MistralToolParser.bot_token,
-                                         "")  # remove BOT token
-                    .replace("'", "\"")  # replace string quotes
-                )[0]
-
-                # load the JSON, and then use it to build the Function and
-                # Tool Call
-                function_call_arr = json.loads(raw_tool_call)
-                tool_calls: List[ToolCall] = [
-                    ToolCall(
-                        type="function",
-                        function=FunctionCall(
-                            name=raw_function_call["name"],
-                            # function call args are JSON but as a string
-                            arguments=json.dumps(
-                                raw_function_call["arguments"])))
-                    for raw_function_call in function_call_arr
-                ]
-                content = model_output.split(MistralToolParser.bot_token)[0]
-                return ExtractedToolCallInformation(
-                    tools_called=True,
-                    tool_calls=tool_calls,
-                    content=content if len(content) > 0 else None)
-
-            except Exception as e:
-                logger.error("Error in extracting tool call from response: %s",
-                             e)
-                print("ERROR", e)
-                # return information to just treat the tool call as regular JSON
-                return ExtractedToolCallInformation(tools_called=False,
-                                                    tool_calls=[],
-                                                    content=model_output)
 
     def __init__(self,
                  tokenizer: Optional[Union[PreTrainedTokenizer,
-                                           PreTrainedTokenizerFast,
-                                           PreTrainedTokenizerFast,
-                                           AutoTokenizer]] = None):
+                 PreTrainedTokenizerFast,
+                 PreTrainedTokenizerFast,
+                 AutoTokenizer]] = None):
         super().__init__(tokenizer)
 
         # initialize properties used for state when parsing tool calls in
@@ -122,13 +120,13 @@ class MistralToolParser(ToolParser):
         ]  # map what has been streamed for each tool so far to a list
 
     def extract_tool_calls_streaming(
-        self,
-        previous_text: str,
-        current_text: str,
-        delta_text: str,
-        previous_token_ids: List[int],
-        current_token_ids: List[int],
-        delta_token_ids: List[int],
+            self,
+            previous_text: str,
+            current_text: str,
+            delta_text: str,
+            previous_token_ids: List[int],
+            current_token_ids: List[int],
+            delta_token_ids: List[int],
     ) -> Union[DeltaMessage, None]:
 
         # if the tool call token is not in the tokens generated so far, append
@@ -184,7 +182,7 @@ class MistralToolParser(ToolParser):
                     # streamed to the client yet.
                     if self.current_tool_id >= 0:
                         diff: Union[str,
-                                    None] = current_tool_call.get("arguments")
+                        None] = current_tool_call.get("arguments")
                         if diff:
                             diff = json.dumps(diff).replace(
                                 self.streamed_args_for_tool[
@@ -193,7 +191,7 @@ class MistralToolParser(ToolParser):
                                 DeltaToolCall(index=self.current_tool_id,
                                               function=DeltaFunctionCall(
                                                   arguments=diff).model_dump(
-                                                      exclude_none=True))
+                                                  exclude_none=True))
                             ])
                             self.streamed_args_for_tool[
                                 self.current_tool_id] += diff
@@ -229,7 +227,7 @@ class MistralToolParser(ToolParser):
                     delta = DeltaMessage(tool_calls=[
                         InitialDeltaToolCall(
                             index=self.current_tool_id).model_dump(
-                                exclude_none=True)
+                            exclude_none=True)
                     ])
 
                 # if the current tool name hasn't been sent, send if available
@@ -244,7 +242,7 @@ class MistralToolParser(ToolParser):
                             DeltaToolCall(index=self.current_tool_id,
                                           function=DeltaFunctionCall(
                                               name=function_name).model_dump(
-                                                  exclude_none=True))
+                                              exclude_none=True))
                         ])
                         self.current_tool_name_sent = True
                     else:
