@@ -663,30 +663,35 @@ class JambaForCausalLM(nn.Module, HasInnerState):
             cache_t[:, to_index].copy_(cache_t[:, from_index],
                                        non_blocking=True)
 
+    def _move_out_if_already_occupied(self, index: int,
+                              all_occupied_indices: List[int]):
+        if index in all_occupied_indices:
+            first_free_index = self._first_free_index_in_mamba_cache()
+            # In case occupied, move the occupied to a new empty block
+            self._move_cache_index_and_mappings(from_index=index,
+                                                to_index=first_free_index)
+
     def _assign_seq_id_to_mamba_cache_in_specific_dest(self, cur_rid: str,
                                                        seq_id: int,
                                                        destination_index: int):
         all_occupied_indices = self._get_all_occupied_indices()
         if cur_rid not in self.mamba_cache_indices_mapping:
-            ## assign new free index
-            if destination_index in all_occupied_indices:
-                # In case occupied, move the occupied to a new empty block
-                self._move_cache_index_and_mappings(
-                    from_index=destination_index,
-                    to_index=self._first_free_index_in_mamba_cache())
+            self._move_out_if_already_occupied(
+                index=destination_index,
+                all_occupied_indices=all_occupied_indices)
             self.mamba_cache_indices_mapping[cur_rid] = {
                 seq_id: destination_index
             }
         elif seq_id not in (seq_ids2indices :=
                             self.mamba_cache_indices_mapping[cur_rid]):
-            # N > 1
-            first_free_index = self._first_free_index_in_mamba_cache()
-            if destination_index in all_occupied_indices:
-                # In case occupied, move the occupied to a new empty block
-                self._move_cache_index_and_mappings(
-                    from_index=destination_index, to_index=first_free_index)
+            # parallel sampling , where n > 1, assume prefill already happend
+            # now we only need to copy the already existing cache into the
+            # siblings seq_ids caches
+            self._move_out_if_already_occupied(
+                index=destination_index,
+                all_occupied_indices=all_occupied_indices)
             index_exists = list(seq_ids2indices.values())[0]
-            ## case of decoding n>1, copy prefill cache to decoding indices
+            # case of decoding n>1, copy prefill cache to decoding indices
             self._copy_mamba_cache(from_index=index_exists,
                                    to_index=destination_index)
             self.mamba_cache_indices_mapping[cur_rid][
