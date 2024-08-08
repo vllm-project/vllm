@@ -242,6 +242,8 @@ class Fp8RocmLinearMethod(LinearMethodBase):
         k = x.shape[1]
 
         solidx = self._config._tuned.get((m, n, k), 0)
+        if solidx == 0:
+            self._config.save_shape(m, n, k)
         res = ops.fp8_mm(x_quant, weight.t(), out_dtype, asf, wsf, osf,
                          int(solidx))
 
