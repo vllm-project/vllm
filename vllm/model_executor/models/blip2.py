@@ -648,8 +648,7 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
             use_default_weight_loading = False
             if "vision" in name:
                 if self.vision_model is not None:
-                    # We only do sharding for language model and
-                    # not vision model for now.
+                    # BlipVisionModel does not need sharding
                     use_default_weight_loading = True
             else:
                 for (param_name, weight_name,
@@ -662,7 +661,6 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
                     break
                 else:
                     use_default_weight_loading = True
-
             if use_default_weight_loading:
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",

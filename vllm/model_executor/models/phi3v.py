@@ -583,6 +583,12 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
+            # Skip loading the img_processor weights since they are
+            # loaded separately.
+            if "vision_embed_tokens.img_processor" in name:
+                vision_weights.append((name, loaded_weight))
+                continue
+
             for key_to_modify, new_key in _KEYS_TO_MODIFY_MAPPING.items():
                 if key_to_modify in name:
                     name = name.replace(key_to_modify, new_key)
@@ -590,17 +596,11 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
                 if weight_name not in name:
                     continue
 
-                if "vision_embed_tokens.img_processor" in name:
-                    continue
-
                 param = params_dict[name.replace(weight_name, param_name)]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                if "vision_embed_tokens.img_processor" in name:
-                    vision_weights.append((name, loaded_weight))
-                    continue
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
@@ -610,6 +610,10 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
                                             default_weight_loader)
                     weight_loader(param, loaded_weight)
 
-        vision_weights = [(n.replace("vision_embed_tokens.img_processor.",
-                                     ""), w) for n, w in vision_weights]
+        # We use regex to extract the sub-module name
+        # from "model.vision_embed_tokens.img_processor.*"
+        vision_weights = [
+            (re.search(r"vision_embed_tokens\.img_processor\.(.*)",
+                       n).group(1), w) for n, w in vision_weights
+        ]
         self.vision_embed_tokens.img_processor.load_weights(vision_weights)
