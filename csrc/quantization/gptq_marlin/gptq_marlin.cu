@@ -1857,6 +1857,18 @@ bool is_valid_config(thread_config_t const& th_config, int max_m_blocks,
     return false;
   }
 
+  // For act_order with is_k_full == False, we load a chunk of scales.
+  // If GPU L1 cache is small, then reduce the N thread size to ensure
+  // we load less data
+  if (has_act_order && !is_k_full &&
+      max_shared_mem <
+          1024 * 110 /* Small GPUs have around 100K of L1 cache */) {
+    if (th_config.thread_n >
+        64 /* thread_n == 64 is the minimal one that we want to have */) {
+      return false;
+    }
+  }
+
   //  Determine cache for scales
   int scales_cache_size =
       get_scales_cache_size(th_config, prob_m, prob_n, prob_k, num_bits,
