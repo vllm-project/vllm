@@ -1,7 +1,7 @@
-import os
 import asyncio
 import importlib
 import inspect
+import os
 import re
 import tempfile
 from argparse import Namespace
@@ -15,7 +15,6 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Mount
-
 
 import vllm.envs as envs
 from vllm.config import ModelConfig
@@ -122,7 +121,7 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
         rpc_server_process = Process(target=run_rpc_server,
                                      args=(engine_args,
                                            UsageContext.OPENAI_API_SERVER,
-                                           rpc_path),)
+                                           rpc_path))
         rpc_server_process.start()
 
         # Build RPCClient, which conforms to AsyncEngineClient Protocol.
