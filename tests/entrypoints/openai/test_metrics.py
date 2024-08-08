@@ -65,6 +65,7 @@ EXPECTED_METRICS = [
     "vllm:request_success_total",
 ]
 
+
 @pytest.mark.asyncio
 async def test_metrics_exist(client: openai.AsyncOpenAI):
     base_url = str(client.base_url)[:-3].strip("/")
@@ -74,11 +75,9 @@ async def test_metrics_exist(client: openai.AsyncOpenAI):
                                     prompt="Hello, my name is",
                                     max_tokens=5,
                                     temperature=0.0)
-    
+
     response = requests.get(base_url + "/metrics")
     assert response.status_code == HTTPStatus.OK
 
     for metric in EXPECTED_METRICS:
         assert metric in response.text
-
-    
