@@ -28,6 +28,7 @@ from vllm.transformers_utils.configs.dbrx import DbrxConfig
 
 from .utils import get_inputs_embeds
 
+
 class DbrxRouter(nn.Module):
     """A Router implementation for DBRX that returns logits for each expert
     per token.
@@ -342,7 +343,8 @@ class DbrxModel(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
         inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        hidden_states = get_inputs_embeds(input_ids, self.wte, inputs_embeds, inputs_embeds_masks)
+        hidden_states = get_inputs_embeds(input_ids, self.wte, inputs_embeds,
+                                          inputs_embeds_masks)
         for i in range(len(self.blocks)):
             block = self.blocks[i]
             hidden_states = block(
@@ -390,7 +392,8 @@ class DbrxForCausalLM(nn.Module):
         inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         attn_metadata, inputs_embeds, inputs_embeds_masks)
+                                         attn_metadata, inputs_embeds,
+                                         inputs_embeds_masks)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,

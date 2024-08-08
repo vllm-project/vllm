@@ -366,7 +366,8 @@ class FalconModel(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
         inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        hidden_states = get_inputs_embeds(input_ids, self.word_embeddings, inputs_embeds, inputs_embeds_masks)
+        hidden_states = get_inputs_embeds(input_ids, self.word_embeddings,
+                                          inputs_embeds, inputs_embeds_masks)
         for i in range(len(self.h)):
             layer = self.h[i]
             hidden_states = layer(

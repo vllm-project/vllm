@@ -26,6 +26,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .utils import get_inputs_embeds
 
+
 class InternLM2MLP(nn.Module):
 
     def __init__(
@@ -278,7 +279,8 @@ class InternLM2ForCausalLM(nn.Module):
         inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, inputs_embeds, inputs_embeds_masks)
+                                   attn_metadata, inputs_embeds,
+                                   inputs_embeds_masks)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,

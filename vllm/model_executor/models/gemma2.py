@@ -277,7 +277,8 @@ class Gemma2Model(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
         inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        hidden_states = get_inputs_embeds(input_ids, self.embed_tokens, inputs_embeds, inputs_embeds_masks)
+        hidden_states = get_inputs_embeds(input_ids, self.embed_tokens,
+                                          inputs_embeds, inputs_embeds_masks)
         hidden_states *= self.normalizer
 
         residual = None
@@ -345,7 +346,8 @@ class Gemma2ForCausalLM(nn.Module, SupportsLoRA):
         inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, inputs_embeds, inputs_embeds_masks)
+                                   attn_metadata, inputs_embeds,
+                                   inputs_embeds_masks)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,

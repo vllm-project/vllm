@@ -531,7 +531,10 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
             vision_embeddings = self.vision_embed_tokens(
                 image_input["data"], image_input["image_sizes"])
             inputs_embeds = self.model.get_input_embeddings(input_ids)
-            inputs_embeds = get_inputs_embeds(input_ids, self.model.get_input_embeddings, inputs_embeds, inputs_embeds_masks)
+            inputs_embeds = get_inputs_embeds(input_ids,
+                                              self.model.get_input_embeddings,
+                                              inputs_embeds,
+                                              inputs_embeds_masks)
             inputs_embeds = merge_vision_embeddings(input_ids, inputs_embeds,
                                                     vision_embeddings,
                                                     self.image_token_id)

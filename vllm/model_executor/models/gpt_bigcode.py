@@ -223,8 +223,8 @@ class GPTBigCodeModel(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
         inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        inputs_embeds = get_inputs_embeds(input_ids, self.wte,
-                                          inputs_embeds, inputs_embeds_masks)
+        inputs_embeds = get_inputs_embeds(input_ids, self.wte, inputs_embeds,
+                                          inputs_embeds_masks)
         position_embeds = self.wpe(position_ids)
         hidden_states = inputs_embeds + position_embeds
 

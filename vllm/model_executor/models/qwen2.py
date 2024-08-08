@@ -264,7 +264,9 @@ class Qwen2Model(nn.Module):
         inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if get_pp_group().is_first_rank:
-            hidden_states = get_inputs_embeds(input_ids, self.embed_tokens, inputs_embeds, inputs_embeds_masks)
+            hidden_states = get_inputs_embeds(input_ids, self.embed_tokens,
+                                              inputs_embeds,
+                                              inputs_embeds_masks)
             residual = None
         else:
             assert intermediate_tensors is not None

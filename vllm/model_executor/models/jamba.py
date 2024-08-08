@@ -527,7 +527,8 @@ class JambaModel(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
         inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        hidden_states = get_inputs_embeds(input_ids, self.embed_tokens, inputs_embeds, inputs_embeds_masks)
+        hidden_states = get_inputs_embeds(input_ids, self.embed_tokens,
+                                          inputs_embeds, inputs_embeds_masks)
         residual = None
 
         for i in range(len(self.layers)):
@@ -663,7 +664,9 @@ class JambaForCausalLM(nn.Module, HasInnerState):
             )
         self.current_indices = indices
 
-        hidden_states = self.model(input_ids, positions, kv_caches,
+        hidden_states = self.model(input_ids,
+                                   positions,
+                                   kv_caches,
                                    attn_metadata,
                                    current_seqlen_agnostic_cache[0],
                                    current_seqlen_agnostic_cache[1],

@@ -237,7 +237,8 @@ class PersimmonModel(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
         inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        hidden_states = get_inputs_embeds(input_ids, self.embed_tokens, inputs_embeds, inputs_embeds_masks)
+        hidden_states = get_inputs_embeds(input_ids, self.embed_tokens,
+                                          inputs_embeds, inputs_embeds_masks)
         for i in range(len(self.layers)):
             hidden_states = self.layers[i](
                 positions,

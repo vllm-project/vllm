@@ -55,6 +55,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 from .interfaces import SupportsLoRA
 from .utils import get_inputs_embeds
 
+
 class MiniCPMMoE(nn.Module):
     """A tensor-parallel MoE implementation that shards each expert
     across all ranks.
@@ -374,7 +375,8 @@ class MiniCPMModel(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
         inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        hidden_states = get_inputs_embeds(input_ids, self.get_input_embeddings, inputs_embeds, inputs_embeds_masks)
+        hidden_states = get_inputs_embeds(input_ids, self.get_input_embeddings,
+                                          inputs_embeds, inputs_embeds_masks)
         residual = None
 
         for i in range(len(self.layers)):

@@ -47,6 +47,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .utils import get_inputs_embeds
 
+
 class OlmoAttention(nn.Module):
     """
     This is the attention block where the output is computed as
@@ -252,7 +253,8 @@ class OlmoModel(nn.Module):
         """
         # Get embeddings of input.
         # shape: (batch_size, seq_len, d_model)
-        hidden_states = get_inputs_embeds(input_ids, self.embed_tokens, inputs_embeds, inputs_embeds_masks)
+        hidden_states = get_inputs_embeds(input_ids, self.embed_tokens,
+                                          inputs_embeds, inputs_embeds_masks)
 
         # Apply blocks one-by-one.
         for layer_idx, decoder_layer in enumerate(self.layers):

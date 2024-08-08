@@ -265,7 +265,9 @@ class FuyuForCausalLM(nn.Module, SupportsVision):
         if image_input is not None:
             vision_embeddings, _ = self.vision_embed_tokens(
                 image_input["data"])
-            inputs_embeds = get_inputs_embeds(input_ids, self.language_model.model.embed_tokens, inputs_embeds, inputs_embeds_masks)
+            inputs_embeds = get_inputs_embeds(
+                input_ids, self.language_model.model.embed_tokens,
+                inputs_embeds, inputs_embeds_masks)
             inputs_embeds = merge_vision_embeddings(input_ids, inputs_embeds,
                                                     vision_embeddings,
                                                     self.image_token_id)

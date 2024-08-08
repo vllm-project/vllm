@@ -236,8 +236,8 @@ class OrionModel(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
         inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        hidden_states = get_inputs_embeds(input_ids, self.embed_tokens, inputs_embeds,
-                                          inputs_embeds_masks)
+        hidden_states = get_inputs_embeds(input_ids, self.embed_tokens,
+                                          inputs_embeds, inputs_embeds_masks)
         residual = None
         for i in range(len(self.layers)):
             layer = self.layers[i]
@@ -281,7 +281,8 @@ class OrionForCausalLM(nn.Module):
         inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, inputs_embeds, inputs_embeds_masks)
+                                   attn_metadata, inputs_embeds,
+                                   inputs_embeds_masks)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,

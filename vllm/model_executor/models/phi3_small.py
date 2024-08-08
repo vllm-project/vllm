@@ -335,7 +335,8 @@ class Phi3SmallModel(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
         inputs_embeds_masks: Optional[torch.Tensor] = None,
     ):
-        hidden_states = get_inputs_embeds(input_ids, self.embed_tokens, inputs_embeds, inputs_embeds_masks)
+        hidden_states = get_inputs_embeds(input_ids, self.embed_tokens,
+                                          inputs_embeds, inputs_embeds_masks)
         if (self.mup_embedding_multiplier is not None
                 and self.mup_embedding_multiplier > 0.0):
             hidden_states = hidden_states * self.mup_embedding_multiplier
