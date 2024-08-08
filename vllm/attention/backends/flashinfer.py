@@ -128,6 +128,7 @@ class FlashInferMetadata(AttentionMetadata):
             raise ValueError(
                 f"Only {supported_head_sizes} are supported for head_dim,",
                 f"received {self.head_dim}.")
+        self.is_profile_run = is_block_tables_empty(self.block_tables)
 
     def begin_forward(self):
         if self.num_prefill_tokens > 0:

@@ -678,7 +678,7 @@ class Scheduler:
                 all tokens.
 
         Returns:
-            SchedulerSwappedInOutputs.
+            SchedulerPrefillOutputs.
         """
         ignored_seq_groups: List[SequenceGroup] = []
         seq_groups: List[SequenceGroup] = []
@@ -851,7 +851,7 @@ class Scheduler:
             preempted=preempted,
         )
 
-    def _schedule_chunked_prefill(self):
+    def _schedule_chunked_prefill(self) -> SchedulerOutputs:
         """Schedule queued requests.
         
         Chunked prefill allows to chunk prefill requests, batch them together
@@ -862,7 +862,7 @@ class Scheduler:
 
         The policy can sustain the high GPU utilization because it can put
         prefill and decodes requests to the same batch, while it improves
-        inter token latency because decodes requests don't need to blocked
+        inter token latency because decodes requests don't need to be blocked
         by prefill requests.
         """
         budget = SchedulingBudget(
