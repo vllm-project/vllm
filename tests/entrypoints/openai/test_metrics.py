@@ -20,7 +20,6 @@ def default_server_args():
         "--enforce-eager",
         "--max-num-seqs",
         "128",
-        "--disable-frontend-multiprocessing"
     ]
 
 
@@ -37,6 +36,7 @@ EXPECTED_METRICS = [
     "vllm:num_requests_running",
     "vllm:num_requests_swapped",
     "vllm:num_requests_waiting",
+    "vllm:gpu_cache_usage_perc",
     "vllm:cpu_cache_usage_perc",
     "vllm:time_to_first_token_seconds_sum",
     "vllm:time_to_first_token_seconds_bucket",
