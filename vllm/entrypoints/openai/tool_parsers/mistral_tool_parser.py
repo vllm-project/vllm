@@ -160,28 +160,33 @@ class MistralToolParser(ToolParser):
                 self.bot_token)[1]
             parsable_arr = tool_call_message_portion.replace("\'", "\"")
 
-            # logger.debug('parsing: %s', parsable_arr)
-
             # tool calls are generated in an array, so do partial JSON
             # parsing on the entire array
-            tool_call_arr: List[Dict] = partial_json_parser.loads(
-                parsable_arr, flags)
+            tool_call_arr: List[Dict] = partial_json_parser.loads(parsable_arr,
+                                                                  flags)
 
             # select as the current tool call the one we're on the state at
             current_tool_call: Dict = tool_call_arr[self.current_tool_id]
 
+            # case -- if no tokens have been streamed for the tool, e.g.
+            #   only the array brackets, stream nothing
+            if len(tool_call_arr) == 0:
+                return None
+
             # case: we are starting a new tool in the array
             #   -> array has > 0 length AND length has moved past cursor
-            if len(tool_call_arr) > 0 and len(
-                    tool_call_arr) > self.current_tool_id + 1:
+            elif (
+                    len(tool_call_arr) > 0 and
+                    len(tool_call_arr) > self.current_tool_id + 1
+            ):
 
                 # if we're moving on to a new call, first make sure we
                 # haven't missed anything in the previous one that was
                 # auto-generated due to JSON completions, but wasn't
                 # streamed to the client yet.
                 if self.current_tool_id >= 0:
-                    diff: Union[str,
-                    None] = current_tool_call.get("arguments")
+                    diff: Union[str,None] = current_tool_call.get("arguments")
+
                     if diff:
                         diff = json.dumps(diff).replace(
                             self.streamed_args_for_tool[
@@ -208,15 +213,8 @@ class MistralToolParser(ToolParser):
                 return delta
 
             # case: update an existing tool - this is handled below
-            elif len(
-                    tool_call_arr
-            ) - 1 == self.current_tool_id and self.current_tool_id >= 0:
-                pass
-
-            # if there is NOTHING in the array, e.g. if only the open
-            # bracket was streamed yet
-            else:
-                return None
+            #elif len(tool_call_arr) - 1 == self.current_tool_id and self.current_tool_id >= 0:
+            #    pass
 
             # if the current tool initial data incl. the id, type=function
             # and idx not sent, send that
