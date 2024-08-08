@@ -237,26 +237,7 @@ class ipex_ops:
         return_softmax: bool,
         gen_: torch.Generator,
     ) -> None:
-        from intel_extension_for_pytorch.llm.modules.mha_fusion import VarlenAttention
-        cur_varlen_aten = VarlenAttention()
-        import pdb
-        pdb.set_trace()
-        cur_varlen_aten.forward(
-            query=query,
-            key=key,
-            value=value,
-            out=out,
-            seqlen_q=seqlen_q,
-            seqlen_k=seqlen_k,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_k=max_seqlen_k,
-            pdropout=pdropout,
-            softmax_scale=softmax_scale,
-            zero_tensors=zero_tensors,
-            is_causal=is_causal,
-            return_softmax=return_softmax,
-            gen_=gen_,
-        )
+        pass
 
         # ipex.llm.functional.varlen_attention(query, key, value, out, seqlen_q,
         #                                      seqlen_k, max_seqlen_q,

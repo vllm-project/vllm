@@ -262,7 +262,8 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
                                 input_positions=input_positions,
                                 attn_metadata=attn_metadata,
                                 sampling_metadata=sampling_metadata,
-                                multi_modal_kwargs=multi_modal_kwargs)
+                                multi_modal_kwargs=multi_modal_kwargs,
+                                virtual_engine=virtual_engine)
 
     def _prepare_decode(
         self,
