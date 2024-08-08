@@ -216,7 +216,14 @@ class BaseResampler(nn.Module):
 
         self.query = nn.Parameter(torch.zeros(self.num_queries, embed_dim))
         trunc_normal_(self.query, std=0.02)
-        self.kv_proj = ReplicatedLinear(kv_dim, embed_dim, bias=False)
+        if kv_dim is not None and kv_dim != embed_dim:
+            self.kv_proj = ReplicatedLinear(kv_dim, embed_dim, bias=False)
+        else:
+            # Maintain the same return value with ReplicatedLinear.forward
+            self.kv_proj = lambda *args, **kwargs: (
+                nn.Identity()(*args, **kwargs),
+                None,
+            )
         self.attn = nn.MultiheadAttention(embed_dim, num_heads)
         self.ln_q = norm_layer(embed_dim)
         self.ln_kv = norm_layer(embed_dim)
