@@ -44,6 +44,8 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
+from .utils import get_inputs_embeds
+
 
 class PersimmonMLP(nn.Module):
 
@@ -233,11 +235,9 @@ class PersimmonModel(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        if inputs_embeds is not None:
-            hidden_states = inputs_embeds
-        else:
-            hidden_states = self.embed_tokens(input_ids)
+        hidden_states = get_inputs_embeds(input_ids, self.embed_tokens, inputs_embeds, inputs_embeds_masks)
         for i in range(len(self.layers)):
             hidden_states = self.layers[i](
                 positions,
@@ -275,6 +275,7 @@ class PersimmonForCausalLM(nn.Module):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
     ):
         hidden_states = self.model(
             input_ids=input_ids,

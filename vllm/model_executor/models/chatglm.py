@@ -29,7 +29,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.transformers_utils.configs import ChatGLMConfig
 
 from .interfaces import SupportsLoRA
-
+from .utils import get_inputs_embeds
 
 class GLMAttention(nn.Module):
 
@@ -312,12 +312,13 @@ class ChatGLMModel(nn.Module):
         position_ids: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        inputs_embeds = self.embedding(input_ids)
-
+        hidden_states = get_inputs_embeds(input_ids, self.embedding, inputs_embeds, inputs_embeds_masks)
         # Run encoder.
         hidden_states = self.encoder(
-            hidden_states=inputs_embeds,
+            hidden_states=hidden_states,
             position_ids=position_ids,
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
@@ -367,9 +368,11 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         attn_metadata)
+                                         attn_metadata, inputs_embeds, inputs_embeds_masks)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,

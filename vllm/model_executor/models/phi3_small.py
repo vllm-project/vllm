@@ -23,6 +23,8 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
+from .utils import get_inputs_embeds
+
 
 def load_column_parallel_weight(param: torch.nn.Parameter,
                                 loaded_weight: torch.Tensor):
@@ -301,6 +303,8 @@ class Phi3SmallModel(nn.Module):
         config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
     ):
         super().__init__()
         self.config = config
@@ -328,8 +332,10 @@ class Phi3SmallModel(nn.Module):
         positions: Optional[torch.LongTensor],
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
     ):
-        hidden_states = self.embed_tokens(input_ids)
+        hidden_states = get_inputs_embeds(input_ids, self.embed_tokens, inputs_embeds, inputs_embeds_masks)
         if (self.mup_embedding_multiplier is not None
                 and self.mup_embedding_multiplier > 0.0):
             hidden_states = hidden_states * self.mup_embedding_multiplier
@@ -414,12 +420,16 @@ class Phi3SmallForCausalLM(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         output_hidden_states = self.model(
             input_ids=input_ids,
             positions=positions,
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
+            inputs_embeds=inputs_embeds,
+            inputs_embeds_masks=inputs_embeds_masks,
         )
         output_hidden_states = output_hidden_states
         return output_hidden_states

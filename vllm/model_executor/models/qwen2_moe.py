@@ -53,7 +53,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.utils import print_warning_once
 
-from .utils import is_pp_missing_parameter, make_layers
+from .utils import is_pp_missing_parameter, make_layers, get_inputs_embeds
 
 
 class Qwen2MoeMLP(nn.Module):
@@ -346,9 +346,11 @@ class Qwen2MoeModel(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if get_pp_group().is_first_rank:
-            hidden_states = self.embed_tokens(input_ids)
+            hidden_states = get_inputs_embeds(input_ids, self.embed_tokens, inputs_embeds, inputs_embeds_masks)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -395,9 +397,12 @@ class Qwen2MoeForCausalLM(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, intermediate_tensors)
+                                   attn_metadata, intermediate_tensors,
+                                   inputs_embeds, inputs_embeds_masks)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,

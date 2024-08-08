@@ -53,7 +53,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .interfaces import SupportsLoRA
-
+from .utils import get_inputs_embeds
 
 class MiniCPMMoE(nn.Module):
     """A tensor-parallel MoE implementation that shards each expert
@@ -372,11 +372,9 @@ class MiniCPMModel(nn.Module):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        if inputs_embeds is not None:
-            hidden_states = inputs_embeds
-        else:
-            hidden_states = self.get_input_embeddings(input_ids)
+        hidden_states = get_inputs_embeds(input_ids, self.get_input_embeddings, inputs_embeds, inputs_embeds_masks)
         residual = None
 
         for i in range(len(self.layers)):
@@ -465,6 +463,8 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata, intermediate_tensors)

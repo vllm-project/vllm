@@ -41,7 +41,7 @@ from vllm.multimodal.image import (cached_get_image_processor,
 from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
 
 from .interfaces import SupportsVision
-from .utils import merge_vision_embeddings
+from .utils import merge_vision_embeddings, get_inputs_embeds
 
 logger = init_logger(__name__)
 
@@ -57,7 +57,7 @@ class FuyuImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     data: torch.Tensor
     """
-    Shape: 
+    Shape:
     (batch_size, num_patches, patch_size_x * patch_size_y * num_channels)
     """
 
@@ -256,6 +256,8 @@ class FuyuForCausalLM(nn.Module, SupportsVision):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
         **kwargs: object,
     ):
         image_input = self._parse_and_validate_image_input(**kwargs)
@@ -263,7 +265,7 @@ class FuyuForCausalLM(nn.Module, SupportsVision):
         if image_input is not None:
             vision_embeddings, _ = self.vision_embed_tokens(
                 image_input["data"])
-            inputs_embeds = self.language_model.model.embed_tokens(input_ids)
+            inputs_embeds = get_inputs_embeds(input_ids, self.language_model.model.embed_tokens, inputs_embeds, inputs_embeds_masks)
             inputs_embeds = merge_vision_embeddings(input_ids, inputs_embeds,
                                                     vision_embeddings,
                                                     self.image_token_id)

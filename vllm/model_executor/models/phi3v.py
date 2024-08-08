@@ -43,7 +43,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
                    input_processor_for_clip)
 from .interfaces import SupportsVision
-from .utils import merge_vision_embeddings
+from .utils import merge_vision_embeddings, get_inputs_embeds
 
 logger = init_logger(__name__)
 
@@ -522,6 +522,8 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
                 kv_caches: List[torch.Tensor],
                 attn_metadata: AttentionMetadata,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
+                inputs_embeds: Optional[torch.Tensor] = None,
+                inputs_embeds_masks: Optional[torch.Tensor] = None,
                 **kwargs: object):
         image_input = self._parse_and_validate_image_input(**kwargs)
 
@@ -529,10 +531,12 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
             vision_embeddings = self.vision_embed_tokens(
                 image_input["data"], image_input["image_sizes"])
             inputs_embeds = self.model.get_input_embeddings(input_ids)
+            inputs_embeds = get_inputs_embeds(input_ids, self.model.get_input_embeddings, inputs_embeds, inputs_embeds_masks)
             inputs_embeds = merge_vision_embeddings(input_ids, inputs_embeds,
                                                     vision_embeddings,
                                                     self.image_token_id)
             input_ids = None
+            inputs_embeds_masks.fill_(1)
         else:
             inputs_embeds = None
 
@@ -541,7 +545,8 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
                                    kv_caches,
                                    attn_metadata,
                                    intermediate_tensors,
-                                   inputs_embeds=inputs_embeds)
+                                   inputs_embeds=inputs_embeds,
+                                   inputs_embeds_masks=inputs_embeds_masks)
 
         return hidden_states
 

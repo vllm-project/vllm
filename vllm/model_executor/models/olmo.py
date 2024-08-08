@@ -45,6 +45,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
+from .utils import get_inputs_embeds
 
 class OlmoAttention(nn.Module):
     """
@@ -243,16 +244,15 @@ class OlmoModel(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         :param input_ids: A tensor of shape `(batch_size, seq_len)`.
         """
         # Get embeddings of input.
         # shape: (batch_size, seq_len, d_model)
-        inputs_embeds = self.embed_tokens(input_ids)
-
-        # embed positions
-        hidden_states = inputs_embeds
+        hidden_states = get_inputs_embeds(input_ids, self.embed_tokens, inputs_embeds, inputs_embeds_masks)
 
         # Apply blocks one-by-one.
         for layer_idx, decoder_layer in enumerate(self.layers):
@@ -302,12 +302,16 @@ class OlmoForCausalLM(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         hidden_states = self.model(
             input_ids=input_ids,
             positions=positions,
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
+            inputs_embeds,
+            inputs_embeds_masks,
         )
         return hidden_states
 

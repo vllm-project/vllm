@@ -37,6 +37,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.worker.model_runner import (_BATCH_SIZES_TO_CAPTURE,
                                       _get_graph_batch_size)
+from .utils import get_inputs_embeds
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -523,8 +524,10 @@ class JambaModel(nn.Module):
         attn_metadata: AttentionMetadata,
         conv_state: torch.Tensor,
         ssm_state: torch.Tensor,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        hidden_states = self.embed_tokens(input_ids)
+        hidden_states = get_inputs_embeds(input_ids, self.embed_tokens, inputs_embeds, inputs_embeds_masks)
         residual = None
 
         for i in range(len(self.layers)):
@@ -628,6 +631,8 @@ class JambaForCausalLM(nn.Module, HasInnerState):
                 kv_caches: List[KVCache],
                 attn_metadata: AttentionMetadata,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
+                inputs_embeds: Optional[torch.Tensor] = None,
+                inputs_embeds_masks: Optional[torch.Tensor] = None,
                 **kwargs):
         if not self.mamba_cache:
             self._prepare_mamba_cache()
@@ -661,7 +666,9 @@ class JambaForCausalLM(nn.Module, HasInnerState):
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata,
                                    current_seqlen_agnostic_cache[0],
-                                   current_seqlen_agnostic_cache[1])
+                                   current_seqlen_agnostic_cache[1],
+                                   inputs_embeds=inputs_embeds,
+                                   inputs_embeds_masks=inputs_embeds_masks)
 
         if "seqlen_agnostic_capture_inputs" not in kwargs:
             self._copy_mamba_cache_by_indices(self.current_indices,
@@ -736,9 +743,9 @@ class JambaForCausalLM(nn.Module, HasInnerState):
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
         """
-        Copy the relevant Mamba cache into the CUDA graph input buffer 
-        that was provided during the capture runs 
-        (JambaForCausalLM.mamba_gc_cache_buffer). 
+        Copy the relevant Mamba cache into the CUDA graph input buffer
+        that was provided during the capture runs
+        (JambaForCausalLM.mamba_gc_cache_buffer).
         """
         assert all(
             key in kwargs
@@ -763,7 +770,7 @@ class JambaForCausalLM(nn.Module, HasInnerState):
     def copy_outputs_after_cuda_graphs(self, input_buffers, **kwargs):
         """
         Copy the relevant Mamba cache from the CUDA graph input_buffers
-        back to the JambaForCausalLM.mamba_cache after CUDA 
+        back to the JambaForCausalLM.mamba_cache after CUDA
         graph replay run is done.
         """
         self._copy_mamba_cache_by_indices(
@@ -773,7 +780,7 @@ class JambaForCausalLM(nn.Module, HasInnerState):
     def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
         """
         Provide the CUDA graph capture runs with a buffer in adjusted size.
-        The buffer is used to maintain the Mamba Cache during the CUDA graph 
+        The buffer is used to maintain the Mamba Cache during the CUDA graph
         replay runs.
         """
         return tuple(buffer[:, :batch_size]

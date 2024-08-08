@@ -25,6 +25,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.transformers_utils.configs.mpt import MPTConfig
 
+from .utils import get_inputs_embeds
 
 def _get_alibi_slopes(
     total_num_heads: int,
@@ -235,8 +236,10 @@ class MPTModel(nn.Module):
         position_ids: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        hidden_states = self.wte(input_ids)
+        hidden_states = get_inputs_embeds(input_ids, self.wte, inputs_embeds, inputs_embeds_masks)
         for i in range(len(self.blocks)):
             block = self.blocks[i]
             hidden_states = block(
@@ -274,9 +277,11 @@ class MPTForCausalLM(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         attn_metadata)
+                                         attn_metadata, inputs_embeds, inputs_embeds_masks)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,
