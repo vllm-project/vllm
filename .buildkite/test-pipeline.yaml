@@ -181,7 +181,7 @@ steps:
   - tests/samplers
   commands:
     - pytest -v -s samplers
-    - VLLM_NO_FLASHINFER_SAMPLER=1 pytest -v -s samplers
+    - VLLM_DISABLE_FLASHINFER_SAMPLER=1 pytest -v -s samplers
 
 - label: LogitsProcessor Test # 5min
   mirror_hardwares: [amd]
