@@ -54,8 +54,7 @@ from vllm.utils import is_hip
 from .interfaces import SupportsLoRA
 from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
 
-from vllm.logger import init_logger
-logger = init_logger(__name__)
+
 class LlamaMLP(nn.Module):
 
     def __init__(
@@ -307,9 +306,6 @@ class LlamaModel(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        if not torch.cuda.is_current_stream_capturing(): 
-           logger.info(f" input ids: {input_ids}")
-         
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -321,11 +317,6 @@ class LlamaModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        if not torch.cuda.is_current_stream_capturing(): 
-          logger.info(f"hidden states: 0  {hidden_states}")
-          if residual: 
-              logger.info(f"residual: {residual}")
-            
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             hidden_states, residual = layer(
@@ -335,9 +326,6 @@ class LlamaModel(nn.Module):
                 attn_metadata,
                 residual,
             )
-            if not torch.cuda.is_current_stream_capturing(): 
-               logger.info(f"hidden states at {i} :  {hidden_states}")
-               logger.info(f"residual {i} :  {residual}")
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -431,9 +419,6 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        
-        if not torch.cuda.is_current_stream_capturing(): 
-            logger.info(f"starting with input_ids: {input_ids} ")
         model_output = self.model(input_ids, positions, kv_caches,
                                   attn_metadata, intermediate_tensors)
         return model_output
@@ -476,10 +461,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
             (".gate_up_proj", ".up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
-        logger.info("Printing weights from weight loader: ")
         for name, loaded_weight in weights:
-            logger.info(f"name: {name}")
-            logger.info(f"loaded_weight: {loaded_weight}")
             if "rotary_emb.inv_freq" in name:
                 continue
             if ("rotary_emb.cos_cached" in name
@@ -499,9 +481,6 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
                                         default_weight_loader)
                 loaded_weight = loaded_weight[0]
                 weight_loader(param, loaded_weight)
-                continue
-            #To Do: Remove when ModelOpt fixes the quantized model. 
-            if ("output_quantizer._amax") in name:
                 continue
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
