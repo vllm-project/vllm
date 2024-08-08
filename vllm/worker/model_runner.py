@@ -1371,8 +1371,6 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         # check if the current run is prefill
         is_prefill_run = prefill_meta is not None
         
-        logger.debug('Into disagg prefill')
-
         # check if we can skip prefilling
         # We can only skip during prefill phase in disaggregated decode instance
         if any([
@@ -1417,8 +1415,6 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                     kv_caches,
                 )
 
-        logger.debug("Out from disagg prefill.")
-                
 
         # Compute the logits in the last pipeline stage.
         if not get_pp_group().is_last_rank:
