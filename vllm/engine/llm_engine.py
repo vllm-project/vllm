@@ -14,8 +14,7 @@ from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
 from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
                                  SchedulerOutputs)
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.metrics import (LoggingStatLogger, PrometheusStatLogger,
-                                 StatLoggerBase, Stats)
+from vllm.engine.metrics_types import StatLoggerBase, Stats
 from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
 from vllm.engine.output_processor.stop_checker import StopChecker
@@ -320,6 +319,9 @@ class LLMEngine:
             if stat_loggers is not None:
                 self.stat_loggers = stat_loggers
             else:
+                from vllm.engine.metrics import (LoggingStatLogger,
+                                                 PrometheusStatLogger)
+
                 self.stat_loggers = {
                     "logging":
                     LoggingStatLogger(

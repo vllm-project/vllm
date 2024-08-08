@@ -106,7 +106,8 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
 
     # Otherwise, use the multiprocessing AsyncLLMEngine.
     else:
-        os.environ["PROMETHEUS_MULTIPROC_DIR"] = "/tmp/testit"
+        if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
+            os.environ["PROMETHEUS_MULTIPROC_DIR"] = "/tmp/mytmpdir"
 
         # Select random path for IPC.
         rpc_path = get_open_zmq_ipc_path()
@@ -150,14 +151,15 @@ router = APIRouter()
 
 
 def mount_metrics(app: FastAPI):
-    from prometheus_client import make_asgi_app, multiprocess, CollectorRegistry
+    from prometheus_client import (CollectorRegistry, make_asgi_app,
+                                   multiprocess)
 
     if "PROMETHEUS_MULTIPROC_DIR" in os.environ:
         registry = CollectorRegistry()
         multiprocess.MultiProcessCollector(registry)
     else:
         registry = None
-    
+
     # Add prometheus asgi middleware to route /metrics requests
     metrics_route = Mount("/metrics", make_asgi_app(registry=registry))
     # Workaround for 307 Redirect for /metrics
