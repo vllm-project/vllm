@@ -11,7 +11,8 @@
 
 #ifndef USE_ROCM
 using FP8_TYPE = c10::Float8_e4m3fn;
-C10_HOST_DEVICE constexpr auto FP8_E4M3_MAX = std::numeric_limits<FP8_TYPE>::max();
+C10_HOST_DEVICE constexpr auto FP8_E4M3_MAX =
+    std::numeric_limits<FP8_TYPE>::max();
 #else
   #include "amd/hip_float8.h"
 using FP8_TYPE = c10::Float8_e4m3fnuz;
