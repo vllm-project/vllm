@@ -335,10 +335,13 @@ class Sequence:
         self,
         token_id: int,
         logprobs: Dict[int, Logprob],
+        update_seq_data: bool = True
     ) -> None:
         assert token_id in logprobs
         self.output_logprobs.append(logprobs)
-        # self.data.append_token_id(token_id, logprobs[token_id].logprob)
+        # Only do this when output proc callback is not used
+        if update_seq_data:
+            self.data.append_token_id(token_id, logprobs[token_id].logprob)
 
     def get_len(self) -> int:
         return self.data.get_len()

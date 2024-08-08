@@ -36,12 +36,14 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         scheduler: List[Scheduler],
         seq_counter: Counter,
         stop_checker: StopChecker,
+        use_output_proc_callback: Optional[bool] = False
     ):
         self.scheduler_config = scheduler_config
         self.detokenizer = detokenizer
         self.scheduler = scheduler
         self.seq_counter = seq_counter
         self.stop_checker = stop_checker
+        self.use_output_proc_callback = use_output_proc_callback
 
     def process_outputs(self, sequence_group: SequenceGroup,
                         outputs: List[SequenceGroupOutput]) -> None:
@@ -87,7 +89,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
             sample = outputs.samples[0]
             # only have one sequence
             seq = seq_group.seqs[0]
-            seq.append_token_id(sample.output_token, sample.logprobs)
+            seq.append_token_id(sample.output_token, sample.logprobs, not self.use_output_proc_callback)
             if sampling_params.detokenize and self.detokenizer:
                 new_char_count = self.detokenizer.decode_sequence_inplace(
                     seq, sampling_params)
@@ -139,14 +141,14 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                 new_child_seq_id: int = next(self.seq_counter)
                 child = parent.fork(new_child_seq_id)
                 child.append_token_id(child_sample.output_token,
-                                      child_sample.logprobs)
+                                      child_sample.logprobs, not self.use_output_proc_callback)
                 child_seqs.append((child, parent))
             # Continue the parent sequence for the last child sample.
             # We reuse the parent sequence here to reduce redundant memory
             # copies, especially when using non-beam search sampling methods.
             last_child_sample = child_samples[-1]
             parent.append_token_id(last_child_sample.output_token,
-                                   last_child_sample.logprobs)
+                                   last_child_sample.logprobs, not self.use_output_proc_callback)
             child_seqs.append((parent, parent))
 
         for seq, _ in child_seqs:

@@ -4,7 +4,7 @@ import pytest
 
 from vllm import CompletionOutput, LLMEngine, SamplingParams
 
-MODEL = "/mnt/workdisk/chengli/models/meta-llama/Meta-Llama-3.1-8B-Instruct"
+MODEL = "meta-llama/llama-2-7b-hf"
 MAX_TOKENS = 200
 
 

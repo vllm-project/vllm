@@ -14,6 +14,8 @@ from vllm.sequence import (Sequence, SequenceGroup, SequenceGroupOutput,
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.utils import Counter
 
+from typing import Optional
+
 logger = init_logger(__name__)
 
 
@@ -38,12 +40,14 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         seq_counter: Counter,
         get_tokenizer_for_seq: Callable[[Sequence], PreTrainedTokenizer],
         stop_checker: StopChecker,
+        use_output_proc_callback: Optional[bool] = False
     ):
         self.detokenizer = detokenizer
         self.scheduler = scheduler
         self.seq_counter = seq_counter
         self.get_tokenizer_for_seq = get_tokenizer_for_seq
         self.stop_checker = stop_checker
+        self.use_output_proc_callback = use_output_proc_callback
 
     def process_prompt_logprob(self, seq_group: SequenceGroup,
                                outputs: List[SequenceGroupOutput]) -> None:

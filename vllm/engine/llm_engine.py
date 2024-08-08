@@ -351,6 +351,7 @@ class LLMEngine:
                     self.scheduler_config.max_model_len,
                     self.get_tokenizer_for_seq,
                 ),
+                use_output_proc_callback=model_config.use_output_proc_callback,
             ))
 
         # Output processing callback pointers
@@ -828,6 +829,9 @@ class LLMEngine:
                 scheduled_seq_groups, outputs,
                 seq_group_metadata_list):
             seq_group = scheduled_seq_group.seq_group
+            if not self.model_config.use_output_proc_callback:
+                seq_group.update_num_computed_tokens(
+                scheduled_seq_group.token_chunk_size)
             if self.model_config.embedding_mode:
                 self._process_sequence_group_outputs(seq_group, output)
                 continue
@@ -861,17 +865,18 @@ class LLMEngine:
         for seq_group_metadata, sequence_group_outputs in zip(
                 seq_group_metadata_list, output):
             seq_group_metadata.is_prompt = False
+            assert len(sequence_group_outputs.samples) == 1, \
+                "sampling_params.n > 1 and sampling_params.best_of > 1 not supported with output proc callback"
+            seq_output = sequence_group_outputs.samples[0]
+            # NOTE: Beam search is not supported, so we can assume that
+            # parent_seq_id == seq_id.
+            seq = seq_group_metadata.seq_data[seq_output.parent_seq_id]
 
-            for seq_output in sequence_group_outputs.samples:
-                # NOTE: Beam search is not supported, so we can assume that
-                # parent_seq_id == seq_id.
-                seq = seq_group_metadata.seq_data[seq_output.parent_seq_id]
+            token_id = seq_output.output_token
+            token_logprob = seq_output.logprobs[token_id]
 
-                token_id = seq_output.output_token
-                token_logprob = seq_output.logprobs[token_id]
-
-                seq.update_num_computed_tokens(seq_group_metadata.token_chunk_size)
-                seq.append_token_id(token_id, token_logprob.logprob)
+            seq.update_num_computed_tokens(seq_group_metadata.token_chunk_size)
+            seq.append_token_id(token_id, token_logprob.logprob)
 
     def step(self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.

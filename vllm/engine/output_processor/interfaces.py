@@ -10,6 +10,7 @@ from vllm.sequence import Sequence, SequenceGroup, SequenceGroupOutput
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.utils import Counter
 
+from typing import Optional
 
 class SequenceGroupOutputProcessor(ABC):
     """Interface for logic that processes new token ids in sequence groups,
@@ -31,6 +32,7 @@ class SequenceGroupOutputProcessor(ABC):
         seq_counter: Counter,
         get_tokenizer_for_seq: Callable[[Sequence], PreTrainedTokenizer],
         stop_checker: "StopChecker",
+        use_output_proc_callback: Optional[bool] = False
     ):
         """Create an output processor.
 
@@ -47,6 +49,7 @@ class SequenceGroupOutputProcessor(ABC):
                 scheduler,
                 seq_counter,
                 stop_checker,
+                use_output_proc_callback
             )
         else:
             # Importing here to avoid cycle.
