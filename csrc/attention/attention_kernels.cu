@@ -889,13 +889,13 @@ __global__ void sequence_block_reduce_kernel(
           out_ptr, exp_sums_ptr, max_logits_ptr, tmp_out_ptr,   \
           max_num_partitions);
 
-template <typename T>
+template <typename T,>
 void sequence_block_reducer_launcher(torch::Tensor& out,
                                      torch::Tensor& exp_sums,
                                      torch::Tensor& max_logits,
                                      torch::Tensor& tmp_out) {
-  int NUM_THREADS = 128;
-  int PARTITION_SIZE = 8192;
+  const int NUM_THREADS = 128;
+  const int PARTITION_SIZE = 8192;
 
   int num_seqs = tmp_out.size(0);
   int num_heads = tmp_out.size(1);
@@ -1611,7 +1611,6 @@ void paged_attention_remote(
     const int64_t blocksparse_local_blocks,
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
     const int64_t blocksparse_head_sliding_step) {
-  const bool is_block_sparse = (blocksparse_vert_stride > 1);
   DISPATCH_BY_KV_CACHE_DTYPE(query.dtype(), kv_cache_dtype,
                              CALL_REMOTE_LAUNCHER_BLOCK_SIZE)
 }
