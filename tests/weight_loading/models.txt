@@ -1,0 +1,2 @@
+gptq_marlin, robertgshaw2/zephyr-7b-beta-channelwise-gptq, main
+gptq_marlin, TheBloke/Llama-2-7B-GPTQ, main
