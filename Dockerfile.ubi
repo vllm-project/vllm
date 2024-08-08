@@ -183,6 +183,10 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 ENV HF_HUB_OFFLINE=1 \
     PORT=8000 \
     HOME=/home/vllm \
+    # Allow requested max length to exceed what is extracted from the
+    # config.json
+    # see: https://github.com/vllm-project/vllm/pull/7080
+    VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
     VLLM_USAGE_SOURCE=production-docker-image \
     VLLM_WORKER_MULTIPROC_METHOD=fork
 
