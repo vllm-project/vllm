@@ -345,7 +345,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
 
   // Copy the cache blocks from src to dst.
   cache_ops.def(
-      "copy_blocks(Tensor[]! key_caches, Tensor[]! value_caches, "
+      "copy_blocks(Tensor(a!)[] key_caches, Tensor[](b!) value_caches, "
       "Tensor block_mapping) -> ()");
   cache_ops.impl("copy_blocks", torch::kCUDA, &copy_blocks);
 

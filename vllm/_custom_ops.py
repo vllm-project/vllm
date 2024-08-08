@@ -232,9 +232,9 @@ def gptq_marlin_24_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                         b_meta: torch.Tensor, b_scales: torch.Tensor,
                         workspace: torch.Tensor, b_q_type: ScalarType,
                         size_m: int, size_n: int, size_k: int) -> torch.Tensor:
-    torch.library.opcheck(torch.ops._C.gptq_marlin_24_gemm, (a, b_q_weight, b_meta, b_scales,
-                                            workspace, b_q_type, size_m,
-                                            size_n, size_k))
+    # torch.library.opcheck(torch.ops._C.gptq_marlin_24_gemm, (a, b_q_weight, b_meta, b_scales,
+    #                                         workspace, b_q_type, size_m,
+    #                                         size_n, size_k))
     return torch.ops._C.gptq_marlin_24_gemm(a, b_q_weight, b_meta, b_scales,
                                             workspace, b_q_type, size_m,
                                             size_n, size_k)
@@ -472,6 +472,10 @@ def gptq_marlin_gemm(a: torch.Tensor,
                      is_k_full: bool,
                      has_zp: bool = False,
                      use_fp32_reduce: bool = False) -> torch.Tensor:
+    # torch.library.opcheck(torch.ops._C.gptq_marlin_gemm, (a, b_q_weight, b_scales, b_zeros,
+    #                                      g_idx, perm, workspace, b_q_type,
+    #                                      size_m, size_n, size_k, is_k_full,
+    #                                      has_zp, use_fp32_reduce))
     return torch.ops._C.gptq_marlin_gemm(a, b_q_weight, b_scales, b_zeros,
                                          g_idx, perm, workspace, b_q_type,
                                          size_m, size_n, size_k, is_k_full,
