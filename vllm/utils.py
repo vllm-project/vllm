@@ -19,6 +19,7 @@ from platform import uname
 from typing import (Any, AsyncGenerator, Awaitable, Callable, Dict, Generic,
                     Hashable, List, Optional, OrderedDict, Set, Tuple, TypeVar,
                     Union, overload)
+from uuid import uuid4
 
 import numpy as np
 import numpy.typing as npt
@@ -404,7 +405,7 @@ async def iterate_with_cancellation(
 
 async def merge_async_iterators(
     *iterators: AsyncGenerator[T, None],
-    is_cancelled: Callable[[], Awaitable[bool]],
+    is_cancelled: Optional[Callable[[], Awaitable[bool]]] = None,
 ) -> AsyncGenerator[Tuple[int, T], None]:
     """Merge multiple asynchronous iterators into a single iterator.
 
@@ -412,8 +413,8 @@ async def merge_async_iterators(
     When it yields, it yields a tuple (i, item) where i is the index of the
     iterator that yields the item.
 
-    It also polls the provided function at least once per second to check
-    for client cancellation.
+    It also optionally polls a provided function at least once per second
+    to check for client cancellation.
     """
 
     # Can use anext() in python >= 3.10
@@ -421,12 +422,13 @@ async def merge_async_iterators(
         ensure_future(pair[1].__anext__()): pair
         for pair in enumerate(iterators)
     }
+    timeout = None if is_cancelled is None else 1
     try:
         while awaits:
             done, pending = await asyncio.wait(awaits.keys(),
                                                return_when=FIRST_COMPLETED,
-                                               timeout=1)
-            if await is_cancelled():
+                                               timeout=timeout)
+            if is_cancelled is not None and await is_cancelled():
                 raise asyncio.CancelledError("client cancelled")
             for d in done:
                 pair = awaits.pop(d)
@@ -484,10 +486,13 @@ def get_distributed_init_method(ip: str, port: int) -> str:
     return f"tcp://[{ip}]:{port}" if ":" in ip else f"tcp://{ip}:{port}"
 
 
-def get_open_port(port: Optional[int] = None) -> int:
-    if port is None:
-        # Default behavior here is to return a port for multi-gpu communication
-        port = envs.VLLM_PORT
+def get_open_zmq_ipc_path() -> str:
+    base_rpc_path = envs.VLLM_RPC_BASE_PATH
+    return f"ipc://{base_rpc_path}/{uuid4()}"
+
+
+def get_open_port() -> int:
+    port = envs.VLLM_PORT
     if port is not None:
         while True:
             try:
@@ -1032,56 +1037,6 @@ def cuda_device_count_stateless() -> int:
     # This can be removed and simply replaced with torch.cuda.get_device_count
     # after https://github.com/pytorch/pytorch/pull/122815 is released.
     return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
-
-
-# NVML utils
-# Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
-# all the related functions work on real physical device ids.
-# the major benefit of using NVML is that it will not initialize CUDA
-
-try:
-    import pynvml
-except ImportError:
-    # For non-NV devices
-    pynvml = None
-
-
-def with_nvml_context(fn):
-
-    @wraps(fn)
-    def wrapper(*args, **kwargs):
-        if pynvml is not None:
-            pynvml.nvmlInit()
-        try:
-            return fn(*args, **kwargs)
-        finally:
-            if pynvml is not None:
-                pynvml.nvmlShutdown()
-
-    return wrapper
-
-
-@with_nvml_context
-def is_full_nvlink(device_ids: List[int]) -> bool:
-    """
-    query if the set of gpus are fully connected by nvlink (1 hop)
-    """
-    handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in device_ids]
-    for i, handle in enumerate(handles):
-        for j, peer_handle in enumerate(handles):
-            if i < j:
-                try:
-                    p2p_status = pynvml.nvmlDeviceGetP2PStatus(
-                        handle, peer_handle, pynvml.NVML_P2P_CAPS_INDEX_NVLINK)
-                    if p2p_status != pynvml.NVML_P2P_STATUS_OK:
-                        return False
-                except pynvml.NVMLError as error:
-                    logger.error(
-                        "NVLink detection failed. This is normal if your"
-                        " machine has no NVLink equipped.",
-                        exc_info=error)
-                    return False
-    return True
 
 
 #From: https://stackoverflow.com/a/4104188/2749989

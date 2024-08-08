@@ -10,6 +10,7 @@ from transformers import PreTrainedTokenizer
 from vllm.config import ModelConfig
 from vllm.engine.protocol import AsyncEngineClient
 from vllm.entrypoints.chat_utils import (ConversationMessage,
+                                         apply_chat_template,
                                          load_chat_template,
                                          parse_chat_messages)
 from vllm.entrypoints.logger import RequestLogger
@@ -99,16 +100,15 @@ class OpenAIServingChat(OpenAIServing):
                 tool.model_dump() for tool in request.tools
             ]
 
-            prompt = tokenizer.apply_chat_template(
+            prompt = apply_chat_template(
+                tokenizer,
                 conversation=conversation,
-                tokenize=False,
+                chat_template=request.chat_template or self.chat_template,
                 add_generation_prompt=request.add_generation_prompt,
                 tools=tool_dicts,
                 documents=request.documents,
-                chat_template=request.chat_template or self.chat_template,
                 **(request.chat_template_kwargs or {}),
             )
-            assert isinstance(prompt, str)
         except Exception as e:
             logger.error("Error in applying chat template from request: %s", e)
             return self.create_error_response(str(e))
