@@ -521,7 +521,7 @@ __inline__ __device__ Tout scaled_convert(const Tin& x, const float scale) {
   #endif
   assert(false);
 }
-  #define DISPATCH_BY_DTYPE(SRC_DTYPE,FN)                                       \
+  #define DISPATCH_BY_DTYPE(SRC_DTYPE, FN)                                   \
     if (SRC_DTYPE == at::ScalarType::Float) {                                \
       FN(float);                                                             \
     } else if (SRC_DTYPE == at::ScalarType::Half) {                          \
