@@ -21,7 +21,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <algorithm>
-
+#include <hip/hip_bfloat16.h>
 #include "attention_dtypes.h"
 #include "attention_utils.cuh"
 
@@ -961,8 +961,8 @@ void sequence_block_reducer(
     sequence_block_reducer_launcher<uint16_t>(out, exp_sums, max_logits,
                                               tmp_out);
   } else if (tmp_out.dtype() == at::ScalarType::BFloat16) {
-    sequence_block_reducer_launcher<__nv_bfloat16>(out, exp_sums, max_logits,
-                                                   tmp_out);
+    sequence_block_reducer_launcher<__hip_bfloat16>(out, exp_sums, max_logits,
+                                                    tmp_out);
   } else {
     TORCH_CHECK(false, "Unsupported input type of kv cache: ", tmp_out.dtype());
   }
