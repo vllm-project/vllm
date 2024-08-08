@@ -322,8 +322,9 @@ class ModelConfig:
                 "BitAndBytes quantization with TP or PP is not supported yet.")
 
         if self.quantization == "bitsandbytes" and self.enforce_eager is False:
-            raise ValueError(
-                "BitAndBytes with enforce_eager = False is not supported yet.")
+            logger.warning("CUDA graph is not supported on BitAndBytes yet, "
+                           "fallback to the eager mode.")
+            self.enforce_eager = True
 
     def get_hf_config_sliding_window(self) -> Optional[int]:
         """Get the sliding window size, or None if disabled."""
