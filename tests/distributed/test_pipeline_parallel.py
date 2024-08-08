@@ -8,6 +8,7 @@ WARNING: This test runs in both single-node (4 GPUs) and multi-node
 import os
 
 import pytest
+from transformers import AutoTokenizer
 
 from ..utils import compare_two_settings, fork_new_process_for_each_test
 

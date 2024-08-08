@@ -557,6 +557,7 @@ def fused_moe(
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
+    stream: torch.cuda.Stream,
     inplace: bool = False,
     override_config: Optional[Dict[str, Any]] = None,
     use_grouped_topk: bool = False,
@@ -609,6 +610,8 @@ def fused_moe(
     else:
         topk_weights, topk_ids = fused_topk(hidden_states, gating_output, topk,
                                             renormalize)
+
+    stream.synchronize()
 
     return fused_experts(hidden_states,
                          w1,

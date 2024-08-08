@@ -91,11 +91,15 @@ class MixtralMoE(nn.Module):
                                 tp_size=tp_size,
                                 prefix=f"{prefix}.experts")
 
+    def load_experts_non_blocking(self):
+        self.experts.load_experts_to_gpu_nonblocking()
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.
         orig_shape = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_size)
         # router_logits: (num_tokens, n_experts)
+        self.load_experts_non_blocking()
         router_logits, _ = self.gate(hidden_states)
         final_hidden_states = self.experts(hidden_states, router_logits)
         return final_hidden_states.view(orig_shape)
@@ -450,9 +454,9 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                         continue
                     param = params_dict[name]
                     weight_loader = param.weight_loader
-                    weight_loader(param,
-                                  loaded_weight,
-                                  weight_name,
+                    weight_loader(param=param,
+                                  loaded_weight=loaded_weight,
+                                  weight_name=weight_name,
                                   shard_id=shard_id,
                                   expert_id=expert_id)
                     break
