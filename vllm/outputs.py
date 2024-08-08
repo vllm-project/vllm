@@ -84,6 +84,7 @@ class RequestOutput:
                         None if decoder-only
         encoder_prompt_token_ids: The token IDs of the encoder prompt;
                                   None if decoder-only
+        prompt_embeds_shape: The shape of the prompt embeddings.
     """
 
     def __init__(
@@ -91,7 +92,6 @@ class RequestOutput:
         request_id: str,
         prompt: Optional[str],
         prompt_token_ids: List[int],
-        prompt_embeds_shape: Optional[Tuple[int, int]],
         prompt_logprobs: Optional[PromptLogprobs],
         outputs: List[CompletionOutput],
         finished: bool,
@@ -99,6 +99,7 @@ class RequestOutput:
         lora_request: Optional[LoRARequest] = None,
         encoder_prompt: Optional[str] = None,
         encoder_prompt_token_ids: Optional[List[int]] = None,
+        prompt_embeds_shape: Optional[Tuple[int, int]] = None,
     ) -> None:
         self.request_id = request_id
         self.prompt = prompt
@@ -164,14 +165,14 @@ class RequestOutput:
         return cls(seq_group.request_id,
                    prompt,
                    prompt_token_ids,
-                   prompt_embeds_shape,
                    prompt_logprobs,
                    outputs,
                    finished,
                    seq_group.metrics,
                    lora_request=seq_group.lora_request,
                    encoder_prompt=encoder_prompt,
-                   encoder_prompt_token_ids=encoder_prompt_token_ids)
+                   encoder_prompt_token_ids=encoder_prompt_token_ids,
+                   prompt_embeds_shape=prompt_embeds_shape)
 
     def __repr__(self) -> str:
         return (f"RequestOutput(request_id={self.request_id}, "
