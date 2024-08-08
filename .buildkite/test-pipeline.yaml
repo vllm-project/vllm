@@ -326,6 +326,7 @@ steps:
   - vllm/
   - tests/quantization
   commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s quantization/test_gptq_marlin.py
 
 
