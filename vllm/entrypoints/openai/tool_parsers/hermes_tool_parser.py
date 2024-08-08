@@ -83,9 +83,9 @@ class Hermes2ProToolParser(ToolParser):
 
     def __init__(self,
                  tokenizer: Optional[Union[PreTrainedTokenizer,
-                                           PreTrainedTokenizerFast,
-                                           PreTrainedTokenizerFast,
-                                           AutoTokenizer]] = None):
+                 PreTrainedTokenizerFast,
+                 PreTrainedTokenizerFast,
+                 AutoTokenizer]] = None):
         super().__init__(tokenizer)
         self.current_tool_name_sent: bool = False
         self.prev_tool_call_arr: List[Dict] = []
@@ -193,7 +193,7 @@ class Hermes2ProToolParser(ToolParser):
                         DeltaToolCall(index=self.current_tool_id,
                                       function=DeltaFunctionCall(
                                           arguments=diff).model_dump(
-                                              exclude_none=True))
+                                          exclude_none=True))
                     ])
 
             # case -- otherwise we're just generating text
@@ -216,7 +216,7 @@ class Hermes2ProToolParser(ToolParser):
                 return DeltaMessage(tool_calls=[
                     InitialDeltaToolCall(
                         index=self.current_tool_id).model_dump(
-                            exclude_none=True)
+                        exclude_none=True)
                 ])
 
             # case - we haven't sent the tool name yet. If it's available, send
@@ -237,110 +237,111 @@ class Hermes2ProToolParser(ToolParser):
                     ])
                 else:
                     return None
-            else:
-                # if there is no tool calls
-                if tool_call_portion is None:
-                    # if there's text but not tool calls, send that -
-                    # otherwise None to skip chunk
-                    delta = DeltaMessage(
-                        content=delta_text
-                    ) if text_portion is not None else None
-                # now, the nitty-gritty of tool calls
-                else:
-                    # now we have the portion to parse as tool call.
-                    if text_portion is not None:
-                        logger.debug(
-                            "Also, will send text portion: %s",
-                            text_portion)
+            # case -- otherwise, send the tool call delta
 
-                    logger.debug(
-                        "Trying to parse current tool call with ID %s",
-                        self.current_tool_id)
-                    if len(self.prev_tool_call_arr
-                           ) <= self.current_tool_id:
-                        self.prev_tool_call_arr.append({})
-                        logger.debug(
-                            "Pushed dummy value into tool call arr")
-                    # main logic for tool parsing here
-                    prev_arguments = self.prev_tool_call_arr[
-                        self.current_tool_id].get("arguments")
-                    cur_arguments = current_tool_call.get(
-                        "arguments"
-                    )  # arguments, if any, in current dict
-
-                    logger.debug("diffing old arguments: %s",
-                                 prev_arguments)
-                    logger.debug("against new ones: %s", cur_arguments)
-
-                    if not cur_arguments and not prev_arguments:
-                        logger.debug("Skipping text %s - no arguments",
-                                     delta_text)
-                        delta = None
-                    elif not cur_arguments and prev_arguments:
-                        logger.error(
-                            "INVARIANT - impossible to have arguments "
-                            "reset mid-call")
-                        delta = None
-                    elif cur_arguments and not prev_arguments:
-                        cur_arguments_json = json.dumps(cur_arguments)
-                        logger.debug("finding %s in %s", delta_text,
-                                     cur_arguments_json)
-                        arguments_delta = cur_arguments_json[:
-                                                             cur_arguments_json
-                                                             .index(
-                                                                 delta_text
-                                                             ) +
-                                                             len(delta_text
-                                                                 )]
-                        logger.debug(
-                            "First tokens in arguments received: %s",
-                            arguments_delta)
-                        delta = DeltaMessage(tool_calls=[
-                            DeltaToolCall(index=self.current_tool_id,
-                                          function=DeltaFunctionCall(
-                                              arguments=arguments_delta
-                                          ).model_dump(
-                                              exclude_none=True))
-                        ])
-                        self.streamed_args_for_tool[
-                            self.current_tool_id] += arguments_delta
-
-                    elif cur_arguments and prev_arguments:
-                        cur_args_json = json.dumps(cur_arguments)
-                        prev_args_json = json.dumps(prev_arguments)
-                        logger.debug("Searching for dif between\n%s",
-                                     cur_args_json)
-                        logger.debug("and\n%s", prev_args_json)
-                        argument_diff = extract_intermediate_diff(
-                            cur_args_json, prev_args_json)
-                        logger.debug("got argument diff %s",
-                                     argument_diff)
-                        delta = DeltaMessage(tool_calls=[
-                            DeltaToolCall(index=self.current_tool_id,
-                                          function=DeltaFunctionCall(
-                                              arguments=argument_diff).
-                                          model_dump(
-                                              exclude_none=True))
-                        ])
-                        self.streamed_args_for_tool[
-                            self.current_tool_id] += argument_diff
-                    else:
-                        delta = None
-
-                    # handle saving the state for the current tool into
-                    # the "prev" list for use in diffing for
-                    # the next iteration
-                    if self.current_tool_id == len(
-                            self.prev_tool_call_arr) - 1:
-                        self.prev_tool_call_arr[
-                            self.current_tool_id] = current_tool_call
-                    else:
-                        self.prev_tool_call_arr.append(
-                            current_tool_call)
-
-                    # TODO REPLACE ME WITH TOOL CALL
-                    # delta = DeltaMessage(content=delta_text)
+            # if the tool call portion is None, send the delta as text
+            if tool_call_portion is None:
+                # if there's text but not tool calls, send that -
+                # otherwise None to skip chunk
+                delta = DeltaMessage(content=delta_text) \
+                    if text_portion is not None else None
                 return delta
+
+            # now, the nitty-gritty of tool calls
+            # now we have the portion to parse as tool call.
+            if text_portion is not None:
+                logger.debug(
+                    "Also, will send text portion: %s",
+                    text_portion)
+
+            logger.debug(
+                "Trying to parse current tool call with ID %s",
+                self.current_tool_id)
+            if len(self.prev_tool_call_arr
+                   ) <= self.current_tool_id:
+                self.prev_tool_call_arr.append({})
+                logger.debug(
+                    "Pushed dummy value into tool call arr")
+            # main logic for tool parsing here
+            prev_arguments = self.prev_tool_call_arr[
+                self.current_tool_id].get("arguments")
+            cur_arguments = current_tool_call.get(
+                "arguments"
+            )  # arguments, if any, in current dict
+
+            logger.debug("diffing old arguments: %s",
+                         prev_arguments)
+            logger.debug("against new ones: %s", cur_arguments)
+
+            if not cur_arguments and not prev_arguments:
+                logger.debug("Skipping text %s - no arguments",
+                             delta_text)
+                delta = None
+            elif not cur_arguments and prev_arguments:
+                logger.error(
+                    "INVARIANT - impossible to have arguments "
+                    "reset mid-call")
+                delta = None
+            elif cur_arguments and not prev_arguments:
+                cur_arguments_json = json.dumps(cur_arguments)
+                logger.debug("finding %s in %s", delta_text,
+                             cur_arguments_json)
+                arguments_delta = cur_arguments_json[:
+                                                     cur_arguments_json
+                                                     .index(
+                                                         delta_text
+                                                     ) +
+                                                     len(delta_text
+                                                         )]
+                logger.debug(
+                    "First tokens in arguments received: %s",
+                    arguments_delta)
+                delta = DeltaMessage(tool_calls=[
+                    DeltaToolCall(index=self.current_tool_id,
+                                  function=DeltaFunctionCall(
+                                      arguments=arguments_delta
+                                  ).model_dump(
+                                      exclude_none=True))
+                ])
+                self.streamed_args_for_tool[
+                    self.current_tool_id] += arguments_delta
+
+            elif cur_arguments and prev_arguments:
+                cur_args_json = json.dumps(cur_arguments)
+                prev_args_json = json.dumps(prev_arguments)
+                logger.debug("Searching for dif between\n%s",
+                             cur_args_json)
+                logger.debug("and\n%s", prev_args_json)
+                argument_diff = extract_intermediate_diff(
+                    cur_args_json, prev_args_json)
+                logger.debug("got argument diff %s",
+                             argument_diff)
+                delta = DeltaMessage(tool_calls=[
+                    DeltaToolCall(index=self.current_tool_id,
+                                  function=DeltaFunctionCall(
+                                      arguments=argument_diff).
+                                  model_dump(
+                                      exclude_none=True))
+                ])
+                self.streamed_args_for_tool[
+                    self.current_tool_id] += argument_diff
+            else:
+                delta = None
+
+            # handle saving the state for the current tool into
+            # the "prev" list for use in diffing for
+            # the next iteration
+            if self.current_tool_id == len(
+                    self.prev_tool_call_arr) - 1:
+                self.prev_tool_call_arr[
+                    self.current_tool_id] = current_tool_call
+            else:
+                self.prev_tool_call_arr.append(
+                    current_tool_call)
+
+            # TODO REPLACE ME WITH TOOL CALL
+            # delta = DeltaMessage(content=delta_text)
+            return delta
 
         except Exception as e:
             logger.error("Error trying to handle streaming tool call: %s",
