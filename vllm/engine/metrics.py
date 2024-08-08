@@ -28,6 +28,12 @@ prometheus_client.disable_created_metrics()
 
 # begin-metrics-definitions
 class Metrics:
+    """
+    vLLM uses a multiprocessing-based frontend for the OpenAI server.
+    This means that we need to run prometheus_client in multiprocessing mode
+    See https://prometheus.github.io/client_python/multiprocess/ for more
+    details on limitations.
+    """
     labelname_finish_reason = "finished_reason"
     _gauge_cls = prometheus_client.Gauge
     _counter_cls = prometheus_client.Counter
@@ -294,9 +300,6 @@ def get_throughput(tracked_stats: List[int], now: float,
 
 class LoggingStatLogger(StatLoggerBase):
     """LoggingStatLogger is used in LLMEngine to log to Stdout."""
-
-    def info(self, type: str, obj: SupportsMetricsInfo) -> None:
-        raise NotImplementedError
 
     def log(self, stats: Stats) -> None:
         """Called by LLMEngine.
