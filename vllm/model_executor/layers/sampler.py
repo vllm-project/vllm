@@ -535,6 +535,7 @@ def _top_k_top_p_multinomial_with_flashinfer(
     if not success.all():
         warnings.warn("Sampling with FlashInfer failed, fallback.",
                       stacklevel=2)
+        probs = _apply_top_k_top_p(probs, top_ps, top_ks)
         return _multinomial(probs, num_samples, seq_groups, is_fallback=True)
     return batch_next_token_ids.view(-1, num_samples)
 
