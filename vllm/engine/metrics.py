@@ -39,8 +39,6 @@ class Metrics:
     _histogram_cls = prometheus_client.Histogram
 
     def __init__(self, labelnames: List[str], max_model_len: int):
-        # Unregister any existing vLLM collectors
-        self._unregister_vllm_metrics()
 
         # System stats
         #   Scheduler State
@@ -178,11 +176,6 @@ class Metrics:
             multiprocess_mode="sum",
         )
 
-    def _unregister_vllm_metrics(self) -> None:
-        for collector in list(prometheus_client.REGISTRY._collector_to_names):
-            if hasattr(collector, "_name") and "vllm" in collector._name:
-                prometheus_client.REGISTRY.unregister(collector)
-
 
 # end-metrics-definitions
 
@@ -267,10 +260,6 @@ class RayMetrics(Metrics):
         if ray_metrics is None:
             raise ImportError("RayMetrics requires Ray to be installed.")
         super().__init__(labelnames, max_model_len)
-
-    def _unregister_vllm_metrics(self) -> None:
-        # No-op on purpose
-        pass
 
 
 def build_1_2_5_buckets(max_value: int) -> List[int]:
