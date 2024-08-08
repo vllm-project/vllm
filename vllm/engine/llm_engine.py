@@ -1206,7 +1206,8 @@ class LLMEngine:
                 scheduled_seq_group.token_chunk_size)
             if output is not None and len(output) > 0:
                 for o in output:
-                    if seq_group.metrics is not None:
+                    if (isinstance(o, SamplerOutput)
+                            and seq_group.metrics is not None):
                         if seq_group.metrics.model_forward_time is not None:
                             seq_group.metrics.model_forward_time += (
                                 o.model_forward_time)
