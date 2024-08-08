@@ -38,11 +38,7 @@ MODELS = [
 @pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
                     reason="gptq_marlin is not supported on this GPU type.")
 @pytest.mark.parametrize("model", MODELS)
-def test_model_weight_loading(
-    vllm_runner,
-    model,
-    dtype: str,
-) -> None:
+def test_model_weight_loading(vllm_runner, model) -> None:
     model_name, revision = model
 
     with vllm_runner(model_name=model_name,
