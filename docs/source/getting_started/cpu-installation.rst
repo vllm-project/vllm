@@ -141,5 +141,22 @@ Performance tips
 
 - If using vLLM CPU backend on a multi-socket machine with NUMA, be aware to set CPU cores using ``VLLM_CPU_OMP_THREADS_BIND`` to avoid cross NUMA node memory access.
 
+Typical CPU backend deployment considerations
+---------------------------------------------
 
+* The CPU backend significantly differs from the GPU backend since the vLLM architecture was originally optimized for GPU use, we need to apply a number of optimizations to enhance the performance on the CPU backend.
 
+* Decouple the HTTP serving components from the inference components. In a GPU backend configuration, the HTTP serving and tokenization tasks operate on the CPU, while inference runs on the GPU, which typically does not pose a problem. However, in a CPU-based setup, the HTTP serving and tokenization can cause significant context switching and reduced cache efficiency. Therefore, it is strongly recommended to segregate these two components for improved performance.
+
+* Like the GPU backend, vLLM on CPU backend also supports tensor-parallel inference and serving. On CPU based vLLM deployment with NUMA enabled, the memory access performance may largely impacted by the topology(details). The typical optimized deployments are to enable Tensor Parallel or Data Parallel on such platform:  
+
+  * Tensor Parallel for a latency constraints deployment: a Megatron-LM's parallel algorithm will used to shard the model, based on the NUMA nodes, e.g. TP = 2 for a two NUMA node system. 
+  * Data Parallel for better throughput: the idea is to launch LLM serving endpoint on each NUMA node, also with one additional load balancer to dispatch the requests to those endpoints. 
+* On Ray based vLLM deployment, each Ray cluster will have components for monitoring, statistics and logging. It's highly recommend to turn off the unnecessary features to introduce less context switches for the inference threads.  As there are several components cannot be turned off, we recommend to use one CPU core for these components.  
+
+... code-block:: console
+
+     $ numactl --physcpubind=63 --membind=1 ray start --head --num-cpus=0 --num-gpus=0 --disable-usage-stats --include-dashboard=false # launch a Ray head node with 0 cpu resources
+     $ numactl --physcpubind=32-63 --membind=1 ray start --address=auto --num-cpus=32 --num-gpus=0
+     $ numactl --physcpubind=0-31 --membind=0 ray start --address=auto --num-cpus=32 --num-gpus=0
+     $ numactl --physcpubind=31 --membind=0 python3 -m vllm.entrypoints.openai.api_server --model meta-llama/Llama-2-7b-chat-hf --dtype=bfloat16 --device cpu --engine-use-ray --disable-log-stats -tp=2
