@@ -120,8 +120,10 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         )
 
         if seq_group.is_encoder_decoder():
+            encoder_seq = seq_group.get_encoder_seq()
+            assert encoder_seq is not None
             num_required_blocks += BlockTable.get_num_required_blocks(
-                seq_group.get_encoder_seq().get_token_ids(),
+                encoder_seq.get_token_ids(),
                 block_size=self.block_size,
             )
 
@@ -133,8 +135,8 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             device=Device.GPU)
 
         # Use watermark to avoid frequent cache eviction.
-        if (self.num_total_gpu_blocks - num_required_blocks <
-                self.watermark_blocks):
+        if (self.num_total_gpu_blocks - num_required_blocks
+                < self.watermark_blocks):
             return AllocStatus.NEVER
         if num_free_gpu_blocks - num_required_blocks >= self.watermark_blocks:
             return AllocStatus.OK
@@ -189,7 +191,9 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         check_no_caching_or_swa_for_blockmgr_encdec(self, seq_group)
 
         if seq_group.is_encoder_decoder():
-            block_table = self._allocate_sequence(seq_group.get_encoder_seq())
+            encoder_seq = seq_group.get_encoder_seq()
+            assert encoder_seq is not None
+            block_table = self._allocate_sequence(encoder_seq)
             self.cross_block_tables[request_id] = block_table
 
     def can_append_slots(self, seq_group: SequenceGroup,

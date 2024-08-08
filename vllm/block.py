@@ -3,8 +3,7 @@ from typing import List
 
 from vllm.utils import Device
 
-DEFAULT_LAST_ACCESSED_TIME = -1
-
+DEFAULT_LAST_ACCESSED_TIME: float = -1
 
 class PhysicalTokenBlock:
     """Represents the state of a block in the KV cache."""
