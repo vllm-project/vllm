@@ -579,14 +579,17 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         num_touched_blocks = 0
         for block in blocks:
             if not block.is_full:
-                if block.num_empty_slots >= num_lookahead_slots:
-                    num_touched_blocks += 1
-                else:
+                num_touched_blocks += 1
+                if num_lookahead_slots > block.num_empty_slots:
                     num_touched_blocks += cdiv(
                         num_lookahead_slots - block.num_empty_slots,
                         self._block_size)
             else:
-                if not self.is_block_cached(block):
+                # If the block has a match in the cache and the cached block
+                # is not referenced, then we still count it as a touched block
+                if not self.is_block_cached(block) or \
+                    (block.content_hash is not None and \
+                     self._cached_blocks[block.content_hash] in self.evictor):
                     num_touched_blocks += 1
         return num_touched_blocks
 
