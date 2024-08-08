@@ -254,45 +254,52 @@ class Hermes2ProToolParser(ToolParser):
                     "Also, will send text portion: %s",
                     text_portion)
 
-            logger.debug(
-                "Trying to parse current tool call with ID %s",
-                self.current_tool_id)
-            if len(self.prev_tool_call_arr
-                   ) <= self.current_tool_id:
+            logger.debug("Trying to parse current tool call with ID %s",
+                         self.current_tool_id)
+
+            # if we're starting a new tool call, push an empty object in as
+            #   a placeholder for the arguments
+            if len(self.prev_tool_call_arr) <= self.current_tool_id:
                 self.prev_tool_call_arr.append({})
                 logger.debug(
                     "Pushed dummy value into tool call arr")
-            # main logic for tool parsing here
-            prev_arguments = self.prev_tool_call_arr[
-                self.current_tool_id].get("arguments")
-            cur_arguments = current_tool_call.get(
-                "arguments"
-            )  # arguments, if any, in current dict
 
-            logger.debug("diffing old arguments: %s",
-                         prev_arguments)
+            # main logic for tool parsing here - compare prev. partially-parsed
+            #   JSON to the current partially-parsed JSON
+            prev_arguments = (self.prev_tool_call_arr[self.current_tool_id]
+                              .get("arguments"))
+            cur_arguments = current_tool_call.get("arguments")
+
+            logger.debug("diffing old arguments: %s",prev_arguments)
             logger.debug("against new ones: %s", cur_arguments)
 
+            # case -- no arguments have been created yet. skip sending a delta.
             if not cur_arguments and not prev_arguments:
                 logger.debug("Skipping text %s - no arguments",
                              delta_text)
                 delta = None
+
+            # case -- prev arguments are defined, but non are now.
+            #   probably impossible, but not a fatal error - just keep going
             elif not cur_arguments and prev_arguments:
-                logger.error(
-                    "INVARIANT - impossible to have arguments "
-                    "reset mid-call")
+                logger.error("should be impossible to have arguments reset "
+                             "mid-call. skipping streaming anything.")
                 delta = None
+
+            # case -- we now have the first info about arguments available from
+            #   autocompleting the JSON
             elif cur_arguments and not prev_arguments:
+
                 cur_arguments_json = json.dumps(cur_arguments)
                 logger.debug("finding %s in %s", delta_text,
                              cur_arguments_json)
-                arguments_delta = cur_arguments_json[:
-                                                     cur_arguments_json
-                                                     .index(
-                                                         delta_text
-                                                     ) +
-                                                     len(delta_text
-                                                         )]
+
+                # get the location where previous args differ from current
+                args_delta_start_loc = cur_arguments_json.index(delta_text) \
+                    + len(delta_text)
+
+                # use that to find the actual delta
+                arguments_delta = cur_arguments_json[:args_delta_start_loc]
                 logger.debug(
                     "First tokens in arguments received: %s",
                     arguments_delta)
