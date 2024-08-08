@@ -326,7 +326,7 @@ steps:
   - vllm/
   - tests/quantization
   commands:
-    - pytest tests/quantization/test_gptq_marlin.py
+    - pytest -v -s quantization/test_gptq_marlin.py
 
 
 ##### multi gpus test #####
