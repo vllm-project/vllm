@@ -5,9 +5,7 @@ from typing import (TYPE_CHECKING, Any, ClassVar, Dict, Iterable, List,
 from typing import Sequence as GenericSequence
 from typing import Set, Tuple, Type, Union
 
-from typing_extensions import TypeVar
-
-from typing_extensions import assert_never
+from typing_extensions import TypeVar, assert_never
 
 import vllm.envs as envs
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
