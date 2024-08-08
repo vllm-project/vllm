@@ -14,9 +14,8 @@ def print_outputs(outputs):
 
 print("=" * 80)
 
-# In this script, we demonstrate two ways to pass input to the chat method:
+# In this script, we demonstrate how to pass input to the chat method:
 
-# Conversation with a list of dictionaries
 conversation = [
     {"role": "system", "content": "You are a helpful assistant"},
     {"role": "user", "content": "Hello"},
@@ -28,30 +27,6 @@ conversation = [
 ]
 outputs = llm.chat(
     conversation, sampling_params=sampling_params, use_tqdm=False
-)
-print_outputs(outputs)
-
-# Multiple conversations
-conversations = [
-    [
-        {"role": "system", "content": "You are a helpful assistant"},
-        {"role": "user", "content": "What is dark matter?"},
-    ],
-    [
-        {"role": "system", "content": "You are a helpful assistant"},
-        {"role": "user", "content": "How are you?"},
-        {
-            "role": "assistant",
-            "content": "I'm an AI without feelings, but I'm here to help!",
-        },
-        {"role": "user", "content": "Tell me a joke."},
-    ],
-]
-
-outputs = llm.chat(
-    conversations,
-    sampling_params=sampling_params,
-    use_tqdm=False,
 )
 print_outputs(outputs)
 

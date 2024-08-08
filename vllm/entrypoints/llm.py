@@ -1,5 +1,5 @@
 from contextlib import contextmanager
-from typing import (ClassVar, Dict, List, Optional, Sequence, Union, cast,
+from typing import (ClassVar, List, Optional, Sequence, Union, cast,
                     overload)
 
 from tqdm import tqdm
@@ -7,7 +7,9 @@ from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam, parse_chat_messages
+from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
+                                         parse_chat_messages,
+                                         apply_chat_template)
 from vllm.inputs import (PromptInputs, TextPrompt, TokensPrompt,
                          parse_and_batch_prompt)
 from vllm.logger import init_logger
@@ -360,13 +362,9 @@ class LLM:
 
     def chat(
         self,
-        messages: Union[
-            List[ChatCompletionMessageParam], 
-            List[List[ChatCompletionMessageParam]]
-        ],
-        sampling_params: Optional[
-            Union[SamplingParams, List[SamplingParams]]
-        ] = None,
+        messages: List[ChatCompletionMessageParam],
+        sampling_params: Optional[Union[SamplingParams,
+                                        List[SamplingParams]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
         chat_template: Optional[str] = None,
@@ -398,33 +396,17 @@ class LLM:
 
         tokenizer = self.get_tokenizer()
         model_config = self.llm_engine.get_model_config()
-            
-        if isinstance(messages[0], dict):
-            conversations, _ = parse_chat_messages(
-                messages,
-                model_config,
-                tokenizer
-            )
-            
-            prompts = tokenizer.apply_chat_template(
-                conversations,
-                tokenize=False,
-                add_generation_template=add_generation_template,
-                chat_template=chat_template,
-            )
 
-        elif isinstance(messages[0], list):
+        conversations, _ = parse_chat_messages(messages, model_config,
+                                               tokenizer)
 
-            prompts = [
-                tokenizer.apply_chat_template(
-                    parse_chat_messages(message, model_config, tokenizer)[0],
-                    tokenize=False,
-                    add_generation_template=add_generation_template,
-                    chat_template=chat_template,
-                )
-                for message in messages
-            ]
-            
+        prompts = apply_chat_template(
+            tokenizer,
+            conversations,
+            chat_template=chat_template,
+            add_generation_template=add_generation_template
+        )
+
         return self.generate(
             prompts,
             sampling_params,
@@ -436,9 +418,8 @@ class LLM:
     def encode(
         self,
         prompts: str,
-        pooling_params: Optional[
-            Union[PoolingParams, Sequence[PoolingParams]]
-        ] = None,
+        pooling_params: Optional[Union[PoolingParams,
+                                       Sequence[PoolingParams]]] = None,
         prompt_token_ids: Optional[List[int]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
@@ -672,9 +653,8 @@ class LLM:
             self._add_request(
                 request_inputs,
                 params[i] if isinstance(params, Sequence) else params,
-                lora_request=lora_request[i]
-                if isinstance(lora_request, Sequence)
-                else lora_request,
+                lora_request=lora_request[i] if isinstance(
+                    lora_request, Sequence) else lora_request,
                 prompt_adapter_request=prompt_adapter_request,
             )
 
