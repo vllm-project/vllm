@@ -69,7 +69,7 @@ class Metrics:
             name="vllm:cpu_cache_usage_perc",
             documentation="CPU KV-cache usage. 1 means 100 percent usage.",
             labelnames=labelnames,
-            mulitprocess_mode="sum")
+            multiprocess_mode="sum")
 
         # Iteration stats
         self.counter_num_preemption = self._counter_cls(
