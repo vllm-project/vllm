@@ -6,7 +6,7 @@ import signal
 import sys
 from typing import List, Optional
 
-os.environ["PROMETHEUS_MULTIPROC_DIR"] = "/tmp/test"
+
 
 from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam
