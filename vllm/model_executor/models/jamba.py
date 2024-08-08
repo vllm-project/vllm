@@ -37,6 +37,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.worker.model_runner import (_BATCH_SIZES_TO_CAPTURE,
                                       _get_graph_batch_size)
+
 from .utils import get_inputs_embeds
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]

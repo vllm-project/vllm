@@ -53,7 +53,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.utils import print_warning_once
 
-from .utils import is_pp_missing_parameter, make_layers, get_inputs_embeds
+from .utils import get_inputs_embeds, is_pp_missing_parameter, make_layers
 
 
 class Qwen2MoeMLP(nn.Module):

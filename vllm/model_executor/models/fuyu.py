@@ -41,7 +41,7 @@ from vllm.multimodal.image import (cached_get_image_processor,
 from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
 
 from .interfaces import SupportsVision
-from .utils import merge_vision_embeddings, get_inputs_embeds
+from .utils import get_inputs_embeds, merge_vision_embeddings
 
 logger = init_logger(__name__)
 

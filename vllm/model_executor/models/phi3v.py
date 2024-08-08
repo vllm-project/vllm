@@ -43,7 +43,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
                    input_processor_for_clip)
 from .interfaces import SupportsVision
-from .utils import merge_vision_embeddings, get_inputs_embeds
+from .utils import get_inputs_embeds, merge_vision_embeddings
 
 logger = init_logger(__name__)
 
