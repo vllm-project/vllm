@@ -257,7 +257,8 @@ class OpenAIServingCompletion(OpenAIServing):
                             *res.prompt_token_ids, *output.token_ids
                         ]
                         out_logprobs = [
-                            *res.prompt_logprobs, *(output.logprobs or []),
+                            *res.prompt_logprobs,
+                            *(output.logprobs or []),
                         ]
                         has_echoed[i] = True
                     else:
