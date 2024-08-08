@@ -1,7 +1,9 @@
+import os
 import asyncio
 import importlib
 import inspect
 import re
+import tempfile
 from argparse import Namespace
 from contextlib import asynccontextmanager
 from http import HTTPStatus
@@ -12,8 +14,8 @@ from fastapi import APIRouter, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from prometheus_client import make_asgi_app, multiprocess, CollectorRegistry
 from starlette.routing import Mount
+
 
 import vllm.envs as envs
 from vllm.config import ModelConfig
@@ -43,7 +45,7 @@ from vllm.entrypoints.openai.serving_tokenization import (
     OpenAIServingTokenization)
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser, get_open_zmq_ipc_path
+from vllm.utils import FlexibleArgumentParser, get_open_zmq_ipc_path, random_uuid
 from vllm.version import __version__ as VLLM_VERSION
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
@@ -54,6 +56,9 @@ openai_serving_chat: OpenAIServingChat
 openai_serving_completion: OpenAIServingCompletion
 openai_serving_embedding: OpenAIServingEmbedding
 openai_serving_tokenization: OpenAIServingTokenization
+prometheus_multiproc_dir: tempfile.TemporaryDirectory
+prometheus_multiproc_dir = tempfile.TemporaryDirectory()
+os.environ["PROMETHEUS_MULTIPROC_DIR"] = prometheus_multiproc_dir.name
 
 logger = init_logger('vllm.entrypoints.openai.api_server')
 
@@ -106,6 +111,15 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
 
     # Otherwise, use the multiprocessing AsyncLLMEngine.
     else:
+        # Create a tmp dir to be used for Prometheus Multiprocessing.
+        # See: https://prometheus.github.io/client_python/multiprocess/
+        # Note: TemporaryDirectory manages the lifecycle of the 
+        #   /tmp/xxx directory which is created. We use a global 
+        #   variable such that the tmp dir will exist for the life 
+        #   of server and get cleaned up at exit.
+        # global prometheus_multiproc_dir
+        
+
         # Select random path for IPC.
         rpc_path = get_open_zmq_ipc_path()
         logger.info("Multiprocessing frontend to use %s for RPC Path.",
@@ -115,7 +129,7 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
         rpc_server_process = Process(target=run_rpc_server,
                                      args=(engine_args,
                                            UsageContext.OPENAI_API_SERVER,
-                                           rpc_path))
+                                           rpc_path),)
         rpc_server_process.start()
 
         # Build RPCClient, which conforms to AsyncEngineClient Protocol.
@@ -148,8 +162,21 @@ router = APIRouter()
 
 
 def mount_metrics(app: FastAPI):
-    registry = CollectorRegistry()
-    multiprocess.MultiProcessCollector(registry)
+    # Lazy import such that we can set PROMETHEUS_MULTIPROC_DIR
+    # before prometheus_client is imported in case of multiprocessing.
+    from prometheus_client import make_asgi_app, multiprocess, CollectorRegistry
+
+    prometheus_multiproc_dir_path = os.getenv("PROMETHEUS_MULTIPROC_DIR", None)
+
+    # If set, we will use multiprocessing mode.
+    if prometheus_multiproc_dir_path is not None:
+        logger.info("Prometheus client using multiprocessing mode with "
+                    "PROMETHEUS_MULTIPROC_DIR=%s", prometheus_multiproc_dir_path)
+        # See https://prometheus.github.io/client_python/exporting/http/fastapi-gunicorn/
+        registry = CollectorRegistry()
+        multiprocess.MultiProcessCollector(registry)
+    else:
+        registry = None
     
     # Add prometheus asgi middleware to route /metrics requests
     metrics_route = Mount("/metrics", make_asgi_app(registry=registry))

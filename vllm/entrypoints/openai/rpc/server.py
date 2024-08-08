@@ -212,5 +212,8 @@ async def run_server(server: AsyncEngineRPCServer):
 
 def run_rpc_server(async_engine_args: AsyncEngineArgs,
                    usage_context: UsageContext, rpc_path: str):
+    import os
+    print("In subprocess")
+    print(os.environ["PROMETHEUS_MULTIPROC_DIR"])
     server = AsyncEngineRPCServer(async_engine_args, usage_context, rpc_path)
     asyncio.run(run_server(server))
