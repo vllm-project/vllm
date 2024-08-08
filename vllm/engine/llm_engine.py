@@ -794,8 +794,8 @@ class LLMEngine:
         decoder_prompt, decoder_prompt_ids, decoder_mm_data = decoder_comps
 
         if encoder_mm_data is not None or decoder_mm_data is not None:
-            raise ValueError("Multi-modal data is not supported for "
-                             "(language) encoder-decoder models")
+            raise ValueError("Multi-modal encoder-decoder models are "
+                             "not supported yet")
 
         decoder_prompt_ids = (
             self._prepare_decoder_input_ids_for_generation(decoder_prompt_ids))
