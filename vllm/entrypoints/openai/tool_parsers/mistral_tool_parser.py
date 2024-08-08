@@ -68,8 +68,7 @@ class MistralToolParser(ToolParser):
             # use a regex to find the tool call. remove the BOT token
             #   and make sure to replace single quotes with double quotes
             raw_tool_call = MistralToolParser.tool_call_regex.findall(
-                model_output.replace(MistralToolParser.bot_token,
-                                     "").replace("'", "\""))[0]
+                model_output.replace(MistralToolParser.bot_token, ""))[0]
 
             # load the JSON, and then use it to build the Function and
             # Tool Call
@@ -152,16 +151,21 @@ class MistralToolParser(ToolParser):
             # replace BOT token with empty string, and convert single quotes
             # to double to allow parsing as JSON since mistral uses single
             # quotes instead of double for tool calls
-            tool_call_message_portion = current_text.split(self.bot_token)[1]
-            parsable_arr = tool_call_message_portion.replace("\'", "\"")
+            parsable_arr = current_text.split(self.bot_token)[1]
 
             # tool calls are generated in an array, so do partial JSON
             # parsing on the entire array
-            tool_call_arr: List[Dict] = partial_json_parser.loads(
-                parsable_arr, flags)
+            try:
+                tool_call_arr: List[Dict] = partial_json_parser.loads(
+                    parsable_arr, flags)
+            except partial_json_parser.core.exceptions.MalformedJSON:
+                logger.debug('not enough tokens to parse into JSON yet')
+                return None
 
             # select as the current tool call the one we're on the state at
-            current_tool_call: Dict = tool_call_arr[self.current_tool_id]
+
+            current_tool_call: Dict = tool_call_arr[self.current_tool_id] \
+                if len(tool_call_arr) > 0 else {}
 
             # case -- if no tokens have been streamed for the tool, e.g.
             #   only the array brackets, stream nothing
@@ -241,6 +245,8 @@ class MistralToolParser(ToolParser):
                 prev_arguments = self.prev_tool_call_arr[
                     self.current_tool_id].get("arguments")
                 cur_arguments = current_tool_call.get("arguments")
+
+                logger.debug("new text: %s", current_text)
 
                 new_text = delta_text.replace("\'", "\"")
 
