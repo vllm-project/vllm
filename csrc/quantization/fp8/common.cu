@@ -15,9 +15,8 @@
 #else
   #include "amd/hip_float8.h"
   #define FP8_TYPE c10::Float8_e4m3fnuz
-  // Amd GPU hardware only supports up to 224.0 for fp8 value.
   // Using the default max value from pytorch (240.0) will cause accuracy
-  // issue when running dynamic quantization.
+  // issue when running dynamic quantization. Here use 224.0f for rocm.
   #define FP8_E4M3_MAX 224.0f
 #endif
 

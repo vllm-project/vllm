@@ -4,9 +4,8 @@ import torch
 
 from vllm.utils import is_hip
 
-# AMD hardware only supports up to 224.0 for float8 type.
 # Using the default value (240.0) from pytorch will cause accuracy
-# issue on dynamic quantization models.
+# issue on dynamic quantization models. Here use 224.0 for rocm.
 ROCM_FP8_MAX = 224.0
 FP8_DTYPE = torch.float8_e4m3fnuz if is_hip() else torch.float8_e4m3fn
 
