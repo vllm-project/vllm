@@ -200,10 +200,15 @@ class Hermes2ProToolParser(ToolParser):
                 return delta
 
             logger.debug("Tool call portion: %s", tool_call_portion or "")
-            current_tool_call = partial_json_parser.loads(
-                tool_call_portion or "{}",
-                flags) if tool_call_portion else None
-            logger.debug("Parsed tool call %s", current_tool_call)
+            try:
+
+                current_tool_call = partial_json_parser.loads(
+                    tool_call_portion or "{}",
+                    flags) if tool_call_portion else None
+                logger.debug("Parsed tool call %s", current_tool_call)
+            except partial_json_parser.core.exceptions.MalformedJSON:
+                logger.debug('not enough tokens to parse into JSON yet')
+                return None
 
             # case - we haven't sent the initial delta with the tool call ID
             #   (it will be sent)
@@ -334,7 +339,4 @@ class Hermes2ProToolParser(ToolParser):
 
         except Exception as e:
             logger.error("Error trying to handle streaming tool call: %s", e)
-            logger.debug(
-                "Skipping chunk as a result of tool streaming extraction "
-                "error")
             return None  # do not stream a delta. skip this token ID.
