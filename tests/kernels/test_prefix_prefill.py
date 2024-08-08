@@ -71,7 +71,7 @@ def test_contexted_kv_attention(
     kv.uniform_(-1e-3, 1e-3)
     key, value = kv.unbind(dim=1)
 
-    cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
+    cache_dtype = dtype if kv_cache_dtype == "auto" else STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
     k_cache = torch.zeros(cache_size,
                           block_size,
                           num_kv_heads,
@@ -293,7 +293,7 @@ def test_contexted_kv_attention_alibi(
     kv.uniform_(-1e-3, 1e-3)
     key, value = kv.unbind(dim=1)
 
-    cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
+    cache_dtype = dtype if kv_cache_dtype == "auto" else STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
     k_cache = torch.zeros(cache_size,
                           block_size,
                           num_kv_heads,
