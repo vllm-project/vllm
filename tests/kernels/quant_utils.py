@@ -10,6 +10,7 @@ from vllm.utils import is_hip
 ROCM_FP8_MAX = 224.0
 FP8_DTYPE = torch.float8_e4m3fnuz if is_hip() else torch.float8_e4m3fn
 
+
 def as_float32_tensor(x: Union[float, torch.tensor]) -> torch.tensor:
     return torch.as_tensor(x, dtype=torch.float32, device='cuda')
 
