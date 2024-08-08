@@ -47,24 +47,29 @@ class Metrics:
         self.gauge_scheduler_running = self._gauge_cls(
             name="vllm:num_requests_running",
             documentation="Number of requests currently running on GPU.",
-            labelnames=labelnames)
+            labelnames=labelnames,
+            multiprocess_mode="sum")
         self.gauge_scheduler_waiting = self._gauge_cls(
             name="vllm:num_requests_waiting",
             documentation="Number of requests waiting to be processed.",
-            labelnames=labelnames)
+            labelnames=labelnames,
+            multiprocess_mode="sum")
         self.gauge_scheduler_swapped = self._gauge_cls(
             name="vllm:num_requests_swapped",
             documentation="Number of requests swapped to CPU.",
-            labelnames=labelnames)
+            labelnames=labelnames,
+            multiprocess_mode="sum")
         #   KV Cache Usage in %
         self.gauge_gpu_cache_usage = self._gauge_cls(
             name="vllm:gpu_cache_usage_perc",
             documentation="GPU KV-cache usage. 1 means 100 percent usage.",
-            labelnames=labelnames)
+            labelnames=labelnames,
+            multiprocess_mode="sum")
         self.gauge_cpu_cache_usage = self._gauge_cls(
             name="vllm:cpu_cache_usage_perc",
             documentation="CPU KV-cache usage. 1 means 100 percent usage.",
-            labelnames=labelnames)
+            labelnames=labelnames,
+            mulitprocess_mode="sum")
 
         # Iteration stats
         self.counter_num_preemption = self._counter_cls(
@@ -138,11 +143,13 @@ class Metrics:
         self.gauge_spec_decode_draft_acceptance_rate = self._gauge_cls(
             name="vllm:spec_decode_draft_acceptance_rate",
             documentation="Speulative token acceptance rate.",
-            labelnames=labelnames)
+            labelnames=labelnames,
+            multiprocess_mode="sum")
         self.gauge_spec_decode_efficiency = self._gauge_cls(
             name="vllm:spec_decode_efficiency",
             documentation="Speculative decoding system efficiency.",
-            labelnames=labelnames)
+            labelnames=labelnames,
+            multiprocess_mode="sum")
         self.counter_spec_decode_num_accepted_tokens = (self._counter_cls(
             name="vllm:spec_decode_num_accepted_tokens_total",
             documentation="Number of accepted tokens.",
@@ -161,12 +168,14 @@ class Metrics:
             name="vllm:avg_prompt_throughput_toks_per_s",
             documentation="Average prefill throughput in tokens/s.",
             labelnames=labelnames,
+            multiprocess_mode="sum",
         )
         # Deprecated in favor of vllm:generation_tokens_total
         self.gauge_avg_generation_throughput = self._gauge_cls(
             name="vllm:avg_generation_throughput_toks_per_s",
             documentation="Average generation throughput in tokens/s.",
             labelnames=labelnames,
+            multiprocess_mode="sum",
         )
 
     def _unregister_vllm_metrics(self) -> None:
