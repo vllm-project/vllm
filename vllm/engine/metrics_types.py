@@ -1,7 +1,7 @@
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Protocol
+from typing import List, Optional
 
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
@@ -40,12 +40,6 @@ class Stats:
     spec_decode_metrics: Optional["SpecDecodeWorkerMetrics"] = None
 
 
-class SupportsMetricsInfo(Protocol):
-
-    def metrics_info(self) -> Dict[str, str]:
-        ...
-
-
 class StatLoggerBase(ABC):
     """Base class for StatLogger."""
 
@@ -56,10 +50,6 @@ class StatLoggerBase(ABC):
         self.last_local_log = time.time()
         self.local_interval = local_interval
         self.spec_decode_metrics: Optional["SpecDecodeWorkerMetrics"] = None
-
-    @abstractmethod
-    def info(self, type: str, obj: SupportsMetricsInfo) -> None:
-        raise NotImplementedError
 
     @abstractmethod
     def log(self, stats: Stats) -> None:

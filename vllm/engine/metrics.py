@@ -5,8 +5,7 @@ from typing import Dict, List, Optional, Union
 import numpy as np
 import prometheus_client
 
-from vllm.engine.metrics_types import (StatLoggerBase, Stats,
-                                       SupportsMetricsInfo)
+from vllm.engine.metrics_types import StatLoggerBase, Stats
 from vllm.executor.ray_utils import ray
 from vllm.logger import init_logger
 
