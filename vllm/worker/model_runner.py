@@ -51,9 +51,9 @@ from vllm.prompt_adapter.worker_manager import (
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (IntermediateTensors, SamplerOutput,
                            SequenceGroupMetadata)
-from vllm.utils import (CudaMemoryProfiler, async_tensor_h2d, flatten_2d_lists,
-                        get_kv_cache_torch_dtype, is_hip,
-                        is_pin_memory_available, PyObjectCache)
+from vllm.utils import (CudaMemoryProfiler, PyObjectCache, async_tensor_h2d,
+                        flatten_2d_lists, get_kv_cache_torch_dtype, is_hip,
+                        is_pin_memory_available)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
     _add_attn_metadata_broadcastable_dict,
