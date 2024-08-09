@@ -267,6 +267,9 @@ class OpenAIServingChat(OpenAIServing):
                     # Send first response for each request.n (index) with
                     # the role
                     role = self.get_chat_request_role(request)
+
+                    # NOTE num_choices defaults to 1 so this usually executes
+                    # once per request
                     for i in range(num_choices):
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=i,
@@ -279,14 +282,18 @@ class OpenAIServingChat(OpenAIServing):
                             created=created_time,
                             choices=[choice_data],
                             model=model_name)
+
+                        # if usage should be included
                         if (request.stream_options
                                 and request.stream_options.include_usage):
+                            # if continuous usage stats are requested, add it
                             if request.stream_options.continuous_usage_stats:
                                 prompt_tokens = len(res.prompt_token_ids)
                                 usage = UsageInfo(prompt_tokens=prompt_tokens,
                                                   completion_tokens=0,
                                                   total_tokens=prompt_tokens)
                                 chunk.usage = usage
+                            # otherwise don't
                             else:
                                 chunk.usage = None
 
@@ -296,11 +303,11 @@ class OpenAIServingChat(OpenAIServing):
                     # Send response to echo the input portion of the
                     # last message
                     if request.echo:
-                        last_msg_content = ""
+                        last_msg_content: Optional[str] = ""
                         if conversation and conversation[-1].get(
                                 "content") and conversation[-1].get(
                                     "role") == role:
-                            last_msg_content = conversation[-1]["content"] or ""
+                            last_msg_content = conversation[-1]["content"]
 
                         if last_msg_content:
                             for i in range(num_choices):
@@ -418,6 +425,8 @@ class OpenAIServingChat(OpenAIServing):
                             created=created_time,
                             choices=[choice_data],
                             model=model_name)
+
+                        # handle usage stats if requested & if continuous
                         if (request.stream_options
                                 and request.stream_options.include_usage):
                             if (request.stream_options.continuous_usage_stats):
