@@ -21,6 +21,9 @@ IS_DISTRIBUTED_KV_INSTANCE = (envs.VLLM_DISAGG_PREFILL_ROLE is not None)
 IS_KV_PREFILL_INSTANCE: bool = (envs.VLLM_DISAGG_PREFILL_ROLE == "prefill")
 IS_KV_DECODE_INSTANCE: bool = (envs.VLLM_DISAGG_PREFILL_ROLE == "decode")
 
+# a magic number
+DISTRIBUTED_KV_GLOO_TAG = 24857323
+
 logger = init_logger(__name__)
 
 
@@ -140,13 +143,17 @@ class DistributedKVCoordinator(GroupCoordinator):
         # KV cache send go through CPU, and the original `send` only use GPU.
         # So create a new group for sending input hash.
         input_hash_tensor = torch.tensor([input_hash], device="cpu").long()
-        torch.distributed.isend(input_hash_tensor, self.target_rank_for_send,
-                                self.cpu_group)
+        torch.distributed.isend(input_hash_tensor, 
+                                self.target_rank_for_send,
+                                self.cpu_group,
+                                tag=DISTRIBUTED_KV_GLOO_TAG)
 
     def recv_input_hash(self) -> int:
         input_hash_tensor = torch.tensor([0], device="cpu").long()
-        torch.distributed.irecv(input_hash_tensor, self.target_rank_for_recv,
-                                self.cpu_group).wait()
+        torch.distributed.irecv(input_hash_tensor, 
+                                self.target_rank_for_recv,
+                                self.cpu_group, 
+                                tag=DISTRIBUTED_KV_GLOO_TAG).wait()
         return input_hash_tensor.item()
 
     def recv_input_hash_and_send_kv(self):
@@ -155,9 +162,10 @@ class DistributedKVCoordinator(GroupCoordinator):
 
             # receive the input hash that the decode instance requires
             logger.debug(
-                '[rank%d]: Waiting for input hash from rank %d',
+                '[rank%d]: Waiting for input hash from rank %d, my keys are %s',
                 torch.distributed.get_rank(),
                 self.target_rank_for_recv,
+                list(self.input_hash_to_kv_sending_requests.keys()),
             )
             input_hash = self.recv_input_hash()
             logger.debug(
@@ -226,25 +234,18 @@ def buffer_kv_caches_send_and_listen_for_input_hash(
 ) -> None:
 
     input_tokens_tuple = tuple(model_input.input_tokens.tolist())
-    seq_query_obj = {
-        "seq_lens": model_input.seq_lens,
-        "query_lens": model_input.query_lens,
-    }
-    seq_query_obj = ps.get_tp_group().broadcast_object(seq_query_obj)
-    seq_lens = seq_query_obj["seq_lens"]
-    query_lens = seq_query_obj["query_lens"]
+    seq_lens = model_input.attn_metadata.seq_lens
     slot_mapping = model_input.attn_metadata.slot_mapping.flatten()
 
-    logger.debug("My query lens is %s, seq len is %s, rank is %s",
-                 str(query_lens), str(seq_lens), torch.distributed.get_rank())
+    logger.debug("My seq len is %s, rank is %s", str(seq_lens), torch.distributed.get_rank())
                  
     # query_lens contains new KV caches that are added to vLLM.
     # so we will send them to decode instance
     # FIXME(Kuntai): This assume that all requests are prefill.
-    for idx, qlen in enumerate(query_lens):
+    for idx, slen in enumerate(seq_lens):
 
-        start_pos = sum(query_lens[:idx])
-        end_pos = start_pos + qlen
+        start_pos = sum(seq_lens[:idx])
+        end_pos = start_pos + slen
         input_hash = hash(input_tokens_tuple[start_pos:end_pos])
 
         for i in range(model_executable.model.start_layer,
@@ -267,7 +268,7 @@ def buffer_kv_caches_send_and_listen_for_input_hash(
             input_hash, hidden_or_intermediate_states[start_pos:end_pos])
         ps.get_disagg_group().kv_cache_send_finish(input_hash)
 
-    logger.error("\033[92mKV send DONE for rank %d\033[0m",
+    logger.debug("[rank%d]: KV send DONE.",
                  torch.distributed.get_rank())
 
 
@@ -278,28 +279,22 @@ def send_input_hash_and_do_kv_caches_recv(
 
     # This is disagg decode instance, during prefill state
     # Need to receive KV from the prefill instance
-    # FIXME(Kuntai): This impl assumes that all requests are prefill.
     input_tokens_tuple = tuple(model_input.input_tokens.tolist())
-    seq_query_obj = {
-        "seq_lens": model_input.seq_lens,
-        "query_lens": model_input.query_lens,
-    }
-    seq_query_obj = ps.get_tp_group().broadcast_object(seq_query_obj)
-    seq_lens = seq_query_obj["seq_lens"]
-    query_lens = seq_query_obj["query_lens"]
+    seq_lens = model_input.attn_metadata.seq_lens
     slot_mapping = model_input.attn_metadata.slot_mapping.flatten()
+
+    logger.debug("My seq len is %s, rank is %s", str(seq_lens), torch.distributed.get_rank())
 
     hidden_or_intermediate_states_for_one_req = []
 
     # enumerate different requests
-    logger.debug("My query lens is %s, seq len is %s, rank is %s",
-                 str(query_lens), str(seq_lens), torch.distributed.get_rank())
-    for idx, qlen in enumerate(query_lens):
+    # FIXME(Kuntai): This impl assumes that all requests are prefill.
+    for idx, slen in enumerate(seq_lens):
 
-        start_pos = sum(query_lens[:idx])
-        end_pos = start_pos + qlen
+        start_pos = sum(seq_lens[:idx])
+        end_pos = start_pos + slen
         input_hash = hash(input_tokens_tuple[start_pos:end_pos])
-        num_tokens = qlen
+        num_tokens = slen
 
         # notify the prefill instance to start sending KVs associated with input_hash
         ps.get_disagg_group().kv_cache_recv_start(input_hash)
@@ -343,6 +338,6 @@ def send_input_hash_and_do_kv_caches_recv(
     hidden_or_intermediate_states = torch.cat(
         hidden_or_intermediate_states_for_one_req, dim=0)
 
-    logger.error("\033[92mKV receive DONE for rank %d\033[0m",
+    logger.error("[rank%d]: KV recv DONE.",
                  torch.distributed.get_rank())
     return hidden_or_intermediate_states
