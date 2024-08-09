@@ -10,10 +10,11 @@ QUANTIZATION = os.environ.get("QUANTIZATION", "gptq_marlin")
 def test_weight_loading(vllm_runner):
     with vllm_runner(model_name=MODEL_NAME,
                      revision=REVISION,
-                     dtype="half",
+                     dtype="auto",
                      quantization=QUANTIZATION,
                      max_model_len=MAX_MODEL_LEN,
                      tensor_parallel_size=2) as model:
 
         output = model.generate_greedy("Hello world!", max_tokens=20)
+        print(output)
         assert output
