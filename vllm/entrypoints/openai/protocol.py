@@ -6,18 +6,19 @@ from typing import Any, Dict, List, Literal, Optional, Union
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from transformers import PreTrainedTokenizer
 from typing_extensions import Annotated
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.openai.logits_processors import get_logits_processors
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import LogitsProcessor, SamplingParams
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
 
 # torch is mocked during docs generation,
 # so we have to provide the values as literals
 _MOCK_LONG_INFO = Namespace(min=-9223372036854775808, max=9223372036854775807)
+_LONG_INFO: Union["torch.iinfo", Namespace]
 
 try:
     from sphinx.ext.autodoc.mock import _MockModule
@@ -233,7 +234,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     # doc: end-chat-completion-extra-params
 
     def to_sampling_params(
-            self, tokenizer: PreTrainedTokenizer,
+            self, tokenizer: AnyTokenizer,
             guided_decode_logits_processor: Optional[LogitsProcessor],
             default_max_tokens: int) -> SamplingParams:
         max_tokens = self.max_tokens
@@ -249,7 +250,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if guided_decode_logits_processor:
             logits_processors.append(guided_decode_logits_processor)
 
-        return SamplingParams(
+        return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
             presence_penalty=self.presence_penalty,
@@ -418,7 +419,7 @@ class CompletionRequest(OpenAIBaseModel):
     # doc: end-completion-extra-params
 
     def to_sampling_params(
-            self, tokenizer: PreTrainedTokenizer,
+            self, tokenizer: AnyTokenizer,
             guided_decode_logits_processor: Optional[LogitsProcessor],
             default_max_tokens: int) -> SamplingParams:
         max_tokens = self.max_tokens
@@ -435,7 +436,7 @@ class CompletionRequest(OpenAIBaseModel):
         if guided_decode_logits_processor:
             logits_processors.append(guided_decode_logits_processor)
 
-        return SamplingParams(
+        return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
             presence_penalty=self.presence_penalty,
@@ -499,7 +500,7 @@ class EmbeddingRequest(OpenAIBaseModel):
     # https://platform.openai.com/docs/api-reference/embeddings
     model: str
     input: Union[List[int], List[List[int]], str, List[str]]
-    encoding_format: Optional[str] = Field('float', pattern='^(float|base64)$')
+    encoding_format: Literal["float", "base64"] = "float"
     dimensions: Optional[int] = None
     user: Optional[str] = None
 

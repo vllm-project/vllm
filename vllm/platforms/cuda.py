@@ -4,9 +4,10 @@ pynvml. However, it should not initialize cuda context.
 
 import os
 from functools import lru_cache, wraps
-from typing import List, Tuple
+from typing import Callable, List, Tuple, TypeVar
 
 import pynvml
+from typing_extensions import ParamSpec
 
 from vllm.logger import init_logger
 
@@ -14,16 +15,19 @@ from .interface import Platform, PlatformEnum
 
 logger = init_logger(__name__)
 
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
 # all the related functions work on real physical device ids.
 # the major benefit of using NVML is that it will not initialize CUDA
 
 
-def with_nvml_context(fn):
+def with_nvml_context(fn: Callable[_P, _R]) -> Callable[_P, _R]:
 
     @wraps(fn)
-    def wrapper(*args, **kwargs):
+    def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
         pynvml.nvmlInit()
         try:
             return fn(*args, **kwargs)

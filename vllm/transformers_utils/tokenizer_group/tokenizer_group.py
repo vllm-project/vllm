@@ -2,9 +2,6 @@ from typing import List, Optional
 
 from vllm.config import TokenizerPoolConfig
 from vllm.lora.request import LoRARequest
-from vllm.transformers_utils.tokenizer import (get_lora_tokenizer,
-                                               get_lora_tokenizer_async,
-                                               get_tokenizer)
 from vllm.utils import LRUCache
 
 from .base_tokenizer_group import AnyTokenizer, BaseTokenizerGroup
@@ -15,6 +12,9 @@ class TokenizerGroup(BaseTokenizerGroup):
 
     def __init__(self, tokenizer_id: str, enable_lora: bool, max_num_seqs: int,
                  max_input_length: Optional[int], **tokenizer_config):
+        # Avoid circular import
+        from vllm.transformers_utils.tokenizer import get_tokenizer
+
         self.tokenizer_id = tokenizer_id
         self.tokenizer_config = tokenizer_config
         self.enable_lora = enable_lora
@@ -73,6 +73,9 @@ class TokenizerGroup(BaseTokenizerGroup):
         self,
         lora_request: Optional[LoRARequest] = None,
     ) -> AnyTokenizer:
+        # Avoid circular import
+        from vllm.transformers_utils.tokenizer import get_lora_tokenizer
+
         if not lora_request or not self.enable_lora:
             return self.tokenizer
         if lora_request.lora_int_id not in self.lora_tokenizers:
@@ -87,6 +90,9 @@ class TokenizerGroup(BaseTokenizerGroup):
         self,
         lora_request: Optional[LoRARequest] = None,
     ) -> AnyTokenizer:
+        # Avoid circular import
+        from vllm.transformers_utils.tokenizer import get_lora_tokenizer_async
+
         if not lora_request or not self.enable_lora:
             return self.tokenizer
         if lora_request.lora_int_id not in self.lora_tokenizers:
