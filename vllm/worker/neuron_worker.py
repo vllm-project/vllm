@@ -89,6 +89,9 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         return WorkerInput(num_seq_groups=len(
             execute_model_req.seq_group_metadata_list), )
 
+    def execute_worker(self, worker_input: WorkerInput) -> None:
+        pass
+
     def get_cache_block_size_bytes(self) -> int:
         """Determine the size in bytes of a cache block.
 
