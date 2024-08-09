@@ -448,6 +448,7 @@ class FlashAttentionImpl(AttentionImpl):
         k_scale: float = 1.0,
         v_scale: float = 1.0,
         attn_type: AttentionType = AttentionType.DECODER,
+        out: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 
@@ -499,7 +500,11 @@ class FlashAttentionImpl(AttentionImpl):
         assert key.shape[0] == num_prefill_tokens + num_decode_tokens
         assert value.shape[0] == num_prefill_tokens + num_decode_tokens
 
-        output = torch.empty_like(query)
+        if out is None:
+            output = torch.empty_like(query)
+        else:
+            output = out.view(-1, self.num_heads, self.head_size)
+
         # Query for decode. KV is not needed because it is already cached.
         decode_query = query[num_prefill_tokens:]
         # QKV for prefill.
@@ -517,7 +522,7 @@ class FlashAttentionImpl(AttentionImpl):
                 # normal attention
                 # When block_tables are not filled, it means q and k are the
                 # prompt, and they have the same length.
-                out = flash_attn_varlen_func(
+                flash_attn_varlen_func(
                     q=query,
                     k=key,
                     v=value,
@@ -530,14 +535,13 @@ class FlashAttentionImpl(AttentionImpl):
                     window_size=self.sliding_window,
                     alibi_slopes=self.alibi_slopes,
                     softcap=self.logits_soft_cap,
+                    out=output[:num_prefill_tokens],
                 )
-                assert output[:num_prefill_tokens].shape == out.shape
-                output[:num_prefill_tokens] = out
             else:
                 # prefix-enabled attention
                 assert prefill_meta.seq_lens is not None
                 max_seq_len = max(prefill_meta.seq_lens)
-                output[:num_prefill_tokens] = flash_attn_varlen_func(
+                flash_attn_varlen_func(
                     q=query,
                     k=key_cache,
                     v=value_cache,
@@ -550,11 +554,12 @@ class FlashAttentionImpl(AttentionImpl):
                     alibi_slopes=self.alibi_slopes,
                     block_table=prefill_meta.block_tables,
                     softcap=self.logits_soft_cap,
+                    out=output[:num_prefill_tokens],
                 )
 
         if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
-            output[num_prefill_tokens:] = flash_attn_with_kvcache(
+            flash_attn_with_kvcache(
                 decode_query.unsqueeze(1),
                 key_cache,
                 value_cache,
@@ -563,7 +568,8 @@ class FlashAttentionImpl(AttentionImpl):
                 softmax_scale=self.scale,
                 causal=True,
                 alibi_slopes=self.alibi_slopes,
-            ).squeeze(1)
+                out=output[num_prefill_tokens:].unsqueeze(1),
+            )
 
         # Reshape the output tensor.
         return output.view(num_tokens, hidden_size)

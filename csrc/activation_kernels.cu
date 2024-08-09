@@ -13,13 +13,13 @@ namespace vllm {
 template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&)>
 __global__ void act_and_mul_kernel(
     scalar_t* __restrict__ out,          // [..., d]
-    const scalar_t* __restrict__ input,  // [..., 2, d]
-    const int d) {
+    const scalar_t* __restrict__ input,  // [..., 2 * d]
+    const int d, const int in_stride, const int out_stride) {
   const int64_t token_idx = blockIdx.x;
   for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
-    const scalar_t x = VLLM_LDG(&input[token_idx * 2 * d + idx]);
-    const scalar_t y = VLLM_LDG(&input[token_idx * 2 * d + d + idx]);
-    out[token_idx * d + idx] = ACT_FN(x) * y;
+    const scalar_t x = VLLM_LDG(&input[token_idx * in_stride + idx]);
+    const scalar_t y = VLLM_LDG(&input[token_idx * in_stride + d + idx]);
+    out[token_idx * out_stride + idx] = ACT_FN(x) * y;
   }
 }
 
@@ -55,18 +55,25 @@ __device__ __forceinline__ T gelu_tanh_kernel(const T& x) {
 }  // namespace vllm
 
 // Launch activation and gating kernel.
-#define LAUNCH_ACTIVATION_GATE_KERNEL(KERNEL)                            \
-  int d = input.size(-1) / 2;                                            \
-  int64_t num_tokens = input.numel() / input.size(-1);                   \
-  dim3 grid(num_tokens);                                                 \
-  dim3 block(std::min(d, 1024));                                         \
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));      \
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();          \
-  VLLM_DISPATCH_FLOATING_TYPES(                                          \
-      input.scalar_type(), "act_and_mul_kernel", [&] {                   \
-        vllm::act_and_mul_kernel<scalar_t, KERNEL<scalar_t>>             \
-            <<<grid, block, 0, stream>>>(out.data_ptr<scalar_t>(),       \
-                                         input.data_ptr<scalar_t>(), d); \
+#define LAUNCH_ACTIVATION_GATE_KERNEL(KERNEL)                           \
+  TORCH_CHECK(input.stride(-1) == 1,                                    \
+              "input must be contiguous in the last dimension");        \
+  TORCH_CHECK(out.stride(-1) == 1,                                      \
+              "out must be contiguous in the last dimension");          \
+  int d = input.size(-1) / 2;                                           \
+  int in_stride = input.stride(-2);                                     \
+  int out_stride = out.stride(-2);                                      \
+  int64_t num_tokens = input.numel() / input.size(-1);                  \
+  dim3 grid(num_tokens);                                                \
+  dim3 block(std::min(d, 1024));                                        \
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));     \
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();         \
+  VLLM_DISPATCH_FLOATING_TYPES(                                         \
+      input.scalar_type(), "act_and_mul_kernel", [&] {                  \
+        vllm::act_and_mul_kernel<scalar_t, KERNEL<scalar_t>>            \
+            <<<grid, block, 0, stream>>>(out.data_ptr<scalar_t>(),      \
+                                         input.data_ptr<scalar_t>(), d, \
+                                         in_stride, out_stride);        \
       });
 
 void silu_and_mul(torch::Tensor& out,    // [..., d]

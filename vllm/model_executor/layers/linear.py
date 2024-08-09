@@ -2,7 +2,6 @@ from abc import abstractmethod
 from typing import Dict, List, Optional, Tuple
 
 import torch
-import torch.nn.functional as F
 from torch.nn.parameter import Parameter, UninitializedParameter
 
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
@@ -118,12 +117,18 @@ class UnquantizedLinearMethod(LinearMethodBase):
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
 
-    def apply(self,
-              layer: torch.nn.Module,
-              x: torch.Tensor,
-              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-
-        return F.linear(x, layer.weight, bias)
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+        out: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if bias is not None:
+            out = torch.addmm(bias, x, layer.weight.t(), out=out)
+        else:
+            out = torch.matmul(x, layer.weight.t(), out=out)
+        return out
 
 
 class LinearBase(torch.nn.Module):
@@ -347,12 +352,12 @@ class ColumnParallelLinear(LinearBase):
     def weight_loader_v2(self, param: Parameter, loaded_weight: torch.Tensor):
         param.load_column_parallel_weight(loaded_weight=loaded_weight)
 
-    def forward(self, input_):
+    def forward(self, input_, out=None):
         bias = self.bias if not self.skip_bias_add else None
 
         # Matrix multiply.
         assert self.quant_method is not None
-        output_parallel = self.quant_method.apply(self, input_, bias)
+        output_parallel = self.quant_method.apply(self, input_, bias, out=out)
         if self.gather_output:
             # All-gather across the partitions.
             output = tensor_model_parallel_all_gather(output_parallel)
@@ -999,7 +1004,7 @@ class RowParallelLinear(LinearBase):
                          loaded_weight: torch.Tensor):
         param.load_row_parallel_weight(loaded_weight=loaded_weight)
 
-    def forward(self, input_):
+    def forward(self, input_, out=None):
         if self.input_is_parallel:
             input_parallel = input_
         else:
@@ -1015,7 +1020,8 @@ class RowParallelLinear(LinearBase):
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
         output_parallel = self.quant_method.apply(self,
                                                   input_parallel,
-                                                  bias=bias_)
+                                                  bias=bias_,
+                                                  out=out)
         if self.reduce_results and self.tp_size > 1:
             output = tensor_model_parallel_all_reduce(output_parallel)
         else:
