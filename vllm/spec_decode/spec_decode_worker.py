@@ -147,6 +147,11 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                     draft_worker_kwargs[
                         "model_runner_cls"] = TP1DraftModelRunner
                 else:
+                    if draft_worker_kwargs[
+                            "model_config"].hf_config.model_type == "eagle":
+                        raise NotImplementedError(
+                            "EAGLE does not support TP > 1 yet")
+
                     allow_zero_draft_token_step = False
                 proposer_worker = MultiStepWorker(**draft_worker_kwargs)
 
@@ -363,6 +368,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # communication to inform them.
         broadcast_dict = dict(
             num_lookahead_slots=num_lookahead_slots,
+            no_spec=num_lookahead_slots == 0
+            or len(execute_model_req.seq_group_metadata_list) == 0
+            or disable_all_speculation,
             disable_all_speculation=disable_all_speculation,
         )
         broadcast_tensor_dict(broadcast_dict, src=self._driver_rank)
@@ -464,8 +472,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         not called, meaning that the kv-cache in proposer for requests is not
         updated, so they cannot enable spec decode in the rest decoding.
         """
-        if not skip_proposer:
-            self.proposer_worker.execute_model(execute_model_req)
 
         sampler_output = self.scorer_worker.execute_model(execute_model_req)
         assert len(sampler_output) == 1
@@ -480,6 +486,19 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             else:
                 self.previous_hidden_states.update(
                     execute_model_req.seq_group_metadata_list, hidden_states)
+
+        if not skip_proposer:
+            # For prefill step in proposer, we run the model for N-1 tokens
+            # because Nth token will be processed in the first decode step. For
+            # N-1 tokens, the input should be 0:N-1 hidden states which should
+            # be concatanated with 1:N token (since output of scorer has to be
+            # the input for proposer). Therefore, we shift the hidden states to
+            # align n-1th hidden state with nth token.
+            if sampler_output.prefill_hidden_states is not None:
+                execute_model_req.previous_hidden_states = sampler_output\
+                    .prefill_hidden_states.roll(shifts=1, dims=0)
+
+            self.proposer_worker.execute_model(execute_model_req)
 
         sampler_output_to_return = (self._serialize_sampler_output_no_logprobs(
             execute_model_req=execute_model_req, sampler_output=sampler_output)
@@ -507,15 +526,23 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             return False
         num_lookahead_slots = data["num_lookahead_slots"]
 
-        # Even if num_lookahead_slots is zero, we want to run the proposer model
-        # as it may have KV.
-        #
-        # We run the proposer once per lookahead slot. In the future we should
-        # delegate how many times it runs to the proposer.
-        for _ in range(max(num_lookahead_slots, 1)):
-            self.proposer_worker.execute_model()
+        # In case of prefill, scorer_worker has to be run before proposer so
+        # that the hidden states can be propagated to proposer when needed.
+        if data["no_spec"]:
+            self.scorer_worker.execute_model()
 
-        self.scorer_worker.execute_model()
+        if not data["disable_all_speculation"]:
+            # Even if num_lookahead_slots is zero, we want to run the
+            # proposer model as it may have KV.
+            #
+            # We run the proposer once per lookahead slot. In the future we
+            # should delegate how many times it runs to the proposer.
+            for _ in range(max(num_lookahead_slots, 1)):
+                self.proposer_worker.execute_model()
+
+        if not data["no_spec"]:
+            self.scorer_worker.execute_model()
+
         return True
 
     @nvtx_range("spec_decode_worker._run_speculative_decoding_step")
@@ -545,6 +572,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             #TODO: Fix it #5814
             raise RuntimeError("Cannot handle cases where distributed draft "
                                "workers generate no tokens")
+
+        execute_model_req.previous_hidden_states = None
 
         with Timer() as scoring_timer:
             proposal_scores = self.scorer.score_proposals(
@@ -652,10 +681,12 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             accepted_index = accepted_token_ids + 1  # Convert -1 to 0
             accepted_index = accepted_index.count_nonzero(dim=1).add_(-1)
             index = accepted_index[:, None, None].expand(-1, 1, hs_size)
+            last_non_bonus_token_hidden_states = hidden_states[:, -2]  # b x d
             hidden_states = hidden_states.gather(1, index).squeeze(1)  # b x d
             # Store hidden states from target model for subsequent decode step
-            self.previous_hidden_states = HiddenStates(seq_group_metadata_list,
-                                                       hidden_states)
+            self.previous_hidden_states = HiddenStates(
+                seq_group_metadata_list, hidden_states,
+                last_non_bonus_token_hidden_states)
 
         return accepted_token_ids, logprobs
 
