@@ -20,50 +20,34 @@ VLLM_RPC_PORT=5570 VLLM_DISAGG_PREFILL_ROLE=prefill CUDA_VISIBLE_DEVICES=0 pytho
     -m vllm.entrypoints.openai.api_server \
     --model meta-llama/Meta-Llama-3.1-8B-Instruct \
     --port 8100 \
-    -tp 1 \
-    --enable-prefix-caching \
-    --gpu-memory-utilization 0.8 \
-    --max-model-len 10000 &
+    --max-model-len 10000 \
+    --gpu-memory-utilization 0.8 &
 
 # decoding instance
 VLLM_RPC_PORT=5580 VLLM_DISAGG_PREFILL_ROLE=decode CUDA_VISIBLE_DEVICES=1 python3 \
     -m vllm.entrypoints.openai.api_server \
     --model meta-llama/Meta-Llama-3.1-8B-Instruct \
     --port 8200 \
-    -tp 1 \
-    --enable-prefix-caching \
-    --gpu-memory-utilization 0.8 \
-    --max-model-len 10000 &
+    --max-model-len 10000 \
+    --gpu-memory-utilization 0.8 &
 
 # wait until prefill and decode instances are ready
 wait_for_server 8100
 wait_for_server 8200
 
-# sending an example request
-# in disaggregated prefilling, there are two steps of sending a request:
-#   1. send the request to prefill instance, with max_tokens set to 1
-#   2. send the request again to decode instance, no modification
+# launch a proxy server that opens the service at port 8000
+python3 ../../benchmarks/disagg_benchmarks/disagg_prefill_proxy_server.py &
+sleep 1
 
-# send to prefill instance, let it only do prefill by setting max_token=1
-curl -m 5 http://localhost:8100/v1/completions \
+# serve an example request
+curl http://localhost:8000/v1/completions \
 -H "Content-Type: application/json" \
 -d '{
 "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-"prompt": "'$i' San Francisco is a",
-"max_tokens": 1,
+"prompt": "San Francisco is a",
+"max_tokens": 10,
 "temperature": 0
 }'
-
-# send to decode instance
-curl -m 5 http://localhost:8100/v1/completions \
--H "Content-Type: application/json" \
--d '{
-"model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-"prompt": "'$i' San Francisco is a",
-"max_tokens": 50,
-"temperature": 0
-}'
-
 
 # clean up
 ps -e | grep pt_main_thread | awk '{print $1}' | xargs kill -9
