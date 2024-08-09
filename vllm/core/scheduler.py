@@ -1125,6 +1125,7 @@ class Scheduler:
         for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
             self.block_manager.mark_blocks_as_computed(
                 scheduled_seq_group.seq_group)
+
         self._seq_group_metadata_cache.reset()
 
         scheduler_time = time.perf_counter() - scheduler_start_time
