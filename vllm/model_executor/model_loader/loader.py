@@ -477,6 +477,7 @@ class TensorizerLoader(BaseModelLoader):
                    parallel_config: ParallelConfig,
                    scheduler_config: SchedulerConfig,
                    cache_config: CacheConfig) -> nn.Module:
+
         self._verify_config(model_config, parallel_config)
 
         if parallel_config.tensor_parallel_size > 1:
