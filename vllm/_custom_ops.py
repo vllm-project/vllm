@@ -330,10 +330,6 @@ def fp8_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
 
 
 # machete
-def machete_supported_types() -> List[ScalarType]:
-    return torch.ops._C.machete_supported_types()
-
-
 def machete_supported_schedules(b_type: ScalarType) -> List[str]:
     return torch.ops._C.machete_supported_schedules(b_type)
 

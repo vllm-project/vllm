@@ -20,24 +20,6 @@ static inline bool is_column_major(torch::Tensor const tensor) {
 }
 
 template <typename T, typename Layout = RowMajor>
-T* maybe_data_ptr(c10::optional<torch::Tensor const> maybe_tensor,
-                  char const* name) {
-  if constexpr (std::is_same_v<Layout, RowMajor>) {
-    TORCH_CHECK(!maybe_tensor || is_row_major(*maybe_tensor), "Expected ", name,
-                " to be RowMajor");
-  } else if constexpr (std::is_same_v<Layout, ColumnMajor>) {
-    TORCH_CHECK(!maybe_tensor || is_column_major(*maybe_tensor), "Expected ",
-                name, " to be ColumnMajor");
-  } else {
-    TORCH_CHECK(false, "Unknown Layout");
-  }
-
-  return (maybe_tensor == at::nullopt)
-             ? nullptr
-             : reinterpret_cast<T*>(maybe_tensor->data_ptr());
-}
-
-template <typename T, typename Layout = RowMajor>
 T* data_ptr(torch::Tensor const tensor, char const* name) {
   if constexpr (std::is_same_v<Layout, RowMajor>) {
     TORCH_CHECK(is_row_major(tensor), "Expected ", name, " to be RowMajor");
@@ -49,6 +31,12 @@ T* data_ptr(torch::Tensor const tensor, char const* name) {
   }
 
   return reinterpret_cast<T*>(tensor.data_ptr());
+}
+
+template <typename T, typename Layout = RowMajor>
+T* maybe_data_ptr(c10::optional<torch::Tensor const> maybe_tensor,
+                  char const* name) {
+  return (maybe_tensor) ? data_ptr<T, Layout>(*maybe_tensor, name) : nullptr;
 }
 
 //

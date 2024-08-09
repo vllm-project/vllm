@@ -27,7 +27,7 @@ DISPATCH_TEMPLATE = """
 #include "../machete_mm_launcher.cuh"
 
 namespace machete {
-using KernelDispatcher_ = KernelDispatcher<
+using GemmDispatcher_ = GemmDispatcher<
     {{DataTypeTag[type_config.element_a]}},  // ElementA
     {{DataTypeTag[type_config.element_b]}},  // ElementB
     {{DataTypeTag[type_config.element_d]}},  // ElementD
@@ -36,10 +36,10 @@ using KernelDispatcher_ = KernelDispatcher<
     {{DataTypeTag[type_config.element_b_zeropoint]}}>; // Zeropoints
 
 {% for s in schedules %}extern torch::Tensor 
-impl_{{type_name}}_sch_{{ gen_sch_name(s) }}(PytorchArguments args);
+impl_{{type_name}}_sch_{{ gen_sch_name(s) }}(PyTorchArguments args);
 {% endfor %}
 template <>
-torch::Tensor KernelDispatcher_::dispatch(PytorchArguments args) {
+torch::Tensor GemmDispatcher_::dispatch(PyTorchArguments args) {
   [[maybe_unused]] auto M = args.A.size(0);
   [[maybe_unused]] auto N = args.B.size(1);
   [[maybe_unused]] auto K = args.A.size(1);
@@ -62,7 +62,7 @@ torch::Tensor KernelDispatcher_::dispatch(PytorchArguments args) {
 }
 
 template <>
-std::vector<std::string> KernelDispatcher_::supported_schedules() {
+std::vector<std::string> GemmDispatcher_::supported_schedules() {
   return { 
     {% for s in schedules -%}
     "{{ gen_sch_name(s) }}"{{ ",
@@ -103,7 +103,7 @@ struct sch_{{schedule_name}} {
 };
 
 torch::Tensor 
-impl_{{type_name}}_sch_{{schedule_name}}(PytorchArguments args) {
+impl_{{type_name}}_sch_{{schedule_name}}(PyTorchArguments args) {
   bool with_C = args.C.has_value(), with_scales = args.scales.has_value(),
        with_zeropoints = args.zeros.has_value();
 

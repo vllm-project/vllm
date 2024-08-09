@@ -242,7 +242,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   )
 
   if (NOT machete_generation_result EQUAL 0)
-    file(READ ${CMAKE_CURRENT_BINARY_DIR}/machete_generation.log log)
     message(FATAL_ERROR "Machete generation failed."
                         " Result: \"${machete_generation_result}\"" 
                         "\nCheck the log for details: "

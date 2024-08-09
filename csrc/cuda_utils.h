@@ -8,7 +8,7 @@
   #define HOST_DEVICE_INLINE inline
   #define DEVICE_INLINE inline
   #define HOST_INLINE inline
-#endif  // CUTE_HOST_DEVICE, CUTE_DEVICE
+#endif
 
 int64_t get_device_attribute(int64_t attribute, int64_t device_id);
 
