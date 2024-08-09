@@ -61,6 +61,11 @@ def flash_attn_varlen_func(
         block_table=block_table,
     )
 
+# Note: registration for these ops should be moved into vllm-flash-attn
+# once it is incorporated into the main repo/build process.
+flash_attn_varlen_func = torch.library.custom_op(
+    "vllm::flash_attn_varlen_func", flash_attn_varlen_func, mutates_args=[])
+
 
 @flash_attn_varlen_func.register_fake  # type: ignore
 def _(
@@ -678,9 +683,9 @@ class FlashAttentionImpl(AttentionImpl):
                     max_seqlen_k=prefill_meta.max_prefill_seq_len,
                     softmax_scale=self.scale,
                     causal=True,
-                    window_size=self.sliding_window,
-                    softcap=self.logits_soft_cap,
+                    window_size=self.sliding_window,  # type: ignore
                     alibi_slopes=self.alibi_slopes,
+                    softcap=self.logits_soft_cap,
                 )
                 assert output[:num_prefill_tokens].shape == out.shape
                 output[:num_prefill_tokens] = out
