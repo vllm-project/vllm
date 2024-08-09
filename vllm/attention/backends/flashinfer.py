@@ -142,7 +142,9 @@ class FlashInferMetadata(AttentionMetadata):
             assert self.paged_kv_last_page_len is not None
             batch_size = self.query_start_loc.shape[0] - 1
             assert batch_size >= 0
-            # Only use flashinfer in the non-profile run
+            # We will use flash attention for profiling to
+            # determine the number of blocks. Therefore,
+            # we don't need to prepare the input for flashinfer for profile run.
             if not self.is_profile_run:
                 self.paged_kv_indptr = self.paged_kv_indptr.to(self.device)
                 self.paged_kv_last_page_len = self.paged_kv_last_page_len.to(
