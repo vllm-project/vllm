@@ -15,6 +15,7 @@ from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
+from vllm.speculative_decode_output import SpeculativeDecodeOutput
 
 if TYPE_CHECKING:
     from vllm.inputs import LLMInputs
@@ -99,30 +100,6 @@ class RequestMetrics:
     first_token_time: Optional[float]
     time_in_queue: Optional[float]
     finished_time: Optional[float] = None
-
-
-class SpeculativeDecodeOutput:
-    def __init__(
-        self,
-        draft_token_indices: list[int],
-        target_token_indices: list[int],
-        accepted_tokens_count: int,
-    ) -> None:
-        self._draft_token_indices = draft_token_indices
-        self._target_token_indices = target_token_indices
-        self._accepted_tokens_count = accepted_tokens_count
-    
-    @property
-    def draft_token_indices(self) -> list[int]:
-        return self._draft_token_indices
-    
-    @property
-    def target_token_indices(self) -> list[int]:
-        return self._target_token_indices
-    
-    @property
-    def accepted_tokens_count(self) -> list[int]:
-        return self._accepted_tokens_count
 
 
 class SequenceData:
@@ -270,6 +247,9 @@ class SequenceData:
     @property
     def last_accepted_tokens_count(self) -> int:
         return self._speculative_decode_outputs[-1].accepted_tokens_count
+    
+    def append_speculative_decode_output(self, speculative_decode_output: SpeculativeDecodeOutput) -> None:
+        self._speculative_decode_outputs.append(speculative_decode_output)
 
     def __repr__(self) -> str:
         return (f"SequenceData("
