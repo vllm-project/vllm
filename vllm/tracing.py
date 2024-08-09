@@ -92,6 +92,12 @@ class SpanAttributes(BaseSpanAttributes):
     LLM_LATENCY_TIME_IN_QUEUE = "gen_ai.latency.time_in_queue"
     LLM_LATENCY_TIME_TO_FIRST_TOKEN = "gen_ai.latency.time_to_first_token"
     LLM_LATENCY_E2E = "gen_ai.latency.e2e"
+    LLM_LATENCY_TIME_IN_SCHEDULER = "gen_ai.latency.time_in_scheduler"
+    # Time taken in the forward pass for this across all workers
+    LLM_LATENCY_TIME_IN_MODEL_FORWARD = "gen_ai.latency.time_in_model_forward"
+    # Time taken in the model execute function. This will include model
+    # forward, block/sync across workers, cpu-gpu sync time and sampling time.
+    LLM_LATENCY_TIME_IN_MODEL_EXECUTE = "gen_ai.latency.time_in_model_execute"
 
 
 def contains_trace_headers(headers: Mapping[str, str]) -> bool:

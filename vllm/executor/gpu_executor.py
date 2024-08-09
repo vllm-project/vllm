@@ -60,6 +60,7 @@ class GPUExecutor(ExecutorBase):
             prompt_adapter_config=self.prompt_adapter_config,
             is_driver_worker=(not self.parallel_config)
             or (rank % self.parallel_config.tensor_parallel_size == 0),
+            observability_config=self.observability_config,
         )
 
     def _get_create_worker_kwargs(
