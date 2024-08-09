@@ -29,7 +29,9 @@ from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import ExecuteModelRequest, SamplerOutput, SequenceGroupMetadata
+from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
+                           SequenceGroupMetadata)
+
 from vllm.usage.usage_lib import UsageContext
 
 logger = init_logger(__name__)
@@ -282,7 +284,6 @@ class _AsyncLLMEngine(LLMEngine):
         cached_outputs = self.cached_scheduler_outputs[virtual_engine]
         seq_group_metadata_list = cached_outputs.seq_group_metadata_list
         scheduler_outputs = cached_outputs.scheduler_outputs
-        cached_last_output = cached_outputs.last_output
         # skip the scheduler if there are any remaining steps in the seq groups.
         # This ensures that the scheduler is only called again when the current
         # batch has completed.
@@ -293,12 +294,8 @@ class _AsyncLLMEngine(LLMEngine):
             if scheduler_outputs.num_lookahead_slots > 0:
                 # cache the scheduler outputs for the next iteration if we have
                 # lookahead slots
-                self.cached_scheduler_outputs[
-                    virtual_engine].seq_group_metadata_list = seq_group_metadata_list
-                self.cached_scheduler_outputs[
-                    virtual_engine].scheduler_outputs = scheduler_outputs
-                self.cached_scheduler_outputs[
-                    virtual_engine].last_output = None
+                self._cache_scheduler_outputs_for_multi_step(
+                    virtual_engine, seq_group_metadata_list, scheduler_outputs)
 
         assert seq_group_metadata_list is not None
         assert scheduler_outputs is not None
@@ -310,21 +307,10 @@ class _AsyncLLMEngine(LLMEngine):
             # check if we have a cached last_output from the previous iteration
             # for PP this is probably the best way to pass the sampled_token_ids
             # as a broadcast across stages will cause one virtual engine's stage
-            # to block another VE
-            cached_last_output = self.cached_scheduler_outputs[
-                virtual_engine].last_output
-            # make sure we don't incur a GPU->CPU transfer if we don't need to
-            if (self.parallel_config.pipeline_parallel_size > 1
-                    and cached_last_output is not None and
-                    cached_last_output.sampled_token_ids_numpy is not None):
-                last_sampled_token_ids =  \
-                    torch.from_numpy(cached_last_output.sampled_token_ids_numpy)
-                # last_sampled_token_ids =  \
-                #     torch.Tensor(cached_last_output.sampled_token_ids_numpy).long()
-                # \
-                # cached_last_output.sampled_token_ids.cpu()
-            else:
-                last_sampled_token_ids = None
+            # to block another VE.
+            last_sampled_token_ids = \
+                self._get_cached_sampled_token_ids_for_multi_step(
+                virtual_engine)
 
             execute_model_req = ExecuteModelRequest(
                 seq_group_metadata_list=seq_group_metadata_list,
@@ -340,15 +326,8 @@ class _AsyncLLMEngine(LLMEngine):
             output = await self.model_executor.execute_model_async(
                 execute_model_req)
             # we need to do this here so that last step's sampled_token_ids can
-            # be passed to the next iteration.
-            if self.scheduler_config.is_multi_step and self.parallel_config.pipeline_parallel_size > 1:
-                if len(output) > 0 and output[0] is not None:
-                    last_output = output[-1]
-                    assert last_output.sampled_token_ids is None
-                    assert last_output.sampled_token_ids_numpy is not None
-                    assert last_output.sampled_token_probs is None
-                    self.cached_scheduler_outputs[
-                        virtual_engine].last_output = last_output
+            # be passed to the next iteration for PP.
+            self._cache_output_for_multi_step(virtual_engine, output)
         else:
             output = []
 
@@ -397,6 +376,41 @@ class _AsyncLLMEngine(LLMEngine):
                for seq_group in seq_group_metadata_list):
             return True
         return False
+
+    def _cache_scheduler_outputs_for_multi_step(
+            self, virtual_engine: int,
+            seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+            scheduler_outputs: SchedulerOutputs) -> None:
+        self.cached_scheduler_outputs[virtual_engine].seq_group_metadata_list = \
+            seq_group_metadata_list
+        self.cached_scheduler_outputs[virtual_engine].scheduler_outputs = \
+            scheduler_outputs
+        self.cached_scheduler_outputs[virtual_engine].last_output = None
+
+    def _get_cached_sampled_token_ids_for_multi_step(
+            self, virtual_engine: int) -> Optional[torch.Tensor]:
+        cached_last_output = self.cached_scheduler_outputs[
+            virtual_engine].last_output
+        if (self.scheduler_config.is_multi_step
+                and self.parallel_config.pipeline_parallel_size > 1
+                and cached_last_output is not None
+                and cached_last_output.sampled_token_ids_numpy is not None):
+            return torch.from_numpy(cached_last_output.sampled_token_ids_numpy)
+        return None
+
+    def _cache_output_for_multi_step(
+            self, virtual_engine: int,
+            output: List[Optional[SamplerOutput]]) -> None:
+        if (self.scheduler_config.is_multi_step
+                and self.parallel_config.pipeline_parallel_size > 1):
+            if len(output) > 0 and output[0] is not None:
+                last_output = output[-1]
+                assert last_output is not None
+                assert last_output.sampled_token_ids_numpy is not None
+                assert last_output.sampled_token_ids is None
+                assert last_output.sampled_token_probs is None
+                self.cached_scheduler_outputs[
+                    virtual_engine].last_output = last_output
 
     async def stop_remote_worker_execution_loop_async(self) -> None:
         """Stop the remote worker execution loop."""

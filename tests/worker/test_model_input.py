@@ -214,9 +214,11 @@ def test_multi_step_model_runner_input():
     assert (frozen_model_input.multi_modal_kwargs ==
             frozen_model_input.multi_modal_kwargs)
     assert receieved_frozen_input.lora_requests is None
-    assert receieved_frozen_input.lora_requests == frozen_model_input.lora_requests
+    assert (receieved_frozen_input.lora_requests ==
+            frozen_model_input.lora_requests)
     assert receieved_frozen_input.lora_mapping is None
-    assert receieved_frozen_input.lora_mapping == frozen_model_input.lora_mapping
+    assert (
+        receieved_frozen_input.lora_mapping == frozen_model_input.lora_mapping)
     for field in dataclasses.fields(AttentionMetadata):
         assert getattr(receieved_frozen_input.attn_metadata, field.name,
                        None) == getattr(attn_metadata, field.name, None)
@@ -227,7 +229,8 @@ def test_multi_step_model_runner_input():
 
     # check non frozen fields
     assert received_model_input.is_last_step == model_input.is_last_step
-    assert received_model_input.is_first_multi_step == model_input.is_first_multi_step
+    assert (received_model_input.is_first_multi_step ==
+            model_input.is_first_multi_step)
     assert received_model_input.current_step == model_input.current_step
     assert (received_model_input.last_sampled_token_ids ==
             model_input.last_sampled_token_ids).all()

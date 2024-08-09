@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
     from vllm.model_executor import SamplingMetadata
 
-T = TypeVar('T', bound="ModelRunnerInputBase")
+T = TypeVar('T', bound="BroadcastableModelInput")
 
 
 def _add_attn_metadata_broadcastable_dict(
@@ -116,7 +116,7 @@ class BroadcastableModelInput(ABC):
     ) -> T:
         """
         Pop fields from the given tensor_dict and populate a new instance of
-        ModelRunnerInputBase.
+        BroadcastableModelInput.
         """
         raise NotImplementedError
 
@@ -132,26 +132,7 @@ class ModelRunnerInputBase(BroadcastableModelInput):
     ModelRunnerInputBase subclass, add their required fields, and specify how to
     serialize/deserialize a ModelInput for broadcast between workers.
     """
-
-    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
-        """
-        Extract broadcastable fields. Override for fields that require some
-        custom deserialization.
-        """
-        raise NotImplementedError
-
-    @classmethod
-    @abstractmethod
-    def from_broadcasted_tensor_dict(
-        cls: Type[T],
-        tensor_dict: Dict[str, Any],
-        attn_backend: Optional["AttentionBackend"] = None,
-    ) -> T:
-        """
-        Pop fields from the given tensor_dict and populate a new instance of
-        ModelRunnerInputBase.
-        """
-        raise NotImplementedError
+    pass
 
 
 class ModelRunnerInputBuilderBase(ABC, Generic[T]):
