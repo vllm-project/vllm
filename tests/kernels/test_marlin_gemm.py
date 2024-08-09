@@ -226,8 +226,7 @@ def test_gptq_marlin_gemm(
         torch.ops._C.gptq_marlin_gemm,
         (a_input, marlin_q_w, marlin_s, marlin_zp, g_idx, sort_indices,
          workspace.scratch, quant_type, a_input.shape[0], b_weight.shape[1],
-         a_input.shape[1], is_k_full, False, use_fp32_reduce),
-    )
+         a_input.shape[1], is_k_full, False, use_fp32_reduce))
 
     output = ops.gptq_marlin_gemm(
         a_input,

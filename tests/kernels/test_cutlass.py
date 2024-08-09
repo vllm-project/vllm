@@ -345,14 +345,14 @@ def test_cutlass_int8_azp(m: int, n: int, k: int, out_dtype: torch.dtype,
     torch.testing.assert_close(out, baseline_dq, rtol=rtol, atol=atol)
     torch.testing.assert_close(out, baseline_q, rtol=rtol, atol=atol)
 
-    if azp_per_token:
-        opcheck(torch.ops._C.cutlass_scaled_mm_azp,
-                (out, aq_i8, bq_i8, scale_a, scale_b, azp_adj_i32, azp_i32,
-                 func_bias))
-    else:
-        opcheck(torch.ops._C.cutlass_scaled_mm_azp,
-                (out, aq_i8, bq_i8, scale_a, scale_b, azp_with_adj_i32, None,
-                 func_bias))
+    opcheck(
+        torch.ops._C.cutlass_scaled_mm_azp,
+        (out, aq_i8, bq_i8, scale_a, scale_b, azp_adj_i32, azp_i32, func_bias),
+        cond=azp_per_token)
+    opcheck(torch.ops._C.cutlass_scaled_mm_azp,
+            (out, aq_i8, bq_i8, scale_a, scale_b, azp_with_adj_i32, None,
+             func_bias),
+            cond=not azp_per_token)
 
 
 # Test working with a subset of A and B

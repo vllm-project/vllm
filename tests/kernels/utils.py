@@ -943,9 +943,13 @@ def opcheck(op: Union[torch._ops.OpOverload, torch._ops.OpOverloadPacket,
             kwargs: Optional[Dict[str, Any]] = None,
             *,
             test_utils: Union[str, Sequence[str]] = OPCHECK_TEST_UTILS,
-            raise_exception: bool = True) -> Dict[str, str]:
-    return torch.library.opcheck(op,
-                                 args,
-                                 kwargs,
-                                 test_utils=test_utils,
-                                 raise_exception=raise_exception)
+            raise_exception: bool = True,
+            cond: bool = True) -> Dict[str, str]:
+    if not cond:
+        return {}
+    else:
+        return torch.library.opcheck(op,
+                                     args,
+                                     kwargs,
+                                     test_utils=test_utils,
+                                     raise_exception=raise_exception)

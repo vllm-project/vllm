@@ -14,7 +14,6 @@ SCALE = [0.1, 0.5, 0.8, 1.2, 2.1]
 
 
 def opcheck_int8_quant(output, input, scale=None):
-
     if scale is not None:
         opcheck(torch.ops._C.static_scaled_int8_quant, (output, input, scale))
     else:
