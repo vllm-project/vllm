@@ -357,6 +357,7 @@ async def run_server(args, **uvicorn_kwargs) -> None:
 
         shutdown_task = await serve_http(
             app,
+            engine=async_engine_client,
             host=args.host,
             port=args.port,
             log_level=args.uvicorn_log_level,
