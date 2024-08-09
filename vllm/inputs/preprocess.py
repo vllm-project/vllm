@@ -18,7 +18,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-
 PromptComponents = Tuple[Optional[str], List[int],
                          Optional["MultiModalDataDict"]]
 DecoderPromptComponents = Tuple[Optional[str], Optional[List[int]],
@@ -28,7 +27,7 @@ DecoderPromptComponents = Tuple[Optional[str], Optional[List[int]],
 class InputPreprocessor:
 
     def __init__(
-        self, 
+        self,
         model_config: ModelConfig,
         tokenizer: Optional[BaseTokenizerGroup],
     ) -> None:
@@ -45,8 +44,8 @@ class InputPreprocessor:
         return self.tokenizer
 
     def get_bos_token_id(self,
-                          lora_request: Optional[LoRARequest] = None
-                          ) -> Optional[int]:
+                         lora_request: Optional[LoRARequest] = None
+                         ) -> Optional[int]:
         if self.tokenizer is None:
             logger.warning("Using None for BOS token id because tokenizer "
                            "is not initialized")
@@ -55,8 +54,8 @@ class InputPreprocessor:
         return self.tokenizer.get_lora_tokenizer(lora_request).bos_token_id
 
     def get_eos_token_id(self,
-                          lora_request: Optional[LoRARequest] = None
-                          ) -> Optional[int]:
+                         lora_request: Optional[LoRARequest] = None
+                         ) -> Optional[int]:
         if self.tokenizer is None:
             logger.warning("Using None for EOS token id because tokenizer "
                            "is not initialized")
