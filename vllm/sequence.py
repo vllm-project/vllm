@@ -515,7 +515,6 @@ class SequenceGroup:
         self.seqs = seqs
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
         self.seqs = seqs
-        self.is_single_seq = len(seqs) == 1
         self.sampling_params = sampling_params
         self.metrics = RequestMetrics(arrival_time=arrival_time,
                                       last_token_time=arrival_time,
@@ -637,7 +636,7 @@ class SequenceGroup:
         if status is None:
             return self.seqs
 
-        if self.is_single_seq:
+        if len(self.seqs) == 1:
             return self.seqs if self.seqs[0].status == status else []
 
         return [seq for seq in self.seqs if seq.status == status]
@@ -649,7 +648,7 @@ class SequenceGroup:
         return self.encoder_seq
 
     def get_unfinished_seqs(self) -> List[Sequence]:
-        if self.is_single_seq:
+        if len(self.seqs) == 1:
             return self.seqs if not self.seqs[0].is_finished() else []
 
         return [seq for seq in self.seqs if not seq.is_finished()]
@@ -676,19 +675,19 @@ class SequenceGroup:
         if status is None:
             return len(self.seqs)
 
-        if self.is_single_seq:
+        if len(self.seqs) == 1:
             return 1 if self.seqs[0].status == status else 0
 
         return len(self.get_seqs(status))
 
     def num_unfinished_seqs(self) -> int:
-        if self.is_single_seq:
+        if len(self.seqs) == 1:
             return 1 if not self.seqs[0].is_finished() else 0
 
         return len(self.get_unfinished_seqs())
 
     def num_finished_seqs(self) -> int:
-        if self.is_single_seq:
+        if len(self.seqs) == 1:
             return 1 if self.seqs[0].is_finished() else 0
 
         return len(self.get_finished_seqs())

@@ -533,7 +533,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             dest_allocator: BlockAllocatorBase,
             mapping: Dict[PhysicalTokenBlock,
                           PhysicalTokenBlock]) -> BlockTable:
-        new_block_table = []
+        new_block_table: BlockTable = BlockTable()
 
         for from_block in block_table:
             if from_block in mapping:

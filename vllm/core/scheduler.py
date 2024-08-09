@@ -894,7 +894,8 @@ class Scheduler:
         assert len(swapped_in.prefill_seq_groups) == 0
 
         # Merge lists
-        if len(prefills.seq_groups) > 0:
+        num_prefill_groups = len(prefills.seq_groups)
+        if num_prefill_groups > 0:
             scheduled_seq_groups = prefills.seq_groups
             scheduled_seq_groups.extend(running_scheduled.decode_seq_groups)
         else:
@@ -909,7 +910,7 @@ class Scheduler:
 
         return SchedulerOutputs(
             scheduled_seq_groups=scheduled_seq_groups,
-            num_prefill_groups=len(prefills.seq_groups),
+            num_prefill_groups=num_prefill_groups,
             num_batched_tokens=budget.num_batched_tokens,
             blocks_to_swap_in=swapped_in.blocks_to_swap_in,
             blocks_to_swap_out=running_scheduled.blocks_to_swap_out,
@@ -1032,7 +1033,7 @@ class Scheduler:
         scheduler_outputs = self._schedule()
         now = time.time()
 
-        if not self.block_manager.enable_caching:
+        if not self.cache_config.enable_prefix_caching:
             common_computed_block_nums = []
 
         # Create input data structures.
@@ -1070,7 +1071,7 @@ class Scheduler:
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
                 self.block_manager.access_all_blocks_in_seq(seq, now)
 
-            if self.block_manager.enable_caching:
+            if self.cache_config.enable_prefix_caching:
                 common_computed_block_nums = (
                     self.block_manager.get_common_computed_block_ids(
                         seq_group.get_seqs(status=SequenceStatus.RUNNING)))

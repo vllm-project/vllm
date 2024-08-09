@@ -187,8 +187,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             self.query_lens[0] = 0  # type: ignore
             self.context_lens[0] = 0  # type: ignore
             self.curr_sliding_window_blocks[0] = 0  # type: ignore
-            self.lora_index_mapping[0].clear()  # type: ignore
-            self.lora_prompt_mapping[0].clear()  # type: ignore
+            self.lora_index_mapping.clear()  # type: ignore
+            self.lora_prompt_mapping.clear()  # type: ignore
             self.lora_requests.clear()  # type: ignore
             self.prompt_adapter_index_mapping.clear()  # type: ignore
             self.prompt_adapter_prompt_mapping.clear()  # type: ignore
@@ -301,14 +301,12 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                     if lora_index_mapping:
                         self.lora_index_mapping = lora_index_mapping
                     else:
-                        for seq_id in range(len(self.seq_ids)):
-                            self.lora_index_mapping[seq_id].clear()
+                        self.lora_index_mapping.clear()
 
                     if lora_prompt_mapping:
                         self.lora_prompt_mapping = lora_prompt_mapping
                     else:
-                        for seq_id in range(len(self.seq_ids)):
-                            self.lora_prompt_mapping[seq_id].clear()
+                        self.lora_prompt_mapping.clear()
 
                     if lora_requests:
                         self.lora_requests = lora_requests
@@ -364,8 +362,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             self.context_lens = [0] * self.n_seqs
             self.curr_sliding_window_blocks = [0] * self.n_seqs
 
-            self.lora_index_mapping = [[] for _ in range(self.n_seqs)]
-            self.lora_prompt_mapping = [[] for _ in range(self.n_seqs)]
+            self.lora_index_mapping = []
+            self.lora_prompt_mapping = []
 
     def gen_inter_data_builder(self, num_seqs: int):
         return lambda: ModelInputForGPUBuilder.InterDataForSeqGroup(
@@ -727,11 +725,14 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 flatten_2d_lists(inter_data.lora_index_mapping)
                 for inter_data in self.inter_data_list
             ])
-            lora_index_mapping.extend(itertools.repeat(0, cuda_graph_pad_size))
+            if cuda_graph_pad_size:
+                lora_index_mapping.extend(
+                    itertools.repeat(0, cuda_graph_pad_size))
             lora_prompt_mapping = flatten_2d_lists([
                 flatten_2d_lists(inter_data.lora_prompt_mapping)
                 for inter_data in self.inter_data_list
             ])
+
             lora_mapping = LoRAMapping(
                 **dict(index_mapping=lora_index_mapping,
                        prompt_mapping=lora_prompt_mapping,
@@ -748,8 +749,9 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 inter_data.prompt_adapter_index_mapping
                 for inter_data in self.inter_data_list
             ])
-            prompt_adapter_index_mapping.extend(
-                itertools.repeat(0, cuda_graph_pad_size))
+            if cuda_graph_pad_size:
+                prompt_adapter_index_mapping.extend(
+                    itertools.repeat(0, cuda_graph_pad_size))
             prompt_adapter_prompt_mapping = flatten_2d_lists([
                 inter_data.prompt_adapter_prompt_mapping
                 for inter_data in self.inter_data_list
