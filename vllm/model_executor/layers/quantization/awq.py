@@ -162,6 +162,11 @@ class AWQLinearMethod(LinearMethodBase):
         out_shape = (x.shape[:-1] + (qweight.shape[-1] * pack_factor, ))
         reshaped_x = x.reshape(-1, x.shape[-1])
 
+        if use_ipex():
+            # detail api depends on ipex, it may fuse bias.
+            out = ipex_awq_gemm(x, qweight, scales, qzeros, pack_factor, ...)
+            return out
+
         # num_tokens >= threshold
         FP16_MATMUL_HEURISTIC_CONDITION = x.shape[:-1].numel() >= 256
 
