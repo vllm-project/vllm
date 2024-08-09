@@ -7,7 +7,7 @@ from typing import (AsyncGenerator, AsyncIterator, List, Optional, Tuple,
 import numpy as np
 from fastapi import Request
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, ModelMode
 from vllm.engine.protocol import AsyncEngineClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (EmbeddingRequest,
@@ -71,7 +71,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                          lora_modules=None,
                          prompt_adapters=None,
                          request_logger=request_logger)
-        self._check_embedding_mode(model_config.embedding_mode)
+        self._check_embedding_mode(model_config.model_mode)
 
     async def create_embedding(
         self,
@@ -173,8 +173,8 @@ class OpenAIServingEmbedding(OpenAIServing):
 
         return response
 
-    def _check_embedding_mode(self, embedding_mode: bool):
-        if not embedding_mode:
+    def _check_embedding_mode(self, model_mode: ModelMode):
+        if model_mode is not ModelMode.EMBEDDING:
             logger.warning(
                 "embedding_mode is False. Embedding API will not work.")
         else:
