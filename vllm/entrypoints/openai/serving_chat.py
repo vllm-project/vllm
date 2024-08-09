@@ -82,8 +82,8 @@ class OpenAIServingChat(OpenAIServing):
             elif tool_parser == "hermes":
                 self.tool_parser = Hermes2ProToolParser
             else:
-                raise TypeError(
-                    "Error: --enable-auto-tool-choice requires --tool-call-parser")
+                raise TypeError("Error: --enable-auto-tool-choice requires "
+                                "--tool-call-parser")
 
     async def create_chat_completion(
         self,
@@ -451,7 +451,6 @@ class OpenAIServingChat(OpenAIServing):
 
                         if self._should_check_for_unstreamed_tool_arg_tokens(
                                 delta_message, output) and tool_parser:
-
                             # get the expected call based on partial JSON
                             # parsing which "autocompletes" the JSON
                             expected_call = json.dumps(
@@ -755,11 +754,11 @@ class OpenAIServingChat(OpenAIServing):
 
         # yapf: disable
         return bool(
-                # if there is a delta message that includes tool calls which
-                # include a function that has arguments
-                self.enable_auto_tools and self.tool_parser and delta_message
-                and delta_message.tool_calls and delta_message.tool_calls[0]
-                and delta_message.tool_calls[0].function
-                and delta_message.tool_calls[0].function.arguments is not None
-                and output.finish_reason is not None
+            # if there is a delta message that includes tool calls which
+            # include a function that has arguments
+            self.enable_auto_tools and self.tool_parser and delta_message
+            and delta_message.tool_calls and delta_message.tool_calls[0]
+            and delta_message.tool_calls[0].function
+            and delta_message.tool_calls[0].function.arguments is not None
+            and output.finish_reason is not None
         )
