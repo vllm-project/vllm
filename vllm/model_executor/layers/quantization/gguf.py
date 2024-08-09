@@ -39,9 +39,6 @@ class GGUFConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "GGUFConfig":
-        if get_tensor_model_parallel_world_size() > 1:
-            raise ValueError(
-                "GGUF quantization hasn't supported tensor parallelism yet.")
         return cls()
 
     def get_quant_method(self, layer: torch.nn.Module,
