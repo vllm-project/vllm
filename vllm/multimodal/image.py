@@ -10,6 +10,7 @@ from vllm.inputs.registry import InputContext
 from vllm.logger import init_logger
 from vllm.transformers_utils.image_processor import get_image_processor
 from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.utils import is_list_of
 
 from .base import MultiModalInputs, MultiModalPlugin
 
@@ -114,8 +115,8 @@ class ImagePlugin(MultiModalPlugin):
                               data: object) -> MultiModalInputs:
         model_config = ctx.model_config
 
-        # Raw image
-        if isinstance(data, (Image.Image, list)):
+        # PIL image
+        if isinstance(data, Image.Image) or is_list_of(data, Image.Image):
             image_processor = self._get_hf_image_processor(model_config)
             if image_processor is None:
                 raise RuntimeError("No HuggingFace processor is available "
@@ -131,7 +132,7 @@ class ImagePlugin(MultiModalPlugin):
             return MultiModalInputs(batch_data)
 
         # Image embedding
-        elif isinstance(data, torch.Tensor):
+        elif isinstance(data, torch.Tensor) or is_list_of(data, torch.Tensor):
             return MultiModalInputs({"image_embeds": data})
 
         raise TypeError(f"Invalid image type: {type(data)}")
