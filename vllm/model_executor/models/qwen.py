@@ -56,11 +56,16 @@ class QWenMLP(nn.Module):
                              "Only silu is supported for now.")
         self.act_fn = SiluAndMul()
 
-    def forward(self, x):
-        gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
-        x, _ = self.c_proj(x)
-        return x
+    def forward(
+        self,
+        x: torch.Tensor,
+        mlp_tmp: Optional[torch.Tensor] = None,
+        out: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        gate_up, _ = self.gate_up_proj(x, out=mlp_tmp)
+        act_out = self.act_fn(gate_up)
+        output, _ = self.c_proj(act_out, out=out)
+        return output
 
 
 class QWenAttention(nn.Module):
@@ -118,12 +123,20 @@ class QWenAttention(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
+        attn_tmp1: Optional[torch.Tensor] = None,
+        attn_tmp2: Optional[torch.Tensor] = None,
+        out: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        qkv, _ = self.c_attn(hidden_states)
+        qkv, _ = self.c_attn(hidden_states, out=attn_tmp1)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
-        output, _ = self.c_proj(attn_output)
+        attn_output = self.attn(q,
+                                k,
+                                v,
+                                kv_cache,
+                                attn_metadata,
+                                output=attn_tmp2)
+        output, _ = self.c_proj(attn_output, out=out)
         return output
 
 
@@ -161,6 +174,9 @@ class QWenBlock(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
+        attn_tmp1: Optional[torch.Tensor] = None,
+        attn_tmp2: Optional[torch.Tensor] = None,
+        mlp_tmp: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
@@ -173,11 +189,18 @@ class QWenBlock(nn.Module):
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
+            attn_tmp1=attn_tmp1,
+            attn_tmp2=attn_tmp2,
+            out=hidden_states,
         )
 
         # Fully Connected
         hidden_states, residual = self.ln_2(hidden_states, residual)
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.mlp(
+            hidden_states,
+            mlp_tmp=mlp_tmp,
+            out=hidden_states,
+        )
         return hidden_states, residual
 
 
@@ -204,6 +227,8 @@ class QWenModel(nn.Module):
             prefix=f"{prefix}.h")
         self.ln_f = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
+        self.tp_size = get_tensor_model_parallel_world_size()
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -219,6 +244,23 @@ class QWenModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
+
+        # pre-alloc a 1d tmp tensor for activation tmp mem reuse
+        # 1d to make sure the tmp is continuous
+        hidden_size = self.config.hidden_size // self.tp_size
+        intermediate_size = self.config.intermediate_size // self.tp_size
+        max_tmp_size = max(hidden_size * 4, intermediate_size)
+        rows = hidden_states.shape[0]
+        tmp_tensor = torch.empty(rows * max_tmp_size,
+                                 dtype=hidden_states.dtype,
+                                 device=hidden_states.device)
+
+        # attn_tmp1 is used for qkv tensor, attn_tmp2 is used for attn output
+        attn_tmp1 = tmp_tensor[:rows * hidden_size * 3].view(rows, -1)
+        attn_tmp2 = tmp_tensor[-rows * hidden_size:].view(rows, -1)
+        # mlp_tmp is used for mlp gate_up tensor
+        mlp_tmp = tmp_tensor[:rows * intermediate_size].view(rows, -1)
+
         for i in range(self.start_layer, self.end_layer):
             layer = self.h[i]
             hidden_states, residual = layer(
@@ -227,6 +269,9 @@ class QWenModel(nn.Module):
                 kv_caches[i - self.start_layer],
                 attn_metadata,
                 residual,
+                attn_tmp1=attn_tmp1,
+                attn_tmp2=attn_tmp2,
+                mlp_tmp=mlp_tmp,
             )
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({

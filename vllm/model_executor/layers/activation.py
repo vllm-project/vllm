@@ -28,12 +28,16 @@ class SiluAndMul(CustomOp):
         d = x.shape[-1] // 2
         return F.silu(x[..., :d]) * x[..., d:]
 
-    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_cuda(
+        self,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
         from vllm import _custom_ops as ops
 
         d = x.shape[-1] // 2
-        output_shape = (x.shape[:-1] + (d, ))
-        out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+        # NOTE: Use x as out for in-place silu_and_mul to
+        # avoid new tensor allocation
+        out = x[..., :d]
         ops.silu_and_mul(out, x)
         return out
 

@@ -47,6 +47,7 @@ class RMSNorm(CustomOp):
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
+        out: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         from vllm import _custom_ops as ops
 
@@ -58,7 +59,8 @@ class RMSNorm(CustomOp):
                 self.variance_epsilon,
             )
             return x, residual
-        out = torch.empty_like(x)
+        if out is None:
+            out = torch.empty_like(x)
         ops.rms_norm(
             out,
             x,
