@@ -107,10 +107,10 @@ class Worker(LocalOrDistributedWorkerBase):
         self.gpu_cache: Optional[List[List[torch.Tensor]]] = None
 
     def _is_encoder_decoder_model(self):
-        return self.model_config.is_encoder_decoder_model
+        return is_encoder_decoder_model_config(self.model_config)
 
     def _is_embedding_model(self):
-        return self.model_config.is_embedding_model
+        return is_embedding_model_config(self.model_config)
 
     def _is_simple_model(self):
         return is_simple_model_config(self.model_config)

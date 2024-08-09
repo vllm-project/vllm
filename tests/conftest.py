@@ -6,6 +6,7 @@ from collections import UserList
 from enum import Enum
 from typing import (Any, Dict, List, Optional, Sequence, Tuple, TypedDict,
                     TypeVar, Union)
+
 import pytest
 import torch
 import torch.nn as nn
@@ -21,9 +22,9 @@ from vllm.config import TokenizerPoolConfig
 from vllm.connections import global_http_connection
 from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
-from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
-                         to_enc_dec_tuple_list, zip_enc_dec_prompts)
-from vllm.inputs import PromptInputs
+from vllm.inputs import (ExplicitEncoderDecoderPrompt, PromptInputs,
+                         TextPrompt, to_enc_dec_tuple_list,
+                         zip_enc_dec_prompts)
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sequence import SampleLogprobs

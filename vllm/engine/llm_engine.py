@@ -29,11 +29,11 @@ from vllm.inputs import (INPUT_REGISTRY, EncoderDecoderLLMInputs, LLMInputs,
 from vllm.inputs.parse import is_explicit_encoder_decoder_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import MultiModalDataDict
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.utils import (is_embedding_model_config,
                                               is_encoder_decoder_model_config,
                                               is_simple_model_config)
+from vllm.multimodal import MultiModalDataDict
 from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
                           RequestOutputFactory, SimpleRequestOutput)
 from vllm.pooling_params import PoolingParams
