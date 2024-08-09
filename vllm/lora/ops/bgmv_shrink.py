@@ -103,6 +103,8 @@ def _bgmv_shrink(
     assert inputs.size(1) == lora_a_weights.size(-1)
     assert inputs.is_contiguous()
 
+    override_config: Optional[Dict[str, int]] = None
+
     if lora_a_weights.ndim == 4:  # shape:(lora_num,1,rank, size)
         assert lora_a_weights.size(1) == 1
         lora_a_weights = lora_a_weights.squeeze(dim=1)
