@@ -883,6 +883,7 @@ class AsyncEngineArgs(EngineArgs):
     """Arguments for asynchronous vLLM engine."""
     engine_use_ray: bool = False
     disable_log_requests: bool = False
+    engine_use_rpc: bool = False
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser,
@@ -896,6 +897,10 @@ class AsyncEngineArgs(EngineArgs):
         parser.add_argument('--disable-log-requests',
                             action='store_true',
                             help='Disable logging requests.')
+        parser.add_argument('--engine-use-rpc',
+                            action='store_true',
+                            help='Use RPC to communicate between api server '
+                            'and LLM engine.')
         return parser
 
 

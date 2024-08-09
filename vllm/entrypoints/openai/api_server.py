@@ -43,7 +43,7 @@ from vllm.entrypoints.openai.serving_tokenization import (
     OpenAIServingTokenization)
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser, get_open_zmq_ipc_path
+from vllm.utils import FlexibleArgumentParser, get_open_zmq_ipc_path, get_rpc_port, get_ip
 from vllm.version import __version__ as VLLM_VERSION
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
@@ -106,10 +106,16 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
 
     # Otherwise, use the multiprocessing AsyncLLMEngine.
     else:
-        # Select random path for IPC.
-        rpc_path = get_open_zmq_ipc_path()
-        logger.info("Multiprocessing frontend to use %s for RPC Path.",
-                    rpc_path)
+        if engine_args.engine_use_rpc:
+            # Select random port for RPC.
+            rpc_port = get_rpc_port()
+            driver_ip = get_ip()
+            rpc_path = f"tcp://{driver_ip}:{rpc_port}"
+        else:
+            # Select random path for IPC.
+            rpc_path = get_open_zmq_ipc_path()
+
+        logger.info("vLLM Async engine use %s for RPC Path.", rpc_path)
 
         # Start RPCServer in separate process (holds the AsyncLLMEngine).
         rpc_server_process = Process(target=run_rpc_server,
