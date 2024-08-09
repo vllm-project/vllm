@@ -135,17 +135,12 @@ class MultiStepWorker(Worker):
                 pass
                 # cache the worker input and model input for the next steps
                 # TODO(will) see below
-
-                # self.multi_step_states[virtual_engine] = MultiStepState(
-                #     worker_input=worker_input, model_input=model_input)
             else:
-                # TODO(will) possible to also use the cached worker input and model input
-                # this can be done if we want to optimize the broadcast to only send
-                # the last sampled token ids for non-first multi steps
+                # TODO(will) possible to also use the cached worker input and
+                # model input this can be done if we want to optimize the
+                # broadcast to only send the last sampled token ids for
+                # non-first multi steps
 
-                # multi_step_state = self.multi_step_states[virtual_engine]
-                # cached_model_input = multi_step_state.model_input
-                # cached_worker_input = multi_step_state.worker_input
                 assert isinstance(
                     model_input, MutableModelInputForGPUWithMultiStepMetadata)
                 # we need to update the last sampled token ids in the model input
@@ -153,10 +148,6 @@ class MultiStepWorker(Worker):
                 model_input.add_sampler_output(
                     SamplerOutput(outputs=[], sampled_token_ids=None),
                     model_input.last_sampled_token_ids)
-                # self.multi_step_states[virtual_engine] = MultiStepState(
-                #     worker_input=worker_input, model_input=model_input)
-                # model_input = cached_model_input
-                # worker_input = cached_worker_input
 
         assert model_input is not None
         assert worker_input is not None
