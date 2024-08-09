@@ -188,7 +188,6 @@ class HpuModelAdapter():
         if 'bypass_hpu_graphs' in kwargs:
             kwargs.pop('bypass_hpu_graphs')  # required for PT eager
         input_ids = kwargs['input_ids']
-
         kwargs['attn_metadata'] = self._set_attn_bias(kwargs['attn_metadata'],
                                                       input_ids.size(0),
                                                       input_ids.size(1),
@@ -1397,7 +1396,6 @@ class HabanaModelRunner(
         batch_size = input_tokens.size(0)
         seq_len = self._seq_len(attn_metadata)
         use_graphs = self._use_graphs(batch_size, seq_len, is_prompt)
-
         execute_model_kwargs = {
             "input_ids": input_tokens,
             "positions": input_positions,
