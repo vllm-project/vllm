@@ -11,6 +11,12 @@ import habana_frameworks.torch as htorch
 import torch
 import torch.nn.functional as F
 
+try:
+    from habana_frameworks.torch.hpex.kernels import FusedSDPA
+except ImportError:
+    print("Not using HPU fused scaled dot-product attention kernel.")
+    FusedSDPA = None
+
 import vllm.hpu.utils as hpu_utils
 
 PA_SPLIT_VALUE = (os.environ.get('PA_SPLIT_VALUE', '1') == '1')
@@ -123,6 +129,21 @@ def static_fused_moe(hidden_states, w1, w2, score, topk):
     return final_hidden_states.view(-1, D)
 
 
+#TODO: remove after SW-195415 fix
+def repeat_kv(kv: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """
+    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). 
+    The hidden states go from (batch, num_key_value_heads, seqlen, head_dim) to
+    (batch, num_attention_heads, seqlen, head_dim)
+    """
+    batch, num_key_value_heads, slen, head_dim = kv.shape
+    if n_rep == 1:
+        return kv
+    kv = kv[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen,
+                                     head_dim)
+    return kv.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+
+
 @hpu_utils.with_mark_steps
 def prompt_attention(
     query: torch.Tensor,
@@ -131,23 +152,35 @@ def prompt_attention(
     attn_bias: Optional[torch.Tensor] = None,
     p: float = 0.0,
     scale: Optional[float] = None,
+    valid_seq_lengths: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     query = query.transpose(1, 2)
     key = key.transpose(1, 2)
     value = value.transpose(1, 2)
     query_heads = query.size(1)
     kv_heads = key.size(1)
-    if query_heads != kv_heads:
-        query = query.unflatten(1, (kv_heads, -1))
-        key = key.unflatten(1, (kv_heads, 1))
-        value = value.unflatten(1, (kv_heads, 1))
-        attn_bias = attn_bias.unsqueeze(2)
-    attn_weights = torch.matmul(query * scale, key.transpose(-1, -2))
-    if attn_bias is not None:
-        attn_weights.add_(attn_bias)
-    attn_weights = torch.softmax(attn_weights, dim=-1)
-    attn_weights = torch.matmul(attn_weights, value)
-    if query_heads != kv_heads:
-        attn_weights = attn_weights.flatten(1, 2)
-    attn_weights = attn_weights.transpose(1, 2)
+    if attn_bias is not None or FusedSDPA is None:
+        if query_heads != kv_heads:
+            query = query.unflatten(1, (kv_heads, -1))
+            key = key.unflatten(1, (kv_heads, 1))
+            value = value.unflatten(1, (kv_heads, 1))
+            attn_bias = attn_bias.unsqueeze(2)
+        attn_weights = torch.matmul(query * scale, key.transpose(-1, -2))
+        if attn_bias is not None:
+            attn_weights.add_(attn_bias)
+        attn_weights = torch.softmax(attn_weights, dim=-1)
+        attn_weights = torch.matmul(attn_weights, value)
+        if query_heads != kv_heads:
+            attn_weights = attn_weights.flatten(1, 2)
+        attn_weights = attn_weights.transpose(1, 2)
+    else:
+        #TODO: remove after SW-195415 fix
+        if query_heads != kv_heads:
+            key = repeat_kv(key, int(query_heads // kv_heads))
+            value = repeat_kv(value, int(query_heads // kv_heads))
+        softmax_mode = 'fast'
+        recompute_mode = True
+        attn_weights = FusedSDPA.apply(query, key, value, None, 0.0, True,
+                                       scale, softmax_mode, recompute_mode,
+                                       valid_seq_lengths, 'left')
     return attn_weights

@@ -11,9 +11,8 @@ from vllm.utils import is_hpu
 logger = init_logger(__name__)
 if is_hpu():
     try:
-        from habana_frameworks.torch.hpex.normalization import (FusedRMSNorm as
-                                                                HPUFusedRMSNorm
-                                                                )
+        from habana_frameworks.torch.hpex.normalization import (
+            FusedRMSNorm as HPUFusedRMSNorm)
     except ImportError:
         logger.warning(
             "Could not import HPU FusedRMSNorm kernel. "
