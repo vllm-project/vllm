@@ -138,8 +138,15 @@ void copy_blocks(std::vector<torch::Tensor> const& key_caches,
   dim3 block(std::min(1024, numel_per_block));
   const at::cuda::OptionalCUDAGuard device_guard(cache_device);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const auto scalar_type = key_caches[0].scalar_type();
+  const at::ScalarType dispatch_type =
+      (scalar_type == at::ScalarType::Float8_e4m3fn ||
+       scalar_type == at::ScalarType::Float8_e5m2)
+          ? at::ScalarType::Byte
+          : scalar_type;
+
   VLLM_DISPATCH_FLOATING_AND_BYTE_TYPES(
-      key_caches[0].scalar_type(), "copy_blocks_kernel", ([&] {
+      dispatch_type, "copy_blocks_kernel", ([&] {
         vllm::copy_blocks_kernel<scalar_t><<<grid, block, 0, stream>>>(
             key_cache_ptrs_tensor.data_ptr<int64_t>(),
             value_cache_ptrs_tensor.data_ptr<int64_t>(),
