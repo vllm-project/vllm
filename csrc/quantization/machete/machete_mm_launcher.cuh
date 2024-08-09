@@ -20,26 +20,25 @@ struct PyTorchArguments {
   c10::optional<std::string> schedule;
 };
 
-template <typename KernelSpecialization>
+template <typename MacheteKernel>
 torch::Tensor run_impl(PyTorchArguments args) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(args.A));
 
   auto device = args.A.device();
   auto stream = at::cuda::getCurrentCUDAStream(device.index());
 
-  using ElementA = typename KernelSpecialization::ElementA;
-  using ElementB = typename KernelSpecialization::ElementB;
-  using ElementC = typename KernelSpecialization::ElementC;
-  using ElementD = typename KernelSpecialization::ElementD;
-  using ElementScale = typename KernelSpecialization::ElementScale;
-  using ElementZero = typename KernelSpecialization::ElementZero;
+  using ElementA = typename MacheteKernel::ElementA;
+  using ElementB = typename MacheteKernel::ElementB;
+  using ElementC = typename MacheteKernel::ElementC;
+  using ElementD = typename MacheteKernel::ElementD;
+  using ElementScale = typename MacheteKernel::ElementScale;
+  using ElementZero = typename MacheteKernel::ElementZero;
 
-  using LayoutA = typename KernelSpecialization::LayoutA;
-  using LayoutB = typename KernelSpecialization::LayoutB;
-  using LayoutC = typename KernelSpecialization::LayoutC;
-  using LayoutD = typename KernelSpecialization::LayoutD;
-  using LayoutScale = typename KernelSpecialization::LayoutScale;
-  using LayoutZero = typename KernelSpecialization::LayoutScale;
+  using LayoutA = typename MacheteKernel::LayoutA;
+  using LayoutC = typename MacheteKernel::LayoutC;
+  using LayoutD = typename MacheteKernel::LayoutD;
+  using LayoutScale = typename MacheteKernel::LayoutScale;
+  using LayoutZero = typename MacheteKernel::LayoutScale;
 
   int M = args.A.size(0);
   int N = args.B.size(1);
@@ -52,7 +51,7 @@ torch::Tensor run_impl(PyTorchArguments args) {
                                .device(device));
 
   auto A_ptr = data_ptr<ElementA const, LayoutA>(args.A, "A");
-  auto B_ptr = data_ptr<ElementB const, LayoutB>(args.B, "B");
+  auto B_ptr = data_ptr<ElementB const>(args.B, "B");
   auto D_ptr = data_ptr<ElementD, LayoutD>(D, "D");
   auto C_ptr = maybe_data_ptr<ElementC const, LayoutC>(args.C, "C");
   auto scales_ptr =
@@ -60,19 +59,19 @@ torch::Tensor run_impl(PyTorchArguments args) {
   auto zeros_ptr =
       maybe_data_ptr<ElementZero const, LayoutZero>(args.zeros, "zeros");
 
-  auto arguments = KernelSpecialization::create_arguments(
+  auto arguments = MacheteKernel::create_arguments(
       stream, M, N, K, A_ptr, B_ptr, C_ptr, D_ptr, scales_ptr, zeros_ptr,
       args.alpha.value_or(1), args.beta.value_or(0),
       args.group_size.value_or(K));
 
-  TORCH_CHECK(KernelSpecialization::can_implement(arguments),
+  TORCH_CHECK(MacheteKernel::can_implement(arguments),
               "Machete kernel cannot be run with these arguments");
 
-  size_t workspace_size = KernelSpecialization::get_workspace_size(arguments);
+  size_t workspace_size = MacheteKernel::get_workspace_size(arguments);
   torch::Tensor workspace = torch::empty(
       workspace_size, torch::TensorOptions().dtype(torch::kU8).device(device));
 
-  KernelSpecialization::run(arguments, workspace.mutable_data_ptr(), stream);
+  MacheteKernel::run(arguments, workspace.mutable_data_ptr(), stream);
 
   return D;
 };

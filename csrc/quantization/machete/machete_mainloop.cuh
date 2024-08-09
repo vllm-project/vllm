@@ -999,8 +999,6 @@ struct MacheteCollectiveMma {
     CUTE_STATIC_ASSERT_V(size<1>(tCsB) == size<2>(accum));      // N
     CUTE_STATIC_ASSERT_V(size<2>(tCsA) == size<2>(tCsB));       // K
     CUTE_STATIC_ASSERT_V(size<3>(tCsA) == size<3>(tCsB));       // PIPE
-    // CUTE_STATIC_ASSERT_V(Int<DispatchPolicy::Stages>{} == size<2>(sA));  //
-    // PIPE
     CUTE_STATIC_ASSERT_V(Int<DispatchPolicy::Stages>{} == size<2>(sB));  // PIPE
 
     //

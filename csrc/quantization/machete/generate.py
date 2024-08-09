@@ -78,15 +78,15 @@ IMPL_TEMPLATE = """
 
 namespace machete {
 template <typename Config, bool with_C, bool with_scales, bool with_zeropoints>
-using Kernel = KernelTemplate<
+using Kernel = MacheteKernelTemplate<
     {{DataTypeTag[type_config.element_a]}},  // ElementA
     {{DataTypeTag[type_config.element_b]}},  // ElementB
     {{DataTypeTag[type_config.element_d]}},  // ElementD
     {{DataTypeTag[type_config.accumulator]}}, // Accumulator
     {{DataTypeTag[type_config.element_b_scale]}}, // Scales
     {{DataTypeTag[type_config.element_b_zeropoint]}}, // Zeropoints
-    cutlass::gemm::KernelTmaWarpSpecializedCooperativeMixedInput
->::Speacialization<Config, with_C, with_scales, with_zeropoints>;
+    cutlass::gemm::KernelTmaWarpSpecializedCooperativeMixedInput,
+    Config, with_C, with_scales, with_zeropoints>;
 
 {% for sch in schedules %}
 {% set schedule_name = gen_sch_name(sch) -%}
@@ -138,7 +138,7 @@ using PrepackBDispatcher_ = PrepackBDispatcher<
   {{DataTypeTag[type_config.element_b_scale]}}, // Scales
   {{DataTypeTag[type_config.element_b_zeropoint]}}>; // Zeropoints
 
-using PrepackedLayoutB = PrepackedLayoutBBTemplate<
+using PrepackedLayoutB = PrepackedLayoutBTemplate<
   {{DataTypeTag[type_config.element_a]}}, // ElementA
   {{DataTypeTag[type_config.element_b]}}, // ElementB
   {{DataTypeTag[type_config.element_d]}}, // ElementD

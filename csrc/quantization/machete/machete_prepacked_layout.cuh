@@ -29,7 +29,7 @@ using namespace cute;
 template <typename ElementA_, typename ElementB_, typename ElementD_,
           typename AccumulatorT, class LayoutB, class KernelSchedule>
 // clang-format on
-struct PrepackedLayoutBBTemplate {
+struct PrepackedLayoutBTemplate {
   using MmaType = ElementA_;
   using ElementA = ElementA_;
   using ElementB = ElementB_;
