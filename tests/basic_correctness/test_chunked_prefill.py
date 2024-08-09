@@ -32,7 +32,7 @@ LOG_PROBS_MODELS = [
 # NOTE: Increasing this in this suite will fail CI because we currently cannot
 # reset distributed env properly. Use a value > 1 just when you test.
 @pytest.mark.parametrize("tensor_parallel_size", [1])
-def test_models_exact_string_match(
+def test_models_hf_exact_string_match(
     hf_runner,
     vllm_runner,
     example_prompts,
@@ -44,7 +44,7 @@ def test_models_exact_string_match(
     tensor_parallel_size: int,
 ) -> None:
     """
-    Checks exact match decode between hf model and vllm runner with
+    Checks exact match decode between huggingface model and vllm runner with
     chunked prefill.
     """
     max_num_seqs = min(chunked_prefill_token_size, 256)
@@ -98,12 +98,11 @@ def test_models_log_probs(
     Only checks log probs match between chunked-prefill and
     non-chunked-prefill version of vLLM model runner.
     
-    This test is to be used as alternative to test_models_exact_string_max
-    when there is discrepancy in kernels / numerics (e.g. when using
-    lower-precision types like FP8).
+    This test is used when there is discrepancy in kernels
+    / numerics (e.g. when using lower-precision types like FP8).
     """
-    if model == "facebook/opt-125" and kv_cache_dtype != "fp8_e5m2":
-        pytest.skip(f"{model} requires kv_cache_dtype={kv_cache_dtype}")
+    if not ((model == "facebook/opt-125") and (kv_cache_dtype == "fp8_e5m2")):
+        pytest.skip(f"only {model} requires kv_cache_dtype={kv_cache_dtype}")
 
     NUM_LOG_PROBS = 8
     NUM_OUTPUT_TOKENS = 4
