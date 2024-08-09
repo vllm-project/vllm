@@ -812,13 +812,12 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             for weight_name, weight_tensor in weight_iterator:
                 if weight_name.endswith(".weight"):
                     continue
-                # TODO: only nf4 quantization is supported for now
-                if weight_name.endswith(".quant_state.bitsandbytes__fp4"):
-                    raise NotImplementedError(
-                        "Only bitsandbytes_nf4 quantization"
-                        f"is supported for now. {weight_name} is fp4 quantized"
-                    )
-                temp_state_dict[weight_name] = weight_tensor
+                # bitsandbytes library requires
+                # weight.quant_state.bitsandbytes__* in CPU
+                if "quant_state.bitsandbytes" in weight_name:
+                    temp_state_dict[weight_name] = weight_tensor.cpu().data
+                else:
+                    temp_state_dict[weight_name] = weight_tensor
 
             # Closure to parse quant_state for each prequant weight
             def _parse_quant_state(param_name: str,
@@ -827,12 +826,6 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 for k in temp_state_dict:
                     if param_name + "." in k:
                         quant_state[k] = temp_state_dict[k]
-                # bitsandbytes library requires
-                # weight.quant_state.bitsandbytes__nf4 in CPU
-                quant_state[param_name +
-                            ".quant_state.bitsandbytes__nf4"] = quant_state[
-                                param_name +
-                                ".quant_state.bitsandbytes__nf4"].cpu().data
                 return QuantState.from_dict(quant_state, device="cuda")
 
             # Second iterate over all prequant and normal weights
@@ -842,8 +835,12 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 # Filter out all weights whose suffix is not ".weight"
                 if not weight_name.endswith(".weight"):
                     continue
-                if weight_name + ".quant_state.bitsandbytes__nf4" \
-                    in temp_state_dict:
+
+                if (f"{weight_name}.quant_state.bitsandbytes__nf4" \
+                        in temp_state_dict) or \
+                (f"{weight_name}.quant_state.bitsandbytes__fp4" \
+                        in temp_state_dict):
+
                     quant_state = _parse_quant_state(weight_name,
                                                      temp_state_dict)
                     weight_name = weight_name.replace(".weight", ".qweight")
