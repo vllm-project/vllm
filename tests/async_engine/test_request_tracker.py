@@ -47,8 +47,10 @@ async def test_request_tracker():
     assert tracker.new_requests_event.is_set()
     await tracker.wait_for_new_requests()
     new, aborted = tracker.get_new_and_aborted_requests()
-    assert len(aborted) == 1
-    assert "4" in aborted
+    # aborted new requests will cancel each other out -
+    # there's no need for them to propagate into the
+    # engine
+    assert not aborted
     assert not new
     assert stream_4.finished
 
