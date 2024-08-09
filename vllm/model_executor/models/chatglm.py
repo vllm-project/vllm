@@ -578,9 +578,10 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA, SupportsVision):
             weight_loader(param, loaded_weight)
 
         for combined_name, merged_weight_dict in merged_weights_dict.items():
-            param = params_dict[combined_name]
-            combined_weight = torch.cat(list(merged_weight_dict.values()),
-                                        dim=0)
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, combined_weight)
+            if combined_name in params_dict:
+                param = params_dict[combined_name]
+                combined_weight = torch.cat(list(merged_weight_dict.values()),
+                                            dim=0)
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, combined_weight)
