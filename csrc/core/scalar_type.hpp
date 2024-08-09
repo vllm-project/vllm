@@ -123,7 +123,7 @@ class ScalarType {
 
  public:
   // unique id for this scalar type that can be computed at compile time for
-  //  c++17 tempalate specialization this is not needed once we migrate to
+  //  c++17 template specialization this is not needed once we migrate to
   //  c++20 and can pass literal classes as template parameters
   constexpr Id id() const {
     static_assert(id_size_bits() <= sizeof(Id) * 8,
