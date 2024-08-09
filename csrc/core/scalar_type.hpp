@@ -36,7 +36,7 @@ class ScalarType {
         bias(bias),
         signed_(signed_),
         finite_values_only(finite_values_only),
-        nan_repr(nan_repr) {};
+        nan_repr(nan_repr){};
 
   static constexpr ScalarType int_(uint8_t size_bits, int32_t bias = 0) {
     return ScalarType(true, 0, size_bits - 1, bias);
@@ -287,9 +287,9 @@ class ScalarTypeTorch : public torch::CustomClassHolder, public ScalarType {
  public:
   ScalarTypeTorch(int64_t exponent, int64_t mantissa, int64_t bias,
                   bool _signed)
-      : ScalarType(exponent, mantissa, bias, _signed) {};
+      : ScalarType(exponent, mantissa, bias, _signed){};
 
-  ScalarTypeTorch(ScalarType type) : ScalarType(type) {};
+  ScalarTypeTorch(ScalarType type) : ScalarType(type){};
 
   using Base = ScalarType;
   using Self = ScalarTypeTorch;
@@ -361,7 +361,7 @@ class ScalarTypeTorch : public torch::CustomClassHolder, public ScalarType {
                         getter_func_helper = std::move(getter_func_helper)](
                            SelfPtr const& self) {
       auto val = getter_func_helper(self);
-      // upconvert uint8_t, int32_t ect. to int64_t for python
+      // upconvert uint8_t, int32_t etc. to int64_t for python
       if constexpr (std::is_integral_v<T>) {
         return static_cast<int64_t>(val);
       } else {
