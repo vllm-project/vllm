@@ -77,15 +77,17 @@ class CacheEngine:
             num_blocks, self.block_size, self.num_kv_heads, self.head_size)
         pin_memory = is_pin_memory_available() if device == "cpu" else False
         kv_cache: List[torch.Tensor] = []
+        fill_dtype = torch.uint8 if torch.finfo(
+            self.dtype).bits == 8 else self.dtype
         for _ in range(self.num_attention_layers):
             # null block in CpuGpuBlockAllocator requires at least that
             # block to be zeroed-out.
             # We zero-out everything for simplicity.
             kv_cache.append(
                 torch.zeros(kv_cache_shape,
-                            dtype=self.dtype,
+                            dtype=fill_dtype,
                             pin_memory=pin_memory,
-                            device=device))
+                            device=device).view(self.dtype))
         return kv_cache
 
     def swap_in(self, src_to_dst: torch.Tensor) -> None:
