@@ -136,6 +136,11 @@ if TYPE_CHECKING or not core_C_available:
         def __repr__(self) -> str:
             raise NotImplementedError
 
+        # __len__ needs to be defined (and has to throw TypeError) for pytorch's
+        # opcheck to work.
+        def __len__(self) -> int:
+            raise TypeError
+
         #
         # Convenience Constructors
         #

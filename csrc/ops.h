@@ -63,12 +63,12 @@ void advance_step(int64_t num_seqs, int64_t num_queries, int64_t block_size,
 torch::Tensor aqlm_gemm(const torch::Tensor& input, const torch::Tensor& codes,
                         const torch::Tensor& codebooks,
                         const torch::Tensor& scales,
-                        const torch::Tensor& codebook_partition_sizes,
+                        const std::vector<int64_t>& codebook_partition_sizes,
                         const std::optional<torch::Tensor>& bias);
 
-torch::Tensor aqlm_dequant(const torch::Tensor& codes,
-                           const torch::Tensor& codebooks,
-                           const torch::Tensor& codebook_partition_sizes);
+torch::Tensor aqlm_dequant(
+    const torch::Tensor& codes, const torch::Tensor& codebooks,
+    const std::vector<int64_t>& codebook_partition_sizes);
 
 torch::Tensor awq_gemm(torch::Tensor _in_feats, torch::Tensor _kernel,
                        torch::Tensor _scaling_factors, torch::Tensor _zeros,
@@ -104,16 +104,24 @@ torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
                                  int64_t size_k, int64_t size_n,
                                  int64_t num_bits);
 
+torch::Tensor gptq_marlin_repack_meta(torch::Tensor& b_q_weight,
+                                      torch::Tensor& perm, c10::SymInt size_k,
+                                      c10::SymInt size_n, int64_t num_bits);
+
 torch::Tensor awq_marlin_repack(torch::Tensor& b_q_weight, int64_t size_k,
                                 int64_t size_n, int64_t num_bits);
 
-torch::Tensor ggml_dequantize(torch::Tensor W, int8_t type, int64_t m,
+torch::Tensor awq_marlin_repack_meta(torch::Tensor& b_q_weight,
+                                     c10::SymInt size_k, c10::SymInt size_n,
+                                     int64_t num_bits);
+
+torch::Tensor ggml_dequantize(torch::Tensor W, int64_t type, int64_t m,
                               int64_t n);
 
-torch::Tensor ggml_mul_mat_vec_a8(torch::Tensor W, torch::Tensor X, int8_t type,
-                                  int64_t row);
+torch::Tensor ggml_mul_mat_vec_a8(torch::Tensor W, torch::Tensor X,
+                                  int64_t type, int64_t row);
 
-torch::Tensor ggml_mul_mat_a8(torch::Tensor W, torch::Tensor X, int8_t type,
+torch::Tensor ggml_mul_mat_a8(torch::Tensor W, torch::Tensor X, int64_t type,
                               int64_t row);
 
 torch::Tensor fp8_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
@@ -193,6 +201,8 @@ void register_buffer(fptr_t _fa, torch::Tensor& t,
                      const std::vector<std::string>& handles,
                      const std::vector<int64_t>& offsets);
 std::tuple<torch::Tensor, std::vector<int64_t>> get_graph_buffer_ipc_meta(
+    fptr_t _fa);
+std::tuple<torch::Tensor, std::vector<int64_t>> get_graph_buffer_ipc_meta_meta(
     fptr_t _fa);
 void register_graph_buffers(fptr_t _fa, const std::vector<std::string>& handles,
                             const std::vector<std::vector<int64_t>>& offsets);

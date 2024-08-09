@@ -215,6 +215,11 @@ class ScalarType {
     }
   }
 
+  int64_t len() const {
+    throw c10::TypeError("__len__ not implemented");
+    return 0;
+  }
+
   bool operator==(ScalarType const& other) const {
     return mantissa == other.mantissa && exponent == other.exponent &&
            bias == other.bias && signed_ == other.signed_ &&
@@ -324,6 +329,7 @@ class ScalarTypeTorch : public torch::CustomClassHolder, public ScalarType {
                         self.get()->min());
     });
 
+    bind_function(cls, "__len__", &Base::len);
     bind_function(cls, "__str__", &Base::str);
     bind_function(cls, "__eq__", [](SelfPtr const& self, SelfPtr const& other) {
       return *self == *other;

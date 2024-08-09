@@ -487,7 +487,7 @@ static void dequantize_row_iq4_xs_cuda(const void * vx, dst_t * y, const int k, 
     dequantize_block_iq4_xs<<<nb, 32, 0, stream>>>(vx, y);
 }
 
-static to_fp16_cuda_t ggml_get_to_fp16_cuda(int type) {
+static to_fp16_cuda_t ggml_get_to_fp16_cuda(int64_t type) {
     switch (type) {
         case 2:
             return dequantize_block_cuda<QK4_0, QR4_0, dequantize_q4_0>;

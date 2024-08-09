@@ -146,6 +146,17 @@ std::tuple<torch::Tensor, std::vector<int64_t>> get_graph_buffer_ipc_meta(
   return {handles, std::move(offsets)};
 }
 
+std::tuple<torch::Tensor, std::vector<int64_t>> get_graph_buffer_ipc_meta_meta(
+    fptr_t _fa) {
+  auto fa = reinterpret_cast<vllm::CustomAllreduce*>(_fa);
+  auto [handle_bytes, offsets] = fa->get_graph_buffer_ipc_meta();
+  auto options =
+      torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
+  auto handles =
+      torch::empty({static_cast<int64_t>(handle_bytes.size())}, options);
+  return {handles, std::move(offsets)};
+}
+
 void register_graph_buffers(fptr_t _fa, const std::vector<std::string>& handles,
                             const std::vector<std::vector<int64_t>>& offsets) {
   auto fa = reinterpret_cast<vllm::CustomAllreduce*>(_fa);
