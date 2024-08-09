@@ -61,6 +61,7 @@ def flash_attn_varlen_func(
         block_table=block_table,
     )
 
+
 # Note: registration for these ops should be moved into vllm-flash-attn
 # once it is incorporated into the main repo/build process.
 flash_attn_varlen_func = torch.library.custom_op(
