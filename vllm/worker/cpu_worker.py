@@ -14,7 +14,7 @@ from vllm.distributed import (ensure_model_parallel_initialized,
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
 from vllm.worker.cpu_model_runner import CPUModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
                                      LoraNotSupportedWorkerBase, WorkerInput)
@@ -107,7 +107,7 @@ class CPUCacheEngine:
             dtype = model_config.dtype
         else:
             dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype]
-        dtype_size = torch.tensor([], dtype=dtype).element_size()
+        dtype_size = get_dtype_size(dtype)
         return dtype_size * total
 
 
