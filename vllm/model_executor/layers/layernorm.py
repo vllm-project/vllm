@@ -23,10 +23,12 @@ class RMSNorm(CustomOp):
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
 
-    def forward_native(
-        self,
+    @staticmethod
+    def forward_static(
         x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
+        residual: Optional[torch.Tensor],
+        weight: torch.Tensor,
+        variance_epsilon: float,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """PyTorch-native implementation equivalent to forward()."""
         orig_dtype = x.dtype
@@ -36,60 +38,20 @@ class RMSNorm(CustomOp):
             residual = x.to(orig_dtype)
 
         variance = x.pow(2).mean(dim=-1, keepdim=True)
-        x = x * torch.rsqrt(variance + self.variance_epsilon)
-        x = x.to(orig_dtype) * self.weight
+        x = x * torch.rsqrt(variance + variance_epsilon)
+        x = x.to(orig_dtype) * weight
         if residual is None:
             return x
         else:
             return x, residual
 
-    def forward_cuda(
+    def forward_native(
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        from vllm import _custom_ops as ops
-
-        if residual is not None:
-            ops.fused_add_rms_norm(
-                x,
-                residual,
-                self.weight.data,
-                self.variance_epsilon,
-            )
-            return x, residual
-        out = torch.empty_like(x)
-        ops.rms_norm(
-            out,
-            x,
-            self.weight.data,
-            self.variance_epsilon,
-        )
-        return out
-
-    def forward_xpu(
-        self,
-        x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        from vllm._ipex_ops import ipex_ops as ops
-
-        if residual is not None:
-            ops.fused_add_rms_norm(
-                x,
-                residual,
-                self.weight.data,
-                self.variance_epsilon,
-            )
-            return x, residual
-        out = torch.empty_like(x)
-        ops.rms_norm(
-            out,
-            x,
-            self.weight.data,
-            self.variance_epsilon,
-        )
-        return out
+        return self.forward_static(x, residual, self.weight,
+                                   self.variance_epsilon)
 
     def extra_repr(self) -> str:
         s = f"hidden_size={self.weight.data.size(0)}"
@@ -114,10 +76,12 @@ class GemmaRMSNorm(CustomOp):
         self.weight = nn.Parameter(torch.zeros(hidden_size))
         self.variance_epsilon = eps
 
-    def forward_native(
-        self,
+    @staticmethod
+    def forward_static(
         x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
+        residual: Optional[torch.Tensor],
+        weight: torch.Tensor,
+        variance_epsilon: float,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """PyTorch-native implementation equivalent to forward()."""
         orig_dtype = x.dtype
@@ -127,17 +91,17 @@ class GemmaRMSNorm(CustomOp):
 
         x = x.float()
         variance = x.pow(2).mean(dim=-1, keepdim=True)
-        x = x * torch.rsqrt(variance + self.variance_epsilon)
+        x = x * torch.rsqrt(variance + variance_epsilon)
         # Llama does x.to(float16) * w whilst Gemma is (x * w).to(float16)
         # See https://github.com/huggingface/transformers/pull/29402
-        x = x * (1.0 + self.weight.float())
+        x = x * (1.0 + weight.float())
         x = x.to(orig_dtype)
         return x if residual is None else (x, residual)
 
-    def forward_cuda(
+    def forward_native(
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        # TODO(woosuk): Implement an optimized kernel for GemmaRMSNorm.
-        return self.forward_native(x, residual)
+        return self.forward_static(x, residual, self.weight,
+                                   self.variance_epsilon)

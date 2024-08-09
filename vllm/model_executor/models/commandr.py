@@ -32,6 +32,7 @@ from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
+from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
@@ -49,19 +50,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
 
-@torch.compile
-def layer_norm_func(hidden_states, weight, variance_epsilon):
-    input_dtype = hidden_states.dtype
-    hidden_states = hidden_states.to(torch.float32)
-    mean = hidden_states.mean(-1, keepdim=True)
-    variance = (hidden_states - mean).pow(2).mean(-1, keepdim=True)
-    hidden_states = (hidden_states - mean) * torch.rsqrt(variance +
-                                                         variance_epsilon)
-    hidden_states = weight.to(torch.float32) * hidden_states
-    return hidden_states.to(input_dtype)
-
-
-class LayerNorm(nn.Module):
+class LayerNorm(CustomOp):
 
     def __init__(self, param_shape=None, eps=1e-5):
         super().__init__()
@@ -69,9 +58,20 @@ class LayerNorm(nn.Module):
         self.variance_epsilon = eps
         set_weight_attrs(self.weight, {"weight_loader": self.weight_loader})
 
-    def forward(self, hidden_states, residuals=None):
-        hidden_states = layer_norm_func(hidden_states, self.weight,
-                                        self.variance_epsilon)
+    @staticmethod
+    def forward_static(hidden_states, weight, variance_epsilon):
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.to(torch.float32)
+        mean = hidden_states.mean(-1, keepdim=True)
+        variance = (hidden_states - mean).pow(2).mean(-1, keepdim=True)
+        hidden_states = (hidden_states - mean) * torch.rsqrt(variance +
+                                                             variance_epsilon)
+        hidden_states = weight.to(torch.float32) * hidden_states
+        return hidden_states.to(input_dtype)
+
+    def forward_native(self, hidden_states, residuals=None):
+        hidden_states = self.forward_static(hidden_states, self.weight,
+                                            self.variance_epsilon)
         return hidden_states, residuals
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):

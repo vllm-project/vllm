@@ -221,6 +221,17 @@ class RotaryEmbedding(CustomOp):
                                  self.cos_sin_cache, self.is_neox_style)
         return query, key
 
+    def forward_cpu(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        offsets: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # forward_native() is too complex to be optimized by torch.compile.
+        # Fall back to the custom C++ kernel.
+        return self.forward_cuda(positions, query, key, offsets)
+
     def forward_xpu(
         self,
         positions: torch.Tensor,
