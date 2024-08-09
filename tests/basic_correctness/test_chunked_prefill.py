@@ -15,13 +15,16 @@ EXACT_MATCH_MODELS = [
     "meta-llama/Llama-2-7b-hf",
 ]
 
-LOG_PROBS_MODELS = [
+E5M2_MODELS = [
     # does not work with fp8 kv cache kernel
     # - CUDA illegal memory access - undiagnosed
-    "facebook/opt-125m",
+    # "facebook/opt-125m",
+]
+E4M3_MODELS = [
     "nm-testing/Qwen2-1.5B-Instruct-FP8-K-V",
     "nm-testing/TinyLlama-1.1B-compressed-tensors-kv-cache-scheme"
 ]
+LOG_PROBS_MODELS = E4M3_MODELS + E5M2_MODELS
 
 
 @pytest.mark.parametrize("model", EXACT_MATCH_MODELS)
@@ -101,8 +104,10 @@ def test_models_log_probs(
     This test is used when there is discrepancy in kernels
     / numerics (e.g. when using lower-precision types like FP8).
     """
-    if not ((model == "facebook/opt-125m") and (kv_cache_dtype == "fp8_e5m2")):
-        pytest.skip(f"only {model} requires kv_cache_dtype={kv_cache_dtype}")
+    if kv_cache_dtype == "fp8_e5m2" and model not in E5M2_MODELS:
+        pytest.skip(f"{model} not in {E5M2_MODELS} requiring kv_cache_dtype={kv_cache_dtype}")
+    elif "fp8" in kv_cache_dtype and model not in E4M3_MODELS:
+        pytest.skip(f"{model} not in {E4M3_MODELS} requiring kv_cache_dtype={kv_cache_dtype}")
 
     NUM_LOG_PROBS = 8
     NUM_OUTPUT_TOKENS = 4
