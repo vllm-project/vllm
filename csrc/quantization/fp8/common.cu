@@ -18,7 +18,7 @@ C10_HOST_DEVICE constexpr auto FP8_E4M3_MAX =
 using FP8_TYPE = c10::Float8_e4m3fnuz;
 // Using the default max value from pytorch (240.0) will cause accuracy
 // issue when running dynamic quantization. Here use 224.0f for rocm.
-constexpr auto FP8_E4M3_MAX = 240.0f;
+constexpr auto FP8_E4M3_MAX = 224.0f;
 #endif
 
 namespace vllm {
