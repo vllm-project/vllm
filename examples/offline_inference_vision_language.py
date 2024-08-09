@@ -124,16 +124,27 @@ def run_minicpmv(question):
 
 # InternVL
 def run_internvl(question):
-    # Generally, InternVL can use chatml template for conversation
-    TEMPLATE = "<|im_start|>User\n{prompt}<|im_end|>\n<|im_start|>Assistant\n"
-    prompt = f"<image>\n{question}\n"
-    prompt = TEMPLATE.format(prompt=prompt)
+    model_name = "OpenGVLab/InternVL2-2B"
+
     llm = LLM(
-        model="OpenGVLab/InternVL2-4B",
+        model=model_name,
         trust_remote_code=True,
         max_num_seqs=5,
     )
-    stop_token_ids = None
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name,
+                                              trust_remote_code=True)
+    messages = [{'role': 'user', 'content': f"<image>\n{question}"}]
+    prompt = tokenizer.apply_chat_template(messages,
+                                           tokenize=False,
+                                           add_generation_prompt=True)
+
+    # Stop tokens for InternVL
+    # models variants may have different stop tokens
+    # please refer to the model card for the correct "stop words":
+    # https://huggingface.co/OpenGVLab/InternVL2-2B#service
+    stop_tokens = ["<|endoftext|>", "<|im_start|>", "<|im_end|>", "<|end|>"]
+    stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
     return llm, prompt, stop_token_ids
 
 
