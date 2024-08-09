@@ -28,6 +28,10 @@ class ProposerWorkerBase(LoraNotSupportedWorkerBase, SpeculativeProposer):
         """Implementation optional"""
         pass
 
+    def set_should_modify_greedy_probs_inplace(self) -> None:
+        """Implementation optional"""
+        pass
+
 
 class NonLLMProposerWorkerBase(ProposerWorkerBase, ABC):
     """Proposer worker which does not use a model with kvcache"""
