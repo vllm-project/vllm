@@ -259,7 +259,8 @@ class OpenAIServingChat(OpenAIServing):
                         if conversation and conversation[-1].get(
                                 "content") and conversation[-1].get(
                                     "role") == role:
-                            last_msg_content = conversation[-1]["content"]
+                            last_msg_content = conversation[-1][
+                                "content"]  # type: ignore[assignment]
 
                         if last_msg_content:
                             for i in range(num_choices):
@@ -486,7 +487,8 @@ class OpenAIServingChat(OpenAIServing):
             last_msg_content = ""
             if conversation and conversation[-1].get(
                     "content") and conversation[-1].get("role") == role:
-                last_msg_content = conversation[-1]["content"]
+                last_msg_content = conversation[-1][
+                    "content"]  # type: ignore[assignment]
 
             for choice in choices:
                 full_message = last_msg_content + choice.message.content
