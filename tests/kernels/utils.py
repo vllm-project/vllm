@@ -924,5 +924,5 @@ def assert_actual_matches_ideal(test_params: PhaseTestParameters,
     * output_under_test: actually observed output value
     '''
     ideal_output = test_params.packed_qkvo.ideal_output
-    assert torch.allclose(ideal_output,
-                          output_under_test.view_as(ideal_output))
+    torch.testing.assert_close(ideal_output,
+                               output_under_test.view_as(ideal_output))
