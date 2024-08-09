@@ -25,12 +25,10 @@ import numpy.typing as npt
 import psutil
 import torch
 import torch.types
-from typing_extensions import ParamSpec, TypeGuard, assert_never
+from typing_extensions import ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm.inputs import (ExplicitEncoderDecoderPrompt, PromptInputs,
-                         SingletonPromptInputs)
 from vllm.logger import enable_trace_function_call, init_logger
 
 logger = init_logger(__name__)
@@ -404,7 +402,7 @@ async def iterate_with_cancellation(
 
 async def merge_async_iterators(
     *iterators: AsyncGenerator[T, None],
-    is_cancelled: Callable[[], Awaitable[bool]],
+    is_cancelled: Optional[Callable[[], Awaitable[bool]]] = None,
 ) -> AsyncGenerator[Tuple[int, T], None]:
     """Merge multiple asynchronous iterators into a single iterator.
 
@@ -412,8 +410,8 @@ async def merge_async_iterators(
     When it yields, it yields a tuple (i, item) where i is the index of the
     iterator that yields the item.
 
-    It also polls the provided function at least once per second to check
-    for client cancellation.
+    It also optionally polls a provided function at least once per second
+    to check for client cancellation.
     """
 
     # Can use anext() in python >= 3.10
@@ -421,12 +419,13 @@ async def merge_async_iterators(
         ensure_future(pair[1].__anext__()): pair
         for pair in enumerate(iterators)
     }
+    timeout = None if is_cancelled is None else 1
     try:
         while awaits:
             done, pending = await asyncio.wait(awaits.keys(),
                                                return_when=FIRST_COMPLETED,
-                                               timeout=1)
-            if await is_cancelled():
+                                               timeout=timeout)
+            if is_cancelled is not None and await is_cancelled():
                 raise asyncio.CancelledError("client cancelled")
             for d in done:
                 pair = awaits.pop(d)
@@ -806,7 +805,7 @@ def is_list_of(
     typ: Type[T],
     *,
     check: Literal["first", "all"] = "first",
-) -> TypeGuard[List[T]]:
+) -> TypeIs[List[T]]:
     if not isinstance(value, list):
         return False
 
@@ -1070,50 +1069,3 @@ async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
     """Utility function to run async task in a lock"""
     async with lock:
         return await task(*args, **kwargs)
-
-
-def is_encoder_decoder_model_config(model_config) -> bool:
-    '''
-    Extract the HF encoder/decoder model flag from the ModelConfig instance.
-    Return False if model_config is None.
-    '''
-    return model_config is not None and \
-                getattr(model_config.hf_config,
-                        "is_encoder_decoder",
-                        False)
-
-
-def is_embedding_model_config(model_config) -> bool:
-    '''
-    Extract the embedding model flag from the ModelConfig instance.
-    Return False if model_config is None.
-    '''
-    return model_config is not None and \
-                model_config.embedding_mode
-
-
-def build_explicit_enc_dec_prompt(
-    encoder_prompt: SingletonPromptInputs,
-    decoder_prompt: SingletonPromptInputs,
-) -> ExplicitEncoderDecoderPrompt:
-    return ExplicitEncoderDecoderPrompt(encoder_prompt=encoder_prompt,
-                                        decoder_prompt=decoder_prompt)
-
-
-def zip_enc_dec_prompt_lists(
-    enc_prompt_list: List[SingletonPromptInputs],
-    dec_prompt_list: List[SingletonPromptInputs],
-) -> List[ExplicitEncoderDecoderPrompt]:
-    return [
-        build_explicit_enc_dec_prompt(encoder_prompt, decoder_prompt)
-        for (encoder_prompt,
-             decoder_prompt) in zip(enc_prompt_list, dec_prompt_list)
-    ]
-
-
-def to_enc_dec_tuple_list(
-    enc_dec_prompts: List[ExplicitEncoderDecoderPrompt],
-) -> List[Tuple[PromptInputs, PromptInputs]]:
-    return [(enc_dec_prompt['encoder_prompt'],
-             enc_dec_prompt['decoder_prompt'])
-            for enc_dec_prompt in enc_dec_prompts]

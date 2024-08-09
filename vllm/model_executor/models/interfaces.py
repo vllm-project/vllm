@@ -1,7 +1,7 @@
 from typing import (ClassVar, Dict, List, Literal, Optional, Protocol, Type,
                     Union, overload, runtime_checkable)
 
-from typing_extensions import TypeGuard
+from typing_extensions import TypeIs
 
 from vllm.config import LoRAConfig, MultiModalConfig, SchedulerConfig
 from vllm.logger import init_logger
@@ -38,18 +38,18 @@ class _SupportsMultiModalType(Protocol):
 
 @overload
 def supports_multimodal(
-        model: Type[object]) -> TypeGuard[Type[SupportsMultiModal]]:
+        model: Type[object]) -> TypeIs[Type[SupportsMultiModal]]:
     ...
 
 
 @overload
-def supports_multimodal(model: object) -> TypeGuard[SupportsMultiModal]:
+def supports_multimodal(model: object) -> TypeIs[SupportsMultiModal]:
     ...
 
 
 def supports_multimodal(
     model: Union[Type[object], object],
-) -> Union[TypeGuard[Type[SupportsMultiModal]], TypeGuard[SupportsMultiModal]]:
+) -> Union[TypeIs[Type[SupportsMultiModal]], TypeIs[SupportsMultiModal]]:
     if isinstance(model, type):
         return isinstance(model, _SupportsMultiModalType)
 
@@ -95,18 +95,18 @@ class _SupportsLoRAType(Protocol):
 
 
 @overload
-def supports_lora(model: Type[object]) -> TypeGuard[Type[SupportsLoRA]]:
+def supports_lora(model: Type[object]) -> TypeIs[Type[SupportsLoRA]]:
     ...
 
 
 @overload
-def supports_lora(model: object) -> TypeGuard[SupportsLoRA]:
+def supports_lora(model: object) -> TypeIs[SupportsLoRA]:
     ...
 
 
 def supports_lora(
     model: Union[Type[object], object],
-) -> Union[TypeGuard[Type[SupportsLoRA]], TypeGuard[SupportsLoRA]]:
+) -> Union[TypeIs[Type[SupportsLoRA]], TypeIs[SupportsLoRA]]:
     result = _supports_lora(model)
 
     if not result:
@@ -138,7 +138,7 @@ def supports_lora(
 
 def _supports_lora(
     model: Union[Type[object], object],
-) -> Union[TypeGuard[Type[SupportsLoRA]], TypeGuard[SupportsLoRA]]:
+) -> Union[TypeIs[Type[SupportsLoRA]], TypeIs[SupportsLoRA]]:
     if isinstance(model, type):
         return isinstance(model, _SupportsLoRAType)
 
@@ -173,18 +173,18 @@ class _HasInnerStateType(Protocol):
 
 
 @overload
-def has_inner_state(model: object) -> TypeGuard[HasInnerState]:
+def has_inner_state(model: object) -> TypeIs[HasInnerState]:
     ...
 
 
 @overload
-def has_inner_state(model: Type[object]) -> TypeGuard[Type[HasInnerState]]:
+def has_inner_state(model: Type[object]) -> TypeIs[Type[HasInnerState]]:
     ...
 
 
 def has_inner_state(
     model: Union[Type[object], object]
-) -> Union[TypeGuard[Type[HasInnerState]], TypeGuard[HasInnerState]]:
+) -> Union[TypeIs[Type[HasInnerState]], TypeIs[HasInnerState]]:
     if isinstance(model, type):
         return isinstance(model, _HasInnerStateType)
 

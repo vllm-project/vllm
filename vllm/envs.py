@@ -49,9 +49,11 @@ if TYPE_CHECKING:
     NVCC_THREADS: Optional[str] = None
     VLLM_USE_PRECOMPILED: bool = False
     VLLM_NO_DEPRECATION_WARNING: bool = False
+    VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: bool = False
     CMAKE_BUILD_TYPE: Optional[str] = None
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
+    VLLM_TEST_FORCE_FP8_MARLIN: bool = False
 
 
 def get_default_cache_root():
@@ -334,6 +336,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_NO_DEPRECATION_WARNING":
     lambda: bool(int(os.getenv("VLLM_NO_DEPRECATION_WARNING", "0"))),
 
+    # If set, the OpenAI API server will stay alive even after the underlying
+    # AsyncLLMEngine errors and stops serving requests
+    "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH":
+    lambda: bool(os.getenv("VLLM_KEEP_ALIVE_ON_ENGINE_DEATH", 0)),
+
     # If the env var VLLM_ALLOW_LONG_MAX_MODEL_LEN is set, it allows
     # the user to specify a max sequence length greater than
     # the max length derived from the model's config.json.
@@ -341,6 +348,13 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ALLOW_LONG_MAX_MODEL_LEN":
     lambda:
     (os.environ.get("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "0").strip().lower() in
+     ("1", "true")),
+
+    # If set, forces FP8 Marlin to be used for FP8 quantization regardless
+    # of the hardware support for FP8 compute.
+    "VLLM_TEST_FORCE_FP8_MARLIN":
+    lambda:
+    (os.environ.get("VLLM_TEST_FORCE_FP8_MARLIN", "0").strip().lower() in
      ("1", "true")),
 }
 

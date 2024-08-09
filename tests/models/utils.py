@@ -1,5 +1,4 @@
 import warnings
-from enum import Enum
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 from vllm.sequence import SampleLogprobs
@@ -136,13 +135,3 @@ def check_logprobs_close(
                     warnings.simplefilter("always")
 
                     warnings.warn(fail_msg, stacklevel=2)
-
-
-class DecoderPromptType(Enum):
-    '''
-    For encoder/decoder models only -
-    
-    '''
-    CUSTOM = 1
-    NONE = 2
-    EMPTY_STR = 3
