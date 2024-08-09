@@ -117,7 +117,7 @@ def test_sample_decoding_only(random_sampling, max_best_of,
             # If the request is greedy and we are not modifying greedy probs,
             # we want to make sure sampled_modified_probs tensor is the same as
             # the probs tensor.
-            torch.testing.assert_close(sampled_modified_probs[i][0],
+            torch.testing.assert_close(sampled_modified_probs[i],
                                        probs[i][sampled_tokens[i]])
 
     if save_logprobs:
