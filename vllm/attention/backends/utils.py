@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Dict, List, Type, TypeVar, Union
 import torch
 
 from vllm.attention import AttentionMetadata, AttentionMetadataBuilder
-from vllm.utils import make_tensor_with_pad
+from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
 # Error string(s) for encoder/decoder
 # unsupported attention scenarios
@@ -68,12 +68,20 @@ def compute_slot_mapping(is_profile_run: bool, slot_mapping: List[int],
     # tokens are masked and the slot mapping will be
     # [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
     block_table = block_tables[seq_id]
-    slot_mapping.extend([PAD_SLOT_ID] * max(0, start_idx - context_len))
-    for i in range(max(start_idx, context_len), seq_len):
+
+    def add_slot(i):
         block_number = block_table[i // block_size]
         block_offset = i % block_size
         slot = block_number * block_size + block_offset
         slot_mapping.append(slot)
+
+    if start_idx == 0 and (seq_len - context_len) == 1:
+        # Optimization for common-case of decoding next token
+        add_slot(seq_len - 1)
+    else:
+        slot_mapping.extend([PAD_SLOT_ID] * max(0, start_idx - context_len))
+        for i in range(max(start_idx, context_len), seq_len):
+            add_slot(i)
 
 
 TAttentionMetadata = TypeVar("TAttentionMetadata", bound='AttentionMetadata')
@@ -181,7 +189,8 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
             for i, block_table in enumerate(self.block_tables):
                 if block_table:
                     input_block_tables[i, :len(block_table)] = block_table
-            block_tables = torch.tensor(input_block_tables, device=device)
+            block_tables = torch.from_numpy(input_block_tables).to(
+                device, non_blocking=True)
         else:
             block_tables = make_tensor_with_pad(
                 self.block_tables,
@@ -191,15 +200,15 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
             )
         assert max_query_len > 0, "query_lens: {}".format(query_lens)
 
-        context_lens_tensor = torch.tensor(self.context_lens,
-                                           dtype=torch.int,
-                                           device=device)
-        seq_lens_tensor = torch.tensor(seq_lens,
-                                       dtype=torch.int,
-                                       device=device)
-        query_lens_tensor = torch.tensor(query_lens,
-                                         dtype=torch.long,
-                                         device=device)
+        assert device is not None
+        context_lens_tensor = async_tensor_h2d(self.context_lens, torch.int,
+                                               device, self.runner.pin_memory)
+        seq_lens_tensor = async_tensor_h2d(seq_lens, torch.int, device,
+                                           self.runner.pin_memory)
+        query_lens_tensor = async_tensor_h2d(query_lens, torch.long, device,
+                                             self.runner.pin_memory)
+        slot_mapping_tensor = async_tensor_h2d(self.slot_mapping, torch.long,
+                                               device, self.runner.pin_memory)
         query_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
                                       dtype=torch.int32,
                                       device=device)
@@ -214,10 +223,6 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
                      dim=0,
                      dtype=query_start_loc.dtype,
                      out=query_start_loc[1:])
-
-        slot_mapping_tensor = torch.tensor(self.slot_mapping,
-                                           dtype=torch.long,
-                                           device=device)
 
         return self._metadata_cls(  # type: ignore
             num_prefills=self.num_prefills,

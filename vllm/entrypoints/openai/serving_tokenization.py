@@ -2,7 +2,9 @@ from typing import List, Optional, Union
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import AsyncEngineClient
-from vllm.entrypoints.chat_utils import load_chat_template, parse_chat_messages
+from vllm.entrypoints.chat_utils import (apply_chat_template,
+                                         load_chat_template,
+                                         parse_chat_messages)
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -70,12 +72,12 @@ class OpenAIServingTokenization(OpenAIServing):
                 logger.warning(
                     "Multi-modal inputs are ignored during tokenization")
 
-            prompt = tokenizer.apply_chat_template(
-                add_generation_prompt=request.add_generation_prompt,
+            prompt = apply_chat_template(
+                tokenizer,
                 conversation=conversation,
-                tokenize=False,
-                chat_template=self.chat_template)
-            assert isinstance(prompt, str)
+                chat_template=self.chat_template,
+                add_generation_prompt=request.add_generation_prompt,
+            )
         else:
             prompt = request.prompt
 

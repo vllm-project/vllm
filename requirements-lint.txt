@@ -8,7 +8,7 @@ isort==5.13.2
 clang-format==18.1.5
 
 # type checking
-mypy==1.9.0
+mypy==1.11.1
 types-PyYAML
 types-requests
 types-setuptools
