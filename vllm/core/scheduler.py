@@ -1032,6 +1032,7 @@ class Scheduler:
         # such as self.running, self.swapped, and self.waiting.
         scheduler_outputs = self._schedule()
         now = time.time()
+        scheduler_start_time = time.perf_counter()
 
         if not self.cache_config.enable_prefix_caching:
             common_computed_block_nums = []
@@ -1126,6 +1127,17 @@ class Scheduler:
                 scheduled_seq_group.seq_group)
 
         self._seq_group_metadata_cache.reset()
+
+        scheduler_time = time.perf_counter() - scheduler_start_time
+        # Add this to scheduler time to all the sequences that are currently
+        # running. This will help estimate if the scheduler is a significant
+        # component in the e2e latency.
+        for seq_group in self.running:
+            if seq_group is not None and seq_group.metrics is not None:
+                if seq_group.metrics.scheduler_time is not None:
+                    seq_group.metrics.scheduler_time += scheduler_time
+                else:
+                    seq_group.metrics.scheduler_time = scheduler_time
 
         return seq_group_metadata_list, scheduler_outputs
 

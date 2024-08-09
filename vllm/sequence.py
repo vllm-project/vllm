@@ -92,6 +92,13 @@ class RequestMetrics:
         first_token_time: The time when the first token was generated.
         time_in_queue: The time the request spent in the queue.
         finished_time: The time when the request was finished.
+        scheduler_time: The time spent in the scheduler when this request was
+                        being considered by the scheduler.
+        model_forward_time: The time spent in the model forward pass when this
+                            request was in the batch.
+        model_execute_time: The time spent in the model execute function. This
+                            will include model forward, block/sync across
+                            workers, cpu-gpu sync time and sampling time.
     """
     arrival_time: float
     last_token_time: float
@@ -99,6 +106,9 @@ class RequestMetrics:
     first_token_time: Optional[float]
     time_in_queue: Optional[float]
     finished_time: Optional[float] = None
+    scheduler_time: Optional[float] = None
+    model_forward_time: Optional[float] = None
+    model_execute_time: Optional[float] = None
 
 
 class SequenceData:
@@ -967,6 +977,13 @@ class SamplerOutput:
 
     # Optional last hidden states from the model.
     hidden_states: Optional[torch.Tensor] = None
+
+    # Time taken in the forward pass for this across all workers
+    model_forward_time: Optional[float] = None
+
+    # Time taken in the model execute function. This will include model forward,
+    # block/sync across workers, cpu-gpu sync time and sampling time.
+    model_execute_time: Optional[float] = None
 
     def __getitem__(self, idx: int):
         return self.outputs[idx]

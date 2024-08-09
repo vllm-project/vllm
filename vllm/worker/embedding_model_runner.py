@@ -4,8 +4,8 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 import torch
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, MultiModalConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig)
+                         ModelConfig, MultiModalConfig, ObservabilityConfig,
+                         ParallelConfig, PromptAdapterConfig, SchedulerConfig)
 from vllm.logger import init_logger
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.multimodal import MultiModalInputs
@@ -45,6 +45,7 @@ class EmbeddingModelRunner(
         is_driver_worker: bool = False,
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         multimodal_config: Optional[MultiModalConfig] = None,
+        observability_config: Optional[ObservabilityConfig] = None,
     ):
         super().__init__(model_config,
                          parallel_config,
@@ -56,7 +57,8 @@ class EmbeddingModelRunner(
                          kv_cache_dtype=kv_cache_dtype,
                          is_driver_worker=is_driver_worker,
                          prompt_adapter_config=prompt_adapter_config,
-                         multimodal_config=multimodal_config)
+                         multimodal_config=multimodal_config,
+                         observability_config=observability_config)
 
     @torch.inference_mode()
     def execute_model(
