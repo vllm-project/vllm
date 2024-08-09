@@ -157,12 +157,5 @@ Supported models:
 * `mistralai/Mistral-7B-Instruct-v0.3`
 * Possibly mistral-large and mixtral? These have not been tested at the time of this writing.
 
-There is a several known with tool-calling in Mistral models:
-* Mistral function-calling / tool use generates calls with _single_ quotes `'` instead of double quotes `"`. As a 
-result, tool call generations can't be handled as JSON by the parser automatically without using `eval`, which would 
-present security issues for vLLM users. As a result, to support Mistral tool calls, we find-and-replace single-quotes 
-with double-quotes in mistral-generated tool calls. Therefore, **it is important to ensure that your tool call 
-arguments do not contain single quotes.** Escaped double quotes may be handled properly, but otherwise you should
-expect parser issues. 
 
 Recommended flags: `--tool-call-parser mistral --chat-template examples/tool_chat_template_mistral.jinja`
