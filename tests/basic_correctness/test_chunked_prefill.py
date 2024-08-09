@@ -10,20 +10,21 @@ import pytest
 
 from ..models.utils import check_logprobs_close, check_outputs_equal
 
-MODELS = [
+EXACT_MATCH_MODELS = [
     "facebook/opt-125m",
     "meta-llama/Llama-2-7b-hf",
 ]
 
-FP8_MODELS = [
-    # does not work - CUDA illegal memory access - undiagnosed
-    # "facebook/opt-125m",
+LOG_PROBS_MODELS = [
+    # does not work with fp8 kv cache kernel
+    # - CUDA illegal memory access - undiagnosed
+    "facebook/opt-125m",
     "nm-testing/Qwen2-1.5B-Instruct-FP8-K-V",
     "nm-testing/TinyLlama-1.1B-compressed-tensors-kv-cache-scheme"
 ]
 
 
-@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("model", EXACT_MATCH_MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16])
@@ -31,7 +32,7 @@ FP8_MODELS = [
 # NOTE: Increasing this in this suite will fail CI because we currently cannot
 # reset distributed env properly. Use a value > 1 just when you test.
 @pytest.mark.parametrize("tensor_parallel_size", [1])
-def test_models(
+def test_models_exact_string_match(
     hf_runner,
     vllm_runner,
     example_prompts,
@@ -42,6 +43,10 @@ def test_models(
     enforce_eager: bool,
     tensor_parallel_size: int,
 ) -> None:
+    """
+    Checks exact match decode between hf model and vllm runner with
+    chunked prefill.
+    """
     max_num_seqs = min(chunked_prefill_token_size, 256)
     enable_chunked_prefill = False
     max_num_batched_tokens = None
@@ -71,15 +76,15 @@ def test_models(
     )
 
 
-@pytest.mark.parametrize("model", FP8_MODELS)
-@pytest.mark.parametrize("kv_cache_dtype", ["fp8"])
+@pytest.mark.parametrize("model", LOG_PROBS_MODELS)
+@pytest.mark.parametrize("kv_cache_dtype", ["fp8", "fp8_e5m2"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16])
 @pytest.mark.parametrize("enforce_eager", [False, True])
 # NOTE: Increasing this in this suite will fail CI because we currently cannot
 # reset distributed env properly. Use a value > 1 just when you test.
 @pytest.mark.parametrize("tensor_parallel_size", [1])
-def test_fp8_kv_cache(
+def test_models_log_probs(
     vllm_runner,
     example_prompts,
     model: str,
@@ -89,6 +94,17 @@ def test_fp8_kv_cache(
     enforce_eager: bool,
     tensor_parallel_size: int,
 ) -> None:
+    """
+    Only checks log probs match between chunked-prefill and
+    non-chunked-prefill version of vLLM model runner.
+    
+    This test is to be used as alternative to test_models_exact_string_max
+    when there is discrepancy in kernels / numerics (e.g. when using
+    lower-precision types like FP8).
+    """
+    if model == "facebook/opt-125" and kv_cache_dtype != "fp8_e5m2":
+        pytest.skip(f"{model} requires kv_cache_dtype={kv_cache_dtype}")
+
     NUM_LOG_PROBS = 8
     NUM_OUTPUT_TOKENS = 4
 
