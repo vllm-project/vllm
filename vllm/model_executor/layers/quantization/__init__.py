@@ -22,11 +22,13 @@ from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
 from vllm.model_executor.layers.quantization.marlin import MarlinConfig
 from vllm.model_executor.layers.quantization.qqq import QQQConfig
 from vllm.model_executor.layers.quantization.squeezellm import SqueezeLLMConfig
+from vllm.model_executor.layers.quantization.tpu_int8 import Int8TpuConfig
 
 QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "aqlm": AQLMConfig,
     "awq": AWQConfig,
     "deepspeedfp": DeepSpeedFPConfig,
+    "tpu_int8": Int8TpuConfig,
     "fp8": Fp8Config,
     "fbgemm_fp8": FBGEMMFp8Config,
     # The order of gptq methods is important for config.py iteration over
