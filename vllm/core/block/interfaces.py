@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from typing import Dict, FrozenSet, List, Optional, Protocol, Tuple
 
+import torch
+
 from vllm.utils import Device
 
 BlockId = int
@@ -254,6 +256,10 @@ class DeviceAwareBlockAllocator(ABC):
             self, computed_seq_block_ids: List[List[int]]) -> List[int]:
         pass
 
+    @abstractmethod
+    def get_kv_tensor_from_block_id(block_id: int) -> torch.Tensor:
+        pass
+    
     @abstractmethod
     def get_num_blocks_touched(self,
                                blocks: List[Block],

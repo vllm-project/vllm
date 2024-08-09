@@ -4,6 +4,8 @@ from typing import Dict, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Tuple
 
+import torch
+
 from vllm.core.block.block_table import BlockTable
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
 from vllm.core.block.interfaces import Block
@@ -119,8 +121,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             block_size=self.block_size,
         )
 
-        if seq_group.is_encoder_decoder():
-            num_required_blocks += BlockTable.get_num_required_blocks(
+        if seq_group.is_encoder_decoder():num_required_blocks += BlockTable.get_num_required_blocks(
                 seq_group.get_encoder_seq().get_token_ids(),
                 block_size=self.block_size,
             )
@@ -315,6 +316,17 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         # NOTE(sang): This assumes seq_block_ids doesn't contain any None.
         return self.block_allocator.get_common_computed_block_ids(
             computed_seq_block_ids)  # type: ignore
+    
+    def get_kv_cache_from_seq(self, seq_group: SequenceGroup) -> torch.Tensor:
+        abs_block_ids = self.get_block_table(
+            seq_group.get_seqs(status=SequenceStatus.RUNNING)[0])
+        rel_block_id = self.block_allocator.get_physical_block_id(
+            Device.GPU, abs_block_ids[0])
+        kv_cache = self.block_allocator.get_kv_tensor_from_block_id(rel_block_id)
+        return kv_cache
+
+    def get_kv_cache_from_block(self, seq_group: SequenceGroup) -> torch.Tensor:
+        return self.get_kv_cache_from_seq(seq_group)
 
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         if parent_seq.seq_id not in self.block_tables:
