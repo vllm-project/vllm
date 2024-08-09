@@ -31,6 +31,21 @@ _KEYS_TO_MODIFY_MAPPING = {
 }
 
 
+class PaliGemmaImagePixelInputs(TypedDict):
+    type: Literal["pixel_values"]
+    data: torch.Tensor
+    """Shape: (batch_size, num_channels, height, width)"""
+
+
+class PaliGemmaImageEmbeddingInputs(TypedDict):
+    type: Literal["image_embeds"]
+    data: torch.Tensor
+
+
+PaliGemmaImageInputs = Union[PaliGemmaImagePixelInputs,
+                             PaliGemmaImageEmbeddingInputs]
+
+
 def get_max_paligemma_image_tokens(ctx: InputContext):
     hf_config = ctx.get_hf_config(PaliGemmaConfig)
     vision_config = hf_config.vision_config
@@ -105,21 +120,6 @@ class PaliGemmaMultiModalProjector(nn.Module):
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
         hidden_states = self.linear(image_features)
         return hidden_states
-
-
-class PaliGemmaImagePixelInputs(TypedDict):
-    type: Literal["pixel_values"]
-    data: torch.Tensor
-    """Shape: (batch_size, num_channels, height, width)"""
-
-
-class PaliGemmaImageEmbeddingInputs(TypedDict):
-    type: Literal["image_embeds"]
-    data: torch.Tensor
-
-
-PaliGemmaImageInputs = Union[PaliGemmaImagePixelInputs,
-                             PaliGemmaImageEmbeddingInputs]
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
@@ -203,29 +203,20 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
 
         return image_features
 
-    def _process_image_pixels(
-        self,
-        inputs: PaliGemmaImagePixelInputs,
-    ) -> torch.Tensor:
-        assert self.vision_tower is not None
-
-        pixel_values = inputs["data"]
-
-        return self._image_pixels_to_features(
-            self.vision_tower,
-            pixel_values,
-        )
-
     def _process_image_input(
         self,
         image_input: PaliGemmaImageInputs,
     ) -> torch.Tensor:
 
-        if image_input["type"] == "pixel_values":
+        if image_input["type"] == "image_embeds":
             return image_input["data"]
 
         assert self.vision_tower is not None
-        image_features = self._process_image_pixels(image_input, )
+        pixel_values = image_input["data"]
+        image_features = self._image_pixels_to_features(
+            self.vision_tower,
+            pixel_values,
+        )
 
         return self.multi_modal_projector(image_features)
 

@@ -50,6 +50,15 @@ class InternVLImagePixelInputs(TypedDict):
     """
 
 
+class InternVLImageEmbeddingInputs(TypedDict):
+    type: Literal["image_embeds"]
+    data: Union[torch.Tensor, List[torch.Tensor]]
+
+
+InternVLImageInputs = Union[InternVLImagePixelInputs,
+                            InternVLImageEmbeddingInputs]
+
+
 # copied from https://huggingface.co/OpenGVLab/InternVL2-1B
 def build_transform(input_size):
     MEAN, STD = IMAGENET_MEAN, IMAGENET_STD
@@ -378,12 +387,22 @@ class InternVLChatModel(nn.Module, SupportsVision):
         return data
 
     def _parse_and_validate_image_input(
-            self, **kwargs: object) -> Optional[InternVLImagePixelInputs]:
+            self, **kwargs: object) -> Optional[InternVLImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
         image_token_id = kwargs.pop("image_token_id", None)
+        image_embeds = kwargs.pop("image_embeds", None)
 
-        if pixel_values is None:
+        if pixel_values is None and image_embeds is None:
             return None
+
+        if image_embeds is not None:
+            if not isinstance(image_embeds, torch.Tensor):
+                raise ValueError("Incorrect type of image embeddings. "
+                                 f"Got type: {type(image_embeds)}")
+            return InternVLImageEmbeddingInputs(
+                type="image_embeds",
+                data=image_embeds,
+            )
 
         self.img_context_token_id = image_token_id[0]
 
@@ -395,6 +414,19 @@ class InternVLChatModel(nn.Module, SupportsVision):
             type="pixel_values",
             data=self._validate_pixel_values(pixel_values),
         )
+
+    def _process_image_input(
+        self,
+        image_input: InternVLImageInputs,
+    ) -> torch.Tensor:
+
+        if image_input["type"] == "image_embeds":
+            return image_input["data"]
+
+        assert self.vision_model is not None
+        image_embeds = self.extract_feature(image_input["data"])
+
+        return image_embeds
 
     def forward(
         self,
@@ -409,7 +441,7 @@ class InternVLChatModel(nn.Module, SupportsVision):
         if image_input is not None:
             inputs_embeds = self.language_model.model.get_input_embeddings(
                 input_ids)
-            vit_embeds = self.extract_feature(image_input["data"])
+            vit_embeds = self._process_image_input(image_input)
             inputs_embeds = merge_vision_embeddings(input_ids, inputs_embeds,
                                                     vit_embeds,
                                                     self.img_context_token_id)
