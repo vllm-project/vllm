@@ -207,6 +207,14 @@ def input_processor_for_llava_next(ctx: InputContext, llm_inputs: LLMInputs):
             input_height=height,
             input_width=width,
         )
+    elif isinstance(image_data, list):
+            width, height = image_data[0].size
+
+            image_feature_size = get_llava_next_image_feature_size(
+                hf_config,
+                input_height=height,
+                input_width=width,
+            )
     elif isinstance(image_data, torch.Tensor):
         raise NotImplementedError("Embeddings input is not supported yet")
     else:
@@ -511,7 +519,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
         9047, 13566, 29901]`.
 
         To reserve space in KV cache, we have to insert placeholder tokens
-        before they are inputted to the model, so the input processor prepends 
+        before they are inputted to the model, so the input processor prepends
         additional image tokens (denoted as `32000`), resulting in:
         `[1, 319, 13563, 1546, 263, 12758, 5199, 322, 385, 23116, 21082, 20255,
         29889, 450, 20255, 4076, 8444, 29892, 13173, 29892, 322, 1248, 568,
@@ -532,7 +540,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
                 batch.
             pixel_values: The pixels in each grid patch for each input image.
             image_sizes: The original `(height, width)` for each input image.
-        
+
         See also:
             :class:`LlavaNextImageInputs`
         """
