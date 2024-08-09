@@ -194,6 +194,7 @@ class PagedAttention:
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
+        kv_cache_dtype: str,
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
         block_tables: torch.Tensor,
@@ -203,6 +204,8 @@ class PagedAttention:
         max_query_len: int,
         alibi_slopes: Optional[torch.Tensor],
         sliding_window: Optional[int],
+        k_scale: float,
+        v_scale: float,
     ) -> torch.Tensor:
         output = torch.empty_like(query)
         context_attention_fwd(
@@ -210,6 +213,7 @@ class PagedAttention:
             key,
             value,
             output,
+            kv_cache_dtype,
             key_cache,
             value_cache,
             block_tables,
@@ -218,6 +222,8 @@ class PagedAttention:
             seq_lens_tensor,
             context_lens,
             max_query_len,
+            k_scale,
+            v_scale,
             alibi_slopes,
             sliding_window,
         )
