@@ -1,4 +1,4 @@
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
+from typing import Iterable, List, Literal, Mapping, Optional, Tuple, TypedDict
 
 import torch
 from torch import nn
@@ -9,8 +9,7 @@ from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.gemma import GemmaModel
@@ -19,7 +18,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
-from .interfaces import SupportsVision
+from .interfaces import SupportsMultiModal
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_max_siglip_image_tokens)
 from .utils import merge_vision_embeddings
@@ -38,17 +37,20 @@ def get_max_paligemma_image_tokens(ctx: InputContext):
     return get_max_siglip_image_tokens(vision_config)
 
 
-def dummy_data_for_paligemma(ctx: InputContext, seq_len: int):
+def dummy_data_for_paligemma(ctx: InputContext, seq_len: int,
+                             mm_counts: Mapping[str, int]):
     hf_config = ctx.get_hf_config(PaliGemmaConfig)
     vision_config = hf_config.vision_config
+    num_images = mm_counts["image"]
 
     seq_data = dummy_seq_data_for_siglip(
         vision_config,
         seq_len,
+        num_images,
         image_token_id=hf_config.image_token_index,
     )
 
-    mm_data = dummy_image_for_siglip(vision_config)
+    mm_data = dummy_image_for_siglip(vision_config, num_images)
     return seq_data, mm_data
 
 
@@ -120,7 +122,7 @@ PaliGemmaImageInputs = PaliGemmaImagePixelInputs
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_paligemma_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_paligemma)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_paligemma)
-class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
+class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def __init__(self,
                  config: PaliGemmaConfig,
@@ -206,7 +208,7 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
     ) -> torch.Tensor:
 
         assert self.vision_tower is not None
-        image_features = self._process_image_pixels(image_input, )
+        image_features = self._process_image_pixels(image_input)
 
         return self.multi_modal_projector(image_features)
 

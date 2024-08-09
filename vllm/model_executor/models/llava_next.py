@@ -1,5 +1,6 @@
 import itertools
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
+from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
+                    TypedDict, Union)
 
 import torch
 import torch.nn as nn
@@ -13,8 +14,7 @@ from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -23,7 +23,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 from .clip import (CLIPVisionModel, dummy_image_for_clip,
                    dummy_seq_data_for_clip, get_clip_image_feature_size,
                    get_clip_patch_grid_length, input_processor_for_clip)
-from .interfaces import SupportsVision
+from .interfaces import SupportsMultiModal
 from .llava import LlavaMultiModalProjector
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_siglip_image_feature_size,
@@ -148,9 +148,11 @@ def get_max_llava_next_image_tokens(ctx: InputContext):
     )
 
 
-def dummy_data_for_llava_next(ctx: InputContext, seq_len: int):
+def dummy_data_for_llava_next(ctx: InputContext, seq_len: int,
+                              mm_counts: Mapping[str, int]):
     hf_config = ctx.get_hf_config(LlavaNextConfig)
     vision_config = hf_config.vision_config
+    num_images = mm_counts["image"]
 
     image_feature_size = get_max_llava_next_image_tokens(ctx)
 
@@ -158,12 +160,14 @@ def dummy_data_for_llava_next(ctx: InputContext, seq_len: int):
         seq_data = dummy_seq_data_for_clip(
             vision_config,
             seq_len,
+            num_images,
             image_token_id=hf_config.image_token_index,
             image_feature_size_override=image_feature_size,
         )
 
         mm_data = dummy_image_for_clip(
             vision_config,
+            num_images,
             image_width_override=MAX_IMAGE_FEATURE_SIZE_WIDTH,
             image_height_override=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
         )
@@ -173,12 +177,14 @@ def dummy_data_for_llava_next(ctx: InputContext, seq_len: int):
         seq_data = dummy_seq_data_for_siglip(
             vision_config,
             seq_len,
+            num_images,
             image_token_id=hf_config.image_token_index,
             image_feature_size_override=image_feature_size,
         )
 
         mm_data = dummy_image_for_siglip(
             vision_config,
+            num_images,
             image_width_override=MAX_IMAGE_FEATURE_SIZE_WIDTH,
             image_height_override=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
         )
@@ -265,7 +271,7 @@ def _init_vision_tower(hf_config: LlavaNextConfig):
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_llava_next_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_llava_next)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_llava_next)
-class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
+class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def __init__(self,
                  config: LlavaNextConfig,

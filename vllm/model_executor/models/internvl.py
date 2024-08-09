@@ -5,7 +5,8 @@
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
 import itertools
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
+from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
+                    TypedDict, Union)
 
 import torch
 import torch.nn as nn
@@ -27,7 +28,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
                    get_clip_num_patches)
-from .interfaces import SupportsVision
+from .interfaces import SupportsMultiModal
 from .utils import (filter_weights, init_vllm_registered_model,
                     merge_vision_embeddings)
 
@@ -241,7 +242,9 @@ def input_mapper_for_internvl(ctx: InputContext, data: object):
     })
 
 
-def dummy_data_for_internvl(ctx: InputContext, seq_len: int):
+def dummy_data_for_internvl(ctx: InputContext, seq_len: int,
+                            mm_counts: Mapping[str, int]):
+    num_images = mm_counts["image"]
 
     image_feature_size = get_max_internvl_image_tokens(ctx)
     model_config = ctx.model_config
@@ -253,6 +256,7 @@ def dummy_data_for_internvl(ctx: InputContext, seq_len: int):
     seq_data = dummy_seq_data_for_clip(
         vision_config,
         seq_len,
+        num_images,
         image_token_id=tokenizer.encode(IMG_CONTEXT,
                                         add_special_tokens=False)[0],
         image_feature_size_override=image_feature_size,
@@ -266,6 +270,7 @@ def dummy_data_for_internvl(ctx: InputContext, seq_len: int):
 
     mm_data = dummy_image_for_clip(
         vision_config,
+        num_images,
         image_width_override=max_image_width,
         image_height_override=max_image_height,
     )
@@ -277,7 +282,7 @@ def dummy_data_for_internvl(ctx: InputContext, seq_len: int):
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_internvl_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_internvl)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_internvl)
-class InternVLChatModel(nn.Module, SupportsVision):
+class InternVLChatModel(nn.Module, SupportsMultiModal):
 
     def __init__(self,
                  config: PretrainedConfig,

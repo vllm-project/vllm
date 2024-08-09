@@ -15,14 +15,14 @@ This document walks you through the steps to extend a vLLM model so that it acce
 It is assumed that you have already implemented the model in vLLM according to :ref:`these steps <adding_a_new_model>`.
 Further update the model as follows:
 
-- Implement the :class:`~vllm.model_executor.models.interfaces.SupportsVision` interface.
+- Implement the :class:`~vllm.model_executor.models.interfaces.SupportsMultiModal` interface.
 
   .. code-block:: diff
 
-      + from vllm.model_executor.models.interfaces import SupportsVision
+      + from vllm.model_executor.models.interfaces import SupportsMultiModal
 
       - class YourModelForImage2Seq(nn.Module):
-      + class YourModelForImage2Seq(nn.Module, SupportsVision):
+      + class YourModelForImage2Seq(nn.Module, SupportsMultiModal):
 
   .. note::
       The model class does not have to be named :code:`*ForCausalLM`.
@@ -51,11 +51,11 @@ This decorator accepts a function that maps multi-modal inputs to the keyword ar
 
 .. code-block:: diff
 
-      from vllm.model_executor.models.interfaces import SupportsVision
+      from vllm.model_executor.models.interfaces import SupportsMultiModal
     + from vllm.multimodal import MULTIMODAL_REGISTRY
 
     + @MULTIMODAL_REGISTRY.register_image_input_mapper()
-      class YourModelForImage2Seq(nn.Module, SupportsVision):
+      class YourModelForImage2Seq(nn.Module, SupportsMultiModal):
 
 A default mapper is available for each modality in the core vLLM library. This input mapper will be used if you do not provide your own function.
 
@@ -66,19 +66,19 @@ A default mapper is available for each modality in the core vLLM library. This i
 3. Register maximum number of multi-modal tokens
 ------------------------------------------------
 
-For each modality type that the model accepts as input, calculate the maximum possible number of tokens
+For each modality type that the model accepts as input, calculate the maximum possible number of tokens per data instance
 and register it via :meth:`INPUT_REGISTRY.register_dummy_data <vllm.inputs.registry.InputRegistry.register_max_multimodal_tokens>`.
 
 .. code-block:: diff
 
       from vllm.inputs import INPUT_REGISTRY
-      from vllm.model_executor.models.interfaces import SupportsVision
+      from vllm.model_executor.models.interfaces import SupportsMultiModal
       from vllm.multimodal import MULTIMODAL_REGISTRY
 
       @MULTIMODAL_REGISTRY.register_image_input_mapper()
     + @MULTIMODAL_REGISTRY.register_max_image_tokens(<your_calculation>)
       @INPUT_REGISTRY.register_dummy_data(<your_dummy_data_factory>)
-      class YourModelForImage2Seq(nn.Module, SupportsVision):
+      class YourModelForImage2Seq(nn.Module, SupportsMultiModal):
 
 Here are some examples:
 
@@ -98,13 +98,13 @@ In such cases, you can define your own dummy data by registering a factory metho
 .. code-block:: diff
 
       from vllm.inputs import INPUT_REGISTRY
-      from vllm.model_executor.models.interfaces import SupportsVision
+      from vllm.model_executor.models.interfaces import SupportsMultiModal
       from vllm.multimodal import MULTIMODAL_REGISTRY
 
       @MULTIMODAL_REGISTRY.register_image_input_mapper()
       @MULTIMODAL_REGISTRY.register_max_image_tokens(<your_calculation>)
     + @INPUT_REGISTRY.register_dummy_data(<your_dummy_data_factory>)
-      class YourModelForImage2Seq(nn.Module, SupportsVision):
+      class YourModelForImage2Seq(nn.Module, SupportsMultiModal):
 
 .. note::
     The dummy data should have the maximum possible number of multi-modal tokens, as described in the previous step.
@@ -128,14 +128,14 @@ You can register input processors via :meth:`INPUT_REGISTRY.register_input_proce
 .. code-block:: diff
 
       from vllm.inputs import INPUT_REGISTRY
-      from vllm.model_executor.models.interfaces import SupportsVision
+      from vllm.model_executor.models.interfaces import SupportsMultiModal
       from vllm.multimodal import MULTIMODAL_REGISTRY
 
       @MULTIMODAL_REGISTRY.register_image_input_mapper()
       @MULTIMODAL_REGISTRY.register_max_image_tokens(<your_calculation>)
       @INPUT_REGISTRY.register_dummy_data(<your_dummy_data_factory>)
     + @INPUT_REGISTRY.register_input_processor(<your_input_processor>)
-      class YourModelForImage2Seq(nn.Module, SupportsVision):
+      class YourModelForImage2Seq(nn.Module, SupportsMultiModal):
 
 A common use case of input processors is inserting placeholder tokens to leverage the vLLM framework for attention mask generation.
 Here are some examples:
