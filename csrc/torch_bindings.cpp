@@ -137,8 +137,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("machete_supported_schedules", &machete::supported_schedules);
   ops.impl("machete_supported_schedules", torch::kCPU,
            &machete::supported_schedules);
-  ops.def("machete_supported_types", &machete::supported_types);
-  ops.impl("machete_supported_types", torch::kCPU, &machete::supported_types);
   ops.def("machete_gemm", &machete::gemm);
   ops.impl("machete_gemm", torch::kCUDA, &machete::gemm);
   ops.def("machete_prepack_B", &machete::prepack_B);

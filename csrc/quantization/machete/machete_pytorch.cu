@@ -36,14 +36,9 @@ static auto scalar_type_dispatch(ScalarType const& type, Fn fn) {
 //  Interface
 //
 
-std::vector<ScalarTypeTorchPtr> supported_types() {
-  return {c10::make_intrusive<ScalarTypeTorch>(vllm::kU4),
-          c10::make_intrusive<ScalarTypeTorch>(vllm::kS4)};
-}
-
 std::vector<std::string> supported_schedules(ScalarTypeTorchPtr const& btype) {
   return scalar_type_dispatch(*btype, [&](auto BType) {
-    return KernelDispatcher<half_t, decltype(BType)>::supported_schedules();
+    return GemmDispatcher<half_t, decltype(BType)>::supported_schedules();
   });
 }
 
@@ -55,7 +50,7 @@ torch::Tensor gemm(torch::Tensor const A, torch::Tensor const B,
                    c10::optional<torch::Tensor> const& C,
                    c10::optional<double> alpha, c10::optional<double> beta,
                    c10::optional<std::string> schedule) {
-  auto args = PytorchArguments{.A = A,
+  auto args = PyTorchArguments{.A = A,
                                .B = B,
                                .scales = scales,
                                .zeros = zeros,
@@ -69,7 +64,7 @@ torch::Tensor gemm(torch::Tensor const A, torch::Tensor const B,
     return AT_DISPATCH_SUPPORTED_COMPUTE_TYPES(
         A.scalar_type(), "machete_gemm", [&] {
           using ComputeType = equivalent_cutlass_type_t<scalar_t>;
-          return KernelDispatcher<ComputeType, decltype(BType)>::dispatch(args);
+          return GemmDispatcher<ComputeType, decltype(BType)>::dispatch(args);
         });
   });
 }

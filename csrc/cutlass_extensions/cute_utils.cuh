@@ -4,6 +4,16 @@
 
 ////////////////////////////////////////////////////////////////////
 // make_cute_stride
+//  - instantiates a stride object thats correctly populated base
+//    on the shape of the tensor and the stride type passed in,
+//    for example:
+//      - if s = Stride<int, _1> and shape = {M, N, L} then the stride will be
+//        constructed as {N, 1}, i.e. Row Major
+//      - if s = Stride<_1, int> and shape = {M, N, L} then the stride will be
+//        constructed as {1, M}, i.e. Column Major
+//      - if s = Stride<int, _1, int64_t> and shape = {M, N, L} then the stride
+//        will be constructed as {N, 1, M * N}, i.e. Row Major Batched
+//      - etc.
 ////////////////////////////////////////////////////////////////////
 
 //

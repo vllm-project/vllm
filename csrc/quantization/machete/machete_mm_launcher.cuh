@@ -8,7 +8,7 @@
 
 namespace machete {
 
-struct PytorchArguments {
+struct PyTorchArguments {
   torch::Tensor const A;
   torch::Tensor const B;
   c10::optional<torch::Tensor> const& scales;
@@ -20,26 +20,26 @@ struct PytorchArguments {
   c10::optional<std::string> schedule;
 };
 
-template <typename KernelSpeacialization>
-torch::Tensor run_impl(PytorchArguments args) {
+template <typename KernelSpecialization>
+torch::Tensor run_impl(PyTorchArguments args) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(args.A));
 
   auto device = args.A.device();
   auto stream = at::cuda::getCurrentCUDAStream(device.index());
 
-  using ElementA = typename KernelSpeacialization::ElementA;
-  using ElementB = typename KernelSpeacialization::ElementB;
-  using ElementC = typename KernelSpeacialization::ElementC;
-  using ElementD = typename KernelSpeacialization::ElementD;
-  using ElementScale = typename KernelSpeacialization::ElementScale;
-  using ElementZero = typename KernelSpeacialization::ElementZero;
+  using ElementA = typename KernelSpecialization::ElementA;
+  using ElementB = typename KernelSpecialization::ElementB;
+  using ElementC = typename KernelSpecialization::ElementC;
+  using ElementD = typename KernelSpecialization::ElementD;
+  using ElementScale = typename KernelSpecialization::ElementScale;
+  using ElementZero = typename KernelSpecialization::ElementZero;
 
-  using LayoutA = typename KernelSpeacialization::LayoutA;
-  using LayoutB = typename KernelSpeacialization::LayoutB;
-  using LayoutC = typename KernelSpeacialization::LayoutC;
-  using LayoutD = typename KernelSpeacialization::LayoutD;
-  using LayoutScale = typename KernelSpeacialization::LayoutScale;
-  using LayoutZero = typename KernelSpeacialization::LayoutScale;
+  using LayoutA = typename KernelSpecialization::LayoutA;
+  using LayoutB = typename KernelSpecialization::LayoutB;
+  using LayoutC = typename KernelSpecialization::LayoutC;
+  using LayoutD = typename KernelSpecialization::LayoutD;
+  using LayoutScale = typename KernelSpecialization::LayoutScale;
+  using LayoutZero = typename KernelSpecialization::LayoutScale;
 
   int M = args.A.size(0);
   int N = args.B.size(1);
@@ -60,19 +60,19 @@ torch::Tensor run_impl(PytorchArguments args) {
   auto zeros_ptr =
       maybe_data_ptr<ElementZero const, LayoutZero>(args.zeros, "zeros");
 
-  auto arguments = KernelSpeacialization::create_arguments(
+  auto arguments = KernelSpecialization::create_arguments(
       stream, M, N, K, A_ptr, B_ptr, C_ptr, D_ptr, scales_ptr, zeros_ptr,
       args.alpha.value_or(1), args.beta.value_or(0),
       args.group_size.value_or(K));
 
-  TORCH_CHECK(KernelSpeacialization::can_implement(arguments),
+  TORCH_CHECK(KernelSpecialization::can_implement(arguments),
               "Machete kernel cannot be run with these arguments");
 
-  size_t workspace_size = KernelSpeacialization::get_workspace_size(arguments);
+  size_t workspace_size = KernelSpecialization::get_workspace_size(arguments);
   torch::Tensor workspace = torch::empty(
       workspace_size, torch::TensorOptions().dtype(torch::kU8).device(device));
 
-  KernelSpeacialization::run(arguments, workspace.mutable_data_ptr(), stream);
+  KernelSpecialization::run(arguments, workspace.mutable_data_ptr(), stream);
 
   return D;
 };
@@ -80,8 +80,8 @@ torch::Tensor run_impl(PytorchArguments args) {
 template <typename ElementA, typename ElementB, typename ElementD = ElementA,
           typename AccumulatorT = float, typename ScaleT = ElementA,
           typename ZeroT = ElementA>
-struct KernelDispatcher {
-  static torch::Tensor dispatch(PytorchArguments args);
+struct GemmDispatcher {
+  static torch::Tensor dispatch(PyTorchArguments args);
   static std::vector<std::string> supported_schedules();
 };
 
