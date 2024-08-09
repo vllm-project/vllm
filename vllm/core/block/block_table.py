@@ -356,7 +356,13 @@ class BlockTable:
         appended to blocks. The first such "token block" may have less token ids
         than the block size, since the last allocated block may be partially
         full.
+
+        If no token ids are provided, then no chunks are returned.
         """
+
+        if not token_ids:
+            return []
+
         first_chunk_size = self._block_size - (self._num_full_slots %
                                                self._block_size)
         token_blocks = [token_ids[:first_chunk_size]]
