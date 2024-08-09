@@ -83,6 +83,12 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         # Need include_gpu_probs_tensor for multi_step_worker
         self._worker.set_include_gpu_probs_tensor()
 
+    def set_should_modify_greedy_probs_inplace(self) -> None:
+        if self._is_dummy:
+            return
+
+        self._worker.set_should_modify_greedy_probs_inplace()
+
     def load_model(self) -> None:
         if self._is_dummy:
             return
