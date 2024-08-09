@@ -400,3 +400,17 @@ class AsyncEngineRPCClient:
                      **kwargs) -> AsyncGenerator[EmbeddingRequestOutput, None]:
         raise NotImplementedError(
             "Embeddings not supported with multiprocessing backend")
+
+    async def start_profile(self) -> None:
+        """Start profiling the engine"""
+
+        await self._send_one_way_rpc_request(
+            request=RPCUtilityRequest.START_PROFILE,
+            error_message="RPCRequest START_PROFILE failed.")
+
+    async def stop_profile(self) -> None:
+        """Stop profiling the engine"""
+
+        await self._send_one_way_rpc_request(
+            request=RPCUtilityRequest.STOP_PROFILE,
+            error_message="RPCRequest STOP_PROFILE failed.")
