@@ -19,11 +19,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d, apply_fp8_linear, convert_to_channelwise,
-    create_per_tensor_scale_param, cutlass_fp8_supported,
+    convert_to_e4m3fnuz, create_per_tensor_scale_param, cutlass_fp8_supported,
     per_tensor_dequantize, requantize_with_max_scale)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils import print_warning_once
+from vllm.utils import is_hip, print_warning_once
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
@@ -120,6 +120,9 @@ class Fp8LinearMethod(LinearMethodBase):
         capability = current_platform.get_device_capability()
         capability = capability[0] * 10 + capability[1]
         self.use_marlin = capability < 89 or envs.VLLM_TEST_FORCE_FP8_MARLIN
+        # Disable marlin for rocm
+        if is_hip():
+            self.use_marlin = False
 
     def create_weights(
         self,
@@ -168,6 +171,8 @@ class Fp8LinearMethod(LinearMethodBase):
                 scale = create_per_tensor_scale_param(output_partition_sizes,
                                                       **extra_weight_attrs)
                 layer.register_parameter("input_scale", scale)
+            else:
+                layer.register_parameter("input_scale", None)
 
     def process_weights_after_loading(self, layer: Module) -> None:
         # If checkpoint not serialized fp8, quantize the weights.
@@ -202,9 +207,22 @@ class Fp8LinearMethod(LinearMethodBase):
             # requantize the logical shards as a single weight.
             else:
                 # Dequant -> Quant with max scale so we can run per tensor.
+                weight = layer.weight
+                weight_scale = layer.weight_scale
+
+                # If rocm, use float8_e4m3fnuz.
+                if is_hip():
+                    weight, weight_scale, input_scale = convert_to_e4m3fnuz(
+                        weight=weight,
+                        weight_scale=weight_scale,
+                        input_scale=layer.input_scale)
+                    if input_scale is not None:
+                        layer.input_scale = Parameter(input_scale,
+                                                      requires_grad=False)
+
                 weight_scale, weight = requantize_with_max_scale(
-                    weight=layer.weight,
-                    weight_scale=layer.weight_scale,
+                    weight=weight,
+                    weight_scale=weight_scale,
                     logical_widths=layer.logical_widths,
                 )
 
@@ -214,8 +232,6 @@ class Fp8LinearMethod(LinearMethodBase):
             if self.quant_config.activation_scheme == "static":
                 layer.input_scale = Parameter(layer.input_scale.max(),
                                               requires_grad=False)
-            else:
-                layer.input_scale = None
 
         if self.use_marlin:
             prepare_fp8_layer_for_marlin(layer)
