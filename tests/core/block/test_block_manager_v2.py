@@ -311,6 +311,68 @@ def test_swap(block_size, num_cpu_blocks, num_gpu_blocks, num_lookahead_slots,
     assert before_gpu_blocks == after_gpu_blocks + len(cpu_blocks)
 
 
+@pytest.mark.parametrize("block_size", [8])
+@pytest.mark.parametrize("num_gpu_blocks", [4])
+@pytest.mark.parametrize("num_lookahead_slots", [3, 8, 10])
+@pytest.mark.parametrize("enable_caching", [True, False])
+def test_can_swap(block_size, num_gpu_blocks, num_lookahead_slots,
+                  enable_caching):
+    """ Verify the block manager can correctly determine if a sequence group
+        can be swapped in/out.
+    """
+    num_cpu_blocks = num_gpu_blocks
+    block_manager = BlockSpaceManagerV2(block_size,
+                                        num_cpu_blocks,
+                                        num_gpu_blocks,
+                                        watermark=0,
+                                        enable_caching=enable_caching)
+    prompt, seq_group = create_dummy_prompt(
+        "1", prompt_length=(num_gpu_blocks - 1) * block_size - 1)
+    prompt.status = SequenceStatus.WAITING
+    block_manager.allocate(seq_group)
+    prompt.status = SequenceStatus.RUNNING
+
+    # Swap seq group from GPU -> CPU.
+    gpu_blocks = block_manager.get_block_table(prompt)
+    assert block_manager.can_swap_out(seq_group)
+    before_cpu_blocks = block_manager.get_num_free_cpu_blocks()
+    before_gpu_blocks = block_manager.get_num_free_gpu_blocks()
+    mapping = block_manager.swap_out(seq_group)
+    mapping_keys = [key for key, _ in mapping]
+    assert mapping_keys == gpu_blocks
+    after_cpu_blocks = block_manager.get_num_free_cpu_blocks()
+    after_gpu_blocks = block_manager.get_num_free_gpu_blocks()
+    assert before_cpu_blocks == after_cpu_blocks + len(gpu_blocks)
+    assert before_gpu_blocks + len(gpu_blocks) == after_gpu_blocks
+    prompt.status = SequenceStatus.SWAPPED
+
+    # At this moment, we still have enough free blocks to swap in the seq group.
+    if num_lookahead_slots <= block_size:
+        assert block_manager.can_swap_in(seq_group,
+                                         num_lookahead_slots) == AllocStatus.OK
+    else:
+        assert block_manager.can_swap_in(
+            seq_group, num_lookahead_slots) == AllocStatus.NEVER
+
+    # During Swapped out, 2 cached blocks were evicted from the GPU,
+    # so the prompt1 can't be swapped in
+    prompt2_len = 2 * block_size - 1
+    prompt2, seq_group2 = create_dummy_prompt(
+        "2",
+        prompt_length=prompt2_len,
+        prompt_tokens=[10000 + i for i in range(prompt2_len)])
+    prompt2.status = SequenceStatus.WAITING
+    block_manager.allocate(seq_group2)
+
+    # Swap seq group from CPU -> GPU.
+    if num_lookahead_slots <= block_size:
+        assert block_manager.can_swap_in(
+            seq_group, num_lookahead_slots) == AllocStatus.LATER
+    else:
+        assert block_manager.can_swap_in(
+            seq_group, num_lookahead_slots) == AllocStatus.NEVER
+
+
 # TODO(cade/kaiyang): add comprehensive tests for swapping at allocator level.
 
 
