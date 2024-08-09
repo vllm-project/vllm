@@ -246,50 +246,6 @@ def run_awq_test(
         )
 
 
-def run_large_model_test(
-    vllm_runner: Type[VllmRunner],
-    image_assets: _ImageAssets,
-    expected_outputs: List[str],
-    model: str,
-    *,
-    dtype: str,
-    max_tokens: int,
-    tensor_parallel_size: int,
-    distributed_executor_backend: Optional[str] = None,
-):
-    images = [asset.pil_image for asset in image_assets]
-
-    inputs_per_image = [(
-        [prompt],
-        [image.resize((448, 448))],
-    ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
-
-    # NOTE: take care of the order. run vLLM first, and then run HF.
-    # vLLM needs a fresh new process without cuda initialization.
-    # if we run HF first, the cuda initialization will be done and it
-    # will hurt multiprocessing backend with fork method (the default method).
-
-    # max_model_len should be greater than image_feature_size
-    with vllm_runner(model,
-                     quantization="awq",
-                     max_model_len=1024,
-                     dtype=dtype,
-                     tensor_parallel_size=tensor_parallel_size,
-                     distributed_executor_backend=distributed_executor_backend,
-                     gpu_memory_utilization=1.0,
-                     cpu_offload_gb=4,
-                     enforce_eager=True) as vllm_model:
-        outputs_per_image = [
-            vllm_model.generate_greedy(prompts, max_tokens, images=images)
-            for prompts, images in inputs_per_image
-        ]
-    for idx, outputs in enumerate(outputs_per_image):
-        _, output_str = outputs[0]
-        prompts = HF_IMAGE_PROMPTS[idx]
-        generation_str = output_str[len(prompts):].split("<|im_end|>")[0]
-        assert generation_str == expected_outputs[idx]
-
-
 target_dtype = "half"
 if is_cpu():
     target_dtype = "bfloat16"
@@ -361,34 +317,26 @@ def test_awq_models(vllm_runner, image_assets, models, size_factors,
     )
 
 
-STOP_SIGN_EXPECTED_STR = [
-    'The content in the center of the image is a red octagonal stop sign with the word "STOP" written in white. '  # noqa: E501
-]
-CHERRY_BLOSSOM_EXPECTED_STR = [
-    'The season depicted in the image is spring. '
-    'This conclusion is drawn from several key indicators:\n\n'
-    '1. **Blossoming Trees**: The presence of cherry blossoms (sakura) is a definitive sign of spring. '  # noqa: E501
-    'Cherry blossoms are a hallmark of the spring season in many parts of the world, particularly in East Asia, '  # noqa: E501
-    'where they are celebrated with festivals and events like Hanami (花見).\n\n'  # noqa: E501
-    '2. **Bright Colors**: The vibrant pink hues of the cherry blossoms are typical of spring when these flowers are in full bloom. '  # noqa: E501
-    'This is a time when nature awakens from winter dormancy, and'
-]
-
-
-@pytest.mark.parametrize("model", ["OpenGVLab/InternVL2-26B-AWQ"])
 @pytest.mark.parametrize(
-    "expected_outputs", [STOP_SIGN_EXPECTED_STR + CHERRY_BLOSSOM_EXPECTED_STR])
+    "model", [("OpenGVLab/InternVL2-26B", "OpenGVLab/InternVL2-26B-AWQ")])
+@pytest.mark.parametrize("size_factors", [[1.0]])
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("tp_size", [2])
 @torch.inference_mode()
-def test_large_models(vllm_runner, image_assets, expected_outputs, model,
-                      dtype: str, max_tokens: int) -> None:
-    run_large_model_test(
+def test_large_models(num_gpus_available, vllm_runner, image_assets, models,
+                      size_factors, dtype: str, max_tokens: int,
+                      num_logprobs: int, tp_size: int) -> None:
+    if num_gpus_available < tp_size:
+        pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
+
+    run_awq_test(
         vllm_runner,
         image_assets,
-        expected_outputs,
-        model,
+        models,
+        size_factors=size_factors,
         dtype=dtype,
         max_tokens=max_tokens,
-        tensor_parallel_size=1,
+        num_logprobs=num_logprobs,
+        tensor_parallel_size=tp_size,
     )
