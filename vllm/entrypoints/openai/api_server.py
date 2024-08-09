@@ -55,7 +55,7 @@ openai_serving_completion: OpenAIServingCompletion
 openai_serving_embedding: OpenAIServingEmbedding
 openai_serving_tokenization: OpenAIServingTokenization
 
-logger = init_logger('vllm.entrypoints.openai.api_server')
+logger = init_logger("vllm.entrypoints.openai.api_server")
 
 _running_tasks: Set[asyncio.Task] = set()
 
@@ -151,7 +151,7 @@ def mount_metrics(app: FastAPI):
     # Add prometheus asgi middleware to route /metrics requests
     metrics_route = Mount("/metrics", make_asgi_app())
     # Workaround for 307 Redirect for /metrics
-    metrics_route.path_regex = re.compile('^/metrics(?P<path>.*)$')
+    metrics_route.path_regex = re.compile("^/metrics(?P<path>.*)$")
     app.routes.append(metrics_route)
 
 
@@ -199,14 +199,21 @@ async def show_version():
 @router.post("/v1/chat/completions")
 async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
+
     generator = await openai_serving_chat.create_chat_completion(
         request, raw_request)
+
+    # if there's an error, return it
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
+
+    # if streaming is requested, handle streaming
     if request.stream:
         return StreamingResponse(content=generator,
                                  media_type="text/event-stream")
+
+    # handle non-streaming requests
     else:
         assert isinstance(generator, ChatCompletionResponse)
         return JSONResponse(content=generator.model_dump())
@@ -319,7 +326,8 @@ async def init_app(
         request_logger=request_logger,
         chat_template=args.chat_template,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
-    )
+        enable_auto_tools=args.enable_auto_tool_choice,
+        tool_parser=args.tool_call_parser)
     openai_serving_completion = OpenAIServingCompletion(
         async_engine_client,
         model_config,

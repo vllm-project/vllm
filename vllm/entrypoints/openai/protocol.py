@@ -2,18 +2,26 @@
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
 from argparse import Namespace
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union, final
 
 import torch
+# yapf conflicts with isort for this block
+# yapf: disable
+from openai.types.chat import ChatCompletionContentPartParam
+from openai.types.chat import (
+    ChatCompletionContentPartParam as OpenAIChatCompletionContentPartParam)
+from openai.types.chat import (
+    ChatCompletionMessageParam as OpenAIChatCompletionMessageParam)
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from transformers import PreTrainedTokenizer
-from typing_extensions import Annotated
+from typing_extensions import Annotated, Required, TypedDict
 
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.openai.logits_processors import get_logits_processors
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import LogitsProcessor, SamplingParams
 from vllm.utils import random_uuid
+
+# yapf: enable
 
 # torch is mocked during docs generation,
 # so we have to provide the values as literals
@@ -31,6 +39,50 @@ except ModuleNotFoundError:
 
 assert _LONG_INFO.min == _MOCK_LONG_INFO.min
 assert _LONG_INFO.max == _MOCK_LONG_INFO.max
+
+
+class CustomChatCompletionMessageParam(TypedDict, total=False):
+    """Enables custom roles in the Chat Completion API."""
+    role: Required[str]
+    """The role of the message's author."""
+
+    content: Union[str, List[ChatCompletionContentPartParam]]
+    """The contents of the message."""
+
+    name: str
+    """An optional name for the participant.
+
+    Provides the model information to differentiate between participants of the
+    same role.
+    """
+
+    tool_call_id: Optional[str]
+
+    tool_calls: Optional[List[dict]]
+
+
+@final  # So that it should be compatible with Dict[str, str]
+class ConversationMessage(TypedDict, total=False):
+    role: str
+    content: Optional[str]
+    tool_call_id: Optional[str]
+    name: Optional[str]
+    tool_calls: Optional[List]
+
+
+ChatCompletionMessageParam = Union[OpenAIChatCompletionMessageParam,
+                                   CustomChatCompletionMessageParam]
+
+
+class CustomChatCompletionContentPartParam(TypedDict, total=False):
+    __pydantic_config__ = ConfigDict(extra="allow")  # type: ignore
+
+    type: Required[str]
+    """The type of the content part."""
+
+
+ChatCompletionContentPartParam = Union[OpenAIChatCompletionContentPartParam,
+                                       CustomChatCompletionContentPartParam]
 
 
 class OpenAIBaseModel(BaseModel):
@@ -133,8 +185,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
     tools: Optional[List[ChatCompletionToolsParam]] = None
-    tool_choice: Optional[Union[Literal["none"],
+    tool_choice: Optional[Union[Union[Literal["none"], Literal["auto"]],
                                 ChatCompletionNamedToolChoiceParam]] = "none"
+
+    # NOTE this will be ignored by VLLM -- the model determines the behavior
+    parallel_tool_calls: Optional[bool] = False
     user: Optional[str] = None
 
     # doc: begin-chat-completion-sampling-params
@@ -289,6 +344,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_guided_decoding_count(cls, data):
+        if isinstance(data, ValueError):
+            raise data
+
         guide_count = sum([
             "guided_json" in data and data["guided_json"] is not None,
             "guided_regex" in data and data["guided_regex"] is not None,
@@ -300,21 +358,61 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 "You can only use one kind of guided decoding "
                 "('guided_json', 'guided_regex' or 'guided_choice').")
         # you can only either use guided decoding or tools, not both
-        if guide_count > 1 and "tool_choice" in data and data[
-                "tool_choice"] != "none":
+        if guide_count > 1 and data.get("tool_choice",
+                                        "none") not in ("none", "auto"):
             raise ValueError(
                 "You can only either use guided decoding or tools, not both.")
         return data
 
     @model_validator(mode="before")
     @classmethod
-    def check_tool_choice(cls, data):
-        if "tool_choice" in data and data["tool_choice"] != "none":
-            if not isinstance(data["tool_choice"], dict):
-                raise ValueError("Currently only named tools are supported.")
+    def check_tool_usage(cls, data):
+
+        # if "tool_choice" is not specified but tools are provided,
+        # default to "auto" tool_choice
+        if "tool_choice" not in data and "tools" in data:
+            data["tool_choice"] = "auto"
+
+        # if "tool_choice" is specified -- validation
+        if "tool_choice" in data:
+
+            # ensure that if "tool choice" is specified, tools are present
             if "tools" not in data or data["tools"] is None:
                 raise ValueError(
                     "When using `tool_choice`, `tools` must be set.")
+
+            # make sure that tool choice is either a named tool
+            # OR that it's set to "auto"
+            if data["tool_choice"] != "auto" and not isinstance(
+                    data["tool_choice"], dict):
+                raise ValueError(
+                    "`tool_choice` must either be a named tool or \"auto\". "
+                    "`tool_choice=\"none\" is not supported.")
+
+            # ensure that if "tool_choice" is specified as an object,
+            # it matches a valid tool
+            if isinstance(data["tool_choice"], dict):
+                valid_tool = False
+                specified_function = data["tool_choice"]["function"]
+                if not specified_function:
+                    return ValueError(
+                        "Incorrectly formatted `tool_choice`. Should be like "
+                        "`{\"type\": \"function\","
+                        " \"function\": {\"name\": \"my_function\"}}`")
+                specified_function_name = specified_function["name"]
+                if not specified_function_name:
+                    return ValueError(
+                        "Incorrectly formatted `tool_choice`. Should be like "
+                        "`{\"type\": \"function\", "
+                        "\"function\": {\"name\": \"my_function\"}}`")
+                for tool in data["tools"]:
+                    if tool["function"]["name"] == specified_function_name:
+                        valid_tool = True
+                        break
+                if not valid_tool:
+                    return ValueError(
+                        "The tool specified in `tool_choice` does not match any"
+                        " of the specified `tools`")
         return data
 
     @model_validator(mode="before")
@@ -386,7 +484,7 @@ class CompletionRequest(OpenAIBaseModel):
     )
     guided_json: Optional[Union[str, dict, BaseModel]] = Field(
         default=None,
-        description=("If specified, the output will follow the JSON schema."),
+        description="If specified, the output will follow the JSON schema.",
     )
     guided_regex: Optional[str] = Field(
         default=None,
@@ -592,9 +690,41 @@ class ToolCall(OpenAIBaseModel):
     function: FunctionCall
 
 
+class DeltaFunctionCall(BaseModel):
+    name: Optional[str] = None
+    arguments: Optional[str] = None
+
+
+# a tool call delta where everything is optional
+class DeltaToolCall(OpenAIBaseModel):
+    id: str = Field(default_factory=lambda: f"chatcmpl-tool-{random_uuid()}")
+    type: Literal["function"] = "function"
+    index: int
+    function: Optional[DeltaFunctionCall] = None
+
+
+# the initial delta that gets sent once a new tool call is started;
+class InitialDeltaToolCall(DeltaToolCall):
+    id: str = Field(default_factory=lambda: f"chatcmpl-tool-{random_uuid()}")
+    type: Literal["function"] = "function"
+    index: int
+
+
+class ExtractedToolCallInformation(BaseModel):
+    # indicate if tools were called
+    tools_called: bool
+
+    # extracted tool calls
+    tool_calls: List[ToolCall]
+
+    # content - per OpenAI spec, content AND tool calls can be returned rarely
+    # But some models will do this intentionally
+    content: Optional[str] = None
+
+
 class ChatMessage(OpenAIBaseModel):
     role: str
-    content: str
+    content: Optional[str] = None
     tool_calls: List[ToolCall] = Field(default_factory=list)
 
 
@@ -616,7 +746,9 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     index: int
     message: ChatMessage
     logprobs: Optional[ChatCompletionLogProbs] = None
-    finish_reason: Optional[str] = None
+    # per OpenAI spec this is the default
+    finish_reason: Optional[str] = Field(default="stop")
+    # not part of the OpenAI spec but included in vLLM for legacy reasons
     stop_reason: Optional[Union[int, str]] = None
 
 
@@ -632,7 +764,7 @@ class ChatCompletionResponse(OpenAIBaseModel):
 class DeltaMessage(OpenAIBaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
-    tool_calls: List[ToolCall] = Field(default_factory=list)
+    tool_calls: List[DeltaToolCall] = Field(default_factory=list)
 
 
 class ChatCompletionResponseStreamChoice(OpenAIBaseModel):

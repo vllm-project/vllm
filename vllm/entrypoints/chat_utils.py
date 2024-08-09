@@ -2,67 +2,26 @@ import codecs
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import (Any, Awaitable, Iterable, List, Optional, Tuple, Union,
-                    cast, final)
+from typing import Any, Awaitable, Iterable, List, Optional, Tuple, Union, cast
 
 # yapf conflicts with isort for this block
 # yapf: disable
-from openai.types.chat import ChatCompletionContentPartImageParam
-from openai.types.chat import (
-    ChatCompletionContentPartParam as OpenAIChatCompletionContentPartParam)
-from openai.types.chat import ChatCompletionContentPartTextParam
-from openai.types.chat import (
-    ChatCompletionMessageParam as OpenAIChatCompletionMessageParam)
+from openai.types.chat import (ChatCompletionContentPartImageParam,
+                               ChatCompletionContentPartTextParam)
 # yapf: enable
 # pydantic needs the TypedDict from typing_extensions
-from pydantic import ConfigDict
 from transformers import PreTrainedTokenizer
-from typing_extensions import Required, TypedDict
 
 from vllm.config import ModelConfig
+from vllm.entrypoints.openai.protocol import (ChatCompletionContentPartParam,
+                                              ChatCompletionMessageParam,
+                                              ConversationMessage)
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.utils import async_get_and_parse_image
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 logger = init_logger(__name__)
-
-
-class CustomChatCompletionContentPartParam(TypedDict, total=False):
-    __pydantic_config__ = ConfigDict(extra="allow")  # type: ignore
-
-    type: Required[str]
-    """The type of the content part."""
-
-
-ChatCompletionContentPartParam = Union[OpenAIChatCompletionContentPartParam,
-                                       CustomChatCompletionContentPartParam]
-
-
-class CustomChatCompletionMessageParam(TypedDict, total=False):
-    """Enables custom roles in the Chat Completion API."""
-    role: Required[str]
-    """The role of the message's author."""
-
-    content: Union[str, List[ChatCompletionContentPartParam]]
-    """The contents of the message."""
-
-    name: str
-    """An optional name for the participant.
-
-    Provides the model information to differentiate between participants of the
-    same role.
-    """
-
-
-ChatCompletionMessageParam = Union[OpenAIChatCompletionMessageParam,
-                                   CustomChatCompletionMessageParam]
-
-
-@final  # So that it should be compatible with Dict[str, str]
-class ConversationMessage(TypedDict):
-    role: str
-    content: str
 
 
 @dataclass(frozen=True)
@@ -187,15 +146,42 @@ def _parse_chat_message_content(
 ) -> ChatMessageParseResult:
     role = message["role"]
     content = message.get("content")
+    tool_call_id = message.get("tool_call_id")
+    tool_calls = message.get("tool_calls")
+    # no longer used by OpenAI, but some models still use it for tool calls.
+    name = message.get("name", "")
 
-    if content is None:
+    # empty case
+    if content is None and tool_calls is None:
         return ChatMessageParseResult(messages=[], mm_futures=[])
-    if isinstance(content, str):
+
+    # special case - assistant message where tool calls are provided.
+    if role == "assistant" and tool_calls is not None:
+        messages = [
+            ConversationMessage(role=role,
+                                content=cast(Optional[str], content),
+                                tool_calls=list(tool_calls))
+        ]
+        return ChatMessageParseResult(messages=messages, mm_futures=[])
+
+    # special case - tool call result message
+    elif role == "tool":
+        messages = [
+            ConversationMessage(role=role,
+                                name=name,
+                                content=cast(Union[str, None], content),
+                                tool_call_id=cast(Union[str, None],
+                                                  tool_call_id))
+        ]
+        return ChatMessageParseResult(messages=messages, mm_futures=[])
+
+    # other cases - normal assistant response, user message or system message
+    elif isinstance(content, str):
         messages = [ConversationMessage(role=role, content=content)]
         return ChatMessageParseResult(messages=messages, mm_futures=[])
 
-    return _parse_chat_message_content_parts(role, content, model_config,
-                                             tokenizer)
+    return _parse_chat_message_content_parts(role, cast(Iterable, content),
+                                             model_config, tokenizer)
 
 
 def parse_chat_messages(
