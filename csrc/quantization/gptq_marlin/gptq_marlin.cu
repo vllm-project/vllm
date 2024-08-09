@@ -42,8 +42,8 @@ __global__ void permute_cols_kernel(int4 const* __restrict__ a_int4_ptr,
                                     int4* __restrict__ out_int4_ptr, int size_m,
                                     int size_k, int block_rows) {}
 
-template <typename scalar_t,          // compute dtype, half or nv_float16
-          const int64_t w_type_id,    // weight ScalarType id
+template <typename scalar_t,  // compute dtype, half or nv_float16
+          const vllm::ScalarTypeId w_type_id,  // weight ScalarType id
           const int threads,          // number of threads in a threadblock
           const int thread_m_blocks,  // number of 16x16 blocks in the m
                                       // dimension (batchsize) of the
@@ -151,10 +151,8 @@ __device__ inline uint32_t prmt(uint32_t a) {
   return res;
 }
 
-template <typename scalar_t, int64_t w_type_id>
-__device__ inline typename ScalarType<scalar_t>::FragB dequant(int q) {
-  STATIC_ASSERT_SCALAR_TYPE_VALID(scalar_t);
-}
+template <typename scalar_t, vllm::ScalarTypeId w_type_id>
+__device__ inline typename ScalarType<scalar_t>::FragB dequant(int q);
 
 //
 // Efficiently dequantize 4bit values packed in an int32 value into a full
@@ -506,8 +504,8 @@ __global__ void permute_cols_kernel(int4 const* __restrict__ a_int4_ptr,
   }
 }
 
-template <typename scalar_t,          // compute dtype, half or nv_float16
-          const int64_t w_type_id,    // weight ScalarType id
+template <typename scalar_t,  // compute dtype, half or nv_float16
+          const vllm::ScalarTypeId w_type_id,  // weight ScalarType id
           const int threads,          // number of threads in a threadblock
           const int thread_m_blocks,  // number of 16x16 blocks in the m
                                       // dimension (batchsize) of the
