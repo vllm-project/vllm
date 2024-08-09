@@ -336,9 +336,9 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
         # Assign the self-attention block tables for each sequence.
         if len(wait_seqs) == 1:
-            self.block_tables[wait_seqs[0].seq_id] = block_table
+            self.block_tables[seq.seq_id] = block_table
         else:
-            for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
+            for seq in wait_seqs:
                 self.block_tables[seq.seq_id] = block_table.copy()
 
         # Allocate encoder sequence
