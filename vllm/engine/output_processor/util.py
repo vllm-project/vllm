@@ -2,11 +2,13 @@ from typing import List
 from typing import Sequence as GenericSequence
 from typing import Union
 
-from vllm.sequence import PoolerOutput, SamplerOutput, SequenceGroupOutput
+from vllm.sequence import (PoolerOutput, SamplerOutput, SequenceGroupOutput,
+                           SimpleOutput)
 
 
 def create_output_by_sequence_group(
-        outputs: GenericSequence[Union[SamplerOutput, PoolerOutput]],
+        outputs: GenericSequence[Union[SamplerOutput, PoolerOutput,
+                                       SimpleOutput]],
         num_seq_groups: int) -> List[List[SequenceGroupOutput]]:
     """Helper method which transforms a 2d list organized by
     [step][sequence group] into [sequence group][step].

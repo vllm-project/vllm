@@ -1,87 +1,73 @@
-import enum
-from abc import ABC, abstractmethod
-from typing import List
-from typing import Sequence as GenericSequence
-from typing import Tuple
+from typing import List, Tuple
 
+from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.sequence import Sequence, SequenceGroup
 
 
-class AllocStatus(enum.Enum):
-    """Result for BlockSpaceManager.can_allocate
+class SimpleModelBlockSpaceManager(BlockSpaceManager):
+    """An simple version of BlockSpaceManager for use in environments
+    with non-[decoder,embedding] models where block management is not required.
 
-    1. Ok: seq_group can be allocated now.
-    2. Later: seq_group cannot be allocated.
-      The capacity of allocator is larger than seq_group required.
-    3. Never: seq_group can never be allocated.
-      The seq_group is too large to allocated in GPU.
+    This class provides the same interface as BlockSpaceManager, but its
+    methods perform no actions or return simple values like True in specific
+    actions. It's designed to be used in scenarios where the overhead of
+    block management is unnecessary, such as in an embedding environment.
     """
-    OK = enum.auto()
-    LATER = enum.auto()
-    NEVER = enum.auto()
 
+    def __init__(
+        self,
+        **kwargs,
+    ) -> None:
+        pass
 
-class BlockSpaceManager(ABC):
-
-    @abstractmethod
     def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
-        pass
+        # Always return OK for dummy purposes
+        return AllocStatus.OK
 
-    @abstractmethod
     def allocate(self, seq_group: SequenceGroup) -> None:
+        # No actual allocation logic needed
         pass
 
-    @abstractmethod
     def can_append_slots(self, seq_group: SequenceGroup,
                          num_lookahead_slots: int) -> bool:
-        pass
+        return True
 
-    @abstractmethod
     def append_slots(
         self,
         seq: Sequence,
         num_lookahead_slots: int,
     ) -> List[Tuple[int, int]]:
-        pass
+        return None  # type: ignore
 
-    @abstractmethod
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         pass
 
-    @abstractmethod
     def can_swap_in(self, seq_group: SequenceGroup,
                     num_lookahead_slots: int) -> AllocStatus:
-        pass
+        return AllocStatus.OK
 
-    @abstractmethod
     def swap_in(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
-        pass
+        return None  # type: ignore
 
-    @abstractmethod
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:
-        pass
+        return True
 
-    @abstractmethod
     def swap_out(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
-        pass
+        return None  # type: ignore
 
-    @abstractmethod
     def free(self, seq: Sequence) -> None:
-        pass
+        # No operation on free
+        return
 
-    @abstractmethod
     def get_block_table(self, seq: Sequence) -> List[int]:
-        pass
+        return None  # type: ignore
 
-    @abstractmethod
     def get_num_free_gpu_blocks(self) -> int:
-        pass
+        return 1
 
-    @abstractmethod
     def get_num_free_cpu_blocks(self) -> int:
-        pass
+        return 1
 
-    @abstractmethod
     def access_all_blocks_in_seq(
         self,
         seq: Sequence,
@@ -89,11 +75,9 @@ class BlockSpaceManager(ABC):
     ) -> None:
         pass
 
-    @abstractmethod
-    def get_common_computed_block_ids(
-            self, seqs: List[Sequence]) -> GenericSequence[int]:
-        pass
+    def get_common_computed_block_ids(self,
+                                      seq_group: SequenceGroup) -> List[int]:
+        return None  # type: ignore
 
-    @abstractmethod
     def mark_blocks_as_computed(self, seq_group: SequenceGroup):
         pass
