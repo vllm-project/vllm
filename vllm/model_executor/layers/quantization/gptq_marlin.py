@@ -1,4 +1,6 @@
-from typing import Any, Dict, List, Optional
+import re
+from copy import deepcopy
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 from torch.nn.parameter import Parameter
@@ -30,12 +32,15 @@ class GPTQMarlinConfig(QuantizationConfig):
     }
 
     def __init__(self, weight_bits: int, group_size: int, desc_act: bool,
-                 is_sym: bool, lm_head_quantized: bool) -> None:
+                 is_sym: bool, lm_head_quantized: bool, dynamic: Dict[str, Dict[str, Union[int, bool]]]) -> None:
         if desc_act and group_size == -1:
             # In this case, act_order == True is the same as act_order == False
             # (since we have only one group per output channel)
             desc_act = False
 
+        self.dynamic = dynamic
+        self.weight_bits = weight_bits
+        self.is_sym = is_sym
         self.pack_factor = 32 // weight_bits  # packed into int32
         self.group_size = group_size
         self.desc_act = desc_act
@@ -51,11 +56,31 @@ class GPTQMarlinConfig(QuantizationConfig):
         verify_marlin_supported(quant_type=self.quant_type,
                                 group_size=self.group_size)
 
+    def update_config(self, prefix: str):
+        bits = self.weight_bits
+        # check for variable/dynamic config
+        if len(self.dynamic) > 0 and prefix:
+            for pattern, dym in self.dynamic.items():
+                if re.match(pattern, prefix):
+                    bits = dym.get("bits", bits)
+                    self.group_size = dym.get("group_size", self.group_size)
+                    self.desc_act = dym.get("bits", self.desc_act)
+                    self.is_sym = dym.get("sym", self.is_sym)
+                    break
+
+        self.pack_factor = 32 // bits  # packed into int32
+        if (bits, self.is_sym) not in self.TYPE_MAP:
+            raise ValueError("Unsupported quantization config: "
+                             f"bits={bits}, sym={self.is_sym}")
+
+        self.quant_type = self.TYPE_MAP[(bits, self.is_sym)]
+
     def __repr__(self) -> str:
         return (f"GPTQMarlinConfig(quant_type={self.quant_type}, "
                 f"group_size={self.group_size}, "
                 f"desc_act={self.desc_act}, "
-                f"lm_head_quantized={self.lm_head_quantized})")
+                f"lm_head_quantized={self.lm_head_quantized}), "
+                f"dynamic={self.dynamic}")
 
     @classmethod
     def get_name(cls) -> str:
@@ -75,6 +100,7 @@ class GPTQMarlinConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "GPTQMarlinConfig":
+        dynamic = cls.get_from_keys_or(config, ["dynamic"], default={})
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
         desc_act = cls.get_from_keys(config, ["desc_act"])
@@ -82,7 +108,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"],
                                                  default=False)
         return cls(weight_bits, group_size, desc_act, is_sym,
-                   lm_head_quantized)
+                   lm_head_quantized, dynamic)
 
     @classmethod
     def override_quantization_method(cls, hf_quant_cfg,
@@ -147,7 +173,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
     """
 
     def __init__(self, quant_config: GPTQMarlinConfig) -> None:
-        self.quant_config = quant_config
+        self.quant_config = deepcopy(quant_config)
 
     def create_weights(
         self,
@@ -160,6 +186,11 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         **extra_weight_attrs,
     ) -> None:
         del output_size
+
+        prefix = extra_weight_attrs.get("prefix", "")
+        # Depending on prefix and dynamic, some arguments may be modified.
+        self.quant_config.update_config(prefix=prefix)
+
         output_size_per_partition = sum(output_partition_sizes)
         is_row_parallel = input_size != input_size_per_partition
 
