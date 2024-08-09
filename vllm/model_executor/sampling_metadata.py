@@ -8,8 +8,9 @@ import torch
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SequenceData, SequenceGroupMetadata
 from vllm.triton_utils.sample import get_num_triton_sampler_splits
-from vllm.utils import (async_tensor_h2d, is_pin_memory_available,
-                        make_tensor_with_pad, maybe_expand_dim)
+from vllm.utils import (PyObjectCache, async_tensor_h2d,
+                        is_pin_memory_available, make_tensor_with_pad,
+                        maybe_expand_dim)
 
 _SAMPLING_EPS = 1e-5
 _SEED_0_REPLACEMENT = 3403598558
@@ -60,6 +61,39 @@ class SequenceGroupToSample:
         if self.is_prompt:
             assert self.seq_len is not None
             assert self.query_len is not None
+
+
+def gen_seq_group_to_sample_builder(num_seqs: int):
+    return lambda: SequenceGroupToSample(
+        seq_ids=[0] * num_seqs,
+        sampling_params=None,
+        seq_data=None,  # type: ignore
+        seq_len=0,
+        query_len=0,
+        generator=None,
+        is_prompt=True,
+        prompt_logprob_indices=[],
+        sample_indices=[])
+
+
+class SamplingMetadataCache:
+    """Used to cache SamplingMetadata objects between scheduler iterations
+    """
+
+    def __init__(self):
+        self._seq_group_to_sample_cache: Dict[int, PyObjectCache] = {}
+
+    def get_cached_seq_group_to_sample(self, num_seqs):
+        if num_seqs not in self._seq_group_to_sample_cache:
+            self._seq_group_to_sample_cache[num_seqs] = PyObjectCache(
+                gen_seq_group_to_sample_builder(num_seqs))
+
+        obj = self._seq_group_to_sample_cache[num_seqs].get_object()
+        return obj
+
+    def reset(self):
+        for cache in self._seq_group_to_sample_cache.values():
+            cache.reset()
 
 
 class SamplingMetadata:
@@ -121,6 +155,7 @@ class SamplingMetadata:
         device: str,
         pin_memory: bool,
         generators: Optional[Dict[str, torch.Generator]] = None,
+        cache: Optional[SamplingMetadataCache] = None,
     ) -> "SamplingMetadata":
         (
             seq_groups,
@@ -128,7 +163,7 @@ class SamplingMetadata:
             categorized_sample_indices,
             num_prompts,
         ) = _prepare_seq_groups(seq_group_metadata_list, seq_lens, query_lens,
-                                device, generators)
+                                device, generators, cache)
         selected_token_indices = async_tensor_h2d(selected_token_indices,
                                                   dtype=torch.long,
                                                   target_device=device,
@@ -164,6 +199,7 @@ def _prepare_seq_groups(
     query_lens: Optional[List[int]],
     device: str,
     generators: Optional[Dict[str, torch.Generator]] = None,
+    cache: Optional[SamplingMetadataCache] = None,
 ) -> Tuple[List[SequenceGroupToSample], List[int], Dict[
         SamplingType, List[Tuple[int, int]]], int]:
     """Prepare sequence groups and indices for sampling.
@@ -210,15 +246,27 @@ def _prepare_seq_groups(
     num_prompts = 0
 
     for i, seq_group_metadata in enumerate(seq_group_metadata_list):
-        seq_ids = list(seq_group_metadata.seq_data.keys())
+        seq_ids = seq_group_metadata.seq_data.keys()
+
+        if cache is not None:
+            sample_obj = cache.get_cached_seq_group_to_sample(len(seq_ids))
+
+            for j, seq_id in enumerate(seq_ids):
+                sample_obj.seq_ids[j] = seq_id
+
+            sample_obj.prompt_logprob_indices.clear()
+            sample_obj.sample_indices.clear()
+
         sampling_params = seq_group_metadata.sampling_params
         is_prompt = seq_group_metadata.is_prompt
         generator: Optional[torch.Generator] = None
         # If the current seq group is in decode stage, it is None.
         seq_len: Optional[int] = None
         query_len: Optional[int] = None
-        prompt_logprob_indices: List[int] = []
-        sample_indices: List[int] = []
+        prompt_logprob_indices: List[int] = \
+            sample_obj.prompt_logprob_indices if cache is not None else []
+        sample_indices: List[int] = \
+            sample_obj.sample_indices if cache is not None else []
         do_sample = seq_group_metadata.do_sample
 
         if seq_group_metadata.is_prompt:
@@ -290,9 +338,16 @@ def _prepare_seq_groups(
             logit_idx += sample_len
             sample_idx += sample_len
 
-        seq_groups.append(
-            SequenceGroupToSample(
-                seq_ids=seq_ids,
+        if cache is not None:
+            sample_obj.sampling_params = sampling_params
+            sample_obj.seq_data = seq_group_metadata.seq_data
+            sample_obj.seq_len = seq_len
+            sample_obj.query_len = query_len
+            sample_obj.generator = generator
+            sample_obj.is_prompt = is_prompt
+        else:
+            sample_obj = SequenceGroupToSample(
+                seq_ids=list(seq_ids),
                 sampling_params=sampling_params,
                 seq_data=seq_group_metadata.seq_data,
                 seq_len=seq_len,
@@ -300,7 +355,13 @@ def _prepare_seq_groups(
                 generator=generator,
                 is_prompt=is_prompt,
                 prompt_logprob_indices=list(prompt_logprob_indices),
-                sample_indices=list(sample_indices)))
+                sample_indices=list(sample_indices))
+
+        seq_groups.append(sample_obj)
+
+    if cache is not None:
+        cache.reset()
+
     return (seq_groups, selected_token_indices, categorized_sample_indices,
             num_prompts)
 

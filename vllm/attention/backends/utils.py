@@ -68,12 +68,20 @@ def compute_slot_mapping(is_profile_run: bool, slot_mapping: List[int],
     # tokens are masked and the slot mapping will be
     # [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
     block_table = block_tables[seq_id]
-    slot_mapping.extend([PAD_SLOT_ID] * max(0, start_idx - context_len))
-    for i in range(max(start_idx, context_len), seq_len):
+
+    def add_slot(i):
         block_number = block_table[i // block_size]
         block_offset = i % block_size
         slot = block_number * block_size + block_offset
         slot_mapping.append(slot)
+
+    if start_idx == 0 and (seq_len - context_len) == 1:
+        # Optimization for common-case of decoding next token
+        add_slot(seq_len - 1)
+    else:
+        slot_mapping.extend([PAD_SLOT_ID] * max(0, start_idx - context_len))
+        for i in range(max(start_idx, context_len), seq_len):
+            add_slot(i)
 
 
 TAttentionMetadata = TypeVar("TAttentionMetadata", bound='AttentionMetadata')

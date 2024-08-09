@@ -1,7 +1,6 @@
 """Sequence and its related classes."""
 import copy
 import enum
-import math
 from abc import ABC, abstractmethod
 from array import array
 from collections import defaultdict
@@ -330,7 +329,7 @@ class Sequence:
 
     @property
     def n_blocks(self) -> int:
-        return math.ceil(self.get_len() / self.block_size)
+        return (self.get_len() + self.block_size - 1) // self.block_size
 
     @property
     def prompt(self) -> Optional[str]:
@@ -514,7 +513,9 @@ class SequenceGroup:
     ) -> None:
         self.request_id = request_id
         self.seqs = seqs
+        self.is_single_seq = len(seqs) == 1
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
+
         self.sampling_params = sampling_params
         self.metrics = RequestMetrics(arrival_time=arrival_time,
                                       last_token_time=arrival_time,
@@ -635,6 +636,10 @@ class SequenceGroup:
     ) -> List[Sequence]:
         if status is None:
             return self.seqs
+
+        if self.is_single_seq:
+            return self.seqs if self.seqs[0].status == status else []
+
         return [seq for seq in self.seqs if seq.status == status]
 
     def is_encoder_decoder(self) -> bool:
@@ -644,6 +649,9 @@ class SequenceGroup:
         return self.encoder_seq
 
     def get_unfinished_seqs(self) -> List[Sequence]:
+        if self.is_single_seq:
+            return self.seqs if not self.seqs[0].is_finished() else []
+
         return [seq for seq in self.seqs if not seq.is_finished()]
 
     def get_finished_seqs(self) -> List[Sequence]:
@@ -668,12 +676,21 @@ class SequenceGroup:
         if status is None:
             return len(self.seqs)
 
+        if self.is_single_seq:
+            return 1 if self.seqs[0].status == status else 0
+
         return len(self.get_seqs(status))
 
     def num_unfinished_seqs(self) -> int:
+        if self.is_single_seq:
+            return 1 if not self.seqs[0].is_finished() else 0
+
         return len(self.get_unfinished_seqs())
 
     def num_finished_seqs(self) -> int:
+        if self.is_single_seq:
+            return 1 if self.seqs[0].is_finished() else 0
+
         return len(self.get_finished_seqs())
 
     def find(self, seq_id: int) -> Sequence:
@@ -686,12 +703,14 @@ class SequenceGroup:
             raise ValueError(f"Sequence {seq.seq_id} already exists.")
         self.seqs_dict[seq.seq_id] = seq
         self.seqs.append(seq)
+        self.is_single_seq = len(self.seqs) == 1
 
     def remove(self, seq_id: int) -> None:
         seq = self.seqs_dict.pop(seq_id, None)
         if seq is None:
             raise ValueError(f"Sequence {seq_id} not found.")
         self.seqs.remove(seq)
+        self.is_single_seq = len(self.seqs) == 1
 
     def is_finished(self) -> bool:
         return all(seq.is_finished() for seq in self.seqs)
@@ -775,9 +794,10 @@ class SequenceGroupMetadata:
         # TODO: We should maintain this states out of the sequence group.
         self.num_speculative_tokens = None
 
-        if self._token_chunk_size is None:
+        if seq_data is not None and self._token_chunk_size is None:
             if is_prompt:
-                self._token_chunk_size = list(seq_data.values())[0].get_len()
+                self._token_chunk_size = next(iter(
+                    seq_data.values())).get_len()
             else:
                 self._token_chunk_size = 1
 
