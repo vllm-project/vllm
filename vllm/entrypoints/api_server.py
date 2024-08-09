@@ -64,7 +64,8 @@ async def generate(request: Request) -> Response:
             text_outputs = [
                 prompt + output.text for output in request_output.outputs
             ]
-            ret = {"text": text_outputs}
+            speculative_decode_outputs = [output.speculative_decode_outputs for output in request_output.outputs]
+            ret = {"text": text_outputs, "speculative_decode_outputs": speculative_decode_outputs}
             yield (json.dumps(ret) + "\0").encode("utf-8")
 
     if stream:
@@ -81,7 +82,8 @@ async def generate(request: Request) -> Response:
     assert final_output is not None
     prompt = final_output.prompt
     text_outputs = [prompt + output.text for output in final_output.outputs]
-    ret = {"text": text_outputs}
+    speculative_decode_outputs = [output.speculative_decode_outputs for output in request_output.outputs]
+    ret = {"text": text_outputs, "speculative_decode_outputs": speculative_decode_outputs}
     return JSONResponse(ret)
 
 

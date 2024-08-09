@@ -5,6 +5,7 @@ from typing import List, Optional, Tuple, Union
 from vllm.lora.request import LoRARequest
 from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
                            SequenceGroup, SequenceStatus)
+from vllm.speculative_decode_output import SpeculativeDecodeOutput
 
 
 @dataclass
@@ -34,6 +35,7 @@ class CompletionOutput:
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
     lora_request: Optional[LoRARequest] = None
+    speculative_decode_outputs: Optional[list[SpeculativeDecodeOutput]] = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -45,6 +47,7 @@ class CompletionOutput:
                 f"cumulative_logprob={self.cumulative_logprob}, "
                 f"logprobs={self.logprobs}, "
                 f"finish_reason={self.finish_reason}, "
+                f"speculative_decode_outputs={self.speculative_decode_outputs}), "
                 f"stop_reason={self.stop_reason})")
 
 
