@@ -11,9 +11,9 @@ pytest distributed/test_basic_distributed_correctness_enc_dec.py
 
 import pytest
 
-from tests.models.utils import DecoderPromptType
 from vllm.utils import cuda_device_count_stateless
 
+from ..conftest import DecoderPromptType
 from ..models.utils import check_logprobs_close
 from ..utils import fork_new_process_for_each_test
 

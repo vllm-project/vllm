@@ -40,9 +40,11 @@ def _get_allowed_token_ids_logits_processor(
     return AllowedTokenIdsLogitsProcessor(allowed_token_ids)
 
 
-def logit_bias_logits_processor(logit_bias: Dict[str,
-                                                 float], token_ids: List[int],
-                                logits: torch.Tensor) -> torch.Tensor:
+def logit_bias_logits_processor(
+    logit_bias: Dict[int, float],
+    token_ids: List[int],
+    logits: torch.Tensor,
+) -> torch.Tensor:
     for token_id, bias in logit_bias.items():
         logits[token_id] += bias
     return logits
