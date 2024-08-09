@@ -1,16 +1,17 @@
-import lm_eval
-import requests
-import numpy
-import time
-import subprocess
 import os
-
+import subprocess
+import time
 from threading import Thread
+
+import lm_eval
+import numpy
+import requests
 
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 os.environ["OPENAI_API_KEY"] = "dummy"
 
 MODEL_NAME = "meta-llama/Meta-Llama-3-8B-Instruct"
+
 
 def wait_for_server(timeout=900) -> bool:
 
@@ -31,6 +32,7 @@ def wait_for_server(timeout=900) -> bool:
 
     return False
 
+
 _TASK = "gsm8k"
 _SUBTASK = "exact_match,strict-match"
 _LIMIT = 250
@@ -41,7 +43,8 @@ _NUM_CLIENTS = 5
 
 
 def launch_lm_eval(idx):
-    print(f"Running lm_eval thread {idx} ... this will take a minute to start.")
+    print(
+        f"Running lm_eval thread {idx} ... this will take a minute to start.")
 
     openai_args = ",".join([
         f"model={MODEL_NAME}",
@@ -60,8 +63,9 @@ def launch_lm_eval(idx):
 
     measured_value = results["results"][_TASK][_SUBTASK]
     print(f"measured: {measured_value}")
-                    
+
     assert numpy.isclose(_EXPECTED_SCORE, measured_value, rtol=0.05)
+
 
 def test_lm_eval_correctness():
     # Setup server launch.
@@ -86,14 +90,15 @@ def test_lm_eval_correctness():
         # Launch N eval jobs to simulate a client under load.
         # Confirm we got the right answer.
         ts = [
-            Thread(target=launch_lm_eval, args=(idx,)) for idx in range(_NUM_CLIENTS)
+            Thread(target=launch_lm_eval, args=(idx, ))
+            for idx in range(_NUM_CLIENTS)
         ]
         for t in ts:
             t.start()
         for t in ts:
-            t.join(timeout=60*20)
+            t.join(timeout=60 * 20)
             assert not t.is_alive()
-       
+
     finally:
         assert server_process is not None
         server_process.terminate()
