@@ -1711,9 +1711,6 @@ class CUDAGraphRunner:
                                               non_blocking=True)
         # Run the graph.
         self.graph.replay()
-        if "seqlen_agnostic_capture_inputs" in self.input_buffers:
-            self.model.copy_outputs_after_cuda_graphs(self.input_buffers,
-                                                      **kwargs)
         # Return the output tensor.
         if get_pp_group().is_last_rank:
             return self.output_buffers["hidden_states"]
