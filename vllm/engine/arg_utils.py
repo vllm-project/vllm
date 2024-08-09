@@ -873,11 +873,6 @@ class EngineArgs:
                 raise ValueError(
                     f"Invalid module {m} in collect_detailed_traces. "
                     f"Valid modules are {ALLOWED_DETAILED_TRACE_MODULES}")
-            if (m == "model"
-                    or m == "all") and self.pipeline_parallel_size > 1:
-                raise ValueError(
-                    "Collection of detailed traces for the 'model' module is "
-                    "not yet supported with pipeline parallelism.")
         observability_config = ObservabilityConfig(
             otlp_traces_endpoint=self.otlp_traces_endpoint,
             collect_model_forward_time="model" in detailed_trace_modules
