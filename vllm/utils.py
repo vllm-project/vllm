@@ -261,6 +261,44 @@ class LRUCache(Generic[T]):
         self.cache.clear()
 
 
+class PyObjectCache:
+    """Used to cache python objects to avoid object allocations 
+    across scheduler iterations.
+    """
+
+    def __init__(self, obj_builder):
+        self._obj_builder = obj_builder
+        self._index = 0
+
+        self._obj_cache = []
+        for _ in range(128):
+            self._obj_cache.append(self._obj_builder())
+
+    def _grow_cache(self):
+        # Double the size of the cache
+        num_objs = len(self._obj_cache)
+        for _ in range(num_objs):
+            self._obj_cache.append(self._obj_builder())
+
+    def get_object(self):
+        """Returns a pre-allocated cached object. If there is not enough 
+        objects, then the cache size will double.
+        """
+        if self._index >= len(self._obj_cache):
+            self._grow_cache()
+            assert self._index < len(self._obj_cache)
+
+        obj = self._obj_cache[self._index]
+        self._index += 1
+
+        return obj
+
+    def reset(self):
+        """Makes all cached-objects available for the next scheduler iteration.
+        """
+        self._index = 0
+
+
 def is_hip() -> bool:
     return torch.version.hip is not None
 
