@@ -24,6 +24,7 @@ def _create_model_runner(model: str, *args, **kwargs) -> ModelRunner:
         load_config=engine_config.load_config,
         lora_config=engine_config.lora_config,
         prompt_adapter_config=engine_config.prompt_adapter_config,
+        observability_config=engine_config.observability_config,
         is_driver_worker=True,
     )
     return model_runner
