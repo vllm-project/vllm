@@ -126,7 +126,7 @@ class ScalarType {
   //  c++17 tempalate specialization this is not needed once we migrate to
   //  c++20 and can pass literal classes as template parameters
   constexpr Id id() const {
-    static_assert(id_size_bits() <= 64,
+    static_assert(id_size_bits() <= sizeof(Id) * 8,
                   "ScalarType id is too large to be stored");
 
     auto or_and_advance = [](std::pair<Id, uint32_t> result,
