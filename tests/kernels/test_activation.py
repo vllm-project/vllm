@@ -3,8 +3,10 @@ from typing import Type
 import pytest
 import torch
 
+from tests.kernels.utils import opcheck
 from vllm.model_executor.layers.activation import (FastGELU, GeluAndMul,
-                                                   NewGELU, SiluAndMul)
+                                                   NewGELU, QuickGELU,
+                                                   SiluAndMul)
 
 from .allclose_default import get_default_atol, get_default_rtol
 
@@ -39,18 +41,28 @@ def test_act_and_mul(
     x = torch.randn(num_tokens, 2 * d, dtype=dtype)
     if activation == "silu":
         layer = SiluAndMul()
+        fn = torch.ops._C.silu_and_mul
     elif activation == "gelu":
         layer = GeluAndMul(approximate="none")
+        fn = torch.ops._C.gelu_and_mul
     elif activation == "gelu_tanh":
         layer = GeluAndMul(approximate="tanh")
+        fn = torch.ops._C.gelu_tanh_and_mul
     out = layer(x)
     ref_out = layer.forward_native(x)
     # The SiLU and GELU implementations are equivalent to the native PyTorch
     # implementations, so we can do exact comparison.
     torch.testing.assert_close(out, ref_out, atol=0.0, rtol=0.0)
 
+    d = x.shape[-1] // 2
+    output_shape = (x.shape[:-1] + (d, ))
+    out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+    opcheck(fn, (out, x))
 
-@pytest.mark.parametrize("activation", [FastGELU, NewGELU])
+
+@pytest.mark.parametrize("activation", [(FastGELU, torch.ops._C.gelu_fast),
+                                        (NewGELU, torch.ops._C.gelu_new),
+                                        (QuickGELU, torch.ops._C.gelu_quick)])
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("d", D)
 @pytest.mark.parametrize("dtype", DTYPES)
@@ -70,10 +82,14 @@ def test_activation(
         torch.cuda.manual_seed(seed)
     torch.set_default_device(device)
     x = torch.randn(num_tokens, d, dtype=dtype)
-    layer = activation()
+    layer = activation[0]()
+    fn = activation[1]
     out = layer(x)
     ref_out = layer.forward_native(x)
     torch.testing.assert_close(out,
                                ref_out,
                                atol=get_default_atol(out),
                                rtol=get_default_rtol(out))
+
+    out = torch.empty_like(x)
+    opcheck(fn, (out, x))
