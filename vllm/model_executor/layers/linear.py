@@ -574,15 +574,13 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                          param: BasevLLMParameter,
                          loaded_weight: torch.Tensor,
                          loaded_shard_id: Optional[int] = None):
-        param_data = param.data
         if loaded_shard_id is None:
             if isinstance(param, PerTensorScaleParameter):
                 param.load_merged_column_weight(loaded_weight=loaded_weight,
                                                 shard_id=0)
                 return
-            if param.output_dim is None:
-                assert param_data.shape == loaded_weight.shape
-                param_data.copy_(loaded_weight)
+            elif type(param) is BasevLLMParameter:
+                param.load_merged_column_weight(loaded_weight=loaded_weight)
                 return
             self._load_fused_module_from_checkpoint(param, loaded_weight)
             return
@@ -725,14 +723,13 @@ class QKVParallelLinear(ColumnParallelLinear):
                          param: BasevLLMParameter,
                          loaded_weight: torch.Tensor,
                          loaded_shard_id: Optional[str] = None):
-        param_data = param.data
         if loaded_shard_id is None:  # special case for certain models
             if isinstance(param, PerTensorScaleParameter):
-                param.load_qkv_weight(loaded_weight=loaded_weight, shard_id=0)
+                param.load_merged_column_weight(loaded_weight=loaded_weight,
+                                                shard_id=0)
                 return
-            if param.output_dim is None:
-                assert param_data.shape == loaded_weight.shape
-                param_data.copy_(loaded_weight)
+            elif type(param) is BasevLLMParameter:
+                param.load_merged_column_weight(loaded_weight=loaded_weight)
                 return
             self._load_fused_module_from_checkpoint(param, loaded_weight)
             return
