@@ -150,6 +150,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     'VLLM_RPC_BASE_PATH':
     lambda: os.getenv('VLLM_RPC_BASE_PATH', tempfile.gettempdir()),
 
+    # port used for rpc when the frontend api server is running in
+    # multi-processing mode to communicate with the backend engine process.
+    'VLLM_RPC_PORT':
+    lambda: int(os.getenv('VLLM_RPC_PORT', '5570')),
+
     # If true, will load models from ModelScope instead of Hugging Face Hub.
     # note that the value is true or false, not numbers
     "VLLM_USE_MODELSCOPE":
