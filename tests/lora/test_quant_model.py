@@ -7,6 +7,7 @@ import pytest
 
 import vllm
 from vllm.lora.request import LoRARequest
+from vllm.utils import is_hip
 
 from .conftest import cleanup
 
@@ -16,13 +17,19 @@ class ModelWithQuantization:
     model_path: str
     quantization: str
 
-
-MODELS: List[ModelWithQuantization] = [
-    ModelWithQuantization(model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ",
-                          quantization="AWQ"),
-    ModelWithQuantization(model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ",
-                          quantization="GPTQ"),
-]
+#AWQ quantization is currently not supported in ROCm.
+if is_hip(): 
+    MODELS: List[ModelWithQuantization] = [
+            ModelWithQuantization(model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ",
+                            quantization="GPTQ"),
+    ]
+else:
+    MODELS: List[ModelWithQuantization] = [
+        ModelWithQuantization(model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ",
+                              quantization="AWQ"),
+        ModelWithQuantization(model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ",
+                              quantization="GPTQ"),
+    ]
 
 
 def do_sample(llm: vllm.LLM,
