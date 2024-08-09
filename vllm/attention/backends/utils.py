@@ -108,6 +108,13 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
         block_tables = inter_data.block_tables
         computed_block_nums = inter_data.computed_block_nums
 
+        if chunked_prefill_enabled and inter_data.prefix_cache_hit:
+            raise RuntimeError(
+                "Chunked prefill and prefix caching can only be used "
+                "simultaneously with flash-attn backend, try switching "
+                "to flash-attn backend by setting the environment variable "
+                "\"VLLM_ATTENTION_BACKEND=FLASH_ATTN\"")
+
         for (seq_id, token_len, seq_len, curr_seq_len, query_len, context_len,
              curr_sliding_window_block) in zip(
                  inter_data.seq_ids, [len(t) for t in inter_data.input_tokens],
