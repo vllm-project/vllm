@@ -655,6 +655,9 @@ class SequenceGroup:
         return [seq for seq in self.seqs if not seq.is_finished()]
 
     def get_finished_seqs(self) -> List[Sequence]:
+        if self.is_single_seq:
+            return self.seqs if self.seqs[0].is_finished() else []
+
         return [seq for seq in self.seqs if seq.is_finished()]
 
     def update_num_computed_tokens(self, num_new_computed_tokens: int):
