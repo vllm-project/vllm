@@ -102,6 +102,7 @@ class ScalarType {
 
   template <typename Fn, typename Init>
   constexpr auto reduce_members(Fn f, Init init) const {
+    // Should be in constructor order for `from_id`
     return reduce_members_helper(f, init, exponent, mantissa, signed_, bias,
                                  finite_values_only, nan_repr);
   };
