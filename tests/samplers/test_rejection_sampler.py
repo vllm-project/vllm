@@ -141,7 +141,10 @@ def test_no_crash_with_varying_dims(k: int, vocab_size: int, batch_size: int,
     rejection_sampler.init_gpu_tensors(device=device)
 
     draft_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
-    target_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
+    target_probs = torch.rand(batch_size,
+                              k + 1,
+                              vocab_size,
+                              dtype=torch.float32)
     bonus_token_ids = torch.randint(low=0,
                                     high=vocab_size,
                                     size=(batch_size, 1),
@@ -170,7 +173,10 @@ def test_deterministic_when_seeded(k: int, vocab_size: int, batch_size: int,
     rejection_sampler.init_gpu_tensors(device=device)
 
     draft_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
-    target_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
+    target_probs = torch.rand(batch_size,
+                              k + 1,
+                              vocab_size,
+                              dtype=torch.float32)
     bonus_token_ids = torch.randint(low=0,
                                     high=vocab_size,
                                     size=(batch_size, 1),
@@ -214,7 +220,10 @@ def test_raises_when_vocab_oob(above_or_below_vocab_range: str,
     rejection_sampler.init_gpu_tensors(device=device)
 
     draft_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
-    target_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
+    target_probs = torch.rand(batch_size,
+                              k + 1,
+                              vocab_size,
+                              dtype=torch.float32)
     bonus_token_ids = torch.randint(low=0,
                                     high=vocab_size,
                                     size=(batch_size, 1),
@@ -398,10 +407,10 @@ class _CorrectnessTestHelper:
         draft_probs = draft_probs.reshape(1, self.k, self.vocab_size).repeat(
             num_samples, 1, 1)
 
-        # Repeat target probs num_samples * k times.
+        # Repeat target probs num_samples * (k + 1) times.
         # Rejection sampler requires bonus token probs, but they aren't used.
         target_probs = target_probs.reshape(1, 1, self.vocab_size).repeat(
-            num_samples, self.k, 1)
+            num_samples, self.k + 1, 1)
 
         # Randomly sample draft token ids from draft probs.
         draft_token_ids = torch.multinomial(draft_probs[:, 0, :],
