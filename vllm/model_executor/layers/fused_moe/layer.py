@@ -178,6 +178,7 @@ class FusedMoE(torch.nn.Module):
         self.num_expert_group = num_expert_group
         self.topk_group = topk_group
 
+        self.quant_config = quant_config
         if quant_config is None:
             self.quant_method: Optional[QuantizeMethodBase] = (
                 UnquantizedFusedMoEMethod())
@@ -197,6 +198,7 @@ class FusedMoE(torch.nn.Module):
                       loaded_weight: torch.Tensor, weight_name: str,
                       shard_id: int, expert_id: int):
         param_data = param.data
+        pack_factor = getattr(self.quant_config, "pack_factor", 1)
 
         # Input scales can be loaded directly and should be equal.
         if "input_scale" in weight_name:
@@ -221,8 +223,46 @@ class FusedMoE(torch.nn.Module):
             #   shard_id 1 == down_proj / w2
             else:
                 param_data[expert_id] = loaded_weight
+        elif 'scales' in weight_name or 'qzeros' in weight_name:
+            # for gptq models
+            assert self.quant_config is not None
+            group_size = getattr(self.quant_config, "group_size", -1)
+            tp_rank = get_tensor_model_parallel_rank()
+            if 'scales' in weight_name:
+                if shard_id == 1:
+                    shard_size = self.intermediate_size_per_partition
+                    if group_size != -1:
+                        shard_size //= group_size
+                else:
+                    shard_size = self.intermediate_size_per_partition
+            else:
+                if shard_id == 1:
+                    shard_size = self.intermediate_size_per_partition
+                    if group_size != -1:
+                        shard_size //= group_size
+                else:
+                    shard_size = (self.intermediate_size_per_partition //
+                                  pack_factor)
+            shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
+
+            # If we are in merged column case (gate_up_proj)
+            #   shard_id 0 == gate_proj / w1
+            #   shard_id 2 == up_proj / w3
+            if shard_id == 0:
+                param_data[expert_id, :, 0:shard_size] = loaded_weight[:,
+                                                                       shard]
+            elif shard_id == 2:
+                param_data[expert_id, :,
+                           shard_size:2 * shard_size] = loaded_weight[:, shard]
+            # If we are in the row parallel case (down_proj)
+            #   shard_id 1 == down_proj / w2
+            elif shard_id == 1:
+                param_data[expert_id] = loaded_weight[shard]
+            else:
+                raise ValueError(
+                    f"Shard id must be in [0,1,2] but got {shard_id}")
         # Weights
-        else:
+        elif not self.quant_config or self.quant_config.get_name() == "fp8":
             tp_rank = get_tensor_model_parallel_rank()
             shard_size = self.intermediate_size_per_partition
             shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
@@ -238,6 +278,29 @@ class FusedMoE(torch.nn.Module):
             # w2, down_proj case: Load into only shard of w2.
             elif shard_id == 1:
                 param_data[expert_id, :, :] = loaded_weight[:, shard]
+            else:
+                raise ValueError(
+                    f"Shard id must be in [0,1,2] but got {shard_id}")
+        else:
+            tp_rank = get_tensor_model_parallel_rank()
+            if shard_id == 1:
+                shard_size = (self.intermediate_size_per_partition //
+                              pack_factor)
+            else:
+                shard_size = self.intermediate_size_per_partition
+            shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
+
+            # w1, gate_proj case: Load into first shard of w13.
+            if shard_id == 0:
+                param_data[expert_id, :, 0:shard_size] = loaded_weight[:,
+                                                                       shard]
+            # w3, up_proj case: Load into second shard of w13.
+            elif shard_id == 2:
+                param_data[expert_id, :,
+                           shard_size:2 * shard_size] = loaded_weight[:, shard]
+            # w2, down_proj case: Load into only shard of w2.
+            elif shard_id == 1:
+                param_data[expert_id, :, :] = loaded_weight[shard, :]
             else:
                 raise ValueError(
                     f"Shard id must be in [0,1,2] but got {shard_id}")
@@ -297,5 +360,37 @@ class FusedMoE(torch.nn.Module):
              if weight_name in gate_up else "experts.a2_scale",
              f"experts.{expert_id}.{weight_name}.input_scale", expert_id,
              shard_id) for expert_id in range(num_experts)
+            for shard_id, weight_name in enumerate(gate_down_up)
+        ] + [
+            # These are the weights for the experts
+            # (param_name, weight_name, expert_id, shard_id)
+            ("experts.w13_qweight"
+             if weight_name in gate_up else "experts.w2_qweight",
+             f"experts.{expert_id}.{weight_name}.qweight", expert_id, shard_id)
+            for expert_id in range(num_experts)
+            for shard_id, weight_name in enumerate(gate_down_up)
+        ] + [
+            # These are the weight scales for the experts
+            # (param_name, weight_name, expert_id, shard_id)
+            ("experts.w13_scales"
+             if weight_name in gate_up else "experts.w2_scales",
+             f"experts.{expert_id}.{weight_name}.scales", expert_id, shard_id)
+            for expert_id in range(num_experts)
+            for shard_id, weight_name in enumerate(gate_down_up)
+        ] + [
+            # These are the weight qzeros for the experts
+            # (param_name, weight_name, expert_id, shard_id)
+            ("experts.w13_qzeros"
+             if weight_name in gate_up else "experts.w2_qzeros",
+             f"experts.{expert_id}.{weight_name}.qzeros", expert_id, shard_id)
+            for expert_id in range(num_experts)
+            for shard_id, weight_name in enumerate(gate_down_up)
+        ] + [
+            # These are the weight g_idx for the experts
+            # (param_name, weight_name, expert_id, shard_id)
+            ("experts.w13_g_idx"
+             if weight_name in gate_up else "experts.w2_g_idx",
+             f"experts.{expert_id}.{weight_name}.g_idx", expert_id, shard_id)
+            for expert_id in range(num_experts)
             for shard_id, weight_name in enumerate(gate_down_up)
         ]

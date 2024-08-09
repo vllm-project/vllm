@@ -5,10 +5,12 @@ from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+    QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.layers.quantization.gptq import GPTQFusedMoEMethod
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     apply_gptq_marlin_linear, check_marlin_supported, marlin_is_k_full,
     marlin_make_empty_g_idx, marlin_make_workspace, marlin_permute_scales,
@@ -106,10 +108,12 @@ class GPTQMarlinConfig(QuantizationConfig):
         return None
 
     def get_quant_method(self, layer: torch.nn.Module,
-                         prefix: str) -> Optional["GPTQMarlinLinearMethod"]:
+                         prefix: str) -> Optional["QuantizeMethodBase"]:
         if (isinstance(layer, LinearBase) or
             (isinstance(layer, ParallelLMHead) and self.lm_head_quantized)):
             return GPTQMarlinLinearMethod(self)
+        elif isinstance(layer, FusedMoE):
+            return GPTQFusedMoEMethod(self)  # type: ignore[arg-type]
         return None
 
     def get_scaled_act_names(self) -> List[str]:
