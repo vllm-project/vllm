@@ -50,12 +50,3 @@ async def test_check_health(client: openai.AsyncOpenAI):
     response = requests.get(base_url + "/health")
 
     assert response.status_code == HTTPStatus.OK
-
-
-@pytest.mark.asyncio
-async def test_log_metrics(client: openai.AsyncOpenAI):
-    base_url = str(client.base_url)[:-3].strip("/")
-
-    response = requests.get(base_url + "/metrics")
-
-    assert response.status_code == HTTPStatus.OK

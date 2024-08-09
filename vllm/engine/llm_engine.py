@@ -14,8 +14,7 @@ from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
 from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
                                  SchedulerOutputs)
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.metrics import (LoggingStatLogger, PrometheusStatLogger,
-                                 StatLoggerBase, Stats)
+from vllm.engine.metrics_types import StatLoggerBase, Stats
 from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
 from vllm.engine.output_processor.stop_checker import StopChecker
@@ -320,6 +319,13 @@ class LLMEngine:
             if stat_loggers is not None:
                 self.stat_loggers = stat_loggers
             else:
+                # Lazy import for prometheus multiprocessing.
+                # We need to set PROMETHEUS_MULTIPROC_DIR environment variable
+                # before prometheus_client is imported.
+                # See https://prometheus.github.io/client_python/multiprocess/
+                from vllm.engine.metrics import (LoggingStatLogger,
+                                                 PrometheusStatLogger)
+
                 self.stat_loggers = {
                     "logging":
                     LoggingStatLogger(
@@ -330,8 +336,6 @@ class LLMEngine:
                         labels=dict(model_name=model_config.served_model_name),
                         max_model_len=self.model_config.max_model_len),
                 }
-                self.stat_loggers["prometheus"].info("cache_config",
-                                                     self.cache_config)
 
         self.tracer = None
         if self.observability_config.otlp_traces_endpoint:
