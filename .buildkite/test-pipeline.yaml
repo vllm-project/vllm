@@ -215,6 +215,7 @@ steps:
     - pytest -v -s spec_decode
 
 - label: LoRA Test %N # 30min each
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/lora
   - csrc/punica
