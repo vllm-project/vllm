@@ -101,7 +101,7 @@ def test_models_log_probs(
     This test is used when there is discrepancy in kernels
     / numerics (e.g. when using lower-precision types like FP8).
     """
-    if not ((model == "facebook/opt-125") and (kv_cache_dtype == "fp8_e5m2")):
+    if not ((model == "facebook/opt-125m") and (kv_cache_dtype == "fp8_e5m2")):
         pytest.skip(f"only {model} requires kv_cache_dtype={kv_cache_dtype}")
 
     NUM_LOG_PROBS = 8
