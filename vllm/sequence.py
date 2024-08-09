@@ -11,7 +11,7 @@ from typing import (TYPE_CHECKING, Dict, List, Mapping, Optional, Set, Tuple,
 
 import torch
 
-from vllm.inputs import is_valid_encoder_decoder_llm_inputs
+from vllm.inputs.parse import is_valid_encoder_decoder_llm_inputs
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest

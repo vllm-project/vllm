@@ -19,8 +19,6 @@ from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest
-from vllm.utils import (is_embedding_model_config,
-                        is_encoder_decoder_model_config)
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
@@ -113,10 +111,10 @@ class Worker(LocalOrDistributedWorkerBase):
         self.gpu_cache: Optional[List[List[torch.Tensor]]] = None
 
     def _is_encoder_decoder_model(self):
-        return is_encoder_decoder_model_config(self.model_config)
+        return self.model_config.is_encoder_decoder_model
 
     def _is_embedding_model(self):
-        return is_embedding_model_config(self.model_config)
+        return self.model_config.is_embedding_model
 
     def init_device(self) -> None:
         if self.device_config.device.type == "cuda":

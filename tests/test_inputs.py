@@ -2,7 +2,7 @@ from typing import List
 
 import pytest
 
-from vllm.inputs import parse_and_batch_prompt
+from vllm.inputs.parse import parse_and_batch_prompt
 
 STRING_INPUTS = [
     '',

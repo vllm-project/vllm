@@ -464,6 +464,16 @@ class ModelConfig:
             if t != "attention"
         ])
 
+    @property
+    def is_encoder_decoder_model(self) -> bool:
+        """Extract the HF encoder/decoder model flag."""
+        return getattr(self.hf_config, "is_encoder_decoder", False)
+
+    @property
+    def is_embedding_model(self) -> bool:
+        """Extract the embedding model flag."""
+        return self.embedding_mode
+
 
 class CacheConfig:
     """Configuration for the KV cache.
