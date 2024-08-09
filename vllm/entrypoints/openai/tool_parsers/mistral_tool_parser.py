@@ -24,19 +24,9 @@ logger = init_logger(__name__)
 class MistralToolParser(ToolParser):
     """
     Tool call parser for Mistral 7B Instruct v0.3, intended for use with the
-    examples/tool_chat_template_mistral.jinja template. There is an
-    IMPORTANT CAVEAT for this parser:
+    examples/tool_chat_template_mistral.jinja template.
 
-    NOTE: Mistral's tool call format, that this translates into an OpenAI
-        format, uses SINGLE QUOTES which cannot be parsed to JSON. To enable
-        JSON parsing and serialization, we find-and-replace these with
-        DOUBLE QUOTES. To prevent tool call corruption / deserialization
-        failure, ensure that your tool calls and in particular your
-        ARGUMENTS never contain single or double quotes except as JSON
-        control characters.
-
-    Used when --enable-auto-tool-choice --tool-call-parser
-    mistral are all set
+    Used when --enable-auto-tool-choice --tool-call-parser gmistral are all set
     """
 
     # the bot_token is the token indicating tool call(s) follow. Tokens before
