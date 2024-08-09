@@ -157,5 +157,25 @@ Supported models:
 * `mistralai/Mistral-7B-Instruct-v0.3`
 * Possibly mistral-large and mixtral? These have not been tested at the time of this writing.
 
+Known issues:
+1. Mistral 7B struggles to generate parallel tool calls correctly. 
+2. Mistral's `tokenizer_config.json` chat template requires tool call IDs that are exactly 9 digits, which is 
+much shorter than what vLLM generates. 
+
+To address this, the following additional chat templates are provided:
+
+* `examples/tool_chat_template_mistral.jinja` - this is the "official" Mistral chat template, but tweaked so that
+it works with vLLM's tool call IDs (provided `tool_call_id` fields are truncated to the last 9 digits)
+* `examples/tool_chat_template_mistral_parallel.jinja` - this is a "better" version that adds a tool-use system prompt
+when tools are provided, that results in much better reliability when working with parallel tool calling.
+
+**Please note** that the model's default chat template in `tokenizer_config.json` will not work with vLLM, as it expects
+tool_call_id fields to be exactly 9 digits, which is shorter than vLLM's format. You **must** do one of the following 
+to get tool calling to work with mistral:
+1. use one of the 2 provided tool chat templates
+2. provide your own tool chat template that corrects for this
+3. in your client code, ignore the vLLM-generated `tool_call_id`, and manually generate and pass in your own 9-digit
+`tool_call_id`s for `assistant`-role messages containing tool calls, and `tool`-role messages containing tool call 
+results.
 
 Recommended flags: `--tool-call-parser mistral --chat-template examples/tool_chat_template_mistral.jinja`
