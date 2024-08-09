@@ -1,5 +1,5 @@
 import itertools
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union, Union
+from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
 
 import torch
 import torch.nn as nn
