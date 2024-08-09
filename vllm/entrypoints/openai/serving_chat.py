@@ -83,7 +83,7 @@ class OpenAIServingChat(OpenAIServing):
                 self.tool_parser = Hermes2ProToolParser
             else:
                 raise TypeError(
-                    "Error: --enable-auto-tool-choice requires --tool-parser")
+                    "Error: --enable-auto-tool-choice requires --tool-call-parser")
 
     async def create_chat_completion(
         self,
@@ -153,12 +153,13 @@ class OpenAIServingChat(OpenAIServing):
             return self.create_error_response(
                 "tool_choice = \"required\" is not supported!")
 
-            # "auto" tools requires --enable-auto-tool-choice and --tool-parser
+            # "auto" tools requires --enable-auto-tool-choice
+            # and --tool-call-parser
         if request.tool_choice == "auto" and not (
                 self.enable_auto_tools and self.tool_parser is not None):
             return self.create_error_response(
                 "\"auto\" tool choice requires "
-                "--enable-auto-tool-choice and --tool-parser to be set")
+                "--enable-auto-tool-choice and --tool-call-parser to be set")
 
         request_id = f"chat-{random_uuid()}"
         try:

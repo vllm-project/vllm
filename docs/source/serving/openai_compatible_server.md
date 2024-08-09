@@ -129,8 +129,7 @@ _This feature is in **beta**. It has limited model support, is not guaranteed to
 well-defined failure modes._ As such, it must be explicitly enabled when desired.
 
 To enable this feature, you must set the following flags:
-* `--enable-api-tools` -- **mandatory** for Auto tool choice. tells vLLM that you want to enable tool templating and extraction.
-* `--enable-auto-toolchoice` -- **mandatory** Auto tool choice. tells vLLM that you want to enable the model to generate its own tool calls when it 
+* `--enable-auto-tool-choice` -- **mandatory** Auto tool choice. tells vLLM that you want to enable the model to generate its own tool calls when it 
 deems appropriate. 
 * `--chat-template` -- **optional** for auto tool choice. the path to the chat template which handles `tool`-role messages and `assistant`-role messages 
 that contain previously generated tool calls.This argument can be set to `tool_use` if your model has a tool use chat 
@@ -151,7 +150,7 @@ Supported models in this series:
 _Note that the Hermes 2 **Theta** models are known to have degraded tool call quality & capabilities due to the merge 
 step in their creation_. It is recommended to use the Hermes 2 **Pro** models. 
 
-Recommended flags: `--tool-parser hermes --chat-template examples/tool_chat_template_hermes.jinja`
+Recommended flags: `--tool-call-parser hermes --chat-template examples/tool_chat_template_hermes.jinja`
 
 #### Mistral Models
 Supported models:
@@ -166,4 +165,4 @@ with double-quotes in mistral-generated tool calls. Therefore, **it is important
 arguments do not contain single quotes.** Escaped double quotes may be handled properly, but otherwise you should
 expect parser issues. 
 
-Recommended flags: `--tool-parser mistral --chat-template examples/tool_chat_template_mistral.jinja`
+Recommended flags: `--tool-call-parser mistral --chat-template examples/tool_chat_template_mistral.jinja`
