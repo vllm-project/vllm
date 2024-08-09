@@ -5,6 +5,7 @@ from typing import (AsyncGenerator, Callable, Dict, Iterable, List, Mapping,
                     Optional, Set, Tuple, Type, Union)
 
 from transformers import PreTrainedTokenizer
+from typing_extensions import assert_never
 
 import vllm.envs as envs
 from vllm.config import (DecodingConfig, EngineConfig, LoRAConfig, ModelConfig,
@@ -12,11 +13,14 @@ from vllm.config import (DecodingConfig, EngineConfig, LoRAConfig, ModelConfig,
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_timeout import asyncio_timeout
-from vllm.engine.llm_engine import LLMEngine
+from vllm.engine.llm_engine import (DecoderPromptComponents, LLMEngine,
+                                    PromptComponents)
 from vllm.engine.metrics import StatLoggerBase
 from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.ray_utils import initialize_ray_cluster, ray
-from vllm.inputs import LLMInputs, PromptInputs
+from vllm.inputs import (EncoderDecoderLLMInputs, LLMInputs, PromptInputs,
+                         SingletonPromptInputs)
+from vllm.inputs.parse import is_explicit_encoder_decoder_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
@@ -58,7 +62,7 @@ def _log_task_completion(task: asyncio.Task,
         error_callback(exception)
         raise AsyncEngineDeadError(
             "Task finished unexpectedly. This should never happen! "
-            "Please open an issue on Github. See stack trace above for the"
+            "Please open an issue on Github. See stack trace above for the "
             "actual cause.") from e
 
 
@@ -81,11 +85,14 @@ class AsyncStream:
             return
         self._queue.put_nowait(item)
 
-    def finish(self, cancelled: bool = False) -> None:
+    def finish(
+        self,
+        exception: Optional[Union[BaseException, Type[BaseException]]] = None,
+    ) -> None:
         if not self._finished:
             self._finished = True
             self._queue.put_nowait(
-                asyncio.CancelledError if cancelled else STOP_ITERATION)
+                exception if exception is not None else STOP_ITERATION)
 
     @property
     def finished(self) -> bool:
@@ -129,12 +136,12 @@ class RequestTracker:
         """Propagate an exception to request streams
         (all if request_id is None)."""
         if request_id is not None:
-            self._request_streams[request_id].put(exc)
-            self.abort_request(request_id)
+            self.abort_request(request_id, exception=exc)
         else:
-            for rid, stream in self._request_streams.items():
-                stream.put(exc)
-                self.abort_request(rid)
+            # NB: tuple() used here because self.abort_request pops the stream
+            # out of self._request_streams, so we can't iterate on it directly
+            for rid in tuple(self._request_streams.keys()):
+                self.abort_request(rid, exception=exc)
 
     def process_request_output(self,
                                request_output: Union[RequestOutput,
@@ -161,14 +168,13 @@ class RequestTracker:
 
     def process_exception(self,
                           request_id: str,
-                          exception: Exception,
+                          exception: BaseException,
                           *,
                           verbose: bool = False) -> None:
         """Propagate an exception from the engine."""
-        self._request_streams[request_id].put(exception)
         if verbose:
             logger.info("Finished request %s.", request_id)
-        self.abort_request(request_id)
+        self.abort_request(request_id, exception=exception)
 
     def add_request(self,
                     request_id: str,
@@ -197,7 +203,8 @@ class RequestTracker:
     def abort_request(self,
                       request_id: str,
                       *,
-                      cancelled: bool = False,
+                      exception: Optional[Union[BaseException,
+                                                Type[BaseException]]] = None,
                       verbose: bool = False) -> None:
         """Abort a request during next background loop iteration."""
         if verbose:
@@ -207,7 +214,7 @@ class RequestTracker:
 
         stream = self._request_streams.pop(request_id, None)
         if stream is not None:
-            stream.finish(cancelled=cancelled)
+            stream.finish(exception=exception)
 
     def get_new_and_aborted_requests(self) -> Tuple[List[Dict], Set[str]]:
         """Get the new requests and finished requests to be
@@ -221,12 +228,14 @@ class RequestTracker:
 
         while not self._new_requests.empty():
             stream, new_request = self._new_requests.get_nowait()
-            if stream.request_id in finished_requests:
+            request_id = stream.request_id
+            if request_id in finished_requests:
                 # The request has already been aborted.
-                stream.finish(cancelled=True)
-                continue
-            self._request_streams[stream.request_id] = stream
-            new_requests.append(new_request)
+                stream.finish(asyncio.CancelledError)
+                finished_requests.discard(request_id)
+            else:
+                self._request_streams[request_id] = stream
+                new_requests.append(new_request)
 
         return new_requests, finished_requests
 
@@ -291,38 +300,138 @@ class _AsyncLLMEngine(LLMEngine):
         """Stop the remote worker execution loop."""
         await self.model_executor.stop_remote_worker_execution_loop_async()
 
-    async def process_model_inputs_async(
+    async def _tokenize_prompt_async(
         self,
+        prompt: str,
         request_id: str,
+        lora_request: Optional[LoRARequest],
+    ) -> List[int]:
+        """Async version of :meth:`_tokenize_prompt`."""
+        tokenizer = self.get_tokenizer_group("prompts must be None if "
+                                             "skip_tokenizer_init is True")
+
+        return await tokenizer.encode_async(request_id=request_id,
+                                            prompt=prompt,
+                                            lora_request=lora_request)
+
+    async def _extract_prompt_components_async(
+        self,
+        inputs: SingletonPromptInputs,
+        request_id: str,
+        lora_request: Optional[LoRARequest] = None,
+    ) -> PromptComponents:
+        """Async version of :meth:`_extract_prompt_components`."""
+        if isinstance(inputs, str):
+            prompt = inputs
+            prompt_token_ids = await self._tokenize_prompt_async(
+                prompt,
+                request_id=request_id,
+                lora_request=lora_request,
+            )
+            multi_modal_data = None
+        elif isinstance(inputs, dict):
+            if "prompt_token_ids" in inputs:
+                prompt = None
+                prompt_token_ids = inputs["prompt_token_ids"]
+            else:
+                # NOTE: This extra assignment is required to pass mypy
+                prompt = parsed_prompt = inputs["prompt"]
+                prompt_token_ids = await self._tokenize_prompt_async(
+                    parsed_prompt,
+                    request_id=request_id,
+                    lora_request=lora_request,
+                )
+
+            multi_modal_data = inputs.get("multi_modal_data")
+        else:
+            assert_never(inputs)
+
+        return prompt, prompt_token_ids, multi_modal_data
+
+    async def _process_encoder_decoder_prompt_async(
+        self,
         inputs: PromptInputs,
+        request_id: str,
+    ) -> EncoderDecoderLLMInputs:
+        """Async version of :meth:`_process_encoder_decoder_prompt`."""
+        encoder_comps: PromptComponents
+        decoder_comps: DecoderPromptComponents
+
+        if is_explicit_encoder_decoder_prompt(inputs):
+            encoder_task = self._extract_prompt_components_async(
+                inputs["encoder_prompt"],
+                request_id=request_id,
+            )
+
+            if (decoder_input := inputs["decoder_prompt"]) is None:
+                encoder_comps = await encoder_task
+                decoder_comps = None, None, None
+            else:
+                decoder_task = self._extract_prompt_components_async(
+                    decoder_input,
+                    request_id=request_id,
+                )
+
+                encoder_comps, decoder_comps = await asyncio.gather(
+                    encoder_task, decoder_task)
+        else:
+            encoder_comps = await self._extract_prompt_components_async(
+                inputs,
+                request_id=request_id,
+            )
+
+            decoder_comps = None, None, None
+
+        return self._build_enc_dec_llm_inputs(encoder_comps, decoder_comps)
+
+    async def _process_decoder_only_prompt_async(
+        self,
+        inputs: SingletonPromptInputs,
+        request_id: str,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> LLMInputs:
-        if isinstance(inputs, str):
-            inputs = {"prompt": inputs}
+        """Async version of :meth:`_process_decoder_only_prompt`."""
+        prompt_comps = await self._extract_prompt_components_async(
+            inputs,
+            request_id=request_id,
+            lora_request=lora_request,
+        )
 
-        if "prompt_token_ids" not in inputs:
-            tokenizer = self.get_tokenizer_group("prompts must be None if "
-                                                 "skip_tokenizer_init is True")
+        return self._build_decoder_only_llm_inputs(
+            prompt_comps,
+            prompt_adapter_request=prompt_adapter_request,
+        )
 
-            prompt_token_ids = await tokenizer.encode_async(
+    async def process_model_inputs_async(
+        self,
+        inputs: PromptInputs,
+        request_id: str,
+        lora_request: Optional[LoRARequest] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+    ) -> Union[LLMInputs, EncoderDecoderLLMInputs]:
+        """Async version of :meth:`process_model_inputs`."""
+        if self.is_encoder_decoder_model():
+            # Encoder-decoder model requires special mapping of
+            # input prompts to encoder & decoder
+            model_inputs = await self._process_encoder_decoder_prompt_async(
+                inputs,
                 request_id=request_id,
-                prompt=inputs["prompt"],
-                lora_request=lora_request)
+            )
         else:
-            prompt_token_ids = inputs["prompt_token_ids"]
+            if is_explicit_encoder_decoder_prompt(inputs):
+                raise ValueError("Cannot pass encoder-decoder prompt "
+                                 "to decoder-only models")
 
-        if prompt_adapter_request:
-            prompt_token_ids = [
-                0
-            ] * prompt_adapter_request.prompt_adapter_num_virtual_tokens + \
-                prompt_token_ids
+            # Decoder-only operation
+            model_inputs = await self._process_decoder_only_prompt_async(
+                inputs,
+                request_id=request_id,
+                lora_request=lora_request,
+                prompt_adapter_request=prompt_adapter_request,
+            )
 
-        llm_inputs = LLMInputs(prompt_token_ids=prompt_token_ids,
-                               prompt=inputs.get("prompt"),
-                               multi_modal_data=inputs.get("multi_modal_data"))
-
-        return self.input_processor(llm_inputs)
+        return self.input_processor(model_inputs)
 
     async def add_request_async(
         self,
@@ -334,6 +443,7 @@ class _AsyncLLMEngine(LLMEngine):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> None:
+        """Async version of :meth:`add_request`."""
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
@@ -341,10 +451,11 @@ class _AsyncLLMEngine(LLMEngine):
             arrival_time = time.time()
 
         processed_inputs = await self.process_model_inputs_async(
+            inputs,
             request_id=request_id,
-            inputs=inputs,
             lora_request=lora_request,
-            prompt_adapter_request=prompt_adapter_request)
+            prompt_adapter_request=prompt_adapter_request,
+        )
 
         self._add_processed_request(
             request_id=request_id,
@@ -907,7 +1018,7 @@ class AsyncLLMEngine:
             request_id: The unique id of the request.
         """
         self._request_tracker.abort_request(request_id,
-                                            cancelled=True,
+                                            exception=asyncio.CancelledError,
                                             verbose=self.log_requests)
 
     async def get_model_config(self) -> ModelConfig:
