@@ -25,6 +25,11 @@ def register_signal_handlers():
 
 def serve(args: argparse.Namespace) -> None:
     # EngineArgs expects the model name to be passed as --model.
+    if args.model is not None:
+        raise ValueError(
+            "In `vllm serve`, you should provide the model as a "
+            "positional argument instead of via the `--model` option.")
+
     args.model = args.model_tag
 
     asyncio.run(run_server(args))
