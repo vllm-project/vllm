@@ -35,6 +35,9 @@ class MedusaWorker(NonLLMProposerWorkerBase, Worker):
     def set_include_gpu_probs_tensor(self):
         pass
 
+    def set_should_modify_greedy_probs_inplace(self):
+        self.model_runner.model.sampler.should_modify_greedy_probs_inplace = True
+
     @torch.inference_mode()
     def sampler_output(
         self,
