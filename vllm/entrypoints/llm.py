@@ -16,7 +16,7 @@ from vllm.model_executor.guided_decoding.guided_fields import LLMGuidedOptions
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.transformers_utils.tokenizer import get_cached_tokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, deprecate_kwargs
@@ -547,14 +547,12 @@ class LLM:
             raise ValueError("The lengths of prompts and lora_request "
                              "must be the same.")
 
-        if isinstance(params, list):
-            params = [
-                self._add_guided_processor(param, guided_options)
-                if isinstance(param, SamplingParams) else param
-                for param in params
-            ]
-        elif isinstance(params, SamplingParams):
-            params = self._add_guided_processor(params, guided_options)
+        for sp in params if isinstance(params, list) else (params, ):
+            if isinstance(sp, SamplingParams):
+                self._add_guided_processor(sp, guided_options)
+
+                # We only care about the final output
+                sp.output_kind = RequestOutputKind.FINAL_ONLY
 
         # Add requests to the engine.
         for i, request_inputs in enumerate(inputs):

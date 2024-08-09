@@ -221,7 +221,7 @@ class OpenAIServingCompletion(OpenAIServing):
         tokenizer: PreTrainedTokenizer,
     ) -> AsyncGenerator[str, None]:
         num_choices = 1 if request.n is None else request.n
-        previous_texts = [""] * num_choices * num_prompts
+        previous_text_lens = [0] * num_choices * num_prompts
         previous_num_tokens = [0] * num_choices * num_prompts
         has_echoed = [False] * num_choices * num_prompts
 
@@ -251,11 +251,9 @@ class OpenAIServingCompletion(OpenAIServing):
                         has_echoed[i] = True
                     else:
                         # return just the delta
-                        delta_text = output.text[len(previous_texts[i]):]
-                        delta_token_ids = output.token_ids[
-                            previous_num_tokens[i]:]
-                        out_logprobs = output.logprobs[previous_num_tokens[
-                            i]:] if output.logprobs else None
+                        delta_text = output.text
+                        delta_token_ids = output.token_ids
+                        out_logprobs = output.logprobs
 
                     if request.logprobs is not None:
                         assert out_logprobs is not None, (
@@ -265,13 +263,13 @@ class OpenAIServingCompletion(OpenAIServing):
                             top_logprobs=out_logprobs,
                             num_output_top_logprobs=request.logprobs,
                             tokenizer=tokenizer,
-                            initial_text_offset=len(previous_texts[i]),
+                            initial_text_offset=previous_text_lens[i],
                         )
                     else:
                         logprobs = None
 
-                    previous_texts[i] = output.text
-                    previous_num_tokens[i] = len(output.token_ids)
+                    previous_text_lens[i] += len(output.text)
+                    previous_num_tokens[i] += len(output.token_ids)
                     finish_reason = output.finish_reason
                     stop_reason = output.stop_reason
 
@@ -293,7 +291,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         if (request.stream_options.continuous_usage_stats
                                 or output.finish_reason is not None):
                             prompt_tokens = len(res.prompt_token_ids)
-                            completion_tokens = len(output.token_ids)
+                            completion_tokens = previous_num_tokens[i]
                             usage = UsageInfo(
                                 prompt_tokens=prompt_tokens,
                                 completion_tokens=completion_tokens,

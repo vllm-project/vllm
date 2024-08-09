@@ -34,7 +34,7 @@ from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
                           RequestOutputFactory)
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
                            PoolerOutput, SamplerOutput, Sequence,
                            SequenceGroup, SequenceGroupMetadata,
@@ -1182,11 +1182,23 @@ class LLMEngine:
         output_by_sequence_group = create_output_by_sequence_group(
             output, num_seq_groups=len(scheduled_seq_groups))
 
+        # seq_id to (output token count, text len)
+        # only for delta output seq groups
+        previous_output_lens: Dict[int, Tuple[int, int]] = {}
+
         # Update the scheduled sequence groups with the model outputs.
         for scheduled_seq_group, outputs, seq_group_meta in zip(
                 scheduled_seq_groups, output_by_sequence_group,
                 seq_group_metadata_list):
-            seq_group = scheduled_seq_group.seq_group
+            seq_group: SequenceGroup = scheduled_seq_group.seq_group
+            if seq_group.sampling_params.output_kind == RequestOutputKind.DELTA:
+                text_buffer_length = (
+                    seq_group.sampling_params.output_text_buffer_length)
+                for seq in seq_group.seqs:
+                    previous_output_lens[seq.seq_id] = (
+                        seq.get_output_len(),
+                        seq.get_output_text_to_return_len(text_buffer_length))
+
             seq_group.update_num_computed_tokens(
                 scheduled_seq_group.token_chunk_size)
             if output is not None and len(output) > 0:
@@ -1223,11 +1235,15 @@ class LLMEngine:
         for scheduled_seq_group in scheduled_seq_groups:
             seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
-            request_output = RequestOutputFactory.create(seq_group)
-            request_outputs.append(request_output)
+            request_output = RequestOutputFactory.create(
+                seq_group, previous_output_lens)
+            if request_output:
+                request_outputs.append(request_output)
         for seq_group in ignored_seq_groups:
-            request_output = RequestOutputFactory.create(seq_group)
-            request_outputs.append(request_output)
+            if seq_group.sampling_params.output_kind == (
+                    RequestOutputKind.CUMULATIVE):
+                request_output = RequestOutputFactory.create(seq_group)
+                request_outputs.append(request_output)
         return request_outputs
 
     def step(self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:

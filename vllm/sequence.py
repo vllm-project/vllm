@@ -386,11 +386,16 @@ class Sequence:
         return self.prompt_adapter_request.prompt_adapter_id \
                         if self.prompt_adapter_request else 0
 
-    def get_output_text_to_return(self, buffer_length: int):
+    def get_output_text_to_return(self, buffer_length: int) -> str:
         # We return the full output text if the sequence is finished.
         truncate = buffer_length and not self.is_finished()
         return self.output_text[:-buffer_length] if truncate else (
             self.output_text)
+
+    def get_output_text_to_return_len(self, buffer_length: int) -> int:
+        if not buffer_length or self.is_finished():
+            return len(self.output_text)
+        return max(0, len(self.output_text) - buffer_length)
 
     def hash_of_block(self, logical_idx: int) -> int:
         # TODO This can produce incorrect hash when block size > prompt size

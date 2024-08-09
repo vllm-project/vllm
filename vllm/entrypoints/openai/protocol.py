@@ -12,7 +12,8 @@ from typing_extensions import Annotated
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.openai.logits_processors import get_logits_processors
 from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import LogitsProcessor, SamplingParams
+from vllm.sampling_params import (LogitsProcessor, RequestOutputKind,
+                                  SamplingParams)
 from vllm.utils import random_uuid
 
 # torch is mocked during docs generation,
@@ -275,6 +276,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
             length_penalty=self.length_penalty,
             logits_processors=logits_processors,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
+            output_kind=RequestOutputKind.DELTA if self.stream \
+                else RequestOutputKind.FINAL_ONLY,
         )
 
     @model_validator(mode='before')
@@ -461,6 +464,8 @@ class CompletionRequest(OpenAIBaseModel):
             length_penalty=self.length_penalty,
             logits_processors=logits_processors,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
+            output_kind=RequestOutputKind.DELTA if self.stream \
+                else RequestOutputKind.FINAL_ONLY,
         )
 
     @model_validator(mode="before")

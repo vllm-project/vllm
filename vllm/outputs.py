@@ -1,10 +1,11 @@
 import time
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Dict, List, Optional
 from typing import Sequence as GenericSequence
-from typing import Union
+from typing import Tuple, Union
 
 from vllm.lora.request import LoRARequest
+from vllm.sampling_params import RequestOutputKind
 from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
                            SequenceGroup, SequenceStatus)
 
@@ -113,19 +114,28 @@ class RequestOutput:
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
 
     @classmethod
-    def from_seq_group(cls, seq_group: SequenceGroup) -> "RequestOutput":
-        if seq_group.sampling_params is None:
+    def from_seq_group(
+        cls,
+        seq_group: SequenceGroup,
+        prior_output_lens: Dict[int, Tuple[int, int]],
+    ) -> Optional["RequestOutput"]:
+        sampling_params = seq_group.sampling_params
+        if sampling_params is None:
             raise ValueError(
                 "Sampling parameters are missing for a CompletionRequest.")
+        finished = seq_group.is_finished()
+        if sampling_params.output_kind == RequestOutputKind.FINAL_ONLY:
+            return None
+
         seqs = seq_group.get_seqs()
         if len(seqs) == 1:
             top_n_seqs = seqs
         else:
             # Get the top-n sequences.
-            n = seq_group.sampling_params.n
-            if seq_group.sampling_params.use_beam_search:
+            n = sampling_params.n
+            if sampling_params.use_beam_search:
                 sorting_key = lambda seq: seq.get_beam_search_score(
-                    seq_group.sampling_params.length_penalty)
+                    sampling_params.length_penalty)
             else:
                 sorting_key = lambda seq: seq.get_cumulative_logprob()
             sorted_seqs = sorted(seqs, key=sorting_key, reverse=True)
@@ -135,18 +145,34 @@ class RequestOutput:
         # NOTE: We need omit logprobs here explicitly because the sequence
         # always has the logprobs of the sampled tokens even if the
         # logprobs are not requested.
-        include_logprobs = seq_group.sampling_params.logprobs is not None
-        text_buffer_length = seq_group.sampling_params.output_text_buffer_length
-        outputs = [
-            CompletionOutput(
-                seqs.index(seq),
-                seq.get_output_text_to_return(text_buffer_length),
-                seq.data._output_token_ids,
-                seq.get_cumulative_logprob() if include_logprobs else None,
-                seq.output_logprobs if include_logprobs else None,
-                SequenceStatus.get_finished_reason(seq.status),
-                seq.stop_reason) for seq in top_n_seqs
-        ]
+        include_logprobs = sampling_params.logprobs is not None
+        text_buffer_length = sampling_params.output_text_buffer_length
+
+        outputs = []
+        for seq in top_n_seqs:
+            output_token_ids = seq.data._output_token_ids
+            output_logprobs = seq.output_logprobs if include_logprobs else None
+            output_text = seq.get_output_text_to_return(text_buffer_length)
+
+            # Truncate if only deltas are requested
+            prior_out_token_len, prior_text_len = prior_output_lens.get(
+                seq.seq_id, (0, 0))
+            if prior_out_token_len:
+                output_token_ids = output_token_ids[prior_out_token_len:]
+                if output_logprobs:
+                    output_logprobs = output_logprobs[prior_out_token_len:]
+            #TODO get deta directly from incremental detokenization to
+            # avoid re-slicing
+            if prior_text_len:
+                output_text = output_text[prior_text_len:]
+
+            outputs.append(
+                CompletionOutput(
+                    seqs.index(seq), output_text, output_token_ids,
+                    seq.get_cumulative_logprob() if include_logprobs else None,
+                    output_logprobs,
+                    SequenceStatus.get_finished_reason(seq.status),
+                    seq.stop_reason))
 
         # Every sequence in the sequence group should have the same prompt.
         prompt = seq_group.prompt
@@ -154,7 +180,6 @@ class RequestOutput:
         encoder_prompt = seq_group.encoder_prompt
         encoder_prompt_token_ids = seq_group.encoder_prompt_token_ids
         prompt_logprobs = seq_group.prompt_logprobs
-        finished = seq_group.is_finished()
         finished_time = time.time() if finished else None
         seq_group.set_finished_time(finished_time)
         return cls(seq_group.request_id,
@@ -230,10 +255,12 @@ class EmbeddingRequestOutput:
 class RequestOutputFactory:
 
     @staticmethod
-    def create(seq_group):
+    def create(seq_group,
+               previous_output_lens: Dict[int, Tuple[int, int]] = {}):  # noqa
         # Determine the type based on a condition, for example:
         if hasattr(seq_group,
                    'embeddings') and seq_group.embeddings is not None:
             return EmbeddingRequestOutput.from_seq_group(seq_group)
         else:
-            return RequestOutput.from_seq_group(seq_group)
+            return RequestOutput.from_seq_group(seq_group,
+                                                previous_output_lens)
