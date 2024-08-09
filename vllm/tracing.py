@@ -8,7 +8,8 @@ TRACE_HEADERS = ["traceparent", "tracestate"]
 
 logger = init_logger(__name__)
 
-_is_otel_installed = False
+_is_otel_imported = False
+otel_import_err = None
 try:
     from opentelemetry.context.context import Context
     from opentelemetry.sdk.environment_variables import (
@@ -19,8 +20,9 @@ try:
     from opentelemetry.trace import SpanKind, Tracer, set_tracer_provider
     from opentelemetry.trace.propagation.tracecontext import (
         TraceContextTextMapPropagator)
-    _is_otel_installed = True
-except ImportError:
+    _is_otel_imported = True
+except ImportError as e:
+    otel_import_err = e
 
     class Context:  # type: ignore
         pass
@@ -35,14 +37,17 @@ except ImportError:
         pass
 
 
-def is_otel_installed() -> bool:
-    return _is_otel_installed
+def is_otel_available() -> bool:
+    return _is_otel_imported
 
 
 def init_tracer(instrumenting_module_name: str,
                 otlp_traces_endpoint: str) -> Optional[Tracer]:
-    assert is_otel_installed(), ("OpenTelemetry packages must be installed "
-                                 "prior to initializing a tracer")
+    if not is_otel_available():
+        raise ValueError(
+            "OpenTelemetry is not available. Unable to initialize "
+            "a tracer. Ensure OpenTelemetry packages are installed."
+        ) from otel_import_err
     trace_provider = TracerProvider()
 
     span_exporter = get_span_exporter(otlp_traces_endpoint)
@@ -70,7 +75,7 @@ def get_span_exporter(endpoint):
 
 def extract_trace_context(
         headers: Optional[Mapping[str, str]]) -> Optional[Context]:
-    if is_otel_installed():
+    if is_otel_available():
         headers = headers or {}
         return TraceContextTextMapPropagator().extract(headers)
     else:
