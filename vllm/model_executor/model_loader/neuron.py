@@ -2,6 +2,7 @@
 import importlib
 import os
 from typing import Dict, List, Optional, Tuple
+import copy
 
 import torch
 import torch.nn as nn
@@ -13,6 +14,8 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import get_quantization_config
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.sequence import SamplerOutput, SequenceOutput, CompletionSequenceGroupOutput, Logprob
+from transformers_neuronx.config import GenerationConfig
 
 TORCH_DTYPE_TO_NEURON_AMP = {
     "auto": "f32",
@@ -71,7 +74,17 @@ class NeuronCasualLM(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
+        hidden_states = logits.flatten()
+        next_tokens = []
+        sample_idx = 0
+        for seq_group in sampling_metadata.seq_groups:
+            samples = []
+            for seq_id in seq_group.seq_ids:
+                token_id = hidden_states[sample_idx].item()
+                samples.append(SequenceOutput(parent_seq_id=seq_id, output_token=token_id,
+                                                logprobs={token_id: Logprob(token_id)}))
+                sample_idx += 1
+            next_tokens.append(CompletionSequenceGroupOutput(samples=samples, prompt_logprobs=None))
         return next_tokens
 
     def load_weights(self, model_name_or_path: str, **kwargs):
@@ -157,7 +170,8 @@ def _get_default_neuron_config(model_config: ModelConfig,
         quant=neuron_quantization_config_builder(model_config.quantization)
         if model_config.quantization else None,
         continuous_batching=continuous_batching_config,
-        weight_tiling=bool(model_config.quantization))
+        weight_tiling=bool(model_config.quantization),
+        on_device_generation = copy.deepcopy(model_config.generation_config))
     return default_neuron_args
 
 
