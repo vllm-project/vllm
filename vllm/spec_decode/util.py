@@ -64,8 +64,8 @@ def create_sequence_group_output(
         token_id_logprob_rank (int): The logprob rank of the sampled token.
         token_id_logprob (float): The logprob value of the sampled token.
         seq_id (int): The sequence id.
-        topk_token_ids (List[int]): The list of top-k token ids.
-        topk_logprobs (List[float]): The list of top-k logprobs.
+        topk_token_ids (List[Optional[int]]): The list of top-k token ids.
+        topk_logprobs (List[Optional[float]]): The list of top-k logprobs.
     """
     # vLLM logprobs always include the sampled token. In addition, the user may
     # request topk-logprobs (where top-k varies per user up to max_logprobs).
@@ -76,11 +76,12 @@ def create_sequence_group_output(
         ),
     }
     logprobs.update({
-        topk_token_ids[topk_logprob_index]: Logprob(
-            logprob=topk_logprobs[topk_logprob_index],
-            rank=topk_logprob_index + 1,
+        topk_token_ids[topk_index]: Logprob(
+            logprob=topk_logprobs[topk_index],
+            rank=topk_index + 1,
         )
-        for topk_logprob_index, _ in enumerate(topk_token_ids)
+        for topk_index, topk_token_id in enumerate(topk_token_ids) \
+        if topk_token_id is not None
     })
 
     return CompletionSequenceGroupOutput(
