@@ -1168,6 +1168,7 @@ class LLMEngine:
 
         Returns RequestOutputs that can be returned to the client.
         """
+        logger.info(output)
 
         now = time.time()
 

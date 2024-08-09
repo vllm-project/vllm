@@ -101,6 +101,30 @@ class RequestMetrics:
     finished_time: Optional[float] = None
 
 
+class SpeculativeDecodeOutput:
+    def __init__(
+        self,
+        draft_token_indices: list[int],
+        target_token_indices: list[int],
+        accepted_tokens_count: int,
+    ) -> None:
+        self._draft_token_indices = draft_token_indices
+        self._target_token_indices = target_token_indices
+        self._accepted_tokens_count = accepted_tokens_count
+    
+    @property
+    def draft_token_indices(self) -> list[int]:
+        return self._draft_token_indices
+    
+    @property
+    def target_token_indices(self) -> list[int]:
+        return self._target_token_indices
+    
+    @property
+    def accepted_tokens_count(self) -> list[int]:
+        return self._accepted_tokens_count
+
+
 class SequenceData:
     """Data associated with a sequence.
 
@@ -119,12 +143,13 @@ class SequenceData:
         self,
         prompt_token_ids: List[int],
         output_token_ids: Optional[List[int]] = None,
+        speculative_decode_outputs: Optional[list[SpeculativeDecodeOutput]] = None
     ) -> None:
         self._prompt_token_ids = array('l', prompt_token_ids)
         self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(prompt_token_ids)
         self._output_token_ids = array(
             'l', output_token_ids if output_token_ids is not None else [])
-
+        self._speculative_decode_outputs = speculative_decode_outputs
         self.cumulative_logprob = 0.0
         # The number of tokens that are computed (that run against the model).
         self._num_computed_tokens = 0
@@ -233,6 +258,18 @@ class SequenceData:
     @property
     def stage(self) -> SequenceStage:
         return self._stage
+
+    @property
+    def last_draft_token_indices(self) -> list[int]:
+        return self._speculative_decode_outputs[-1].draft_token_indices
+    
+    @property
+    def last_target_token_indices(self) -> list[int]:
+        return self._speculative_decode_outputs[-1].target_token_indices
+    
+    @property
+    def last_accepted_tokens_count(self) -> int:
+        return self._speculative_decode_outputs[-1].accepted_tokens_count
 
     def __repr__(self) -> str:
         return (f"SequenceData("
