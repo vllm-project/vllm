@@ -9,7 +9,7 @@ torch.library.define("vllm::tensor_model_parallel_all_reduce",
                      ("(Tensor(a!) input_ ) -> Tensor(a)"))
 
 
-@torch.library.impl("vllm::tensor_model_parallel_all_reduce", "cuda")
+@torch.library.register_kernel("vllm::tensor_model_parallel_all_reduce", ("cuda", "cpu"))
 def _tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     """All-reduce the input tensor across model parallel group."""
     return get_tp_group().all_reduce(input_)
