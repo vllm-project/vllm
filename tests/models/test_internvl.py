@@ -318,10 +318,11 @@ def test_awq_models(vllm_runner, image_assets, models, size_factors,
 
 
 @pytest.mark.parametrize(
-    "model", [("OpenGVLab/InternVL2-26B", "OpenGVLab/InternVL2-26B-AWQ")])
+    "models", [("OpenGVLab/InternVL2-26B", "OpenGVLab/InternVL2-26B-AWQ")])
 @pytest.mark.parametrize("size_factors", [[1.0]])
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("tp_size", [2])
 @torch.inference_mode()
 def test_large_models(num_gpus_available, vllm_runner, image_assets, models,
