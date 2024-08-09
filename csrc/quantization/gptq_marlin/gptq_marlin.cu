@@ -43,7 +43,7 @@ __global__ void permute_cols_kernel(int4 const* __restrict__ a_int4_ptr,
                                     int size_k, int block_rows) {}
 
 template <typename scalar_t,          // compute dtype, half or nv_float16
-          const int num_bits,         // number of bits used for weights
+          const int64_t w_type_id,    // weight ScalarType id
           const int threads,          // number of threads in a threadblock
           const int thread_m_blocks,  // number of 16x16 blocks in the m
                                       // dimension (batchsize) of the
@@ -507,7 +507,7 @@ __global__ void permute_cols_kernel(int4 const* __restrict__ a_int4_ptr,
 }
 
 template <typename scalar_t,          // compute dtype, half or nv_float16
-          const int64_t w_type_id,    // number of bits used for weights
+          const int64_t w_type_id,    // weight ScalarType id
           const int threads,          // number of threads in a threadblock
           const int thread_m_blocks,  // number of 16x16 blocks in the m
                                       // dimension (batchsize) of the
