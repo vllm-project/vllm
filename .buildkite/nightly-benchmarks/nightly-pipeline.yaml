@@ -37,7 +37,8 @@ common_container_settings: &common_container_settings
 
 steps:
   - block: ":rocket: Ready for comparing vllm against alternatives? This will take 4 hours."
-  - label: "A100 trt benchmark"
+
+  - label: "A100 sglang benchmark"
     priority: 100
     agents:
       queue: A100
@@ -46,21 +47,10 @@ steps:
           podSpec:
             <<: *common_pod_spec
             containers:
-              - image: nvcr.io/nvidia/tritonserver:24.04-trtllm-python-py3
+              - image: lmsysorg/sglang:latest 
                 <<: *common_container_settings
 
-  - label: "A100 lmdeploy benchmark"
-    priority: 100
-    agents:
-      queue: A100
-    plugins:
-      - kubernetes:
-          podSpec:
-            <<: *common_pod_spec
-            containers:
-              - image: openmmlab/lmdeploy:v0.5.0
-                <<: *common_container_settings
-  
+  - wait
 
   - label: "A100 vllm benchmark"
     priority: 100
@@ -72,18 +62,6 @@ steps:
             <<: *common_pod_spec
             containers:
               - image: vllm/vllm-openai:latest 
-                <<: *common_container_settings
-
-  - label: "A100 tgi benchmark"
-    priority: 100
-    agents:
-      queue: A100
-    plugins:
-      - kubernetes:
-          podSpec:
-            <<: *common_pod_spec
-            containers:
-              - image: ghcr.io/huggingface/text-generation-inference:2.1 
                 <<: *common_container_settings
         
   - wait
@@ -97,7 +75,7 @@ steps:
           podSpec:
             <<: *common_pod_spec
             containers:
-            - image: vllm/vllm-openai:v0.5.0.post1
+            - image: vllm/vllm-openai:v0.5.2
               command:
               - bash .buildkite/nightly-benchmarks/scripts/nightly-annotate.sh
               resources:

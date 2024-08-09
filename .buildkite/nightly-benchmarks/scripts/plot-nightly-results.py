@@ -55,7 +55,7 @@ def main(args):
     # plot results
     fig, axes = plt.subplots(3, 3, figsize=(16, 14))
     fig.subplots_adjust(hspace=1)
-    methods = ["vllm", "trt", "lmdeploy", "tgi"]
+    methods = ["vllm", "sgl", "lmdeploy", "tgi"]
     for i, model in enumerate(["llama8B", "llama70B", "mixtral8x7B"]):
         for j, metric in enumerate(["TTFT", "ITL"]):
             means, stds = [], []
@@ -79,7 +79,7 @@ def main(args):
             ax = axes[i, j + 1]
 
             bars = ax.bar(
-                ["vllm", "trt", "lmdeploy", "tgi"],
+                ["vllm", "sglang", "lmdeploy", "tgi"],
                 means,
                 yerr=stds,
                 capsize=10,
@@ -114,7 +114,7 @@ def main(args):
             ax = axes[i, j]
 
             bars = ax.bar(
-                ["vllm", "trt", "lmdeploy", "tgi"],
+                ["vllm", "sglang", "lmdeploy", "tgi"],
                 tputs,
             )
             for idx, bar in enumerate(bars):

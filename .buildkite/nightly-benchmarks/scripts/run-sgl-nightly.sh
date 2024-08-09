@@ -18,10 +18,8 @@ check_gpus() {
 kill_gpu_processes() {
   # kill all processes on GPU.
   pkill pt_main_thread
-  sleep 5
+  sleep 10
 
-  # remove vllm config file
-  rm -rf ~/.config/vllm
 
   # Print the GPU memory usage
   # so that we know if all GPU processes are killed.
@@ -47,8 +45,6 @@ json2args() {
 }
 
 wait_for_server() {
-  # wait for vllm server to start
-  # return 1 if vllm server crashes
   timeout 1200 bash -c '
     until curl -s localhost:8000/v1/completions > /dev/null; do
       sleep 1
@@ -74,7 +70,7 @@ run_serving_tests() {
     fi
 
     # append vllm to the test name
-    test_name=vllm_$test_name
+    test_name=sgl_$test_name
 
 
     # get common parameters
@@ -87,8 +83,8 @@ run_serving_tests() {
     num_prompts=$(echo "$common_params" | jq -r '.num_prompts')
 
     # get client and server arguments
-    server_params=$(echo "$params" | jq -r '.vllm_server_parameters')
-    client_params=$(echo "$params" | jq -r '.vllm_client_parameters')
+    server_params=$(echo "$params" | jq -r '.sgl_server_parameters')
+    client_params=$(echo "$params" | jq -r '.sgl_client_parameters')
     server_args=$(json2args "$server_params")
     client_args=$(json2args "$client_params")
     qps_list=$(echo "$params" | jq -r '.qps_list')
@@ -105,17 +101,17 @@ run_serving_tests() {
       echo "Key 'fp8' exists in common params. Use neuralmagic fp8 model for convenience."
       model=$(echo "$common_params" | jq -r '.neuralmagic_quantized_model')
       server_command="python3 \
-        -m vllm.entrypoints.openai.api_server \
-        -tp $tp \
-        --model $model \
+        -m sglang.launch_server \
+        --tp $tp \
+        --model-path $model \
         --port $port \
         $server_args"
     else
       echo "Key 'fp8' does not exist in common params."
       server_command="python3 \
-        -m vllm.entrypoints.openai.api_server \
-        -tp $tp \
-        --model $model \
+        -m sglang.launch_server \
+        --tp $tp \
+        --model-path $model \
         --port $port \
         $server_args"
     fi
@@ -129,10 +125,10 @@ run_serving_tests() {
     wait_for_server
     if [ $? -eq 0 ]; then
       echo ""
-      echo "vllm server is up and running."
+      echo "sgl server is up and running."
     else
       echo ""
-      echo "vllm failed to start within the timeout period."
+      echo "sgl failed to start within the timeout period."
       break
     fi
 
@@ -148,7 +144,7 @@ run_serving_tests() {
       new_test_name=$test_name"_qps_"$qps
 
       client_command="python3 benchmark_serving.py \
-        --backend vllm \
+        --backend sglang \
         --model $model \
         --dataset-name $dataset_name \
         --dataset-path $dataset_path \
@@ -170,7 +166,7 @@ run_serving_tests() {
         --arg server "$server_command" \
         --arg client "$client_command" \
         --arg gpu "$gpu_type" \
-        --arg engine "vllm" \
+        --arg engine "sgl" \
         '{
           server_command: $server,
           client_command: $client,
@@ -202,9 +198,6 @@ upload_to_buildkite() {
 
 main() {
 
-  export VLLM_SOURCE_CODE_LOC=$(pwd)
-  export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
-
   check_gpus
   # enter vllm directory
   cd $VLLM_SOURCE_CODE_LOC/benchmarks
@@ -212,7 +205,7 @@ main() {
   mkdir -p $RESULTS_FOLDER
   BENCHMARK_ROOT=../.buildkite/nightly-benchmarks/
 
-  export CURRENT_LLM_SERVING_ENGINE=vllm
+  export CURRENT_LLM_SERVING_ENGINE=sgl
   run_serving_tests $BENCHMARK_ROOT/tests/nightly-tests.json
 
   python3 -m pip install tabulate pandas

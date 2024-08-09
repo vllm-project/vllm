@@ -282,6 +282,7 @@ run_serving_tests() {
     fi
 
     server_command="python3 \
+      -m cProfile -o profile_output.prof \
       -m vllm.entrypoints.openai.api_server \
       $server_args"
 
