@@ -37,7 +37,7 @@ from torch.nn.init import trunc_normal_
 from transformers.configuration_utils import PretrainedConfig
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, MultiModalConfig
+from vllm.config import CacheConfig, LoRAConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -59,12 +59,12 @@ from vllm.multimodal.image import (cached_get_image_processor,
 from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
 
 from .idefics2_vision_model import Idefics2VisionTransformer
+from .interfaces import SupportsLoRA
 
 logger = init_logger(__name__)
 
 _KEYS_TO_MODIFY_MAPPING = {
     "llm.lm_head": "lm_head",
-    "llm.model": "llm",
 }
 
 
@@ -479,6 +479,21 @@ def input_processor_for_minicpmv(ctx: InputContext, llm_inputs: LLMInputs):
     return llm_inputs
 
 
+class LLMWrapper(nn.Module):
+    """
+    To align with the key names of LoRA trained with PEFT, we need to add an 
+    additional layer to the llm's implementation.
+    """
+
+    def __init__(self, llm: nn.Module, name: str) -> None:
+        super().__init__()
+        self.model_name = name
+        setattr(self, name, llm)
+
+    def forward(self, *args, **kwargs) -> Any:
+        return getattr(self, self.model_name)(*args, **kwargs)
+
+
 class MiniCPMVBaseModel(nn.Module, SupportsVision):
     """
     The abstract class of MiniCPMV can only be inherited, but cannot be
@@ -517,7 +532,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
         input_ids: torch.Tensor,
         image_inputs: Optional[MiniCPMVImageInputs],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        vlm_embedding: torch.Tensor = self.llm.embed_tokens(input_ids)
+        vlm_embedding: torch.Tensor = self.get_llm_embedding(input_ids)
         if hasattr(self.config, "scale_emb"):
             vlm_embedding *= self.config.scale_emb
 
@@ -706,6 +721,9 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
     ) -> torch.Tensor:
         raise NotImplementedError
 
+    def get_llm_embedding(self, input_ids: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
+
     def get_vision_hidden_states(self,
                                  data: MiniCPMVImageInputs) -> torch.Tensor:
         raise NotImplementedError
@@ -732,9 +750,11 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> nn.Module:
-        return MiniCPMModel(config,
-                            cache_config=cache_config,
-                            quant_config=quant_config)
+
+        return LLMWrapper(MiniCPMModel(config,
+                                       cache_config=cache_config,
+                                       quant_config=quant_config),
+                          name="model")
 
     def init_vision_module(self) -> nn.Module:
         # TODO :refactor this vision model
@@ -759,6 +779,9 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
             model.blocks = model.blocks[:-1]
 
         return model
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_tokens(input_ids)
 
     def init_resampler(self, embed_dim: int, vision_dim: int) -> nn.Module:
         with set_default_torch_dtype(torch.float16):
@@ -795,6 +818,9 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
             res.append(self.resampler(vision_embedding, tgt_size))
         return torch.vstack(res)
 
+    def get_llm_embedding(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.llm.embed_tokens(input_ids)
+
     def get_vision_hidden_states(self,
                                  data: MiniCPMVImageInputs) -> torch.Tensor:
         pixel_values = data["pixel_values"]
@@ -805,7 +831,26 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
         return "resampler" in name or "vpm" in name
 
 
-class MiniCPMV2_5(MiniCPMVBaseModel):
+class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
+
+    # LoRA specific attributes
+    supported_lora_modules = [
+        "qkv_proj", "o_proj", "gate_up_proj", "down_proj", "fc1", "fc2",
+        "out_proj", "kv_proj"
+    ]
+    embedding_modules = {}
+    embedding_padding_modules = []
 
     def __init__(
         self,
@@ -813,6 +858,7 @@ class MiniCPMV2_5(MiniCPMVBaseModel):
         multimodal_config: MultiModalConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        lora_config: Optional[LoRAConfig] = None,
     ):
         super().__init__(config, multimodal_config, cache_config, quant_config)
         assert self.version == (2, 5)
@@ -823,9 +869,10 @@ class MiniCPMV2_5(MiniCPMVBaseModel):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> nn.Module:
-        return LlamaModel(config,
-                          cache_config=cache_config,
-                          quant_config=quant_config)
+        return LLMWrapper(LlamaModel(config,
+                                     cache_config=cache_config,
+                                     quant_config=quant_config),
+                          name="model")
 
     def init_vision_module(self) -> nn.Module:
         model = Idefics2VisionTransformer(self.config.vision_config)
@@ -853,6 +900,9 @@ class MiniCPMV2_5(MiniCPMVBaseModel):
                                     patch_attention_mask=patch_attn_mask)
         vision_embedding = self.resampler(vision_embedding, tgt_sizes)
         return vision_embedding
+
+    def get_llm_embedding(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.llm.model.embed_tokens(input_ids)
 
     def get_vision_hidden_states(self,
                                  data: MiniCPMVImageInputs) -> torch.Tensor:
@@ -932,7 +982,6 @@ class MiniCPMV2_6(MiniCPMVBaseModel):
                 num_heads=embed_dim // 128,
                 kv_dim=vision_dim,
             )
-
         return resampler
 
     def get_vision_embedding(
@@ -947,6 +996,9 @@ class MiniCPMV2_6(MiniCPMVBaseModel):
             tgt_sizes=tgt_sizes,
         ).last_hidden_state
         return vision_embedding
+
+    def get_llm_embedding(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.llm.embed_tokens(input_ids)
 
     def get_vision_hidden_states(self,
                                  data: MiniCPMVImageInputs) -> torch.Tensor:
@@ -996,20 +1048,25 @@ _SUPPORT_VERSION = {
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_minicpmv_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_minicpmv)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_minicpmv)
-class MiniCPMV(MiniCPMVBaseModel):
+class MiniCPMV(MiniCPMVBaseModel, SupportsLoRA):
     """
     Different versions of MiniCPMV use different visual encoders and LLMs,
     which is not conducive to the current integration logic of LoRA and
     bitsandbytes in vLLM. Therefore, it is necessary to separate them.
     """
+    # Ensure that the LoRA support check passes when the class is not
+    # initialized,but set all these attributes to empty
+    packed_modules_mapping = {}
+    supported_lora_modules = []
+    embedding_modules = {}
+    embedding_padding_modules = []
 
-    def __new__(
-        cls,
-        config: PretrainedConfig,
-        multimodal_config: MultiModalConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-    ):
+    def __new__(cls,
+                config: PretrainedConfig,
+                multimodal_config: MultiModalConfig,
+                cache_config: Optional[CacheConfig] = None,
+                quant_config: Optional[QuantizationConfig] = None,
+                lora_config: Optional[LoRAConfig] = None):
         if not hasattr(config, "version"):
             if config.hidden_size == 2304 and config.query_num == 64:
                 version = (2, 0)

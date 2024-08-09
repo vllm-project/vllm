@@ -443,6 +443,13 @@ class LoRAModelManager(AdapterModelManager):
                 self.model, module_name,
                 from_layer(module, self.lora_slots, self.lora_config,
                            packed_moduled_lst, self.model.config))
+            # In some models, especially multimodal ones, layers with the same
+            # name may have different types, such as nn.Linear and
+            # ReplicatedLinear. The nn.Linear layers cannot be replaced with
+            # LoRA layers, leading to assertion error. The following check
+            # aims to prevent this error
+            if not isinstance(new_module, BaseLayerWithLoRA):
+                continue
             # LinearScalingRotaryEmbeddingWithLora is used to handle
             # long context lora. Register relevant metadata.
             if isinstance(new_module, LinearScalingRotaryEmbeddingWithLora):
