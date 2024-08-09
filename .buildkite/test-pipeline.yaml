@@ -326,7 +326,6 @@ steps:
   - vllm/
   - tests/weight_loading
   commands:
-    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - bash weight_loading/run_model_weight_loading_test.sh
 
 
