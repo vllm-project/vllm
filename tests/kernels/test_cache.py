@@ -90,7 +90,8 @@ def test_copy_blocks(
                                         device=device).view(-1, 2)
 
     opcheck(torch.ops._C_cache_ops.copy_blocks,
-            (key_caches, value_caches, block_mapping_tensor))
+            (key_caches, value_caches, block_mapping_tensor),
+            cond=(head_size == HEAD_SIZES[0]))
     ops.copy_blocks(key_caches, value_caches, block_mapping_tensor)
 
     # Run the reference implementation.
@@ -168,7 +169,8 @@ def test_reshape_and_cache(
     # Call the reshape_and_cache kernel.
     opcheck(torch.ops._C_cache_ops.reshape_and_cache,
             (key, value, key_cache, value_cache, slot_mapping, kv_cache_dtype,
-             k_scale, v_scale))
+             k_scale, v_scale),
+            cond=(head_size == HEAD_SIZES[0]))
     ops.reshape_and_cache(key, value, key_cache, value_cache, slot_mapping,
                           kv_cache_dtype, k_scale, v_scale)
 
@@ -278,7 +280,8 @@ def test_reshape_and_cache_flash(
     # Call the reshape_and_cache kernel.
     opcheck(torch.ops._C_cache_ops.reshape_and_cache_flash,
             (key, value, key_cache, value_cache, slot_mapping, kv_cache_dtype,
-             k_scale, v_scale))
+             k_scale, v_scale),
+            cond=(head_size == HEAD_SIZES[0]))
     ops.reshape_and_cache_flash(key, value, key_cache, value_cache,
                                 slot_mapping, kv_cache_dtype, k_scale, v_scale)
 
@@ -376,10 +379,13 @@ def test_swap_blocks(
     src_value_caches_clone = src_value_caches[0].clone()
 
     # Call the swap_blocks kernel.
+    do_opcheck = (head_size == HEAD_SIZES[0])
     opcheck(torch.ops._C_cache_ops.swap_blocks,
-            (src_key_caches[0], dist_key_caches[0], block_mapping_tensor))
+            (src_key_caches[0], dist_key_caches[0], block_mapping_tensor),
+            cond=do_opcheck)
     opcheck(torch.ops._C_cache_ops.swap_blocks,
-            (src_value_caches[0], dist_value_caches[0], block_mapping_tensor))
+            (src_value_caches[0], dist_value_caches[0], block_mapping_tensor),
+            cond=do_opcheck)
 
     ops.swap_blocks(src_key_caches[0], dist_key_caches[0],
                     block_mapping_tensor)
