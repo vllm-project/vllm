@@ -39,7 +39,7 @@ _LIMIT = 250
 _NUM_FEWSHOT = 5
 _EXPECTED_SCORE = 0.756
 _BATCH_SIZE = 10
-_NUM_CLIENTS = 5
+_NUM_CLIENTS = 3
 
 
 def launch_lm_eval(idx):
