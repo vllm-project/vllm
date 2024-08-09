@@ -458,6 +458,7 @@ def tensorize_vllm_model(engine_args: EngineArgs,
         ) as stream:
             stream.write(encryption_params.key)
 
+    # Avoid circular import, move 'import LLMEngine' here
     from vllm.engine.llm_engine import LLMEngine
     engine = LLMEngine.from_engine_args(engine_args)
     if tensorizer_config._is_sharded:
