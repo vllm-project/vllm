@@ -527,7 +527,8 @@ class EngineArgs:
             help=
             'The name of the draft model to be used in speculative decoding.')
         # Quantization settings for speculative model.
-        parser.add_argument('--speculative-model-quantization',
+        parser.add_argument(
+            '--speculative-model-quantization',
             type=nullable_str,
             choices=[*QUANTIZATION_METHODS, None],
             default=EngineArgs.speculative_model_quantization,
