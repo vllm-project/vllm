@@ -43,7 +43,8 @@ from vllm.entrypoints.openai.serving_tokenization import (
     OpenAIServingTokenization)
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser, get_open_zmq_ipc_path, get_rpc_port, get_ip
+from vllm.utils import (FlexibleArgumentParser, get_ip, get_open_zmq_ipc_path,
+                        get_rpc_port)
 from vllm.version import __version__ as VLLM_VERSION
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
