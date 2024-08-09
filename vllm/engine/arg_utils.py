@@ -69,7 +69,7 @@ class EngineArgs:
     rope_theta: Optional[float] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
-    enforce_eager: bool = False
+    enforce_eager: Optional[bool] = None
     max_context_len_to_capture: Optional[int] = None
     max_seq_len_to_capture: int = 8192
     disable_custom_all_reduce: bool = False
@@ -672,6 +672,9 @@ class EngineArgs:
         return engine_args
 
     def create_engine_config(self, ) -> EngineConfig:
+        # gguf file needs a specific model loader and doesn't use hf_repo
+        if self.model.endswith(".gguf"):
+            self.quantization = self.load_format = "gguf"
 
         # bitsandbytes quantization needs a specific model loader
         # so we make sure the quant method and the load format are consistent
@@ -792,6 +795,7 @@ class EngineArgs:
             speculative_max_model_len=self.speculative_max_model_len,
             enable_chunked_prefill=self.enable_chunked_prefill,
             use_v2_block_manager=self.use_v2_block_manager,
+            disable_log_stats=self.disable_log_stats,
             ngram_prompt_lookup_max=self.ngram_prompt_lookup_max,
             ngram_prompt_lookup_min=self.ngram_prompt_lookup_min,
             draft_token_acceptance_method=\
