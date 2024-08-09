@@ -99,6 +99,9 @@ class RequestMetrics:
     first_token_time: Optional[float]
     time_in_queue: Optional[float]
     finished_time: Optional[float] = None
+    preempt_recompute_count: int = 0
+    preempt_swap_count: int = 0
+    preempt_swap_block_count: int = 0
 
 
 class SequenceData:
@@ -521,7 +524,10 @@ class SequenceGroup:
                                       last_token_time=arrival_time,
                                       first_scheduled_time=None,
                                       first_token_time=None,
-                                      time_in_queue=None)
+                                      time_in_queue=None,
+                                      preempt_recompute_count=0,
+                                      preempt_swap_count=0,
+                                      preempt_swap_block_count=0)
         self.lora_request = lora_request
         self.prompt_logprobs: Optional[PromptLogprobs] = None
         self.embeddings = embeddings
@@ -611,6 +617,19 @@ class SequenceGroup:
     def set_finished_time(self, time: Optional[float]) -> None:
         """Sets the finished time for Request level timings."""
         self.metrics.finished_time = time
+
+    def accumulate_preempt_recompute_count(self) -> None:
+        """Statistics of the frequency at which preemptive
+        recomputation occurs."""
+        self.metrics.preempt_recompute_count += 1
+
+    def accumulate_preempt_swap_count(self) -> None:
+        """Statistics of the frequency of preemptive swapping."""
+        self.metrics.preempt_swap_count += 1
+
+    def accumulate_preempt_swap_block_count(self, count: int) -> None:
+        """Statistics of the number of blocks preemptively swapped."""
+        self.metrics.preempt_swap_block_count += count
 
     def get_max_num_running_seqs(self) -> int:
         """The maximum number of sequences running in parallel in the remaining
