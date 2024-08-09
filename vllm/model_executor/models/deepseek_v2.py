@@ -590,7 +590,7 @@ class DeepseekV2ForCausalLM(nn.Module):
                     weight_loader = param.weight_loader
                     weight_loader(param,
                                   loaded_weight,
-                                  name,#weight_name,
+                                  name,
                                   shard_id=shard_id,
                                   expert_id=expert_id)
                     break
