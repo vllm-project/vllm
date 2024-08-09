@@ -29,26 +29,18 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     return generated_texts
 
-@pytest.mark.xfail(is_hip())
+@pytest.mark.xfail(is_hip(), reason="There can be output mismatch on ROCm")
 def test_gemma_lora(gemma_lora_files):
     llm = vllm.LLM(MODEL_PATH,
                    max_model_len=1024,
                    enable_lora=True,
                    max_loras=4)
 
-    if is_hip():
-        expected_lora_output = [
-            "more important than knowledge.\nAuthor: Albert Einstein\n",
-            "everyone else is already taken.\nAuthor: Oscar Wilde\n",
-            "so little time\nAuthor: Frank Zappa\n",
-        ]
-    else:
-        #Third output has an extra period on ROCm
-        expected_lora_output = [
-            "more important than knowledge.\nAuthor: Albert Einstein\n",
-            "everyone else is already taken.\nAuthor: Oscar Wilde\n",
-            "so little time.\nAuthor: Frank Zappa\n",
-        ]
+    expected_lora_output = [
+        "more important than knowledge.\nAuthor: Albert Einstein\n",
+        "everyone else is already taken.\nAuthor: Oscar Wilde\n",
+        "so little time.\nAuthor: Frank Zappa\n",
+    ]
 
     output1 = do_sample(llm, gemma_lora_files, lora_id=1)
     for i in range(len(expected_lora_output)):
