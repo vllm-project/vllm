@@ -5,11 +5,20 @@ import torch.distributed
 
 from .parallel_state import get_tp_group
 
+torch.library.define("vllm::tensor_model_parallel_all_reduce",
+                     ("(Tensor(a!) input_ ) -> Tensor(a)"))
 
-def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
+@torch.library.impl("vllm::tensor_model_parallel_all_reduce", "cuda")
+def _tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     """All-reduce the input tensor across model parallel group."""
     return get_tp_group().all_reduce(input_)
 
+@torch.library.register_fake("vllm::tensor_model_parallel_all_reduce")
+def _tensor_model_parallel_all_reduce_fake(input_: torch.Tensor) -> torch.Tensor:
+    return input_
+
+def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
+    return torch.ops.vllm.tensor_model_parallel_all_reduce(input_)
 
 def tensor_model_parallel_all_gather(input_: torch.Tensor,
                                      dim: int = -1) -> torch.Tensor:
