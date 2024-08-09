@@ -291,22 +291,28 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # Allocate 2 scales for w1 and w3 respectively.
         # They will be combined to a single scale after weight loading.
         w13_weight_scale = torch.nn.Parameter(torch.ones(num_experts,
-                                                  2,
-                                                  dtype=torch.float32),
-                                       requires_grad=False)
+                                                         2,
+                                                         dtype=torch.float32),
+                                              requires_grad=False)
         layer.register_parameter("w13_weight_scale", w13_weight_scale)
 
         w2_weight_scale = torch.nn.Parameter(torch.ones(num_experts,
-                                                 dtype=torch.float32),
-                                      requires_grad=False)
+                                                        dtype=torch.float32),
+                                             requires_grad=False)
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
 
         # If loading fp8 checkpoint, pass the weight loaders.
         # If loading an fp16 checkpoint, do not (we will quantize in
         #   process_weights_after_loading()
         if self.quant_config.is_checkpoint_fp8_serialized:
-            set_weight_attrs(w13_weight_scale, {"is_fp8_scale": True, **extra_weight_attrs})
-            set_weight_attrs(w2_weight_scale, {"is_fp8_scale": True, **extra_weight_attrs})
+            set_weight_attrs(w13_weight_scale, {
+                "is_fp8_scale": True,
+                **extra_weight_attrs
+            })
+            set_weight_attrs(w2_weight_scale, {
+                "is_fp8_scale": True,
+                **extra_weight_attrs
+            })
 
         # INPUT_SCALES
         if self.quant_config.activation_scheme == "static":
@@ -315,17 +321,23 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     "Found static activation scheme for checkpoint that "
                     "was not serialized fp8.")
 
-            w13_input_scale = torch.nn.Parameter(torch.ones(num_experts,
-                                                      dtype=torch.float32),
-                                           requires_grad=False)
+            w13_input_scale = torch.nn.Parameter(torch.ones(
+                num_experts, dtype=torch.float32),
+                                                 requires_grad=False)
             layer.register_parameter("w13_input_scale", w13_input_scale)
-            set_weight_attrs(w13_input_scale, {"is_fp8_scale": True, **extra_weight_attrs})
+            set_weight_attrs(w13_input_scale, {
+                "is_fp8_scale": True,
+                **extra_weight_attrs
+            })
 
-            w2_input_scale = torch.nn.Parameter(torch.ones(num_experts,
-                                                     dtype=torch.float32),
-                                          requires_grad=False)
+            w2_input_scale = torch.nn.Parameter(torch.ones(
+                num_experts, dtype=torch.float32),
+                                                requires_grad=False)
             layer.register_parameter("w2_input_scale", w2_input_scale)
-            set_weight_attrs(w2_input_scale, {"is_fp8_scale": True, **extra_weight_attrs})
+            set_weight_attrs(w2_input_scale, {
+                "is_fp8_scale": True,
+                **extra_weight_attrs
+            })
         else:
             layer.w13_input_scale = None
             layer.w2_input_scale = None
@@ -345,7 +357,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 layer.num_experts,
                 dtype=torch.float32,
                 device=w13_weight.device),
-                                                 requires_grad=False)
+                                                        requires_grad=False)
             for expert in range(layer.num_experts):
                 w13_weight[expert, :, :], layer.w13_weight_scale[
                     expert] = ops.scaled_fp8_quant(
@@ -366,7 +378,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             # Fp8 moe kernels require a single activation scale.
             # We take the max of all the scales in case they differ.
             if self.quant_config.activation_scheme == "static":
-                if layer.w13_input_scale is None or layer.w2_input_scale is None:
+                if (layer.w13_input_scale is None
+                        or layer.w2_input_scale is None):
                     raise ValueError(
                         "QuantConfig has static quantization, but found "
                         "activation scales are None.")
@@ -376,10 +389,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                         "Found input_scales that are not equal for "
                         "fp8 MoE layer. Using the maximum across experts "
                         "for each layer. ")
-                layer.w13_input_scale = torch.nn.Parameter(layer.w13_input_scale.max(),
-                                                     requires_grad=False)
-                layer.w2_input_scale = torch.nn.Parameter(layer.w2_input_scale.max(),
-                                                    requires_grad=False)
+                layer.w13_input_scale = torch.nn.Parameter(
+                    layer.w13_input_scale.max(), requires_grad=False)
+                layer.w2_input_scale = torch.nn.Parameter(
+                    layer.w2_input_scale.max(), requires_grad=False)
 
             # Fp8 moe kernel needs single weight scale for w13 per expert.
             # We take the max then dequant and requant each expert.
@@ -399,54 +412,26 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     start += shard_size
 
             layer.w13_weight_scale = torch.nn.Parameter(max_w13_scales,
-                                                 requires_grad=False)
+                                                        requires_grad=False)
             return
 
-
-    """
-    def apply(self,
-              layer: torch.nn.Module,
-              x: torch.Tensor,
-              router_logits: torch.Tensor,
-              top_k: int,
-              renormalize: bool = True,
-              use_grouped_topk: bool = False,
-              num_expert_group: Optional[int] = None,
-              topk_group: Optional[int] = None) -> torch.Tensor:
-
-        from vllm.model_executor.layers.fused_moe import fused_moe
-        return fused_moe(x,
-                         layer.w13_weight,
-                         layer.w2_weight,
-                         router_logits,
-                         top_k,
-                         renormalize=renormalize,
-                         inplace=True,
-                         use_fp8=True,
-                         w1_scale=layer.w13_scale,
-                         w2_scale=layer.w2_scale,
-                         a1_scale=layer.a13_scale,
-                         a2_scale=layer.a2_scale,
-                         use_grouped_topk=use_grouped_topk,
-                         num_expert_group=num_expert_group,
-                         topk_group=topk_group)
-
-    """
     def apply(self, layer: torch.nn.Module, x: torch.Tensor,
-            topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-            **kwargs) -> torch.Tensor:
+              topk_weights: torch.Tensor, topk_ids: torch.Tensor,
+              **kwargs) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe import fused_experts
         return fused_experts(x,
-                            layer.w13_weight,
-                            layer.w2_weight,
-                            topk_weights=topk_weights,
-                            topk_ids=topk_ids,
-                            inplace=True,
-                            use_fp8=True,
-                            w1_scale=layer.w13_weight_scale,
-                            w2_scale=layer.w2_weight_scale,
-                            a1_scale=layer.w13_input_scale,
-                            a2_scale=layer.w2_input_scale)
+                             layer.w13_weight,
+                             layer.w2_weight,
+                             topk_weights=topk_weights,
+                             topk_ids=topk_ids,
+                             inplace=True,
+                             use_fp8=True,
+                             w1_scale=layer.w13_weight_scale,
+                             w2_scale=layer.w2_weight_scale,
+                             a1_scale=layer.w13_input_scale,
+                             a2_scale=layer.w2_input_scale)
+
+
 class Fp8KVCacheMethod(BaseKVCacheMethod):
     """
     Supports loading kv-cache scaling factors from FP8 checkpoints.
