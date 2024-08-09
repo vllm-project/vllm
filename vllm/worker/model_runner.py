@@ -348,6 +348,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             self.multi_modal_inputs = multi_modal_inputs
             self.prefix_cache_hit = prefix_cache_hit
 
+            self.n_seqs = len(self.seq_ids)
+
             if not reinit:
                 self.__post_init__()
 
