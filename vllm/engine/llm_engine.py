@@ -1589,7 +1589,7 @@ class LLMEngine:
             seq_span.set_attribute(SpanAttributes.LLM_LATENCY_E2E, e2e_time)
 
     def is_encoder_decoder_model(self):
-        return self.model_config.is_encoder_decoder_model
+        return is_encoder_decoder_model_config(self.model_config)
 
     def is_embedding_model(self):
         return is_embedding_model_config(self.model_config)
