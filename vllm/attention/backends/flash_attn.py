@@ -291,8 +291,9 @@ class FlashAttentionMetadataBuilder(
             for inter_data in self.input_builder.inter_data_list
         ])
         for inter_data in self.input_builder.inter_data_list:
+            prefill_enabled = self.input_builder.chunked_prefill_enabled or True
             self._add_seq_group(inter_data,
-                                self.input_builder.chunked_prefill_enabled,
+                                prefill_enabled,
                                 prefix_cache_hit)
 
         device = self.runner.device

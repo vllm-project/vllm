@@ -16,6 +16,7 @@ from vllm.sequence import (CompletionSequenceGroupOutput, ExecuteModelRequest,
                            HiddenStates, SamplerOutput, SequenceGroupMetadata,
                            get_all_seq_ids, get_all_seq_ids_and_request_ids)
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
+from vllm.spec_decode.prefill_scorer import PrefillTop1Scorer
 from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
@@ -264,11 +265,16 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self._metrics.init_gpu_tensors(self.rank)
         self.spec_decode_sampler.init_gpu_tensors(self.rank)
 
-        self.scorer = BatchExpansionTop1Scorer(
+        # cls_name = BatchExpansionTop1Scorer
+        cls_name = PrefillTop1Scorer
+
+        self.scorer = cls_name(
             scorer_worker=self.scorer_worker,
             device=self.device,
-            vocab_size=self._vocab_size)
+            vocab_size=self._vocab_size,
+        )
 
+        
         self._configure_model_sampler_for_spec_decode()
 
     def load_model(self, *args, **kwargs):
