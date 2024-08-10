@@ -202,8 +202,10 @@ def input_processor_for_internvl(ctx: InputContext, llm_inputs: LLMInputs):
         # add thumbnail image if num_blocks > 1
         if hf_config.use_thumbnail and num_blocks > 1:
             num_blocks += 1
+        
+        image_feature_size = num_blocks * num_patches
     elif isinstance(image_data, torch.Tensor):
-        raise NotImplementedError("Embeddings input is not supported yet")
+        raise image_feature_size.shape[0]
     else:
         raise TypeError(f"Invalid image type: {type(image_data)}")
 
@@ -214,7 +216,7 @@ def input_processor_for_internvl(ctx: InputContext, llm_inputs: LLMInputs):
     prompt_token_ids = llm_inputs["prompt_token_ids"]
     if prompt is None:
         prompt = tokenizer.decode(prompt_token_ids)
-    image_prompt = IMG_START + IMG_CONTEXT * num_blocks * num_patches + IMG_END
+    image_prompt = IMG_START + IMG_CONTEXT * image_feature_size + IMG_END
     new_prompt = prompt.replace('<image>', image_prompt, 1)
     new_prompt_token_ids = tokenizer.encode(new_prompt)
 
