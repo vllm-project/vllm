@@ -19,12 +19,13 @@ from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
+from uuid import uuid4
 
 # Time to wait before checking it the server process is alive.
 SERVER_START_TIMEOUT_MS = 1000
 
 # Inprocess path
-INPROC_PATH = "inproc://abcde"
+INPROC_PATH = f"inproc://{uuid4()}"
 
 
 class AsyncEngineRPCClient:
@@ -80,8 +81,6 @@ class AsyncEngineRPCClient:
             parallel_config=(await self._get_parallel_config_rpc()),
             enable_lora=bool(await self._get_lora_config_rpc()),
         )
-
-        print("GOT CONFIGS!")
 
     def close(self):
         """Destroy the ZeroMQ Context."""
