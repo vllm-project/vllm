@@ -897,23 +897,31 @@ class QKVParallelLinear(ColumnParallelLinear):
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
+
 class _WeightWrapper(torch.nn.Module):
-    def __init__(self, 
-                 weight: torch.Tensor,
-        ) -> None:
+
+    def __init__(
+        self,
+        weight: torch.Tensor,
+    ) -> None:
         super(_WeightWrapper, self).__init__()
         self.weight = torch.nn.Parameter(weight)
 
-class CrossAttentionQKVParallelLinear(QKVParallelLinear):
+
+class QCrossKVParallelLinear(QKVParallelLinear):
     """Linear layers for encoder/decoder cross-attention's 
     QKV transformation.
 
+    Q is computed from the previous decoder layer outputs,
+    KV are computed from the encoder output hidden states;
+    thus, `forward()` takes two tensor arguments.
+    
     Linear layers are for the linear transformation of the query, key, and value
-    vectors in the cross-attention layer. The weight matrix is concatenated along
-    the output dimension. The layer is parallelized along the head dimension.
-    When the number of key/value heads is smaller than the number of query
-    heads (e.g., multi-query/grouped-query attention), the key/value head may
-    be replicated while the query heads are partitioned.
+    vectors in the cross-attention layer. The weight matrix is concatenated
+    along the output dimension. The layer is parallelized along the head
+    dimension. When the number of key/value heads is smaller than the number
+    of query heads (e.g., multi-query/grouped-query attention), the key/value
+    head may be replicated while the query heads are partitioned.
 
     Args:
         hidden_size: input hidden state size of the transformer.
@@ -931,34 +939,28 @@ class CrossAttentionQKVParallelLinear(QKVParallelLinear):
                         (e.g. model.layers.0.qkv_proj)
     """
 
-    def forward(self, 
-                decoder_input_, 
-                encoder_input_ = None,
-                ):
+    def forward(
+        self,
+        decoder_input_,
+        encoder_input_=None,
+    ):
         skip_bias_add = self.skip_bias_add
         bias = self.bias
         shard_size = self.num_heads * self.head_size
         skip_cross_kvs = encoder_input_ is None
-                                  
+
         # Matrix multiply.
         assert self.quant_method is not None
         q_bias = bias[0:shard_size]
-        q_output_parallel = (
-            self.quant_method.apply(
-                _WeightWrapper(self.weight[0:shard_size,:]), 
-                decoder_input_, 
-                None if skip_bias_add else q_bias
-                )
-        )
+        q_output_parallel = (self.quant_method.apply(
+            _WeightWrapper(self.weight[0:shard_size, :]), decoder_input_,
+            None if skip_bias_add else q_bias))
 
         kv_bias = bias[shard_size:]
-        kv_output_parallel = (None if skip_cross_kvs else
-            self.quant_method.apply(
-                _WeightWrapper(self.weight[shard_size:,:]), 
-                encoder_input_, 
-                None if skip_bias_add else kv_bias
-                )
-        )
+        kv_output_parallel = (
+            None if skip_cross_kvs else self.quant_method.apply(
+                _WeightWrapper(self.weight[shard_size:, :]), encoder_input_,
+                None if skip_bias_add else kv_bias))
 
         if self.gather_output:
             # All-gather across the partitions.
@@ -967,14 +969,15 @@ class CrossAttentionQKVParallelLinear(QKVParallelLinear):
                          tensor_model_parallel_all_gather(kv_output_parallel))
         else:
             q_output = q_output_parallel
-            kv_output = kv_output_parallel # None if skip_cross_kvs
-            
+            kv_output = kv_output_parallel  # None if skip_cross_kvs
+
         return (
             q_output,
             kv_output,
             q_bias if skip_bias_add else None,
             kv_bias if skip_bias_add else None,
         )
+
 
 class RowParallelLinear(LinearBase):
     """Linear layer with row parallelism.
