@@ -81,7 +81,10 @@ def run_test(
 
     inputs_per_image = [(
         [prompt for _ in size_factors],
-        [rescale_image_size(image, factor) for factor in size_factors],
+        [
+            rescale_image_size(image, factor, transpose=idx)
+            for idx, factor in enumerate(size_factors)
+        ],
     ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
 
     # NOTE: take care of the order. run vLLM first, and then run HF.

@@ -189,7 +189,7 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
         global_image_features_hd_newline = self.add_image_newline(
             global_image_features_hd)
 
-        all_image_embeddings = []
+        batch_image_features_proj = []
         # need a for loop to process each image because of different image sizes
         # (patch arrangement is different for each image)
         for i, img_size in enumerate(image_sizes):
@@ -207,19 +207,17 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
                 sub_image_features_hd)
 
             # [sub features, separator, global features]
-            all_image_embeddings.append(
-                torch.cat([
-                    sub_image_features_hd_newline.squeeze(
-                        0),  # (h_crop*12*(w_crop*12+1), 4096)
-                    self.glb_GN.squeeze(0),
-                    global_image_features_hd_newline[i],
-                ]))
+            image_embeddings = torch.cat([
+                sub_image_features_hd_newline.squeeze(
+                    0),  # (h_crop*12*(w_crop*12+1), 4096)
+                self.glb_GN.squeeze(0),
+                global_image_features_hd_newline[i],
+            ])
+            img_proj = self.img_projection(
+                image_embeddings.to(target_device, target_dtype))
+            batch_image_features_proj.append(img_proj)
 
-        image_features_proj = self.img_projection(
-            torch.stack(all_image_embeddings).to(target_device, target_dtype)
-        )  # (num_images, (h_crop*12*(w_crop*12+1)+1), hidden_size)
-
-        return image_features_proj
+        return batch_image_features_proj
 
     def reshape_hd_patches_2x2merge(self, image_features, h_crop, w_crop):
         """
