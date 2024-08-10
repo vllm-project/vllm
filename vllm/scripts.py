@@ -24,7 +24,8 @@ def register_signal_handlers():
 
 
 def serve(args: argparse.Namespace) -> None:
-    if args.model is not None:
+    # The default value of `--model`
+    if args.model != "facebook/opt-125m":
         raise ValueError(
             "In `vllm serve`, you should provide the model as a "
             "positional argument instead of via the `--model` option.")
