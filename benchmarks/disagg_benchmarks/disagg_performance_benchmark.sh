@@ -17,17 +17,12 @@ set -ex
 
 kill_gpu_processes() {
   # kill all processes on GPU.
-  pkill pt_main_thread
-  sleep 10
-
-  # remove vllm config file
-  rm -rf ~/.config/vllm
-
-  # Print the GPU memory usage
-  # so that we know if all GPU processes are killed.
-  gpu_memory_usage=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i 0)
-  # The memory usage should be 0 MB.
-  echo "GPU 0 Memory Usage: $gpu_memory_usage MB"
+  pkill -f pt_main_thread
+  pkill -f python3
+  pkill -f round_robin_proxy.sh
+  ps -e | grep pt_main_thread | awk '{print $1}' | xargs kill -9
+  for port in 8000 8100 8200; do lsof -t -i:$port | xargs -r kill -9; done
+  sleep 1
 }
 
 wait_for_server() {
@@ -41,57 +36,40 @@ wait_for_server() {
 }
 
 
-benchmark() {
-
-  export VLLM_LOGGING_LEVEL=DEBUG
-  export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
-  export VLLM_PORT=12345
-  # export VLLM_TRACE_FUNCTION=1
-
-  # compare chunked prefill with disaggregated prefill
-
-  results_folder="./results"
+launch_chunked_prefill() {
   model="meta-llama/Meta-Llama-3.1-70B-Instruct"
-  dataset_name="sonnet"
-  dataset_path="../sonnet_4x.txt"
-  num_prompts=10
-  qps=$1
-  prefix_len=50
-  input_len=2048
-  output_len=$2
-
-
-  # baseline: chunked prefill
-  # CUDA_VISIBLE_DEVICES=0,1,2,3 python3 \
-  #   -m vllm.entrypoints.openai.api_server \
-  #   --model $model \
-  #   --port 8000 \
-  #   -tp 4 \
-  #   --disable-log-stats \
-  #   --disable-log-requests \
-  #   --enable-chunked-prefill &
-  # wait_for_server 8000
-
-  # python3 ../benchmark_serving.py \
-  #         --backend vllm \
-  #         --model $model \
-  #         --dataset-name $dataset_name \
-  #         --dataset-path $dataset_path \
-  #         --sonnet-input-len $input_len \
-  #         --sonnet-output-len $output_len \
-  #         --sonnet-prefix-len $prefix_len \
-  #         --num-prompts $((num_prompts / 2)) \
-  #         --port 8000 \
-  #         --save-result \
-  #         --result-dir $results_folder \
-  #         --result-filename chunked_prefill_tp4.json \
-  #         --request-rate $((qps / 2))
-  # kill_gpu_processes
-
-
-
   # disagg prefill
-  VLLM_RPC_PORT=5570 VLLM_DISAGG_PREFILL_ROLE=prefill CUDA_VISIBLE_DEVICES=0,1,2,3 python3 \
+  VLLM_RPC_PORT=5570 CUDA_VISIBLE_DEVICES=0,1,2,3 python3 \
+      -m vllm.entrypoints.openai.api_server \
+      --model $model \
+      --port 8100 \
+      -tp 4 \
+      --max-model-len 30000 \
+      --disable-log-stats \
+      --disable-log-requests \
+      --enable-chunked-prefill \
+      --gpu-memory-utilization 0.8 &
+  VLLM_RPC_PORT=5580 CUDA_VISIBLE_DEVICES=4,5,6,7 python3 \
+    -m vllm.entrypoints.openai.api_server \
+    --model $model \
+    --port 8200 \
+    -tp 4 \
+    --max-model-len 30000 \
+    --disable-log-stats \
+    --disable-log-requests \
+    --enable-chunked-prefill \
+    --gpu-memory-utilization 0.8 &
+  wait_for_server 8100
+  wait_for_server 8200
+  bash round_robin_proxy.sh &
+  sleep 1
+}
+
+
+launch_disagg_prefill() {
+  model="meta-llama/Meta-Llama-3.1-70B-Instruct" 
+  # disagg prefill
+  VLLM_PORT=12345 VLLM_RPC_PORT=5570 VLLM_DISAGG_PREFILL_ROLE=prefill CUDA_VISIBLE_DEVICES=0,1,2,3 python3 \
       -m vllm.entrypoints.openai.api_server \
       --model $model \
       --port 8100 \
@@ -100,7 +78,7 @@ benchmark() {
       --disable-log-stats \
       --disable-log-requests \
       --gpu-memory-utilization 0.8 &
-  VLLM_RPC_PORT=5580 VLLM_DISAGG_PREFILL_ROLE=decode CUDA_VISIBLE_DEVICES=4,5,6,7 python3 \
+  VLLM_PORT=12345 VLLM_RPC_PORT=5580 VLLM_DISAGG_PREFILL_ROLE=decode CUDA_VISIBLE_DEVICES=4,5,6,7 python3 \
     -m vllm.entrypoints.openai.api_server \
     --model $model \
     --port 8200 \
@@ -109,13 +87,24 @@ benchmark() {
     --disable-log-stats \
     --disable-log-requests \
     --gpu-memory-utilization 0.8 &
-
   wait_for_server 8100
   wait_for_server 8200
-
-  # launch a proxy server that listen from port 8000
   python3 disagg_prefill_proxy_server.py &
   sleep 1
+}
+
+
+benchmark() {
+  results_folder="./results"
+  model="meta-llama/Meta-Llama-3.1-70B-Instruct"
+  dataset_name="sonnet"
+  dataset_path="../sonnet_4x.txt"
+  num_prompts=400
+  qps=$1
+  prefix_len=50
+  input_len=2048
+  output_len=$2
+  tag=$3
 
   python3 ../benchmark_serving.py \
           --backend vllm \
@@ -129,12 +118,10 @@ benchmark() {
           --port 8000 \
           --save-result \
           --result-dir $results_folder \
-          --result-filename disagg_prefill_2xtp4.json \
+          --result-filename $tag-qps-$qps.json \
           --request-rate $qps
 
-
-  kill_gpu_processes
-
+  sleep 2
 
 }
 
@@ -162,9 +149,22 @@ main() {
   mkdir results
 
   default_qps=10
-  default_output_len=10
+  default_output_len=150
 
-  benchmark $default_qps $default_output_len
+  export VLLM_LOGGING_LEVEL=DEBUG
+  export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
+
+  launch_chunked_prefill
+  for qps in 2 4 6 8; do
+  benchmark $qps $default_output_len chunked_prefill
+  done
+  kill_gpu_processes
+
+  launch_disagg_prefill
+  for qps in 2 4 6 8; do
+  benchmark $qps $default_output_len disagg_prefill
+  done
+  kill_gpu_processes
 
 }
 
