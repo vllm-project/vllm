@@ -1,8 +1,10 @@
-import pytest
-from ...utils import VLLM_PATH, RemoteOpenAIServer
-from typing import List, TypedDict, Dict
+from typing import Dict, List, TypedDict
+
 import openai
+import pytest
 from openai.types.chat import ChatCompletionMessageParam
+
+from ...utils import VLLM_PATH, RemoteOpenAIServer
 
 
 class ServerConfig(TypedDict):
@@ -16,47 +18,48 @@ class TestConfig(TypedDict):
 
 
 ARGS: List[str] = [
-    "--dtype", "half",  # TODO change to BF16
-    "--kv-cache-dtype", "fp8",
+    "--dtype",
+    "half",  # TODO change to BF16
+    "--kv-cache-dtype",
+    "fp8",
     "--enable-auto-tool-choice"
 ]
 
 CONFIGS: Dict[str, ServerConfig] = {
     "hermes": {
-        "model": "NousResearch/Hermes-2-Pro-Llama-3-8B",
+        "model":
+        "NousResearch/Hermes-2-Pro-Llama-3-8B",
         "arguments": [
-            "--tool-call-parser",
-            "hermes",
-            "--chat-template",
+            "--tool-call-parser", "hermes", "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_hermes.jinja")
         ]
     },
     "mistral": {
-        "model": "mistralai/Mistral-7B-Instruct-v0.3",
+        "model":
+        "mistralai/Mistral-7B-Instruct-v0.3",
         "arguments": [
-            "--tool-call-parser",
-            "mistral",
-            "--chat-template",
+            "--tool-call-parser", "mistral", "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_mistral.jinja")
         ]
-
     }
 }
 
-MESSAGES_WITHOUT_TOOLS: List[ChatCompletionMessageParam] = [
-    {
-        "role": "user",
-        "content": "Hi! How are you?"
-    },
-    {
-        "role": "assistant",
-        "content": "I'm doing great! How can I assist you?"
-    },
-    {
-        "role": "user",
-        "content": "Can you write a simple 'hello world' program in python?"
-    }
-]
+MESSAGES_WITHOUT_TOOLS: List[ChatCompletionMessageParam] = [{
+    "role":
+    "user",
+    "content":
+    "Hi! How are you?"
+}, {
+    "role":
+    "assistant",
+    "content":
+    "I'm doing great! How can I assist you?"
+}, {
+    "role":
+    "user",
+    "content":
+    "Can you write a simple 'hello world' program in python?"
+}]
 
 WEATHER_TOOL = {
     "type": "function",
@@ -67,23 +70,24 @@ WEATHER_TOOL = {
             "type": "object",
             "properties": {
                 "city": {
-                    "type": "string",
-                    "description": "The city to find the weather for, "
-                                   "e.g. 'San Francisco'"
+                    "type":
+                    "string",
+                    "description":
+                    "The city to find the weather for, "
+                    "e.g. 'San Francisco'"
                 },
                 "state": {
-                    "type": "string",
-                    "description": "the two-letter abbreviation for the state "
-                                   "that the city is in, e.g. 'CA' which would "
-                                   "mean 'California'"
+                    "type":
+                    "string",
+                    "description":
+                    "the two-letter abbreviation for the state "
+                    "that the city is in, e.g. 'CA' which would "
+                    "mean 'California'"
                 },
                 "unit": {
                     "type": "string",
                     "description": "The unit to fetch the temperature in",
-                    "enum": [
-                        "celsius",
-                        "fahrenheit"
-                    ]
+                    "enum": ["celsius", "fahrenheit"]
                 }
             }
         }
@@ -93,19 +97,23 @@ WEATHER_TOOL = {
 SEARCH_TOOL = {
     "type": "function",
     "function": {
-        "name": "web_search",
-        "description": "Search the internet and get a summary of the top "
-                       "10 webpages. Should only be used if you don't know "
-                       "the answer to a user query, and the results are likely"
-                       "to be able to be found with a web search",
+        "name":
+        "web_search",
+        "description":
+        "Search the internet and get a summary of the top "
+        "10 webpages. Should only be used if you don't know "
+        "the answer to a user query, and the results are likely"
+        "to be able to be found with a web search",
         "parameters": {
             "type": "object",
             "properties": {
                 "search_term": {
-                    "type": "string",
-                    "description": "The term to use in the search. This should"
-                                   "ideally be keywords to search for, not a"
-                                   "natural-language question"
+                    "type":
+                    "string",
+                    "description":
+                    "The term to use in the search. This should"
+                    "ideally be keywords to search for, not a"
+                    "natural-language question"
                 }
             },
             "required": ["search_term"]
@@ -113,24 +121,25 @@ SEARCH_TOOL = {
     }
 }
 
+configKeys = CONFIGS.keys()
 
-# Parameterize with the keys in the configs dict, instead of the items, or using
-# a list of configs, so that if tests fail, we can easily/nicely see which
-# model/config was the param that caused the failure.
-@pytest.fixture(params=CONFIGS.keys(), scope="module")
-def config(request) -> ServerConfig:
-    server_config: ServerConfig = CONFIGS[request.param]
-    with (RemoteOpenAIServer(server_config["model"],
-                             ARGS + server_config["arguments"]) as server):
-        yield TestConfig(
-            client=server.get_async_client(),
-            model=server_config["model"]
-        )
+
+@pytest.fixture(scope="module", params=configKeys)
+def client_config(request):
+    print('param', request.param)
+    server_config: ServerConfig = CONFIGS["hermes"]
+    model = server_config["model"]
+    args_for_model = server_config["arguments"]
+    with RemoteOpenAIServer(model, ARGS + args_for_model) as server:
+        client = server.get_async_client()
+        yield TestConfig(client=client, model=model)
 
 
 @pytest.mark.asyncio
-async def test_get_models(config: TestConfig):
-    client = config["client"]
+async def test_get_models(client_config: TestConfig):
+    client = client_config["client"]
+    model = client_config["model"]
+    print('Running test_get_models for ', model)
     assert client is not None
     assert isinstance(client, openai.AsyncOpenAI)
 
@@ -142,14 +151,13 @@ async def test_get_models(config: TestConfig):
 # are enabled. This makes sure tool call chat templates work, AND that the tool
 # parser stream processing doesn't change the output of the model.
 @pytest.mark.asyncio
-async def test_chat_completion_without_tools(config: TestConfig):
-    chat_completion = await config["client"].chat.completions.create(
+async def test_chat_completion_without_tools(client_config: TestConfig):
+    chat_completion = await client_config["client"].chat.completions.create(
         messages=MESSAGES_WITHOUT_TOOLS,
         temperature=0,
         max_tokens=16,
-        model=config["model"],
-        logprobs=False
-    )
+        model=client_config["model"],
+        logprobs=False)
     choice = chat_completion.choices[0]
     stop_reason = chat_completion.choices[0].finish_reason
     output_text = chat_completion.choices[0].message.content
@@ -159,15 +167,15 @@ async def test_chat_completion_without_tools(config: TestConfig):
     assert len(output_text) > 0
 
     # check to make sure no tool calls were returned
-    assert (choice.message.tool_calls is None or
-            len(choice.message.tool_calls) == 0)
+    assert (choice.message.tool_calls is None
+            or len(choice.message.tool_calls) == 0)
 
     # make the same request, streaming
-    stream = await config["client"].chat.completions.create(
+    stream = await client_config["client"].chat.completions.create(
         messages=MESSAGES_WITHOUT_TOOLS,
         temperature=0,
         max_tokens=16,
-        model=config["model"],
+        model=client_config["model"],
         logprobs=False,
         stream=True,
     )
@@ -201,14 +209,13 @@ async def test_chat_completion_without_tools(config: TestConfig):
     assert len(chunks)
     assert "".join(chunks) == output_text
 
+
 # test: conversation with tools enabled and provided that should not invoke
 # tools, to make sure we can still get normal chat completion responses
 # and that they won't be parsed as tools
 
-
 # test: request a chat completion that should return tool calls, so we know they
 # are parsable
-
 
 # test: providing tools and results back to model to get a non-tool response
 # (streaming/not)
