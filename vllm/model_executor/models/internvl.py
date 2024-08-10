@@ -202,8 +202,8 @@ def input_processor_for_internvl(ctx: InputContext, llm_inputs: LLMInputs):
         # add thumbnail image if num_blocks > 1
         if hf_config.use_thumbnail and num_blocks > 1:
             num_blocks += 1
-        
         image_feature_size = num_blocks * num_patches
+
     elif isinstance(image_data, torch.Tensor):
         image_feature_size = image_data.shape[0]
     else:
