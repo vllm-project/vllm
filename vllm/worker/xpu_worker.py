@@ -90,7 +90,6 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
         self.gpu_cache: Optional[List[List[torch.Tensor]]]
 
     def init_device(self) -> None:
-        torch._dynamo.config.inline_inbuilt_nn_modules = True
         if self.device_config.device.type == "xpu" and is_xpu():
             self.device = torch.device(f"xpu:{self.local_rank}")
             torch.xpu.set_device(self.device)

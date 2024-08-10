@@ -3,6 +3,9 @@ import torch.nn as nn
 
 from vllm.utils import is_cpu, is_hip, is_tpu, is_xpu
 
+# Set this flag to avoid the re-compilation due to `self`.`
+torch._dynamo.config.inline_inbuilt_nn_modules = True
+
 
 class CustomOp(nn.Module):
 

@@ -183,7 +183,6 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         self.cpu_cache: List[List[torch.Tensor]]
 
     def init_device(self) -> None:
-        torch._dynamo.config.inline_inbuilt_nn_modules = True
         if self.local_omp_cpuid != "all":
             torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
 
