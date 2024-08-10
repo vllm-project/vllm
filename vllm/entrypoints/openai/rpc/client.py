@@ -1,25 +1,26 @@
+import asyncio
 from contextlib import contextmanager
 from typing import Any, AsyncGenerator, Mapping, Optional
+from uuid import uuid4
 
-import asyncio
 import cloudpickle
 import zmq
 import zmq.asyncio
 
 from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
-from vllm.entrypoints.openai.rpc import (VLLM_RPC_ZMQ_MAX_SOCKETS,
-                                         RPC_REQUEST_TYPE,
+from vllm.entrypoints.openai.rpc import (RPC_REQUEST_TYPE,
                                          VLLM_RPC_HEALTHY_STR,
-                                         VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
-                                         RPCGenerateRequest, RPCUtilityRequest)
+                                         VLLM_RPC_SUCCESS_STR,
+                                         VLLM_RPC_ZMQ_MAX_SOCKETS,
+                                         RPCAbortRequest, RPCGenerateRequest,
+                                         RPCUtilityRequest)
 from vllm.inputs import PromptInputs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
-from uuid import uuid4
 
 # Time to wait before checking it the server process is alive.
 SERVER_START_TIMEOUT_MS = 1000
@@ -32,7 +33,7 @@ class AsyncEngineRPCClient:
 
     def __init__(self, rpc_path: str):
         self.context = zmq.asyncio.Context()
-        self.context.set(zmq.MAX_SOCKETS, VLLM_RPC_ZMQ_MAX_SOCKETS)
+        self.context.set(zmq.constants.MAX_SOCKETS, VLLM_RPC_ZMQ_MAX_SOCKETS)
 
         # PROXY
         self.from_client = self.context.socket(zmq.constants.ROUTER)
@@ -45,11 +46,10 @@ class AsyncEngineRPCClient:
         self.proxy_task = asyncio.create_task(
             self.run_proxy(self.from_client, self.to_server))
 
-
     async def run_proxy(self, socket_from, socket_to):
         poller = zmq.asyncio.Poller()
-        poller.register(socket_from, zmq.POLLIN)
-        poller.register(socket_to, zmq.POLLIN)
+        poller.register(socket_from, zmq.constants.POLLIN)
+        poller.register(socket_to, zmq.constants.POLLIN)
         while True:
             events = await poller.poll()
             events = dict(events)
@@ -59,7 +59,6 @@ class AsyncEngineRPCClient:
             elif socket_to in events:
                 msg = await socket_to.recv_multipart()
                 await socket_from.send_multipart(msg)
-        
 
     async def setup(self):
         """Setup the client before it starts sending server requests."""
@@ -301,8 +300,8 @@ class AsyncEngineRPCClient:
         with self.socket() as socket:
 
             # Ping RPCServer with CHECK_HEALTH request.
-            await socket.send_multipart([
-                cloudpickle.dumps(RPCUtilityRequest.CHECK_HEALTH)])
+            await socket.send_multipart(
+                [cloudpickle.dumps(RPCUtilityRequest.CHECK_HEALTH)])
 
             # Await the reply from the server.
             # TODO: do we need an internal timeout here?
