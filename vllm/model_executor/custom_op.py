@@ -29,8 +29,8 @@ class CustomOp(nn.Module):
 
         if not self._is_compiled:
             options = {"cpp_wrapper": True} if is_cpu() else None
-            self._forward_compiled = torch.compile(
-                self.forward_native, options=options)
+            self._forward_compiled = torch.compile(self.forward_native,
+                                                   options=options)
             self._is_compiled = True
         return self._forward_compiled(*args, **kwargs)
 
