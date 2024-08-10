@@ -789,7 +789,10 @@ class SchedulerConfig:
             (e.g., beam search), recomputation is not currently supported. In
             such a case, we use swapping instead.
         _use_delta: Private API. If used, scheduler sends delta data to
-            workers instead of an entire data.
+            workers instead of an entire data. It should be enabled only
+            when SPMD worker architecture is enabled. I.e.,
+            VLLM_USE_RAY_SPMD_WORKER=1
+
     """
 
     def __init__(self,

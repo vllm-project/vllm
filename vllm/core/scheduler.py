@@ -1021,7 +1021,7 @@ class Scheduler:
                 # the first request to reduce serialization cost.
                 seq_data_delta = {}
                 for id, data in seq_data.items():
-                    seq_data_delta[id] = data.get_delta()
+                    seq_data_delta[id] = data.reset_and_get_delta()
                 seq_group_metadata = SequenceGroupMetadataDelta(
                     seq_data_delta,
                     seq_group.request_id,

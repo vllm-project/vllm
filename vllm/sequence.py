@@ -162,6 +162,11 @@ class SequenceData(msgspec.Struct, omit_defaults=True):
 
     @property
     def prompt_token_ids_array(self) -> array:
+        """Return the prompt token ids in array type.
+
+        Note that the array is in "I" type, and it is not compatible
+        with torch.long (2 bytes vs 4 bytes). So beware of the usage.
+        """
         return self._prompt_token_ids
 
     @property
@@ -175,6 +180,11 @@ class SequenceData(msgspec.Struct, omit_defaults=True):
 
     @property
     def output_token_ids_array(self) -> array:
+        """Return the prompt token ids in array type.
+
+        Note that the array is in "I" type, and it is not compatible
+        with torch.long (2 bytes vs 4 bytes). So beware of the usage.
+        """
         assert isinstance(self._output_token_ids, array)
         return self._output_token_ids
 
@@ -247,7 +257,7 @@ class SequenceData(msgspec.Struct, omit_defaults=True):
     def get_output_token_ids(self) -> Tuple[int, ...]:
         return self.output_token_ids
 
-    def get_delta(self) -> SequenceDataDelta:
+    def reset_and_get_delta(self) -> SequenceDataDelta:
         delta = SequenceDataDelta(self._new_appended_tokens,
                                   self._cumulative_logprob,
                                   self.get_num_computed_tokens(), self.stage)
@@ -663,7 +673,11 @@ class SequenceGroupMetadataDelta(msgspec.Struct,
                                  tag=True,
                                  array_like=True,
                                  omit_defaults=True):
-    """Delta sequence group metadata."""
+    """Delta of SequenceGroupMetadata.
+
+    After sending the first SequenceGroupMetadata, vLLM scheduler
+    only sends delta to reduce the data payload size.
+    """
     seq_data_delta: Dict[int, SequenceDataDelta]
     request_id: str
     block_tables: Dict[int, List[int]]

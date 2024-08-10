@@ -5,6 +5,7 @@ import msgspec
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
+from vllm.executor.msgspec_utils import encode_hook, decode_hook
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.utils import get_ip, is_hip, is_tpu, is_xpu
 from vllm.worker.worker_base import WorkerWrapperBase
@@ -26,20 +27,9 @@ try:
             # that thread.
             self.compiled_dag_cuda_device_set = False
 
-            def dec_hook(type: Type, obj: Any) -> Any:
-                if type is array:
-                    deserialized = array('I')
-                    deserialized.frombytes(obj)
-                    return deserialized
-
-            def enc_hook(obj: Any) -> Any:
-                if isinstance(obj, array):
-                    # convert the complex to a tuple of real, imag
-                    return obj.tobytes()
-
             self.input_decoder = msgspec.msgpack.Decoder(ExecuteModelRequest,
-                                                         dec_hook=dec_hook)
-            self.output_encoder = msgspec.msgpack.Encoder(enc_hook=enc_hook)
+                                                         dec_hook=decode_hook)
+            self.output_encoder = msgspec.msgpack.Encoder(enc_hook=encode_hook)
 
         def get_node_ip(self) -> str:
             return get_ip()
@@ -64,11 +54,11 @@ try:
                     stage. The request is serialized by msgspec.
             """
             if isinstance(req_or_tuple, bytes):
-                serialized_data, intermediate_tensors = req_or_tuple, None
+                serialized_req, intermediate_tensors = req_or_tuple, None
             else:
-                serialized_data, intermediate_tensors = req_or_tuple
+                serialized_req, intermediate_tensors = req_or_tuple
 
-            execute_model_req = self.input_decoder.decode(serialized_data)
+            execute_model_req = self.input_decoder.decode(serialized_req)
 
             # TODO(swang): This is needed right now because Ray aDAG executes
             # on a background thread, so we need to reset torch's current

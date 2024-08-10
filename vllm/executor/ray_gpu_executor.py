@@ -11,6 +11,7 @@ import vllm.envs as envs
 from vllm.executor.distributed_gpu_executor import (  # yapf: disable
     DistributedGPUExecutor, DistributedGPUExecutorAsync)
 from vllm.executor.ray_utils import RayWorkerWrapper, ray
+from vllm.executor.msgspec_utils import encode_hook
 from vllm.logger import init_logger
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import (_run_task_with_lock, get_distributed_init_method,
@@ -63,12 +64,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
         # Create the parallel GPU workers.
         self._init_workers_ray(placement_group)
 
-        def enc_hook(obj: Any) -> Any:
-            if isinstance(obj, array):
-                # convert the complex to a tuple of real, imag
-                return obj.tobytes()
-
-        self.input_encoder = msgspec.msgpack.Encoder(enc_hook=enc_hook)
+        self.input_encoder = msgspec.msgpack.Encoder(enc_hook=encode_hook)
         self.output_decoder = msgspec.msgpack.Decoder(
             Optional[List[SamplerOutput]])
 

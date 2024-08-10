@@ -54,9 +54,9 @@ def dummy_seq_data_for_blip(
     else:
         image_feature_size = image_feature_size_override
 
-    token_ids = [image_token_id] * image_feature_size
-    token_ids += [0] * (seq_len - image_feature_size)
-    return SequenceData(array("I", token_ids))
+    token_ids = array("I", [image_token_id]) * image_feature_size
+    token_ids += array("I", [0]) * (seq_len - image_feature_size)
+    return SequenceData(token_ids)
 
 
 def dummy_image_for_blip(
