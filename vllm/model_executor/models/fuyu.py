@@ -255,9 +255,6 @@ class FuyuForCausalLM(nn.Module, SupportsVision):
     def _process_image_input(self,
                              image_input: FuyuImageInputs) -> torch.Tensor:
 
-        if image_input["type"] == "image_embeds":
-            return image_input["data"]
-
         assert self.vision_embed_tokens is not None
         vision_embeddings, _ = self.vision_embed_tokens(image_input["data"])
         return vision_embeddings
