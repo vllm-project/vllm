@@ -16,7 +16,7 @@
 # limitations under the License.
 """ PyTorch Fuyu model."""
 import math
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
+from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
 
 import torch
 import torch.nn as nn
@@ -62,12 +62,7 @@ class FuyuImagePixelInputs(TypedDict):
     """
 
 
-class FuyuImageEmbeddingInputs(TypedDict):
-    type: Literal["image_embeds"]
-    data: torch.Tensor
-
-
-FuyuImageInputs = Union[FuyuImagePixelInputs, FuyuImageEmbeddingInputs]
+FuyuImageInputs = FuyuImagePixelInputs
 
 
 def _calculate_num_image_tokens(
