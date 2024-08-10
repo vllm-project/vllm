@@ -7,7 +7,6 @@ import argparse
 
 device = "cuda"
 
-
 @triton.jit
 def awq_dequantize_kernel(
         qweight_ptr,  # quantized matrix
@@ -20,7 +19,6 @@ def awq_dequantize_kernel(
         result_ptr,  # Output matrix
         num_cols,  # input num cols in qweight
         num_rows,  # input num rows in qweight
-        reverse_awq_order_ptr,
         BLOCK_SIZE_X: tl.constexpr,
         BLOCK_SIZE_Y: tl.constexpr):
     # Setup the pids.
@@ -51,10 +49,10 @@ def awq_dequantize_kernel(
     # Load the weights.
     iweights = tl.load(qweight_ptr + offsets, masks)
 
-    # Load the AWQ reverse order offsets.
-    reverse_awq_order_offsets = tl.arange(0, 8)
-    reverse_awq_order_tensor = tl.load(reverse_awq_order_ptr +
-                                       reverse_awq_order_offsets)
+    # Create reverse AWQ order as tensor: [0, 4, 1, 5, 2, 6, 3, 7]
+    # that will map given indices to the correct order.
+    reverse_awq_order_tensor = ((tl.arange(0, 2) * 4)[None, :] +
+                                tl.arange(0, 4)[:, None]).reshape(8)
 
     # Use this to compute a set of shifts that can be used to unpack and
     # reorder the values in iweights and zeros.
@@ -103,38 +101,42 @@ def awq_dequantize_kernel(
     tl.store(result_ptr + result_offsets, iweights, result_masks)
 
 
-# NOTE: This doesn't work in TRITON_INTERPRET=1 mode
-# @triton.heuristics({
-# 'EVEN_K':
-# lambda args: args['K'] % (args['BLOCK_SIZE_K'] * args['SPLIT_K']) == 0,
-# })
 @triton.jit
 def awq_gemm_kernel(a_ptr, b_ptr, c_ptr, zeros_ptr, scales_ptr, M, N, K,
-                    awq_group_size, reverse_awq_order_ptr, stride_am,
-                    stride_ak, stride_bk, stride_bn, stride_cm, stride_cn,
-                    stride_zk, stride_zn, stride_sk, stride_sn,
-                    BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr,
-                    BLOCK_SIZE_K: tl.constexpr, SPLIT_K: tl.constexpr):
+                    awq_group_size, stride_am, stride_ak, stride_bk, stride_bn,
+                    stride_cm, stride_cn, stride_zk, stride_zn, stride_sk,
+                    stride_sn, BLOCK_SIZE_M: tl.constexpr,
+                    BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
+                    SPLIT_K: tl.constexpr):
     pid = tl.program_id(axis=0)
     pid_z = tl.program_id(1)
 
-    # NOTE: This doesn't work in TRITON_INTERPRET=1 mode
+    # NOTE: This doesn't work in TRITON_INTERPRET=1 mode.  Use below instead.
+    # num_pid_m = (M + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
+    # num_pid_n = (N + BLOCK_SIZE_N - 1) // BLOCK_SIZE_N
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
 
     pid_m = pid // num_pid_n
     pid_n = pid % num_pid_n
 
-    # NOTE: This doesn't work in TRITON_INTERPRET=1 mode
-    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float16)
+    accumulator_dtype = tl.float16
+
+    # NOTE: This doesn't work in TRITON_INTERPRET=1 mode.  Use below instead.
     # accumulator = tl.arange(0, BLOCK_SIZE_N)
     # accumulator = tl.broadcast_to(accumulator[None, :],
     # (BLOCK_SIZE_M, BLOCK_SIZE_N))
-    # accumulator = 0.0
+    # accumulator = accumulator & 0x0
+    # accumulator = accumulator.to(accumulator_dtype)
+    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N),
+                           dtype=accumulator_dtype)
 
-    reverse_awq_order_offsets = tl.arange(0, 8)
-    reverse_awq_order_tensor = tl.load(reverse_awq_order_ptr +
-                                       reverse_awq_order_offsets)
+    # Create reverse AWQ order as tensor: [0, 4, 1, 5, 2, 6, 3, 7]
+    # that will map given indices to the correct order.
+    reverse_awq_order_tensor = ((tl.arange(0, 2) * 4)[None, :] +
+                                tl.arange(0, 4)[:, None]).reshape(8)
+
+    # Create the necessary shifts to use to unpack.
     shifts = reverse_awq_order_tensor * 4
     shifts = tl.broadcast_to(shifts[None, :],
                              (BLOCK_SIZE_K * (BLOCK_SIZE_N // 8), 8))
@@ -156,48 +158,50 @@ def awq_gemm_kernel(a_ptr, b_ptr, c_ptr, zeros_ptr, scales_ptr, M, N, K,
     masks_sn = offsets_sn < N
 
     offsets_k = pid_z * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
+    offsets_a = K * offsets_am[:, None] + offsets_k[None, :]
+    offsets_b = (N // 8) * offsets_k[:, None] + offsets_bn[None, :]
+
+    a_ptrs = a_ptr + offsets_a
+    b_ptrs = b_ptr + offsets_b
 
     # NOTE: Use this in TRITON_INTERPRET=1 mode instead of tl.cdiv
     # block_offset = BLOCK_SIZE_K * SPLIT_K
     # for k in range(0, (K + block_offset - 1) // (block_offset)):
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K * SPLIT_K)):
-
-        offsets_a = K * offsets_am[:, None] + offsets_k[None, :]
         masks_k = offsets_k < K
         masks_a = masks_am[:, None] & masks_k[None, :]
-        a_ptrs = a_ptr + offsets_a
         a = tl.load(a_ptrs, mask=masks_a)
 
-        offsets_b = (N // 8) * offsets_k[:, None] + offsets_bn[None, :]
-        b_ptrs = b_ptr + offsets_b
         masks_b = masks_k[:, None] & masks_bn[None, :]
         b = tl.load(b_ptrs, mask=masks_b)
 
-        offsets_zk = ((BLOCK_SIZE_K * SPLIT_K * k + pid_z * BLOCK_SIZE_K) //
-                      awq_group_size +
-                      tl.arange(0, BLOCK_SIZE_K) // awq_group_size)
-        offsets_z = (N // 8) * offsets_zk[:, None] + offsets_zn[None, :]
-        masks_zk = offsets_zk < K // awq_group_size
+        # Dequantize b.
+        offsets_szk = ((BLOCK_SIZE_K * SPLIT_K * k + pid_z * BLOCK_SIZE_K) //
+                       awq_group_size +
+                       tl.arange(0, BLOCK_SIZE_K) // awq_group_size)
+        offsets_z = (N // 8) * offsets_szk[:, None] + offsets_zn[None, :]
+        masks_zk = offsets_szk < K // awq_group_size
         masks_z = masks_zk[:, None] & masks_zn[None, :]
         zeros_ptrs = zeros_ptr + offsets_z
         zeros = tl.load(zeros_ptrs, mask=masks_z)
 
-        offsets_sk = ((BLOCK_SIZE_K * SPLIT_K * k + pid_z * BLOCK_SIZE_K) //
-                      awq_group_size +
-                      tl.arange(0, BLOCK_SIZE_K) // awq_group_size)
-        offsets_s = N * offsets_sk[:, None] + offsets_sn[None, :]
-        masks_sk = offsets_sk < K // awq_group_size
+        offsets_s = N * offsets_szk[:, None] + offsets_sn[None, :]
+        masks_sk = offsets_szk < K // awq_group_size
         masks_s = masks_sk[:, None] & masks_sn[None, :]
         scales_ptrs = scales_ptr + offsets_s
         scales = tl.load(scales_ptrs, mask=masks_s)
-
-        offsets_k += BLOCK_SIZE_K * SPLIT_K
 
         b = (b >> shifts) & 0xF
         zeros = (zeros >> shifts) & 0xF
         b = (b - zeros) * scales
         b = b.to(tl.float16)
-        accumulator = tl.dot(a, b, accumulator, out_dtype=tl.float16)
+
+        # Accumulate results.
+        accumulator = tl.dot(a, b, accumulator, out_dtype=accumulator_dtype)
+
+        offsets_k += BLOCK_SIZE_K * SPLIT_K
+        a_ptrs += BLOCK_SIZE_K * SPLIT_K
+        b_ptrs += BLOCK_SIZE_K * SPLIT_K * (N // 8)
 
     c = accumulator.to(c_ptr.type.element_ty)
     offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
@@ -240,10 +244,6 @@ def awq_dequantize_triton(
     block_size_x = 32
     block_size_y = 32
 
-    reverse_awq_order = torch.tensor([0, 4, 1, 5, 2, 6, 3, 7],
-                                     dtype=torch.uint8,
-                                     device=qweight.device)
-
     Y = qweight.shape[0]  # num rows
     X = qweight.shape[1]  # num cols
     group_size = 128
@@ -261,7 +261,6 @@ def awq_dequantize_triton(
                                 result,
                                 X,
                                 Y,
-                                reverse_awq_order,
                                 BLOCK_SIZE_X=block_size_x,
                                 BLOCK_SIZE_Y=block_size_y)
 
@@ -290,8 +289,6 @@ def reverse_awq_order(t: torch.Tensor):
 def awq_dequantize_torch(qweight: torch.Tensor, scales: torch.Tensor,
                          qzeros: torch.Tensor, split_k_iters: int, thx: int,
                          thy: int) -> torch.Tensor:
-    # print(f"awq_dequantize_torch:qweight.shape = {qweight.shape}"
-    # f", qzeros.shape={qzeros.shape}")
     bits = 4
     group_size = 128
     shifts = torch.arange(0, 32, bits, device=qzeros.device)
@@ -300,12 +297,6 @@ def awq_dequantize_torch(qweight: torch.Tensor, scales: torch.Tensor,
                                          shifts[None, None, :]).to(torch.int8)
 
     iweights = iweights.view(iweights.shape[0], -1)
-
-    # iweights = reverse_awq_order(iweights)
-    # return (iweights & 0xF).to(torch.float16)
-    # qqzeros = qzeros.repeat_interleave(group_size, dim=0)
-    # print(f"awq_dequantize_torch:qzeros_upper = {qqzeros[:128, :]}")
-    # print(f"awq_dequantize_torch:qzeros_lower = {qqzeros[128:, :]}")
 
     zeros = torch.bitwise_right_shift(qzeros[:, :, None],
                                       shifts[None, None, :]).to(torch.int8)
@@ -317,21 +308,8 @@ def awq_dequantize_torch(qweight: torch.Tensor, scales: torch.Tensor,
     iweights = torch.bitwise_and(iweights, (2**bits) - 1)
     zeros = torch.bitwise_and(zeros, (2**bits) - 1)
 
-    # print(f"====>scales.shape = {scales.shape}")
     scales = scales.repeat_interleave(group_size, dim=0)
     zeros = zeros.repeat_interleave(group_size, dim=0)
-    # print(f"====>iweights.shape = {iweights.shape}, zeros.shape = {zeros.shape}, scales.shape = {scales.shape}")
-    # print(f"awq_dequantize_torch:iweights.shape = {iweights.shape},"
-    # f"zeros.shape={zeros.shape}, "
-    # f"scales.shape={scales.shape}")
-    # print(f"awq_dequantize_torch:zeros_upper = {zeros[:128, :]}")
-    # print(f"awq_dequantize_torch:zeros_lower = {zeros[128:, :]}")
-    # print(f"awq_dequantize_torch:iweights_upper = {iweights[:128, :]}")
-    # print(f"awq_dequantize_torch:iweights_lower = {iweights[128:, :]}")
-    # print(f"awq_dequantize_torch:scales_upper = {scales[:128, :]}")
-    # print(f"awq_dequantize_torch:scales_lower = {scales[128:, :]}")
-
-    # return iweights.to(torch.float16)
     return (iweights - zeros) * scales, zeros
 
 
@@ -406,23 +384,9 @@ def awq_gemm_triton(input: torch.Tensor, qweight: torch.Tensor,
     block_size_m = 32
     block_size_n = 32
     block_size_k = 32
-    reverse_awq_order = torch.tensor([0, 4, 1, 5, 2, 6, 3, 7],
-                                     dtype=torch.uint8,
-                                     device=qweight.device)
 
     result = torch.zeros((M, N), dtype=torch.float16, device=input.device)
 
-    # def awq_gemm_kernel(a_ptr, b_ptr, c_ptr, zeros_ptr, scales_ptr, M, N, K,
-    # awq_group_size, reverse_awq_order_ptr, stride_am,
-    # stride_ak, stride_bk, stride_bn, stride_cm, stride_cn,
-    # stride_zk, stride_zn, stride_sk, stride_sn,
-    # BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr,
-    # BLOCK_SIZE_K: tl.constexpr, SPLIT_K: tl.constexpr,
-    # EVEN_K: tl.constexpr):
-    # @triton.heuristics({
-    # 'EVEN_K':
-    # lambda args: args['K'] % (args['BLOCK_SIZE_K'] * args['SPLIT_K']) == 0,
-    # })
     # A = input, B = qweight, C = result
     # A = M x K, B = K x N, C = M x N
     awq_gemm_kernel[grid](input,
@@ -434,7 +398,6 @@ def awq_gemm_triton(input: torch.Tensor, qweight: torch.Tensor,
                           N,
                           K,
                           awq_group_size,
-                          reverse_awq_order,
                           input.stride(0),
                           input.stride(1),
                           qweight.stride(0),
@@ -541,6 +504,7 @@ def test_gemm():
     use_triton = True
     use_torch = True
 
+    # NOTE: Use to see more data and accuracy during testing.
     # import numpy as np
     # import sys
     # torch.set_printoptions(precision = 3, threshold=10000000000000000000000000000, sci_mode = False)
