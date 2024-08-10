@@ -90,8 +90,13 @@ def load_image_from_base64(image: Union[bytes, str]) -> Image.Image:
     return _load_image_from_bytes(base64.b64decode(image))
 
 
-def rescale_image_size(image: Image.Image, size_factor: float) -> Image.Image:
+def rescale_image_size(image: Image.Image,
+                       size_factor: float,
+                       transpose: int = -1) -> Image.Image:
     """Rescale the dimensions of an image by a constant factor."""
     new_width = int(image.width * size_factor)
     new_height = int(image.height * size_factor)
-    return image.resize((new_width, new_height))
+    image = image.resize((new_width, new_height))
+    if transpose >= 0:
+        image = image.transpose(Image.Transpose(transpose))
+    return image
