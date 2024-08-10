@@ -400,7 +400,7 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
                                                           input_width=w,
                                                           input_height=h)
     elif isinstance(image_data, torch.Tensor):
-        raise NotImplementedError("Embeddings input is not supported yet")
+        image_feature_size = image_data.shape[0]
     else:
         raise TypeError(f"Invalid image type: {type(image_data)}")
 
