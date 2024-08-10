@@ -11,10 +11,8 @@ from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.entrypoints.openai.rpc import (RPC_REQUEST_TYPE,
                                          VLLM_RPC_HEALTHY_STR,
-                                         VLLM_RPC_SUCCESS_STR,
-                                         VLLM_RPC_ZMQ_MAX_SOCKETS,
-                                         RPCAbortRequest, RPCGenerateRequest,
-                                         RPCUtilityRequest)
+                                         VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
+                                         RPCGenerateRequest, RPCUtilityRequest)
 from vllm.inputs import PromptInputs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
@@ -33,7 +31,8 @@ class AsyncEngineRPCClient:
 
     def __init__(self, rpc_path: str):
         self.context = zmq.asyncio.Context()
-        self.context.set(zmq.constants.MAX_SOCKETS, VLLM_RPC_ZMQ_MAX_SOCKETS)
+        self.context.set(zmq.constants.MAX_SOCKETS,
+                         self.context.get(zmq.constants.SOCKET_LIMIT))
 
         # PROXY
         self.from_client = self.context.socket(zmq.constants.ROUTER)

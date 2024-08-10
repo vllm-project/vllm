@@ -9,10 +9,8 @@ from typing_extensions import Never
 
 from vllm import AsyncEngineArgs, AsyncLLMEngine
 from vllm.entrypoints.openai.rpc import (VLLM_RPC_HEALTHY_STR,
-                                         VLLM_RPC_SUCCESS_STR,
-                                         VLLM_RPC_ZMQ_MAX_SOCKETS,
-                                         RPCAbortRequest, RPCGenerateRequest,
-                                         RPCUtilityRequest)
+                                         VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
+                                         RPCGenerateRequest, RPCUtilityRequest)
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 
@@ -29,7 +27,8 @@ class AsyncEngineRPCServer:
 
         # Initialize context.
         self.context = zmq.asyncio.Context()
-        self.context.set(zmq.constants.MAX_SOCKETS, VLLM_RPC_ZMQ_MAX_SOCKETS)
+        self.context.set(zmq.constants.MAX_SOCKETS,
+                         self.context.get(zmq.constants.SOCKET_LIMIT))
 
         # Init socket for readiness state.
         self.socket = self.context.socket(zmq.constants.ROUTER)
