@@ -86,7 +86,7 @@ class OpenAIServingEmbedding(OpenAIServing):
     async def create_embedding(
         self,
         request: EmbeddingRequest,
-        raw_request: Request,
+        raw_request: Optional[Request] = None,
     ) -> Union[EmbeddingResponse, ErrorResponse]:
         """Completion API similar to OpenAI's API.
 
@@ -153,7 +153,9 @@ class OpenAIServingEmbedding(OpenAIServing):
             return self.create_error_response(str(e))
 
         result_generator = merge_async_iterators(
-            *generators, is_cancelled=raw_request.is_disconnected)
+            *generators,
+            is_cancelled=raw_request.is_disconnected if raw_request else None,
+        )
 
         # Non-streaming response
         final_res_batch: List[Optional[EmbeddingRequestOutput]]
