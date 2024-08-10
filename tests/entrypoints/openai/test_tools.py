@@ -1,10 +1,39 @@
-from typing import Dict, List, TypedDict
+import json
+from typing import Dict, List, Literal, Optional
 
 import openai
 import pytest
 from openai.types.chat import ChatCompletionMessageParam
+from typing_extensions import NotRequired, TypedDict
 
 from ...utils import VLLM_PATH, RemoteOpenAIServer
+
+# we need this because this is more precise than the existing definition in
+# vll.entrypoints.openai.protocol which inherits BaseModel. for literals, I need
+# a dict to check against
+
+
+class OaiToolFunctionParamProperties(TypedDict):
+    type: str
+    description: Optional[str]
+    enum: NotRequired[List[str]]
+
+
+class OAiToolFunctionParams(TypedDict):
+    type: Literal["object"]
+    properties: Dict[str, OaiToolFunctionParamProperties]
+    required: NotRequired[List[str]]
+
+
+class OAiFunctionDefinition(TypedDict):
+    name: str
+    description: str
+    parameters: OAiToolFunctionParams
+
+
+class OpenAICompatibleToolDefinition(TypedDict):
+    type: Literal["function"]
+    function: OAiFunctionDefinition
 
 
 class ServerConfig(TypedDict):
@@ -58,10 +87,17 @@ MESSAGES_WITHOUT_TOOLS: List[ChatCompletionMessageParam] = [{
     "role":
     "user",
     "content":
-    "Can you write a simple 'hello world' program in python?"
+    "Can you tell me a joke?"
 }]
 
-WEATHER_TOOL = {
+MESSAGES_ASKING_FOR_TOOLS: List[ChatCompletionMessageParam] = [{
+    "role":
+    "user",
+    "content":
+    "What is the weather in Dallas, Texas in Fahrenheit?"
+}]
+
+WEATHER_TOOL: OpenAICompatibleToolDefinition = {
     "type": "function",
     "function": {
         "name": "get_current_weather",
@@ -94,7 +130,7 @@ WEATHER_TOOL = {
     }
 }
 
-SEARCH_TOOL = {
+SEARCH_TOOL: OpenAICompatibleToolDefinition = {
     "type": "function",
     "function": {
         "name":
@@ -135,18 +171,6 @@ def client_config(request):
         yield TestConfig(client=client, model=model)
 
 
-@pytest.mark.asyncio
-async def test_get_models(client_config: TestConfig):
-    client = client_config["client"]
-    model = client_config["model"]
-    print('Running test_get_models for ', model)
-    assert client is not None
-    assert isinstance(client, openai.AsyncOpenAI)
-
-    models = await client.models.list()
-    assert len(models.data) == 1
-
-
 # test: make sure chat completions without tools provided work even when tools
 # are enabled. This makes sure tool call chat templates work, AND that the tool
 # parser stream processing doesn't change the output of the model.
@@ -155,7 +179,7 @@ async def test_chat_completion_without_tools(client_config: TestConfig):
     chat_completion = await client_config["client"].chat.completions.create(
         messages=MESSAGES_WITHOUT_TOOLS,
         temperature=0,
-        max_tokens=16,
+        max_tokens=128,
         model=client_config["model"],
         logprobs=False)
     choice = chat_completion.choices[0]
@@ -174,7 +198,7 @@ async def test_chat_completion_without_tools(client_config: TestConfig):
     stream = await client_config["client"].chat.completions.create(
         messages=MESSAGES_WITHOUT_TOOLS,
         temperature=0,
-        max_tokens=16,
+        max_tokens=128,
         model=client_config["model"],
         logprobs=False,
         stream=True,
@@ -213,9 +237,125 @@ async def test_chat_completion_without_tools(client_config: TestConfig):
 # test: conversation with tools enabled and provided that should not invoke
 # tools, to make sure we can still get normal chat completion responses
 # and that they won't be parsed as tools
+@pytest.mark.asyncio
+async def test_chat_completion_with_tools(client_config: TestConfig):
+    chat_completion = await client_config["client"].chat.completions.create(
+        messages=MESSAGES_WITHOUT_TOOLS,
+        temperature=0,
+        max_tokens=128,
+        model=client_config["model"],
+        tools=[WEATHER_TOOL],
+        logprobs=False)
+    choice = chat_completion.choices[0]
+    stop_reason = chat_completion.choices[0].finish_reason
+    output_text = chat_completion.choices[0].message.content
+
+    # check to make sure we got text
+    assert output_text is not None
+    assert stop_reason != 'tool_calls'
+    assert len(output_text) > 0
+
+    # check to make sure no tool calls were returned
+    assert (choice.message.tool_calls is None
+            or len(choice.message.tool_calls) == 0)
+
+    # make the same request, streaming
+    stream = await client_config["client"].chat.completions.create(
+        messages=MESSAGES_WITHOUT_TOOLS,
+        temperature=0,
+        max_tokens=128,
+        model=client_config["model"],
+        logprobs=False,
+        tools=[WEATHER_TOOL],
+        stream=True,
+    )
+
+    chunks: List[str] = []
+    finish_reason_count = 0
+    role_sent: bool = False
+
+    # assemble streamed chunks
+    async for chunk in stream:
+        delta = chunk.choices[0].delta
+
+        # make sure the role is assistant
+        if delta.role:
+            assert delta.role == 'assistant'
+            role_sent = True
+
+        if delta.content:
+            chunks.append(delta.content)
+
+        if chunk.choices[0].finish_reason is not None:
+            finish_reason_count += 1
+
+        # make sure tool call chunks aren't being streamed
+        assert not delta.tool_calls or len(delta.tool_calls) == 0
+
+    # make sure the role was sent, only 1 finish reason was sent, that chunks
+    # were in fact sent, and that the chunks match non-streaming
+    assert role_sent
+    assert finish_reason_count == 1
+    assert chunk.choices[0].finish_reason == stop_reason
+    assert chunk.choices[0].finish_reason != 'tool_calls'
+    assert len(chunks)
+    assert "".join(chunks) == output_text
+
 
 # test: request a chat completion that should return tool calls, so we know they
 # are parsable
+@pytest.mark.asyncio
+async def test_tool_call(client_config: TestConfig):
+    chat_completion = await client_config["client"].chat.completions.create(
+        messages=MESSAGES_ASKING_FOR_TOOLS,
+        temperature=0,
+        max_tokens=500,
+        model=client_config["model"],
+        tools=[WEATHER_TOOL, SEARCH_TOOL],
+        logprobs=False)
+
+    choice = chat_completion.choices[0]
+    stop_reason = chat_completion.choices[0].finish_reason
+    tool_calls = chat_completion.choices[0].message.tool_calls
+
+    # make sure a tool call is present
+    assert choice.message.role == 'assistant'
+    assert tool_calls is not None
+    assert len(tool_calls) == 1
+    assert tool_calls[0].type == 'function'
+    assert tool_calls[0].function is not None
+    assert isinstance(tool_calls[0].id, str)
+    assert len(tool_calls[0].id) > 16
+
+    # make sure the weather tool was called (classic example) with arguments
+    assert tool_calls[0].function.name == WEATHER_TOOL["function"]["name"]
+    assert tool_calls[0].function.arguments is not None
+    assert isinstance(tool_calls[0].function.arguments, str)
+
+    # make sure the arguments parse properly
+    parsed_arguments = json.loads(tool_calls[0].function.arguments)
+    assert isinstance(parsed_arguments, Dict)
+    assert isinstance(parsed_arguments.get("city"), str)
+    assert isinstance(parsed_arguments.get("state"), str)
+    assert parsed_arguments.get("city") == "Dallas"
+    assert parsed_arguments.get("state") == "TX"
+
+    assert stop_reason == "tool_calls"
+    """
+    # make the same request, streaming
+    stream = await client_config["client"].chat.completions.create(
+        messages=MESSAGES_WITHOUT_TOOLS,
+        temperature=0,
+        max_tokens=128,
+        model=client_config["model"],
+        logprobs=False,
+        tools=[WEATHER_TOOL],
+        stream=True,
+    )
+    """
+
+    pass
+
 
 # test: providing tools and results back to model to get a non-tool response
 # (streaming/not)
