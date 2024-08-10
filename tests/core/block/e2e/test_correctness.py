@@ -261,11 +261,22 @@ def test_lookahead_greedy_equality_with_preemption(baseline_llm_generator,
             # skip cuda graph creation for fast test.
             "enforce_eager": True,
             "enable_chunked_prefill": True,
-            "max_num_batched_tokens": 2,
-            "max_num_seqs": 2,
         },
     ])
-@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
+@pytest.mark.parametrize("per_test_common_llm_kwargs",
+                         [{
+                             "block_size": 8,
+                             "max_num_batched_tokens": 2,
+                             "max_num_seqs": 2,
+                         }, {
+                             "block_size": 8,
+                             "max_num_batched_tokens": 3,
+                             "max_num_seqs": 2,
+                         }, {
+                             "block_size": 8,
+                             "max_num_batched_tokens": 256,
+                             "max_num_seqs": 10,
+                         }])
 @pytest.mark.parametrize("baseline_llm_kwargs", [
     {
         "use_v2_block_manager": False,
@@ -294,6 +305,7 @@ def test_chunked_prefill_block_manager_v2(baseline_llm_generator,
     prompts = [
         "Hello, my name is",
         "The president of the United States is",
+        ("1 + " * 50) + " 1 = ",  # Longer prompt.
         "The capital of France is",
         "The future of AI is",
     ]

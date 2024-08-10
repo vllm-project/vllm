@@ -139,7 +139,7 @@ class RequestOutput:
             CompletionOutput(
                 seqs.index(seq),
                 seq.get_output_text_to_return(text_buffer_length),
-                seq.get_output_token_ids(),
+                seq.data._output_token_ids,  # type: ignore
                 seq.get_cumulative_logprob() if include_logprobs else None,
                 seq.output_logprobs if include_logprobs else None,
                 SequenceStatus.get_finished_reason(seq.status),
