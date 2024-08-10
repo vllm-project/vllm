@@ -3,7 +3,9 @@ import torch.nn as nn
 
 from vllm.utils import is_cpu, is_hip, is_tpu, is_xpu
 
-# Set this flag to avoid the re-compilation due to `self`.`
+# Set this flag to avoid the re-compilation due to `self`.
+# NOTE(woosuk): This only works for PyTorch 2.4+.
+# In PyTorch 2.5, we will not need this flag.
 torch._dynamo.config.inline_inbuilt_nn_modules = True
 
 
