@@ -9,10 +9,7 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-# NOTE: 7/26/24: Use Triton implementation of AWQ functions. Currently, only
-#       awq_dequantize is implemented, but awq_gemm coming soon.
-
-use_awq_triton = True
+use_awq_triton = False
 
 try:
     import vllm._C
@@ -191,8 +188,6 @@ def awq_dequantize(qweight: torch.Tensor, scales: torch.Tensor,
             awq_dequantize_triton)
         return awq_dequantize_triton(qweight, scales, zeros, split_k_iters,
                                      thx, thy)
-    # return torch.ops._C.awq_dequantize(qweight, scales, zeros, split_k_iters,
-                                       # thx, thy)
     return torch.ops._C.awq_dequantize(qweight, scales, zeros, split_k_iters,
                                        thx, thy)
 
@@ -203,8 +198,8 @@ def awq_gemm(input: torch.Tensor, qweight: torch.Tensor, qzeros: torch.Tensor,
         from vllm.model_executor.layers.quantization.awq_triton import (
             awq_gemm_triton)
         return awq_gemm_triton(input, qweight, qzeros, scales, split_k_iters)
-    # return torch.ops._C.awq_gemm(input, qweight, qzeros, scales, split_k_iters)
     return torch.ops._C.awq_gemm(input, qweight, qzeros, scales, split_k_iters)
+
 
 # gptq
 def gptq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,

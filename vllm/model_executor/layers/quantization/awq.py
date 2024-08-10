@@ -171,7 +171,6 @@ class AWQLinearMethod(LinearMethodBase):
         else:
             out = ops.awq_gemm(reshaped_x, qweight, scales, qzeros,
                                pack_factor)
-
         if bias is not None:
             out.add_(bias)
         return out.reshape(out_shape)
