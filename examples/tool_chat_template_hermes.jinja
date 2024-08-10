@@ -39,7 +39,7 @@
             {%- set tool = tool.function %}
         {%- endif %}
         {{- '{"type": "function", "function": ' }}
-        {{- '{"name": ' + tool.name + '", ' }}
+        {{- '{"name": "' + tool.name + '", ' }}
         {{- '"description": "' + tool.name + '(' }}
         {%- for param_name, param_fields in tool.parameters.properties|items %}
             {{- param_name + ": " + json_to_python_type(param_fields) }}
