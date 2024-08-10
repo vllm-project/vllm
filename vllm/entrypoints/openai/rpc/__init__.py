@@ -9,6 +9,7 @@ from vllm.sampling_params import SamplingParams
 
 VLLM_RPC_SUCCESS_STR = "SUCCESS"
 VLLM_RPC_HEALTHY_STR = "HEALTHY"
+VLLM_RPC_ZMQ_MAX_SOCKETS = 1000000
 
 
 @dataclass
