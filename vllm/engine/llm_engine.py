@@ -1191,9 +1191,10 @@ class LLMEngine:
                 scheduled_seq_groups, output_by_sequence_group,
                 seq_group_metadata_list):
             seq_group: SequenceGroup = scheduled_seq_group.seq_group
-            if seq_group.sampling_params.output_kind == RequestOutputKind.DELTA:
-                text_buffer_length = (
-                    seq_group.sampling_params.output_text_buffer_length)
+            params = seq_group.sampling_params
+            if params is not None and (params.output_kind
+                                       == RequestOutputKind.DELTA):
+                text_buffer_length = params.output_text_buffer_length
                 for seq in seq_group.seqs:
                     previous_output_lens[seq.seq_id] = (
                         seq.get_output_len(),

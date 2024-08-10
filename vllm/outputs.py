@@ -124,7 +124,8 @@ class RequestOutput:
             raise ValueError(
                 "Sampling parameters are missing for a CompletionRequest.")
         finished = seq_group.is_finished()
-        if sampling_params.output_kind == RequestOutputKind.FINAL_ONLY:
+        if sampling_params.output_kind == RequestOutputKind.FINAL_ONLY and (
+                not finished):
             return None
 
         seqs = seq_group.get_seqs()
