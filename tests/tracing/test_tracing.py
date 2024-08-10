@@ -115,4 +115,4 @@ def test_traces(trace_service):
     e2e_time = metrics.finished_time - metrics.arrival_time
     assert attributes.get(SpanAttributes.LLM_LATENCY_E2E) == e2e_time
     assert attributes.get(
-        +SpanAttributes.LLM_LATENCY_TIME_IN_SCHEDULER) == metrics.scheduler_tim
+        SpanAttributes.LLM_LATENCY_TIME_IN_SCHEDULER) == metrics.scheduler_time
