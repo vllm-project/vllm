@@ -15,6 +15,5 @@ get_next_port() {
 # Start the proxy
 while true; do
   NEXT_PORT=$(get_next_port)
-  echo "Forwarding to port $NEXT_PORT"
-  socat TCP4-LISTEN:8000,reuseaddr,fork TCP4:localhost:$NEXT_PORT
+  socat TCP4-LISTEN:8000,reuseaddr,fork TCP4:localhost:$NEXT_PORT 2>/dev/null
 done
