@@ -204,17 +204,16 @@ async def test_chat_completion_without_tools(config: TestConfig):
 # test: conversation with tools enabled and provided that should not invoke
 # tools, to make sure we can still get normal chat completion responses
 # and that they won't be parsed as tools
-@pytest.mark.asyncio
-async def test_chat_completion_with_tools_expecting_chat(config: TestConfig):
-    pass
+
 
 # test: request a chat completion that should return tool calls, so we know they
 # are parsable
-@pytest.mark.asyncio
-async def test_chat_completion_with_tools_expecting_tools(config: TestConfig):
-    pass
-# test: providing tools and results back to model to get a non-tool response (streaming/not)
+
+
+# test: providing tools and results back to model to get a non-tool response
+# (streaming/not)
 
 # test: getting the model to generate parallel tool calls (streaming/not)
 
-# test: providing parallel tool calls back to the model to get a response (streaming/not)
+# test: providing parallel tool calls back to the model to get a response
+# (streaming/not)
