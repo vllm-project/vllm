@@ -200,6 +200,8 @@ def input_mapper_for_fuyu(ctx: InputContext, data: object):
             image_patch[0]
             for image_patch in model_image_input["image_patches"]
         ])
+    else:
+        raise TypeError(f"Invalid image type: {type(data)}")
 
     # image has been processed with prompt in input processor
     return MultiModalInputs({"image_patches": data})
