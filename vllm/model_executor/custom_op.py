@@ -24,11 +24,13 @@ class CustomOp(nn.Module):
 
     def forward_compile(self, *args, **kwargs):
         """Runs a torch-compiled version of forward_native."""
-        if torch.utils.is_compiling():
+        if torch._utils.is_compiling():
             return self.forward_native(*args, **kwargs)
 
         if not self._is_compiled:
-            self._forward_compiled = torch.compile(self.forward_native)
+            options = {"cpp_wrapper": True} if is_cpu() else None
+            self._forward_compiled = torch.compile(
+                self.forward_native, options=options)
             self._is_compiled = True
         return self._forward_compiled(*args, **kwargs)
 
@@ -38,10 +40,7 @@ class CustomOp(nn.Module):
         By default, we use torch.compile to optimize the op. However, we can
         override this method to use a custom CUDA implementation if needed.
         """
-        if torch.utils.is_compiling():
-            return self.forward_native(*args, **kwargs)
-        else:
-            return self.forward_compile(*args, **kwargs)
+        return self.forward_compile(*args, **kwargs)
 
     def forward_hip(self, *args, **kwargs):
         """Forward method for AMD GPUs.
