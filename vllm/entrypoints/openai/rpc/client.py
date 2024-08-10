@@ -55,7 +55,7 @@ class AsyncEngineRPCClient:
             if socket_from in events:
                 msg = await socket_from.recv_multipart()
                 await socket_to.send_multipart(msg)
-            elif socket_to in events:
+            if socket_to in events:
                 msg = await socket_to.recv_multipart()
                 await socket_from.send_multipart(msg)
 
