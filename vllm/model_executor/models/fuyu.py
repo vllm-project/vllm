@@ -62,9 +62,6 @@ class FuyuImagePixelInputs(TypedDict):
     """
 
 
-FuyuImageInputs = FuyuImagePixelInputs
-
-
 def _calculate_num_image_tokens(
     height: int,
     width: int,
@@ -237,7 +234,8 @@ class FuyuForCausalLM(nn.Module, SupportsVision):
                                                    cache_config=cache_config,
                                                    quant_config=quant_config)
 
-    def _parse_and_validate_image_input(self, **kwargs: object):
+    def _parse_and_validate_image_input(
+            self, **kwargs: object) -> Optional[FuyuImagePixelInputs]:
         image_patches = kwargs.pop("image_patches", None)
 
         if isinstance(image_patches, torch.Tensor):
@@ -252,8 +250,8 @@ class FuyuForCausalLM(nn.Module, SupportsVision):
                                         data=image_patches)
         return None
 
-    def _process_image_input(self,
-                             image_input: FuyuImageInputs) -> torch.Tensor:
+    def _process_image_input(
+            self, image_input: FuyuImagePixelInputs) -> torch.Tensor:
 
         assert self.vision_embed_tokens is not None
         vision_embeddings, _ = self.vision_embed_tokens(image_input["data"])
