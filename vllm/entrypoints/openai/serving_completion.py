@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import time
 from typing import (AsyncGenerator, AsyncIterator, Callable, Dict, List,
                     Optional)
@@ -8,6 +9,7 @@ from typing import Tuple, cast
 from fastapi import Request
 from transformers import PreTrainedTokenizer
 
+from vllm import SamplingParams
 from vllm.config import ModelConfig
 from vllm.engine.protocol import AsyncEngineClient
 from vllm.entrypoints.logger import RequestLogger
@@ -29,6 +31,10 @@ from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
+# yapf: disable
+from vllm.transformers_utils.detokenizer import (
+    IncrementalDetokenizer, decode_prompt_logprobs_inplace)
+# yapf: enable
 from vllm.utils import merge_async_iterators, random_uuid
 
 logger = init_logger(__name__)
@@ -106,18 +112,26 @@ class OpenAIServingCompletion(OpenAIServing):
                     add_special_tokens=request.add_special_tokens,
                 ))
 
+            sampling_params = request.to_sampling_params(
+                tokenizer, guided_decode_logits_processor)
+
+            if not sampling_params.stop:
+                sampling_params.detokenize = False
+
             for i, prompt_inputs in enumerate(prompts):
-                sampling_params = request.to_sampling_params(
-                    tokenizer,
-                    guided_decode_logits_processor,
-                    default_max_tokens=self.max_model_len -
-                    len(prompt_inputs["prompt_token_ids"]))
+                req_sampling_params = sampling_params
+                if request.max_tokens is None:
+                    if i != len(prompts) - 1:
+                        req_sampling_params = copy.copy(req_sampling_params)
+                    req_sampling_params.max_tokens = (
+                        self.max_model_len -
+                        len(prompt_inputs["prompt_token_ids"]))
 
                 request_id_item = f"{request_id}-{i}"
 
                 self._log_inputs(request_id_item,
                                  prompt_inputs,
-                                 params=sampling_params,
+                                 params=req_sampling_params,
                                  lora_request=lora_request,
                                  prompt_adapter_request=prompt_adapter_request)
 
@@ -132,7 +146,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
                 generator = self.async_engine_client.generate(
                     {"prompt_token_ids": prompt_inputs["prompt_token_ids"]},
-                    sampling_params,
+                    req_sampling_params,
                     request_id_item,
                     lora_request=lora_request,
                     prompt_adapter_request=prompt_adapter_request,
@@ -157,13 +171,15 @@ class OpenAIServingCompletion(OpenAIServing):
 
         # Streaming response
         if stream:
-            return self.completion_stream_generator(request,
-                                                    result_generator,
-                                                    request_id,
-                                                    created_time,
-                                                    model_name,
-                                                    num_prompts=len(prompts),
-                                                    tokenizer=tokenizer)
+            return self.completion_stream_generator(
+                request,
+                result_generator,
+                request_id,
+                created_time,
+                model_name,
+                num_prompts=len(prompts),
+                sampling_params=sampling_params,
+                tokenizer=tokenizer)
 
         # Non-streaming response
         final_res_batch: List[Optional[RequestOutput]] = [None] * len(prompts)
@@ -189,7 +205,8 @@ class OpenAIServingCompletion(OpenAIServing):
                 request_id,
                 created_time,
                 model_name,
-                tokenizer,
+                sampling_params=sampling_params,
+                tokenizer=tokenizer,
             )
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
@@ -218,12 +235,18 @@ class OpenAIServingCompletion(OpenAIServing):
         created_time: int,
         model_name: str,
         num_prompts: int,
+        sampling_params: SamplingParams,
         tokenizer: PreTrainedTokenizer,
     ) -> AsyncGenerator[str, None]:
         num_choices = 1 if request.n is None else request.n
-        previous_texts = [""] * num_choices * num_prompts
-        previous_num_tokens = [0] * num_choices * num_prompts
-        has_echoed = [False] * num_choices * num_prompts
+        num_seqs = num_choices * num_prompts
+        previous_texts = [""] * num_seqs
+        previous_num_tokens = [0] * num_seqs
+        has_echoed = [False] * num_seqs
+
+        detokenizers = None if sampling_params.detokenize else [
+            IncrementalDetokenizer() for _ in range(num_seqs)
+        ]
 
         try:
             async for prompt_idx, res in result_generator:
@@ -232,6 +255,16 @@ class OpenAIServingCompletion(OpenAIServing):
                     i = output.index + prompt_idx * num_choices
                     # TODO(simon): optimize the performance by avoiding full
                     # text O(n^2) sending.
+
+                    if detokenizers is None:
+                        new_text = output.text[len(previous_texts[i]):]
+                    else:
+                        new_text = detokenizers[i].decode_sequence_inplace(
+                            output.token_ids,
+                            output.logprobs,
+                            sampling_params,
+                            tokenizer,
+                        )
 
                     assert request.max_tokens is not None
                     if request.echo and request.max_tokens == 0:
@@ -243,15 +276,24 @@ class OpenAIServingCompletion(OpenAIServing):
                     elif (request.echo and request.max_tokens > 0
                           and not has_echoed[i]):
                         # echo the prompt and first token
-                        delta_text = res.prompt + output.text
+                        delta_text = res.prompt + new_text
                         delta_token_ids = (res.prompt_token_ids +
-                                           output.token_ids)
+                                           list(output.token_ids))
+                        if res.prompt_logprobs and (
+                                not sampling_params.detokenize):
+                            decode_prompt_logprobs_inplace(
+                                res.prompt_token_ids,
+                                res.prompt_logprobs,
+                                position_offset=0,
+                                params=sampling_params,
+                                tokenizer=tokenizer)
+
                         out_logprobs = res.prompt_logprobs + (output.logprobs
                                                               or [])
                         has_echoed[i] = True
                     else:
                         # return just the delta
-                        delta_text = output.text[len(previous_texts[i]):]
+                        delta_text = new_text
                         delta_token_ids = output.token_ids[
                             previous_num_tokens[i]:]
                         out_logprobs = output.logprobs[previous_num_tokens[
@@ -333,6 +375,7 @@ class OpenAIServingCompletion(OpenAIServing):
         request_id: str,
         created_time: int,
         model_name: str,
+        sampling_params: SamplingParams,
         tokenizer: PreTrainedTokenizer,
     ) -> CompletionResponse:
         choices: List[CompletionResponseChoice] = []
@@ -344,21 +387,35 @@ class OpenAIServingCompletion(OpenAIServing):
             prompt_logprobs = final_res.prompt_logprobs
             prompt_text = final_res.prompt
 
+            if prompt_logprobs and (not sampling_params.detokenize):
+                decode_prompt_logprobs_inplace(prompt_token_ids,
+                                               prompt_logprobs,
+                                               position_offset=0,
+                                               params=sampling_params,
+                                               tokenizer=tokenizer)
+
             for output in final_res.outputs:
                 assert request.max_tokens is not None
                 if request.echo and request.max_tokens == 0:
                     token_ids = prompt_token_ids
                     out_logprobs = prompt_logprobs
                     output_text = prompt_text
-                elif request.echo and request.max_tokens > 0:
-                    token_ids = prompt_token_ids + list(output.token_ids)
-                    out_logprobs = (prompt_logprobs + output.logprobs
-                                    if request.logprobs is not None else None)
-                    output_text = prompt_text + output.text
                 else:
                     token_ids = output.token_ids
                     out_logprobs = output.logprobs
-                    output_text = output.text
+                    if sampling_params.detokenize:
+                        output_text = output.text
+                    else:
+                        output_text = tokenizer.decode(
+                            token_ids,
+                            skip_special_tokens=sampling_params.
+                            skip_special_tokens,
+                        )
+                    if request.echo and request.max_tokens > 0:
+                        token_ids = prompt_token_ids + list(token_ids)
+                        out_logprobs = (prompt_logprobs + out_logprobs if
+                                        request.logprobs is not None else None)
+                        output_text = prompt_text + output_text
 
                 if request.logprobs is not None:
                     assert out_logprobs is not None, "Did not output logprobs"

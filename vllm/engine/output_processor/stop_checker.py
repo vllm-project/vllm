@@ -1,4 +1,4 @@
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 from transformers import PreTrainedTokenizer
 
@@ -69,9 +69,12 @@ class StopChecker:
             return
 
         # Check if any stop strings are matched.
-        stop_str = self._check_stop_strings(seq, new_char_count,
-                                            sampling_params)
-        if stop_str is not None:
+        stop = self.check_stop_strings(seq.output_text, new_char_count,
+                                       sampling_params)
+        if stop is not None:
+            stop_str, truncate_to = stop
+            if truncate_to != -1:
+                seq.output_text = seq.output_text[:truncate_to]
             seq.status = SequenceStatus.FINISHED_STOPPED
             seq.stop_reason = stop_str
             return
@@ -87,8 +90,9 @@ class StopChecker:
             return
 
     @staticmethod
-    def _check_stop_strings(seq: Sequence, new_char_count: int,
-                            sampling_params: SamplingParams) -> Optional[str]:
+    def check_stop_strings(
+            output_text: str, new_char_count: int,
+            sampling_params: SamplingParams) -> Optional[Tuple[str, int]]:
         """Check if any stop strings are matched and truncate sequence
         output text accordingly.
 
@@ -100,20 +104,21 @@ class StopChecker:
         for stop_str in sampling_params.stop:
             stop_string_len = len(stop_str)
             # Avoid searching already-searched text.
-            stop_index = seq.output_text.find(
-                stop_str, -new_char_count - stop_string_len)
+            stop_index = output_text.find(stop_str,
+                                          -new_char_count - stop_string_len)
             if stop_index == -1:
                 continue
 
             if sampling_params.include_stop_str_in_output:
                 # Truncate to end of stop string.
                 stop_index += stop_string_len
-                if stop_index >= len(seq.output_text):
+                if stop_index >= len(output_text):
                     # No truncation required.
-                    return stop_str
+                    return stop_str, -1
 
             # Truncate the output text to either the beginning
             # or end of the stop string.
-            seq.output_text = seq.output_text[:stop_index]
-            return stop_str
+            return stop_str, stop_index
         return None
+
+        #seq.output_text = seq.output_text[:stop_index]

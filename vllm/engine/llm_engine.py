@@ -42,7 +42,6 @@ from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
 from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
 from vllm.transformers_utils.config import try_get_generation_config
-from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer_group import (
     AnyTokenizer, BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
@@ -244,10 +243,8 @@ class LLMEngine:
 
         if not self.model_config.skip_tokenizer_init:
             self.tokenizer = self._init_tokenizer()
-            self.detokenizer = Detokenizer(self.tokenizer)
         else:
             self.tokenizer = None
-            self.detokenizer = None
 
         self.seq_counter = Counter()
         self.generation_config_fields = _load_generation_config_dict(
@@ -353,7 +350,7 @@ class LLMEngine:
         self.output_processor = (
             SequenceGroupOutputProcessor.create_output_processor(
                 self.scheduler_config,
-                self.detokenizer,
+                self.tokenizer,
                 self.scheduler,
                 self.seq_counter,
                 self.get_tokenizer_for_seq,

@@ -11,7 +11,7 @@ from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (Sequence, SequenceGroup, SequenceGroupOutput,
                            SequenceOutput, SequenceStatus)
-from vllm.transformers_utils.detokenizer import Detokenizer
+from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.utils import Counter
 
 logger = init_logger(__name__)
@@ -33,13 +33,13 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
 
     def __init__(
         self,
-        detokenizer: Detokenizer,
+        tokenizer_group: BaseTokenizerGroup,
         scheduler: List[Scheduler],
         seq_counter: Counter,
         get_tokenizer_for_seq: Callable[[Sequence], PreTrainedTokenizer],
         stop_checker: StopChecker,
     ):
-        self.detokenizer = detokenizer
+        self.tokenizer_group = tokenizer_group
         self.scheduler = scheduler
         self.seq_counter = seq_counter
         self.get_tokenizer_for_seq = get_tokenizer_for_seq
@@ -100,7 +100,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         remaining_tokens = sampling_params.max_tokens - (seq.get_output_len() +
                                                          len(output_token_ids))
         if remaining_tokens < 0:
-            valid_samples = valid_samples[:remaining_tokens]
+            #valid_samples = valid_samples[:remaining_tokens]
             output_token_ids = output_token_ids[:remaining_tokens]
 
         # Truncate any tokens after EOS. This is required as spec decode
@@ -114,7 +114,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             for i in range(len(output_token_ids)):
                 if output_token_ids[i] == eos_token_id:
                     output_token_ids = output_token_ids[:i + 1]
-                    valid_samples = valid_samples[:i + 1]
+                    #valid_samples = valid_samples[:i + 1]
                     break
 
         # Incrementally append tokens to the sequence, as if we had only one new
@@ -127,9 +127,11 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             )
 
             new_char_count = 0
-            if sampling_params.detokenize:
-                new_char_count = self.detokenizer.decode_sequence_inplace(
-                    seq, sampling_params)
+            if sampling_params.detokenize and self.tokenizer_group:
+                tokenizer = self.tokenizer_group.get_lora_tokenizer(
+                    seq.lora_request)
+                new_char_count = seq.decode_sequence_inplace(
+                    sampling_params, tokenizer)
 
             # TODO(sang): Support lora.
             self.stop_checker.maybe_stop_sequence(

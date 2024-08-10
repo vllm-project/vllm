@@ -7,9 +7,11 @@ from vllm.engine.output_processor.interfaces import (
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (Sequence, SequenceGroup, SequenceGroupOutput,
-                           SequenceOutput, SequenceStatus)
-from vllm.transformers_utils.detokenizer import Detokenizer
+from vllm.sequence import (CompletionSequenceGroupOutput, Sequence,
+                           SequenceGroup, SequenceGroupOutput, SequenceOutput,
+                           SequenceStatus)
+from vllm.transformers_utils.detokenizer import decode_prompt_logprobs_inplace
+from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.utils import Counter
 
 logger = init_logger(__name__)
@@ -32,13 +34,13 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
     def __init__(
         self,
         scheduler_config: SchedulerConfig,
-        detokenizer: Detokenizer,
+        tokenizer_group: BaseTokenizerGroup,
         scheduler: List[Scheduler],
         seq_counter: Counter,
         stop_checker: StopChecker,
     ):
         self.scheduler_config = scheduler_config
-        self.detokenizer = detokenizer
+        self.tokenizer_group = tokenizer_group
         self.scheduler = scheduler
         self.seq_counter = seq_counter
         self.stop_checker = stop_checker
@@ -55,9 +57,10 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                 ), f"{type(self)} does not support multiple outputs per step"
         return self._process_sequence_group_outputs(sequence_group, outputs[0])
 
-    def process_prompt_logprob(self, seq_group: SequenceGroup,
-                               outputs: List[SequenceGroupOutput]) -> None:
-        assert len(outputs) == 1, ("Single step should only has 1 output.")
+    def process_prompt_logprob(
+            self, seq_group: SequenceGroup,
+            outputs: List[CompletionSequenceGroupOutput]) -> None:
+        assert len(outputs) == 1, "Single step should only has 1 output."
         output = outputs[0]
         prompt_logprobs = output.prompt_logprobs
 
@@ -71,11 +74,17 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                 prompt_logprobs = [None] + prompt_logprobs
                 seq_group.prompt_logprobs = []
 
-            if seq_group.sampling_params.detokenize and self.detokenizer:
-                self.detokenizer.decode_prompt_logprobs_inplace(
-                    seq_group,
+            if seq_group.sampling_params.detokenize and self.tokenizer_group:
+                seq = seq_group.seqs[0]
+                tokenizer = self.tokenizer_group.get_lora_tokenizer(
+                    seq.lora_request)
+
+                decode_prompt_logprobs_inplace(
+                    seq.get_token_ids(),
                     prompt_logprobs,
-                    position_offset=len(seq_group.prompt_logprobs))
+                    position_offset=len(seq_group.prompt_logprobs),
+                    params=seq_group.sampling_params,
+                    tokenizer=tokenizer)
 
             seq_group.prompt_logprobs.extend(prompt_logprobs)
 
@@ -88,9 +97,11 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
             # only have one sequence
             seq = seq_group.seqs[0]
             seq.append_token_id(sample.output_token, sample.logprobs)
-            if sampling_params.detokenize and self.detokenizer:
-                new_char_count = self.detokenizer.decode_sequence_inplace(
-                    seq, sampling_params)
+            if sampling_params.detokenize and self.tokenizer_group:
+                tokenizer = self.tokenizer_group.get_lora_tokenizer(
+                    seq.lora_request)
+                new_char_count = seq.decode_sequence_inplace(
+                    sampling_params, tokenizer)
             else:
                 new_char_count = 0
             self.stop_checker.maybe_stop_sequence(
@@ -150,9 +161,11 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
             child_seqs.append((parent, parent))
 
         for seq, _ in child_seqs:
-            if sampling_params.detokenize and self.detokenizer:
-                new_char_count = self.detokenizer.decode_sequence_inplace(
-                    seq, sampling_params)
+            if sampling_params.detokenize and self.tokenizer_group:
+                tokenizer = self.tokenizer_group.get_lora_tokenizer(
+                    seq.lora_request)
+                new_char_count = seq.decode_sequence_inplace(
+                    sampling_params, tokenizer)
             else:
                 new_char_count = 0
             self.stop_checker.maybe_stop_sequence(

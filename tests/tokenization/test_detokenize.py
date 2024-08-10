@@ -3,10 +3,11 @@ from typing import Any, Dict, List, Optional
 import pytest
 from transformers import AutoTokenizer
 
-from vllm.sequence import Logprob, SamplingParams, Sequence, SequenceGroup
-from vllm.transformers_utils.detokenizer import (Detokenizer,
-                                                 detokenize_incrementally)
-from vllm.transformers_utils.tokenizer_group import get_tokenizer_group
+from vllm.sequence import Logprob, SamplingParams, Sequence
+from vllm.transformers_utils.detokenizer import (
+    decode_prompt_logprobs_inplace, detokenize_incrementally)
+from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
+                                                     get_tokenizer_group)
 
 TRUTH = [
     "Hello here, this is a simple test",
@@ -92,7 +93,7 @@ def test_decode_streaming(tokenizer_id, truth, with_prompt,
 
 
 @pytest.fixture
-def detokenizer(tokenizer_name: str) -> Detokenizer:
+def tokenizer_group(tokenizer_name: str) -> BaseTokenizerGroup:
     init_kwargs = dict(
         tokenizer_id=tokenizer_name,
         enable_lora=False,
@@ -108,7 +109,7 @@ def detokenizer(tokenizer_name: str) -> Detokenizer:
         **init_kwargs,
     )
 
-    return Detokenizer(tokenizer_group)
+    return tokenizer_group
 
 
 @pytest.fixture(name="complete_sequence_token_ids")
@@ -153,7 +154,7 @@ def create_dummy_prompt_logprobs(
 @pytest.mark.parametrize("skip_special_tokens", [True, False])
 def test_decode_sequence_logprobs(complete_sequence: str,
                                   complete_sequence_token_ids: List[int],
-                                  detokenizer: Detokenizer,
+                                  tokenizer_group: BaseTokenizerGroup,
                                   skip_special_tokens: bool):
     """Verify Detokenizer decodes logprobs correctly."""
     sampling_params = SamplingParams(skip_special_tokens=skip_special_tokens,
@@ -167,7 +168,9 @@ def test_decode_sequence_logprobs(complete_sequence: str,
     for new_token, logprobs in zip(complete_sequence_token_ids,
                                    dummy_logprobs):
         seq.append_token_id(new_token, logprobs)
-        detokenizer.decode_sequence_inplace(seq, sampling_params)
+
+        tokenizer = tokenizer_group.get_lora_tokenizer(seq.lora_request)
+        seq.decode_sequence_inplace(sampling_params, tokenizer)
         sequential_logprobs_text_chosen_token.append(
             seq.output_logprobs[-1][new_token].decoded_token)
         sequential_logprobs_text_other_token.append(
@@ -187,28 +190,30 @@ def test_decode_sequence_logprobs(complete_sequence: str,
 @pytest.mark.parametrize("complete_sequence", TRUTH)
 @pytest.mark.parametrize("tokenizer_name", TOKENIZERS)
 def test_decode_prompt_logprobs(complete_sequence_token_ids: List[int],
-                                detokenizer: Detokenizer):
+                                tokenizer_group: BaseTokenizerGroup):
     """Verify Detokenizer decodes prompt logprobs correctly."""
     sampling_params = SamplingParams(skip_special_tokens=True,
                                      prompt_logprobs=1)
 
     # Run sequentially.
     seq = create_sequence(complete_sequence_token_ids)
-    seq_group = SequenceGroup(request_id="1",
-                              seqs=[seq],
-                              sampling_params=sampling_params,
-                              arrival_time=0.0)
+
     dummy_logprobs = create_dummy_prompt_logprobs(complete_sequence_token_ids)
-    detokenizer.decode_prompt_logprobs_inplace(seq_group,
-                                               dummy_logprobs,
-                                               position_offset=0)
+    tokenizer = tokenizer_group.get_lora_tokenizer(seq.lora_request)
+
+    decode_prompt_logprobs_inplace(seq.get_token_ids(),
+                                   dummy_logprobs,
+                                   position_offset=0,
+                                   params=sampling_params,
+                                   tokenizer=tokenizer)
+
     # First logprob is None.
     decoded_prompt_logprobs: List[Dict[int, Any]] = dummy_logprobs[
         1:]  # type: ignore
 
     # decoded_prompt_logprobs doesn't contain the first token.
     token_ids = complete_sequence_token_ids
-    tokenzier = detokenizer.get_tokenizer_for_seq(seq)
+    tokenzier = tokenizer_group.get_lora_tokenizer(seq.lora_request)
     text_full = tokenzier.decode(token_ids, skip_special_tokens=True)
     text_first = tokenzier.decode(token_ids[0], skip_special_tokens=True)
     text = text_full[len(text_first):]

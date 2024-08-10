@@ -7,7 +7,7 @@ from vllm.config import SchedulerConfig
 from vllm.core.scheduler import Scheduler
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.sequence import Sequence, SequenceGroup, SequenceGroupOutput
-from vllm.transformers_utils.detokenizer import Detokenizer
+from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.utils import Counter
 
 
@@ -26,7 +26,7 @@ class SequenceGroupOutputProcessor(ABC):
     @staticmethod
     def create_output_processor(
         scheduler_config: SchedulerConfig,
-        detokenizer: Detokenizer,
+        tokenizer_group: BaseTokenizerGroup,
         scheduler: List[Scheduler],
         seq_counter: Counter,
         get_tokenizer_for_seq: Callable[[Sequence], PreTrainedTokenizer],
@@ -43,7 +43,7 @@ class SequenceGroupOutputProcessor(ABC):
                 SingleStepOutputProcessor)
             return SingleStepOutputProcessor(
                 scheduler_config,
-                detokenizer,
+                tokenizer_group,
                 scheduler,
                 seq_counter,
                 stop_checker,
@@ -53,7 +53,7 @@ class SequenceGroupOutputProcessor(ABC):
             from vllm.engine.output_processor.multi_step import (
                 MultiStepOutputProcessor)
             return MultiStepOutputProcessor(
-                detokenizer,
+                tokenizer_group,
                 scheduler,
                 seq_counter,
                 get_tokenizer_for_seq,

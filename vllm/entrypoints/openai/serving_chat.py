@@ -7,6 +7,7 @@ from typing import Union
 from fastapi import Request
 from transformers import PreTrainedTokenizer
 
+from vllm import SamplingParams
 from vllm.config import ModelConfig
 from vllm.engine.protocol import AsyncEngineClient
 from vllm.entrypoints.chat_utils import (ConversationMessage,
@@ -31,6 +32,7 @@ from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
+from vllm.transformers_utils.detokenizer import IncrementalDetokenizer
 from vllm.utils import iterate_with_cancellation, random_uuid
 
 logger = init_logger(__name__)
@@ -144,6 +146,9 @@ class OpenAIServingChat(OpenAIServing):
                 default_max_tokens=self.max_model_len -
                 len(prompt_inputs["prompt_token_ids"]))
 
+            if not sampling_params.stop:
+                sampling_params.detokenize = False
+
             self._log_inputs(request_id,
                              prompt_inputs,
                              params=sampling_params,
@@ -184,10 +189,12 @@ class OpenAIServingChat(OpenAIServing):
         # Streaming response
         if request.stream:
             return self.chat_completion_stream_generator(
-                request, result_generator, request_id, conversation, tokenizer)
+                request, result_generator, request_id, conversation,
+                sampling_params, tokenizer)
         try:
             return await self.chat_completion_full_generator(
-                request, result_generator, request_id, conversation, tokenizer)
+                request, result_generator, request_id, conversation,
+                sampling_params, tokenizer)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
@@ -204,6 +211,7 @@ class OpenAIServingChat(OpenAIServing):
         result_generator: AsyncIterator[RequestOutput],
         request_id: str,
         conversation: List[ConversationMessage],
+        sampling_params: SamplingParams,
         tokenizer: PreTrainedTokenizer,
     ) -> AsyncGenerator[str, None]:
         model_name = self.served_model_names[0]
@@ -216,6 +224,10 @@ class OpenAIServingChat(OpenAIServing):
         previous_texts = [""] * num_choices
         previous_num_tokens = [0] * num_choices
         finish_reason_sent = [False] * num_choices
+
+        detokenizers = None if sampling_params.detokenize else [
+            IncrementalDetokenizer() for _ in range(num_choices)
+        ]
 
         try:
             async for res in result_generator:
@@ -317,8 +329,17 @@ class OpenAIServingChat(OpenAIServing):
                     else:
                         logprobs = None
 
-                    delta_text = output.text[len(previous_texts[i]):]
-                    previous_texts[i] = output.text
+                    if detokenizers is None:
+                        delta_text = output.text[len(previous_texts[i]):]
+                        previous_texts[i] = output.text
+                    else:
+                        delta_text = detokenizers[i].decode_sequence_inplace(
+                            output.token_ids,
+                            output.logprobs,
+                            sampling_params,
+                            tokenizer,
+                        )
+
                     previous_num_tokens[i] = len(output.token_ids)
 
                     if request.tool_choice and type(
@@ -428,6 +449,7 @@ class OpenAIServingChat(OpenAIServing):
         result_generator: AsyncIterator[RequestOutput],
         request_id: str,
         conversation: List[ConversationMessage],
+        sampling_params: SamplingParams,
         tokenizer: PreTrainedTokenizer,
     ) -> Union[ErrorResponse, ChatCompletionResponse]:
 
@@ -461,6 +483,13 @@ class OpenAIServingChat(OpenAIServing):
             else:
                 logprobs = None
 
+            if sampling_params.detokenize:
+                output_text = output.text
+            else:
+                output_text = tokenizer.decode(
+                    token_ids,
+                    skip_special_tokens=sampling_params.skip_special_tokens)
+
             if request.tool_choice and type(
                     request.tool_choice) is ChatCompletionNamedToolChoiceParam:
                 message = ChatMessage(
@@ -469,10 +498,10 @@ class OpenAIServingChat(OpenAIServing):
                     tool_calls=[
                         ToolCall(function=FunctionCall(
                             name=request.tool_choice.function.name,
-                            arguments=output.text))
+                            arguments=output_text))
                     ])
             elif not request.tool_choice or request.tool_choice == "none":
-                message = ChatMessage(role=role, content=output.text)
+                message = ChatMessage(role=role, content=output_text)
 
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,

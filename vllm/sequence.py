@@ -9,12 +9,14 @@ from typing import (TYPE_CHECKING, Dict, List, Mapping, Optional, Set, Tuple,
                     Union, cast)
 
 import torch
+from transformers import PreTrainedTokenizer
 
 from vllm.inputs.parse import is_valid_encoder_decoder_llm_inputs
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
+from vllm.transformers_utils.detokenizer import IncrementalDetokenizer
 
 if TYPE_CHECKING:
     from vllm.inputs import LLMInputs
@@ -331,11 +333,7 @@ class Sequence:
         self.status = SequenceStatus.WAITING
         self.stop_reason: Union[int, str, None] = None
 
-        # Used for incremental detokenization
-        self.prefix_offset = 0
-        self.read_offset = 0
-        # Input + output tokens
-        self.tokens: Optional[List[str]] = None
+        self.detokenizer: Optional[IncrementalDetokenizer] = None
 
     @property
     def n_blocks(self) -> int:
@@ -482,6 +480,16 @@ class Sequence:
 
     def is_prefill(self) -> bool:
         return self.data.stage == SequenceStage.PREFILL
+
+    def decode_sequence_inplace(self, params: SamplingParams,
+                                tokenizer: PreTrainedTokenizer) -> int:
+        if self.detokenizer is None:
+            self.detokenizer = IncrementalDetokenizer()
+
+        new_text = self.detokenizer.decode_sequence_inplace(
+            self.get_token_ids(), self.output_logprobs, params, tokenizer)
+        self.output_text += new_text
+        return len(new_text)
 
     def __repr__(self) -> str:
         return (f"Sequence(seq_id={self.seq_id}, "
