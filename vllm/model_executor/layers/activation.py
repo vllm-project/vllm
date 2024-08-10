@@ -23,8 +23,8 @@ class SiluAndMul(CustomOp):
         return: (num_tokens, d) or (batch_size, seq_len, d)
     """
 
-    @staticmethod
-    def forward_static(x: torch.Tensor) -> torch.Tensor:
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        """PyTorch-native implementation equivalent to forward()."""
         d = x.shape[-1] // 2
         return F.silu(x[..., :d]) * x[..., d:]
 
@@ -45,13 +45,10 @@ class GeluAndMul(CustomOp):
         if approximate not in ("none", "tanh"):
             raise ValueError(f"Unknown approximate mode: {approximate}")
 
-    @staticmethod
-    def forward_static(x: torch.Tensor, approximate: str) -> torch.Tensor:
-        d = x.shape[-1] // 2
-        return F.gelu(x[..., :d], approximate=approximate) * x[..., d:]
-
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
-        return self.forward_static(x, self.approximate)
+        """PyTorch-native implementation equivalent to forward()."""
+        d = x.shape[-1] // 2
+        return F.gelu(x[..., :d], approximate=self.approximate) * x[..., d:]
 
     def extra_repr(self) -> str:
         return f'approximate={repr(self.approximate)}'
@@ -59,8 +56,8 @@ class GeluAndMul(CustomOp):
 
 class NewGELU(CustomOp):
 
-    @staticmethod
-    def forward_static(x: torch.Tensor) -> torch.Tensor:
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        """PyTorch-native implementation equivalent to forward()."""
         c = math.sqrt(2.0 / math.pi)
         return 0.5 * x * (1.0 + torch.tanh(c *
                                            (x + 0.044715 * torch.pow(x, 3.0))))
@@ -68,8 +65,8 @@ class NewGELU(CustomOp):
 
 class FastGELU(CustomOp):
 
-    @staticmethod
-    def forward_static(x: torch.Tensor) -> torch.Tensor:
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        """PyTorch-native implementation equivalent to forward()."""
         return 0.5 * x * (1.0 + torch.tanh(x * 0.7978845608 *
                                            (1.0 + 0.044715 * x * x)))
 
@@ -77,8 +74,8 @@ class FastGELU(CustomOp):
 class QuickGELU(CustomOp):
 
     # https://github.com/huggingface/transformers/blob/main/src/transformers/activations.py#L90
-    @staticmethod
-    def forward_static(x: torch.Tensor) -> torch.Tensor:
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        """PyTorch-native implementation equivalent to forward()."""
         return x * torch.sigmoid(1.702 * x)
 
 
@@ -87,12 +84,12 @@ class ReLUSquaredActivation(CustomOp):
     Applies the relu^2 activation introduced in https://arxiv.org/abs/2109.08668v2
     """
 
-    @staticmethod
-    def forward_static(x: torch.Tensor) -> torch.Tensor:
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        """PyTorch-native implementation equivalent to forward()."""
         return torch.square(F.relu(x))
 
 
-class ScaledActivation(nn.Module):
+class ScaledActivation(CustomOp):
     """An activation function with post-scale parameters.
 
     This is used for some quantization methods like AWQ.
@@ -120,7 +117,7 @@ class ScaledActivation(nn.Module):
             torch.empty(intermediate_size_per_partition, dtype=params_dtype))
         set_weight_attrs(self.scales, {"weight_loader": self.weight_loader})
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         return self.act(x) / self.scales
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):

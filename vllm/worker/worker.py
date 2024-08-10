@@ -117,6 +117,7 @@ class Worker(LocalOrDistributedWorkerBase):
         return self.model_config.is_embedding_model
 
     def init_device(self) -> None:
+        torch._dynamo.config.inline_inbuilt_nn_modules = True
         if self.device_config.device.type == "cuda":
             # torch.distributed.all_reduce does not free the input tensor until
             # the synchronization point. This causes the memory usage to grow

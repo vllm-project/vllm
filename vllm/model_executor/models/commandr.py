@@ -58,21 +58,15 @@ class LayerNorm(CustomOp):
         self.variance_epsilon = eps
         set_weight_attrs(self.weight, {"weight_loader": self.weight_loader})
 
-    @staticmethod
-    def forward_static(hidden_states, weight, variance_epsilon):
+    def forward_native(self, hidden_states, residuals=None):
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.to(torch.float32)
         mean = hidden_states.mean(-1, keepdim=True)
         variance = (hidden_states - mean).pow(2).mean(-1, keepdim=True)
         hidden_states = (hidden_states - mean) * torch.rsqrt(variance +
-                                                             variance_epsilon)
-        hidden_states = weight.to(torch.float32) * hidden_states
-        return hidden_states.to(input_dtype)
-
-    def forward_native(self, hidden_states, residuals=None):
-        hidden_states = self.forward_static(hidden_states, self.weight,
-                                            self.variance_epsilon)
-        return hidden_states, residuals
+                                                             self.variance_epsilon)
+        hidden_states = self.weight.to(torch.float32) * hidden_states
+        return hidden_states.to(input_dtype), residuals
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         tp_rank = get_tensor_model_parallel_rank()

@@ -23,12 +23,10 @@ class RMSNorm(CustomOp):
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
 
-    @staticmethod
-    def forward_static(
+    def forward_native(
+        self,
         x: torch.Tensor,
-        residual: Optional[torch.Tensor],
-        weight: torch.Tensor,
-        variance_epsilon: float,
+        residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """PyTorch-native implementation equivalent to forward()."""
         orig_dtype = x.dtype
@@ -38,20 +36,12 @@ class RMSNorm(CustomOp):
             residual = x.to(orig_dtype)
 
         variance = x.pow(2).mean(dim=-1, keepdim=True)
-        x = x * torch.rsqrt(variance + variance_epsilon)
-        x = x.to(orig_dtype) * weight
+        x = x * torch.rsqrt(variance + self.variance_epsilon)
+        x = x.to(orig_dtype) * self.weight
         if residual is None:
             return x
         else:
             return x, residual
-
-    def forward_native(
-        self,
-        x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        return self.forward_static(x, residual, self.weight,
-                                   self.variance_epsilon)
 
     def extra_repr(self) -> str:
         s = f"hidden_size={self.weight.data.size(0)}"
@@ -76,12 +66,10 @@ class GemmaRMSNorm(CustomOp):
         self.weight = nn.Parameter(torch.zeros(hidden_size))
         self.variance_epsilon = eps
 
-    @staticmethod
-    def forward_static(
+    def forward_native(
+        self,
         x: torch.Tensor,
-        residual: Optional[torch.Tensor],
-        weight: torch.Tensor,
-        variance_epsilon: float,
+        residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """PyTorch-native implementation equivalent to forward()."""
         orig_dtype = x.dtype
@@ -91,17 +79,9 @@ class GemmaRMSNorm(CustomOp):
 
         x = x.float()
         variance = x.pow(2).mean(dim=-1, keepdim=True)
-        x = x * torch.rsqrt(variance + variance_epsilon)
+        x = x * torch.rsqrt(variance + self.variance_epsilon)
         # Llama does x.to(float16) * w whilst Gemma is (x * w).to(float16)
         # See https://github.com/huggingface/transformers/pull/29402
-        x = x * (1.0 + weight.float())
+        x = x * (1.0 + self.weight.float())
         x = x.to(orig_dtype)
         return x if residual is None else (x, residual)
-
-    def forward_native(
-        self,
-        x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        return self.forward_static(x, residual, self.weight,
-                                   self.variance_epsilon)
