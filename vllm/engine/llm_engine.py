@@ -1241,9 +1241,19 @@ class LLMEngine:
             if request_output:
                 request_outputs.append(request_output)
         for seq_group in ignored_seq_groups:
-            if seq_group.sampling_params.output_kind == (
-                    RequestOutputKind.CUMULATIVE):
-                request_output = RequestOutputFactory.create(seq_group)
+            params = seq_group.sampling_params
+            if params is not None and params.output_kind == (
+                    RequestOutputKind.DELTA):
+                if not seq_group.is_finished():
+                    continue
+                # Ignored seq groups have no delta, but we must still return
+                # an "empty" RequestOutput when finished
+                for seq in seq_group.seqs:
+                    previous_output_lens[seq.seq_id] = (seq.get_output_len(),
+                                                        seq.output_text)
+            request_output = RequestOutputFactory.create(
+                seq_group, previous_output_lens)
+            if request_output:
                 request_outputs.append(request_output)
         return request_outputs
 
