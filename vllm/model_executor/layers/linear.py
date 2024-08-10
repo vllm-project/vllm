@@ -931,69 +931,50 @@ class CrossAttentionQKVParallelLinear(QKVParallelLinear):
                         (e.g. model.layers.0.qkv_proj)
     """
 
-    def __init__(self,
-                 hidden_size: int,
-                 head_size: int,
-                 total_num_heads: int,
-                 total_num_kv_heads: Optional[int] = None,
-                 bias: bool = True,
-                 skip_bias_add: bool = False,
-                 params_dtype: Optional[torch.dtype] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
-        self.hidden_size = hidden_size
-        self.head_size = head_size
-        self.total_num_heads = total_num_heads
-        if total_num_kv_heads is None:
-            total_num_kv_heads = total_num_heads
-        self.total_num_kv_heads = total_num_kv_heads
-        # Divide the weight matrix along the last dimension.
-        tp_size = get_tensor_model_parallel_world_size()
-        self.num_heads = divide(self.total_num_heads, tp_size)
-        if tp_size >= self.total_num_kv_heads:
-            self.num_kv_heads = 1
-            self.num_kv_head_replicas = divide(tp_size,
-                                               self.total_num_kv_heads)
-        else:
-            self.num_kv_heads = divide(self.total_num_kv_heads, tp_size)
-            self.num_kv_head_replicas = 1
-        input_size = self.hidden_size
-        output_size = (self.num_heads +
-                       2 * self.num_kv_heads) * tp_size * self.head_size
-        self.output_sizes = [
-            self.num_heads * self.head_size * tp_size,  # q_proj
-            self.num_kv_heads * self.head_size * tp_size,  # k_proj
-            self.num_kv_heads * self.head_size * tp_size,  # v_proj 
-        ]
-
-        super().__init__(input_size=input_size,
-                         output_size=output_size,
-                         bias=bias,
-                         gather_output=False,
-                         skip_bias_add=skip_bias_add,
-                         params_dtype=params_dtype,
-                         quant_config=quant_config,
-                         prefix=prefix)
-
     def forward(self, 
                 decoder_input_, 
                 encoder_input_ = None,
                 ):
-        bias = self.bias if not self.skip_bias_add else None
-
-
-
+        skip_bias_add = self.skip_bias_add
+        bias = self.bias
+        shard_size = self.num_heads * self.head_size
+        skip_cross_kvs = encoder_input_ is None
+                                  
         # Matrix multiply.
         assert self.quant_method is not None
-        output_parallel = self.quant_method.apply(self, input_, bias)
+        q_bias = bias[0:shard_size]
+        q_output_parallel = (
+            self.quant_method.apply(
+                _WeightWrapper(self.weight[0:shard_size,:]), 
+                decoder_input_, 
+                None if skip_bias_add else q_bias
+                )
+        )
+
+        kv_bias = bias[shard_size:]
+        kv_output_parallel = (None if skip_cross_kvs else
+            self.quant_method.apply(
+                _WeightWrapper(self.weight[shard_size:,:]), 
+                encoder_input_, 
+                None if skip_bias_add else kv_bias
+                )
+        )
 
         if self.gather_output:
             # All-gather across the partitions.
-            output = tensor_model_parallel_all_gather(output_parallel)
+            q_output = tensor_model_parallel_all_gather(q_output_parallel)
+            kv_output = (None if skip_cross_kvs else
+                         tensor_model_parallel_all_gather(kv_output_parallel))
         else:
-            output = output_parallel
-        output_bias = self.bias if self.skip_bias_add else None
-        return output, output_bias
+            q_output = q_output_parallel
+            kv_output = kv_output_parallel # None if skip_cross_kvs
+            
+        return (
+            q_output,
+            kv_output,
+            q_bias if skip_bias_add else None,
+            kv_bias if skip_bias_add else None,
+        )
 
 class RowParallelLinear(LinearBase):
     """Linear layer with row parallelism.
