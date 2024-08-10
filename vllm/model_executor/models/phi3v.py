@@ -538,6 +538,8 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
                 data=image_embeds,
             )
 
+        raise AssertionError("This line should be unreachable.")
+
     def _process_image_input(
         self,
         image_input: Phi3VImageInputs,

@@ -238,6 +238,8 @@ class LlavaForConditionalGeneration(nn.Module, SupportsVision):
                 data=image_embeds,
             )
 
+        raise AssertionError("This line should be unreachable.")
+
     def _select_image_features(self, image_features: torch.Tensor, *,
                                strategy: str) -> torch.Tensor:
         # Copied from https://github.com/huggingface/transformers/blob/39c3c0a72af6fbda5614dde02ff236069bb79827/src/transformers/models/llava/modeling_llava.py#L421  # noqa

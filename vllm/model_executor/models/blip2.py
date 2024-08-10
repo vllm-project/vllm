@@ -535,6 +535,8 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
                 data=image_embeds,
             )
 
+        raise AssertionError("This line should be unreachable.")
+
     def _image_pixels_to_features(self, vision_model: BlipVisionModel,
                                   pixel_values: torch.Tensor) -> torch.Tensor:
 

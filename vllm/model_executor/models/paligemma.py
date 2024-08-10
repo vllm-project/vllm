@@ -192,6 +192,8 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
                 data=image_embeds,
             )
 
+        raise AssertionError("This line should be unreachable.")
+
     def _image_pixels_to_features(
         self,
         vision_tower: SiglipVisionModel,
