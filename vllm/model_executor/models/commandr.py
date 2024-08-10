@@ -63,8 +63,8 @@ class LayerNorm(CustomOp):
         hidden_states = hidden_states.to(torch.float32)
         mean = hidden_states.mean(-1, keepdim=True)
         variance = (hidden_states - mean).pow(2).mean(-1, keepdim=True)
-        hidden_states = (hidden_states - mean) * torch.rsqrt(variance +
-                                                             self.variance_epsilon)
+        hidden_states = (hidden_states -
+                         mean) * torch.rsqrt(variance + self.variance_epsilon)
         hidden_states = self.weight.to(torch.float32) * hidden_states
         return hidden_states.to(input_dtype), residuals
 

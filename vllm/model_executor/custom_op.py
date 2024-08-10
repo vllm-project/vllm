@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 
-import vllm.envs as envs
 from vllm.utils import is_cpu, is_hip, is_tpu, is_xpu
 
 
