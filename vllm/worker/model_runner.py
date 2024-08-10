@@ -1371,16 +1371,26 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         # check if the current run is prefill
         is_prefill_run = prefill_meta is not None
         
-        # check if we can skip prefilling
-        # We can only skip during prefill phase in disaggregated decode instance
-        if any([
-            not is_prefill_run,
-            not dist_kv.IS_KV_DECODE_INSTANCE,
-            is_profile_run]):
+        # for disaggregated prefilling: allow bypassing model execution
+        bypass_model_exec = False
+        
+        # Recv kv cache for disaggregated prefill
+        # Skip model execution if all required KV cache are received
+        if all([
+            is_prefill_run,
+            dist_kv.IS_KV_DECODE_INSTANCE,
+            not is_profile_run]):
+            
+            hidden_or_intermediate_states, bypass = \
+                dist_kv.recv_kv_caches_and_hidden_states(
+                    model_executable,
+                    model_input,
+                    kv_caches,
+                )
+            if bypass:
+                bypass_model_exec = True
 
-            # model forwarding
-            # during forwarding the KV cache will be sent in prefill instance
-            # see vllm/attention/backends/flash_attn.py for sending impl
+        if not bypass_model_exec:
             hidden_or_intermediate_states = model_executable(
             input_ids=model_input.input_tokens,
             positions=model_input.input_positions,
@@ -1388,32 +1398,21 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             attn_metadata=model_input.attn_metadata,
             intermediate_tensors=intermediate_tensors,
             **MultiModalInputs.as_kwargs(multi_modal_kwargs,
-                                         device=self.device),
+                                            device=self.device),
             **seqlen_agnostic_kwargs)
+        
+        # Send KV cache for disaggregated prefill
+        if all([
+            is_prefill_run,
+            dist_kv.IS_KV_PREFILL_INSTANCE,
+            not is_profile_run]):
             
-            
-            if all([
-                is_prefill_run,
-                dist_kv.IS_KV_PREFILL_INSTANCE,
-                not is_profile_run]):
-                
-                # transfer KV cache and hidden state
-                dist_kv.buffer_kv_caches_send_and_listen_for_input_hash(
-                    model_executable,
-                    model_input,
-                    kv_caches,
-                    hidden_or_intermediate_states,
-                )
-                
-        else:
-            
-            # skip prefill, receive KV cache and hidden state
-            hidden_or_intermediate_states = \
-                dist_kv.send_input_hash_and_do_kv_caches_recv(
-                    model_executable,
-                    model_input,
-                    kv_caches,
-                )
+            dist_kv.send_kv_caches_and_hidden_states(
+                model_executable,
+                model_input,
+                kv_caches,
+                hidden_or_intermediate_states,
+            )
 
 
         # Compute the logits in the last pipeline stage.

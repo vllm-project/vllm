@@ -36,7 +36,7 @@ async def handle_request():
         async for _ in forward_request('http://localhost:8100/v1/completions', prefill_request):
             continue
 
-        print(f"Request {prefill_request} prefill done. proceeding to decode.")
+        print(f"Prefill done. proceeding to decode.")
         
         # return decode
         generator = forward_request('http://localhost:8200/v1/completions', original_request_data)
@@ -46,9 +46,10 @@ async def handle_request():
         return response
     
     except Exception as e:
-        exc_info = sys.exc_info()
-        print(e)
-        print("".join(traceback.format_exception(*exc_info)))
+        pass
+        # exc_info = sys.exc_info()
+        # print(e)
+        # print("".join(traceback.format_exception(*exc_info)))
 
 if __name__ == '__main__':
     app.run(port=8000)
