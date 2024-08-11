@@ -18,7 +18,7 @@ def get_cache_dir():
 def get_vllm_public_assets(filename: str) -> str:
     """
     Download an asset file from 
-    ``s3://vllm-public-assets/vision_model_images/``.
+    ``s3://vllm-public-assets``.
     and return the path to the downloaded file.
     """
     asset_directory = get_cache_dir() / "vllm_public_assets"
@@ -26,7 +26,7 @@ def get_vllm_public_assets(filename: str) -> str:
 
     asset_path = asset_directory / filename
     if not asset_path.exists():
-        base_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images"
+        base_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com"
 
         global_http_connection.download_file(f"{base_url}/{filename}",
                                              asset_path,
