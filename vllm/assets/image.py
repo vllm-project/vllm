@@ -11,7 +11,7 @@ from .base import get_cache_dir
 
 
 @lru_cache
-def get_air_example_data_2_asset(filename: str) -> Image.Image:
+def get_vllm_public_assets(filename: str) -> Image.Image:
     """
     Download and open an image from
     ``s3://vllm-public-assets/vision_model_images/``.
@@ -36,4 +36,4 @@ class ImageAsset:
 
     @property
     def pil_image(self) -> Image.Image:
-        return get_air_example_data_2_asset(f"{self.name}.jpg")
+        return get_vllm_public_assets(f"{self.name}.jpg")
