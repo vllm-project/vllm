@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import (Any, Awaitable, Iterable, List, Optional, Sequence, Tuple,
-                    Union, cast, final)
+                    Union, cast)
 
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -109,7 +109,7 @@ ChatCompletionMessageParam = Union[OpenAIChatCompletionSystemMessageParam,
                                    CustomChatCompletionMessageParam]
 
 
-@final  # So that it should be compatible with Dict[str, str]
+# TODO: Make fields ReadOnly once mypy supports it
 class TextConversationMessage(TypedDict):
     role: str
     content: str

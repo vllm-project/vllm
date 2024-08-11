@@ -1,7 +1,8 @@
 import asyncio
 import base64
 import time
-from typing import AsyncGenerator, AsyncIterator, List, Optional, Tuple, cast
+from typing import (AsyncGenerator, AsyncIterator, List, Optional, Tuple,
+                    Union, cast)
 
 import numpy as np
 from fastapi import Request
@@ -11,7 +12,8 @@ from vllm.engine.protocol import AsyncEngineClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (EmbeddingRequest,
                                               EmbeddingResponse,
-                                              EmbeddingResponseData, UsageInfo)
+                                              EmbeddingResponseData,
+                                              ErrorResponse, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.logger import init_logger
 from vllm.outputs import EmbeddingRequestOutput
@@ -71,8 +73,11 @@ class OpenAIServingEmbedding(OpenAIServing):
                          request_logger=request_logger)
         self._check_embedding_mode(model_config.embedding_mode)
 
-    async def create_embedding(self, request: EmbeddingRequest,
-                               raw_request: Request):
+    async def create_embedding(
+        self,
+        request: EmbeddingRequest,
+        raw_request: Optional[Request] = None
+    ) -> Union[ErrorResponse, EmbeddingResponse]:
         """Completion API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/embeddings/create
@@ -140,7 +145,9 @@ class OpenAIServingEmbedding(OpenAIServing):
 
         result_generator: AsyncIterator[Tuple[
             int, EmbeddingRequestOutput]] = merge_async_iterators(
-                *generators, is_cancelled=raw_request.is_disconnected)
+                *generators,
+                is_cancelled=raw_request.is_disconnected
+                if raw_request else None)
 
         # Non-streaming response
         final_res_batch: List[Optional[EmbeddingRequestOutput]]

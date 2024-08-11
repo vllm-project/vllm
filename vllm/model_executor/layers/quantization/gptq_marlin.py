@@ -136,8 +136,7 @@ class GPTQMarlinConfig(QuantizationConfig):
             return False
 
         return check_marlin_supported(quant_type=cls.TYPE_MAP[(num_bits, sym)],
-                                      group_size=group_size,
-                                      min_capability=cls.get_min_capability())
+                                      group_size=group_size)
 
 
 class GPTQMarlinLinearMethod(LinearMethodBase):
