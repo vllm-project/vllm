@@ -68,6 +68,16 @@ You can also build and install vLLM from source:
     $ cd vllm
     $ pip install -e .  # This may take 5-10 minutes.
 
+.. note::
+
+    vLLM can fully run only on Linux, but you can still build it on other systems (for example, macOS). This build is only for development purposes, allowing for imports and a more convenient dev environment. The binaries will not be compiled and not work on non-Linux systems. You can create such a build with the following commands:
+
+    .. code-block:: console
+
+        $ export VLLM_TARGET_DEVICE=empty
+        $ pip install -e .
+
+
 .. tip::
 
     Building from source requires quite a lot compilation. If you are building from source for multiple times, it is beneficial to cache the compilation results. For example, you can install `ccache <https://github.com/ccache/ccache>`_ via either `conda install ccache` or `apt install ccache` . As long as `which ccache` command can find the `ccache` binary, it will be used automatically by the build system. After the first build, the subsequent builds will be much faster.
