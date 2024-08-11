@@ -1335,5 +1335,5 @@ class Scheduler:
                                  budget.remaining_token_budget())
         if not enable_chunking and status == SequenceStatus.RUNNING:
             num_new_tokens = min(num_new_tokens,
-                                 budget.remaining_token_budget())        
+                                 budget.remaining_token_budget())
         return num_new_tokens
