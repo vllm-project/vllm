@@ -45,7 +45,6 @@ if TYPE_CHECKING:
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_TARGET_DEVICE: str = "cuda"
-    PLATFORM_AGNOSTIC_BUILD: bool = False
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
     VLLM_USE_PRECOMPILED: bool = False
@@ -84,10 +83,6 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # rocm, neuron, cpu, openvino]
     "VLLM_TARGET_DEVICE":
     lambda: os.getenv("VLLM_TARGET_DEVICE", "cuda"),
-
-    # Target device of vLLM, supporting [cuda (by default), rocm, neuron, cpu]
-    "PLATFORM_AGNOSTIC_BUILD":
-    lambda: bool(os.environ.get("PLATFORM_AGNOSTIC_BUILD", False)),
 
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs
