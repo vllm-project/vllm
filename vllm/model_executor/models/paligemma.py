@@ -40,6 +40,10 @@ class PaliGemmaImagePixelInputs(TypedDict):
 class PaliGemmaImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
     data: torch.Tensor
+    """Shape: `(batch_size, image_feature_size, hidden_size)`
+
+    `hidden_size` must match the hidden size of language model backbone.
+    """
 
 
 PaliGemmaImageInputs = Union[PaliGemmaImagePixelInputs,

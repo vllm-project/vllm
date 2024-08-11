@@ -63,6 +63,10 @@ class LlavaNextImagePixelInputs(TypedDict):
 class LlavaNextImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
     data: torch.Tensor
+    """Shape: `(batch_size, image_feature_size, hidden_size)`
+
+    `hidden_size` must match the hidden size of language model backbone.
+    """
 
 
 LlavaNextImageInputs = Union[LlavaNextImagePixelInputs,

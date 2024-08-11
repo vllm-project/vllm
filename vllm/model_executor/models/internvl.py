@@ -53,6 +53,10 @@ class InternVLImagePixelInputs(TypedDict):
 class InternVLImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
     data: Union[torch.Tensor, List[torch.Tensor]]
+    """Shape: `(batch_size, image_feature_size, hidden_size)`
+
+    `hidden_size` must match the hidden size of language model backbone.
+    """
 
 
 InternVLImageInputs = Union[InternVLImagePixelInputs,
