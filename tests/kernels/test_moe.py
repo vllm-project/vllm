@@ -29,7 +29,7 @@ def torch_moe(a, w1, w2, score, topk):
             topk_weight.view(B, -1, 1).to(out.dtype)).sum(dim=1)
 
 
-@pytest.mark.parametrize("m", [512, 222, 33, 1])
+@pytest.mark.parametrize("m", [1024 * 128, 512, 222, 33, 1])
 @pytest.mark.parametrize("n", [2048, 256, 1024])
 @pytest.mark.parametrize("k", [128, 511, 1024])
 @pytest.mark.parametrize("e", [8, 64])
@@ -77,8 +77,8 @@ def test_mixtral_moe(dtype: torch.dtype):
     for i in range(config.num_local_experts):
         weights = (hf_moe.experts[i].w1.weight.data,
                    hf_moe.experts[i].w3.weight.data)
-        vllm_moe.w13_weight[i][:] = torch.cat(weights, dim=0)
-        vllm_moe.w2_weight[i][:] = hf_moe.experts[i].w2.weight.data
+        vllm_moe.experts.w13_weight[i][:] = torch.cat(weights, dim=0)
+        vllm_moe.experts.w2_weight[i][:] = hf_moe.experts[i].w2.weight.data
 
     # Generate input batch of dimensions [batch_size, seq_len, hidden_dim]
     hf_inputs = torch.randn((1, 64, config.hidden_size)).to(dtype).to("cuda")

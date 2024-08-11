@@ -4,21 +4,29 @@ import math
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple, Type, Union
+from typing import Any, Callable, Dict, List, Optional, Type
 
 import safetensors.torch
 import torch
 from torch import nn
 
+from vllm.adapter_commons.models import (AdapterLRUCache, AdapterModel,
+                                         AdapterModelManager)
+from vllm.adapter_commons.utils import (add_adapter, deactivate_adapter,
+                                        get_adapter, list_adapters,
+                                        remove_adapter, set_adapter_mapping)
 from vllm.config import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import (BaseLayerWithLoRA,
                               LinearScalingRotaryEmbeddingWithLora,
                               LoRAMapping)
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
+from vllm.lora.punica import PunicaWrapper
 from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              parse_fine_tuned_lora_name, replace_submodule)
-from vllm.utils import LRUCache, is_pin_memory_available
+from vllm.model_executor.models.interfaces import SupportsLoRA
+from vllm.model_executor.models.utils import PPMissingLayer
+from vllm.utils import is_pin_memory_available
 
 logger = init_logger(__name__)
 
@@ -37,122 +45,13 @@ class LongContextLoRAContext:
     offsets_by_lora_id: Dict[int, int] = field(default_factory=dict)
 
 
-def convert_mapping(
-    mapping: LoRAMapping,
-    lora_index_to_id: List[Optional[int]],
-    max_loras: int,
-    vocab_size: int,
-    extra_vocab_size: int,
-    long_lora_context: Optional[LongContextLoRAContext] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
-           Optional[torch.Tensor], List[int]]:
-    """Converts LoRAMapping to index tensors.
-
-    Args:
-        mapping: LoRAMapping mapping rows in a batch to LoRA ids.
-        lora_index_to_id: List mapping LoRA ids to LoRA indices.
-        max_loras: Maximum number of LoRAs.
-        vocab_size: Model vocab size.
-        extra_vocab_size: Extra vocab size each LoRA can have.
-        long_lora_context: Passed if there are long context lora in a batch.
-
-    Returns:
-        A tuple of tensors:
-            base_indices: Tensor of shape [batch_size] mapping batch rows to
-                LoRA indices.
-            sampler_indices: Tensor of shape [batch_size] mapping requests to
-                LoRA indices for sampler. For generation, this will be the
-                same as base_indicies. For prefill, this will map requests
-                to LoRA indices.
-            sampler_indices_padded: Tensor of shape [batch_size] mapping
-                requests to LoRA indices for sampler with padding.
-                Same as sampler_indicies, but -1 is replaced with
-                max_loras.
-            embeddings_indices: Tensor of shape [2, batch_size] mapping
-                requests to embedding indices. First row is for embeddings
-                added by the LoRAs, second row is for the LoRA.lora_a
-                embeddings.
-            long_lora_indices: Tensor of shape [batch_size] mapping
-                requests to RoPE offsets and rot dims for long LoRAs.
-                None if long context lora doesn't exist.
-            indices_len: List of lengths of the above tensors.
-                Used to index into each tensor. It contains length for
-                (base_indices, sampler_indices, sampler_indices_padded,
-                embeddings_indices, long_lora_indices). If long_lora doesn't
-                exist, it only contains first 4 entries.
-    """
-    index_mapping_indices: List[int] = list(mapping.index_mapping).copy()
-    embedding_indices = index_mapping_indices.copy()
-    lora_indices = index_mapping_indices.copy()
-    long_lora_offsets: Optional[torch.Tensor] = None
-    if long_lora_context:
-        long_lora_offsets = torch.zeros(len(index_mapping_indices),
-                                        device="cuda",
-                                        dtype=torch.long)
-    prompt_mapping: List[int] = [
-        lora_index_to_id.index(x) if x > 0 else -1
-        for x in mapping.prompt_mapping
-    ]
-    lora_idx = None
-    for i in range(len(index_mapping_indices)):
-        # TODO index can be slow. optimize
-        lora_idx = (lora_index_to_id.index(index_mapping_indices[i])
-                    if index_mapping_indices[i] > 0 else -1)
-        embedding_indices[i] = lora_idx if index_mapping_indices[i] > 0 else 0
-        lora_indices[i] = lora_idx
-        if long_lora_context:
-            assert long_lora_offsets is not None
-            lora_offset: int = long_lora_context.offsets_by_lora_id.get(
-                index_mapping_indices[i], 0)
-            long_lora_offsets[i] = lora_offset
-
-    indices_list: List[Union[List[int], torch.Tensor]] = [
-        index_mapping_indices, lora_indices, embedding_indices
-    ]
-    if long_lora_context:
-        assert long_lora_offsets is not None
-        indices_list.append(long_lora_offsets)
-    indices = torch.tensor(indices_list, dtype=torch.long, device="cuda")
-    prompt_mapping_tensor = torch.tensor(prompt_mapping,
-                                         device="cuda",
-                                         dtype=torch.long)
-    embeddings_indices = torch.stack([
-        indices[2] * extra_vocab_size,
-        indices[2] * (vocab_size + extra_vocab_size)
-    ])
-    embeddings_indices[embeddings_indices == -1] = max_loras - 1
-    base_indices = indices[1]
-    sampler_indices = prompt_mapping_tensor
-    sampler_indices_padded = sampler_indices.clone()
-    sampler_indices_padded[sampler_indices_padded == -1] = max_loras - 1
-    sampler_indices_padded = (
-        torch.arange(
-            0, len(sampler_indices_padded), device="cuda", dtype=torch.long) +
-        (sampler_indices_padded * len(sampler_indices_padded)))
-    long_lora_indices = None
-    long_lora_indices_len: Optional[int] = None
-    if long_lora_context:
-        long_lora_indices = indices[3]
-        long_lora_indices_len = long_lora_indices.shape[-1]
-    # Contain length of indices tensors. Used to index into each tensor.
-    indices_len = [
-        base_indices.shape[-1], sampler_indices.shape[-1],
-        sampler_indices_padded.shape[-1], embeddings_indices.shape[-1]
-    ]
-    if long_lora_indices_len is not None:
-        indices_len.append(long_lora_indices_len)
-
-    return (base_indices, sampler_indices, sampler_indices_padded,
-            embeddings_indices, long_lora_indices, indices_len)
-
-
 def get_lora_id():
     global _GLOBAL_LORA_ID
     _GLOBAL_LORA_ID += 1
     return _GLOBAL_LORA_ID
 
 
-class LoRAModel:
+class LoRAModel(AdapterModel):
     """A LoRA fine-tuned model."""
 
     def __init__(
@@ -302,26 +201,55 @@ class LoRAModel:
                                                     "new_embeddings.bin")
         with open(lora_config_path) as f:
             config = json.load(f)
-        target_modules = config["target_modules"]
-        unexpected_modules = []
-        for module in target_modules:
-            # Compatible with more modules, such as:layers.11.self_attn.k_proj
-            part_name = module.split(".")[-1]
-            if part_name not in expected_lora_modules:
-                unexpected_modules.append(module)
-        # loaded lora's target modules must be a subset of expected_lora_modules
-
-        if unexpected_modules:
-            print(unexpected_modules, "modules")
-            raise ValueError(
-                f"While loading {lora_dir}, expected"
-                f" target modules in {expected_lora_modules}"
-                f" but received {unexpected_modules}."
-                f" Please verify that the loaded LoRA module is correct")
         if os.path.isfile(lora_tensor_path):
-            tensors = safetensors.torch.load_file(lora_tensor_path)
+            tensors: Dict[str, torch.Tensor] = {}
+            # Find unexpected modules.
+            # Use safetensor key as a source of truth to find expected modules.
+            # in peft if you have target_modules A, B, C and C does not exist
+            # in the model it won’t error and model will be trained with A, B
+            # loraified. C won’t exist in the safetensor but it will exist in
+            # the target_modules of the adapter_config.json.
+            unexpected_modules = []
+            with safetensors.safe_open(lora_tensor_path,
+                                       framework="pt") as f:  # type: ignore
+                for lora_module in f.keys():  # noqa
+                    module_name, _ = parse_fine_tuned_lora_name(lora_module)
+                    part_name = module_name.split(".")[-1]
+                    if part_name not in expected_lora_modules:
+                        unexpected_modules.append(module_name)
+                if unexpected_modules:
+                    raise ValueError(
+                        f"While loading {lora_dir}, expected"
+                        f" target modules in {expected_lora_modules}"
+                        f" but received {unexpected_modules}."
+                        f" Please verify that the loaded LoRA module is correct"
+                    )
+                # Load tensors if there are only expected modules.
+                for module in f.keys():  # noqa
+                    tensors[module] = f.get_tensor(module)
         elif os.path.isfile(lora_bin_file_path):
-            tensors = torch.load(lora_bin_file_path)
+            # When a bin file is provided, we rely on config to find unexpected
+            # modules.
+            unexpected_modules = []
+            target_modules = config["target_modules"]
+            for module in target_modules:
+                # Compatible with more modules,
+                # such as:layers.11.self_attn.k_proj
+                part_name = module.split(".")[-1]
+                if part_name not in expected_lora_modules:
+                    unexpected_modules.append(module)
+            # loaded lora's target modules must be a subset of
+            # expected_lora_modules. It is not reliable. See
+            # https://github.com/vllm-project/vllm/pull/5909. But there's no
+            # other better mechanism.
+            if unexpected_modules:
+                print(unexpected_modules, "modules")
+                raise ValueError(
+                    f"While loading {lora_dir}, expected"
+                    f" target modules in {expected_lora_modules}"
+                    f" but received {unexpected_modules}."
+                    f" Please verify that the loaded LoRA module is correct")
+            tensors = torch.load(lora_bin_file_path, map_location=device)
         else:
             raise ValueError(f"{lora_dir} doesn't contain tensors")
 
@@ -330,7 +258,8 @@ class LoRAModel:
             embeddings = safetensors.torch.load_file(
                 new_embeddings_tensor_path)
         elif os.path.isfile(new_embeddings_bin_file_path):
-            embeddings = torch.load(new_embeddings_bin_file_path)
+            embeddings = torch.load(new_embeddings_bin_file_path,
+                                    map_location=device)
 
         rank = config["r"]
         lora_alpha = config["lora_alpha"]
@@ -358,12 +287,12 @@ class LoRAModel:
         )
 
 
-class LoRAModelManager:
+class LoRAModelManager(AdapterModelManager):
     """A manager that manages multiple LoRA-fine-tuned models."""
 
     def __init__(
         self,
-        model: nn.Module,
+        model: SupportsLoRA,
         max_num_seqs: int,
         max_num_batched_tokens: int,
         vocab_size: int,
@@ -387,31 +316,13 @@ class LoRAModelManager:
         self.lora_index_to_id: List[Optional[int]] = [None] * self.lora_slots
         self.vocab_size = vocab_size
         self.long_lora_context: Optional[LongContextLoRAContext] = None
-        self.base_indices = torch.empty(self.max_num_batched_tokens,
-                                        dtype=torch.long,
-                                        device="cuda")
-        self.sampler_indices = torch.empty(self.max_num_batched_tokens,
-                                           dtype=torch.long,
-                                           device="cuda")
-        self.sampler_indices_padded = torch.empty(self.max_num_batched_tokens,
-                                                  dtype=torch.long,
-                                                  device="cuda")
-        self.embeddings_indices = torch.empty(2,
-                                              self.max_num_batched_tokens,
-                                              dtype=torch.long,
-                                              device="cuda")
-        self.long_lora_indices = torch.empty(self.max_num_batched_tokens,
-                                             dtype=torch.long,
-                                             device="cuda")
+        self.punica_wrapper = PunicaWrapper(max_num_batched_tokens,
+                                            max_batches=self.max_num_seqs,
+                                            device="cuda")
         # Scaling factor -> offset to the sin_cos_cache to it.
         # Used for long context lora.
         self.scaling_factor_to_offset: Dict[float, int] = {}
-        # 4 is the number of indicies tensors defined above
-        # base_indices, sampler_indices, sampler_indices_padded,
-        # embeddings_indices
-        self.indices_len: List[Optional[int]] = [None] * 4
-
-        self.model: nn.Module = model
+        super().__init__(model)
         if hasattr(self.model, "supported_lora_modules"):
             self.supported_lora_modules = copy.deepcopy(
                 self.model.supported_lora_modules)
@@ -423,12 +334,11 @@ class LoRAModelManager:
                 self.model.packed_modules_mapping)
         self.packed_modules: Dict[str, List[str]] = {}
         self.modules: Dict[str, "BaseLayerWithLoRA"] = {}
-        self._registered_loras: Dict[int, LoRAModel] = {}
         # Dict instead of a Set for compatibility with LRUCache.
-        self._active_loras: Dict[int, None] = {}
         self._last_mapping: Optional[LoRAMapping] = None
         self._create_lora_modules()
         self.model.lora_manager = self
+        self.adapter_type = 'LoRa'
 
     @property
     def capacity(self) -> int:
@@ -438,15 +348,16 @@ class LoRAModelManager:
     def lora_slots(self) -> int:
         return self.lora_config.max_loras
 
-    def __len__(self) -> int:
-        return len(self._registered_loras)
+    @property
+    def adapter_slots(self) -> int:
+        return self.lora_slots
 
-    def activate_lora(
+    def activate_adapter(
         self,
         lora_id: int,
     ) -> bool:
         """Move LoRA into a GPU buffer to be used in the forward pass."""
-        if lora_id in self._active_loras:
+        if lora_id in self._active_adapters:
             return False
         first_free_slot = next(
             ((i, lora_id) for i, lora_id in enumerate(self.lora_index_to_id)
@@ -454,8 +365,8 @@ class LoRAModelManager:
         if first_free_slot is None:
             raise ValueError("No free lora slots")
         index, _ = first_free_slot
-        self._active_loras[lora_id] = None
-        lora_model = self._registered_loras[lora_id]
+        self._active_adapters[lora_id] = None
+        lora_model = self._registered_adapters[lora_id]
         logger.debug("Activating LoRA. int id: %d, slot index: %d",
                      lora_model.id, index)
         self.lora_index_to_id[index] = lora_model.id
@@ -469,20 +380,12 @@ class LoRAModelManager:
                 module.reset_lora(index)
         return True
 
-    def _deactivate_lora(self, lora_id: int):
+    def _deactivate_adapter(self, lora_id: int):
         try:
             index = self.lora_index_to_id.index(lora_id)
             self.lora_index_to_id[index] = None
         except ValueError:
             pass
-
-    def deactivate_lora(self, lora_id: int) -> bool:
-        """Remove a LoRA from a GPU buffer."""
-        if lora_id in self._active_loras:
-            self._deactivate_lora(lora_id)
-            self._active_loras.pop(lora_id)
-            return True
-        return False
 
     def _set_long_lora_context(self, lora: LoRAModel):
         if self.long_lora_context is None:
@@ -499,76 +402,39 @@ class LoRAModelManager:
         if offsets:
             self.long_lora_context.offsets_by_lora_id[lora.id] = offsets
 
-    def _add_lora(self, lora: LoRAModel):
+    def _add_adapter(self, lora: LoRAModel):
         self._create_merged_loras_inplace(lora)
-        self._registered_loras[lora.id] = lora
+        self._registered_adapters[lora.id] = lora
         self._set_long_lora_context(lora)
 
-    def add_lora(self, lora: LoRAModel) -> bool:
-        """Add a LoRAModel to the manager CPU cache."""
-        logger.debug(
-            "Adding lora. Model id: %d, "
-            "int id: %d, "
-            "scaling factor: %s", lora.id, lora.id, lora.scaling_factor)
-        if lora.id not in self._registered_loras:
-            if len(self._registered_loras) >= self.capacity:
-                raise RuntimeError("No free LoRA slots.")
-            self._add_lora(lora)
-            return True
-        return False
+    def pin_adapter(self, lora_id: int) -> bool:
+        """Pin a LoRAModel in the manager cache."""
+        raise NotImplementedError(
+            "Pinning is not supported in LoRAModelManager."
+            "Use LRUCacheLoRAModelManager for pinning")  # type: ignore
 
-    def remove_lora(self, lora_id: int) -> bool:
-        """Remove a LoRAModel from the manager CPU cache."""
-        # TODO: should we check active lora?
-        self.deactivate_lora(lora_id)
-        if self.long_lora_context:
-            self.long_lora_context.offsets_by_lora_id.pop(lora_id, None)
-        return bool(self._registered_loras.pop(lora_id, None))
+    def _set_adapter_mapping(self, mapping: LoRAMapping) -> None:
+        # update lora states
+        self.punica_wrapper.update_metadata(
+            mapping,
+            self.lora_index_to_id,
+            self.lora_slots + 1,
+            self.vocab_size,
+            self.lora_config.lora_extra_vocab_size,
+            self.long_lora_context,
+        )
 
-    # TODO see if this can be vectorized
-    def _set_lora_mapping(self, mapping: LoRAMapping) -> None:
-        (base_indices, sampler_indices, sampler_indices_padded,
-         embeddings_indices, long_lora_offsets_tensor,
-         indices_len) = convert_mapping(mapping, self.lora_index_to_id,
-                                        self.lora_slots + 1, self.vocab_size,
-                                        self.lora_config.lora_extra_vocab_size,
-                                        self.long_lora_context)
-        self.base_indices[:base_indices.shape[0]].copy_(base_indices)
-        self.sampler_indices[:sampler_indices.shape[0]].copy_(sampler_indices)
-        self.sampler_indices_padded[:sampler_indices_padded.shape[0]].copy_(
-            sampler_indices_padded)
-        self.embeddings_indices[:embeddings_indices.
-                                shape[0], :embeddings_indices.shape[1]].copy_(
-                                    embeddings_indices)
-        if long_lora_offsets_tensor is not None:
-            self.long_lora_indices[:long_lora_offsets_tensor.shape[0]].copy_(
-                long_lora_offsets_tensor)
-        else:
-            self.long_lora_indices.zero_()
-        # Maintain the reference
-        self.indices_len[:] = indices_len
-
-    def set_lora_mapping(self, lora_mapping: LoRAMapping) -> None:
-        if self._last_mapping != lora_mapping:
-            self._set_lora_mapping(lora_mapping)
-        self._last_mapping = lora_mapping
-
-    def list_loras(self) -> Dict[int, LoRAModel]:
-        """List all registered LoRAModels."""
-        return dict(self._registered_loras)
-
-    def get_lora(self, lora_id: int) -> Optional[LoRAModel]:
-        return self._registered_loras.get(lora_id, None)
-
-    def remove_all_loras(self):
+    def remove_all_adapters(self):
         """Remove all LoRAModels from the manager."""
-        self._registered_loras.clear()
+        self._registered_adapters.clear()
         self.lora_index_to_id = [None] * self.lora_slots
-        self._active_loras.clear()
+        self._active_adapters.clear()
 
     def _create_lora_modules(self):
         for module_name, module in self.model.named_modules(
                 remove_duplicate=False):
+            if isinstance(module, PPMissingLayer):
+                continue
             if not self._match_target_modules(module_name):
                 continue
             parts = module_name.split(".")[-1]
@@ -596,10 +462,8 @@ class LoRAModelManager:
                                                 self.model.config))
             self.register_module(module_name, new_module)
             self._register_packed_modules(module_name)
-            new_module.set_mapping(self.base_indices, self.sampler_indices,
-                                   self.sampler_indices_padded,
-                                   self.embeddings_indices,
-                                   self.long_lora_indices, self.indices_len)
+            # All lora layers share the same punica_wrapper based on reference.
+            new_module.set_mapping(self.punica_wrapper)
 
     def register_module(self, module_name: str, module: "BaseLayerWithLoRA"):
         assert isinstance(module, BaseLayerWithLoRA)
@@ -708,18 +572,39 @@ class LoRAModelManager:
             lora_model.loras[module_name] = PackedLoRALayerWeights.pack(
                 replacement_loras)
 
+    def deactivate_adapter(self, adapter_id: int) -> bool:
+        return deactivate_adapter(adapter_id, self._active_adapters,
+                                  self._deactivate_adapter)
 
-class LoRALRUCache(LRUCache[LoRAModel]):
+    def add_adapter(self, adapter: LoRAModel) -> bool:
+        logger.debug(
+            "Adding lora. Model id: %d, "
+            "int id: %d, "
+            "scaling factor: %s", adapter.id, adapter.id,
+            adapter.scaling_factor)
+        return add_adapter(adapter, self._registered_adapters, self.capacity,
+                           self._add_adapter)
+
+    def set_adapter_mapping(self, mapping: LoRAMapping) -> None:
+        self._last_mapping = set_adapter_mapping(mapping, self._last_mapping,
+                                                 self._set_adapter_mapping)
+
+    def remove_adapter(self, adapter_id: int) -> bool:
+        return remove_adapter(adapter_id, self._registered_adapters,
+                              self.deactivate_adapter)
+
+    def list_adapters(self) -> Dict[int, Any]:
+        return list_adapters(self._registered_adapters)
+
+    def get_adapter(self, adapter_id: int) -> Optional[Any]:
+        return get_adapter(adapter_id, self._registered_adapters)
+
+
+class LoRALRUCache(AdapterLRUCache[LoRAModel]):
 
     def __init__(self, capacity: int, deactivate_lora_fn: Callable[[int],
                                                                    bool]):
-        super().__init__(capacity)
-        self.deactivate_lora_fn = deactivate_lora_fn
-
-    def _on_remove(self, key: int, value: LoRAModel):
-        logger.debug("Removing LoRA. int id: %d", key)
-        self.deactivate_lora_fn(key)
-        return super()._on_remove(key, value)
+        super().__init__(capacity, deactivate_lora_fn)
 
 
 class LRUCacheLoRAModelManager(LoRAModelManager):
@@ -735,47 +620,67 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
     ):
         super().__init__(model, max_num_seqs, max_num_batched_tokens,
                          vocab_size, lora_config)
-        self._registered_loras: LoRALRUCache = LoRALRUCache(
-            self.capacity, self.deactivate_lora)
-        self._active_loras: LoRALRUCache = LoRALRUCache(
-            self.lora_slots, self._deactivate_lora)
+        self._registered_adapters: LoRALRUCache = LoRALRUCache(
+            self.capacity, self.deactivate_adapter)
+        self._active_adapters: LoRALRUCache = LoRALRUCache(
+            self.lora_slots, self._deactivate_adapter)
 
-    def list_loras(self) -> Dict[int, LoRAModel]:
+    def list_adapters(self) -> Dict[int, LoRAModel]:
         """List all registered LoRAModels."""
-        return dict(self._registered_loras.cache)
+        return dict(self._registered_adapters.cache)
 
-    def add_lora(self, lora: LoRAModel) -> bool:
+    def add_adapter(self, lora: LoRAModel) -> bool:
         """Add a LoRAModel to the manager."""
         logger.debug(
             "Adding lora. Model id: %d, "
             "int id: %d, "
             "scaling factor: %s", lora.id, lora.id, lora.scaling_factor)
-        if lora.id not in self._registered_loras:
-            self._add_lora(lora)
+        if lora.id not in self._registered_adapters:
+            self._add_adapter(lora)
             was_added = True
         else:
             # We always touch to update the LRU cache order
-            self._registered_loras.touch(lora.id)
+            self._registered_adapters.touch(lora.id)
             was_added = False
         return was_added
 
-    def activate_lora(
+    def activate_adapter(
         self,
         lora_id: int,
     ) -> bool:
-        if lora_id not in self._active_loras and len(
-                self._active_loras) >= self.lora_slots:
-            self._active_loras.remove_oldest()
-        result = super().activate_lora(lora_id)
+        if lora_id not in self._active_adapters and len(
+                self._active_adapters) >= self.lora_slots:
+            self._active_adapters.remove_oldest()
+        result = super().activate_adapter(lora_id)
         # We always touch to update the LRU cache order
-        self._active_loras.touch(lora_id)
+        self._active_adapters.touch(lora_id)
         return result
 
-    def remove_oldest_lora(self) -> bool:
-        if len(self._registered_loras) > 0:
-            self._registered_loras.remove_oldest()
+    def remove_oldest_adapter(self) -> bool:
+        if len(self._registered_adapters) > 0:
+            self._registered_adapters.remove_oldest()
             return True
         return False
+
+    def pin_adapter(self, lora_id: int) -> bool:
+        """Pin a LoRAModel in the manager cache."""
+        self._pin_lora_in_cpu_cache(lora_id)
+        self._pin_lora_in_gpu_cache(lora_id)
+        return True
+
+    def _pin_lora_in_cpu_cache(self, lora_id: int):
+        try:
+            self._registered_adapters.pin(lora_id)
+        except ValueError as err:
+            raise ValueError("Pinning failed. "
+                             f"LoRA {lora_id} is not registered.") from err
+
+    def _pin_lora_in_gpu_cache(self, lora_id: int):
+        if lora_id not in self._active_adapters:
+            # move lora to gpu if not already active
+            self.activate_adapter(lora_id)
+
+        self._active_adapters.pin(lora_id)
 
 
 def create_lora_manager(

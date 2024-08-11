@@ -43,7 +43,8 @@ class AWQConfig(QuantizationConfig):
     def get_supported_act_dtypes(self) -> List[torch.dtype]:
         return [torch.half]
 
-    def get_min_capability(self) -> int:
+    @classmethod
+    def get_min_capability(cls) -> int:
         # The AWQ kernel only supports Turing or newer GPUs.
         return 75
 
@@ -62,8 +63,8 @@ class AWQConfig(QuantizationConfig):
         zero_point = cls.get_from_keys(config, ["zero_point"])
         return cls(weight_bits, group_size, zero_point)
 
-    def get_quant_method(
-            self, layer: torch.nn.Module) -> Optional["AWQLinearMethod"]:
+    def get_quant_method(self, layer: torch.nn.Module,
+                         prefix: str) -> Optional["AWQLinearMethod"]:
         if isinstance(layer, LinearBase):
             return AWQLinearMethod(self)
         return None

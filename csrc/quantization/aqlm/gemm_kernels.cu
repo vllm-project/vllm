@@ -18,7 +18,7 @@
 #include <cuda.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
-#include <torch/extension.h>
+#include <torch/all.h>
 #include <c10/cuda/CUDAStream.h>
 #include <c10/cuda/CUDAGuard.h>
 
@@ -272,8 +272,6 @@ __global__ void Code2x8Dequant(
     for (int j = 0; j < 8; j++) sh_code[8 * i + (j + lane) % 8] = dec;
   }
   __syncthreads();
-
-  float res = 0;
 
   int iters = (prob_k / 8 - 1) / (8 * 32) + 1;
   while (iters--) {

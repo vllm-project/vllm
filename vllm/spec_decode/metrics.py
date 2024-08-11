@@ -4,7 +4,8 @@ from typing import Callable, Optional
 
 import torch
 
-from vllm.model_executor.layers.rejection_sampler import RejectionSampler
+from vllm.model_executor.layers.spec_decode_base_sampler import (
+    SpecDecodeBaseSampler)
 from vllm.utils import is_pin_memory_available
 
 
@@ -46,15 +47,15 @@ Timer = Callable[[], float]
 
 
 class AsyncMetricsCollector:
-    """Class which copies rejection sampler metrics from the device to CPU on a
-    non-default Torch stream.
+    """Class which copies rejection/typical-acceptance sampler metrics
+    from the device to CPU on a non-default Torch stream.
     """
 
     def __init__(self,
-                 rejection_sampler: RejectionSampler,
+                 spec_decode_sampler: SpecDecodeBaseSampler,
                  timer: Optional[Timer] = None,
                  collect_interval_s: float = 5.0):
-        self._rejection_sampler = rejection_sampler
+        self.spec_decode_sampler = spec_decode_sampler
         self._timer = time.time if timer is None else timer
 
         self._rank: Optional[int] = None
@@ -95,7 +96,7 @@ class AsyncMetricsCollector:
         return None
 
     def _should_collect_rejsample_metrics(self, now: float) -> bool:
-        """Return whether or not this iteration should print rejection sampling
+        """Return whether or not this iteration should print sampling
         metrics.
         """
         if self._rank != 0:
@@ -107,8 +108,8 @@ class AsyncMetricsCollector:
         return True
 
     def _copy_rejsample_metrics_async(self) -> torch.cuda.Event:
-        """Copy rejection sampling metrics (number of accepted tokens, etc) to
-        CPU asynchronously.
+        """Copy rejection/typical-acceptance sampling metrics 
+        (number of accepted tokens, etc) to CPU asynchronously.
 
         Returns a CUDA event recording when the copy is complete.
         """
@@ -117,13 +118,14 @@ class AsyncMetricsCollector:
 
         with torch.cuda.stream(self._copy_stream):
             self._aggregate_num_accepted_tokens.copy_(
-                self._rejection_sampler.num_accepted_tokens, non_blocking=True)
+                self.spec_decode_sampler.num_accepted_tokens,
+                non_blocking=True)
             self._aggregate_num_emitted_tokens.copy_(
-                self._rejection_sampler.num_emitted_tokens, non_blocking=True)
+                self.spec_decode_sampler.num_emitted_tokens, non_blocking=True)
             # Number of draft tokens is calculated on CPU, so no copy is
             # required.
             self._aggregate_num_draft_tokens = (
-                self._rejection_sampler.num_draft_tokens)
+                self.spec_decode_sampler.num_draft_tokens)
 
         aggregate_metrics_ready = torch.cuda.Event()
         aggregate_metrics_ready.record(self._copy_stream)
@@ -143,6 +145,10 @@ class AsyncMetricsCollector:
         """
 
         ready_event.synchronize()
+
+        # update time of last collection
+        self._last_metrics_collect_time = self._timer()
+
         accepted_tokens = self._aggregate_num_accepted_tokens.item()
         emitted_tokens = self._aggregate_num_emitted_tokens.item()
         draft_tokens = self._aggregate_num_draft_tokens
