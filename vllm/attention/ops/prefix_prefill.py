@@ -2,20 +2,8 @@
 # https://github.com/ModelTC/lightllm/blob/main/lightllm/models/llama/triton_kernel/context_flashattention_nopad.py
 
 import torch
-
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
-
-try:
-    import triton
-    import triton.language as tl
-except ImportError as e:
-    logger.warning(
-        "Failed to import triton with %r. To enable vllm execution, "
-        "please install triton with `pip install triton` "
-        "(not available on macos)", e)
-    triton = type('triton', tuple(), {"__version__": "0.0.0"})()
+import triton
+import triton.language as tl
 
 from vllm.platforms import current_platform
 

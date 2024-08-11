@@ -21,34 +21,8 @@ Not currently supported:
 """
 
 import torch
-
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
-
-try:
-    import triton
-    import triton.language as tl
-except ImportError as e:
-    logger.warning(
-        "Failed to import triton with %r. To enable vllm execution, "
-        "please install triton with `pip install triton` "
-        "(not available on macos)", e)
-
-    def dummy_decorator(*args, **kwargs):
-        return args[0]
-
-    def dummy_callable(*args, **kwargs):
-        return None
-
-    triton = type(
-        "triton", tuple(), {
-            "jit": dummy_decorator,
-            "autotune": dummy_decorator,
-            "Config": dummy_callable,
-            "__call__": dummy_callable
-        })()
-    tl = type("tl", tuple(), {"constexpr": None})()
+import triton
+import triton.language as tl
 
 torch_dtype: tl.constexpr = torch.float16
 

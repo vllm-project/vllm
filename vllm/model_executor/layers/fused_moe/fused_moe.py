@@ -5,27 +5,14 @@ import os
 from typing import Any, Dict, Optional, Tuple
 
 import torch
+import triton
+import triton.language as tl
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
-
-try:
-    import triton
-    import triton.language as tl
-except ImportError as e:
-    logger.warning(
-        "Failed to import triton with %r. To enable vllm execution, "
-        "please install triton with `pip install triton` "
-        "(not available on macos)", e)
-
-    def dummy_decorator(*args, **kwargs):
-        return args[0]
-
-    triton = type("triton", tuple(), {"jit": dummy_decorator})()
-    tl = type("tl", tuple(), {"constexpr": None, "dtype": None})()
 
 
 @triton.jit
