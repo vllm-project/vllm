@@ -62,9 +62,10 @@ envs = load_module_from_path('envs', os.path.join(ROOT_DIR, 'vllm', 'envs.py'))
 VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE
 
 if not sys.platform.startswith("linux"):
-    logger.info(f"vLLM only supports Linux platform (including WSL). "
-                f"Building on {sys.platform}, "
-                f"so vLLM may not be able to run correctly",)
+    logger.warning(
+        "vLLM only supports Linux platform (including WSL). "
+        "Building on %s, "
+        "so vLLM may not be able to run correctly", sys.platform)
     VLLM_TARGET_DEVICE = "empty"
 
 MAIN_CUDA_VERSION = "12.1"
