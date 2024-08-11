@@ -265,7 +265,7 @@ def get_neuron_sdk_version(run_lambda):
 def get_vllm_version():
     try:
         import vllm
-        return vllm.__version__
+        return vllm.__version__ + "@" + vllm.__commit__
     except ImportError:
         return 'N/A'
 
