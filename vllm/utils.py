@@ -1135,3 +1135,24 @@ async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
     """Utility function to run async task in a lock"""
     async with lock:
         return await task(*args, **kwargs)
+
+
+def load_general_plugins():
+    import sys
+    if sys.version_info < (3, 10):
+        from importlib_metadata import entry_points
+    else:
+        from importlib.metadata import entry_points
+
+    allowed_plugins = envs.VLLM_GENERAL_PLUGINS
+
+    discovered_plugins = entry_points(group='vllm.general_plugins')
+    for plugin in discovered_plugins:
+        logger.info("Found general plugin: %s", plugin.value)
+        if allowed_plugins is None or plugin.value in allowed_plugins:
+            try:
+                plugin.load()
+                logger.info("Loaded general plugin: %s", plugin.value)
+            except Exception:
+                logger.exception("Failed to load general plugin: %s",
+                                 plugin.value)
