@@ -658,6 +658,10 @@ class QKVParallelLinear(ColumnParallelLinear):
             self.num_kv_heads * self.head_size * tp_size,  # v_proj 
         ]
 
+        # Remember the shape of each shard (Q,K,V)
+        # that is loaded into self.weights
+        self.shard_shape_dict: Dict[str, torch.Size] = {}
+
         super().__init__(input_size=input_size,
                          output_size=output_size,
                          bias=bias,
@@ -744,6 +748,10 @@ class QKVParallelLinear(ColumnParallelLinear):
                               shard_id=loaded_shard_id,
                               shard_offset=shard_offset,
                               shard_size=shard_size)
+
+        if loaded_shard_id is not None:
+            # Remember the shard shape
+            self.shard_shape_dict[loaded_shard_id] = param.shape
 
     def weight_loader(self,
                       param: Parameter,
@@ -897,6 +905,10 @@ class QKVParallelLinear(ColumnParallelLinear):
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
+        if loaded_shard_id is not None:
+            # Remember the shard shape
+            self.shard_shape_dict[loaded_shard_id] = param_data.shape
+
 
 class _WeightWrapper(torch.nn.Module):
 
@@ -931,20 +943,20 @@ class QCrossKVParallelLinear(QKVParallelLinear):
     ):
         skip_bias_add = self.skip_bias_add
         bias = self.bias
-        shard_size = self.num_heads * self.head_size
+        q_shard_size = self.shard_shape_dict['q'][0]
         skip_cross_kvs = encoder_input_ is None
 
         # Matrix multiply.
         assert self.quant_method is not None
-        q_bias = bias[0:shard_size]
+        q_bias = bias[0:q_shard_size]
         q_output_parallel = (self.quant_method.apply(
-            _WeightWrapper(self.weight[0:shard_size, :]), decoder_input_,
+            _WeightWrapper(self.weight[0:q_shard_size, :]), decoder_input_,
             None if skip_bias_add else q_bias))
 
-        kv_bias = bias[shard_size:]
+        kv_bias = bias[q_shard_size:]
         kv_output_parallel = (
             None if skip_cross_kvs else self.quant_method.apply(
-                _WeightWrapper(self.weight[shard_size:, :]), encoder_input_,
+                _WeightWrapper(self.weight[q_shard_size:, :]), encoder_input_,
                 None if skip_bias_add else kv_bias))
 
         if self.gather_output:
