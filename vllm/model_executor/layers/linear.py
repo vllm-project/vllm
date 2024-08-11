@@ -922,21 +922,6 @@ class QCrossKVParallelLinear(QKVParallelLinear):
     dimension. When the number of key/value heads is smaller than the number
     of query heads (e.g., multi-query/grouped-query attention), the key/value
     head may be replicated while the query heads are partitioned.
-
-    Args:
-        hidden_size: input hidden state size of the transformer.
-        head_size: size of each attention head.
-        total_num_heads: total number of attention query heads.
-        total_num_kv_heads: total number of attention key/value heads. If
-                            None, assume total_num_kv_heads = total_num_heads.
-        bias: If true, add bias.
-        skip_bias_add: This was added to enable performance optimizations where
-                       bias can be fused with other element-wise operations. we
-                       skip adding bias but instead return it.
-        params_dtype: Data type for the parameters.
-        quant_config: Quantization configure.
-        prefix: The name of the layer in the state dict, including all parents
-                        (e.g. model.layers.0.qkv_proj)
     """
 
     def forward(
