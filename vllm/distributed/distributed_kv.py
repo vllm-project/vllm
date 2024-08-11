@@ -314,7 +314,7 @@ class DistributedKVCoordinator(GroupCoordinator):
         # TODO: allow using other policies to handle buffer full
         while True:
             self.input_hash_to_kv_sending_requests_lock.acquire()
-            if len(self.input_hash_to_kv_sending_requests.keys()) > 55:
+            if len(self.input_hash_to_kv_sending_requests.keys()) > 40:
                 self.input_hash_to_kv_sending_requests_lock.release()
                 time.sleep(0.1)
             else:
@@ -452,6 +452,11 @@ def recv_kv_caches_and_hidden_states(
                 [num_tokens, model_executable.config.hidden_size]),
                                                 kv_cache[0].dtype,
                                                 is_hidden=True))
+    
+    if not bypass_model_exec:
+        # Some of the KV cache is not retrieved
+        # so we need to recompute the hidden state
+        return [], bypass_model_exec
 
     # concatenate hidden states from different requests
     if isinstance(hidden_or_intermediate_states_for_one_req[0], torch.Tensor):
