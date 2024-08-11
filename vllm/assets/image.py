@@ -1,33 +1,9 @@
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Literal
 
 from PIL import Image
 
-from vllm.connections import global_http_connection
-from vllm.envs import VLLM_IMAGE_FETCH_TIMEOUT
-
-from .base import get_cache_dir
-
-
-@lru_cache
-def get_vllm_public_assets(filename: str) -> Image.Image:
-    """
-    Download and open an image from
-    ``s3://vllm-public-assets/vision_model_images/``.
-    """
-    image_directory = get_cache_dir() / "vllm_public_assets"
-    image_directory.mkdir(parents=True, exist_ok=True)
-
-    image_path = image_directory / filename
-    if not image_path.exists():
-        base_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images"
-
-        global_http_connection.download_file(f"{base_url}/{filename}",
-                                             image_path,
-                                             timeout=VLLM_IMAGE_FETCH_TIMEOUT)
-
-    return Image.open(image_path)
+from vllm.assets.base import get_vllm_public_assets
 
 
 @dataclass(frozen=True)
@@ -36,4 +12,6 @@ class ImageAsset:
 
     @property
     def pil_image(self) -> Image.Image:
-        return get_vllm_public_assets(f"{self.name}.jpg")
+
+        image_path = get_vllm_public_assets(f"{self.name}.jpg")
+        return Image.open(image_path)
