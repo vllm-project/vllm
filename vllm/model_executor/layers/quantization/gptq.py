@@ -10,6 +10,7 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.utils import set_weight_attrs
 
 
@@ -24,10 +25,12 @@ class GPTQConfig(QuantizationConfig):
         weight_bits: int,
         group_size: int,
         desc_act: bool,
+        lm_head_quantized: bool,
     ) -> None:
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.desc_act = desc_act
+        self.lm_head_quantized = lm_head_quantized
         self.pack_factor = Fraction(32, self.weight_bits)
         if self.weight_bits not in [2, 3, 4, 8]:
             raise ValueError(
@@ -37,7 +40,8 @@ class GPTQConfig(QuantizationConfig):
     def __repr__(self) -> str:
         return (f"GPTQConfig(weight_bits={self.weight_bits}, "
                 f"group_size={self.group_size}, "
-                f"desc_act={self.desc_act})")
+                f"desc_act={self.desc_act}),"
+                f"lm_head_quantized={self.lm_head_quantized}")
 
     @classmethod
     def get_name(cls) -> str:
@@ -61,11 +65,14 @@ class GPTQConfig(QuantizationConfig):
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
         desc_act = cls.get_from_keys(config, ["desc_act"])
-        return cls(weight_bits, group_size, desc_act)
+        lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"],
+                                                 default=False)
+        return cls(weight_bits, group_size, desc_act, lm_head_quantized)
 
-    def get_quant_method(
-            self, layer: torch.nn.Module) -> Optional["GPTQLinearMethod"]:
-        if isinstance(layer, LinearBase):
+    def get_quant_method(self, layer: torch.nn.Module,
+                         prefix: str) -> Optional["GPTQLinearMethod"]:
+        if (isinstance(layer, LinearBase) or
+            (isinstance(layer, ParallelLMHead) and self.lm_head_quantized)):
             return GPTQLinearMethod(self)
         return None
 
@@ -197,13 +204,7 @@ class GPTQLinearMethod(LinearMethodBase):
 
         layer.exllama_state = exllama_state
 
-    def apply(self,
-              layer: torch.nn.Module,
-              x: torch.Tensor,
-              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        qweight = layer.qweight
-        out_shape = x.shape[:-1] + (qweight.shape[-1], )
-        reshaped_x = x.reshape(-1, x.shape[-1])
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # exllama needs to shuffle the weight after the weight is loaded
         # here we do the shuffle on first forward pass
         if layer.exllama_state == ExllamaState.UNINITIALIZED:
@@ -215,6 +216,14 @@ class GPTQLinearMethod(LinearMethodBase):
             layer.exllama_state = ExllamaState.READY
             ops.gptq_shuffle(layer.qweight, layer.g_idx,
                              self.quant_config.weight_bits)
+
+    def apply(self,
+              layer: torch.nn.Module,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        out_shape = x.shape[:-1] + (layer.qweight.shape[-1], )
+        reshaped_x = x.reshape(-1, x.shape[-1])
+
         output = ops.gptq_gemm(reshaped_x, layer.qweight, layer.qzeros,
                                layer.scales, layer.g_idx,
                                layer.exllama_state == ExllamaState.READY,

@@ -17,6 +17,8 @@ except ImportError as e:
         "(not available on macos)", e)
     triton = type('triton', tuple(), {"__version__": "0.0.0"})()
 
+from vllm.platforms import current_platform
+
 if triton.__version__ >= "2.1.0":
 
     @triton.jit
@@ -695,8 +697,14 @@ if triton.__version__ >= "2.1.0":
                               alibi_slopes=None,
                               sliding_window=None):
 
-        cap = torch.cuda.get_device_capability()
+        cap = current_platform.get_device_capability()
         BLOCK = 128 if cap[0] >= 8 else 64
+
+        # need to reduce num. blocks when using fp32
+        # due to increased use of GPU shared memory
+        if q.dtype is torch.float32:
+            BLOCK = BLOCK // 2
+
         # shape constraints
         Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
         assert Lq == Lk and Lk == Lv
@@ -728,7 +736,7 @@ if triton.__version__ >= "2.1.0":
                 b_ctx_len,
                 alibi_slopes,
                 v_cache.shape[3],
-                8,
+                k_cache.shape[4],
                 o,
                 b_loc.stride(0),
                 b_loc.stride(1),
@@ -778,7 +786,7 @@ if triton.__version__ >= "2.1.0":
             b_seq_len,
             b_ctx_len,
             v_cache.shape[3],
-            8,
+            k_cache.shape[4],
             o,
             b_loc.stride(0),
             b_loc.stride(1),

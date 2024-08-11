@@ -39,7 +39,8 @@ class SqueezeLLMConfig(QuantizationConfig):
     def get_supported_act_dtypes(self) -> List[torch.dtype]:
         return [torch.half]
 
-    def get_min_capability(self) -> int:
+    @classmethod
+    def get_min_capability(cls) -> int:
         return 70
 
     @staticmethod
@@ -51,8 +52,8 @@ class SqueezeLLMConfig(QuantizationConfig):
         weight_bits = cls.get_from_keys(config, ["wbits"])
         return cls(weight_bits)
 
-    def get_quant_method(
-            self, layer: torch.nn.Module) -> Optional[QuantizeMethodBase]:
+    def get_quant_method(self, layer: torch.nn.Module,
+                         prefix: str) -> Optional[QuantizeMethodBase]:
         if isinstance(layer, LinearBase):
             return SqueezeLLMLinearMethod(self)
         return None

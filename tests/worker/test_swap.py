@@ -39,8 +39,8 @@ def test_swap() -> None:
         num_cpu_blocks=engine_config.cache_config.num_cpu_blocks)
 
     # Randomly initialize the cache.
-    gpu_cache = worker.cache_engine.gpu_cache
-    cpu_cache = worker.cache_engine.cpu_cache
+    gpu_cache = worker.cache_engine[0].gpu_cache
+    cpu_cache = worker.cache_engine[0].cpu_cache
     num_layers = len(gpu_cache)
     for i in range(num_layers):
         gpu_key_cache, gpu_value_cache = gpu_cache[i]

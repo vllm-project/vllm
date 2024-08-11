@@ -1,14 +1,15 @@
 import asyncio
+from contextlib import suppress
 from dataclasses import dataclass
+from unittest.mock import MagicMock
 
-import pytest
-
+from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
+from vllm.transformers_utils.tokenizer import get_tokenizer
 
 MODEL_NAME = "openai-community/gpt2"
 CHAT_TEMPLATE = "Dummy chat template for testing {}"
-
-pytestmark = pytest.mark.openai
 
 
 @dataclass
@@ -36,11 +37,47 @@ async def _async_serving_chat_init():
                                            model_config,
                                            served_model_names=[MODEL_NAME],
                                            response_role="assistant",
-                                           chat_template=CHAT_TEMPLATE)
+                                           chat_template=CHAT_TEMPLATE,
+                                           lora_modules=None,
+                                           prompt_adapters=None,
+                                           request_logger=None)
     return serving_completion
 
 
 def test_async_serving_chat_init():
     serving_completion = asyncio.run(_async_serving_chat_init())
-    assert serving_completion.tokenizer is not None
-    assert serving_completion.tokenizer.chat_template == CHAT_TEMPLATE
+    assert serving_completion.chat_template == CHAT_TEMPLATE
+
+
+def test_serving_chat_should_set_correct_max_tokens():
+    mock_engine = MagicMock(spec=AsyncLLMEngine)
+    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
+
+    serving_chat = OpenAIServingChat(mock_engine,
+                                     MockModelConfig(),
+                                     served_model_names=[MODEL_NAME],
+                                     response_role="assistant",
+                                     chat_template=CHAT_TEMPLATE,
+                                     lora_modules=None,
+                                     prompt_adapters=None,
+                                     request_logger=None)
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{
+            "role": "user",
+            "content": "what is 1+1?"
+        }],
+        guided_decoding_backend="outlines",
+    )
+
+    with suppress(Exception):
+        asyncio.run(serving_chat.create_chat_completion(req))
+
+    # AsyncLLMEngine.generate(inputs, sampling_params, ...)
+    assert mock_engine.generate.call_args.args[1].max_tokens == 93
+
+    req.max_tokens = 10
+    with suppress(Exception):
+        asyncio.run(serving_chat.create_chat_completion(req))
+
+    assert mock_engine.generate.call_args.args[1].max_tokens == 10

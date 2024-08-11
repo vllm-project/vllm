@@ -4,7 +4,10 @@ from typing import List, Optional, Tuple
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.attention.ops.prefix_prefill import context_attention_fwd
+from vllm.triton_utils import HAS_TRITON
+
+if HAS_TRITON:
+    from vllm.attention.ops.prefix_prefill import context_attention_fwd
 
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
 _PARTITION_SIZE = 512
@@ -31,7 +34,7 @@ class PagedAttention:
 
     @staticmethod
     def get_supported_head_sizes() -> List[int]:
-        return [64, 80, 96, 112, 128, 192, 256]
+        return [64, 80, 96, 112, 120, 128, 192, 256]
 
     @staticmethod
     def get_kv_cache_shape(
@@ -66,7 +69,8 @@ class PagedAttention:
         value_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
         kv_cache_dtype: str,
-        kv_scale: float,
+        k_scale: float,
+        v_scale: float,
     ) -> None:
         ops.reshape_and_cache(
             key,
@@ -75,7 +79,8 @@ class PagedAttention:
             value_cache,
             slot_mapping.flatten(),
             kv_cache_dtype,
-            kv_scale,
+            k_scale,
+            v_scale,
         )
 
     @staticmethod
@@ -90,7 +95,8 @@ class PagedAttention:
         num_kv_heads: int,
         scale: float,
         alibi_slopes: Optional[torch.Tensor],
-        kv_scale: float,
+        k_scale: float,
+        v_scale: float,
         tp_rank: int = 0,
         blocksparse_local_blocks: int = 0,
         blocksparse_vert_stride: int = 0,
@@ -135,7 +141,8 @@ class PagedAttention:
                 max_seq_len,
                 alibi_slopes,
                 kv_cache_dtype,
-                kv_scale,
+                k_scale,
+                v_scale,
                 tp_rank,
                 blocksparse_local_blocks,
                 blocksparse_vert_stride,
@@ -172,7 +179,8 @@ class PagedAttention:
                 max_seq_len,
                 alibi_slopes,
                 kv_cache_dtype,
-                kv_scale,
+                k_scale,
+                v_scale,
                 tp_rank,
                 blocksparse_local_blocks,
                 blocksparse_vert_stride,

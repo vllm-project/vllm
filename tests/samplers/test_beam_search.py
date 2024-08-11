@@ -2,10 +2,8 @@
 
 Run `pytest tests/samplers/test_beam_search.py`.
 """
-import gc
 
 import pytest
-import torch
 
 # FIXME(zhuohan): The test can not pass if we:
 #   1. Increase max_tokens to 256.
@@ -30,19 +28,13 @@ def test_beam_search_single_input(
     beam_width: int,
 ) -> None:
     example_prompts = example_prompts[:1]
-    hf_model = hf_runner(model, dtype=dtype)
-    hf_outputs = hf_model.generate_beam_search(example_prompts, beam_width,
-                                               max_tokens)
-    del hf_model
-
-    vllm_model = vllm_runner(model, dtype=dtype)
-    vllm_outputs = vllm_model.generate_beam_search(example_prompts, beam_width,
+    with hf_runner(model, dtype=dtype) as hf_model:
+        hf_outputs = hf_model.generate_beam_search(example_prompts, beam_width,
                                                    max_tokens)
-    del vllm_model
-    # NOTE(woosuk): For some reason, the following GC is required to avoid
-    # GPU OOM errors in the following tests using `vllm_runner`.
-    gc.collect()
-    torch.cuda.empty_cache()
+
+    with vllm_runner(model, dtype=dtype) as vllm_model:
+        vllm_outputs = vllm_model.generate_beam_search(example_prompts,
+                                                       beam_width, max_tokens)
 
     for i in range(len(example_prompts)):
         hf_output_ids, _ = hf_outputs[i]

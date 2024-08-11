@@ -26,7 +26,7 @@ def get_lora_model(model_id: str, target_modules: List[str], rank: int):
     return lora_model
 
 
-def do_sample(llm,
+def do_sample(llm: vllm.LLM,
               lora_path: Optional[str] = None,
               lora_id: Optional[int] = None,
               logprobs: int = 0,
@@ -42,8 +42,8 @@ def do_sample(llm,
         lora_request=LoRARequest(str(lora_id), lora_id, lora_path)
         if lora_id else None)
     # Print the outputs.
-    generated_texts = []
-    generated_logprobs = []
+    generated_texts: List[str] = []
+    generated_logprobs: List[List[List[int]]] = []
     for output in outputs:
         prompt = output.prompt
         generated_text = output.outputs[0].text
