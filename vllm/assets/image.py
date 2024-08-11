@@ -14,14 +14,14 @@ from .base import get_cache_dir
 def get_air_example_data_2_asset(filename: str) -> Image.Image:
     """
     Download and open an image from
-    ``s3://air-example-data-2/vllm_opensource_llava/``.
+    ``s3://vllm-public-assets/vision_model_images/``.
     """
-    image_directory = get_cache_dir() / "air-example-data-2"
+    image_directory = get_cache_dir() / "vllm_public_assets"
     image_directory.mkdir(parents=True, exist_ok=True)
 
     image_path = image_directory / filename
     if not image_path.exists():
-        base_url = "https://air-example-data-2.s3.us-west-2.amazonaws.com/vllm_opensource_llava"
+        base_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images"
 
         global_http_connection.download_file(f"{base_url}/{filename}",
                                              image_path,
