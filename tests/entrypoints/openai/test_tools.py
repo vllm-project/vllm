@@ -305,7 +305,7 @@ async def test_chat_completion_with_tools(client_config: TestConfig):
 # test: request a chat completion that should return tool calls, so we know they
 # are parsable
 @pytest.mark.asyncio
-async def test_tool_call(client_config: TestConfig):
+async def test_tool_call_and_choice(client_config: TestConfig):
     chat_completion = await client_config["client"].chat.completions.create(
         messages=MESSAGES_ASKING_FOR_TOOLS,
         temperature=0,
@@ -341,20 +341,88 @@ async def test_tool_call(client_config: TestConfig):
     assert parsed_arguments.get("state") == "TX"
 
     assert stop_reason == "tool_calls"
-    """
+
+    function_name: Optional[str] = None
+    function_args_str: str = ''
+    tool_call_id: Optional[str] = None
+    role_name: Optional[str] = None
+    finish_reason_count: int = 0
+
     # make the same request, streaming
     stream = await client_config["client"].chat.completions.create(
-        messages=MESSAGES_WITHOUT_TOOLS,
-        temperature=0,
-        max_tokens=128,
         model=client_config["model"],
+        messages=MESSAGES_ASKING_FOR_TOOLS,
+        temperature=0,
+        max_tokens=500,
+        tools=[WEATHER_TOOL, SEARCH_TOOL],
         logprobs=False,
-        tools=[WEATHER_TOOL],
-        stream=True,
-    )
-    """
+        stream=True)
 
-    pass
+    async for chunk in stream:
+        assert chunk.choices[0].index == 0
+
+        if chunk.choices[0].finish_reason:
+            finish_reason_count += 1
+            assert chunk.choices[0].finish_reason == 'tool_calls'
+
+        # if a role is being streamed make sure it wasn't already set to
+        # something else
+        if chunk.choices[0].delta.role:
+            assert not role_name or role_name == 'assistant'
+            role_name = 'assistant'
+
+        # if a tool call is streamed make sure there's exactly one
+        # (based on the request parameters
+        streamed_tool_calls = chunk.choices[0].delta.tool_calls
+
+        if streamed_tool_calls and len(streamed_tool_calls) > 0:
+            assert len(streamed_tool_calls) == 1
+            tool_call = streamed_tool_calls[0]
+
+            # if a tool call ID is streamed, make sure one hasn't been already
+            if tool_call.id:
+                assert not tool_call_id
+                tool_call_id = tool_call.id
+
+            # if parts of the function start being streamed
+            if tool_call.function:
+                # if the function name is defined, set it. it should be streamed
+                # IN ENTIRETY, exactly one time.
+                if tool_call.function.name:
+                    assert function_name is None
+                    assert isinstance(tool_call.function.name, str)
+                    function_name = tool_call.function.name
+                if tool_call.function.arguments:
+                    assert isinstance(tool_call.function.arguments, str)
+                    function_args_str += tool_call.function.arguments
+
+    assert finish_reason_count == 1
+    assert role_name == 'assistant'
+    assert isinstance(tool_call_id, str) and (len(tool_call_id) > 16)
+
+    # validate the name and arguments
+    assert function_name == WEATHER_TOOL["function"]["name"]
+    assert function_name == tool_calls[0].function.name
+    assert isinstance(function_args_str, str)
+
+    # validate arguments
+    streamed_args = json.loads(function_args_str)
+    assert isinstance(streamed_args, Dict)
+    assert isinstance(streamed_args.get("city"), str)
+    assert isinstance(streamed_args.get("state"), str)
+    assert streamed_args.get("city") == "Dallas"
+    assert streamed_args.get("state") == "TX"
+
+    # make sure everything matches non-streaming except for ID
+    assert function_name == tool_calls[0].function.name
+    assert choice.message.role == role_name
+    assert choice.message.tool_calls[0].function.name == function_name
+
+    # compare streamed with non-streamed args Dict-wise, not string-wise
+    # because character-to-character comparison might not work e.g. the tool
+    # call parser adding extra spaces or something like that. we care about the
+    # dicts matching not byte-wise match
+    assert parsed_arguments == streamed_args
 
 
 # test: providing tools and results back to model to get a non-tool response
