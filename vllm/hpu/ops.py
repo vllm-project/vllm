@@ -16,13 +16,6 @@ import vllm.hpu.utils as hpu_utils
 PA_SPLIT_VALUE = (os.environ.get('PA_SPLIT_VALUE', '1') == '1')
 
 
-def silu_and_mul(output, input):
-    d = input.shape[-1] // 2
-    silu = torch.nn.SiLU().to(input.device)
-    x, y = torch.split(input, d, dim=-1)
-    output.copy_(silu(x) * y)
-
-
 def gelu_new(output, input):
     raise NotImplementedError
 
@@ -131,12 +124,9 @@ def awq_gemm(*args):
     raise NotImplementedError
 
 
-def silu_and_mul_wrapper(x: torch.Tensor) -> torch.Tensor:
+def silu_and_mul(x: torch.Tensor) -> torch.Tensor:
     d = x.shape[-1] // 2
-    output_shape = (x.shape[:-1] + (d, ))
-    out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-    silu_and_mul(out, x)
-    return out
+    return F.silu(x[..., :d]) * x[..., d:]
 
 
 def static_fused_moe(hidden_states, w1, w2, score, topk):
@@ -159,12 +149,10 @@ def static_fused_moe(hidden_states, w1, w2, score, topk):
     htorch.core.mark_step()
 
     for expert_idx in range(num_experts):
-        padded_weight = padded_weights[expert_idx]
-        current_state_static = hidden_states.reshape(-1, D)
-        w_output = silu_and_mul_wrapper(torch.matmul(current_state_static, w1[expert_idx].transpose(0, 1)))
+        w_output = torch.matmul(hidden_states, w1[expert_idx].transpose(0, 1))
+        w_output = silu_and_mul(w_output)
         w_output = torch.matmul(w_output, w2[expert_idx].transpose(0, 1))
-        current_hidden_states_static = w_output * padded_weight
-        final_hidden_states += current_hidden_states_static
+        final_hidden_states += w_output * padded_weights[expert_idx]
         htorch.core.mark_step()
 
     return final_hidden_states.view(-1, D)
