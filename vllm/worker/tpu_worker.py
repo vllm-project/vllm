@@ -143,8 +143,8 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         num_tpu_blocks = (num_tpu_blocks // 8) * 8  # Round down to 8.
 
         # Calculate the CPU KV cache size based on the config.
-        num_cpu_blocks = (self.cache_config.swap_space_bytes //
-                          block_size_bytes)
+        num_cpu_blocks = int(self.cache_config.swap_space_bytes //
+                             block_size_bytes)
         num_cpu_blocks = (num_cpu_blocks // 8) * 8  # Round down to 8.
         return num_tpu_blocks, num_cpu_blocks
 

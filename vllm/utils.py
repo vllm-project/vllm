@@ -115,6 +115,9 @@ STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
 STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
 
+GiB_bytes = 1 << 30
+"""The number of bytes in one gibibyte (GiB)."""
+
 STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.half,
     "bfloat16": torch.bfloat16,
