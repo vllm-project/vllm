@@ -180,7 +180,7 @@ struct MacheteKernelTemplate {
     }
 
     // Transpose A and D
-    // A doen't need to be tranposed since cutlass expects a NxK matrix
+    // A doesn't need to be transposed since cutlass expects a NxK matrix
     //  for B (which is At)
     auto stride_At = layout_A.stride();
     auto stride_Dt = permute_layout<1, 0, 2>(layout_D).stride();

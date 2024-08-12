@@ -31,8 +31,8 @@ torch::Tensor run_impl(PyTorchArguments args) {
   using EleB = typename MacheteKernel::ElementB;
   using EleC = typename MacheteKernel::ElementC;
   using EleD = typename MacheteKernel::ElementD;
-  using EleS = typename MacheteKernel::ElementS;
-  using EleZ = typename MacheteKernel::ElementZ;
+  using EleScale = typename MacheteKernel::ElementS;
+  using EleZero = typename MacheteKernel::ElementZ;
 
   using StrideA = typename MacheteKernel::StrideA;
   using StrideC = typename MacheteKernel::StrideC;
@@ -64,9 +64,9 @@ torch::Tensor run_impl(PyTorchArguments args) {
   auto D_ptr = static_cast<EleD*>(D.mutable_data_ptr());
   auto C_ptr = static_cast<EleC const*>(C ? C->const_data_ptr() : nullptr);
   auto S_ptr =
-      static_cast<EleS const*>(scales ? scales->const_data_ptr() : nullptr);
+      static_cast<EleScale const*>(scales ? scales->const_data_ptr() : nullptr);
   auto Z_ptr =
-      static_cast<EleZ const*>(zeros ? zeros->const_data_ptr() : nullptr);
+      static_cast<EleZero const*>(zeros ? zeros->const_data_ptr() : nullptr);
 
   auto arguments = MacheteKernel::create_arguments(
       stream, A_ptr, layout_A, B_ptr, D_ptr, layout_D, C_ptr, layout_C, S_ptr,
