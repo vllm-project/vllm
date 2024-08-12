@@ -123,6 +123,8 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
                                               stdin=subprocess.PIPE,
                                               stdout=sys.stdout,
                                               stderr=sys.stderr)
+        logger.info("Started engine process with PID %d",
+                    rpc_server_process.pid)
         data = pickle.dumps(
             (engine_args, UsageContext.OPENAI_API_SERVER, rpc_path))
         assert rpc_server_process.stdin is not None
