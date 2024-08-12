@@ -235,27 +235,22 @@ class FusedMoE(torch.nn.Module):
         param_data = param.data
 
         if is_quantized:
-            if "_qweight" in weight_name or "_scales" in weight_name:
+            if ["_qweight", "_scales", "_qzeros"] in weight_name:
                 if "w13" in weight_name:
                     shard_size = self.intermediate_size_per_partition
                     if shard_id == 0:
                         param_data[expert_id, :, :shard_size] = loaded_weight
-                    elif shard_id == 1:
+                    elif shard_id == 2:
                         param_data[expert_id, :, shard_size:] = loaded_weight
                     else:
                         raise ValueError(f"Invalid shard_id: {shard_id}: "
-                                         "must be 0 or 1.")
+                                         "must be 0 or 2.")
                 elif "w2" in weight_name:
                     param_data[expert_id][:] = loaded_weight
                 else:
                     raise ValueError(f"Invalid weight name: {weight_name}: "
                                      "must contain 'w13' or 'w2'.")
             elif "_g_idx" in weight_name:
-                if "w13" not in weight_name and "w2" not in weight_name:
-                    raise ValueError(f"Invalid weight name: {weight_name}: "
-                                     "must contain 'w13' or 'w2'.")
-                param_data[expert_id] = loaded_weight
-            elif "qzeros" in weight_name:
                 if "w13" not in weight_name and "w2" not in weight_name:
                     raise ValueError(f"Invalid weight name: {weight_name}: "
                                      "must contain 'w13' or 'w2'.")
