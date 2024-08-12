@@ -1,9 +1,8 @@
-import torch
+import argparse
 
+import torch
 import triton
 import triton.language as tl
-
-import argparse
 
 device = "cuda"
 
@@ -371,13 +370,13 @@ def test_dequantize():
 def awq_gemm_triton(input: torch.Tensor, qweight: torch.Tensor,
                     scales: torch.Tensor, qzeros: torch.Tensor,
                     split_k_iters: int) -> torch.Tensor:
+    M, K = input.shape
+    N = qweight.shape[1] * 8
     grid = lambda META: (
         triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(
             N, META['BLOCK_SIZE_N']),
         split_k_iters,
     )
-    M, K = input.shape
-    N = qweight.shape[1] * 8
     awq_group_size = 128
     block_size_m = 32
     block_size_n = 32
