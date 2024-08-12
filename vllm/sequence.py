@@ -12,6 +12,7 @@ import torch
 from transformers import PreTrainedTokenizer
 
 from vllm.inputs.parse import is_valid_encoder_decoder_llm_inputs
+from vllm.logprobs import Logprob, PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -22,27 +23,6 @@ if TYPE_CHECKING:
     from vllm.inputs import LLMInputs
     from vllm.multimodal import MultiModalDataDict
     from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
-
-
-@dataclass
-class Logprob:
-    """Infos for supporting OpenAI compatible logprobs and token ranks.
-
-    Attributes:
-        logprob: The logprob of chosen token
-        rank: The vocab rank of chosen token (>=1)
-        decoded_token: The decoded chosen token index
-    """
-    logprob: float
-    rank: Optional[int] = None
-    decoded_token: Optional[str] = None
-
-
-# {token_id -> logprob} per each sequence group. None if the corresponding
-# sequence group doesn't require prompt logprob.
-PromptLogprobs = List[Optional[Dict[int, Logprob]]]
-# {token_id -> logprob} for each sequence group.
-SampleLogprobs = List[Dict[int, Logprob]]
 
 
 class SequenceStatus(enum.IntEnum):

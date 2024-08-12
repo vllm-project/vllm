@@ -2,8 +2,8 @@ from typing import Dict, List, Optional, Sequence, Tuple, TypeVar, Union
 
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
-from vllm import SamplingParams
-from vllm.sequence import Logprob
+from vllm.logprobs import Logprob
+from vllm.sampling_params import SamplingParams
 
 # Used eg. for marking rejected tokens in spec decoding.
 INVALID_TOKEN_ID = -1
