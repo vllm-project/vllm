@@ -12,7 +12,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
 
-logger = init_logger(__name__)
 
 
 class ExpertsInt8Config(QuantizationConfig):
