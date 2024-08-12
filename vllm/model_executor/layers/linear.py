@@ -658,10 +658,6 @@ class QKVParallelLinear(ColumnParallelLinear):
             self.num_kv_heads * self.head_size * tp_size,  # v_proj 
         ]
 
-        # Remember the shape of each shard (Q,K,V)
-        # that is loaded into self.weights
-        self.q_shard_size: Optional[int] = None
-
         super().__init__(input_size=input_size,
                          output_size=output_size,
                          bias=bias,
@@ -723,15 +719,6 @@ class QKVParallelLinear(ColumnParallelLinear):
                                                        shard_size)
             self.weight_loader_v2(param, loaded_weight_shard, shard_id)
 
-    def _maybe_set_q_shard_size(
-        self,
-        loaded_shard_id: Optional[str],
-        shard_size: int,
-    ) -> None:
-        if loaded_shard_id == 'q':
-            # Remember the shard shape
-            self.q_shard_size = shard_size
-
     def weight_loader_v2(self,
                          param: BasevLLMParameter,
                          loaded_weight: torch.Tensor,
@@ -758,8 +745,6 @@ class QKVParallelLinear(ColumnParallelLinear):
                               shard_offset=shard_offset,
                               shard_size=shard_size)
 
-        self._maybe_set_q_shard_size(loaded_shard_id, param.shape[0])
-
     def weight_loader(self,
                       param: Parameter,
                       loaded_weight: torch.Tensor,
@@ -773,7 +758,6 @@ class QKVParallelLinear(ColumnParallelLinear):
             idx_map = {"q": 0, "k": 1, "v": 2}
             param.data[idx_map[loaded_shard_id]].copy_(loaded_weight)
             param.shard_weight_type[loaded_shard_id] = loaded_weight.item()
-            self._maybe_set_q_shard_size(loaded_shard_id, idx_map['k'])
             return
 
         if is_gguf_weight and isinstance(param, UninitializedParameter):
@@ -805,8 +789,6 @@ class QKVParallelLinear(ColumnParallelLinear):
 
                 assert param_data.shape == loaded_weight.shape
                 param_data.copy_(loaded_weight)
-                self._maybe_set_q_shard_size(loaded_shard_id,
-                                             self.num_heads * self.head_size)
                 return
             shard_offsets = [
                 # (shard_id, shard_offset, shard_size)
@@ -832,7 +814,6 @@ class QKVParallelLinear(ColumnParallelLinear):
                 loaded_weight_shard = loaded_weight.narrow(
                     output_dim, shard_offset, shard_size)
                 self.weight_loader(param, loaded_weight_shard, shard_id)
-            self._maybe_set_q_shard_size('q', shard_offsets[0][2])
             return
 
         tp_rank = get_tensor_model_parallel_rank()
@@ -916,9 +897,6 @@ class QKVParallelLinear(ColumnParallelLinear):
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
-        self._maybe_set_q_shard_size(loaded_shard_id, param_data.shape[0])
-
-
 class _WeightWrapper(torch.nn.Module):
 
     def __init__(
@@ -949,9 +927,11 @@ class QCrossKVParallelLinear(QKVParallelLinear):
         self,
         decoder_input_,
         encoder_input_=None,
-    ):
-        assert self.q_shard_size is not None
-        q_shard_size = self.q_shard_size
+    ) -> Tuple[torch.Tensor,
+               torch.Tensor,
+               Optional[torch.Tensor],
+               Optional[torch.Tensor]]:
+        q_shard_size = self.num_heads * self.head_size
         skip_bias_add = self.skip_bias_add
         bias = self.bias
         skip_cross_kvs = encoder_input_ is None
@@ -984,7 +964,6 @@ class QCrossKVParallelLinear(QKVParallelLinear):
             q_bias if skip_bias_add else None,
             kv_bias if skip_bias_add else None,
         )
-
 
 class RowParallelLinear(LinearBase):
     """Linear layer with row parallelism.
