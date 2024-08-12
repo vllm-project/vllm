@@ -111,6 +111,9 @@ autodoc_mock_imports = [
     "tqdm",
     "tensorizer",
     "pynvml",
+    "outlines",
+    "gguf",
+    "lark",
 ]
 
 for mock_target in autodoc_mock_imports:

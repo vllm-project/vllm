@@ -50,7 +50,7 @@ VLLM_PATH = Path(__file__).parent.parent
 
 class RemoteOpenAIServer:
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
-    MAX_SERVER_START_WAIT_S = 600  # wait for server to start for 60 seconds
+    MAX_START_WAIT_S = 120  # wait for server to start for 120 seconds
 
     def __init__(
         self,
@@ -85,7 +85,7 @@ class RemoteOpenAIServer:
                                      stdout=sys.stdout,
                                      stderr=sys.stderr)
         self._wait_for_server(url=self.url_for("health"),
-                              timeout=self.MAX_SERVER_START_WAIT_S)
+                              timeout=self.MAX_START_WAIT_S)
 
     def __enter__(self):
         return self
@@ -266,8 +266,9 @@ def compare_two_settings(model: str,
     arg1_results = results[:n]
     arg2_results = results[n:]
     for arg1_result, arg2_result in zip(arg1_results, arg2_results):
-        assert arg1_result == arg2_result, \
-            f"Results for {model=} are not the same with {arg1=} and {arg2=}"
+        assert arg1_result == arg2_result, (
+            f"Results for {model=} are not the same with {arg1=} and {arg2=}. "
+            f"{arg1_result=} != {arg2_result=}")
 
 
 def init_test_distributed_environment(
@@ -360,6 +361,9 @@ def wait_for_gpu_memory_to_clear(devices: List[int],
 
 
 def fork_new_process_for_each_test(f):
+    """Decorator to fork a new process for each test function.
+    See https://github.com/vllm-project/vllm/issues/7053 for more details.
+    """
 
     @functools.wraps(f)
     def wrapper(*args, **kwargs):

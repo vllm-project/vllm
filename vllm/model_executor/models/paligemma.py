@@ -2,9 +2,8 @@ from array import array
 from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
 
 import torch
-from PIL import Image
 from torch import nn
-from transformers import PaliGemmaConfig, SiglipVisionConfig, SiglipVisionModel
+from transformers import PaliGemmaConfig
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
@@ -19,9 +18,11 @@ from vllm.model_executor.models.gemma import GemmaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import cached_get_tokenizer
-from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
+from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .interfaces import SupportsVision
+from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
+                     dummy_seq_data_for_siglip, get_max_siglip_image_tokens)
 from .utils import merge_vision_embeddings
 
 logger = init_logger(__name__)
@@ -33,7 +34,7 @@ _KEYS_TO_MODIFY_MAPPING = {
 
 def get_max_paligemma_image_tokens(ctx: InputContext):
     hf_config = ctx.get_hf_config(PaliGemmaConfig)
-    text_config = hf_config.text_config
+    vision_config = hf_config.vision_config
 
     return text_config.num_image_tokens
 
@@ -75,13 +76,13 @@ def dummy_data_for_paligemma(ctx: InputContext, seq_len: int):
     hf_config = ctx.get_hf_config(PaliGemmaConfig)
     vision_config = hf_config.vision_config
 
-    seq_data = dummy_seq_data_for_paligemma(
-        hf_config,
+    seq_data = dummy_seq_data_for_siglip(
+        vision_config,
         seq_len,
         image_token_id=hf_config.image_token_index,
     )
 
-    mm_data = dummy_image_for_paligemma(vision_config)
+    mm_data = dummy_image_for_siglip(vision_config)
     return seq_data, mm_data
 
 
@@ -209,30 +210,37 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
             data=self._validate_pixel_values(pixel_values),
         )
 
-    def _image_pixels_to_features(self, vision_tower: SiglipVisionModel,
-                                  pixel_values: torch.Tensor) -> torch.Tensor:
+    def _image_pixels_to_features(
+        self,
+        vision_tower: SiglipVisionModel,
+        pixel_values: torch.Tensor,
+    ) -> torch.Tensor:
 
         target_dtype = vision_tower.get_input_embeddings().weight.dtype
-        image_outputs = vision_tower(pixel_values.to(dtype=target_dtype),
-                                     output_hidden_states=True)
+        image_features = vision_tower(pixel_values.to(dtype=target_dtype))
 
-        selected_image_features = image_outputs.last_hidden_state
-
-        return selected_image_features
+        return image_features
 
     def _process_image_pixels(
-            self, inputs: PaliGemmaImagePixelInputs) -> torch.Tensor:
+        self,
+        inputs: PaliGemmaImagePixelInputs,
+    ) -> torch.Tensor:
         assert self.vision_tower is not None
 
         pixel_values = inputs["data"]
 
-        return self._image_pixels_to_features(self.vision_tower, pixel_values)
+        return self._image_pixels_to_features(
+            self.vision_tower,
+            pixel_values,
+        )
 
     def _process_image_input(
-            self, image_input: PaliGemmaImageInputs) -> torch.Tensor:
+        self,
+        image_input: PaliGemmaImageInputs,
+    ) -> torch.Tensor:
 
         assert self.vision_tower is not None
-        image_features = self._process_image_pixels(image_input)
+        image_features = self._process_image_pixels(image_input, )
 
         return self.multi_modal_projector(image_features)
 
