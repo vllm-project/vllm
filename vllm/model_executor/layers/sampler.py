@@ -23,6 +23,7 @@ from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
                            SequenceOutput)
 
 if not envs.VLLM_DISABLE_FLASHINFER_SAMPLER and find_spec("flashinfer"):
+    import flashinfer.sampling
     # yapf: disable
     from flashinfer.sampling import (
         top_k_top_p_sampling_from_probs as flashinfer_top_k_top_p_sampling)
@@ -485,9 +486,8 @@ def _multinomial(
     probs: torch.Tensor,
     num_samples: int,
     seq_groups: Optional[List[SequenceGroupToSample]] = None,
-    is_fallback: bool = False,
 ) -> torch.Tensor:
-    if num_samples > 1 and not is_fallback:
+    if num_samples > 1:
         probs = probs.repeat_interleave(num_samples, dim=0)
     q = torch.empty_like(probs)
     if seq_groups is None:
@@ -516,7 +516,7 @@ def _top_k_top_p_multinomial_with_flashinfer(
     uniform_samples = torch.empty((max_top_k_round, batch_size),
                                   device=probs.device)
     if seq_groups is None:
-        uniform_samples.random_()
+        uniform_samples.uniform_()
     else:
         sample_idx = 0
         for seq_group in seq_groups:
@@ -524,7 +524,7 @@ def _top_k_top_p_multinomial_with_flashinfer(
             stride = len(seq_ids) * num_samples
             assert seq_group.generator is not None
             uniform_samples[:, sample_idx:sample_idx +
-                            stride].random_(generator=seq_group.generator)
+                            stride].uniform_(generator=seq_group.generator)
             sample_idx += stride
     batch_next_token_ids, success = flashinfer_top_k_top_p_sampling(
         probs,
@@ -533,10 +533,12 @@ def _top_k_top_p_multinomial_with_flashinfer(
         top_ps,
     )
     if not success.all():
-        warnings.warn("Sampling with FlashInfer failed, fallback.",
-                      stacklevel=2)
-        probs = _apply_top_k_top_p(probs, top_ps, top_ks)
-        return _multinomial(probs, num_samples, seq_groups, is_fallback=True)
+        warnings.warn("FlashInfer rejection sampling failed, fallback.",
+                      stacklevel=1)
+        probs = flashinfer.sampling.top_k_renorm_prob(probs, top_ks)
+        probs = flashinfer.sampling.top_p_renorm_prob(probs, top_ps)
+        batch_next_token_ids = flashinfer.sampling.sampling_from_probs(
+            probs, uniform_samples[0])
     return batch_next_token_ids.view(-1, num_samples)
 
 

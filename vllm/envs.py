@@ -253,7 +253,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 
     # If set, vllm will not use flashinfer sampler
     "VLLM_DISABLE_FLASHINFER_SAMPLER":
-    lambda: bool(os.getenv("VLLM_DISABLE_FLASHINFER_SAMPLER", 0)),
+    lambda: bool(int(os.getenv("VLLM_DISABLE_FLASHINFER_SAMPLER", "0"))),
 
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION":

@@ -7,6 +7,7 @@ import pytest
 import torch
 from transformers import GenerationConfig, GenerationMixin
 
+import vllm.envs as envs
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_random_seed
@@ -637,6 +638,37 @@ def test_sampler_top_k_top_p(seed: int, device: str):
     hf_probs = torch.softmax(hf_probs, dim=-1, dtype=torch.float)
     assert torch.allclose(hf_probs, sample_probs, atol=1e-5)
     assert torch.equal(hf_probs.eq(0), sample_probs.eq(0))
+
+
+@pytest.mark.parametrize("seed", RANDOM_SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_flashinfer_fallback(seed: int, device: str):
+    if envs.VLLM_DISABLE_FLASHINFER_SAMPLER:
+        pytest.skip("Flashinfer sampler is disabled")
+
+    set_random_seed(seed)
+    torch.set_default_device(device)
+    batch_size = random.randint(1, 256)
+    _, fake_logits, sampler = _prepare_test(batch_size)
+
+    def failing_flashinfer_sampling(*_args, **_kwargs):
+        return None, torch.zeros(batch_size, device=device, dtype=torch.int32)
+
+    sampling_params = SamplingParams(
+        temperature=1.0,
+        n=random.randint(1, 10),
+        seed=random.randint(0, 10000),
+    )
+    sampler_output = _do_sample(batch_size, fake_logits, sampler,
+                                sampling_params, device)
+
+    with patch(
+            "vllm.model_executor.layers.sampler."
+            "flashinfer_top_k_top_p_sampling", failing_flashinfer_sampling):
+        fallback_sampler_output = _do_sample(batch_size, fake_logits, sampler,
+                                             sampling_params, device)
+
+    assert sampler_output == fallback_sampler_output
 
 
 @pytest.mark.parametrize("device", CUDA_DEVICES)
