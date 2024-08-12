@@ -39,12 +39,16 @@ struct PrepackedLayoutBTemplate {
   using ElementMma = MmaType;
 
   // TODO (Lucas): compare the performance for other sizes
-  using PPBlockShape_MK = Shape<_128, _64>;
+  using PPBlockShape_NK = Shape<_128, _64>;
 
-  // The N here doesn't actually impact the shape of the stored tile directly
-  // but may impact the op selected by rs_op_selector
-  using PPBlockShape_MNK = decltype(make_shape(
-      size<0>(PPBlockShape_MK{}), _128{}, size<1>(PPBlockShape_MK{})));
+  // Create the shape of the tile anticipated to be used by the GEMM kernel,
+  //  when the kernel executes we will compute `Ct = Bt * At` since the
+  //  quantized weights (B), must be the lhs operand so the flow through
+  //  registers.
+  // The _128 here doesn't actually impact the shape of the stored tile directly
+  //  but may impact the op selected by rs_op_selector
+  using GemmTileShape = decltype(make_shape(size<0>(PPBlockShape_NK{}), _128{},
+                                            size<1>(PPBlockShape_NK{})));
 
   static constexpr cute::GMMA::Major GmmaMajorB =
       gmma_rs_tag_to_major_B<LayoutB>();
@@ -55,95 +59,94 @@ struct PrepackedLayoutBTemplate {
 
   using TiledMma = decltype(cute::make_tiled_mma(
       cute::GMMA::rs_op_selector<ElementMma, ElementMma, ElementAccumulator,
-                                 PPBlockShape_MNK, GMMA::Major::K,
-                                 GmmaMajorB>(),
+                                 GemmTileShape, GMMA::Major::K, GmmaMajorB>(),
       AtomLayoutMNK{}));
 
-  // Prepacked block, (athrid, val) -> (M,K)
-  // i.e. ((ThrV,(ThrM,ThrK)),(FrgV,(RestM,RestK,...))) -> (M,K)
-  CUTE_HOST_DEVICE static constexpr auto ppblock_TV_to_MK() {
-    return TiledMma{}.thrfrg_A(make_layout(PPBlockShape_MK{}));
+  // Prepacked block, (athrid, val) -> (N,K)
+  // i.e. ((ThrV,(ThrM,ThrK)),(FrgV,(RestM,RestK,...))) -> (N,K)
+  CUTE_HOST_DEVICE static constexpr auto ppblock_TV_to_NK() {
+    return TiledMma{}.thrfrg_A(make_layout(PPBlockShape_NK{}));
   }
 
-  // Prepacked block, (M,K) -> (athrid, val)
-  // i.e. (M,K) -> ((ThrV,(ThrM,ThrK)),(FrgV,(RestM,RestK,...)))
-  CUTE_HOST_DEVICE static constexpr auto ppblock_MK_to_TV() {
-    return right_inverse(ppblock_TV_to_MK()).with_shape(PPBlockShape_MK{});
+  // Prepacked block, (N,K) -> (athrid, val)
+  // i.e. (N,K) -> ((ThrV,(ThrM,ThrK)),(FrgV,(RestM,RestK,...)))
+  CUTE_HOST_DEVICE static constexpr auto ppblock_NK_to_TV() {
+    return right_inverse(ppblock_TV_to_NK()).with_shape(PPBlockShape_NK{});
   }
 
   // Prepacked block, (athrid, val) -> (storage_offset)
   // i.e. ((ThrV,(ThrM,ThrK)),(FrgV,(RestM,RestK,...))) -> (storage_idx)
   CUTE_HOST_DEVICE static constexpr auto ppblock_TV_to_offset() {
-    return make_ordered_layout(shape(ppblock_TV_to_MK()), Step<_1, _0>{});
+    return make_ordered_layout(shape(ppblock_TV_to_NK()), Step<_1, _0>{});
   }
 
-  // Prepacked block, (M,K) -> (storage_offset)
-  CUTE_HOST_DEVICE static constexpr auto ppblock_MK_to_offset() {
-    // do (M,K) -> (athrid, val) -> (storage_idx)
-    return ppblock_TV_to_offset().compose(ppblock_MK_to_TV());
+  // Prepacked block, (N,K) -> (storage_offset)
+  CUTE_HOST_DEVICE static constexpr auto ppblock_NK_to_offset() {
+    // do (N,K) -> (athrid, val) -> (storage_idx)
+    return ppblock_TV_to_offset().compose(ppblock_NK_to_TV());
   }
 
-  // ((athrid, val), (BlocksM, BlocksK), L) -> (storage_idx)
+  // ((athrid, val), (BlocksN, BlocksK), L) -> (storage_idx)
   template <typename Shape_MKL>
-  CUTE_HOST_DEVICE static constexpr auto TVbMbKL_to_offset(
+  CUTE_HOST_DEVICE static constexpr auto TVbNbKL_to_offset(
       Shape_MKL shape_mkl) {
     constexpr auto block_layout = ppblock_TV_to_offset();
 
-    // (BlocksM, BlocksK, L)
+    // (BlocksN, BlocksK, L)
     auto blocks_shape =
-        cute::transform(shape_mkl, append(PPBlockShape_MK{}, _1{}),
+        cute::transform(shape_mkl, append(PPBlockShape_NK{}, _1{}),
                         [](auto x, auto y) { return x / y; });
 
-    // ((athrid, val), (BlocksM, BlocksK, L)) -> (storage_idx)
+    // ((athrid, val), (BlocksN, BlocksK, L)) -> (storage_idx)
     auto result = make_layout(
         block_layout,
         make_layout(blocks_shape,
                     compact_col_major(blocks_shape, size(block_layout))));
 
-    // ((athrid, val), (BlocksM, BlocksK, L)) => ((athrid, val), (BlocksM,
+    // ((athrid, val), (BlocksN, BlocksK, L)) => ((athrid, val), (BlocksN,
     // BlocksK), L)
     return group<1, 3>(result(_, repeat<rank<1>(result)>(_)));
   }
 
-  // ((BlockM, BlockK), (BlocksM, BlocksK), L) -> (storage_idx)
+  // ((BlockM, BlockK), (BlocksN, BlocksK), L) -> (storage_idx)
   template <typename Shape_MKL>
   CUTE_HOST_DEVICE static constexpr auto MKbMbKL_to_offset(
       Shape_MKL shape_mkl) {
-    constexpr auto block_layout = ppblock_MK_to_offset();
+    constexpr auto block_layout = ppblock_NK_to_offset();
 
-    // (BlocksM, BlocksK, L)
+    // (BlocksN, BlocksK, L)
     auto blocks_shape =
-        cute::transform(shape_mkl, append(PPBlockShape_MK{}, _1{}),
+        cute::transform(shape_mkl, append(PPBlockShape_NK{}, _1{}),
                         [](auto x, auto y) { return x / y; });
 
-    // ((athrid, val), (BlocksM, BlocksK, L)) -> (storage_idx)
+    // ((athrid, val), (BlocksN, BlocksK, L)) -> (storage_idx)
     auto result = make_layout(
         block_layout,
         make_layout(blocks_shape,
                     compact_col_major(blocks_shape, size(block_layout))));
 
-    // ((athrid, val), (BlocksM, BlocksK, L)) => ((athrid, val), (BlocksM,
+    // ((athrid, val), (BlocksN, BlocksK, L)) => ((athrid, val), (BlocksN,
     // BlocksK), L)
     return group<1, 3>(result(_, repeat<rank<1>(result)>(_)));
   }
 
-  // ((athrid, val), (BlocksM, BlocksK, L)) -> (M, K, L)
+  // ((athrid, val), (BlocksN, BlocksK, L)) -> (M, K, L)
   template <class Shape_MKL>
-  CUTE_HOST_DEVICE static auto TVbMbK_to_MKL(Shape_MKL shape_mkl) {
-    auto tile = make_tile(make_layout(size<0>(PPBlockShape_MK{})),
-                          make_layout(size<1>(PPBlockShape_MK{})));
+  CUTE_HOST_DEVICE static auto TVbNbK_to_NKL(Shape_MKL shape_mkl) {
+    auto tile = make_tile(make_layout(size<0>(PPBlockShape_NK{})),
+                          make_layout(size<1>(PPBlockShape_NK{})));
 
-    // ((BlockM, BlockK), (BlocksM, BlocksK, L)) -> (M, K, L)
+    // ((BlockM, BlockK), (BlocksN, BlocksK, L)) -> (M, K, L)
     auto tiled_A = zipped_divide(make_layout(shape_mkl), tile);
-    return tiled_A.compose(ppblock_TV_to_MK(), _);
+    return tiled_A.compose(ppblock_TV_to_NK(), _);
   }
 
-  // (M, K, L) -> ((athrid, val), (BlocksM, BlocksK), L)
+  // (M, K, L) -> ((athrid, val), (BlocksN, BlocksK), L)
   template <class Shape_MKL>
-  CUTE_HOST_DEVICE static auto MKL_to_TVbMbK(Shape_MKL shape_mkl) {
-    auto TVbMbK_to_MKL_layout = TVbMbK_to_MKL(shape_mkl);
-    return blocked_product(ppblock_MK_to_TV(),
-                           make_layout(shape<1>(TVbMbK_to_MKL_layout)));
+  CUTE_HOST_DEVICE static auto NKL_to_TVbNbK(Shape_MKL shape_mkl) {
+    auto TVbNbK_to_NKL_layout = TVbNbK_to_NKL(shape_mkl);
+    return blocked_product(ppblock_NK_to_TV(),
+                           make_layout(shape<1>(TVbNbK_to_NKL_layout)));
   }
 };
 

@@ -62,8 +62,8 @@ struct MacheteCollectiveMma {
  public:
   static constexpr bool ALayoutIsPrepacked = true;
 
-  // Prepacked block shape
-  using PPBlockShape_MK = typename GmemLayoutA::PPBlockShape_MK;
+  // Prepacked block shape (N is M in the transposed problem)
+  using PPBlockShape_MK = typename GmemLayoutA::PPBlockShape_NK;
   // Prepacked blocks per dim in each dimension
   using PPBlocksPerTile_MK = decltype(make_shape(
       size<0>(TileShape_MNK{}) / size<0>(PPBlockShape_MK{}),
@@ -131,7 +131,7 @@ struct MacheteCollectiveMma {
       decltype(sm90_cluster_shape_to_tma_atom(shape<0>(ClusterShape_MNK{})));
 
   // ((T, V), (BlocksM, BlocksK), pipe) -> offset
-  using SmemLayoutA = decltype(GmemLayoutA::TVbMbKL_to_offset(
+  using SmemLayoutA = decltype(GmemLayoutA::TVbNbKL_to_offset(
       make_shape(size<0>(TileShape_MNK{}), size<2>(TileShape_MNK{}),
                  Int<DispatchPolicy::Stages>{})));
 
@@ -396,12 +396,12 @@ struct MacheteCollectiveMma {
   }
 
   // ((athrid, val), (BlocksM, BlockK), L) -> (storage_idx)
-  using PrepackedStrideA = decltype(stride(GmemLayoutA::TVbMbKL_to_offset(
+  using PrepackedStrideA = decltype(stride(GmemLayoutA::TVbNbKL_to_offset(
       make_shape(int32_t(0), int32_t(0), int32_t(0)))));
 
   using ATensor = decltype(make_tensor(
       get_logical_ptr(static_cast<InternalElementA const*>(nullptr)),
-      shape(GmemLayoutA::TVbMbKL_to_offset(
+      shape(GmemLayoutA::TVbNbKL_to_offset(
           make_shape(int32_t(0), int32_t(0), int32_t(0)))),
       PrepackedStrideA{}));
 
@@ -541,7 +541,7 @@ struct MacheteCollectiveMma {
     typename Params::TMA_Scale tma_load_scale;
     typename Params::TMA_Zero tma_load_zero;
 
-    auto layout = GmemLayoutA::TVbMbKL_to_offset(make_shape(M, K, L));
+    auto layout = GmemLayoutA::TVbNbKL_to_offset(make_shape(M, K, L));
     tma_load_a = make_tma_copy_A(
         make_logical_tensor(ptr_A, shape(layout), stride(layout)));
 
@@ -692,7 +692,7 @@ struct MacheteCollectiveMma {
     // (TILE_V,TILE_B,m,k,l)
     auto make_gA_mkl = [&]() {
       // ((athrid, val), (BlocksM, BlockK), L) -> (storage_idx)
-      auto layout = GmemLayoutA::TVbMbKL_to_offset(make_shape(M, K, L));
+      auto layout = GmemLayoutA::TVbNbKL_to_offset(make_shape(M, K, L));
       Tensor mA_mkl = mainloop_params.tma_load_a.get_tma_tensor(shape(layout));
       return local_tile(mA_mkl,
                         make_shape(size<0>(layout), PPBlocksPerTile_MK{}),
