@@ -3,15 +3,12 @@ from typing import Any, Dict, List, Optional
 import torch
 
 from vllm.distributed import get_tensor_model_parallel_rank, get_tp_group
-from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
-                                                  fused_moe)
+from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
-
 
 
 class ExpertsInt8Config(QuantizationConfig):
@@ -108,6 +105,7 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
               use_grouped_topk: bool = False,
               num_expert_group: Optional[int] = None,
               topk_group: Optional[int] = None) -> torch.Tensor:
+        from vllm.model_executor.layers.fused_moe import fused_moe
         return fused_moe(x,
                          layer.w13_weight,
                          layer.w2_weight,
