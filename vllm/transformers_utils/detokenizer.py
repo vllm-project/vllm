@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, Sequence, Tuple, TypeVar, Union
+from typing import Dict, List, Optional, Sequence as GenericSequence, Tuple, TypeVar, Union
 
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
@@ -19,7 +19,7 @@ class IncrementalDetokenizer:
         # Input + output tokens
         self.tokens: Optional[List[str]] = None
 
-    def decode_sequence_inplace(self, all_input_ids: Sequence[int],
+    def decode_sequence_inplace(self, all_input_ids: GenericSequence[int],
                                 output_logprobs: Optional[List[Dict[int,
                                                                     Logprob]]],
                                 params: SamplingParams,
@@ -92,7 +92,7 @@ class IncrementalDetokenizer:
         return new_decoded_token_text
 
 
-def ensure_list(s: Sequence[T]) -> List[T]:
+def ensure_list(s: GenericSequence[T]) -> List[T]:
     return s if isinstance(s, list) else list(s)
 
 
@@ -215,7 +215,7 @@ INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET = 5
 
 def convert_prompt_ids_to_tokens(
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
-    prompt_ids: Sequence[int],
+    prompt_ids: GenericSequence[int],
     skip_special_tokens: bool = False,
 ) -> Tuple[List[str], int, int]:
     """Converts the prompt ids to tokens and returns the tokens and offsets
@@ -242,7 +242,7 @@ def convert_prompt_ids_to_tokens(
 # under Apache 2.0 license
 def detokenize_incrementally(
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
-    all_input_ids: Sequence[int],
+    all_input_ids: GenericSequence[int],
     prev_tokens: Optional[List[str]],
     prefix_offset: int,
     read_offset: int,
