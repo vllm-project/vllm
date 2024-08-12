@@ -15,6 +15,6 @@ class ImageAsset:
     @property
     def pil_image(self) -> Image.Image:
 
-        image_path = get_vllm_public_assets(
-            f"{VLM_IMAGES_DIR}/{self.name}.jpg")
+        image_path = get_vllm_public_assets(filename=f"{self.name}.jpg",
+                                            s3_prefix=VLM_IMAGES_DIR)
         return Image.open(image_path)
