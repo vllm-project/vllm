@@ -26,8 +26,11 @@ namespace machete {
 
 using namespace cute;
 
+struct IlvBlkLayoutAuto {};
+
 template <typename ElementA_, typename ElementB_, typename ElementD_,
-          typename AccumulatorT, class LayoutB, class KernelSchedule>
+          typename AccumulatorT, class LayoutB,class KernelSchedule, typename IlvBlkLayout_ = IlvBlkLayoutAuto
+          >
 // clang-format on
 struct PrepackedLayoutBTemplate {
   using MmaType = ElementA_;
@@ -37,6 +40,8 @@ struct PrepackedLayoutBTemplate {
   using ElementAccumulator =
       AccumulatorT;  // Element type for internal accumulation
   using ElementMma = MmaType;
+
+  using IlvdBlkLayout = IlvBlkLayout_;
 
   // TODO (Lucas): compare the performance for other sizes
   // Prepacked block shape, smallest layout atom for loading into registers
@@ -79,13 +84,42 @@ struct PrepackedLayoutBTemplate {
   // Prepacked block, (athrid, val) -> (storage_offset)
   // i.e. ((ThrV,(ThrN,ThrK)),(FrgV,(RestN,RestK,...))) -> (storage_idx)
   CUTE_HOST_DEVICE static constexpr auto ppblock_TV_to_offset() {
+    // Return iterleaved layout
     return make_ordered_layout(shape(ppblock_TV_to_NK()), Step<_1, _0>{});
   }
 
-  // Prepacked block, (N,K) -> (storage_offset)
-  CUTE_HOST_DEVICE static constexpr auto ppblock_NK_to_offset() {
-    // do (N,K) -> (athrid, val) -> (storage_idx)
-    return ppblock_TV_to_offset().compose(ppblock_NK_to_TV());
+  // Prepacked block, (athrid, val) -> (storage_offset)
+  // i.e. ((ThrV,(ThrM,ThrK)),(IlvdFrgV,(RestM,RestK,...))) -> (storage_idx)
+  CUTE_HOST_DEVICE static constexpr auto ppblock_ilvd_TV_to_offset() {
+    auto layout_no_interleave =
+        make_ordered_layout(shape(ppblock_TV_to_NK()), Step<_1, _0>{});
+
+    if constexpr (std::is_same_v<IlvdBlkLayout, void>) {
+      return layout_no_interleave;
+    } else {
+      // interleave by transforming FrgV into interleaved blocks where each
+      // block has the layout IlvdBlkLayout, for example if IlvdBlkLayout is
+      // (2, 2) : (2, 1) then we get: ((2, 2), size(FrgV) / 4) : ((2, 1), 4)
+      //   if FrgV is {A, B, C, D, E, F, G, H}
+      //   then ((IlvBlk), FrgB) is {A, C, B, D, C, G, D, H}
+      auto frgV = get<1, 0>(layout_no_interleave);
+      auto ilvdBlk = IlvdBlkLayout{};
+      static_assert(size(frgV) % 4 == 0, "FrgV must be divisible by 4");
+      auto ilvd_FrgV = make_layout(
+          make_shape(shape(ilvdBlk), Int<size(frgV) / size(ilvdBlk)>{}),
+          make_stride(stride(ilvdBlk), size(ilvdBlk)));
+
+      // Return iterleaved layout
+      return make_layout(
+          get<0>(layout_no_interleave),
+          make_layout(ilvd_FrgV, get<1, 1>(layout_no_interleave)));
+    }
+  }
+
+  // Prepacked block, (M,K) -> (storage_offset)
+  CUTE_HOST_DEVICE static constexpr auto ppblock_ilvd_NK_to_offset() {
+    // do (M,K) -> (athrid, val) -> (storage_idx)
+    return ppblock_ilvd_TV_to_offset().compose(ppblock_NK_to_TV());
   }
 
   // ((athrid, val), (BlocksN, BlocksK), L) -> (storage_idx)
@@ -112,9 +146,9 @@ struct PrepackedLayoutBTemplate {
 
   // ((BlockN, BlockK), (BlocksN, BlocksK), L) -> (storage_idx)
   template <typename Shape_NKL>
-  CUTE_HOST_DEVICE static constexpr auto NKbNbKL_to_offset(
+  CUTE_HOST_DEVICE static constexpr auto ilvd_NKbNbKL_to_offset(
       Shape_NKL shape_mkl) {
-    constexpr auto block_layout = ppblock_NK_to_offset();
+    constexpr auto block_layout = ppblock_ilvd_NK_to_offset();
 
     // (BlocksN, BlocksK, L)
     auto blocks_shape =

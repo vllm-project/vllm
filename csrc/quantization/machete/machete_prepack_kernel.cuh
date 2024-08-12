@@ -45,6 +45,8 @@ static void prepack_B(cudaStream_t stream,
   auto TVbNbK_to_offset = PrepackedLayoutB::TVbNbKL_to_offset(shape(B_layout));
   auto NKL_to_offset = coalesce(composition(TVbNbK_to_offset, NKL_to_TVbNbK));
   auto NKbNbKL_to_offset = PrepackedLayoutB::NKbNbKL_to_offset(shape(B_layout));
+  auto ilvd_NKbNbKL_to_offset =
+      PrepackedLayoutB::ilvd_NKbNbKL_to_offset(shape(B_layout));
 
   TORCH_CHECK(size(B_layout) == size(NKL_to_offset));
   TORCH_CHECK(size<0>(B_layout) % size<0>(TileShapeNKL{}) == 0);
@@ -56,7 +58,8 @@ static void prepack_B(cudaStream_t stream,
   auto L_tiles = size<2>(B_layout) / size<2>(TileShapeNKL{});
 
   auto B_in = make_tensor(get_logical_ptr(B_in_ptr), B_layout);
-  auto B_tiled_out = make_tensor(get_logical_ptr(B_out_ptr), NKbNbKL_to_offset);
+  auto B_tiled_out =
+      make_tensor(get_logical_ptr(B_out_ptr), ilvd_NKbNbKL_to_offset);
 
   prepack_B_kernel<TileShapeNKL, typename PrepackedLayoutB::ElementB>
       <<<dim3(N_tiles, K_tiles, L_tiles), 128, 0, stream>>>(B_in, B_tiled_out);
