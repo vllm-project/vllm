@@ -2,7 +2,8 @@ from typing import Dict, List, Optional, Tuple
 
 from vllm.sequence import Logprob, SamplingParams, Sequence, SequenceGroup
 
-from .tokenizer_group import AnyTokenizer, BaseTokenizerGroup
+from .tokenizer import AnyTokenizer
+from .tokenizer_group import BaseTokenizerGroup
 
 # Used eg. for marking rejected tokens in spec decoding.
 INVALID_TOKEN_ID = -1

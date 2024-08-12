@@ -3,7 +3,8 @@ from pathlib import Path
 from typing import Optional, Union
 
 import huggingface_hub
-from transformers import AutoTokenizer, PreTrainedTokenizerFast
+from transformers import (AutoTokenizer, PreTrainedTokenizer,
+                          PreTrainedTokenizerFast)
 
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
@@ -11,9 +12,9 @@ from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.tokenizers import BaichuanTokenizer
 from vllm.utils import make_async
 
-from .tokenizer_group import AnyTokenizer
-
 logger = init_logger(__name__)
+
+AnyTokenizer = Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
 
 
 def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
