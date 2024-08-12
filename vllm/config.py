@@ -11,7 +11,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
 from vllm.transformers_utils.config import get_config, get_hf_text_config
-from vllm.utils import get_cpu_memory, is_cpu, is_hip, is_neuron
+from vllm.utils import (get_cpu_memory, is_cpu, is_hip, is_neuron,
+                        print_warning_once)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -133,6 +134,17 @@ class ModelConfig:
                                     code_revision, rope_scaling)
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
+
+        if (not self.disable_sliding_window
+                and self.hf_text_config.model_type == "gemma2"
+                and self.hf_text_config.sliding_window is not None):
+            print_warning_once(
+                "Gemma 2 uses sliding window attention for every odd layer, "
+                "which is currently not supported by vLLM. Disabling sliding "
+                "window and capping the max length to the sliding window size "
+                f"({self.hf_text_config.sliding_window}).")
+            self.disable_sliding_window = True
+
         self.max_model_len = _get_and_verify_max_len(
             hf_config=self.hf_text_config,
             max_model_len=max_model_len,
@@ -1225,20 +1237,32 @@ def _get_and_verify_max_len(
         derived_max_model_len = default_max_len
 
     rope_scaling = getattr(hf_config, "rope_scaling", None)
-    if rope_scaling is not None and rope_scaling["type"] != "su":
-        if disable_sliding_window:
-            # TODO(robertgshaw): Find a model that supports rope_scaling
-            # with sliding window to see if this case should be allowed.
-            raise NotImplementedError(
-                "Disabling sliding window is not supported for models "
-                "with rope_scaling. Please raise an issue so we can "
-                "investigate.")
-        assert "factor" in rope_scaling
-        scaling_factor = rope_scaling["factor"]
-        if rope_scaling["type"] == "yarn":
-            derived_max_model_len = rope_scaling[
-                "original_max_position_embeddings"]
-        derived_max_model_len *= scaling_factor
+    if rope_scaling is not None:
+        if "type" in rope_scaling:
+            rope_type = rope_scaling["type"]
+        elif "rope_type" in rope_scaling:
+            rope_type = rope_scaling["rope_type"]
+        else:
+            raise ValueError(
+                "rope_scaling must have a 'type' or 'rope_type' key.")
+
+        # The correct one should be "longrope", kept "su" here
+        # to be backward compatible
+        if rope_type not in ("su", "longrope", "llama3"):
+            if disable_sliding_window:
+                # TODO(robertgshaw): Find a model that supports rope_scaling
+                # with sliding window to see if this case should be allowed.
+                raise NotImplementedError(
+                    "Disabling sliding window is not supported for models "
+                    "with rope_scaling. Please raise an issue so we can "
+                    "investigate.")
+
+            assert "factor" in rope_scaling
+            scaling_factor = rope_scaling["factor"]
+            if rope_type == "yarn":
+                derived_max_model_len = rope_scaling[
+                    "original_max_position_embeddings"]
+            derived_max_model_len *= scaling_factor
 
     # If the user specified a max length, make sure it is smaller than the
     # derived length from the HF model config.
