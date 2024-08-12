@@ -545,10 +545,6 @@ class CacheConfig:
             raise NotImplementedError(
                 "Prefix caching is not supported with sliding window. "
                 "Run with --disable-sliding-window to use prefix caching.")
-        if self.cache_dtype == "fp8":
-            raise NotImplementedError(
-                "Prefix caching is not supported for fp8 cache_dtype. "
-                "Run with --kv-cache-dtype auto to use prefix caching.")
 
     def verify_with_parallel_config(
         self,
