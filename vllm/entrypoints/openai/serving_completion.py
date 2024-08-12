@@ -474,9 +474,10 @@ class OpenAIServingCompletion(OpenAIServing):
         for i, token_id in enumerate(token_ids):
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None:
-                token = tokenizer.decode(token_id)
                 if self.return_tokens_as_token_ids:
                     token = f"token_id:{token_id}"
+                else:
+                    token = tokenizer.decode(token_id)
                 out_tokens.append(token)
                 out_token_logprobs.append(None)
                 out_top_logprobs.append(None)
@@ -499,12 +500,12 @@ class OpenAIServingCompletion(OpenAIServing):
                     # Convert float("-inf") to the
                     # JSON-serializable float that OpenAI uses
                     self._get_decoded_token(
-                        top_lp[1],
-                        top_lp[0],
+                        lp,
+                        tid,
                         tokenizer,
                         return_as_token_id=self.return_tokens_as_token_ids):
-                    max(top_lp[1].logprob, -9999.0)
-                    for i, top_lp in enumerate(step_top_logprobs.items())
+                    max(lp.logprob, -9999.0)
+                    for i, (tid, lp) in enumerate(step_top_logprobs.items())
                     if num_output_top_logprobs >= i
                 })
 

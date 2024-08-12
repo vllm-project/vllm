@@ -20,7 +20,8 @@ class IncrementalDetokenizer:
         self.tokens: Optional[List[str]] = None
 
     def decode_sequence_inplace(self, all_input_ids: Sequence[int],
-                                output_logprobs: List[Dict[int, Logprob]],
+                                output_logprobs: Optional[List[Dict[int,
+                                                                    Logprob]]],
                                 params: SamplingParams,
                                 tokenizer: PreTrainedTokenizer) -> str:
         """Decodes the new token for a sequence. In-place operation.
@@ -60,8 +61,7 @@ class IncrementalDetokenizer:
          )
 
         # Decode logprobs
-        logprobs = output_logprobs[-1]
-        if logprobs:
+        if output_logprobs and (logprobs := output_logprobs[-1]):
             previous_tokens = ensure_list(all_input_ids[:-1])
             for token_id, sample_logprob in logprobs.items():
                 # If the token was generated this iteration,

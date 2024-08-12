@@ -544,14 +544,14 @@ class OpenAIServingChat(OpenAIServing):
             tokenizer: PreTrainedTokenizer) -> List[ChatCompletionLogProb]:
         return [
             ChatCompletionLogProb(token=(token := self._get_decoded_token(
-                p[1],
-                p[0],
+                logprob,
+                tid,
                 tokenizer,
                 return_as_token_id=self.return_tokens_as_token_ids)),
-                                  logprob=max(p[1].logprob, -9999.0),
+                                  logprob=max(logprob.logprob, -9999.0),
                                   bytes=list(
                                       token.encode("utf-8", errors="replace")))
-            for i, p in enumerate(logprobs.items())
+            for i, (tid, logprob) in enumerate(logprobs.items())
             if top_logprobs and i < top_logprobs
         ]
 
@@ -569,26 +569,21 @@ class OpenAIServingChat(OpenAIServing):
         for i, token_id in enumerate(token_ids):
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None:
-                token = tokenizer.decode(token_id)
                 if self.return_tokens_as_token_ids:
                     token = f"token_id:{token_id}"
-                logprobs_content.append(
-                    ChatCompletionLogProbsContent(
-                        token=token,
-                        bytes=list(token.encode("utf-8", errors="replace"))))
+                else:
+                    token = tokenizer.decode(token_id)
+                content = ChatCompletionLogProbsContent(token=token)
             else:
-                logprobs_content.append(
-                    ChatCompletionLogProbsContent(
-                        token=self._get_decoded_token(
-                            step_top_logprobs[token_id], token_id, tokenizer,
-                            self.return_tokens_as_token_ids),
-                        logprob=max(step_top_logprobs[token_id].logprob,
-                                    -9999.0),
-                        bytes=list(
-                            step_top_logprobs[token_id].decoded_token.encode(
-                                "utf-8", errors="replace")),
-                        top_logprobs=self._get_top_logprobs(
-                            step_top_logprobs, num_output_top_logprobs,
-                            tokenizer)))
+                token = self._get_decoded_token(
+                    step_top_logprobs[token_id], token_id, tokenizer,
+                    self.return_tokens_as_token_ids)
+                content = ChatCompletionLogProbsContent(
+                    token=token,
+                    logprob=max(step_top_logprobs[token_id].logprob, -9999.0),
+                    top_logprobs=self._get_top_logprobs(
+                        step_top_logprobs, num_output_top_logprobs, tokenizer))
+            content.bytes = list(token.encode("utf-8", errors="replace"))
+            logprobs_content.append(content)
 
         return ChatCompletionLogProbs(content=logprobs_content)
