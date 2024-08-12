@@ -245,9 +245,18 @@ class LLMEngine:
         if not self.model_config.skip_tokenizer_init:
             self.tokenizer = self._init_tokenizer()
             self.detokenizer = Detokenizer(self.tokenizer)
+            tokenizer_group = self.get_tokenizer_group()
         else:
             self.tokenizer = None
             self.detokenizer = None
+            tokenizer_group = None
+
+        # Ensure that the function doesn't contain a reference to self,
+        # to avoid engine GC issues
+        def get_tokenizer_for_seq(sequence: Sequence) -> AnyTokenizer:
+            assert tokenizer_group, ("tokenizer_group cannot be None, "
+                                     "make sure skip_tokenizer_init is False")
+            return tokenizer_group.get_lora_tokenizer(sequence.lora_request)
 
         self.seq_counter = Counter()
         self.generation_config_fields = _load_generation_config_dict(
@@ -347,13 +356,6 @@ class LLMEngine:
             self.tracer = init_tracer(
                 "vllm.llm_engine",
                 self.observability_config.otlp_traces_endpoint)
-
-        tokenizer_group = self.get_tokenizer_group()
-
-        # Ensure that the function doesn't contain a reference to self,
-        # to avoid engine GC issues
-        def get_tokenizer_for_seq(sequence: Sequence) -> AnyTokenizer:
-            return tokenizer_group.get_lora_tokenizer(sequence.lora_request)
 
         # Create sequence output processor, e.g. for beam search or
         # speculative decoding.
