@@ -430,7 +430,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         w13_qzeros = torch.nn.Parameter(
             torch.empty(num_experts,
                         scales_size13,
-                        2 * intermediate_size // self.quant_config.pack_factor,
+                        intermediate_size // self.quant_config.pack_factor,
                         dtype=params_dtype),
             requires_grad=False,
         )
