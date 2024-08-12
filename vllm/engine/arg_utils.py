@@ -816,8 +816,8 @@ class EngineArgs:
             enable_chunked_prefill=self.enable_chunked_prefill,
             embedding_mode=model_config.embedding_mode,
             preemption_mode=self.preemption_mode,
-            _use_delta=(envs.VLLM_USE_RAY_SPMD_WORKER
-                        and parallel_config.use_ray))
+            _send_delta_data=(envs.VLLM_USE_RAY_SPMD_WORKER
+                              and parallel_config.use_ray))
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,

@@ -99,7 +99,8 @@ def dummy_seq_data_for_fuyu(ctx: InputContext, seq_len: int):
     ncol, nrow = get_max_fuyu_image_feature_size()
     image_feature_size = get_max_fuyu_image_tokens(ctx)
 
-    token_ids = (array("I", [_IMAGE_TOKEN_ID]) * ncol + array("I", [_NEWLINE_TOKEN_ID])) * nrow
+    token_ids = (array("I", [_IMAGE_TOKEN_ID]) * ncol +
+                 array("I", [_NEWLINE_TOKEN_ID])) * nrow
     token_ids += array("I", [0]) * (seq_len - image_feature_size)
     return SequenceData(token_ids)
 

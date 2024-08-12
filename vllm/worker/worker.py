@@ -298,7 +298,7 @@ class Worker(LocalOrDistributedWorkerBase):
     def _get_cached_seq_group_metadata(
             self,
             seq_group_metadata_list: List[Union[SequenceGroupMetadata,
-                                        SequenceGroupMetadataDelta]],
+                                                SequenceGroupMetadataDelta]],
             finished_request_ids: List[str]) -> List[SequenceGroupMetadata]:
         """Return a list of cached Sequence Group Metadata after updating its
         state.

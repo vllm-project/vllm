@@ -12,6 +12,7 @@ def encode_hook(obj: Any) -> Any:
     else:
         raise ValueError(f"Unsupported serialization type: {type(obj)}")
 
+
 def decode_hook(type: Type, obj: Any) -> Any:
     """Custom msgspec dec hook that supports array types.
 
