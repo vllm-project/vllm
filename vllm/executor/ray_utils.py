@@ -1,11 +1,10 @@
-from array import array
-from typing import Any, List, Optional, Tuple, Type, Union
+from typing import List, Optional, Tuple, Union
 
 import msgspec
 
 from vllm.config import ParallelConfig
+from vllm.executor.msgspec_utils import decode_hook, encode_hook
 from vllm.logger import init_logger
-from vllm.executor.msgspec_utils import encode_hook, decode_hook
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.utils import get_ip, is_hip, is_tpu, is_xpu
 from vllm.worker.worker_base import WorkerWrapperBase
@@ -72,7 +71,7 @@ try:
                                                      intermediate_tensors)
             # Pipeline model request and output to the next pipeline stage.
             if isinstance(output, IntermediateTensors):
-                output = serialized_data, output
+                output = serialized_req, output
             else:
                 output = self.output_encoder.encode(output)
 

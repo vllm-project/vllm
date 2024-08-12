@@ -1,5 +1,5 @@
-from typing import Any, Type
 from array import array
+from typing import Any, Type
 
 
 def encode_hook(obj: Any) -> Any:
