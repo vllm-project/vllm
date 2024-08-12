@@ -24,20 +24,6 @@ models_dir=$(pwd)
 trt_model_path=${models_dir}/${model_name}-trt-ckpt
 trt_engine_path=${models_dir}/${model_name}-trt-engine
 
-cd ~
-rm -rf tensorrt-demo
-git clone https://github.com/neuralmagic/tensorrt-demo.git
-cd tensorrt-demo
-tensorrt_demo_dir=$(pwd)
-
-# make sure the parameter inside tensorrt_demo is consistent to envvar
-sed -i.bak "/key: \"tokenizer_dir\"/,/string_value:/s|string_value: \".*\"|string_value: \"$model_path\"|" ./triton_model_repo/postprocessing/config.pbtxt
-sed -i.bak "/key: \"tokenizer_dir\"/,/string_value:/s|string_value: \".*\"|string_value: \"$model_path\"|" ./triton_model_repo/preprocessing/config.pbtxt
-sed -i.bak "s|\(max_batch_size:\s*\)[0-9]*|\1$max_batch_size|g" ./triton_model_repo/ensemble/config.pbtxt
-sed -i.bak "s|\(max_batch_size:\s*\)[0-9]*|\1$max_batch_size|g" ./triton_model_repo/preprocessing/config.pbtxt
-sed -i.bak "s|\(max_batch_size:\s*\)[0-9]*|\1$max_batch_size|g" ./triton_model_repo/postprocessing/config.pbtxt
-sed -i.bak "s|\(max_batch_size:\s*\)[0-9]*|\1$max_batch_size|g" ./triton_model_repo/tensorrt_llm_bls/config.pbtxt
-
 
 cd /
 rm -rf tensorrtllm_backend
@@ -47,7 +33,19 @@ cd tensorrtllm_backend
 git checkout $trt_llm_version
 tensorrtllm_backend_dir=$(pwd)
 git submodule update --init --recursive
-cp -r ${tensorrt_demo_dir}/triton_model_repo ${tensorrtllm_backend_dir}/
+
+
+# handle protobuf files
+mkdir triton_model_repo
+cp -r all_models/inflight_batcher_llm/* triton_model_repo/
+# set tokenizer and max_batch_size in protobuf files
+sed -i.bak "/key: \"tokenizer_dir\"/,/string_value:/s|string_value: \".*\"|string_value: \"$model_path\"|" ./triton_model_repo/postprocessing/config.pbtxt
+sed -i.bak "/key: \"tokenizer_dir\"/,/string_value:/s|string_value: \".*\"|string_value: \"$model_path\"|" ./triton_model_repo/preprocessing/config.pbtxt
+sed -i.bak "s|\(max_batch_size:\s*\)[0-9]*|\1$max_batch_size|g" ./triton_model_repo/ensemble/config.pbtxt
+sed -i.bak "s|\(max_batch_size:\s*\)[0-9]*|\1$max_batch_size|g" ./triton_model_repo/preprocessing/config.pbtxt
+sed -i.bak "s|\(max_batch_size:\s*\)[0-9]*|\1$max_batch_size|g" ./triton_model_repo/postprocessing/config.pbtxt
+sed -i.bak "s|\(max_batch_size:\s*\)[0-9]*|\1$max_batch_size|g" ./triton_model_repo/tensorrt_llm_bls/config.pbtxt
+
 
 cd /tensorrtllm_backend
 cd ./tensorrt_llm/examples/${model_type}
