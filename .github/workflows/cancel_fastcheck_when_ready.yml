@@ -1,0 +1,15 @@
+name: Cancel fastcheck run when PR is marked ready
+
+on:
+  pull_request:
+    types: [labeled]
+
+jobs:
+  cancel-buildkite-run:
+    if: github.event.label.name == 'a'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cancel Buildkite Run
+        run:
+          - echo "PR branch"
+          - echo ${{ github.event.pull_request.head.ref }}
