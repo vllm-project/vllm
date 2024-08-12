@@ -27,7 +27,7 @@ def serve(args: argparse.Namespace) -> None:
     # The default value of `--model`
     if args.model != "facebook/opt-125m":
         raise ValueError(
-            "In `vllm serve`, you should provide the model as a "
+            "With `vllm serve`, you should provide the model as a "
             "positional argument instead of via the `--model` option.")
 
     # EngineArgs expects the model name to be passed as --model.
