@@ -3,8 +3,10 @@ import msgspec
 from vllm.adapter_commons.request import AdapterRequest
 
 
-class PromptAdapterRequest(msgspec.Struct, array_like=True,
-                           omit_defaults=True):
+class PromptAdapterRequest(msgspec.Struct,
+                           array_like=True,
+                           omit_defaults=True,
+                           frozen=True):
     """
     Request for a Prompt adapter.
     """

@@ -220,7 +220,8 @@ class MultiModalPlugin(ABC):
 
         return wrapper
 
-    def map_input(self, model_config: ModelConfig, data: object) -> MultiModalInputs:
+    def map_input(self, model_config: ModelConfig,
+                  data: object) -> MultiModalInputs:
         """
         Transform the data into a dictionary of model inputs using the
         input mapper registered for that model.

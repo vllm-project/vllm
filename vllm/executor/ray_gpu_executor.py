@@ -121,6 +121,8 @@ class RayGPUExecutor(DistributedGPUExecutor):
             ray_remote_kwargs = self._configure_ray_workers_use_nsight(
                 ray_remote_kwargs)
 
+        logger.info("use_ray_spmd_worker: %s", self.use_ray_spmd_worker)
+
         # Create the workers.
         driver_ip = get_ip()
         worker_wrapper_kwargs = self._get_worker_wrapper_args()

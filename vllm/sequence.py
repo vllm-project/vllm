@@ -5,8 +5,8 @@ from abc import ABC, abstractmethod
 from array import array
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Set, Tuple,
-                    Union, cast)
+from typing import (TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Set,
+                    Tuple, Union, cast)
 
 import msgspec
 import torch
@@ -112,8 +112,7 @@ class RequestMetrics:
 
 
 class SequenceDataDelta(msgspec.Struct, array_like=True, omit_defaults=True):
-    """Delta SequenceGroupData to send per new decode request.
-    """
+    """Delta SequenceGroupData to send to workers."""
     new_output_token_ids: List[int]
     new_cumulative_logprob: float
     new_num_computed_tokens: int

@@ -364,8 +364,6 @@ class Scheduler:
         self.num_cumulative_preemption: int = 0
 
         # Used to cache python objects
-        self._seq_group_metadata_cache: PyObjectCache = PyObjectCache(
-            seq_group_metadata_builder)
         self._scheduler_running_outputs_cache: PyObjectCache = PyObjectCache(
             scheduler_running_outputs_builder)
         self._scheduled_seq_group_cache: PyObjectCache = PyObjectCache(
@@ -1046,15 +1044,10 @@ class Scheduler:
             token_chunk_size = scheduled_seq_group.token_chunk_size
             seq_group.maybe_set_first_scheduled_time(now)
 
-            seq_group_metadata = self._seq_group_metadata_cache.get_object()
-            seq_group_metadata.seq_data.clear()
-            seq_group_metadata.block_tables.clear()
-
             # seq_id -> SequenceData
-            seq_data: Dict[int, SequenceData] = seq_group_metadata.seq_data
+            seq_data: Dict[int, SequenceData] = {}
             # seq_id -> physical block numbers
-            block_tables: Dict[int,
-                               List[int]] = seq_group_metadata.block_tables
+            block_tables: Dict[int, List[int]] = {}
 
             if seq_group.is_encoder_decoder():
                 # Encoder associated with SequenceGroup
@@ -1101,27 +1094,6 @@ class Scheduler:
             # It assumes the scheduled_seq_groups is ordered by
             # prefill < decoding.
             if is_first_prefill or not self.scheduler_config._send_delta_data:
-                # seq_group_metadata.__init__(
-                #     request_id=seq_group.request_id,
-                #     is_prompt=is_prompt,
-                #     seq_data=seq_data,
-                #     sampling_params=seq_group.sampling_params,
-                #     block_tables=block_tables,
-                #     do_sample=do_sample,
-                #     pooling_params=seq_group.pooling_params,
-                #     token_chunk_size=token_chunk_size,
-                #     lora_request=seq_group.lora_request,
-                #     computed_block_nums=common_computed_block_nums,
-                #     encoder_seq_data=encoder_seq_data,
-                #     cross_block_table=cross_block_table,
-                #     # `multi_modal_data` will only be present for the 1st comm
-                #     # between engine and worker.
-                #     # the subsequent comms can still use delta, but
-                #     # `multi_modal_data` will be None.
-                #     multi_modal_data=seq_group.multi_modal_data
-                #     if scheduler_outputs.num_prefill_groups > 0 else None,
-                #     prompt_adapter_request=seq_group.prompt_adapter_request,
-                # )
                 seq_group_metadata = SequenceGroupMetadata(
                     request_id=seq_group.request_id,
                     is_prompt=is_prompt,
@@ -1167,8 +1139,6 @@ class Scheduler:
         for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
             self.block_manager.mark_blocks_as_computed(
                 scheduled_seq_group.seq_group)
-
-        self._seq_group_metadata_cache.reset()
 
         scheduler_time = time.perf_counter() - scheduler_start_time
         # Add this to scheduler time to all the sequences that are currently

@@ -17,7 +17,7 @@ from ..utils import fork_new_process_for_each_test
 
 @pytest.mark.skipif(cuda_device_count_stateless() < 2,
                     reason="Need at least 2 GPUs to run the test.")
-@pytest.mark.parametrize("model, distributed_executor_backend", [
+@pytest.mark.parametrize("model, distributed_executor_backend, enable_adag", [
     ("facebook/opt-125m", "ray", False),
     ("facebook/opt-125m", "ray", True),
     ("meta-llama/Llama-2-7b-hf", "ray", False),
