@@ -77,7 +77,7 @@ def test_models(
 
 @pytest.mark.parametrize(
     "kv_dtype_n_model",
-    [("fp8_e5m2", m) for m in MODELS] + [("fp8_e4m3", m)
+    ["fp8_e5m2" + "#+" + m for m in MODELS] + ["fp8_e4m3" + "#+" + m
                                          for m in E4M3_KV_MODELS],
 )
 @pytest.mark.parametrize("max_tokens", [4])
@@ -104,7 +104,7 @@ def test_models_with_fp8_kv_cache(
     """
     NUM_LOG_PROBS = 8
 
-    kv_cache_dtype, model = kv_dtype_n_model
+    kv_cache_dtype, model = kv_dtype_n_model.split("#+")
 
     if model == "facebook/opt-125m":
         pytest.skip(
