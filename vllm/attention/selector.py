@@ -8,6 +8,7 @@ import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
 from vllm.utils import is_cpu, is_hip, is_openvino, is_tpu, is_xpu
+from vllm.transformers_utils.configs.RWKV5 import useLinear
 
 logger = init_logger(__name__)
 
@@ -21,6 +22,7 @@ class _Backend(enum.Enum):
     FLASHINFER = enum.auto()
     PALLAS = enum.auto()
     IPEX = enum.auto()
+    LINEAR = enum.auto()
 
 
 @lru_cache(maxsize=None)
@@ -86,6 +88,10 @@ def get_attn_backend(
         logger.info("Using Pallas backend.")
         from vllm.attention.backends.pallas import PallasAttentionBackend
         return PallasAttentionBackend
+    elif backend == _Backend.LINEAR:
+        logger.info("Using Pallas backend.")
+        from vllm.attention.backends.rwkv5linear_attn import RWKVFlashAttentionBackend
+        return RWKVFlashAttentionBackend
     else:
         raise ValueError("Invalid attention backend.")
 
@@ -102,6 +108,10 @@ def which_attn_to_use(
     """Returns which flash attention backend to use."""
     # Default case.
     selected_backend = _Backend.FLASH_ATTN
+
+    if useLinear:
+        print("Using Linear Attention")
+        return _Backend.LINEAR
 
     # Check the environment variable and override if specified
     backend_by_env_var: Optional[str] = envs.VLLM_ATTENTION_BACKEND

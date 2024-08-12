@@ -75,6 +75,7 @@ class CacheEngine:
             # null block in CpuGpuBlockAllocator requires at least that
             # block to be zeroed-out.
             # We zero-out everything for simplicity.
+            print("kv_cache_shape", kv_cache_shape)
             kv_cache.append(
                 torch.zeros(kv_cache_shape,
                             dtype=self.dtype,

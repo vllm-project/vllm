@@ -10,6 +10,8 @@ logger = init_logger(__name__)
 
 # Architecture -> (module, class).
 _GENERATION_MODELS = {
+
+    "Rwkv5ForCausalLM": ("Rwkv5ForCausalLM","Rwkv5ForCausalLM"),
     "AquilaModel": ("llama", "LlamaForCausalLM"),
     "AquilaForCausalLM": ("llama", "LlamaForCausalLM"),  # AquilaChat2
     "BaiChuanForCausalLM": ("baichuan", "BaiChuanForCausalLM"),  # baichuan-7b

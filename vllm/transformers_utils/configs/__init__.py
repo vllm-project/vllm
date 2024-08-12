@@ -7,6 +7,7 @@ from vllm.transformers_utils.configs.falcon import RWConfig
 from vllm.transformers_utils.configs.jais import JAISConfig
 from vllm.transformers_utils.configs.mlp_speculator import MLPSpeculatorConfig
 from vllm.transformers_utils.configs.mpt import MPTConfig
+from vllm.transformers_utils.configs.RWKV5 import RWKV5Config
 
 __all__ = [
     "ChatGLMConfig",
@@ -15,4 +16,5 @@ __all__ = [
     "RWConfig",
     "JAISConfig",
     "MLPSpeculatorConfig",
+    "RWKV5Config",
 ]
