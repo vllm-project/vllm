@@ -160,7 +160,7 @@ class InternVisionEncoderLayer(nn.Module):
         super().__init__()
         self.embed_dim = config.hidden_size
         self.intermediate_size = config.intermediate_size
-        self.norm_type = getattr(config, "norm_type", "rms_norm")
+        self.norm_type = config.norm_type
 
         self.attn = InternAttention(config)
         self.mlp = InternMLP(config, quant_config=quant_config)
