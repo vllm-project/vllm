@@ -1148,11 +1148,11 @@ def load_general_plugins():
 
     discovered_plugins = entry_points(group='vllm.general_plugins')
     for plugin in discovered_plugins:
-        logger.info("Found general plugin: %s", plugin.value)
-        if allowed_plugins is None or plugin.value in allowed_plugins:
+        logger.info("Found general plugin: %s", plugin.name)
+        if allowed_plugins is None or plugin.name in allowed_plugins:
             try:
                 plugin.load()
-                logger.info("Loaded general plugin: %s", plugin.value)
+                logger.info("Loaded general plugin: %s", plugin.name)
             except Exception:
                 logger.exception("Failed to load general plugin: %s",
-                                 plugin.value)
+                                 plugin.name)
