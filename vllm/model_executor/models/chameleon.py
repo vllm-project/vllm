@@ -704,6 +704,8 @@ class ChameleonVQVAEEncoder(nn.Module):
         )
 
     def forward(self, pixel_values: torch.Tensor):
+        pixel_values = pixel_values.to(self.conv_in.weight.dtype)
+
         # downsampling
         hidden_states = [self.conv_in(pixel_values)]
         for i_level in range(self.num_resolutions):
