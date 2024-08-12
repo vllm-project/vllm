@@ -1,6 +1,7 @@
+from array import array
+
 import pytest
 
-from array import array
 from vllm.sequence import (CompletionSequenceGroupOutput, SamplerOutput,
                            SequenceData, SequenceOutput)
 

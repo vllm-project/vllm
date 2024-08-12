@@ -1,9 +1,9 @@
+from array import array
 from itertools import count
 from typing import Callable, Dict, List, Optional
 from typing import Sequence as GenericSequence
 from typing import TypeVar, Union
 from unittest.mock import MagicMock
-from array import array
 
 import torch
 

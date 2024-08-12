@@ -1,4 +1,3 @@
-from array import array
 from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
 
 import torch
@@ -37,39 +36,6 @@ def get_max_paligemma_image_tokens(ctx: InputContext):
     vision_config = hf_config.vision_config
 
     return get_max_siglip_image_tokens(vision_config)
-
-
-def dummy_seq_data_for_paligemma(
-    hf_config: PaliGemmaConfig,
-    seq_len: int,
-    *,
-    image_token_id: int,
-    image_feature_size_override: Optional[int] = None,
-):
-    if image_feature_size_override is None:
-        image_feature_size = hf_config.text_config.num_image_tokens
-    else:
-        image_feature_size = image_feature_size_override
-
-    token_ids = array("I", [image_token_id]) * image_feature_size
-    token_ids += array("I", [0]) * (seq_len - image_feature_size)
-    return SequenceData(token_ids)
-
-
-def dummy_image_for_paligemma(
-    hf_config: SiglipVisionConfig,
-    *,
-    image_width_override: Optional[int] = None,
-    image_height_override: Optional[int] = None,
-):
-    width = height = hf_config.image_size
-    if image_width_override is not None:
-        width = image_width_override
-    if image_height_override is not None:
-        height = image_height_override
-
-    image = Image.new("RGB", (width, height), color=0)
-    return {"image": image}
 
 
 def dummy_data_for_paligemma(ctx: InputContext, seq_len: int):

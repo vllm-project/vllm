@@ -1,5 +1,6 @@
 from array import array
 from typing import Any, Type
+
 from vllm.sequence import SequenceData
 
 

@@ -23,8 +23,7 @@ TARGET_TEST_SUITE = os.environ.get("TARGET_TEST_SUITE", "L4")
                     reason="Need at least 2 GPUs to run the test.")
 @pytest.mark.parametrize(
     "model, distributed_executor_backend, attention_backend, "
-    "test_suite, enable_adag",
-    [
+    "test_suite, enable_adag", [
         ("facebook/opt-125m", "ray", "", "L4", False),
         ("facebook/opt-125m", "ray", "", "L4", True),
         ("facebook/opt-125m", "mp", "", "L4", False),

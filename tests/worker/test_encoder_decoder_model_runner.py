@@ -1,8 +1,8 @@
+from array import array
 from typing import List
 
 import pytest
 import torch
-from array import array
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata

@@ -1,8 +1,8 @@
 import itertools
 import random
+from array import array
 from typing import Dict, List, Optional, Tuple
 from unittest.mock import Mock, patch
-from array import array
 
 import pytest
 import torch

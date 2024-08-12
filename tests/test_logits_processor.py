@@ -1,7 +1,7 @@
 import random
+from array import array
 from typing import Tuple
 from unittest.mock import patch
-from array import array
 
 import pytest
 import torch

@@ -1,8 +1,8 @@
+from array import array
 from typing import List
 
 import pytest
 import torch
-from array import array
 
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
