@@ -747,3 +747,9 @@ def num_gpus_available():
     in current process."""
 
     return cuda_device_count_stateless()
+
+
+@pytest.fixture
+def dummy_opt_path():
+    cur_dir = os.path.dirname(__file__)
+    return os.path.join(cur_dir, "dummy_opt")
