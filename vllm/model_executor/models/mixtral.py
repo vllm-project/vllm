@@ -449,7 +449,7 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                     param_name, weight_name, expert_id, shard_id = mapping
                     if weight_name not in name:
                         continue
-                    logger.error(weight_name, param_name, name)
+                    logger.error(f"{weight_name} {param_name} {name}")
                     name = name.replace(weight_name, param_name)
                     logger.error(f"Loading {name} from {weight_name}")
                     # Skip layers on other devices.
