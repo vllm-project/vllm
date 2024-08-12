@@ -9,8 +9,8 @@ import torch
 import torch.distributed
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, MultiModalConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig,
+                         ModelConfig, MultiModalConfig, ObservabilityConfig,
+                         ParallelConfig, PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
@@ -51,6 +51,7 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
         speculative_config: Optional[SpeculativeConfig] = None,
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         is_driver_worker: bool = False,
+        observability_config: Optional[ObservabilityConfig] = None,
     ) -> None:
         assert device_config.device_type == "xpu"
         assert is_xpu()
@@ -71,6 +72,7 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
         if parallel_config and is_driver_worker:
             assert rank % parallel_config.tensor_parallel_size == 0, \
                    "Driver worker should be rank 0 of tensor parallel group."
+        self.observability_config = observability_config
 
         self.multimodal_config = multimodal_config
 

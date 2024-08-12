@@ -3,8 +3,9 @@ from typing import List, Optional, Tuple, Union
 import torch
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, PromptAdapterConfig,
-                         SchedulerConfig, SpeculativeConfig)
+                         ModelConfig, ObservabilityConfig, ParallelConfig,
+                         PromptAdapterConfig, SchedulerConfig,
+                         SpeculativeConfig)
 from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.logger import init_logger
@@ -29,6 +30,7 @@ class XPUExecutor(GPUExecutor):
         lora_config: Optional[LoRAConfig],
         prompt_adapter_config: Optional[PromptAdapterConfig],
         speculative_config: Optional[SpeculativeConfig],
+        observability_config: Optional[ObservabilityConfig],
     ) -> None:
         assert device_config.device_type == "xpu"
         assert (not speculative_config
@@ -45,6 +47,7 @@ class XPUExecutor(GPUExecutor):
         self.device_config = device_config
         self.prompt_adapter_config = prompt_adapter_config
         self.speculative_config = None
+        self.observability_config = observability_config
 
         # Instantiate the worker and load the model to GPU.
         self._init_executor()
