@@ -13,6 +13,8 @@ def test_oot_registration_for_api_server(dummy_opt_path: str):
         "float32",
         "--chat-template",
         str(chatml_jinja_path),
+        "--load-format",
+        "dummy",
     ]
     with RemoteOpenAIServer(dummy_opt_path, server_args) as server:
         client = server.get_client()
