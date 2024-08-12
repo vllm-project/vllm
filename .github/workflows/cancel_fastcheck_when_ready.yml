@@ -22,7 +22,7 @@ jobs:
           echo $BUILDKITE_ORG
           echo $BUILDKITE_PIPELINE
           LATEST_BUILD_NUMBER=$(curl -H "Authorization: Bearer $BUILDKITE_TOKEN" \
-            "https://api.buildkite.com/v2/organizations/$BUILDKITE_ORG/pipelines/$BUILDKITE_PIPELINE/builds?branch=$FULL_BRANCH&state=running" \
+            "https://api.buildkite.com/v2/organizations/$BUILDKITE_ORG/pipelines/$BUILDKITE_PIPELINE/builds?branch=$FULL_BRANCH&state[]=scheduled&state[]=running" \
             | jq -r '.[0].number')
           echo "Latest build number: $LATEST_BUILD_NUMBER"
           curl -X POST -H "Authorization: Bearer $BUILDKITE_TOKEN" \
