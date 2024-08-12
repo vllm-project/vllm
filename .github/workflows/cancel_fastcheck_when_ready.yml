@@ -17,10 +17,6 @@ jobs:
         run: |
           echo "PR branch"
           FULL_BRANCH=${{ github.event.pull_request.head.repo.owner.login }}:${{ github.event.pull_request.head.ref }}
-          echo $FULL_BRANCH
-          echo $BUILDKITE_TOKEN
-          echo $BUILDKITE_ORG
-          echo $BUILDKITE_PIPELINE
           LATEST_BUILD_NUMBER=$(curl -H "Authorization: Bearer $BUILDKITE_TOKEN" \
             "https://api.buildkite.com/v2/organizations/$BUILDKITE_ORG/pipelines/$BUILDKITE_PIPELINE/builds?branch=$FULL_BRANCH&state[]=scheduled&state[]=running" \
             | jq -r '.[0].number')
