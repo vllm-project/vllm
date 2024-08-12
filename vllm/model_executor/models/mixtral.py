@@ -444,7 +444,7 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                               is_quantized=True)
                 break
             else:
-                logger.error(expert_params_mapping)
+                # logger.error(expert_params_mapping)
                 for mapping in expert_params_mapping:
                     param_name, weight_name, expert_id, shard_id = mapping
                     if weight_name not in name:
@@ -455,7 +455,7 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                     # Skip layers on other devices.
                     if is_pp_missing_parameter(name, self):
                         continue
-                    logger.error(params_dict.keys())
+                    # logger.error(params_dict.keys())
                     param = params_dict[name]
                     weight_loader = param.weight_loader
                     weight_loader(param,
