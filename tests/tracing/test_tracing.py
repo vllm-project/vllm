@@ -114,3 +114,5 @@ def test_traces(trace_service):
         SpanAttributes.LLM_LATENCY_TIME_TO_FIRST_TOKEN) == ttft
     e2e_time = metrics.finished_time - metrics.arrival_time
     assert attributes.get(SpanAttributes.LLM_LATENCY_E2E) == e2e_time
+    assert attributes.get(
+        SpanAttributes.LLM_LATENCY_TIME_IN_SCHEDULER) == metrics.scheduler_time

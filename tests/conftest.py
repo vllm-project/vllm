@@ -3,6 +3,7 @@ import gc
 import os
 import sys
 from collections import UserList
+from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, TypedDict, TypeVar, Union
 
 import pytest
@@ -14,20 +15,19 @@ from transformers import (AutoModelForCausalLM, AutoModelForSeq2SeqLM,
                           AutoModelForVision2Seq, AutoTokenizer, BatchEncoding,
                           BatchFeature)
 
-from tests.models.utils import DecoderPromptType
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.config import TokenizerPoolConfig
 from vllm.connections import global_http_connection
 from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
-from vllm.inputs import TextPrompt
+from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
+                         to_enc_dec_tuple_list, zip_enc_dec_prompts)
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sequence import SampleLogprobs
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, cuda_device_count_stateless,
-                        is_cpu, to_enc_dec_tuple_list,
-                        zip_enc_dec_prompt_lists)
+                        is_cpu)
 
 logger = init_logger(__name__)
 
@@ -124,10 +124,16 @@ def example_prompts() -> List[str]:
     return prompts
 
 
+class DecoderPromptType(Enum):
+    """For encoder/decoder models only."""
+    CUSTOM = 1
+    NONE = 2
+    EMPTY_STR = 3
+
+
 @pytest.fixture
-def example_encoder_decoder_prompts() \
-    -> Dict[DecoderPromptType,
-            Tuple[List[str], List[Optional[str]]]]:
+def example_encoder_decoder_prompts(
+) -> Dict[DecoderPromptType, List[ExplicitEncoderDecoderPrompt]]:
     '''
     Returns an encoder prompt list and a decoder prompt list, wherein each pair
     of same-index entries in both lists corresponds to an (encoder prompt,
@@ -150,11 +156,11 @@ def example_encoder_decoder_prompts() \
     # NONE decoder prompt type
     return {
         DecoderPromptType.NONE:
-        zip_enc_dec_prompt_lists(encoder_prompts, none_decoder_prompts),
+        zip_enc_dec_prompts(encoder_prompts, none_decoder_prompts),
         DecoderPromptType.EMPTY_STR:
-        zip_enc_dec_prompt_lists(encoder_prompts, empty_str_decoder_prompts),
+        zip_enc_dec_prompts(encoder_prompts, empty_str_decoder_prompts),
         DecoderPromptType.CUSTOM:
-        zip_enc_dec_prompt_lists(encoder_prompts, custom_decoder_prompts),
+        zip_enc_dec_prompts(encoder_prompts, custom_decoder_prompts),
     }
 
 
@@ -444,7 +450,7 @@ class HfRunner:
 
     def generate_encoder_decoder_greedy_logprobs_limit(
         self,
-        encoder_decoder_prompts: Tuple[List[str], List[str]],
+        encoder_decoder_prompts: List[ExplicitEncoderDecoderPrompt[str, str]],
         max_tokens: int,
         num_logprobs: int,
         **kwargs: Any,
@@ -608,7 +614,7 @@ class VllmRunner:
 
     def generate_encoder_decoder_w_logprobs(
         self,
-        encoder_decoder_prompts: Tuple[List[str], List[str]],
+        encoder_decoder_prompts: List[ExplicitEncoderDecoderPrompt[str, str]],
         sampling_params: SamplingParams,
     ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
         '''
@@ -653,7 +659,7 @@ class VllmRunner:
 
     def generate_encoder_decoder_greedy_logprobs(
         self,
-        encoder_decoder_prompts: Tuple[List[str], List[str]],
+        encoder_decoder_prompts: List[ExplicitEncoderDecoderPrompt[str, str]],
         max_tokens: int,
         num_logprobs: int,
     ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
