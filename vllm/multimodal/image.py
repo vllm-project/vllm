@@ -118,6 +118,7 @@ class ImagePlugin(MultiModalPlugin):
     ) -> MultiModalInputs:
         model_config = ctx.model_config
 
+        # PIL image
         if isinstance(data, Image.Image) or is_list_of(data, Image.Image):
             image_processor = self._get_hf_image_processor(model_config)
             if image_processor is None:
@@ -132,8 +133,10 @@ class ImagePlugin(MultiModalPlugin):
                 raise
 
             return MultiModalInputs(batch_data)
+
+        # Image embedding
         elif isinstance(data, torch.Tensor) or is_list_of(data, torch.Tensor):
-            raise NotImplementedError("Embeddings input is not supported yet")
+            return MultiModalInputs({"image_embeds": data})
 
         raise TypeError(f"Invalid image type: {type(data)}")
 
