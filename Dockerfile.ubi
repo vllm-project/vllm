@@ -62,6 +62,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install \
         -r requirements-cuda.txt
 
+
 ## Development #################################################################
 FROM python-cuda-base AS dev
 
@@ -113,7 +114,6 @@ ENV VLLM_INSTALL_PUNICA_KERNELS=1
 
 # Make sure the cuda environment is in the PATH
 ENV PATH=/usr/local/cuda/bin:$PATH
-ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 
 # Copy the entire directory before building wheel
 COPY vllm vllm
@@ -145,11 +145,17 @@ RUN ./configure --prefix="/usr/" && make && make check
 
 ## Release #####################################################################
 FROM python-install AS vllm-openai
+ARG PYTHON_VERSION
 
 WORKDIR /workspace
 
 ENV VIRTUAL_ENV=/opt/vllm
 ENV PATH=$VIRTUAL_ENV/bin/:$PATH
+
+# force using the python venv's cuda runtime libraries
+ENV LD_LIBRARY_PATH="${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/nvidia/cuda_nvrtc/lib:${LD_LIBRARY_PATH}"
+ENV LD_LIBRARY_PATH="${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/nvidia/cuda_runtime/lib:${LD_LIBRARY_PATH}"
+ENV LD_LIBRARY_PATH="${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/nvidia/nvtx/lib:${LD_LIBRARY_PATH}"
 
 # Triton needs a CC compiler
 RUN microdnf install -y gcc \
