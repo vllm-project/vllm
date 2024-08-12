@@ -1151,7 +1151,8 @@ def load_general_plugins():
         logger.info("Found general plugin: %s", plugin.name)
         if allowed_plugins is None or plugin.name in allowed_plugins:
             try:
-                plugin.load()
+                func = plugin.load()
+                func()
                 logger.info("Loaded general plugin: %s", plugin.name)
             except Exception:
                 logger.exception("Failed to load general plugin: %s",
