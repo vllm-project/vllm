@@ -13,4 +13,5 @@ class AudioPlugin(MultiModalPlugin):
         raise NotImplementedError("There is no default audio input mapper")
 
     def _default_max_multimodal_tokens(self, ctx: InputContext) -> int:
-        raise NotImplementedError("There is no default maximum multimodal tokens")
+        raise NotImplementedError(
+            "There is no default maximum multimodal tokens")
