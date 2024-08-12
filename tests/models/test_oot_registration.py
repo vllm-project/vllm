@@ -9,7 +9,7 @@ def test_plugin(dummy_opt_path):
     os.environ["VLLM_GENERAL_PLUGINS"] = ""
     with pytest.raises(Exception) as excinfo:
         LLM(model=dummy_opt_path, load_format="dummy")
-    assert "No plugin found for model" in str(excinfo.value)
+    assert "are not supported for now" in str(excinfo.value)
 
 
 def test_oot_registration(dummy_opt_path):
