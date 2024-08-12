@@ -1,0 +1,25 @@
+name: Cancel fastcheck run when PR is marked ready
+
+on:
+  pull_request:
+    types: [labeled]
+
+jobs:
+  cancel-buildkite-run:
+    if: github.event.label.name == 'invalid'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cancel Buildkite Run
+        env:
+          BUILDKITE_TOKEN: ${{ secrets.BUILDKITE_TOKEN }}
+          BUILDKITE_ORG: vllm
+          BUILDKITE_PIPELINE: fastcheck
+        run: |
+          echo "PR branch"
+          FULL_BRANCH=${{ github.event.pull_request.head.repo.owner.login }}:${{ github.event.pull_request.head.ref }}
+          LATEST_BUILD_NUMBER=$(curl -H "Authorization: Bearer $BUILDKITE_TOKEN" \
+            "https://api.buildkite.com/v2/organizations/$BUILDKITE_ORG/pipelines/$BUILDKITE_PIPELINE/builds?branch=$FULL_BRANCH&state[]=scheduled&state[]=running" \
+            | jq -r '.[0].number')
+          echo "Latest build number: $LATEST_BUILD_NUMBER"
+          curl -X POST -H "Authorization: Bearer $BUILDKITE_TOKEN" \
+            "https://api.buildkite.com/v2/organizations/$BUILDKITE_ORG/pipelines/$BUILDKITE_PIPELINE/builds/$LATEST_BUILD_NUMBER/cancel"
