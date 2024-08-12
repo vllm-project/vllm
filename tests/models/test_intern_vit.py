@@ -1,18 +1,18 @@
 import tempfile
-from typing import Optional, Type
+from typing import Optional
 
 import pytest
 import torch
 import torch.nn as nn
 from huggingface_hub import snapshot_download
-from transformers import AutoModel, AutoConfig, CLIPImageProcessor
+from transformers import AutoConfig, AutoModel, CLIPImageProcessor
 
 from vllm import ModelRegistry
-from vllm.distributed import (initialize_model_parallel,
-                              init_distributed_environment)
+from vllm.distributed import (init_distributed_environment,
+                              initialize_model_parallel)
 from vllm.model_executor.models.intern_vit import InternVisionModel
 
-from ..conftest import VllmRunner, _ImageAssets, cleanup
+from ..conftest import _ImageAssets, cleanup
 
 pytestmark = pytest.mark.vlm
 
@@ -57,9 +57,12 @@ def run_intern_vit_test(
     if not getattr(config, "norm_type", None):
         config.norm_type = "rms_norm"
 
-    hf_model = AutoModel.from_pretrained(model, torch_dtype=dtype, trust_remote_code=True).to("cuda")
+    hf_model = AutoModel.from_pretrained(model,
+                                         torch_dtype=dtype,
+                                         trust_remote_code=True).to("cuda")
     hf_outputs_per_image = [
-        hf_model(pixel_value.to("cuda")).last_hidden_state for pixel_value in pixel_values
+        hf_model(pixel_value.to("cuda")).last_hidden_state
+        for pixel_value in pixel_values
     ]
 
     vllm_model = InternVisionModel(config)
@@ -70,7 +73,8 @@ def run_intern_vit_test(
 
     vllm_model = vllm_model.to("cuda", dtype)
     vllm_outputs_per_image = [
-        vllm_model(pixel_values=pixel_value.to("cuda")) for pixel_value in pixel_values
+        vllm_model(pixel_values=pixel_value.to("cuda"))
+        for pixel_value in pixel_values
     ]
     del vllm_model
     cleanup()
