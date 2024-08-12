@@ -121,6 +121,8 @@ class EngineArgs:
     otlp_traces_endpoint: Optional[str] = None
     collect_detailed_traces: Optional[str] = None
 
+    model_architecture_override: Optional[str] = None
+
     def __post_init__(self):
         if self.tokenizer is None:
             self.tokenizer = self.model
@@ -674,6 +676,14 @@ class EngineArgs:
             "modules. This involves use of possibly costly and or blocking "
             "operations and hence might have a performance impact.")
 
+        parser.add_argument(
+            '--model-architecture-override',
+            type=str,
+            default=None,
+            help=
+            'Override the model architecture to use - useful for using plugins.'
+        )
+
         return parser
 
     @classmethod
@@ -735,6 +745,11 @@ class EngineArgs:
             skip_tokenizer_init=self.skip_tokenizer_init,
             served_model_name=self.served_model_name,
             multimodal_config=multimodal_config)
+        if self.model_architecture_override:
+            model_config.hf_config.architectures = [
+                self.model_architecture_override
+            ]
+
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
