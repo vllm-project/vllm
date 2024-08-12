@@ -38,6 +38,9 @@ class IncrementalDetokenizer:
         Returns:
             The number of characters added to the output text.
         """
+        if not all_input_ids:
+            return ""
+
         token_id_generated_this_iteration = all_input_ids[-1]
 
         # Convert prompt token IDs to tokens if necessary.

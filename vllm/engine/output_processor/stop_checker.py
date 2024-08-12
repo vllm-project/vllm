@@ -120,5 +120,3 @@ class StopChecker:
             # or end of the stop string.
             return stop_str, stop_index
         return None
-
-        #seq.output_text = seq.output_text[:stop_index]
