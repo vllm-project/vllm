@@ -218,7 +218,6 @@ steps:
   mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/lora
-  - csrc/punica
   - tests/lora
   command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_long_context.py
   parallelism: 4
