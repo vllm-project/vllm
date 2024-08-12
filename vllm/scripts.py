@@ -9,6 +9,7 @@ from typing import List, Optional
 from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam
 
+from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.openai.api_server import run_server
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.utils import FlexibleArgumentParser
@@ -25,7 +26,7 @@ def register_signal_handlers():
 
 def serve(args: argparse.Namespace) -> None:
     # The default value of `--model`
-    if args.model != "facebook/opt-125m":
+    if args.model != EngineArgs.model:
         raise ValueError(
             "With `vllm serve`, you should provide the model as a "
             "positional argument instead of via the `--model` option.")
