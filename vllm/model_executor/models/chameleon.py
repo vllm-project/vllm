@@ -1,3 +1,4 @@
+from array import array
 from functools import cached_property
 from typing import (Any, Dict, Iterable, List, Literal, Optional, Tuple,
                     TypedDict)
@@ -68,8 +69,8 @@ def dummy_seq_data_for_chameleon(
     else:
         image_feature_size = image_feature_size_override
 
-    token_ids = [image_token_id] * image_feature_size
-    token_ids += [0] * (seq_len - image_feature_size)
+    token_ids = array("I", [image_token_id]) * image_feature_size
+    token_ids += array("I", [0]) * (seq_len - image_feature_size)
     return SequenceData(token_ids)
 
 
@@ -998,6 +999,13 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsVision):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
+
+            # With tie_word_embeddings, we can skip lm_head.weight
+            # The weight might appear unnecessarily in the files if the model is
+            # processed with quantization, LoRA, fine-tuning, etc.
+            if self.config.tie_word_embeddings and "lm_head.weight" in name:
+                continue
+
             use_default_weight_loading = False
             if "vqmodel" in name:
                 if self.model.vqmodel is not None:

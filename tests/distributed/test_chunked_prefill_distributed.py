@@ -1,16 +1,11 @@
 """Compare the outputs of HF and distributed vLLM when using greedy sampling.
-vLLM will allocate all the available memory, so we need to run the tests one
-by one. The solution is to pass arguments (model name) by environment
-variables.
 
 Run:
 ```sh
-TEST_DIST_MODEL=facebook/opt-125m pytest \
-    test_chunked_prefill_distributed.py
-TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf \
-    test_chunked_prefill_distributed.py
+pytest test_chunked_prefill_distributed.py
 ```
 """
+
 import os
 
 import pytest
@@ -18,29 +13,36 @@ import pytest
 from vllm.utils import cuda_device_count_stateless
 
 from ..models.utils import check_outputs_equal
-
-MODELS = [
-    os.environ["TEST_DIST_MODEL"],
-]
-DISTRIBUTED_EXECUTOR_BACKEND = "DISTRIBUTED_EXECUTOR_BACKEND"
+from ..utils import fork_new_process_for_each_test
 
 
 @pytest.mark.skipif(cuda_device_count_stateless() < 2,
                     reason="Need at least 2 GPUs to run the test.")
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["half"])
-@pytest.mark.parametrize("max_tokens", [5])
-@pytest.mark.parametrize("chunked_prefill_token_size", [16])
+@pytest.mark.parametrize("model, distributed_executor_backend, enable_adag", [
+    ("facebook/opt-125m", "ray", False),
+    ("facebook/opt-125m", "ray", True),
+    ("meta-llama/Llama-2-7b-hf", "ray", False),
+    ("facebook/opt-125m", "mp", False),
+    ("meta-llama/Llama-2-7b-hf", "mp", False),
+])
+@fork_new_process_for_each_test
 def test_models(
     hf_runner,
     vllm_runner,
     example_prompts,
     model: str,
-    dtype: str,
-    max_tokens: int,
-    chunked_prefill_token_size: int,
+    distributed_executor_backend: str,
+    enable_adag: bool,
 ) -> None:
-    distributed_executor_backend = os.getenv(DISTRIBUTED_EXECUTOR_BACKEND)
+    if enable_adag:
+        assert distributed_executor_backend == "ray"
+        # test ray adag
+        os.environ['VLLM_USE_RAY_SPMD_WORKER'] = "1"
+        os.environ['VLLM_USE_RAY_COMPILED_DAG'] = "1"
+
+    dtype = "half"
+    max_tokens = 5
+    chunked_prefill_token_size = 16
 
     # Add a chunked prefill config.
     max_num_seqs = min(chunked_prefill_token_size, 256)

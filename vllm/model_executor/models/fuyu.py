@@ -16,6 +16,7 @@
 # limitations under the License.
 """ PyTorch Fuyu model."""
 import math
+from array import array
 from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
 
 import torch
@@ -98,8 +99,9 @@ def dummy_seq_data_for_fuyu(ctx: InputContext, seq_len: int):
     ncol, nrow = get_max_fuyu_image_feature_size()
     image_feature_size = get_max_fuyu_image_tokens(ctx)
 
-    token_ids = ([_IMAGE_TOKEN_ID] * ncol + [_NEWLINE_TOKEN_ID]) * nrow
-    token_ids += [0] * (seq_len - image_feature_size)
+    token_ids = (array("I", [_IMAGE_TOKEN_ID]) * ncol +
+                 array("I", [_NEWLINE_TOKEN_ID])) * nrow
+    token_ids += array("I", [0]) * (seq_len - image_feature_size)
     return SequenceData(token_ids)
 
 
@@ -169,7 +171,7 @@ def input_processor_for_fuyu(ctx: InputContext, llm_inputs: LLMInputs):
         raise TypeError(f"Invalid image type: {type(image_data)}")
 
     # process prompts
-    prompt = llm_inputs["prompt"]
+    prompt = llm_inputs.get("prompt")
     prompt_token_ids = llm_inputs["prompt_token_ids"]
     tokenizer = cached_get_tokenizer(model_config.model)
     # dim0 is batch_size, dim1 is subseq_size which will always be 1

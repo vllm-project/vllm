@@ -1,3 +1,4 @@
+from array import array
 from itertools import count
 from typing import Callable, Dict, List, Optional
 from typing import Sequence as GenericSequence
@@ -138,8 +139,8 @@ def create_seq_group_metadata_from_prompts(
             seq_data={
                 i:
                 SequenceData(
-                    prompt_token_ids=prompt_token_ids[:],
-                    output_token_ids=cont_token_ids[:],
+                    array("I", prompt_token_ids[:]),
+                    _output_token_ids=array("I", cont_token_ids[:]),
                 ),
             },
             sampling_params=SamplingParams(temperature=0.0, ),

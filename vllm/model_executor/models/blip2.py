@@ -1,3 +1,4 @@
+from array import array
 from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
 
 import torch
@@ -409,8 +410,8 @@ def dummy_data_for_blip2(ctx: InputContext, seq_len: int):
     vision_config = hf_config.vision_config
 
     image_feature_size = get_blip2_image_feature_size(hf_config)
-    token_ids = [BLIP2_IMAGE_TOKEN_ID] * image_feature_size
-    token_ids += [0] * (seq_len - image_feature_size)
+    token_ids = array("I", [BLIP2_IMAGE_TOKEN_ID]) * image_feature_size
+    token_ids += array("I", [0]) * (seq_len - image_feature_size)
     seq_data = SequenceData(token_ids)
 
     if isinstance(vision_config, Blip2VisionConfig):

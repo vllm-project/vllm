@@ -1,6 +1,7 @@
 """Minimal implementation of CLIPVisionModel intended to be only used 
 within a vision language model."""
-from typing import Optional
+from array import array
+from typing import Iterable, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -14,6 +15,7 @@ from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal.image import (cached_get_tokenizer,
                                    repeat_and_pad_image_tokens)
 from vllm.sequence import SequenceData
@@ -32,7 +34,7 @@ def get_clip_num_patches(*, image_size: int, patch_size: int) -> int:
 
 def get_clip_image_feature_size(hf_config: CLIPVisionConfig) -> int:
     return get_clip_num_patches(image_size=hf_config.image_size,
-                                patch_size=hf_config.patch_size)
+                                patch_size=hf_config.patch_size) + 1
 
 
 def get_max_clip_image_tokens(hf_config: CLIPVisionConfig) -> int:
@@ -51,8 +53,8 @@ def dummy_seq_data_for_clip(
     else:
         image_feature_size = image_feature_size_override
 
-    token_ids = [image_token_id] * image_feature_size
-    token_ids += [0] * (seq_len - image_feature_size)
+    token_ids = array("I", [image_token_id]) * image_feature_size
+    token_ids += array("I", [0]) * (seq_len - image_feature_size)
     return SequenceData(token_ids)
 
 
@@ -291,3 +293,22 @@ class CLIPVisionModel(nn.Module):
     @property
     def device(self):
         return next(self.parameters()).device
+
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        params_dict = dict(self.named_parameters())
+        layer_count = len(self.vision_model.encoder.layers)
+
+        for name, loaded_weight in weights:
+            # post_layernorm is not needed in CLIPVisionModel
+            if "vision_model.post_layernorm" in name:
+                continue
+            # omit layers when num_hidden_layers_override is set
+            if "vision_model.encoder.layers." in name:
+                layer_idx = int(name.split(".")[3])
+                if layer_idx >= layer_count:
+                    continue
+
+            param = params_dict[name]
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
+            weight_loader(param, loaded_weight)

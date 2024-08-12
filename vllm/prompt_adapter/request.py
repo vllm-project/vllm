@@ -1,13 +1,16 @@
-from dataclasses import dataclass
+import msgspec
 
 from vllm.adapter_commons.request import AdapterRequest
 
 
-@dataclass
-class PromptAdapterRequest(AdapterRequest):
+class PromptAdapterRequest(msgspec.Struct,
+                           array_like=True,
+                           omit_defaults=True,
+                           frozen=True):
     """
     Request for a Prompt adapter.
     """
+    __metaclass__ = AdapterRequest
 
     prompt_adapter_name: str
     prompt_adapter_id: int

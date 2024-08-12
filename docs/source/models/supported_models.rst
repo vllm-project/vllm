@@ -220,10 +220,14 @@ Vision Language Models
     - Phi-3-Vision
     - :code:`microsoft/Phi-3-vision-128k-instruct`, etc.
     -
-  * - :code:`MiniCPM-V`
+  * - :code:`MiniCPMV`
     - MiniCPM-V
-    - :code:`openbmb/MiniCPM-V-2`, :code:`openbmb/MiniCPM-Llama3-V-2_5`, etc.
+    - :code:`openbmb/MiniCPM-V-2` (see note), :code:`openbmb/MiniCPM-Llama3-V-2_5`, :code:`openbmb/MiniCPM-V-2_6`, etc.
     -
+
+.. note::
+  For :code:`openbmb/MiniCPM-V-2`, the official repo doesn't work yet, so we need to use a fork (:code:`HwwwH/MiniCPM-V-2`) for now.
+  For more details, please see: https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630
 
 ----
 
