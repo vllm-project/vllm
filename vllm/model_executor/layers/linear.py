@@ -660,7 +660,7 @@ class QKVParallelLinear(ColumnParallelLinear):
 
         # Remember the shape of each shard (Q,K,V)
         # that is loaded into self.weights
-        self.shard_shape_dict: Dict[str, torch.Size] = {}
+        self.q_shard_output_len: Optional[int] = None
 
         super().__init__(input_size=input_size,
                          output_size=output_size,
@@ -749,9 +749,9 @@ class QKVParallelLinear(ColumnParallelLinear):
                               shard_offset=shard_offset,
                               shard_size=shard_size)
 
-        if loaded_shard_id is not None:
+        if loaded_shard_id == 'q':
             # Remember the shard shape
-            self.shard_shape_dict[loaded_shard_id] = param.shape
+            self.q_shard_output_len = param.shape[0]
 
     def weight_loader(self,
                       param: Parameter,
@@ -905,9 +905,9 @@ class QKVParallelLinear(ColumnParallelLinear):
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
-        if loaded_shard_id is not None:
+        if loaded_shard_id == 'q':
             # Remember the shard shape
-            self.shard_shape_dict[loaded_shard_id] = param_data.shape
+            self.q_shard_output_len = param_data.shape[0]
 
 
 class _WeightWrapper(torch.nn.Module):
@@ -941,9 +941,10 @@ class QCrossKVParallelLinear(QKVParallelLinear):
         decoder_input_,
         encoder_input_=None,
     ):
+        assert self.q_shard_output_len is not None
+        q_shard_size = self.q_shard_output_len
         skip_bias_add = self.skip_bias_add
         bias = self.bias
-        q_shard_size = self.shard_shape_dict['q'][0]
         skip_cross_kvs = encoder_input_ is None
 
         # Matrix multiply.
