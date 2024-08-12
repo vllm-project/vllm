@@ -361,6 +361,17 @@ class FusedMoE(torch.nn.Module):
             ) for expert_id in range(num_experts)
             for shard_id, weight_name in enumerate(gate_down_up)
         ] + [
+            # These are the weights for the experts
+            # (param_name, weight_name, expert_id, shard_id)
+            (
+                "experts.w13_scales"
+                if weight_name in gate_up else "experts.w2_scales",
+                f"experts.{expert_id}.{weight_name}.scales",
+                expert_id,
+                shard_id,
+            ) for expert_id in range(num_experts)
+            for shard_id, weight_name in enumerate(gate_down_up)
+        ] + [
             # These are the weight scales for the experts
             # (param_name, weight_name, expert_id, shard_id)
             (
