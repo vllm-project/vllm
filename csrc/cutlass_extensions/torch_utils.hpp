@@ -48,6 +48,12 @@ CUTE_HOST_DEVICE constexpr auto make_shape_from_idx(F&& f) {
 
 };  // namespace cute
 
+// Make a layout from a tensor with `rank(Stride{})`, where the shape is the
+// shape of the passed in tensor and the strides are of type `Stride` and
+// contain the strides of the passed in tensor, checking that any static strides
+// in `Stride{}` match the strides of the passed in tensor.
+// If `tensor.dim() < rank(Stride{})`, the shape is padded with 1s and the extra
+// strides are set to be 0 or 1.
 template <typename Stride>
 static inline auto make_cute_layout(torch::Tensor const& tensor,
                                     std::string_view name = "tensor") {
@@ -56,16 +62,19 @@ static inline auto make_cute_layout(torch::Tensor const& tensor,
       Stride{}, [&](auto const& stride_ele, auto const& idx) {
         using StrideEle = std::decay_t<decltype(stride_ele)>;
 
-        if (tensor.dim() <= idx) {
-          return StrideEle{};
-        }
-
-        if constexpr (cute::is_static_v<StrideEle>) {
-          TORCH_CHECK(StrideEle::value == tensor.stride(idx), "Expected ", name,
-                      ".stride(", idx, ") to be ", StrideEle::value);
-          return StrideEle{};
+        if (idx < tensor.dim()) {
+          if constexpr (cute::is_static_v<StrideEle>) {
+            TORCH_CHECK(StrideEle::value == tensor.stride(idx), "Expected ",
+                        name, ".stride(", idx, ") to be ", StrideEle::value);
+            return StrideEle{};
+          } else {
+            return tensor.stride(idx);
+          }
         } else {
-          return tensor.stride(idx);
+          // Extra strides are assumed to be 0 or 1
+          if constexpr (cute::is_static_v<StrideEle>)
+            static_assert(StrideEle::value == 0 || StrideEle::value == 1);
+          return StrideEle{};
         }
       });
 
