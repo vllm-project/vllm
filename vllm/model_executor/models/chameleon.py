@@ -966,15 +966,19 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsVision):
                                    attn_metadata)
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
 
         # Disallow image tokens which does not include special
         # begin-image and end-image tokens
-        image_tokens = self.model.vocabulary_mapping.image_tokens
-        logits[:, image_tokens] = torch.finfo(logits.dtype).min
+        if logits is not None:
+            image_tokens = self.model.vocabulary_mapping.image_tokens
+            logits[:, image_tokens] = torch.finfo(logits.dtype).min
 
         return logits
 
