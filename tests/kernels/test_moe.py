@@ -4,9 +4,12 @@ Run `pytest tests/kernels/test_moe.py`.
 """
 import pytest
 import torch
+from torch.nn import Parameter
+from torch.nn import functional as F
 from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
+from vllm import envs
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.models.mixtral import MixtralMoE
@@ -48,8 +51,15 @@ def test_fused_moe(
     w2 = torch.randn((e, k, n), device='cuda', dtype=dtype) / 10
 
     score = torch.randn((m, e), device='cuda', dtype=dtype)
-    triton_output = fused_moe(a, w1, w2, score, topk, renormalize=False)
     torch_output = torch_moe(a, w1, w2, score, topk)
+
+    # Pad the input if use padding
+    if envs.VLLM_MOE_PADDING:
+        w1 = F.pad(w1, (0, 128), "constant", 0)
+        torch.cuda.empty_cache()
+        w2 = F.pad(w2, (0, 128), "constant", 0)
+        torch.cuda.empty_cache()
+    triton_output = fused_moe(a, w1, w2, score, topk, renormalize=False)
     assert torch.allclose(triton_output, torch_output, atol=1e-2, rtol=0)
 
 
@@ -84,6 +94,15 @@ def test_mixtral_moe(dtype: torch.dtype):
     hf_inputs = torch.randn((1, 64, config.hidden_size)).to(dtype).to("cuda")
     # vLLM uses 1D query [num_tokens, hidden_dim]
     vllm_inputs = hf_inputs.flatten(0, 1)
+
+    # pad the weight if using padding
+    if envs.VLLM_MOE_PADDING:
+        w13_weight = F.pad(vllm_moe.w13_weight, (0, 128), "constant", 0)
+        torch.cuda.empty_cache()
+        w2_weight = F.pad(vllm_moe.w2_weight, (0, 128), "constant", 0)
+        torch.cuda.empty_cache()
+        vllm_moe.w13_weight = Parameter(w13_weight, requires_grad=False)
+        vllm_moe.w2_weight = Parameter(w2_weight, requires_grad=False)
 
     # Run forward passes for both MoE blocks
     hf_states, _ = hf_moe.forward(hf_inputs)
