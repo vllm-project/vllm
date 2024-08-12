@@ -1,11 +1,13 @@
 import asyncio
 import importlib
 import inspect
+import pickle
 import re
+import subprocess
+import sys
 from argparse import Namespace
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from multiprocessing import Process
 from typing import AsyncIterator, Set
 
 from fastapi import APIRouter, FastAPI, Request
@@ -34,7 +36,6 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               TokenizeRequest,
                                               TokenizeResponse)
 from vllm.entrypoints.openai.rpc.client import AsyncEngineRPCClient
-from vllm.entrypoints.openai.rpc.server import run_rpc_server
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
@@ -112,11 +113,21 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
                     rpc_path)
 
         # Start RPCServer in separate process (holds the AsyncLLMEngine).
-        rpc_server_process = Process(target=run_rpc_server,
-                                     args=(engine_args,
-                                           UsageContext.OPENAI_API_SERVER,
-                                           rpc_path))
-        rpc_server_process.start()
+        # NOTE: we don't use multiprocessing to avoid fork/spawn issues.
+        # subprocess can give us a clean process with no shared state.
+        rpc_server_process = subprocess.Popen([
+            sys.executable,
+            "-m",
+            "vllm.entrypoints.openai.rpc.server",
+        ],
+                                              stdin=subprocess.PIPE,
+                                              stdout=sys.stdout,
+                                              stderr=sys.stderr)
+        data = pickle.dumps(
+            (engine_args, UsageContext.OPENAI_API_SERVER, rpc_path))
+        assert rpc_server_process.stdin is not None
+        rpc_server_process.stdin.write(data)
+        rpc_server_process.stdin.close()
 
         # Build RPCClient, which conforms to AsyncEngineClient Protocol.
         async_engine_client = AsyncEngineRPCClient(rpc_path)
@@ -127,7 +138,7 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
                     await async_engine_client.setup()
                     break
                 except TimeoutError as e:
-                    if not rpc_server_process.is_alive():
+                    if rpc_server_process.poll() is not None:
                         raise RuntimeError(
                             "The server process died before "
                             "responding to the readiness probe") from e
@@ -141,7 +152,7 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
             async_engine_client.close()
 
             # Wait for server process to join
-            rpc_server_process.join()
+            rpc_server_process.wait()
 
 
 router = APIRouter()
