@@ -300,6 +300,8 @@ class ScalarType {
     }
   }
 
+  // This needs to be implemented and throw a TypeError in order for
+  // PyTorch's opcheck to work on ops that use ScalarTypes.
   int64_t len() const {
     throw c10::TypeError("__len__ not implemented");
     return 0;

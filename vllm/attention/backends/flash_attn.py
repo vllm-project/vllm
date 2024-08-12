@@ -96,6 +96,7 @@ def flash_attn_with_kvcache(
     block_table: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
     causal: bool = False,
+    softcap: float = 0.0,
     alibi_slopes: Optional[torch.Tensor] = None,
     softcap: float = 0.0,
 ) -> torch.Tensor:
@@ -107,6 +108,7 @@ def flash_attn_with_kvcache(
         block_table=block_table,
         softmax_scale=softmax_scale,
         causal=causal,
+        softcap=softcap,
         alibi_slopes=alibi_slopes,
         softcap=softcap,
     )
@@ -121,6 +123,7 @@ def _(
     block_table: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
     causal: bool = False,
+    softcap: float = 0.0,
     alibi_slopes: Optional[torch.Tensor] = None,
     softcap: float = 0.0,
 ) -> torch.Tensor:
