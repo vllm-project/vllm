@@ -78,7 +78,7 @@ def test_models(
 
 @pytest.mark.parametrize(
     "kv_dtype_n_model",
-    ["fp8_e5m2" + "#+#" + m for m in MODELS] + ["fp8_e4m3" + "#+#" + m
+    ["fp8_e5m2" + "#+#" + m for m in MODELS] + ["fp8" + "#+#" + m
                                          for m in E4M3_KV_MODELS],
 )
 @pytest.mark.parametrize("max_tokens", [NUM_FP8_KV_OUTPUTS_TO_CHECK])
