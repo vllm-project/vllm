@@ -563,6 +563,7 @@ class FlashAttentionImpl(AttentionImpl):
                 softmax_scale=self.scale,
                 causal=True,
                 alibi_slopes=self.alibi_slopes,
+                softcap=self.logits_soft_cap,
             ).squeeze(1)
 
         # Reshape the output tensor.
