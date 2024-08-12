@@ -4,11 +4,21 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.jit
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.spec_decode_base_sampler import (
     SpecDecodeStochasticBaseSampler)
 
+logger = init_logger(__name__)
+
 try:
+    """
+    Consider utilizing the FlashInfer rejection sampling kernel initially,
+    as it employs a dedicated kernel rather than relying on 
+    Torch tensor operations. This design choice helps to fuse operations, 
+    reduce memory I/O, and consequently enhances performance.
+    """
     from flashinfer.sampling import chain_speculative_sampling
+    logger.info("Use flashinfer for rejection sampling.")
 except ImportError:
     chain_speculative_sampling = None
 
@@ -55,7 +65,7 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         sequence.
 
         Args:
-            target_probs_with_bonus_probs: The probability distribution 
+            target_with_bonus_probs: The probability distribution 
                 over token ids given context according to the target model.
             shape = [batch_size, num_speculative_tokens + 1, vocab_size]
 
@@ -82,12 +92,17 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         """
         # Only perform shape/dtype/device checking in strict mode, as it adds
         # overhead.
-        target_probs = target_with_bonus_probs[:, :-1]
         if self._strict_mode:
-            self._raise_if_incorrect_input(target_probs, draft_token_ids,
-                                           bonus_token_ids, draft_probs)
+            self._raise_if_incorrect_input(target_with_bonus_probs,
+                                           draft_token_ids, bonus_token_ids,
+                                           draft_probs)
 
-        if chain_speculative_sampling:
+        batch_size, k, _ = draft_probs.shape
+
+        if batch_size == 0:
+            return torch.empty(0, k + 1, device=draft_probs.device, dtype=int)
+
+        if chain_speculative_sampling is not None:
             batch_size, k, _ = draft_probs.shape
             uniform_samples = self._create_uniform_samples(
                 seeded_seqs, batch_size, k, draft_probs.device)
@@ -97,7 +112,7 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         else:
             accepted, recovered_token_ids = (
                 self._batch_modified_rejection_sampling(
-                    target_probs,
+                    target_with_bonus_probs[:, :-1],
                     draft_probs,
                     draft_token_ids,
                     seeded_seqs,
@@ -154,28 +169,56 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
                                                            torch.Generator]],
                                 batch_size: int, k: int,
                                 device: torch.device) -> torch.Tensor:
-        if not seeded_seqs:
-            uniform_rand = torch.rand(batch_size, k + 1, device=device)
-        else:
-            uniform_rand = torch.empty(batch_size, k + 1, device=device)
+        """
+        Generates a batch of uniform random samples, with optional seeding 
+        for specific sequences.
 
-            non_seeded_indices = []
-            for idx in range(batch_size):
-                generator = seeded_seqs.get(idx)
-                if generator is None:
-                    non_seeded_indices.append(idx)
-                else:
-                    uniform_rand[idx, :] = torch.rand(1,
-                                                      k + 1,
-                                                      dtype=self.probs_dtype,
-                                                      device=device,
-                                                      generator=generator)
-            if non_seeded_indices:
-                uniform_rand[non_seeded_indices, :] = torch.rand(
-                    len(non_seeded_indices),
-                    k + 1,
-                    dtype=self.probs_dtype,
-                    device=device)
+        This method creates a tensor of shape `(batch_size, k + 1)` filled 
+        with uniform random values in the range [0, 1). If `seeded_seqs` 
+        is provided, the sequences corresponding to specific indices 
+        will be generated using the provided `torch.Generator` for 
+        reproducibility. The other sequences will be generated without 
+        a seed.
+
+        Args:
+            seeded_seqs : Optional[Dict[int, torch.Generator]]
+                A dictionary mapping indices in the batch to 
+                `torch.Generator` objects. If `None`, all samples are 
+                generated without a seed.
+            batch_size : int
+                The number of sequences to generate.
+            k : int
+                The number of random samples per sequence.
+            device : torch.device
+                The device on which to allocate the tensor.
+
+        Returns:
+            uniform_rand : torch.Tensor
+                A tensor of shape `(batch_size, k + 1)` containing uniform 
+                random values in the range [0, 1).
+        """
+        if not seeded_seqs:
+            return torch.rand(batch_size, k + 1, device=device)
+
+        uniform_rand = torch.empty(batch_size, k + 1, device=device)
+
+        non_seeded_indices = []
+        for idx in range(batch_size):
+            generator = seeded_seqs.get(idx)
+            if generator is None:
+                non_seeded_indices.append(idx)
+            else:
+                uniform_rand[idx, :] = torch.rand(1,
+                                                  k + 1,
+                                                  dtype=self.probs_dtype,
+                                                  device=device,
+                                                  generator=generator)
+        if non_seeded_indices:
+            uniform_rand[non_seeded_indices, :] = torch.rand(
+                len(non_seeded_indices),
+                k + 1,
+                dtype=self.probs_dtype,
+                device=device)
         return uniform_rand
 
     def _get_accepted(
