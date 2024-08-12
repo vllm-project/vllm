@@ -13,3 +13,4 @@ jobs:
         run: |
           echo "PR branch"
           echo ${{ github.event.pull_request.head.ref }}
+          echo ${{ github.event.pull_request.head.repo.owner.login }}
