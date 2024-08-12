@@ -10,7 +10,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Cancel Buildkite Run
+        env:
+          BUILDKITE_TOKEN: ${{ secrets.BUILDKITE_TOKEN }}
+          BUILDKITE_ORG: vllm
+          BUILDKITE_PIPELINE: fastcheck
         run: |
           echo "PR branch"
-          echo ${{ github.event.pull_request.head.ref }}
-          echo ${{ github.event.pull_request.head.repo.owner.login }}
+          FULL_BRANCH=${{ github.event.pull_request.head.ref }}:${{ github.event.pull_request.head.repo.owner.login }}
+          echo FULL_BRANCH
+          LATEST_BUILD_NUMBER=$(curl -H "Authorization: Bearer $BUILDKITE_TOKEN" \
+            "https://api.buildkite.com/v2/organizations/$BUILDKITE_ORG/pipelines/$BUILDKITE_PIPELINE/builds?branch=main&state=running" \
+            | jq -r '.[0].number')
+          echo "Latest build number: $LATEST_BUILD_NUMBER"
+          curl -X POST -H "Authorization: Bearer $BUILDKITE_TOKEN" \
+            "https://api.buildkite.com/v2/organizations/$BUILDKITE_ORG/pipelines/$BUILDKITE_PIPELINE/builds/$LATEST_BUILD_NUMBER/cancel"
