@@ -1,4 +1,4 @@
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
+from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
 
 import torch
 from torch import nn
@@ -29,6 +29,25 @@ logger = init_logger(__name__)
 _KEYS_TO_MODIFY_MAPPING = {
     "language_model.model": "language_model",
 }
+
+
+class PaliGemmaImagePixelInputs(TypedDict):
+    type: Literal["pixel_values"]
+    data: torch.Tensor
+    """Shape: (batch_size, num_channels, height, width)"""
+
+
+class PaliGemmaImageEmbeddingInputs(TypedDict):
+    type: Literal["image_embeds"]
+    data: torch.Tensor
+    """Shape: `(batch_size, image_feature_size, hidden_size)`
+
+    `hidden_size` must match the hidden size of language model backbone.
+    """
+
+
+PaliGemmaImageInputs = Union[PaliGemmaImagePixelInputs,
+                             PaliGemmaImageEmbeddingInputs]
 
 
 def get_max_paligemma_image_tokens(ctx: InputContext):
@@ -107,15 +126,6 @@ class PaliGemmaMultiModalProjector(nn.Module):
         return hidden_states
 
 
-class PaliGemmaImagePixelInputs(TypedDict):
-    type: Literal["pixel_values"]
-    data: torch.Tensor
-    """Shape: (batch_size, num_channels, height, width)"""
-
-
-PaliGemmaImageInputs = PaliGemmaImagePixelInputs
-
-
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_paligemma_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_paligemma)
@@ -163,18 +173,30 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[PaliGemmaImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
+        image_embeds = kwargs.pop("image_embeds", None)
 
-        if pixel_values is None:
+        if pixel_values is None and image_embeds is None:
             return None
 
-        if not isinstance(pixel_values, torch.Tensor):
-            raise ValueError("Incorrect type of pixel values. "
-                             f"Got type: {type(pixel_values)}")
+        if pixel_values is not None:
+            if not isinstance(pixel_values, torch.Tensor):
+                raise ValueError("Incorrect type of pixel values. "
+                                 f"Got type: {type(pixel_values)}")
+            return PaliGemmaImagePixelInputs(
+                type="pixel_values",
+                data=self._validate_pixel_values(pixel_values),
+            )
 
-        return PaliGemmaImagePixelInputs(
-            type="pixel_values",
-            data=self._validate_pixel_values(pixel_values),
-        )
+        if image_embeds is not None:
+            if not isinstance(image_embeds, torch.Tensor):
+                raise ValueError("Incorrect type of image embeddings. "
+                                 f"Got type: {type(image_embeds)}")
+            return PaliGemmaImageEmbeddingInputs(
+                type="image_embeds",
+                data=image_embeds,
+            )
+
+        raise AssertionError("This line should be unreachable.")
 
     def _image_pixels_to_features(
         self,
@@ -187,26 +209,20 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
 
         return image_features
 
-    def _process_image_pixels(
-        self,
-        inputs: PaliGemmaImagePixelInputs,
-    ) -> torch.Tensor:
-        assert self.vision_tower is not None
-
-        pixel_values = inputs["data"]
-
-        return self._image_pixels_to_features(
-            self.vision_tower,
-            pixel_values,
-        )
-
     def _process_image_input(
         self,
         image_input: PaliGemmaImageInputs,
     ) -> torch.Tensor:
 
+        if image_input["type"] == "image_embeds":
+            return image_input["data"]
+
         assert self.vision_tower is not None
-        image_features = self._process_image_pixels(image_input, )
+        pixel_values = image_input["data"]
+        image_features = self._image_pixels_to_features(
+            self.vision_tower,
+            pixel_values,
+        )
 
         return self.multi_modal_projector(image_features)
 
