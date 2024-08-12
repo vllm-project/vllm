@@ -451,7 +451,7 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                         continue
                     # logger.error(f"{weight_name} {param_name} {name}")
                     name = name.replace(weight_name, param_name)
-                    # logger.error(f"Loading {name} from {weight_name}")
+                    logger.error(f"Loading {name} from {weight_name}")
                     # Skip layers on other devices.
                     if is_pp_missing_parameter(name, self):
                         continue
