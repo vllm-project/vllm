@@ -515,7 +515,15 @@ class AsyncLLMEngine:
             print_warning_once(
                 "DEPRECATED. `--engine-use-ray` is deprecated and may "
                 "be removed in a future update. "
-                "See #7045.")
+                "See https://github.com/vllm-project/vllm/issues/7045.")
+
+            if envs.VLLM_ALLOW_ENGINE_USE_RAY:
+                print_warning_once(
+                    "VLLM_ALLOW_ENGINE_USE_RAY is set, force engine use Ray")
+            else:
+                raise ValueError("`--engine-use-ray` is deprecated. "
+                                 "Set `VLLM_ALLOW_ENGINE_USE_RAY=1` to "
+                                 "force use it")
 
         self.background_loop: Optional[asyncio.Future] = None
         # We need to keep a reference to unshielded
