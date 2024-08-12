@@ -28,5 +28,5 @@ def test_oot_registration():
     for output in outputs:
         generated_text = output.outputs[0].text
         # make sure only the first token is generated
-        rest = generated_text.replace(first_token, "")  # noqa
+        rest = generated_text.replace(first_token, "")
         assert rest == ""
