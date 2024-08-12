@@ -77,9 +77,10 @@ def test_models(
     )
 
 
-@pytest.mark.parametrize("kv_dtype_n_model",
-                         ["fp8_e5m2" + "#+#" + m for m in E5M2_KV_MODELS] +
-                         ["fp8_e4m3" + "#+#" + m for m in E4M3_KV_MODELS])
+@pytest.mark.parametrize("kv_cache_dtype,model",
+                         [("fp8_e5m2", m)
+                          for m in E5M2_KV_MODELS] + [("fp8_e4m3", m)
+                                                      for m in E4M3_KV_MODELS])
 # Due to low-precision numerical divergence, we only test logprob of 4 tokens
 @pytest.mark.parametrize("max_tokens", [4])
 @pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16])
@@ -90,7 +91,8 @@ def test_models(
 def test_models_with_fp8_kv_cache(
     vllm_runner,
     example_prompts,
-    kv_dtype_n_model: str,
+    kv_cache_dtype: str,
+    model: str,
     max_tokens: int,
     chunked_prefill_token_size: int,
     enforce_eager: bool,
@@ -104,8 +106,6 @@ def test_models_with_fp8_kv_cache(
     / numerics (e.g. when using lower-precision types like FP8).
     """
     NUM_LOG_PROBS = 8
-
-    kv_cache_dtype, model = kv_dtype_n_model.split("#+#")
 
     if model == "facebook/opt-125m":
         pytest.skip(
