@@ -23,7 +23,7 @@ class FusionFail(Exception):
 class FusedOpGenerator(ABC):
     """
     The FusedOpGenerator is a class that is responsible for generating a fused
-    operation for sequences of gx graph nodes.
+    operation for sequences of fx graph nodes.
     """
 
     @abstractmethod

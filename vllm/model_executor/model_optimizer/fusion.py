@@ -284,6 +284,8 @@ def pointwise_fusion(cc: CodeCache,
 
     # Map of nodes to partitions.  Partition 0 represents unfusable operations.
     node_map: Dict[torch.fx.Node, int] = dict()
+
+    # TODO: make UNFUSED_PARTITION = 0 constant
     partition = 0
 
     # assumption, graph.nodes are in topo order

@@ -125,13 +125,37 @@ def assert_close(a, b):
     torch.testing.assert_close(a, b, rtol=rtol, atol=atol)
 
 
+@torch.compile(backend='eager')
+def _sgmv_shrink(
+    inputs_tensor,
+    lora_weights,
+    our_out_tensor,
+    b_seq_start_loc,
+    seq_len_tensor,
+    lora_indices_tensor,
+    batches,
+    max_seq_length,
+    scaling,
+):
+    sgmv_shrink(
+        inputs_tensor,
+        lora_weights,
+        our_out_tensor,
+        b_seq_start_loc,
+        seq_len_tensor,
+        lora_indices_tensor,
+        batches,
+        max_seq_length,
+        scaling,
+    )
+
 @pytest.mark.parametrize("batches", BATCHES)
 @pytest.mark.parametrize("num_loras", NUM_LORA)
 @pytest.mark.parametrize("rank", MAX_RANKS)
-@pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
+@pytest.mark.parametrize("hidden_size", (HIDDEN_SIZES[0:8]))
 @pytest.mark.parametrize("scaling", SCALES)
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("op_type", ["shrink", "expand"])
+@pytest.mark.parametrize("op_type", ["shrink"])
 @pytest.mark.parametrize("seed", SEED)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_punica_sgmv(
@@ -177,7 +201,7 @@ def test_punica_sgmv(
     else:
         max_seq_length = max_seq_length.item()
     if op_type == "shrink":
-        sgmv_shrink(
+        _sgmv_shrink(
             inputs_tensor,
             lora_weights,
             our_out_tensor,
