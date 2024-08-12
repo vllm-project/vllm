@@ -936,7 +936,15 @@ class QCrossKVParallelLinear(QKVParallelLinear):
                  params_dtype: Optional[torch.dtype] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = ""):
+        '''
+        The :class:`QKVParallelLinear` parent class packs Q,K,V into
+        self.weights, however cross-attention QKV computation is more
+        efficient if we compute separate views of the W_Q weights,
+        packed W_K W_V weights, Q bias vector, and packed KV bias vector. 
 
+        To avoid recomputing these views of the underlying self.weights,
+        we cache them.
+        '''
         self._param_views_not_cached: bool = True
         self._cached_q_weights_wrapper: Optional[_WeightWrapper] = None
         self._cached_kv_weights_wrapper: Optional[_WeightWrapper] = None
@@ -954,6 +962,11 @@ class QCrossKVParallelLinear(QKVParallelLinear):
                          prefix=prefix)
 
     def _maybe_cache_param_views(self) -> None:
+        '''
+        Compute the W_Q weights, packed W_K W_V weights, Q bias vector, and
+        packed KV bias vector once, in order to cache them.
+        '''
+
         if self._param_views_not_cached:
             q_shard_size = self._get_shard_offset_mapping('k')
             self._cached_q_weights_wrapper = _WeightWrapper(
@@ -968,14 +981,32 @@ class QCrossKVParallelLinear(QKVParallelLinear):
         self,
         q_output_parallel: torch.Tensor,
         kv_output_parallel: Optional[torch.Tensor],
-        skip_cross_kvs: bool,
+        is_decode_phase: bool,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        '''
+        Perform all-gather, if required.
+
+        Arguments:
+
+        * q_output_parallel: computed Q on current GPU
+        * kv_output_parallel: computed KV on current GPU
+        * is_decode_phase: skip KV all-gather if True
+
+        Returns:
+
+        * Q all-gather result if required, otherwise q_output_parallel
+        * For KV:
+            * If all-gather required,
+                * KV all-gather result if in prefill-phase
+                * None if in decode-phase
+            * kv_output_parallel otherwise
+        '''
 
         if self.gather_output:
             # All-gather across the partitions.
             return (
                 tensor_model_parallel_all_gather(q_output_parallel),
-                (None if skip_cross_kvs else
+                (None if is_decode_phase else
                  tensor_model_parallel_all_gather(kv_output_parallel)),
             )
 
@@ -990,6 +1021,20 @@ class QCrossKVParallelLinear(QKVParallelLinear):
         input: torch.Tensor,
         bias: torch.Tensor,
     ) -> torch.Tensor:
+        '''
+        Invoke linear method, including bias argument if required.
+
+        Arguments:
+
+        * weights: parameter matrix
+        * input: hidden states
+        * bias: bias
+
+        Returns:
+
+        * weights * input if self.skip_bias_add
+        * weights * input + bias otherwise
+        '''
         assert self.quant_method is not None
         return self.quant_method.apply(weights, input,
                                        None if self.skip_bias_add else bias)
@@ -1009,10 +1054,10 @@ class QCrossKVParallelLinear(QKVParallelLinear):
 
         Returns:
 
-        * Q tensor
-        * KV packed tensor
-        * Q bias tensor
-        * KV bias tensor
+        * Q  = (decoder_input_) x W_Q
+        * KV  = (encoder_input_) x [W_K W_V] (None if encoder_input_ is None)
+        * Q bias vector
+        * KV bias vector (None if encoder_input_ is None)
         '''
         self._maybe_cache_param_views()
         assert self._cached_q_weights_wrapper is not None
@@ -1020,12 +1065,12 @@ class QCrossKVParallelLinear(QKVParallelLinear):
         assert self._cached_q_bias is not None
         assert self._cached_kv_bias is not None
 
-        # Compute Q and KV
-        skip_cross_kvs = encoder_input_ is None
+        # Compute Q and maybe KV
+        is_decode_phase = encoder_input_ is None
         q_output_parallel = self._apply_w_conditional_bias(
             self._cached_q_weights_wrapper, decoder_input_,
             self._cached_q_bias)
-        kv_output_parallel = None if skip_cross_kvs else (
+        kv_output_parallel = None if is_decode_phase else (
             self._apply_w_conditional_bias(self._cached_kv_weights_wrapper,
                                            encoder_input_,
                                            self._cached_kv_bias))
@@ -1035,7 +1080,7 @@ class QCrossKVParallelLinear(QKVParallelLinear):
             q_output,
             kv_output,
         ) = self._maybe_gather_output(q_output_parallel, kv_output_parallel,
-                                      skip_cross_kvs)
+                                      is_decode_phase)
 
         return (
             q_output,
