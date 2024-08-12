@@ -1138,6 +1138,10 @@ async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
 
 
 def load_general_plugins():
+    """WARNING: plugins can be loaded for multiple times in different
+    processes. They should be designed in a way that they can be loaded
+    multiple times without causing issues.
+    """
     import sys
     if sys.version_info < (3, 10):
         from importlib_metadata import entry_points
