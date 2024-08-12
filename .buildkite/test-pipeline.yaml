@@ -89,7 +89,7 @@ steps:
 - label: Layers Tests
   fast_check: true
   source_file_dependencies:
-  - vllm/model_executor/layers/linear.py
+  - vllm/model_executor/layers
   commands:
   - pytest -v -s model_executor/layers
 
