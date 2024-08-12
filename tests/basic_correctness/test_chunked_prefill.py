@@ -21,6 +21,7 @@ E4M3_KV_MODELS = [
     "nm-testing/Qwen2-1.5B-Instruct-FP8-K-V",
     "nm-testing/TinyLlama-1.1B-compressed-tensors-kv-cache-scheme"
 ]
+NUM_FP8_KV_OUTPUTS_TO_CHECK = 4
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -77,10 +78,10 @@ def test_models(
 
 @pytest.mark.parametrize(
     "kv_dtype_n_model",
-    ["fp8_e5m2" + "#+" + m for m in MODELS] + ["fp8_e4m3" + "#+" + m
+    ["fp8_e5m2" + "#+#" + m for m in MODELS] + ["fp8_e4m3" + "#+#" + m
                                          for m in E4M3_KV_MODELS],
 )
-@pytest.mark.parametrize("max_tokens", [4])
+@pytest.mark.parametrize("max_tokens", [NUM_FP8_KV_OUTPUTS_TO_CHECK])
 @pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16])
 @pytest.mark.parametrize("enforce_eager", [False, True])
 # NOTE: Increasing this in this suite will fail CI because we currently cannot
@@ -104,7 +105,7 @@ def test_models_with_fp8_kv_cache(
     """
     NUM_LOG_PROBS = 8
 
-    kv_cache_dtype, model = kv_dtype_n_model.split("#+")
+    kv_cache_dtype, model = kv_dtype_n_model.split("#+#")
 
     if model == "facebook/opt-125m":
         pytest.skip(
@@ -125,7 +126,7 @@ def test_models_with_fp8_kv_cache(
             max_num_seqs=max_num_seqs,
             kv_cache_dtype=kv_cache_dtype,
     ) as vllm_model:
-        decode_outputs = vllm_model.generate_greedy_logprobs(
+        no_chunked_prefill_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, NUM_LOG_PROBS)
 
     with vllm_runner(
@@ -141,8 +142,8 @@ def test_models_with_fp8_kv_cache(
             example_prompts, max_tokens, NUM_LOG_PROBS)
 
     check_logprobs_close(
-        outputs_0_lst=decode_outputs,
-        outputs_1_lst=chunked_prefill_outputs,
+        outputs_0_lst=no_chunked_prefill_outputs[:NUM_FP8_KV_OUTPUTS_TO_CHECK],
+        outputs_1_lst=chunked_prefill_outputs[:NUM_FP8_KV_OUTPUTS_TO_CHECK],
         name_0="no_chunked_prefill",
         name_1="chunked_prefill",
     )
