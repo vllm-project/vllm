@@ -1,9 +1,12 @@
-from typing import Dict, List, Optional, Sequence as GenericSequence, Tuple, TypeVar, Union
+from typing import Dict, List, Optional
+from typing import Sequence as GenericSequence
+from typing import Tuple, TypeVar, Union
 
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from vllm.logprobs import Logprob
 from vllm.sampling_params import SamplingParams
+from vllm.utils import ensure_list
 
 # Used eg. for marking rejected tokens in spec decoding.
 INVALID_TOKEN_ID = -1
@@ -92,8 +95,25 @@ class IncrementalDetokenizer:
         return new_decoded_token_text
 
 
-def ensure_list(s: GenericSequence[T]) -> List[T]:
-    return s if isinstance(s, list) else list(s)
+def decode_output_tokens(
+    output_token_ids: GenericSequence[int],
+    prompt_token_ids: List[int],
+    tokenizer: PreTrainedTokenizer,
+    skip_special_tokens: bool,
+) -> str:
+    if not prompt_token_ids:
+        return tokenizer.decode(output_token_ids,
+                                skip_special_tokens=skip_special_tokens)
+
+    # Ensure spaces are handled as if the output tokens were decoded as
+    # a full list of ids including the prompt.
+    token_ids = prompt_token_ids[-4:]
+    prefix_ids_str = tokenizer.decode(token_ids,
+                                      skip_special_tokens=skip_special_tokens)
+    token_ids.extend(output_token_ids)
+    all_ids_str = tokenizer.decode(token_ids,
+                                   skip_special_tokens=skip_special_tokens)
+    return all_ids_str[len(prefix_ids_str):]
 
 
 def decode_prompt_logprobs_inplace(all_token_ids: List[int],

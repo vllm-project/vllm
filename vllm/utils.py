@@ -17,8 +17,9 @@ from collections import defaultdict
 from functools import lru_cache, partial, wraps
 from platform import uname
 from typing import (Any, AsyncGenerator, Awaitable, Callable, Dict, Generic,
-                    Hashable, List, Literal, Optional, OrderedDict, Set, Tuple,
-                    Type, TypeVar, Union, overload)
+                    Hashable, List, Literal, Optional, OrderedDict)
+from typing import Sequence as GenericSequence
+from typing import Set, Tuple, Type, TypeVar, Union, overload
 from uuid import uuid4
 
 import numpy as np
@@ -860,10 +861,17 @@ def is_list_of(
 
     if check == "first":
         return len(value) == 0 or isinstance(value[0], typ)
-    elif check == "all":
+    if check == "all":
         return all(isinstance(v, typ) for v in value)
 
     assert_never(check)
+
+
+def ensure_list(s: GenericSequence[T]) -> List[T]:
+    """Convert input sequence to a list, or return as-is if
+    already a list.
+    """
+    return s if isinstance(s, list) else list(s)
 
 
 def merge_dicts(dict1: Dict[K, List[T]],

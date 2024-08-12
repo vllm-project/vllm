@@ -10,7 +10,7 @@ from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
                            SequenceOutput, SequenceStatus)
-from vllm.transformers_utils.detokenizer import Detokenizer
+from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.utils import Counter
 
 from ...core.utils import create_seq_group
@@ -25,13 +25,13 @@ def test_appends_token_ids(num_new_tokens: int, seq_output_len: int):
     We append token ids and verify all the token ids were appended correctly.
     Note that ignore_eos=True.
     """
-    detokenizer = MagicMock(spec=Detokenizer)
+    tokenizer_group = MagicMock(spec=BaseTokenizerGroup)
     scheduler = MagicMock(spec=Scheduler)
     stop_checker = MagicMock(spec=StopChecker)
     seq_counter = Counter()
 
     output_processor = MultiStepOutputProcessor(
-        detokenizer=detokenizer,
+        tokenizer_group=tokenizer_group,
         scheduler=[scheduler],
         seq_counter=seq_counter,
         get_tokenizer_for_seq=lambda _: mock_tokenizer(),
@@ -79,13 +79,13 @@ def test_respects_max_tokens(num_new_tokens: int, seq_prompt_len: int,
     """Verify tokens after max_tokens are dropped and not appended to the
     sequence.
     """
-    detokenizer = MagicMock(spec=Detokenizer)
+    tokenizer_group = MagicMock(spec=BaseTokenizerGroup)
     scheduler = MagicMock(spec=Scheduler)
     stop_checker = MagicMock(spec=StopChecker)
     seq_counter = Counter()
 
     output_processor = MultiStepOutputProcessor(
-        detokenizer=detokenizer,
+        tokenizer_group=tokenizer_group,
         scheduler=[scheduler],
         seq_counter=seq_counter,
         get_tokenizer_for_seq=lambda _: mock_tokenizer(),
@@ -139,7 +139,7 @@ def test_respects_eos_token_id(num_new_tokens: int, seq_prompt_len: int,
     tokens are dropped (not appended to sequence).
     """
     random.seed(seed)
-    detokenizer = MagicMock(spec=Detokenizer)
+    tokenizer_group = MagicMock(spec=BaseTokenizerGroup)
     scheduler = MagicMock(spec=Scheduler)
     stop_checker = MagicMock(spec=StopChecker)
     seq_counter = Counter()
@@ -147,7 +147,7 @@ def test_respects_eos_token_id(num_new_tokens: int, seq_prompt_len: int,
     eos_token_id = 100
 
     output_processor = MultiStepOutputProcessor(
-        detokenizer=detokenizer,
+        tokenizer_group=tokenizer_group,
         scheduler=[scheduler],
         seq_counter=seq_counter,
         get_tokenizer_for_seq=lambda _: mock_tokenizer(eos_token_id),
@@ -206,7 +206,7 @@ def test_ignores_eos_token_id(num_new_tokens: int, seq_prompt_len: int,
     ensure all token ids are appended even if the eos token id is emitted.
     """
     random.seed(seed)
-    detokenizer = MagicMock(spec=Detokenizer)
+    tokenizer_group = MagicMock(spec=BaseTokenizerGroup)
     scheduler = MagicMock(spec=Scheduler)
     stop_checker = MagicMock(spec=StopChecker)
     seq_counter = Counter()
@@ -214,7 +214,7 @@ def test_ignores_eos_token_id(num_new_tokens: int, seq_prompt_len: int,
     eos_token_id = 100
 
     output_processor = MultiStepOutputProcessor(
-        detokenizer=detokenizer,
+        tokenizer_group=tokenizer_group,
         scheduler=[scheduler],
         seq_counter=seq_counter,
         get_tokenizer_for_seq=lambda _: mock_tokenizer(eos_token_id),

@@ -33,7 +33,8 @@ from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
 # yapf: disable
 from vllm.transformers_utils.detokenizer import (
-    IncrementalDetokenizer, decode_prompt_logprobs_inplace)
+    IncrementalDetokenizer, decode_output_tokens,
+    decode_prompt_logprobs_inplace)
 # yapf: enable
 from vllm.utils import merge_async_iterators, random_uuid
 
@@ -406,8 +407,10 @@ class OpenAIServingCompletion(OpenAIServing):
                     if sampling_params.detokenize:
                         output_text = output.text
                     else:
-                        output_text = tokenizer.decode(
+                        output_text = decode_output_tokens(
                             token_ids,
+                            prompt_token_ids,
+                            tokenizer=tokenizer,
                             skip_special_tokens=sampling_params.
                             skip_special_tokens,
                         )

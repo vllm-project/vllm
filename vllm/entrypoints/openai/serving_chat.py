@@ -32,7 +32,8 @@ from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
-from vllm.transformers_utils.detokenizer import IncrementalDetokenizer
+from vllm.transformers_utils.detokenizer import (IncrementalDetokenizer,
+                                                 decode_output_tokens)
 from vllm.utils import iterate_with_cancellation, random_uuid
 
 logger = init_logger(__name__)
@@ -486,8 +487,10 @@ class OpenAIServingChat(OpenAIServing):
             if sampling_params.detokenize:
                 output_text = output.text
             else:
-                output_text = tokenizer.decode(
+                output_text = decode_output_tokens(
                     token_ids,
+                    final_res.prompt_token_ids,
+                    tokenizer=tokenizer,
                     skip_special_tokens=sampling_params.skip_special_tokens)
 
             if request.tool_choice and type(
