@@ -88,7 +88,13 @@ def input_processor_for_clip(
     tokenizer = cached_get_tokenizer(model_config.tokenizer)
 
     if image_feature_size_override is None:
-        image_feature_size = get_clip_image_feature_size(hf_config)
+        image_data = multi_modal_data["image"]
+        if isinstance(image_data, Image.Image):
+            image_feature_size = get_clip_image_feature_size(hf_config)
+        elif isinstance(image_data, torch.Tensor):
+            image_feature_size = image_data.shape[0]
+        else:
+            raise TypeError(f"Invalid image type: {type(image_data)}")
     else:
         image_feature_size = image_feature_size_override
 

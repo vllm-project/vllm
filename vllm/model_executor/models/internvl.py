@@ -50,6 +50,19 @@ class InternVLImagePixelInputs(TypedDict):
     """
 
 
+class InternVLImageEmbeddingInputs(TypedDict):
+    type: Literal["image_embeds"]
+    data: Union[torch.Tensor, List[torch.Tensor]]
+    """Shape: `(batch_size, image_feature_size, hidden_size)`
+
+    `hidden_size` must match the hidden size of language model backbone.
+    """
+
+
+InternVLImageInputs = Union[InternVLImagePixelInputs,
+                            InternVLImageEmbeddingInputs]
+
+
 # copied from https://huggingface.co/OpenGVLab/InternVL2-1B
 def build_transform(input_size):
     MEAN, STD = IMAGENET_MEAN, IMAGENET_STD
@@ -193,8 +206,10 @@ def input_processor_for_internvl(ctx: InputContext, llm_inputs: LLMInputs):
         # add thumbnail image if num_blocks > 1
         if hf_config.use_thumbnail and num_blocks > 1:
             num_blocks += 1
+        image_feature_size = num_blocks * num_patches
+
     elif isinstance(image_data, torch.Tensor):
-        raise NotImplementedError("Embeddings input is not supported yet")
+        image_feature_size = image_data.shape[0]
     else:
         raise TypeError(f"Invalid image type: {type(image_data)}")
 
@@ -205,7 +220,7 @@ def input_processor_for_internvl(ctx: InputContext, llm_inputs: LLMInputs):
     prompt_token_ids = llm_inputs["prompt_token_ids"]
     if prompt is None:
         prompt = tokenizer.decode(prompt_token_ids)
-    image_prompt = IMG_START + IMG_CONTEXT * num_blocks * num_patches + IMG_END
+    image_prompt = IMG_START + IMG_CONTEXT * image_feature_size + IMG_END
     new_prompt = prompt.replace('<image>', image_prompt, 1)
     new_prompt_token_ids = tokenizer.encode(new_prompt)
 
@@ -378,23 +393,49 @@ class InternVLChatModel(nn.Module, SupportsVision):
         return data
 
     def _parse_and_validate_image_input(
-            self, **kwargs: object) -> Optional[InternVLImagePixelInputs]:
+            self, **kwargs: object) -> Optional[InternVLImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
         image_token_id = kwargs.pop("image_token_id", None)
+        image_embeds = kwargs.pop("image_embeds", None)
 
-        if pixel_values is None:
+        if pixel_values is None and image_embeds is None:
             return None
+
+        if image_embeds is not None:
+            if not isinstance(image_embeds, torch.Tensor):
+                raise ValueError("Incorrect type of image embeddings. "
+                                 f"Got type: {type(image_embeds)}")
+            return InternVLImageEmbeddingInputs(
+                type="image_embeds",
+                data=image_embeds,
+            )
 
         self.img_context_token_id = image_token_id[0]
 
-        if not isinstance(pixel_values, (torch.Tensor, list)):
-            raise ValueError("Incorrect type of pixel values. "
-                             f"Got type: {type(pixel_values)}")
+        if pixel_values is not None:
+            if not isinstance(pixel_values, (torch.Tensor, list)):
+                raise ValueError("Incorrect type of pixel values. "
+                                 f"Got type: {type(pixel_values)}")
 
-        return InternVLImagePixelInputs(
-            type="pixel_values",
-            data=self._validate_pixel_values(pixel_values),
-        )
+            return InternVLImagePixelInputs(
+                type="pixel_values",
+                data=self._validate_pixel_values(pixel_values),
+            )
+
+        raise AssertionError("This line should be unreachable.")
+
+    def _process_image_input(
+        self,
+        image_input: InternVLImageInputs,
+    ) -> torch.Tensor:
+
+        if image_input["type"] == "image_embeds":
+            return image_input["data"]
+
+        assert self.vision_model is not None
+        image_embeds = self.extract_feature(image_input["data"])
+
+        return image_embeds
 
     def forward(
         self,
@@ -409,9 +450,9 @@ class InternVLChatModel(nn.Module, SupportsVision):
         if image_input is not None:
             inputs_embeds = self.language_model.model.get_input_embeddings(
                 input_ids)
-            vit_embeds = self.extract_feature(image_input["data"])
+            vision_embeddings = self._process_image_input(image_input)
             inputs_embeds = merge_vision_embeddings(input_ids, inputs_embeds,
-                                                    vit_embeds,
+                                                    vision_embeddings,
                                                     self.img_context_token_id)
             input_ids = None
         else:

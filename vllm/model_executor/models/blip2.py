@@ -1,4 +1,4 @@
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
+from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -27,6 +27,29 @@ _KEYS_TO_MODIFY_MAPPING = {
     "language_model.lm_head": "lm_head",
     "language_model.model": "language_model",
 }
+
+# We use this internally as placeholders since there is no image token
+# defined on the HuggingFace repo
+BLIP2_IMAGE_TOKEN = "<image>"
+BLIP2_IMAGE_TOKEN_ID = 50265
+
+
+class Blip2ImagePixelInputs(TypedDict):
+    type: Literal["pixel_values"]
+    data: torch.Tensor
+    """Shape: (batch_size, num_channels, height, width)"""
+
+
+class Blip2ImageEmbeddingInputs(TypedDict):
+    type: Literal["image_embeds"]
+    data: torch.Tensor
+    """Shape: `(batch_size, image_feature_size, hidden_size)`
+
+    `hidden_size` must match the hidden size of language model backbone.
+    """
+
+
+Blip2ImageInputs = Union[Blip2ImagePixelInputs, Blip2ImageEmbeddingInputs]
 
 
 class Blip2QFormerMultiHeadAttention(nn.Module):
@@ -375,20 +398,6 @@ class Blip2QFormerModel(nn.Module):
         return sequence_output
 
 
-class Blip2ImagePixelInputs(TypedDict):
-    type: Literal["pixel_values"]
-    data: torch.Tensor
-    """Shape: (batch_size, num_channels, height, width)"""
-
-
-Blip2ImageInputs = Blip2ImagePixelInputs
-
-# We use this internally as placeholders since there is no image token
-# defined on the HuggingFace repo
-BLIP2_IMAGE_TOKEN = "<image>"
-BLIP2_IMAGE_TOKEN_ID = 50265
-
-
 def get_blip2_image_feature_size(hf_config: Blip2Config) -> int:
     return hf_config.num_query_tokens
 
@@ -506,18 +515,31 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[Blip2ImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
+        image_embeds = kwargs.pop("image_embeds", None)
 
-        if pixel_values is None:
+        if pixel_values is None and image_embeds is None:
             return None
 
-        if not isinstance(pixel_values, torch.Tensor):
-            raise ValueError("Incorrect type of pixel values. "
-                             f"Got type: {type(pixel_values)}")
+        if pixel_values is not None:
+            if not isinstance(pixel_values, torch.Tensor):
+                raise ValueError("Incorrect type of pixel values. "
+                                 f"Got type: {type(pixel_values)}")
 
-        return Blip2ImagePixelInputs(
-            type="pixel_values",
-            data=self._validate_pixel_values(pixel_values),
-        )
+            return Blip2ImagePixelInputs(
+                type="pixel_values",
+                data=self._validate_pixel_values(pixel_values),
+            )
+
+        if image_embeds is not None:
+            if not isinstance(image_embeds, torch.Tensor):
+                raise ValueError("Incorrect type of image embeddings. "
+                                 f"Got type: {type(image_embeds)}")
+            return Blip2ImageEmbeddingInputs(
+                type="image_embeds",
+                data=image_embeds,
+            )
+
+        raise AssertionError("This line should be unreachable.")
 
     def _image_pixels_to_features(self, vision_model: BlipVisionModel,
                                   pixel_values: torch.Tensor) -> torch.Tensor:
@@ -538,6 +560,10 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
 
     def _process_image_input(self,
                              image_input: Blip2ImageInputs) -> torch.Tensor:
+
+        if image_input["type"] == "image_embeds":
+            return image_input["data"]
+
         assert self.vision_model is not None
         image_features = self._process_image_pixels(image_input)
 
