@@ -5,5 +5,5 @@ setup(name='vllm_add_dummy_model',
       packages=['vllm_add_dummy_model'],
       entry_points={
           'vllm.general_plugins':
-          ["add_dummy_model = vllm_add_dummy_model:register"]
+          ["register_dummy_model = vllm_add_dummy_model:register"]
       })
