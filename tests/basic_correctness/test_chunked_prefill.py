@@ -15,6 +15,9 @@ MODELS = [
     "facebook/opt-125m",
     "meta-llama/Llama-2-7b-hf",
 ]
+E5M2_KV_MODELS = [
+    "facebook/opt-125m",
+]
 E4M3_KV_MODELS = [
     "meta-llama/Llama-2-7b-chat-hf", "nm-testing/Qwen2-1.5B-Instruct-FP8-K-V",
     "nm-testing/TinyLlama-1.1B-compressed-tensors-kv-cache-scheme"
@@ -79,6 +82,7 @@ def test_models(
 
 
 @pytest.mark.parametrize("kv_dtype_n_model",
+                         ["fp8_e5m2" + "#+#" + m for m in E5M2_KV_MODELS] +
                          ["fp8_e4m3" + "#+#" + m for m in E4M3_KV_MODELS])
 @pytest.mark.parametrize("max_tokens", [NUM_FP8_KV_OUTPUTS_TO_CHECK])
 @pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16])
