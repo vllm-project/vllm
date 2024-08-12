@@ -11,6 +11,7 @@ try:
 except ImportError as e:
     logger.warning("Import error msg: %s", e.msg)
 
+import vllm._C.ops
 
 class ipex_ops:
 
@@ -27,26 +28,31 @@ class ipex_ops:
 
     @staticmethod
     def silu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
-        x1, x2 = ipex_ops._reshape_activation_tensor(x)
-        ipex.llm.functional.silu_mul(x1, x2, out)
+        # x1, x2 = ipex_ops._reshape_activation_tensor(x)
+        # ipex.llm.functional.silu_mul(x1, x2, out)
+        vllm._C.ops.silu_and_mul(out, x)
 
     @staticmethod
     def gelu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
-        x1, x2 = ipex_ops._reshape_activation_tensor(x)
-        ipex.llm.functional.gelu_mul(x1, x2, out, "none")
+        # x1, x2 = ipex_ops._reshape_activation_tensor(x)
+        # ipex.llm.functional.gelu_mul(x1, x2, out, "none")
+        vllm._C.ops.gelu_and_mul(out, x)
 
     @staticmethod
     def gelu_tanh_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
-        x1, x2 = ipex_ops._reshape_activation_tensor(x)
-        ipex.llm.functional.gelu_mul(x1, x2, out, "tanh")
+        # x1, x2 = ipex_ops._reshape_activation_tensor(x)
+        # ipex.llm.functional.gelu_mul(x1, x2, out, "tanh")
+        vllm._C.ops.gelu_tanh_and_mul(out, x)
 
     @staticmethod
     def gelu_fast(out: torch.Tensor, x: torch.Tensor) -> None:
-        out.copy_(torch.nn.functional.gelu(x))
+        # out.copy_(torch.nn.functional.gelu(x))
+        vllm._C.ops.gelu_fast(out, x)
 
     @staticmethod
     def gelu_new(out: torch.Tensor, x: torch.Tensor) -> None:
-        out.copy_(torch.nn.functional.gelu(x))
+        # out.copy_(torch.nn.functional.gelu(x))
+        vllm._C.ops.gelu_new(out, x)
 
     # TODO add implementation of gelu_quick here
     # def gelu_quick(out: torch.Tensor, x: torch.Tensor) -> None:
@@ -208,17 +214,19 @@ class ipex_ops:
     @staticmethod
     def rms_norm(out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
                  epsilon: float) -> None:
-        from intel_extension_for_pytorch.llm.modules.mha_fusion import RMSNorm
-        ipex_rms_norm = RMSNorm(weight, epsilon)
-        tmp = ipex_rms_norm.apply(input, weight, epsilon)
-        out.copy_(tmp)
+        # from intel_extension_for_pytorch.llm.modules.mha_fusion import RMSNorm
+        # ipex_rms_norm = RMSNorm(weight, epsilon)
+        # tmp = ipex_rms_norm.apply(input, weight, epsilon)
+        # out.copy_(tmp)
+        vllm._C.ops.rms_norm(out, input, weight, epsilon)
 
     @staticmethod
     def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
                            weight: torch.Tensor, epsilon: float) -> None:
-        tmp = ipex.llm.functional.add_rms_norm(residual, input, weight, None,
-                                               epsilon, True)
-        input.copy_(tmp)
+        # tmp = ipex.llm.functional.add_rms_norm(residual, input, weight, None,
+        #                                        epsilon, True)
+        # input.copy_(tmp)
+        vllm._C.ops.fused_add_rms_norm(input, residual, weight, epsilon)
 
     @staticmethod
     def varlen_attention(
@@ -256,21 +264,24 @@ class ipex_ops:
         k_scale: float,
         v_scale: float,
     ) -> None:
-        assert kv_cache_dtype == "auto"
-        ipex.llm.modules.PagedAttention.reshape_and_cache(
-            key, value, key_cache, value_cache, slot_mapping)
+        # assert kv_cache_dtype == "auto"
+        # ipex.llm.modules.PagedAttention.reshape_and_cache(
+        #     key, value, key_cache, value_cache, slot_mapping)
+        vllm._C.cache_ops.reshape_and_cache(key, value, key_cache, value_cache, slot_mapping, kv_cache_dtype, k_scale)
 
     @staticmethod
     def copy_blocks(key_caches: List[torch.Tensor],
                     value_caches: List[torch.Tensor],
                     block_mapping: torch.Tensor) -> None:
-        torch.xpu.copy_blocks(  # type: ignore
-            key_caches,
-            value_caches,
-            block_mapping,
-        )
+        # torch.xpu.copy_blocks(  # type: ignore
+        #     key_caches,
+        #     value_caches,
+        #     block_mapping,
+        # )
+        vllm._C.cache_ops.copy_blocks(key_caches, value_caches, block_mapping)
 
     @staticmethod
     def swap_blocks(src: torch.Tensor, dst: torch.Tensor,
                     block_mapping: torch.Tensor) -> None:
-        torch.xpu.swap_blocks(src, dst, block_mapping)  # type: ignore
+        # torch.xpu.swap_blocks(src, dst, block_mapping)  # type: ignore
+        vllm._C.cache_ops.swap_blocks(key_caches, value_caches, block_mapping)
