@@ -1022,7 +1022,7 @@ class QCrossKVParallelLinear(QKVParallelLinear):
         bias: torch.Tensor,
     ) -> torch.Tensor:
         '''
-        Invoke linear method, including bias argument if required.
+        Invoke linear method, utilizing bias argument if required.
 
         Arguments:
 
