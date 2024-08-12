@@ -32,7 +32,7 @@ def nullable_str(val: str):
 @dataclass
 class EngineArgs:
     """Arguments for vLLM engine."""
-    model: str
+    model: str = 'facebook/opt-125m'
     served_model_name: Optional[Union[List[str]]] = None
     tokenizer: Optional[str] = None
     skip_tokenizer_init: bool = False
@@ -133,7 +133,7 @@ class EngineArgs:
         parser.add_argument(
             '--model',
             type=str,
-            default='facebook/opt-125m',
+            default=EngineArgs.model,
             help='Name or path of the huggingface model to use.')
         parser.add_argument(
             '--tokenizer',
