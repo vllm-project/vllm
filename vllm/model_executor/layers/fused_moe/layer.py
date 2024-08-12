@@ -255,6 +255,11 @@ class FusedMoE(torch.nn.Module):
                     raise ValueError(f"Invalid weight name: {weight_name}: "
                                      "must contain 'w13' or 'w2'.")
                 param_data[expert_id] = loaded_weight
+            elif "qzeros" in weight_name:
+                if "w13" not in weight_name and "w2" not in weight_name:
+                    raise ValueError(f"Invalid weight name: {weight_name}: "
+                                     "must contain 'w13' or 'w2'.")
+                param_data[expert_id] = loaded_weight
             else:
                 raise ValueError(f"Invalid weight name: {weight_name}.")
         else:
