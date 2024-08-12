@@ -6,17 +6,17 @@ on:
 
 jobs:
   cancel-buildkite-run:
-    if: github.event.label.name == 'invalid'
+    if: github.event.label.name == 'ready'
     runs-on: ubuntu-latest
     steps:
-      - name: Cancel Buildkite Run
+      - name: Cancel fastcheck run on Buildkite
         env:
           BUILDKITE_TOKEN: ${{ secrets.BUILDKITE_TOKEN }}
           BUILDKITE_ORG: vllm
           BUILDKITE_PIPELINE: fastcheck
         run: |
-          echo "PR branch"
           FULL_BRANCH=${{ github.event.pull_request.head.repo.owner.login }}:${{ github.event.pull_request.head.ref }}
+          echo "PR branch: $FULL_BRANCH"
           LATEST_BUILD_NUMBER=$(curl -H "Authorization: Bearer $BUILDKITE_TOKEN" \
             "https://api.buildkite.com/v2/organizations/$BUILDKITE_ORG/pipelines/$BUILDKITE_PIPELINE/builds?branch=$FULL_BRANCH&state[]=scheduled&state[]=running" \
             | jq -r '.[0].number')
