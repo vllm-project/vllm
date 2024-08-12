@@ -825,7 +825,7 @@ def test_e2e_enc_dec_attn(
     max_enc_seq_len: int,
 ) -> None:
     '''
-    End-to-end  encoder/decoder test:
+    End-to-end encoder/decoder test:
 
     * Construct fake test vectors for (1) encoder attention,
       (2) decoder self-attention, and (3) encoder/decoder cross-attention
