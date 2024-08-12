@@ -1,11 +1,11 @@
 from functools import lru_cache
-from typing import Any, List, Optional, Tuple, TypeVar
+from typing import List, Optional, Tuple, TypeVar
 
 import torch
 from PIL import Image
 from transformers import PreTrainedTokenizerBase
 
-# from vllm.config import ModelConfig
+from vllm.config import ModelConfig
 from vllm.inputs.registry import InputContext
 from vllm.logger import init_logger
 from vllm.transformers_utils.image_processor import get_image_processor
@@ -106,7 +106,7 @@ class ImagePlugin(MultiModalPlugin):
     def get_data_key(self) -> str:
         return "image"
 
-    def _get_hf_image_processor(self, model_config: Any):
+    def _get_hf_image_processor(self, model_config: ModelConfig):
         return cached_get_image_processor(
             model_config.model,
             trust_remote_code=model_config.trust_remote_code)

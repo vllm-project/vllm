@@ -11,7 +11,7 @@ from PIL import Image
 from torch import nn
 from typing_extensions import TypeAlias
 
-# from vllm.config import ModelConfig
+from vllm.config import ModelConfig
 from vllm.inputs import InputContext
 from vllm.logger import init_logger
 from vllm.utils import JSONTree, json_map_leaves
@@ -220,7 +220,7 @@ class MultiModalPlugin(ABC):
 
         return wrapper
 
-    def map_input(self, model_config: Any, data: object) -> MultiModalInputs:
+    def map_input(self, model_config: ModelConfig, data: object) -> MultiModalInputs:
         """
         Transform the data into a dictionary of model inputs using the
         input mapper registered for that model.
@@ -290,7 +290,7 @@ class MultiModalPlugin(ABC):
 
         return wrapper
 
-    def get_max_multimodal_tokens(self, model_config: Any) -> int:
+    def get_max_multimodal_tokens(self, model_config: ModelConfig) -> int:
         """
         Get the maximum number of multi-modal tokens
         for profiling the memory usage of a model.

@@ -1,5 +1,6 @@
 import pytest
 
+from array import array
 from vllm.sequence import (CompletionSequenceGroupOutput, SamplerOutput,
                            SequenceData, SequenceOutput)
 
@@ -54,7 +55,7 @@ def test_sampler_output_eq(sample_outputs):
 
 
 def test_sequence_data_prefill():
-    seq_data = SequenceData(prompt_token_ids=[1, 2, 3, 4])
+    seq_data = SequenceData(array("I", [1, 2, 3, 4]))
     assert seq_data.get_num_uncomputed_tokens() == 4
     assert seq_data.get_num_computed_tokens() == 0
     # advance by 2

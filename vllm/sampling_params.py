@@ -138,7 +138,6 @@ class SamplingParams(msgspec.Struct, omit_defaults=True):
     spaces_between_special_tokens: bool = True
     # Optional[List[LogitsProcessor]] type. We use Any here because
     # Optional[List[LogitsProcessor]] type is not supported by msgspec.
-    # We will also remove this API soon.
     logits_processors: Optional[Any] = None
     include_stop_str_in_output: bool = False
     truncate_prompt_tokens: Optional[Annotated[int, msgspec.Meta(ge=1)]] = None

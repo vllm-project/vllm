@@ -13,7 +13,6 @@ import torch
 
 from vllm.inputs.parse import is_valid_encoder_decoder_llm_inputs
 from vllm.lora.request import LoRARequest
-from vllm.multimodal.base import MultiModalDataDict
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
@@ -21,6 +20,7 @@ from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 if TYPE_CHECKING:
     from vllm.inputs import LLMInputs
+    from vllm.multimodal.base import MultiModalDataDict
 
 
 class Logprob(msgspec.Struct, omit_defaults=True, array_like=True):
@@ -112,6 +112,8 @@ class RequestMetrics:
 
 
 class SequenceDataDelta(msgspec.Struct, array_like=True, omit_defaults=True):
+    """Delta SequenceGroupData to send per new decode request.
+    """
     new_output_token_ids: List[int]
     new_cumulative_logprob: float
     new_num_computed_tokens: int
@@ -131,6 +133,8 @@ class SequenceData(msgspec.Struct, omit_defaults=True):
         output_token_ids: The token IDs of the output.
         cumulative_logprob: The cumulative log probability of the output.
     """
+    # NOTE: we cannot use Union[List, array] because msgspec cannot support
+    # union of 2 list types.
     _prompt_token_ids: array
     _output_token_ids: array = msgspec.field(
         default_factory=lambda: array("I", []))
@@ -144,7 +148,8 @@ class SequenceData(msgspec.Struct, omit_defaults=True):
     _stage: SequenceStage = SequenceStage.PREFILL
     _cached_all_token_ids: List[int] = msgspec.field(default_factory=list)
 
-    # Below fields are used to get delta input.
+    # It is used to get delta input. It is reset when `reset_and_get_delta`
+    # is called.
     _new_appended_tokens: List[int] = msgspec.field(default_factory=list)
 
     def __post_init__(self, ) -> None:

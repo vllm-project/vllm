@@ -2,6 +2,7 @@ import itertools
 import random
 from typing import Dict, List, Optional, Tuple
 from unittest.mock import Mock, patch
+from array import array
 
 import pytest
 import torch
@@ -56,7 +57,7 @@ def _do_sample(
             SequenceGroupMetadata(
                 request_id=f"test_{i}",
                 is_prompt=True,
-                seq_data={0: SequenceData([1, 2, 3])},
+                seq_data={0: SequenceData(array("I", [1, 2, 3]))},
                 sampling_params=sampling_params,
                 block_tables={0: [1]},
             ))
@@ -201,7 +202,7 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
 
     def create_sequence_data(num_input=3, num_generated=0):
         seq_data = SequenceData(
-            random.choices(range(0, VOCAB_SIZE), k=num_input))
+            array("I", random.choices(range(0, VOCAB_SIZE), k=num_input)))
         if num_generated > 0:
             seq_data.output_token_ids = random.choices(range(0, VOCAB_SIZE),
                                                        k=num_generated)
@@ -504,7 +505,7 @@ def test_sampler_mixed(seed: int, device: str):
             SequenceGroupMetadata(
                 request_id=f"test_{i}",
                 is_prompt=True,
-                seq_data={0: SequenceData([1, 2, 3])},
+                seq_data={0: SequenceData(array("I", [1, 2, 3]))},
                 sampling_params=sampling_params,
                 block_tables={0: [1]},
             ))
@@ -600,7 +601,7 @@ def test_sampler_top_k_top_p(seed: int, device: str):
             SequenceGroupMetadata(
                 request_id=f"test_{i}",
                 is_prompt=True,
-                seq_data={0: SequenceData([1, 2, 3])},
+                seq_data={0: SequenceData(array("I", [1, 2, 3]))},
                 sampling_params=SamplingParams(
                     temperature=1,
                     top_k=top_k,
@@ -650,7 +651,7 @@ def test_sampler_repetition_penalty_mixed(device: str):
                 SequenceGroupMetadata(
                     request_id=f"test_{i}",
                     is_prompt=True,
-                    seq_data={0: SequenceData([1, 2, 3])},
+                    seq_data={0: SequenceData(array("I", [1, 2, 3]))},
                     sampling_params=sampling_params[i],
                     block_tables={0: [1]},
                 ))

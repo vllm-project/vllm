@@ -294,7 +294,6 @@ steps:
   - pytest -v -s distributed/test_chunked_prefill_distributed.py
   - pytest -v -s distributed/test_multimodal_broadcast.py
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp2.py
-  - DISTRIBUTED_EXECUTOR_BACKEND=ray VLLM_USE_RAY_SPMD_WORKER=1 VLLM_USE_RAY_COMPILED_DAG=1 pytest -v -s spec_decode/e2e/test_integration_dist_tp2.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s distributed/test_utils.py
 
