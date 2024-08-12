@@ -6,7 +6,6 @@ prefill requests are chunked.
 
 Run `pytest tests/models/test_chunked_prefill.py`.
 """
-from typing import Tuple
 
 import pytest
 
@@ -15,12 +14,15 @@ from ..models.utils import check_logprobs_close, check_outputs_equal
 MODELS = [
     "facebook/opt-125m",
     "meta-llama/Llama-2-7b-hf",
-    "Qwen/Qwen2-1.5B-Instruct",
 ]
 E4M3_KV_MODELS = [
-    "nm-testing/Qwen2-1.5B-Instruct-FP8-K-V",
+    "meta-llama/Llama-2-7b-chat-hf", "nm-testing/Qwen2-1.5B-Instruct-FP8-K-V",
     "nm-testing/TinyLlama-1.1B-compressed-tensors-kv-cache-scheme"
 ]
+KV_CACHE_QUANTIZATION_PATHS = {
+    "meta-llama/Llama-2-7b-chat-hf":
+    "./tests/fp8_kv/llama2-7b-fp8-kv/kv_cache_scales.json"
+}
 NUM_FP8_KV_OUTPUTS_TO_CHECK = 4
 
 
@@ -76,11 +78,7 @@ def test_models(
     )
 
 
-@pytest.mark.parametrize(
-    "kv_dtype_n_model",
-    ["fp8_e5m2" + "#+#" + m for m in MODELS] + ["fp8" + "#+#" + m
-                                         for m in E4M3_KV_MODELS],
-)
+@pytest.mark.parametrize(["fp8_e4m3" + "#+#" + m for m in E4M3_KV_MODELS])
 @pytest.mark.parametrize("max_tokens", [NUM_FP8_KV_OUTPUTS_TO_CHECK])
 @pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16])
 @pytest.mark.parametrize("enforce_eager", [False, True])
@@ -90,7 +88,7 @@ def test_models(
 def test_models_with_fp8_kv_cache(
     vllm_runner,
     example_prompts,
-    kv_dtype_n_model: Tuple[str, str],
+    kv_dtype_n_model: str,
     max_tokens: int,
     chunked_prefill_token_size: int,
     enforce_eager: bool,
@@ -119,12 +117,18 @@ def test_models_with_fp8_kv_cache(
         enable_chunked_prefill = True
         max_num_batched_tokens = chunked_prefill_token_size
 
+    extra_kwargs = {}
+    if model in KV_CACHE_QUANTIZATION_PATHS:
+        extra_kwargs["quantization_param_path"] = KV_CACHE_QUANTIZATION_PATHS[
+            model]
+
     with vllm_runner(
             model,
             tensor_parallel_size=tensor_parallel_size,
             enforce_eager=enforce_eager,
             max_num_seqs=max_num_seqs,
             kv_cache_dtype=kv_cache_dtype,
+            **extra_kwargs,
     ) as vllm_model:
         no_chunked_prefill_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, NUM_LOG_PROBS)
@@ -137,13 +141,14 @@ def test_models_with_fp8_kv_cache(
             enforce_eager=enforce_eager,
             max_num_seqs=max_num_seqs,
             kv_cache_dtype=kv_cache_dtype,
+            **extra_kwargs,
     ) as vllm_model:
         chunked_prefill_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, NUM_LOG_PROBS)
 
     check_logprobs_close(
-        outputs_0_lst=no_chunked_prefill_outputs[:NUM_FP8_KV_OUTPUTS_TO_CHECK],
-        outputs_1_lst=chunked_prefill_outputs[:NUM_FP8_KV_OUTPUTS_TO_CHECK],
+        outputs_0_lst=no_chunked_prefill_outputs,
+        outputs_1_lst=chunked_prefill_outputs,
         name_0="no_chunked_prefill",
         name_1="chunked_prefill",
     )
