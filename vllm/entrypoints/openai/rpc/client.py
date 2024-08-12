@@ -11,6 +11,7 @@ from vllm.entrypoints.openai.rpc import (RPC_REQUEST_TYPE,
                                          VLLM_RPC_HEALTHY_STR,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCGenerateRequest, RPCUtilityRequest)
+from vllm.envs import VLLM_RPC_GET_DATA_TIMEOUT_MS
 from vllm.inputs import PromptInputs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
@@ -27,6 +28,7 @@ class AsyncEngineRPCClient:
     def __init__(self, rpc_path: str):
         self.context = zmq.asyncio.Context()
         self.rpc_path = rpc_path
+        self._data_timeout = VLLM_RPC_GET_DATA_TIMEOUT_MS
 
     async def setup(self):
         """Setup the client before it starts sending server requests."""
@@ -76,9 +78,11 @@ class AsyncEngineRPCClient:
             # Reference: http://api.zeromq.org/4-2:zmq-setsockopt#toc24
             socket.close(linger=0)
 
-    async def _send_get_data_rpc_request(self, request: RPCUtilityRequest,
+    async def _send_get_data_rpc_request(self,
+                                         request: RPCUtilityRequest,
                                          expected_type: Any,
-                                         error_message: str) -> Any:
+                                         error_message: str,
+                                         timeout: Optional[int] = None) -> Any:
         """Send an RPC request that is expecting data back."""
 
         with self.socket() as socket:
@@ -86,8 +90,17 @@ class AsyncEngineRPCClient:
             # Ping RPCServer with a request.
             await socket.send(cloudpickle.dumps(request))
 
+            # Make sure the server responds
+            timeout = timeout or self._data_timeout
+            if await socket.poll(timeout=timeout) == 0:
+                raise TimeoutError(f"server didn't reply within {timeout} ms")
+
             # Await the data from the Server.
             data = cloudpickle.loads(await socket.recv())
+
+        if isinstance(data, Exception):
+            # Re-raise exceptions returned by the server
+            raise data
 
         if not isinstance(data, expected_type):
             # LoRAConfig can be None.
@@ -242,6 +255,7 @@ class AsyncEngineRPCClient:
 
                 # Stream back the results from the RPC Server.
                 while not finished:
+                    # TODO: timeouts
                     message = await socket.recv()
                     request_output = cloudpickle.loads(message)
 
@@ -265,24 +279,14 @@ class AsyncEngineRPCClient:
 
     async def check_health(self) -> None:
         """Raise if unhealthy"""
-
-        with self.socket() as socket:
-
-            # Ping RPCServer with CHECK_HEALTH request.
-            await socket.send(cloudpickle.dumps(RPCUtilityRequest.CHECK_HEALTH)
-                              )
-
-            # Await the reply from the server.
-            # TODO: do we need an internal timeout here?
-            # Or do we expect the external probe to timeout and let this chill?
-            health_message = cloudpickle.loads(await socket.recv())
-
-        if isinstance(health_message, Exception):
-            raise health_message
+        health_message = await self._send_get_data_rpc_request(
+            RPCUtilityRequest.CHECK_HEALTH,
+            expected_type=str,
+            error_message="Failed to check server health")
 
         if health_message != VLLM_RPC_HEALTHY_STR:
             raise ValueError("Expected healthy response from backend but got "
-                             "f{health_message}")
+                             f"{health_message}")
 
     async def encode(self, *args,
                      **kwargs) -> AsyncGenerator[EmbeddingRequestOutput, None]:
