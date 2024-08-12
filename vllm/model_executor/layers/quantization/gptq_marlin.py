@@ -263,31 +263,31 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             },
         )
 
-        # Quantized zero-points
-        qzeros = Parameter(
-            torch.empty(
-                scales_and_zp_size,
-                output_size_per_partition // self.quant_config.pack_factor,
-                dtype=torch.int32,
-                device="meta",
-            ),
-            requires_grad=False,
-        )
-        set_weight_attrs(
-            qzeros,
-            {
-                **extra_weight_attrs,
-                "input_dim": scales_and_zp_input_dim,
-                "output_dim": 1,
-                "packed_dim": 1,
-                "pack_factor": self.quant_config.pack_factor,
-            },
-        )
+        # # Quantized zero-points
+        # qzeros = Parameter(
+        #     torch.empty(
+        #         scales_and_zp_size,
+        #         output_size_per_partition // self.quant_config.pack_factor,
+        #         dtype=torch.int32,
+        #         device="meta",
+        #     ),
+        #     requires_grad=False,
+        # )
+        # set_weight_attrs(
+        #     qzeros,
+        #     {
+        #         **extra_weight_attrs,
+        #         "input_dim": scales_and_zp_input_dim,
+        #         "output_dim": 1,
+        #         "packed_dim": 1,
+        #         "pack_factor": self.quant_config.pack_factor,
+        #     },
+        # )
 
         layer.register_parameter("qweight", qweight)
         layer.register_parameter("g_idx", g_idx)
         layer.register_parameter("scales", scales)
-        layer.register_parameter("qzeros", qzeros)
+        # layer.register_parameter("qzeros", qzeros)
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
         layer.input_size = input_size
