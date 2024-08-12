@@ -39,6 +39,8 @@ struct PrepackedLayoutBTemplate {
   using ElementMma = MmaType;
 
   // TODO (Lucas): compare the performance for other sizes
+  // Prepacked block shape, smallest layout atom for loading into registers
+  //   (can contain multiple wgmma instructions worth of data in one block)
   using PPBlockShape_NK = Shape<_128, _64>;
 
   // Create the shape of the tile anticipated to be used by the GEMM kernel,
@@ -63,19 +65,19 @@ struct PrepackedLayoutBTemplate {
       AtomLayoutMNK{}));
 
   // Prepacked block, (athrid, val) -> (N,K)
-  // i.e. ((ThrV,(ThrM,ThrK)),(FrgV,(RestM,RestK,...))) -> (N,K)
+  // i.e. ((ThrV,(ThrN,ThrK)),(FrgV,(RestN,RestK,...))) -> (N,K)
   CUTE_HOST_DEVICE static constexpr auto ppblock_TV_to_NK() {
     return TiledMma{}.thrfrg_A(make_layout(PPBlockShape_NK{}));
   }
 
   // Prepacked block, (N,K) -> (athrid, val)
-  // i.e. (N,K) -> ((ThrV,(ThrM,ThrK)),(FrgV,(RestM,RestK,...)))
+  // i.e. (N,K) -> ((ThrV,(ThrN,ThrK)),(FrgV,(RestN,RestK,...)))
   CUTE_HOST_DEVICE static constexpr auto ppblock_NK_to_TV() {
     return right_inverse(ppblock_TV_to_NK()).with_shape(PPBlockShape_NK{});
   }
 
   // Prepacked block, (athrid, val) -> (storage_offset)
-  // i.e. ((ThrV,(ThrM,ThrK)),(FrgV,(RestM,RestK,...))) -> (storage_idx)
+  // i.e. ((ThrV,(ThrN,ThrK)),(FrgV,(RestN,RestK,...))) -> (storage_idx)
   CUTE_HOST_DEVICE static constexpr auto ppblock_TV_to_offset() {
     return make_ordered_layout(shape(ppblock_TV_to_NK()), Step<_1, _0>{});
   }
@@ -87,9 +89,9 @@ struct PrepackedLayoutBTemplate {
   }
 
   // ((athrid, val), (BlocksN, BlocksK), L) -> (storage_idx)
-  template <typename Shape_MKL>
+  template <typename Shape_NKL>
   CUTE_HOST_DEVICE static constexpr auto TVbNbKL_to_offset(
-      Shape_MKL shape_mkl) {
+      Shape_NKL shape_mkl) {
     constexpr auto block_layout = ppblock_TV_to_offset();
 
     // (BlocksN, BlocksK, L)
@@ -103,15 +105,15 @@ struct PrepackedLayoutBTemplate {
         make_layout(blocks_shape,
                     compact_col_major(blocks_shape, size(block_layout))));
 
-    // ((athrid, val), (BlocksN, BlocksK, L)) => ((athrid, val), (BlocksN,
-    // BlocksK), L)
+    // ((athrid, val), (BlocksN, BlocksK, L))
+    //   => ((athrid, val), (BlocksN, BlocksK), L)
     return group<1, 3>(result(_, repeat<rank<1>(result)>(_)));
   }
 
-  // ((BlockM, BlockK), (BlocksN, BlocksK), L) -> (storage_idx)
-  template <typename Shape_MKL>
-  CUTE_HOST_DEVICE static constexpr auto MKbMbKL_to_offset(
-      Shape_MKL shape_mkl) {
+  // ((BlockN, BlockK), (BlocksN, BlocksK), L) -> (storage_idx)
+  template <typename Shape_NKL>
+  CUTE_HOST_DEVICE static constexpr auto NKbNbKL_to_offset(
+      Shape_NKL shape_mkl) {
     constexpr auto block_layout = ppblock_NK_to_offset();
 
     // (BlocksN, BlocksK, L)
@@ -130,20 +132,20 @@ struct PrepackedLayoutBTemplate {
     return group<1, 3>(result(_, repeat<rank<1>(result)>(_)));
   }
 
-  // ((athrid, val), (BlocksN, BlocksK, L)) -> (M, K, L)
-  template <class Shape_MKL>
-  CUTE_HOST_DEVICE static auto TVbNbK_to_NKL(Shape_MKL shape_mkl) {
+  // ((athrid, val), (BlocksN, BlocksK, L)) -> (N, K, L)
+  template <class Shape_NKL>
+  CUTE_HOST_DEVICE static auto TVbNbK_to_NKL(Shape_NKL shape_mkl) {
     auto tile = make_tile(make_layout(size<0>(PPBlockShape_NK{})),
                           make_layout(size<1>(PPBlockShape_NK{})));
 
-    // ((BlockM, BlockK), (BlocksN, BlocksK, L)) -> (M, K, L)
+    // ((BlockN, BlockK), (BlocksN, BlocksK, L)) -> (N, K, L)
     auto tiled_A = zipped_divide(make_layout(shape_mkl), tile);
     return tiled_A.compose(ppblock_TV_to_NK(), _);
   }
 
-  // (M, K, L) -> ((athrid, val), (BlocksN, BlocksK), L)
-  template <class Shape_MKL>
-  CUTE_HOST_DEVICE static auto NKL_to_TVbNbK(Shape_MKL shape_mkl) {
+  // (N, K, L) -> ((athrid, val), (BlocksN, BlocksK), L)
+  template <class Shape_NKL>
+  CUTE_HOST_DEVICE static auto NKL_to_TVbNbK(Shape_NKL shape_mkl) {
     auto TVbNbK_to_NKL_layout = TVbNbK_to_NKL(shape_mkl);
     return blocked_product(ppblock_NK_to_TV(),
                            make_layout(shape<1>(TVbNbK_to_NKL_layout)));
