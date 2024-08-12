@@ -1,23 +1,17 @@
-ARG NIGHTLY_DATE="20240726"
+ARG NIGHTLY_DATE="20240808"
 ARG BASE_IMAGE="us-central1-docker.pkg.dev/tpu-pytorch-releases/docker/xla:nightly_3.10_tpuvm_$NIGHTLY_DATE"
 
 FROM $BASE_IMAGE
 WORKDIR /workspace
 
-# Install aiohttp separately to avoid build errors.
-RUN pip install aiohttp
-# Install NumPy 1 instead of NumPy 2.
-RUN pip install "numpy<2"
 # Install the TPU and Pallas dependencies.
-RUN pip install torch_xla[tpu] -f https://storage.googleapis.com/libtpu-releases/index.html
-RUN pip install torch_xla[pallas] -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
-
-# Fix FastAPI dependence
-RUN pip install "starlette<0.38.0"
+RUN python3 -m pip install torch_xla[tpu] -f https://storage.googleapis.com/libtpu-releases/index.html
+RUN python3 -m pip install torch_xla[pallas] -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
 
 # Build vLLM.
 COPY . /workspace/vllm
 ENV VLLM_TARGET_DEVICE="tpu"
-RUN cd /workspace/vllm && python setup.py develop
+RUN cd /workspace/vllm && python3 -m pip install -r requirements-tpu.txt
+RUN cd /workspace/vllm && python3 setup.py develop
 
 CMD ["/bin/bash"]
