@@ -1080,7 +1080,7 @@ class QCrossKVParallelLinear(QKVParallelLinear):
         Returns:
 
         * Q  = (`decoder_input_`) x W_Q
-        * KV  = (`encoder_input_`) x [W_K W_V]
+        * KV  = (`encoder_input_`) x [W_K, W_V]
             * (`None` if `encoder_input_ `is `None`)
         * Q bias vector
         * KV bias vector (`None` if `encoder_input_` is `None`)
