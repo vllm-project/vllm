@@ -16,7 +16,7 @@ jobs:
           BUILDKITE_PIPELINE: fastcheck
         run: |
           echo "PR branch"
-          FULL_BRANCH=${{ github.event.pull_request.head.ref }}:${{ github.event.pull_request.head.repo.owner.login }}
+          FULL_BRANCH=${{ github.event.pull_request.head.repo.owner.login }}:${{ github.event.pull_request.head.ref }}
           echo $FULL_BRANCH
           LATEST_BUILD_NUMBER=$(curl -H "Authorization: Bearer $BUILDKITE_TOKEN" \
             "https://api.buildkite.com/v2/organizations/$BUILDKITE_ORG/pipelines/$BUILDKITE_PIPELINE/builds?branch=$FULL_BRANCH&state=running" \
