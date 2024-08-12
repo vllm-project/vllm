@@ -152,7 +152,11 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
             async_engine_client.close()
 
             # Wait for server process to join
-            rpc_server_process.wait()
+            try:
+                rpc_server_process.wait(3)
+            except subprocess.TimeoutExpired:
+                # force kill if needed
+                rpc_server_process.kill()
 
 
 router = APIRouter()
