@@ -36,7 +36,7 @@ def get_max_paligemma_image_tokens(ctx: InputContext):
     hf_config = ctx.get_hf_config(PaliGemmaConfig)
     vision_config = hf_config.vision_config
 
-    return text_config.num_image_tokens
+    return get_max_siglip_image_tokens(vision_config)
 
 
 def dummy_seq_data_for_paligemma(

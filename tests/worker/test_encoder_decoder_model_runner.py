@@ -126,10 +126,10 @@ def test_prepare_prompt(
         # make sure all tokens fit into one block
         seq_len = i % (model_runner.block_size - 1) + 1
         seq_lens.append(seq_len)
-        seq_data = SequenceData(array("I", range(seq_len))))
+        seq_data = SequenceData(array("I", range(seq_len)))
         encoder_seq_len = (i + 1) % (model_runner.block_size - 1) + 1
         encoder_seq_lens.append(encoder_seq_len)
-        encoder_seq_data = SequenceData(array("I", range(encoder_seq_len))))
+        encoder_seq_data = SequenceData(array("I", range(encoder_seq_len)))
         seq_group_metadata = SequenceGroupMetadata(
             request_id=f"test_{i}",
             is_prompt=True,

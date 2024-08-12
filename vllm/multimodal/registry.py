@@ -1,5 +1,5 @@
 import functools
-from typing import Any, Dict, Optional, Sequence
+from typing import Dict, Optional, Sequence
 
 import torch
 
