@@ -235,7 +235,7 @@ class FusedMoE(torch.nn.Module):
         param_data = param.data
 
         if is_quantized:
-            if weight_name in ["_qweight", "_scales", "_qzeros"]:
+            if "_qweight" in weight_name or "_scales" in weight_name or "_qzeros" in weight_name:
                 if "w13" in weight_name:
                     shard_size = self.intermediate_size_per_partition
                     if shard_id == 0:
