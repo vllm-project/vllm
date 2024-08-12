@@ -6,28 +6,23 @@ prefill requests are chunked.
 
 Run `pytest tests/models/test_chunked_prefill.py`.
 """
+from typing import Tuple
+
 import pytest
 
 from ..models.utils import check_logprobs_close, check_outputs_equal
 
-EXACT_MATCH_MODELS = [
+MODELS = [
     "facebook/opt-125m",
     "meta-llama/Llama-2-7b-hf",
-]
-
-E5M2_KV_MODELS = [  # type: ignore
-    # does not work with fp8 kv cache kernel
-    # - CUDA illegal memory access - undiagnosed
-    # "facebook/opt-125m",
 ]
 E4M3_KV_MODELS = [
     "nm-testing/Qwen2-1.5B-Instruct-FP8-K-V",
     "nm-testing/TinyLlama-1.1B-compressed-tensors-kv-cache-scheme"
 ]
-LOG_PROBS_MODELS = E4M3_KV_MODELS + E5M2_KV_MODELS
 
 
-@pytest.mark.parametrize("model", EXACT_MATCH_MODELS)
+@pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16])
@@ -35,7 +30,7 @@ LOG_PROBS_MODELS = E4M3_KV_MODELS + E5M2_KV_MODELS
 # NOTE: Increasing this in this suite will fail CI because we currently cannot
 # reset distributed env properly. Use a value > 1 just when you test.
 @pytest.mark.parametrize("tensor_parallel_size", [1])
-def test_models_hf_exact_string_match(
+def test_models(
     hf_runner,
     vllm_runner,
     example_prompts,
@@ -53,7 +48,7 @@ def test_models_hf_exact_string_match(
     max_num_seqs = min(chunked_prefill_token_size, 256)
     enable_chunked_prefill = False
     max_num_batched_tokens = None
-    if chunked_prefill_token_size != -1:
+    if chunked_prefill_token_size != 1:
         enable_chunked_prefill = True
         max_num_batched_tokens = chunked_prefill_token_size
 
@@ -79,19 +74,21 @@ def test_models_hf_exact_string_match(
     )
 
 
-@pytest.mark.parametrize("model", LOG_PROBS_MODELS)
-@pytest.mark.parametrize("kv_cache_dtype", ["fp8", "fp8_e5m2"])
-@pytest.mark.parametrize("max_tokens", [32])
+@pytest.mark.parametrize(
+    "kv_dtype_n_model",
+    [("fp8_e5m2", m) for m in MODELS] + [("fp8_e4m3", m)
+                                         for m in E4M3_KV_MODELS],
+)
+@pytest.mark.parametrize("max_tokens", [4])
 @pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16])
 @pytest.mark.parametrize("enforce_eager", [False, True])
 # NOTE: Increasing this in this suite will fail CI because we currently cannot
 # reset distributed env properly. Use a value > 1 just when you test.
 @pytest.mark.parametrize("tensor_parallel_size", [1])
-def test_models_log_probs(
+def test_models_with_fp8_kv_cache(
     vllm_runner,
     example_prompts,
-    model: str,
-    kv_cache_dtype: str,
+    kv_dtype_n_model: Tuple[str, str],
     max_tokens: int,
     chunked_prefill_token_size: int,
     enforce_eager: bool,
@@ -104,20 +101,19 @@ def test_models_log_probs(
     This test is used when there is discrepancy in kernels
     / numerics (e.g. when using lower-precision types like FP8).
     """
-    if kv_cache_dtype == "fp8_e5m2" and model not in E5M2_KV_MODELS:
-        pytest.skip(
-            f"{model} not in {E5M2_KV_MODELS} requiring {kv_cache_dtype}")
-    elif "fp8" in kv_cache_dtype and model not in E4M3_KV_MODELS:
-        pytest.skip(
-            f"{model} not in {E4M3_KV_MODELS} requiring {kv_cache_dtype}")
-
     NUM_LOG_PROBS = 8
-    NUM_OUTPUT_TOKENS = 4
 
-    max_num_seqs = min(chunked_prefill_token_size, 256)
+    kv_cache_dtype, model = kv_dtype_n_model
+
+    if kv_cache_dtype == "fp8_e5m2" and model == "facebook/opt-125m":
+        pytest.skip(
+            "#7378: CUDA illegal memory access (undiagnosed) facebook/opt-125m"
+        )
+
+    max_num_seqs = chunked_prefill_token_size
     enable_chunked_prefill = False
     max_num_batched_tokens = None
-    if chunked_prefill_token_size != -1:
+    if chunked_prefill_token_size != 1:
         enable_chunked_prefill = True
         max_num_batched_tokens = chunked_prefill_token_size
 
@@ -144,8 +140,8 @@ def test_models_log_probs(
             example_prompts, max_tokens, NUM_LOG_PROBS)
 
     check_logprobs_close(
-        outputs_0_lst=decode_outputs[:NUM_OUTPUT_TOKENS],
-        outputs_1_lst=chunked_prefill_outputs[:NUM_OUTPUT_TOKENS],
-        name_0="decode",
+        outputs_0_lst=decode_outputs,
+        outputs_1_lst=chunked_prefill_outputs,
+        name_0="no_chunked_prefill",
         name_1="chunked_prefill",
     )

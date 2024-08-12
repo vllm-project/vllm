@@ -18,8 +18,8 @@ if triton.__version__ >= "2.1.0":
         V_cache,
         B_Loc,
         sm_scale,
-        fp8_k_scale,
-        fp8_v_scale,
+        k_scale,
+        v_scale,
         B_Start_Loc,
         B_Seqlen,
         B_Ctxlen,
@@ -125,7 +125,7 @@ if triton.__version__ >= "2.1.0":
                              other=0.0)  # [D,N]
 
             if k_load.dtype.is_fp8():
-                k = (k_load.to(tl.float32) * fp8_k_scale).to(q.dtype)
+                k = (k_load.to(tl.float32) * k_scale).to(q.dtype)
             else:
                 k = k_load
 
@@ -173,7 +173,7 @@ if triton.__version__ >= "2.1.0":
                              ((start_n + offs_n[:, None]) < cur_batch_ctx_len),
                              other=0.0)  # [N,D]
             if v_load.dtype.is_fp8():
-                v = (v_load.to(tl.float32) * fp8_v_scale).to(q.dtype)
+                v = (v_load.to(tl.float32) * v_scale).to(q.dtype)
             else:
                 v = v_load
             p = p.to(v.dtype)
@@ -452,8 +452,8 @@ if triton.__version__ >= "2.1.0":
         V_cache,
         B_Loc,
         sm_scale,
-        fp8_k_scale,
-        fp8_v_scale,
+        k_scale,
+        v_scale,
         B_Start_Loc,
         B_Seqlen,
         B_Ctxlen,
@@ -555,7 +555,7 @@ if triton.__version__ >= "2.1.0":
                              other=0.0)  # [D,N]
 
             if k_load.dtype.is_fp8():
-                k = (k_load.to(tl.float32) * fp8_k_scale).to(q.dtype)
+                k = (k_load.to(tl.float32) * k_scale).to(q.dtype)
             else:
                 k = k_load
 
@@ -595,7 +595,7 @@ if triton.__version__ >= "2.1.0":
                              ((start_n + offs_n[:, None]) < cur_batch_ctx_len),
                              other=0.0)
             if v_load.dtype.is_fp8():
-                v = (v_load.to(tl.float32) * fp8_v_scale).to(q.dtype)
+                v = (v_load.to(tl.float32) * v_scale).to(q.dtype)
             else:
                 v = v_load
             p = p.to(v.dtype)
@@ -704,8 +704,8 @@ if triton.__version__ >= "2.1.0":
                               b_seq_len,
                               b_ctx_len,
                               max_input_len,
-                              fp8_k_scale: float = 1.0,
-                              fp8_v_scale: float = 1.0,
+                              k_scale: float = 1.0,
+                              v_scale: float = 1.0,
                               alibi_slopes=None,
                               sliding_window=None):
 
@@ -724,7 +724,7 @@ if triton.__version__ >= "2.1.0":
             assert (k_cache.dtype == torch.uint8)
             assert (v_cache.dtype == torch.uint8)
 
-            if kv_cache_dtype == "fp8" or kv_cache_dtype == "fp8_e4m3":
+            if kv_cache_dtype in ("fp8", "fp8_e4m3"):
                 target_dtype = torch.float8_e4m3fn
             elif kv_cache_dtype == "fp8_e5m2":
                 target_dtype = torch.float8_e5m2
@@ -764,8 +764,8 @@ if triton.__version__ >= "2.1.0":
                 v_cache,
                 b_loc,
                 sm_scale,
-                fp8_k_scale,
-                fp8_v_scale,
+                k_scale,
+                v_scale,
                 b_start_loc,
                 b_seq_len,
                 b_ctx_len,
@@ -817,8 +817,8 @@ if triton.__version__ >= "2.1.0":
             v_cache,
             b_loc,
             sm_scale,
-            fp8_k_scale,
-            fp8_v_scale,
+            k_scale,
+            v_scale,
             b_start_loc,
             b_seq_len,
             b_ctx_len,
