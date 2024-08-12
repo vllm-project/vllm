@@ -897,7 +897,6 @@ class QKVParallelLinear(ColumnParallelLinear):
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
-
 class _WeightWrapper:
     '''
     Wrapper for weight matrices. Helper class for
@@ -923,7 +922,6 @@ class _WeightWrapper:
         weight: torch.Tensor,
     ) -> None:
         self.weight = torch.nn.Parameter(weight)
-
 
 class QCrossKVParallelLinear(QKVParallelLinear):
     """Linear layer for the linear transformation of the query, key, and
@@ -953,7 +951,8 @@ class QCrossKVParallelLinear(QKVParallelLinear):
                  skip_bias_add: bool = False,
                  params_dtype: Optional[torch.dtype] = None,
                  quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
+                 prefix: str = "",
+    ) -> None:
         '''
         The :class:`QKVParallelLinear` parent class packs [W_Q W_K W_V]
         and the corresponding bias vectors into `self.weight` and `self.bias`
@@ -1112,7 +1111,6 @@ class QCrossKVParallelLinear(QKVParallelLinear):
             self._cached_q_bias if self.skip_bias_add else None,
             self._cached_kv_bias if self.skip_bias_add else None,
         )
-
 
 class RowParallelLinear(LinearBase):
     """Linear layer with row parallelism.
