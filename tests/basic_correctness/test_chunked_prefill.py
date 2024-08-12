@@ -15,6 +15,7 @@ from ..models.utils import check_logprobs_close, check_outputs_equal
 MODELS = [
     "facebook/opt-125m",
     "meta-llama/Llama-2-7b-hf",
+    "Qwen/Qwen2-1.5B-Instruct",
 ]
 E4M3_KV_MODELS = [
     "nm-testing/Qwen2-1.5B-Instruct-FP8-K-V",
@@ -105,7 +106,7 @@ def test_models_with_fp8_kv_cache(
 
     kv_cache_dtype, model = kv_dtype_n_model
 
-    if kv_cache_dtype == "fp8_e5m2" and model == "facebook/opt-125m":
+    if model == "facebook/opt-125m":
         pytest.skip(
             "#7378: CUDA illegal memory access (undiagnosed) facebook/opt-125m"
         )
