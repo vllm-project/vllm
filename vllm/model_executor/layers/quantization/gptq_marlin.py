@@ -263,31 +263,31 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             },
         )
 
-        # # Quantized zero-points
-        # qzeros = Parameter(
-        #     torch.empty(
-        #         scales_and_zp_size,
-        #         output_size_per_partition // self.quant_config.pack_factor,
-        #         dtype=torch.int32,
-        #         device="meta",
-        #     ),
-        #     requires_grad=False,
-        # )
-        # set_weight_attrs(
-        #     qzeros,
-        #     {
-        #         **extra_weight_attrs,
-        #         "input_dim": scales_and_zp_input_dim,
-        #         "output_dim": 1,
-        #         "packed_dim": 1,
-        #         "pack_factor": self.quant_config.pack_factor,
-        #     },
-        # )
+        # Quantized zero-points
+        qzeros = Parameter(
+            torch.empty(
+                scales_and_zp_size,
+                output_size_per_partition // self.quant_config.pack_factor,
+                dtype=torch.int32,
+                device="meta",
+            ),
+            requires_grad=False,
+        )
+        set_weight_attrs(
+            qzeros,
+            {
+                **extra_weight_attrs,
+                "input_dim": scales_and_zp_input_dim,
+                "output_dim": 1,
+                "packed_dim": 1,
+                "pack_factor": self.quant_config.pack_factor,
+            },
+        )
 
         layer.register_parameter("qweight", qweight)
         layer.register_parameter("g_idx", g_idx)
         layer.register_parameter("scales", scales)
-        # layer.register_parameter("qzeros", qzeros)
+        layer.register_parameter("qzeros", qzeros)
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
         layer.input_size = input_size
@@ -426,6 +426,26 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         )
         layer.register_parameter("w2_scales", w2_scales)
         set_weight_attrs(w2_scales, extra_weight_attrs)
+        # up_proj scales
+        w13_qzeros = torch.nn.Parameter(
+            torch.empty(num_experts,
+                        scales_size13,
+                        2 * intermediate_size // self.quant_config.pack_factor,
+                        dtype=params_dtype),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_qzeros", w13_qzeros)
+        set_weight_attrs(w13_qzeros, extra_weight_attrs)
+        # down_proj scales
+        w2_qzeros = torch.nn.Parameter(
+            torch.empty(num_experts,
+                        scales_size2,
+                        hidden_size // self.quant_config.pack_factor,
+                        dtype=params_dtype),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_qzeros", w2_qzeros)
+        set_weight_attrs(w2_qzeros, extra_weight_attrs)
         w13_g_idx = torch.nn.Parameter(
             torch.empty(
                 num_experts,

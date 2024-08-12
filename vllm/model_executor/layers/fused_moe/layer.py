@@ -388,4 +388,15 @@ class FusedMoE(torch.nn.Module):
                 shard_id,
             ) for expert_id in range(num_experts)
             for shard_id, weight_name in enumerate(gate_down_up)
+        ] + [
+            # These are the qzeros for the experts
+            # (param_name, weight_name, expert_id, shard_id)
+            (
+                "experts.w13_qzeros"
+                if weight_name in gate_up else "experts.w2_qzeros",
+                f"experts.{expert_id}.{weight_name}.qzeros",
+                expert_id,
+                shard_id,
+            ) for expert_id in range(num_experts)
+            for shard_id, weight_name in enumerate(gate_down_up)
         ])
