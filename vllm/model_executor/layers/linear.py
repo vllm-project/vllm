@@ -898,30 +898,48 @@ class QKVParallelLinear(ColumnParallelLinear):
         param_data.copy_(loaded_weight)
 
 
-class _WeightWrapper(torch.nn.Module):
+class _WeightWrapper:
+    '''
+    Wrapper for weight matrices. Helper class for
+    :class:`QCrossKVParallelLinear`.
+
+    Generally speaking, the quantized & unquantized linear method
+    implementations look like the following:
+     
+    ```
+    some_linear_function(x, layer.weight, bias)
+    ```
+      
+    i.e. they expect the `layer` argument to be a class with a `weight` member,
+    mirroring :class:`Linear`.
+
+    :class:`QCrossKVParallelLinear` wraps W_Q and [W_K W_V]
+    (two views of `self.weight`) in :class:`_WeightWrapper` instances, which
+    can both be passed to the linear method as the `layer` argument.
+    '''
 
     def __init__(
         self,
         weight: torch.Tensor,
     ) -> None:
-        super(_WeightWrapper, self).__init__()
         self.weight = torch.nn.Parameter(weight)
 
 
 class QCrossKVParallelLinear(QKVParallelLinear):
-    """Linear layers for encoder/decoder cross-attention's 
-    QKV transformation.
+    """Linear layer for the linear transformation of the query, key, and
+    value vectors in the cross-attention layer. 
 
     Q is computed from the previous decoder layer outputs;
     KV are computed from the encoder output hidden states
     during prefill; thus, `forward()` takes two tensor
-    arguments (which differentiates :class:`QCrossKVParallelLinear`
-    from :class:`QKVParallelLinear`)
+    arguments.
     
-    Linear layers are for the linear transformation of the query, key, and value
-    vectors in the cross-attention layer. The weight matrix is concatenated
-    along the output dimension. The layer is parallelized along the head
-    dimension. When the number of key/value heads is smaller than the number
+    The weight matrix is concatenated along the output dimension. However,
+    Q and KV are computed in two steps, which operate respectively on W_Q
+    and [W_K W_V] (two views obtained by slicing `self.weight`.)
+    
+    The layer is parallelized along the head dimension.
+    When the number of key/value heads is smaller than the number
     of query heads (e.g., multi-query/grouped-query attention), the key/value
     head may be replicated while the query heads are partitioned.
     """
@@ -937,13 +955,18 @@ class QCrossKVParallelLinear(QKVParallelLinear):
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = ""):
         '''
-        The :class:`QKVParallelLinear` parent class packs Q,K,V into
-        self.weights, however cross-attention QKV computation is more
-        efficient if we compute separate views of the W_Q weights,
-        packed W_K W_V weights, Q bias vector, and packed KV bias vector. 
+        The :class:`QKVParallelLinear` parent class packs [W_Q W_K W_V]
+        and the corresponding bias vectors into `self.weight` and `self.bias`
+        (respectively) during weight loading. 
+        
+        However cross-attention QKV computation requires that we
+        (1) partially unpack `self.weights` into the W_Q weights matrix &
+            the packed [W_K W_V] weights matrix,
+        (2) partially unpack `self.bias` into the Q bias vector,
+            and the packed KV bias vector. 
 
-        To avoid recomputing these views of the underlying self.weights,
-        we cache them.
+        To avoid recomputing these views of the underlying `self.weight`
+        and `self.bias`, we cache them.
         '''
         self._param_views_not_cached: bool = True
         self._cached_q_weights_wrapper: Optional[_WeightWrapper] = None
@@ -963,7 +986,7 @@ class QCrossKVParallelLinear(QKVParallelLinear):
 
     def _maybe_cache_param_views(self) -> None:
         '''
-        Compute the W_Q weights, packed W_K W_V weights, Q bias vector, and
+        Compute the W_Q weights, packed [W_K W_V] weights, Q bias vector, and
         packed KV bias vector once, in order to cache them.
         '''
 
@@ -988,18 +1011,18 @@ class QCrossKVParallelLinear(QKVParallelLinear):
 
         Arguments:
 
-        * q_output_parallel: computed Q on current GPU
-        * kv_output_parallel: computed KV on current GPU
-        * is_decode_phase: skip KV all-gather if True
+        * `q_output_parallel`: computed Q on current GPU
+        * `kv_output_parallel`: computed KV on current GPU
+        * `is_decode_phase`: skip KV all-gather if True
 
         Returns:
 
-        * Q all-gather result if required, otherwise q_output_parallel
+        * Q all-gather result if required, otherwise `q_output_parallel`
         * For KV:
             * If all-gather required,
                 * KV all-gather result if in prefill-phase
                 * None if in decode-phase
-            * kv_output_parallel otherwise
+            * `kv_output_parallel` otherwise
         '''
 
         if self.gather_output:
@@ -1026,14 +1049,14 @@ class QCrossKVParallelLinear(QKVParallelLinear):
 
         Arguments:
 
-        * weights: parameter matrix
-        * input: hidden states
-        * bias: bias
+        * `weights`: parameter matrix
+        * `input`: hidden states
+        * `bias`: bias
 
         Returns:
 
-        * weights * input if self.skip_bias_add
-        * weights * input + bias otherwise
+        * `weights` * `input` if `self.skip_bias_add`
+        * `weights` * `input` + `bias` otherwise
         '''
         assert self.quant_method is not None
         return self.quant_method.apply(weights, input,
@@ -1048,16 +1071,17 @@ class QCrossKVParallelLinear(QKVParallelLinear):
         '''
         Arguments:
 
-        * decoder_input_: Q will be computed using these hidden states
-        * encoder_input_: KV is computed using these hidden states
+        * `decoder_input_`: Q will be computed using these hidden states
+        * `encoder_input_`: KV is computed using these hidden states
             * If `None`, KV computations are skipped (implicitly decode-phase)
 
         Returns:
 
-        * Q  = (decoder_input_) x W_Q
-        * KV  = (encoder_input_) x [W_K W_V] (None if encoder_input_ is None)
+        * Q  = (`decoder_input_`) x W_Q
+        * KV  = (`encoder_input_`) x [W_K W_V]
+            * (`None` if `encoder_input_ `is `None`)
         * Q bias vector
-        * KV bias vector (None if encoder_input_ is None)
+        * KV bias vector (`None` if `encoder_input_` is `None`)
         '''
         self._maybe_cache_param_views()
         assert self._cached_q_weights_wrapper is not None
