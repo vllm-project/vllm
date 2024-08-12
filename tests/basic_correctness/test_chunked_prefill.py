@@ -110,10 +110,10 @@ def test_models_with_fp8_kv_cache(
 
     kv_cache_dtype, model = kv_dtype_n_model.split("#+#")
 
-    if model == "facebook/opt-125m":
-        pytest.skip(
-            "#7378: CUDA illegal memory access (undiagnosed) facebook/opt-125m"
-        )
+    # if model == "facebook/opt-125m":
+    #     pytest.skip(
+    #         "#7378: CUDA illegal memory access (undiagnosed) facebook/opt-125m"
+    #     )
 
     max_num_seqs = chunked_prefill_token_size
     enable_chunked_prefill = False
