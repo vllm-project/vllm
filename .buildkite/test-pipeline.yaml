@@ -80,8 +80,7 @@ steps:
   fast_check: true
   mirror_hardwares: [amd]
   source_file_dependencies:
-  - vllm/entrypoints
-  - tests/entrypoints
+  - vllm/
   commands:
   - pytest -v -s entrypoints/llm
   - pytest -v -s entrypoints/openai
