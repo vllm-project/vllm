@@ -220,12 +220,13 @@ def _prepare_seq_groups(
         prompt_logprob_indices: List[int] = []
         sample_indices: List[int] = []
         do_sample = seq_group_metadata.do_sample
-        seed = sampling_params.seed
 
         if seq_group_metadata.is_prompt:
-            if seed is not None and generators is not None:
-                generator = torch.Generator(device=device).manual_seed(seed)
-                generators[seq_group_metadata.request_id] = generator
+            if sampling_params.seed is not None:
+                generator = torch.Generator(device=device).manual_seed(
+                    sampling_params.seed)
+                if generators is not None:
+                    generators[seq_group_metadata.request_id] = generator
 
             num_prompts += 1
             num_prefill_sample = len(seq_ids)
@@ -242,7 +243,7 @@ def _prepare_seq_groups(
             prompt_logprob_len = 0
             sample_len = len(seq_ids) if do_sample else 0
 
-            if seed is not None and generators is not None:
+            if sampling_params.seed is not None and generators is not None:
                 generator = generators.get(seq_group_metadata.request_id)
 
         # Update indices to select from the model output.
