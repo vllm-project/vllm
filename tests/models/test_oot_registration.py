@@ -29,5 +29,4 @@ def test_oot_registration():
         generated_text = output.outputs[0].text
         # make sure only the first token is generated
         rest = generated_text.replace(first_token, "")  # noqa
-        # TODO(youkaichao): Fix the test with plugin
-        # assert rest == ""
+        assert rest == ""
