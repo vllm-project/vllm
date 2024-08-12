@@ -20,8 +20,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-
 """Inference-only LLaMA model compatible with HuggingFace weights."""
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
@@ -285,9 +283,9 @@ class GraniteModel(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: GraniteDecoderLayer(config=config,
-                                             cache_config=cache_config,
-                                             quant_config=quant_config,
-                                             prefix=prefix),
+                                               cache_config=cache_config,
+                                               quant_config=quant_config,
+                                               prefix=prefix),
             prefix=f"{prefix}.layers")
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -385,10 +383,10 @@ class GraniteForCausalLM(nn.Module, SupportsLoRA):
         self.lora_config = lora_config
 
         self.model = GraniteModel(config,
-                                cache_config,
-                                quant_config,
-                                lora_config=lora_config,
-                                prefix="model")
+                                  cache_config,
+                                  quant_config,
+                                  lora_config=lora_config,
+                                  prefix="model")
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = config.vocab_size
             if lora_config:
@@ -430,7 +428,7 @@ class GraniteForCausalLM(nn.Module, SupportsLoRA):
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
-        logit = logits / self.config.logits_scaling
+        logits = logits / self.config.logits_scaling
         return logits
 
     def sample(
