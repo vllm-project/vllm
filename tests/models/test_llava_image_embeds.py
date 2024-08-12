@@ -69,12 +69,22 @@ def run_test(
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """
-    images = [asset.image_embeds for asset in image_assets]
 
-    inputs_per_image = [(
+    # vLLM to load from image embeddings
+    vllm_images = [asset.image_embeds for asset in image_assets]
+
+    # transformers to load from PIL images
+    hf_images = [asset.pil_image for asset in image_assets]
+
+    vllm_inputs_per_image = [(
         [prompt for _ in size_factors],
         [image for _ in size_factors],
-    ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
+    ) for image, prompt in zip(vllm_images, HF_IMAGE_PROMPTS)]
+
+    hf_inputs_per_image = [(
+        [prompt for _ in size_factors],
+        [image for _ in size_factors],
+    ) for image, prompt in zip(hf_images, HF_IMAGE_PROMPTS)]
 
     # NOTE: take care of the order. run vLLM first, and then run HF.
     # vLLM needs a fresh new process without cuda initialization.
@@ -92,7 +102,7 @@ def run_test(
                                                 max_tokens,
                                                 num_logprobs=num_logprobs,
                                                 images=images)
-            for prompts, images in inputs_per_image
+            for prompts, images in vllm_inputs_per_image
         ]
 
     with hf_runner(model, dtype=dtype, is_vision_model=True) as hf_model:
@@ -101,7 +111,7 @@ def run_test(
                                                     max_tokens,
                                                     num_logprobs=num_logprobs,
                                                     images=images)
-            for prompts, images in inputs_per_image
+            for prompts, images in hf_inputs_per_image
         ]
 
     for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
