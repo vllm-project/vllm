@@ -11,6 +11,8 @@ from vllm.utils import is_cpu
 
 from ..conftest import VllmRunner, _ImageAssets, cleanup
 
+pytestmark = pytest.mark.vlm
+
 models = [
     "OpenGVLab/InternViT-300M-448px", "OpenGVLab/InternViT-6B-448px-V1-5"
 ]
