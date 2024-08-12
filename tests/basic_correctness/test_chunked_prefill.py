@@ -17,6 +17,7 @@ MODELS = [
 ]
 E5M2_KV_MODELS = [
     "facebook/opt-125m",
+    "meta-llama/Llama-2-7b-chat-hf",
 ]
 E4M3_KV_MODELS = [
     "meta-llama/Llama-2-7b-chat-hf", "nm-testing/Qwen2-1.5B-Instruct-FP8-K-V",
@@ -110,10 +111,10 @@ def test_models_with_fp8_kv_cache(
 
     kv_cache_dtype, model = kv_dtype_n_model.split("#+#")
 
-    # if model == "facebook/opt-125m":
-    #     pytest.skip(
-    #         "#7378: CUDA illegal memory access (undiagnosed) facebook/opt-125m"
-    #     )
+    if model == "facebook/opt-125m":
+        pytest.skip(
+            "#7378: CUDA illegal memory access (undiagnosed) facebook/opt-125m"
+        )
 
     max_num_seqs = chunked_prefill_token_size
     enable_chunked_prefill = False
