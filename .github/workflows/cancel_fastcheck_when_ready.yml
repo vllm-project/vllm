@@ -6,7 +6,7 @@ on:
 
 jobs:
   cancel-buildkite-run:
-    if: github.event.label.name == 'a'
+    if: github.event.label.name == 'invalid'
     runs-on: ubuntu-latest
     steps:
       - name: Cancel Buildkite Run
