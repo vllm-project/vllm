@@ -80,8 +80,7 @@ steps:
   fast_check: true
   mirror_hardwares: [amd]
   source_file_dependencies:
-  - vllm/entrypoints
-  - tests/entrypoints
+  - vllm/
   commands:
   - pytest -v -s entrypoints/llm
   - pytest -v -s entrypoints/openai
@@ -155,7 +154,6 @@ steps:
   - vllm/
   - tests/models
   commands:
-    - pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.1.2/flashinfer-0.1.2+cu121torch2.4-cp310-cp310-linux_x86_64.whl
     - pytest -v -s models -m \"not vlm\"
 
 - label: Vision Language Models Test # 42min
@@ -210,7 +208,6 @@ steps:
   - vllm/attention
   - tests/kernels
   commands:
-    - pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.1.2/flashinfer-0.1.2+cu121torch2.4-cp310-cp310-linux_x86_64.whl
     - pytest -v -s kernels --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 4
 
