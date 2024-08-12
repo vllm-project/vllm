@@ -8,30 +8,47 @@ namespace machete {
 template <typename PrepackedLayoutB>
 torch::Tensor prepack_impl(torch::Tensor const B) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(B));
+  using ElementB = typename PrepackedLayoutB::ElementB;
 
   auto device = B.device();
   auto stream = at::cuda::getCurrentCUDAStream(device.index());
-
-  using ElementB = typename PrepackedLayoutB::ElementB;
-  using StrideB = cutlass::detail::TagToStrideB_t<cutlass::layout::ColumnMajor>;
-
-  auto B_ptr = data_ptr<ElementB const, cutlass::layout::ColumnMajor>(B, "B");
-
-  auto elements_per_storage_item =
+  auto B_ptr = static_cast<ElementB const*>(B.const_data_ptr());
+  // elements per storage item for B
+  auto eles_per_storage =
       (B.dtype().itemsize() * 8) / cute::sizeof_bits_v<ElementB>;
 
-  int N = B.size(0) * elements_per_storage_item;
-  int M = B.size(1);
+  // torch B passed in is/should be (packed_K,N), the kernel expects (N,K,L) (to
+  // match cutlass using (N,K,L) for B), so we transpose B to (N,packed_K,L)
+  auto Bt_packed = B.t();
 
-  auto const shape_Bt = cute::make_shape(M, N, 1);
-  auto const stride_B = make_cute_stride(StrideB{}, shape_Bt);
+  using StrideB = cutlass::detail::TagToStrideB_t<cutlass::layout::ColumnMajor>;
+  auto const l_Bt_packed = make_cute_layout<StrideB>(Bt_packed, "B");
+
+  // convert (N,packed_K,L) layout to (N,K,L) layout
+  //  in effect we want to do: blocked_product(layout_Bt_packed,
+  //      make_ordered_layout(make_shape(_1{}, eles_per_storage, _1{}),
+  //                          Step<_1, _0, _2>{}));
+  // but blocked_product does not support dynamic strides so we implement the
+  // equivalent manually,
+  //   new_shape = (N, packed_K, L) * (1, eles_per_storage, 1) -> (N, K, L)
+  //   new_stride = (s0, s1, s2) * (eles_per_storage, 1, eles_per_storage)
+  //                 when s1 == 1
+  TORCH_CHECK(stride<1>(l_Bt_packed) == 1);
+  // clang-format off
+  auto const layout_Bt = make_layout(
+      transform_with_idx(l_Bt_packed.shape(), [&](auto ele, auto idx) {
+        return idx == 1 ? ele * eles_per_storage : ele;
+      }), 
+      transform_with_idx(l_Bt_packed.stride(), [&](auto ele, auto idx) {
+        return idx != 1 ? ele * eles_per_storage : ele;
+      }));
+  // clang-format on
 
   // Allocate output
   torch::Tensor D = torch::empty_like(B);
 
-  prepack_B<PrepackedLayoutB>(
-      stream, B_ptr, make_layout(shape_Bt, stride_B),
-      reinterpret_cast<ElementB*>(D.mutable_data_ptr()));
+  prepack_B<PrepackedLayoutB>(stream, B_ptr, layout_Bt,
+                              static_cast<ElementB*>(D.mutable_data_ptr()));
 
   return D;
 };

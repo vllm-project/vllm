@@ -1,112 +1,20 @@
 #pragma once
 
 #include <cute/tensor.hpp>
+#include <torch/all.h>
+namespace cute {
 
 ////////////////////////////////////////////////////////////////////
-// make_cute_stride
-//  - instantiates a stride object thats correctly populated base
-//    on the shape of the tensor and the stride type passed in,
-//    for example:
-//      - if s = Stride<int, _1> and shape = {M, N, L} then the stride will be
-//        constructed as {N, 1}, i.e. Row Major
-//      - if s = Stride<_1, int> and shape = {M, N, L} then the stride will be
-//        constructed as {1, M}, i.e. Column Major
-//      - if s = Stride<int, _1, int64_t> and shape = {M, N, L} then the stride
-//        will be constructed as {N, 1, M * N}, i.e. Row Major Batched
-//      - etc.
+// layout utils
 ////////////////////////////////////////////////////////////////////
 
-//
-// Row Major Batched
-//
-template <class IntT>
-CUTLASS_HOST_DEVICE cute::Stride<IntT, cute::Int<1>> make_cute_stride(
-    cute::Stride<IntT, cute::Int<1>> s, cute::Shape<int, int, int> shape_MNL) {
-  static_assert(std::is_integral_v<IntT>,
-                "Stride must have an integral type so it can be set "
-                "dynamically. Static strides not supported.");
-  auto s_copy = s;
-  cute::get<0>(s_copy) = static_cast<IntT>(cute::get<1>(shape_MNL));
-  return s_copy;
-}
-
-template <class IntT>
-CUTLASS_HOST_DEVICE cute::Stride<IntT, cute::Int<1>> make_cute_stride(
-    cute::Stride<IntT, cute::Int<1>> s, int M, int N, int L) {
-  return make_cute_stride(s, cute::make_shape(M, N, L));
-}
-
-template <class IntT>
-CUTLASS_HOST_DEVICE cute::Stride<cute::Int<1>, IntT> make_cute_stride(
-    cute::Stride<cute::Int<1>, IntT> s, cute::Shape<int, int, int> shape_MNL) {
-  static_assert(std::is_integral_v<IntT>,
-                "Stride must have an integral type so it can be set "
-                "dynamically. Static strides not supported.");
-  auto s_copy = s;
-  cute::get<1>(s_copy) = static_cast<IntT>(cute::get<0>(shape_MNL));
-  return s_copy;
-}
-
-template <class IntT>
-CUTLASS_HOST_DEVICE cute::Stride<cute::Int<1>, IntT> make_cute_stride(
-    cute::Stride<cute::Int<1>, IntT> s, int M, int N, int L) {
-  return make_cute_stride(s, cute::make_shape(M, N, L));
-}
-
-//
-// Row Major Batched
-//
-template <class IntT>
-CUTLASS_HOST_DEVICE cute::Stride<IntT, cute::Int<1>, int64_t> make_cute_stride(
-    cute::Stride<IntT, cute::Int<1>, int64_t> s,
-    cute::Shape<int, int, int> shape_MNL) {
-  static_assert(std::is_integral_v<IntT>,
-                "Stride must have an integral type so it can be set "
-                "dynamically. Static strides not supported.");
-  auto s_copy = s;
-  cute::get<0>(s_copy) = static_cast<IntT>(cute::get<1>(shape_MNL));
-  int batch_count = cute::get<2>(shape_MNL);
-  if (batch_count > 1) {
-    cute::get<2>(s_copy) =
-        static_cast<IntT>(cute::get<0>(shape_MNL) * cute::get<1>(shape_MNL));
-  } else {
-    cute::get<2>(s_copy) = static_cast<IntT>(0);
-  }
-  return s_copy;
-}
-
-template <class IntT>
-CUTLASS_HOST_DEVICE cute::Stride<IntT, cute::Int<1>, int64_t> make_cute_stride(
-    cute::Stride<IntT, cute::Int<1>, int64_t> s, int M, int N, int L) {
-  return make_cute_stride(s, cute::make_shape(M, N, L));
-}
-
-//
-// Col Major Batched
-//
-template <class IntT>
-CUTLASS_HOST_DEVICE cute::Stride<cute::Int<1>, IntT, int64_t> make_cute_stride(
-    cute::Stride<cute::Int<1>, IntT, int64_t> s,
-    cute::Shape<int, int, int> shape_MNL) {
-  static_assert(std::is_integral_v<IntT>,
-                "Stride must have an integral type so it can be set "
-                "dynamically. Static strides not supported.");
-  auto s_copy = s;
-  cute::get<1>(s_copy) = static_cast<IntT>(cute::get<0>(shape_MNL));
-  int batch_count = cute::get<2>(shape_MNL);
-  if (batch_count > 1) {
-    cute::get<2>(s_copy) =
-        static_cast<IntT>(cute::get<0>(shape_MNL) * cute::get<1>(shape_MNL));
-  } else {
-    cute::get<2>(s_copy) = static_cast<IntT>(0);
-  }
-  return s_copy;
-}
-
-template <class IntT>
-CUTLASS_HOST_DEVICE cute::Stride<cute::Int<1>, IntT, int64_t> make_cute_stride(
-    cute::Stride<cute::Int<1>, IntT, int64_t> s, int M, int N, int L) {
-  return make_cute_stride(s, cute::make_shape(M, N, L));
+// Permute layout based on indices, example:
+//   permute_layout<1, 0>(layout) will swap the two dimensions
+//   permute_layout<0, 2, 1>(layout) will swap the last two dimensions
+template <size_t... I, typename Layout>
+auto permute_layout(Layout l) {
+  static_assert(rank(l) == sizeof...(I), "Invalid permutation, rank mismatch");
+  return cute::make_layout(cute::get<I>(l)...);
 }
 
 ////////////////////////////////////////////////////////////////////
@@ -121,3 +29,5 @@ static constexpr auto get_logical_ptr(PointerType* ptr) {
     return ptr;
   }
 }
+
+};  // namespace cute

@@ -2,6 +2,7 @@
 
 #include <torch/all.h>
 
+#include "cute/layout.hpp"
 #include "cutlass/layout/matrix.h"
 #include "cutlass/bfloat16.h"
 #include "cutlass/half.h"
@@ -9,34 +10,86 @@
 using ColumnMajor = typename cutlass::layout::ColumnMajor;
 using RowMajor = typename cutlass::layout::RowMajor;
 
-static inline bool is_row_major(torch::Tensor const tensor) {
-  TORCH_CHECK(tensor.dim() == 2);
-  return tensor.is_contiguous();
+namespace cute {
+
+namespace detail {
+
+template <class T, class F, class G, int... I>
+CUTE_HOST_DEVICE constexpr auto tapply_with_idx(T&& t, F&& f, G&& g,
+                                                seq<I...>) {
+  return g(f(get<I>(static_cast<T&&>(t)), I)...);
 }
 
-static inline bool is_column_major(torch::Tensor const tensor) {
-  TORCH_CHECK(tensor.dim() == 2);
-  return tensor.stride(0) == 1 && tensor.stride(1) == tensor.size(0);
+template <class F, int... I>
+CUTE_HOST_DEVICE constexpr auto make_shape_from_idx(F&& f, seq<I...>) {
+  return make_shape(f(I)...);
 }
 
-template <typename T, typename Layout = RowMajor>
-T* data_ptr(torch::Tensor const tensor, char const* name) {
-  if constexpr (std::is_same_v<Layout, RowMajor>) {
-    TORCH_CHECK(is_row_major(tensor), "Expected ", name, " to be RowMajor");
-  } else if constexpr (std::is_same_v<Layout, ColumnMajor>) {
-    TORCH_CHECK(is_column_major(tensor), "Expected ", name,
-                " to be ColumnMajor");
+};  // namespace detail
+
+template <class T, class F>
+CUTE_HOST_DEVICE constexpr auto transform_with_idx(T const& t, F&& f) {
+  if constexpr (is_tuple<T>::value) {
+    return detail::tapply_with_idx(
+        t, f, [](auto const&... a) { return cute::make_tuple(a...); },
+        tuple_seq<T>{});
   } else {
-    TORCH_CHECK(false, "Unknown Layout");
+    return f(t);
   }
 
-  return reinterpret_cast<T*>(tensor.data_ptr());
+  CUTE_GCC_UNREACHABLE;
 }
 
-template <typename T, typename Layout = RowMajor>
-T* maybe_data_ptr(c10::optional<torch::Tensor const> maybe_tensor,
-                  char const* name) {
-  return (maybe_tensor) ? data_ptr<T, Layout>(*maybe_tensor, name) : nullptr;
+// calls: make_shape(f(0), f(1), ..., f(N-1))
+template <int N, class F>
+CUTE_HOST_DEVICE constexpr auto make_shape_from_idx(F&& f) {
+  return detail::make_shape_from_idx(f, make_seq<N>{});
+}
+
+};  // namespace cute
+
+template <typename Stride>
+static inline auto make_cute_layout(torch::Tensor const& tensor,
+                                    std::string_view name = "tensor") {
+  TORCH_CHECK(tensor.dim() <= rank(Stride{}));
+  auto stride = cute::transform_with_idx(
+      Stride{}, [&](auto const& stride_ele, auto const& idx) {
+        using StrideEle = std::decay_t<decltype(stride_ele)>;
+
+        if (tensor.dim() <= idx) {
+          return StrideEle{};
+        }
+
+        if constexpr (cute::is_static_v<StrideEle>) {
+          TORCH_CHECK(StrideEle::value == tensor.stride(idx), "Expected ", name,
+                      ".stride(", idx, ") to be ", StrideEle::value);
+          return StrideEle{};
+        } else {
+          return tensor.stride(idx);
+        }
+      });
+
+  auto shape = cute::make_shape_from_idx<rank(Stride{})>([&](auto const& idx) {
+    if (idx < tensor.dim())
+      return tensor.size(idx);
+    else
+      return int64_t(1);
+  });
+
+  return make_layout(shape, stride);
+}
+
+template <typename Stride>
+static inline auto maybe_make_cute_layout(
+    c10::optional<torch::Tensor> const& tensor,
+    std::string_view name = "tensor") {
+  using Layout = decltype(make_cute_layout<Stride>(*tensor));
+
+  if (tensor) {
+    return std::optional<Layout>{make_cute_layout<Stride>(*tensor, name)};
+  } else {
+    return std::optional<Layout>{};
+  }
 }
 
 //

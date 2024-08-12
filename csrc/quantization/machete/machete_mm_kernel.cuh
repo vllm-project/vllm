@@ -45,8 +45,9 @@ struct MacheteKernelTemplate {
   using ElementB = ElementB_;
   using ElementD = ElementD_;
   using ElementC = cute::conditional_t<with_C, ElementD, void>;
-  using ElementZero = ZeroT;
-  using ElementScale = ScaleT;
+  using ElementZ = ZeroT;
+  using ElementS = ScaleT;
+
   using ElementAccumulator =
       AccumulatorT;  // Element type for internal accumulation
   using ElementCompute = AccumulatorT;  // For Epilogue
@@ -54,8 +55,8 @@ struct MacheteKernelTemplate {
   using BTypeTuple = cute::conditional_t<
       with_scales,
       cute::conditional_t<with_zeropoints,
-                          cute::tuple<ElementB, ElementScale, ElementZero>,
-                          cute::tuple<ElementB, ElementScale>>,
+                          cute::tuple<ElementB, ElementS, ElementZ>,
+                          cute::tuple<ElementB, ElementS>>,
       ElementB>;
 
   using LayoutA = cutlass::layout::RowMajor;
@@ -64,6 +65,13 @@ struct MacheteKernelTemplate {
   using LayoutScale = cutlass::layout::RowMajor;
   // not actually used since B has the prepacked layout, but required by cutlass
   using _LayoutB = cutlass::layout::ColumnMajor;
+
+  // Interface strides expected by create_arguments (will get transposed)
+  using StrideA = cutlass::detail::TagToStrideA_t<LayoutA>;
+  using StrideC = cutlass::detail::TagToStrideA_t<LayoutC>;
+  using StrideD = cutlass::detail::TagToStrideA_t<LayoutD>;
+  using StrideS = cutlass::detail::TagToStrideA_t<LayoutScale>;
+  using StrideZ = StrideS;
 
   using LayoutA_Transpose =
       typename cutlass::layout::LayoutTranspose<LayoutA>::type;
@@ -115,11 +123,6 @@ struct MacheteKernelTemplate {
       CollectiveMainloop, CollectiveEpilogue, TileScheduler>;
   using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
 
-  using StrideA = cutlass::detail::TagToStrideA_t<LayoutA>;
-  using StrideC = typename GemmKernel::StrideC;
-  using StrideD = typename GemmKernel::StrideD;
-  using StrideS = typename CollectiveMainloop::StrideScale;
-
   // stride_B is unused (since B is prepacked), but still required by cutlass
   using _StrideB = cutlass::detail::TagToStrideB_t<_LayoutB>;
 
@@ -127,41 +130,81 @@ struct MacheteKernelTemplate {
   using MainloopArguments = typename GemmKernel::MainloopArguments;
   using EpilogueArguments = typename GemmKernel::EpilogueArguments;
 
-  static Arguments create_arguments(cudaStream_t stream, int M, int N, int K,
-                                    ElementA const* A, ElementB const* B,
-                                    ElementC const* C, ElementD* D,
-                                    ElementScale const* scales,
-                                    ElementZero const* zeros,
-                                    ElementCompute alpha, ElementCompute beta,
-                                    std::optional<int> maybe_group_size) {
+  template <typename ShapeA, typename ShapeC, typename ShapeD, typename ShapeS,
+            typename ShapeZ>
+  static Arguments create_arguments(
+      cudaStream_t stream,
+      ElementA const* A_ptr,  // A is an MxK matrix
+      Layout<ShapeA, StrideA> const& layout_A,
+      ElementB const* B_ptr,  // B is an KxN prepacked matrix
+      ElementD* D_ptr,        // D is an MxN matrix
+      Layout<ShapeD, StrideD> const& layout_D,
+      ElementC const* C_ptr,  // C is an MxN matrix
+      std::optional<Layout<ShapeC, StrideC>> const& layout_C,
+      ElementS const* S_ptr,  // S is an scale_KxN matrix
+      std::optional<Layout<ShapeS, StrideS>> const& layout_S,
+      ElementZ const* Z_ptr,  // Z is an scale_KxN matrix
+      std::optional<Layout<ShapeZ, StrideZ>> const& layout_Z,
+      ElementCompute alpha, ElementCompute beta,
+      std::optional<int> maybe_group_size) {
     static_assert(!with_zeropoints || with_scales);
-    TORCH_CHECK(with_C || (!with_C && beta == 0));
-    TORCH_CHECK(with_scales || !scales);
-    TORCH_CHECK(with_zeropoints || !zeros);
 
-    static int constexpr L = 1;
+    int M = size<0>(layout_A), N = size<1>(layout_D), K = size<1>(layout_A);
+
     int const group_size = maybe_group_size.value_or(K);
     int const scale_k = (K + group_size - 1) / group_size;
 
-    // stride_B is unused (since B is prepacked), but still required by cutlass
-    auto stride_A = make_cute_stride(StrideA{}, N, K, L);
-    auto stride_B = make_cute_stride(_StrideB{}, M, K, L);
-    auto stride_C = make_cute_stride(StrideC{}, N, M, L);
-    auto stride_D = make_cute_stride(StrideD{}, N, M, L);
-    auto stride_S = make_cute_stride(StrideS{}, N, scale_k, L);
+    TORCH_CHECK(size<0>(layout_A) == M && size<1>(layout_A) == K);
+    TORCH_CHECK(size<0>(layout_D) == M && size<1>(layout_D) == N);
+
+    if constexpr (with_C) {
+      TORCH_CHECK(C_ptr && layout_C);
+    } else {
+      TORCH_CHECK(!C_ptr, "C not supported");
+    }
+
+    if constexpr (with_scales) {
+      TORCH_CHECK(S_ptr && layout_S);
+      TORCH_CHECK((size<0>(*layout_S) == scale_k && size<1>(*layout_S) == N));
+    } else {
+      TORCH_CHECK(!S_ptr, "Scales not supported");
+    }
+
+    if constexpr (with_zeropoints) {
+      TORCH_CHECK(Z_ptr && layout_Z);
+      TORCH_CHECK((size<0>(*layout_Z) == scale_k && size<1>(*layout_Z) == N));
+      TORCH_CHECK(layout_S && *layout_Z == *layout_S,
+                  "Scales and zeros must have the same layout");
+    } else {
+      TORCH_CHECK(!Z_ptr, "Zeropoints not supported");
+    }
+
+    // Transpose A and D
+    // A doen't need to be tranposed since cutlass expects a NxK matrix
+    //  for B (which is At)
+    auto stride_At = layout_A.stride();
+    auto stride_Dt = permute_layout<1, 0, 2>(layout_D).stride();
+    auto stride_Ct = stride_Dt;
+    if (layout_C) {
+      stride_Ct = permute_layout<1, 0, 2>(*layout_C).stride();
+    }
 
     MainloopArguments mainloop_arguments{};
     EpilogueArguments epilogue_arguments{
-        {alpha, beta}, C, stride_C, D, stride_D};
+        {alpha, beta}, C_ptr, stride_Ct, D_ptr, stride_Dt};
 
     if constexpr (with_scales && with_zeropoints) {
-      mainloop_arguments = MainloopArguments{
-          B, stride_B, A, stride_A, scales, stride_S, group_size, zeros};
+      auto stride_S = permute_layout<1, 0, 2>(*layout_S).stride();
+      mainloop_arguments =
+          MainloopArguments{B_ptr, _StrideB{}, A_ptr,      stride_At,
+                            S_ptr, stride_S,   group_size, Z_ptr};
     } else if constexpr (with_scales) {
+      auto stride_S = permute_layout<1, 0, 2>(*layout_S).stride();
       mainloop_arguments = MainloopArguments{
-          B, stride_B, A, stride_A, scales, stride_S, group_size};
+          B_ptr, _StrideB{}, A_ptr, stride_At, S_ptr, stride_S, group_size};
     } else {
-      mainloop_arguments = MainloopArguments{B, stride_B, A, stride_A};
+      mainloop_arguments =
+          MainloopArguments{B_ptr, _StrideB{}, A_ptr, stride_At};
     }
 
     return Arguments{cutlass::gemm::GemmUniversalMode::kGemm,
