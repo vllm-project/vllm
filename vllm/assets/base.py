@@ -4,7 +4,7 @@ from typing import Optional
 
 import vllm.envs as envs
 from vllm.connections import global_http_connection
-from vllm.envs import VLLM_IMAGE_FETCH_TIMEOUT
+from vllm.envs import VLLM_MULTIMODAL_FETCH_TIMEOUT
 
 vLLM_S3_BUCKET_URL = "https://vllm-public-assets.s3.us-west-2.amazonaws.com"
 
@@ -34,6 +34,6 @@ def get_vllm_public_assets(filename: str,
         global_http_connection.download_file(
             f"{vLLM_S3_BUCKET_URL}/{filename}",
             asset_path,
-            timeout=VLLM_IMAGE_FETCH_TIMEOUT)
+            timeout=VLLM_MULTIMODAL_FETCH_TIMEOUT)
 
     return asset_path
