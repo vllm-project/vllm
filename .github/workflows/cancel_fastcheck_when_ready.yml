@@ -10,6 +10,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Cancel Buildkite Run
-        run:
-          - echo "PR branch"
-          - echo ${{ github.event.pull_request.head.ref }}
+        run: |
+          echo "PR branch"
+          echo ${{ github.event.pull_request.head.ref }}
