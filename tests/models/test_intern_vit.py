@@ -7,7 +7,6 @@ import torch.nn as nn
 from huggingface_hub import snapshot_download
 from transformers import AutoConfig, AutoModel, CLIPImageProcessor
 
-from vllm import ModelRegistry
 from vllm.distributed import (init_distributed_environment,
                               initialize_model_parallel)
 from vllm.model_executor.models.intern_vit import InternVisionModel
@@ -34,8 +33,6 @@ def run_intern_vit_test(
     dtype: str,
     distributed_executor_backend: Optional[str] = None,
 ):
-    ModelRegistry.register_model("InternVisionModel", InternVisionModel)
-
     img_processor = CLIPImageProcessor.from_pretrained(model)
     images = [asset.pil_image for asset in image_assets]
     pixel_values = [
