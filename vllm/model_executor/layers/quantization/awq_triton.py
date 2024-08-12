@@ -7,6 +7,7 @@ import argparse
 
 device = "cuda"
 
+
 @triton.jit
 def awq_dequantize_kernel(
         qweight_ptr,  # quantized matrix
@@ -112,9 +113,7 @@ def awq_gemm_kernel(a_ptr, b_ptr, c_ptr, zeros_ptr, scales_ptr, M, N, K,
     pid_z = tl.program_id(1)
 
     # NOTE: This doesn't work in TRITON_INTERPRET=1 mode.  Use below instead.
-    # num_pid_m = (M + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
     # num_pid_n = (N + BLOCK_SIZE_N - 1) // BLOCK_SIZE_N
-    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
 
     pid_m = pid // num_pid_n
@@ -355,9 +354,8 @@ def test_dequantize():
         iweights_triton = awq_dequantize_triton(qweight, scales, zeros,
                                                 split_k_iters, thx, thy)
         print(f"Triton result:iweights_triton = {iweights_triton}")
-        print(
-            f"Any infs in triton result? --> {not torch.all(False == torch.isinf(iweights_triton))}"
-        )
+        print("Any infs in triton result? -->"
+              f"{torch.any(torch.isinf(iweights_triton))}")
 
     if use_torch:
         iweights_torch, _ = awq_dequantize_torch(qweight, scales, zeros,
@@ -461,13 +459,11 @@ def test_gemm():
         input_dtype = torch.float16
         qweight_rows = input_cols
         qweight_cols = 32 if small_test_size else 448
-        qweight_dtype = torch.int32
         scales_rows = qweight_rows // group_size
         scales_cols = qweight_cols * 8
         scales_dtype = torch.float16
         qzeros_rows = scales_rows
         qzeros_cols = qweight_cols
-        qzeros_dtype = torch.int32
         print(f"input_rows = {input_rows} input_cols = {input_cols}"
               f" qweight_rows = {qweight_rows} qweight_cols = {qweight_cols}"
               f" scales_rows = {scales_rows} scales_cols = {scales_cols}")
@@ -507,7 +503,9 @@ def test_gemm():
     # NOTE: Use to see more data and accuracy during testing.
     # import numpy as np
     # import sys
-    # torch.set_printoptions(precision = 3, threshold=10000000000000000000000000000, sci_mode = False)
+    # torch.set_printoptions(precision = 3,
+    #                        threshold=10000000000000000000000000000,
+    #                        sci_mode = False)
     # np.set_printoptions(threshold=sys.maxsize)
 
     if use_torch:
