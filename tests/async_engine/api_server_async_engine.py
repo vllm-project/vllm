@@ -1,4 +1,4 @@
-"""vllm.entrypoints.api_server with some extra logging for testing."""
+"""vllm.entrypoints.api_server with some extra logging for stesting."""
 from typing import Any, Dict, Iterable
 
 import uvicorn
