@@ -7,17 +7,21 @@ import torch
 import torch.distributed
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, SchedulerConfig,
-                         SpeculativeConfig, VisionLanguageConfig)
+                         ModelConfig, MultiModalConfig, ObservabilityConfig,
+                         ParallelConfig, PromptAdapterConfig, SchedulerConfig,
+                         SpeculativeConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+from vllm.platforms import current_platform
+from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
+from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
 from vllm.worker.worker_base import LocalOrDistributedWorkerBase, WorkerInput
 
@@ -42,13 +46,16 @@ class Worker(LocalOrDistributedWorkerBase):
         rank: int,
         distributed_init_method: str,
         lora_config: Optional[LoRAConfig] = None,
-        vision_language_config: Optional[VisionLanguageConfig] = None,
+        multimodal_config: Optional[MultiModalConfig] = None,
         speculative_config: Optional[SpeculativeConfig] = None,
+        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         is_driver_worker: bool = False,
         model_runner_cls: Optional[Type[GPUModelRunnerBase]] = None,
+        observability_config: Optional[ObservabilityConfig] = None,
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
+        self.parallel_config.rank = rank
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.cache_config = cache_config
@@ -57,32 +64,34 @@ class Worker(LocalOrDistributedWorkerBase):
         self.distributed_init_method = distributed_init_method
         self.lora_config = lora_config
         self.load_config = load_config
+        self.prompt_adapter_config = prompt_adapter_config
         self.is_driver_worker = is_driver_worker
-        if self.is_driver_worker:
-            assert self.rank == 0, "The driver worker must have rank 0."
-
+        if parallel_config and is_driver_worker:
+            assert rank % parallel_config.tensor_parallel_size == 0, \
+                   "Driver worker should be rank 0 of tensor parallel group."
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
-        self.vision_language_config = vision_language_config
-        if self.vision_language_config:
-            assert not self.lora_config, (
-                "To be tested: vision language model with LoRA settings.")
+        self.multimodal_config = multimodal_config
+        self.observability_config = observability_config
 
         # Return hidden states from target model if the draft model is an
         # mlp_speculator
         speculative_args = {} if speculative_config is None \
             or (speculative_config.draft_model_config.model ==
                 model_config.model) \
-              or (speculative_config.draft_model_config.hf_config.model_type !=
-                  "mlp_speculator") else {"return_hidden_states": True}
+            or (speculative_config.draft_model_config.hf_config.model_type
+                not in ["medusa", "mlp_speculator"]) \
+                    else {"return_hidden_states": True}
 
         ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
         if model_runner_cls is not None:
             ModelRunnerClass = model_runner_cls
-        elif self.model_config.embedding_mode:
+        elif self._is_embedding_model():
             ModelRunnerClass = EmbeddingModelRunner
+        elif self._is_encoder_decoder_model():
+            ModelRunnerClass = EncoderDecoderModelRunner
         self.model_runner: GPUModelRunnerBase = ModelRunnerClass(
             model_config,
             parallel_config,
@@ -93,14 +102,22 @@ class Worker(LocalOrDistributedWorkerBase):
             lora_config=self.lora_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=is_driver_worker,
-            vision_language_config=vision_language_config,
+            prompt_adapter_config=prompt_adapter_config,
+            multimodal_config=multimodal_config,
+            observability_config=observability_config,
             **speculative_args,
         )
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
-        self.cache_engine: CacheEngine
+        self.cache_engine: List[CacheEngine]
         # Initialize gpu_cache as embedding models don't initialize kv_caches
-        self.gpu_cache: Optional[List[torch.tensor]] = None
+        self.gpu_cache: Optional[List[List[torch.Tensor]]] = None
+
+    def _is_encoder_decoder_model(self):
+        return self.model_config.is_encoder_decoder_model
+
+    def _is_embedding_model(self):
+        return self.model_config.is_embedding_model
 
     def init_device(self) -> None:
         if self.device_config.device.type == "cuda":
@@ -181,7 +198,9 @@ class Worker(LocalOrDistributedWorkerBase):
         # GPU did not change their memory usage during the profiling.
         peak_memory = self.init_gpu_memory - free_gpu_memory
         assert peak_memory > 0, (
-            "Error in memory profiling. This happens when the GPU memory was "
+            "Error in memory profiling. "
+            f"Initial free memory {self.init_gpu_memory}, current free memory"
+            f" {free_gpu_memory}. This happens when the GPU memory was "
             "not properly cleaned up before initializing the vLLM instance.")
 
         cache_block_size = self.get_cache_block_size_bytes()
@@ -216,10 +235,15 @@ class Worker(LocalOrDistributedWorkerBase):
 
     def _init_cache_engine(self):
         assert self.cache_config.num_gpu_blocks is not None
-        self.cache_engine = CacheEngine(self.cache_config, self.model_config,
-                                        self.parallel_config,
-                                        self.device_config)
-        self.gpu_cache = self.cache_engine.gpu_cache
+        self.cache_engine = [
+            CacheEngine(self.cache_config, self.model_config,
+                        self.parallel_config, self.device_config)
+            for _ in range(self.parallel_config.pipeline_parallel_size)
+        ]
+        self.gpu_cache = [
+            self.cache_engine[ve].gpu_cache
+            for ve in range(self.parallel_config.pipeline_parallel_size)
+        ]
 
     def _warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:
@@ -233,12 +257,14 @@ class Worker(LocalOrDistributedWorkerBase):
         return self.parallel_config.tensor_parallel_size > 1
 
     @property
-    def kv_cache(self) -> Optional[List[torch.Tensor]]:
+    def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
         return self.gpu_cache
 
     @torch.inference_mode()
     def prepare_worker_input(
             self, execute_model_req: ExecuteModelRequest) -> WorkerInput:
+        virtual_engine = execute_model_req.virtual_engine
+        num_steps = execute_model_req.num_steps
         num_seq_groups = len(execute_model_req.seq_group_metadata_list)
         # `blocks_to_swap_in` and `blocks_to_swap_out` are cpu tensors.
         # they contain parameters to launch cudamemcpyasync.
@@ -260,20 +286,25 @@ class Worker(LocalOrDistributedWorkerBase):
             blocks_to_swap_in=blocks_to_swap_in,
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
+            virtual_engine=virtual_engine,
+            num_steps=num_steps,
         )
 
     @torch.inference_mode()
     def execute_worker(self, worker_input: WorkerInput) -> None:
+        virtual_engine = worker_input.virtual_engine
         # Issue cache operations.
         if (worker_input.blocks_to_swap_in is not None
                 and worker_input.blocks_to_swap_in.numel() > 0):
-            self.cache_engine.swap_in(worker_input.blocks_to_swap_in)
+            self.cache_engine[virtual_engine].swap_in(
+                worker_input.blocks_to_swap_in)
         if (worker_input.blocks_to_swap_out is not None
                 and worker_input.blocks_to_swap_out.numel() > 0):
-            self.cache_engine.swap_out(worker_input.blocks_to_swap_out)
+            self.cache_engine[virtual_engine].swap_out(
+                worker_input.blocks_to_swap_out)
         if (worker_input.blocks_to_copy is not None
                 and worker_input.blocks_to_copy.numel() > 0):
-            self.cache_engine.copy(worker_input.blocks_to_copy)
+            self.cache_engine[virtual_engine].copy(worker_input.blocks_to_copy)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
@@ -286,6 +317,19 @@ class Worker(LocalOrDistributedWorkerBase):
 
     def list_loras(self) -> Set[int]:
         return self.model_runner.list_loras()
+
+    def add_prompt_adapter(
+            self, prompt_adapter_request: PromptAdapterRequest) -> bool:
+        return self.model_runner.add_prompt_adapter(prompt_adapter_request)
+
+    def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
+        return self.model_runner.remove_lora(prompt_adapter_id)
+
+    def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
+        return self.model_runner.pin_prompt_adapter(prompt_adapter_id)
+
+    def list_prompt_adapters(self) -> Set[int]:
+        return self.model_runner.list_prompt_adapters()
 
     @property
     def max_model_len(self) -> int:
@@ -322,7 +366,7 @@ def init_worker_distributed_environment(
 def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
     # Check if the GPU supports the dtype.
     if torch_dtype == torch.bfloat16:
-        compute_capability = torch.cuda.get_device_capability()
+        compute_capability = current_platform.get_device_capability()
         if compute_capability[0] < 8:
             gpu_name = torch.cuda.get_device_name()
             raise ValueError(

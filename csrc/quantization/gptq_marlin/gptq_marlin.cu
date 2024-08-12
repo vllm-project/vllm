@@ -19,8 +19,9 @@
  * Adapted from https://github.com/IST-DASLab/marlin
  */
 
-#include "gptq_marlin.cuh"
-#include "gptq_marlin_dtypes.cuh"
+#include "marlin.cuh"
+#include "marlin_dtypes.cuh"
+#include "core/scalar_type.hpp"
 
 #define STATIC_ASSERT_SCALAR_TYPE_VALID(scalar_t)               \
   static_assert(std::is_same<scalar_t, half>::value ||          \
@@ -32,7 +33,7 @@ inline std::string str(T x) {
   return std::to_string(x);
 }
 
-namespace gptq_marlin {
+namespace marlin {
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
 
@@ -59,23 +60,27 @@ __global__ void Marlin(
     const int4* __restrict__ A,  // fp16 input matrix of shape mxk
     const int4* __restrict__ B,  // 4bit quantized weight matrix of shape kxn
     int4* __restrict__ C,        // fp16 output buffer of shape mxn
+    int4* __restrict__ C_tmp,    // fp32 tmp output buffer (for reduce)
     const int4* __restrict__ scales_ptr,  // fp16 quantization scales of shape
                                           // (k/groupsize)xn
     const int* __restrict__ g_idx,        // int32 group indices of shape k
-    int num_groups,  // number of scale groups per output channel
-    int prob_m,      // batch dimension m
-    int prob_n,      // output dimension n
-    int prob_k,      // reduction dimension k
-    int* locks       // extra global storage for barrier synchronization
+    int num_groups,       // number of scale groups per output channel
+    int prob_m,           // batch dimension m
+    int prob_n,           // output dimension n
+    int prob_k,           // reduction dimension k
+    int* locks,           // extra global storage for barrier synchronization
+    bool use_fp32_reduce  // whether to use fp32 global reduce
 ) {}
 
-}  // namespace gptq_marlin
+}  // namespace marlin
 
 torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
-                               torch::Tensor& b_scales, torch::Tensor& g_idx,
-                               torch::Tensor& perm, torch::Tensor& workspace,
-                               int64_t num_bits, int64_t size_m, int64_t size_n,
-                               int64_t size_k, bool is_k_full) {
+                               torch::Tensor& b_scales, torch::Tensor& b_zeros,
+                               torch::Tensor& g_idx, torch::Tensor& perm,
+                               torch::Tensor& workspace,
+                               vllm::ScalarTypeTorchPtr const& b_q_type,
+                               int64_t size_m, int64_t size_n, int64_t size_k,
+                               bool is_k_full, bool has_zp) {
   TORCH_CHECK_NOT_IMPLEMENTED(false,
                               "marlin_gemm(..) requires CUDA_ARCH >= 8.0");
   return torch::empty({1, 1});
@@ -264,6 +269,114 @@ dequant_8bit<nv_bfloat16>(int q) {
   return frag_b;
 }
 
+// Zero-point dequantizers
+
+template <typename scalar_t>
+__device__ inline typename ScalarType<scalar_t>::FragB dequant_4bit_zp(int q) {
+  STATIC_ASSERT_SCALAR_TYPE_VALID(scalar_t);
+}
+
+template <>
+__device__ inline typename ScalarType<half>::FragB dequant_4bit_zp<half>(
+    int q) {
+  const int LO = 0x000f000f;
+  const int HI = 0x00f000f0;
+  const int EX = 0x64006400;
+  // Guarantee that the `(a & b) | c` operations are LOP3s.
+  int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, LO, EX);
+  int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, HI, EX);
+
+  const int SUB = 0x64006400;
+  const int MUL = 0x2c002c00;
+  const int ADD = 0xd400d400;
+  typename ScalarType<half>::FragB frag_b;
+  frag_b[0] = __hsub2(*reinterpret_cast<half2*>(&lo),
+                      *reinterpret_cast<const half2*>(&SUB));
+  frag_b[1] = __hfma2(*reinterpret_cast<half2*>(&hi),
+                      *reinterpret_cast<const half2*>(&MUL),
+                      *reinterpret_cast<const half2*>(&ADD));
+  return frag_b;
+}
+
+template <>
+__device__ inline typename ScalarType<nv_bfloat16>::FragB
+dequant_4bit_zp<nv_bfloat16>(int q) {
+  static constexpr uint32_t MASK = 0x000f000f;
+  static constexpr uint32_t EX = 0x43004300;
+
+  // Guarantee that the `(a & b) | c` operations are LOP3s.
+
+  int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
+  q >>= 4;
+  int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
+
+  typename ScalarType<nv_bfloat16>::FragB frag_b;
+  static constexpr uint32_t MUL = 0x3F803F80;
+  static constexpr uint32_t ADD = 0xC300C300;
+
+  frag_b[0] = __hfma2(*reinterpret_cast<nv_bfloat162*>(&lo),
+                      *reinterpret_cast<const nv_bfloat162*>(&MUL),
+                      *reinterpret_cast<const nv_bfloat162*>(&ADD));
+  frag_b[1] = __hfma2(*reinterpret_cast<nv_bfloat162*>(&hi),
+                      *reinterpret_cast<const nv_bfloat162*>(&MUL),
+                      *reinterpret_cast<const nv_bfloat162*>(&ADD));
+  return frag_b;
+}
+
+template <typename scalar_t>
+__device__ inline typename ScalarType<scalar_t>::FragB dequant_8bit_zp(int q) {
+  STATIC_ASSERT_SCALAR_TYPE_VALID(scalar_t);
+}
+
+template <>
+__device__ inline typename ScalarType<half>::FragB dequant_8bit_zp<half>(
+    int q) {
+  static constexpr uint32_t mask_for_elt_01 = 0x5250;
+  static constexpr uint32_t mask_for_elt_23 = 0x5351;
+  static constexpr uint32_t start_byte_for_fp16 = 0x64646464;
+
+  uint32_t lo = prmt<start_byte_for_fp16, mask_for_elt_01>(q);
+  uint32_t hi = prmt<start_byte_for_fp16, mask_for_elt_23>(q);
+
+  static constexpr uint32_t I8s_TO_F16s_MAGIC_NUM = 0x64006400;
+
+  typename ScalarType<half>::FragB frag_b;
+  frag_b[0] = __hsub2(*reinterpret_cast<half2*>(&lo),
+                      *reinterpret_cast<const half2*>(&I8s_TO_F16s_MAGIC_NUM));
+  frag_b[1] = __hsub2(*reinterpret_cast<half2*>(&hi),
+                      *reinterpret_cast<const half2*>(&I8s_TO_F16s_MAGIC_NUM));
+  return frag_b;
+}
+
+template <>
+__device__ inline typename ScalarType<nv_bfloat16>::FragB
+dequant_8bit_zp<nv_bfloat16>(int q) {
+  typename ScalarType<nv_bfloat16>::FragB frag_b;
+
+  float fp32_intermediates[4];
+  uint32_t* fp32_intermediates_casted =
+      reinterpret_cast<uint32_t*>(fp32_intermediates);
+
+  static constexpr uint32_t fp32_base = 0x4B000000;
+  fp32_intermediates_casted[0] = __byte_perm(q, fp32_base, 0x7650);
+  fp32_intermediates_casted[1] = __byte_perm(q, fp32_base, 0x7652);
+  fp32_intermediates_casted[2] = __byte_perm(q, fp32_base, 0x7651);
+  fp32_intermediates_casted[3] = __byte_perm(q, fp32_base, 0x7653);
+
+  fp32_intermediates[0] -= 8388608.f;
+  fp32_intermediates[1] -= 8388608.f;
+  fp32_intermediates[2] -= 8388608.f;
+  fp32_intermediates[3] -= 8388608.f;
+
+  uint32_t* bf16_result_ptr = reinterpret_cast<uint32_t*>(&frag_b);
+  bf16_result_ptr[0] = __byte_perm(fp32_intermediates_casted[0],
+                                   fp32_intermediates_casted[1], 0x7632);
+  bf16_result_ptr[1] = __byte_perm(fp32_intermediates_casted[2],
+                                   fp32_intermediates_casted[3], 0x7632);
+
+  return frag_b;
+}
+
 // Multiply dequantized values by the corresponding quantization scale; used
 // only for grouped quantization.
 template <typename scalar_t>
@@ -275,6 +388,17 @@ __device__ inline void scale(typename ScalarType<scalar_t>::FragB& frag_b,
       ScalarType<scalar_t>::num2num2(reinterpret_cast<scalar_t*>(&frag_s)[i]);
   frag_b[0] = __hmul2(frag_b[0], s);
   frag_b[1] = __hmul2(frag_b[1], s);
+}
+
+template <typename scalar_t>
+__device__ inline void sub_zp(typename ScalarType<scalar_t>::FragB& frag_b,
+                              typename ScalarType<scalar_t>::scalar_t2& frag_zp,
+                              int i) {
+  using scalar_t2 = typename ScalarType<scalar_t>::scalar_t2;
+  scalar_t2 zp =
+      ScalarType<scalar_t>::num2num2(reinterpret_cast<scalar_t*>(&frag_zp)[i]);
+  frag_b[0] = __hsub2(frag_b[0], zp);
+  frag_b[1] = __hsub2(frag_b[1], zp);
 }
 
 // Same as above, but for act_order (each K is multiplied individually)
@@ -404,6 +528,7 @@ template <typename scalar_t,          // compute dtype, half or nv_float16
           const int stages,  // number of stages for the async global->shared
                              // fetch pipeline
           const bool has_act_order,    // whether act_order is enabled
+          const bool has_zp,           // whether zero-points are enabled
           const int group_blocks = -1  // number of consecutive 16x16 blocks
                                        // with a separate quantization scale
           >
@@ -411,14 +536,18 @@ __global__ void Marlin(
     const int4* __restrict__ A,  // fp16 input matrix of shape mxk
     const int4* __restrict__ B,  // 4bit quantized weight matrix of shape kxn
     int4* __restrict__ C,        // fp16 output buffer of shape mxn
+    int4* __restrict__ C_tmp,    // fp32 tmp output buffer (for reduce)
     const int4* __restrict__ scales_ptr,  // fp16 quantization scales of shape
                                           // (k/groupsize)xn
+    const int4* __restrict__ zp_ptr,      // 4bit packed zero-points of shape
+                                          // (k/groupsize)x(n/pack_factor)
     const int* __restrict__ g_idx,        // int32 group indices of shape k
-    int num_groups,  // number of scale groups per output channel
-    int prob_m,      // batch dimension m
-    int prob_n,      // output dimension n
-    int prob_k,      // reduction dimension k
-    int* locks       // extra global storage for barrier synchronization
+    int num_groups,       // number of scale groups per output channel
+    int prob_m,           // batch dimension m
+    int prob_n,           // output dimension n
+    int prob_k,           // reduction dimension k
+    int* locks,           // extra global storage for barrier synchronization
+    bool use_fp32_reduce  // whether to use fp32 global reduce
 ) {
   // Each threadblock processes one "stripe" of the B matrix with (roughly) the
   // same size, which might involve multiple column "slices" (of width 16 *
@@ -437,6 +566,7 @@ __global__ void Marlin(
   using FragB = typename ScalarType<scalar_t>::FragB;
   using FragC = typename ScalarType<scalar_t>::FragC;
   using FragS = typename ScalarType<scalar_t>::FragS;
+  using FragZP = typename ScalarType<scalar_t>::FragZP;
 
   constexpr int pack_factor = 32 / num_bits;
 
@@ -471,6 +601,8 @@ __global__ void Marlin(
   int slice_idx;  // index of threadblock in current slice; numbered bottom to
                   // top
 
+  int par_id = 0;
+
   // We can easily implement parallel problem execution by just remapping
   // indices and advancing global pointers
   if (slice_col_par >= n_tiles) {
@@ -478,6 +610,7 @@ __global__ void Marlin(
     C += (slice_col_par / n_tiles) * 16 * thread_m_blocks * prob_n / 8;
     locks += (slice_col_par / n_tiles) * n_tiles;
     slice_col = slice_col_par % n_tiles;
+    par_id = slice_col_par / n_tiles;
   }
 
   // Compute all information about the current slice which is required for
@@ -508,6 +641,7 @@ __global__ void Marlin(
       C += 16 * thread_m_blocks * prob_n / 8;
       locks += n_tiles;
       slice_col = 0;
+      par_id++;
     }
   };
   init_slice();
@@ -566,6 +700,13 @@ __global__ void Marlin(
   int tb_n_warps = thread_n_blocks / 4;
   int act_s_col_tb_stride = act_s_col_warp_stride * tb_n_warps;
 
+  // Zero-points sizes/strides
+  int zp_gl_stride = (prob_n / pack_factor) / 4;
+  constexpr int zp_sh_stride = ((16 * thread_n_blocks) / pack_factor) / 4;
+  constexpr int zp_tb_groups = s_tb_groups;
+  constexpr int zp_sh_stage = has_zp ? zp_tb_groups * zp_sh_stride : 0;
+  int zp_gl_rd_delta = zp_gl_stride;
+
   // Global A read index of current thread.
   int a_gl_rd = a_gl_stride * (threadIdx.x / a_gl_rd_delta_o) +
                 (threadIdx.x % a_gl_rd_delta_o);
@@ -605,6 +746,19 @@ __global__ void Marlin(
   int s_sh_wr = threadIdx.x;
   bool s_sh_wr_pred = threadIdx.x < s_sh_stride;
 
+  // Zero-points
+  int zp_gl_rd;
+  if constexpr (has_zp) {
+    if constexpr (group_blocks == -1) {
+      zp_gl_rd = zp_sh_stride * slice_col + threadIdx.x;
+    } else {
+      zp_gl_rd = zp_gl_stride * ((thread_k_blocks * slice_row) / group_blocks) +
+                 zp_sh_stride * slice_col + threadIdx.x;
+    }
+  }
+  int zp_sh_wr = threadIdx.x;
+  bool zp_sh_wr_pred = threadIdx.x < zp_sh_stride;
+
   // We use a different scale layout for grouped and column-wise quantization as
   // we scale a `half2` tile in column-major layout in the former and in
   // row-major in the latter case.
@@ -615,6 +769,18 @@ __global__ void Marlin(
   else
     s_sh_rd = 8 * ((threadIdx.x / 32) % (thread_n_blocks / 4)) +
               (threadIdx.x % 32) % 4;
+
+  // Zero-points have the same read layout as the scales
+  // (without column-wise case)
+  constexpr int num_col_threads = 8;
+  constexpr int num_row_threads = 4;
+  constexpr int num_ints_per_thread = 8 / pack_factor;
+  int zp_sh_rd;
+  if constexpr (has_zp) {
+    zp_sh_rd = num_ints_per_thread * num_col_threads *
+                   ((threadIdx.x / 32) % (thread_n_blocks / 4)) +
+               num_ints_per_thread * ((threadIdx.x % 32) / num_row_threads);
+  }
 
   // Precompute which thread should not read memory in which iterations; this is
   // needed if there are more threads than required for a certain tilesize or
@@ -664,14 +830,17 @@ __global__ void Marlin(
   int4* sh_a = sh;
   int4* sh_b = sh_a + (stages * a_sh_stage);
   int4* sh_g_idx = sh_b + (stages * b_sh_stage);
-  int4* sh_s = sh_g_idx + (stages * g_idx_stage);
+  int4* sh_zp = sh_g_idx + (stages * g_idx_stage);
+  int4* sh_s = sh_zp + (stages * zp_sh_stage);
 
   // Register storage for double buffer of shared memory reads.
   FragA frag_a[2][thread_m_blocks];
   I4 frag_b_quant[2][b_thread_vecs];
   FragC frag_c[thread_m_blocks][4][2];
-  FragS frag_s[2][4];         // No act-order
-  FragS act_frag_s[2][4][4];  // For act-order
+  FragS frag_s[2][4];                    // No act-order
+  FragS act_frag_s[2][4][4];             // For act-order
+  int frag_qzp[2][num_ints_per_thread];  // Zero-points
+  FragZP frag_zp;                        // Zero-points in fp16
 
   // Zero accumulators.
   auto zero_accums = [&]() {
@@ -777,11 +946,39 @@ __global__ void Marlin(
             }
           }
         }
+
+        if constexpr (has_zp && group_blocks != -1) {
+          int4* sh_zp_stage = sh_zp + zp_sh_stage * pipe;
+
+          if constexpr (group_blocks >= thread_k_blocks) {
+            // Only fetch zero-points if this tile starts a new group
+            if (pipe % (group_blocks / thread_k_blocks) == 0) {
+              if (zp_sh_wr_pred) {
+                cp_async4(&sh_zp_stage[zp_sh_wr], &zp_ptr[zp_gl_rd]);
+              }
+              zp_gl_rd += zp_gl_rd_delta;
+            }
+          } else {
+            for (int i = 0; i < zp_tb_groups; i++) {
+              if (zp_sh_wr_pred) {
+                cp_async4(&sh_zp_stage[i * zp_sh_stride + zp_sh_wr],
+                          &zp_ptr[zp_gl_rd]);
+              }
+              zp_gl_rd += zp_gl_rd_delta;
+            }
+          }
+        }
       }
     }
     // Insert a fence even when we are winding down the pipeline to ensure that
     // waiting is also correct at this point.
     cp_async_fence();
+  };
+
+  auto fetch_zp_to_shared = [&]() {
+    if (zp_sh_wr_pred) {
+      cp_async4(&sh_zp[zp_sh_wr], &zp_ptr[zp_gl_rd]);
+    }
   };
 
   // Wait until the next thread tile has been loaded to shared memory.
@@ -932,8 +1129,82 @@ __global__ void Marlin(
     }
   };
 
+  auto fetch_zp_to_registers = [&](int k, int full_pipe) {
+    // This code does not handle group_blocks == 0,
+    // which signifies act_order.
+    // has_zp implies AWQ, which doesn't have act_order,
+    static_assert(!has_zp || group_blocks != 0);
+
+    if constexpr (has_zp) {
+      int pipe = full_pipe % stages;
+
+      if constexpr (group_blocks == -1) {
+        for (int i = 0; i < num_ints_per_thread; i++) {
+          frag_qzp[k % 2][i] = (reinterpret_cast<int*>(sh_zp))[zp_sh_rd + i];
+        }
+
+      } else if constexpr (group_blocks >= thread_k_blocks) {
+        int4* sh_zp_stage =
+            sh_zp + zp_sh_stage * ((group_blocks / thread_k_blocks) *
+                                   (pipe / (group_blocks / thread_k_blocks)));
+        for (int i = 0; i < num_ints_per_thread; i++) {
+          frag_qzp[k % 2][i] =
+              (reinterpret_cast<int*>(sh_zp_stage))[zp_sh_rd + i];
+        }
+      } else {
+        int warp_id = threadIdx.x / 32;
+        int n_warps = thread_n_blocks / 4;
+
+        int warp_row = warp_id / n_warps;
+
+        int cur_k = warp_row * 16;
+        cur_k += k_iter_size * (k % b_sh_wr_iters);
+
+        int k_blocks = cur_k / 16;
+        int cur_group_id = 0;
+
+        // Suppress bogus and persistent divide-by-zero warning
+  #pragma nv_diagnostic push
+  #pragma nv_diag_suppress divide_by_zero
+        cur_group_id = k_blocks / group_blocks;
+  #pragma nv_diagnostic pop
+
+        int4* sh_zp_stage = sh_zp + zp_sh_stage * pipe;
+
+        sh_zp_stage += cur_group_id * zp_sh_stride;
+
+        for (int i = 0; i < num_ints_per_thread; i++) {
+          frag_qzp[k % 2][i] =
+              (reinterpret_cast<int*>(sh_zp_stage))[zp_sh_rd + i];
+        }
+      }
+    }
+  };
+
   // Execute the actual tensor core matmul of a sub-tile.
   auto matmul = [&](int k) {
+    if constexpr (has_zp) {
+      FragB frag_zp_0;
+      FragB frag_zp_1;
+      if constexpr (num_bits == 4) {
+        int zp_quant = frag_qzp[k % 2][0];
+        int zp_quant_shift = zp_quant >> 8;
+        frag_zp_0 = dequant_4bit_zp<scalar_t>(zp_quant);
+        frag_zp_1 = dequant_4bit_zp<scalar_t>(zp_quant_shift);
+
+      } else {
+        int zp_quant_0 = frag_qzp[k % 2][0];
+        int zp_quant_1 = frag_qzp[k % 2][1];
+        frag_zp_0 = dequant_8bit_zp<scalar_t>(zp_quant_0);
+        frag_zp_1 = dequant_8bit_zp<scalar_t>(zp_quant_1);
+      }
+
+      frag_zp[0] = frag_zp_0[0];
+      frag_zp[1] = frag_zp_0[1];
+      frag_zp[2] = frag_zp_1[0];
+      frag_zp[3] = frag_zp_1[1];
+    }
+
   // We have the m dimension as the inner loop in order to encourage overlapping
   // dequantization and matmul operations.
   #pragma unroll
@@ -944,16 +1215,32 @@ __global__ void Marlin(
         int b_quant = frag_b_quant[k % 2][0][j];
         int b_quant_shift = b_quant >> 8;
 
-        frag_b0 = dequant_4bit<scalar_t>(b_quant);
-        frag_b1 = dequant_4bit<scalar_t>(b_quant_shift);
+        if constexpr (has_zp) {
+          frag_b0 = dequant_4bit_zp<scalar_t>(b_quant);
+          frag_b1 = dequant_4bit_zp<scalar_t>(b_quant_shift);
+
+        } else {
+          frag_b0 = dequant_4bit<scalar_t>(b_quant);
+          frag_b1 = dequant_4bit<scalar_t>(b_quant_shift);
+        }
 
       } else {
         int* frag_b_quant_ptr = reinterpret_cast<int*>(frag_b_quant[k % 2]);
         int b_quant_0 = frag_b_quant_ptr[j * 2 + 0];
         int b_quant_1 = frag_b_quant_ptr[j * 2 + 1];
 
-        frag_b0 = dequant_8bit<scalar_t>(b_quant_0);
-        frag_b1 = dequant_8bit<scalar_t>(b_quant_1);
+        if constexpr (has_zp) {
+          frag_b0 = dequant_8bit_zp<scalar_t>(b_quant_0);
+          frag_b1 = dequant_8bit_zp<scalar_t>(b_quant_1);
+        } else {
+          frag_b0 = dequant_8bit<scalar_t>(b_quant_0);
+          frag_b1 = dequant_8bit<scalar_t>(b_quant_1);
+        }
+      }
+
+      // Apply zero-point to frag_b0
+      if constexpr (has_zp) {
+        sub_zp<scalar_t>(frag_b0, frag_zp[j], 0);
       }
 
       // Apply scale to frag_b0
@@ -965,6 +1252,11 @@ __global__ void Marlin(
         if constexpr (group_blocks != -1) {
           scale<scalar_t>(frag_b0, frag_s[k % 2][j], 0);
         }
+      }
+
+      // Apply zero-point to frag_b1
+      if constexpr (has_zp) {
+        sub_zp<scalar_t>(frag_b1, frag_zp[j], 1);
       }
 
       // Apply scale to frag_b1
@@ -1048,7 +1340,7 @@ __global__ void Marlin(
   // finally have to globally reduce over the results. As the striped
   // partitioning minimizes the number of such reductions and our outputs are
   // usually rather small, we perform this reduction serially in L2 cache.
-  auto global_reduce = [&](bool first = false, bool last = false) {
+  auto global_reduce_fp16 = [&](bool first = false, bool last = false) {
     // We are very careful here to reduce directly in the output buffer to
     // maximize L2 cache utilization in this step. To do this, we write out
     // results in FP16 (but still reduce with FP32 compute).
@@ -1105,6 +1397,53 @@ __global__ void Marlin(
                 c;
           }
         }
+      }
+    }
+  };
+
+  // Globally reduce over threadblocks that compute the same column block.
+  // We use a tmp C buffer to reduce in full fp32 precision.
+  auto global_reduce_fp32 = [&](bool first = false, bool last = false) {
+    constexpr int tb_m = thread_m_blocks * 16;
+    constexpr int tb_n = thread_n_blocks * 16;
+
+    constexpr int c_size = tb_m * tb_n * sizeof(float) / 16;
+
+    constexpr int active_threads = 32 * thread_n_blocks / 4;
+    bool is_th_active = threadIdx.x < active_threads;
+
+    int par_offset = c_size * n_tiles * par_id;
+    int slice_offset = c_size * slice_col;
+
+    constexpr int num_floats = thread_m_blocks * 4 * 2 * 4;
+    constexpr int th_size = num_floats * sizeof(float) / 16;
+
+    int c_cur_offset = par_offset + slice_offset;
+
+    if (!is_th_active) {
+      return;
+    }
+
+    if (!first) {
+      float* frag_c_ptr = reinterpret_cast<float*>(&frag_c);
+  #pragma unroll
+      for (int k = 0; k < th_size; k++) {
+        sh[threadIdx.x] =
+            C_tmp[c_cur_offset + active_threads * k + threadIdx.x];
+
+        float* sh_c_ptr = reinterpret_cast<float*>(&sh[threadIdx.x]);
+  #pragma unroll
+        for (int f = 0; f < 4; f++) {
+          frag_c_ptr[k * 4 + f] += sh_c_ptr[f];
+        }
+      }
+    }
+
+    if (!last) {
+      int4* frag_c_ptr = reinterpret_cast<int4*>(&frag_c);
+  #pragma unroll
+      for (int k = 0; k < th_size; k++) {
+        C_tmp[c_cur_offset + active_threads * k + threadIdx.x] = frag_c_ptr[k];
       }
     }
   };
@@ -1189,6 +1528,12 @@ __global__ void Marlin(
         }
         fetch_scales_to_shared(true, g_idx[slice_k_start], g_idx[last_g_idx]);
       }
+
+      if constexpr (has_zp && group_blocks == -1) {
+        if (i == 0) {
+          fetch_zp_to_shared();
+        }
+      }
       fetch_to_shared(i, i, i < slice_iters);
     }
 
@@ -1197,6 +1542,7 @@ __global__ void Marlin(
     init_same_group(0);
     fetch_to_registers(0, 0);
     fetch_scales_to_registers(0, 0);
+    fetch_zp_to_registers(0, 0);
     a_gl_rd += a_gl_rd_delta_o * (stages - 1);
     slice_k_start_shared_fetch += tb_k * (stages - 1);
   };
@@ -1217,6 +1563,7 @@ __global__ void Marlin(
       for (int k = 0; k < b_sh_wr_iters; k++) {
         fetch_to_registers(k + 1, pipe % stages);
         fetch_scales_to_registers(k + 1, pipe);
+        fetch_zp_to_registers(k + 1, pipe);
         if (k == b_sh_wr_iters - 2) {
           fetch_to_shared((pipe + stages - 1) % stages, pipe,
                           slice_iters >= stages);
@@ -1325,7 +1672,11 @@ __global__ void Marlin(
       if (slice_count > 1) {  // only globally reduce if there is more than one
                               // block in a slice
         barrier_acquire(&locks[slice_col], slice_idx);
-        global_reduce(slice_idx == 0, last);
+        if (use_fp32_reduce) {
+          global_reduce_fp32(slice_idx == 0, last);
+        } else {
+          global_reduce_fp16(slice_idx == 0, last);
+        }
         barrier_release(&locks[slice_col], last);
       }
       if (last)  // only the last block in a slice actually writes the result
@@ -1354,6 +1705,7 @@ __global__ void Marlin(
 
         } else {
           s_gl_rd = s_sh_stride * slice_col + threadIdx.x;
+          zp_gl_rd = zp_sh_stride * slice_col + threadIdx.x;
         }
 
         start_pipes();
@@ -1363,22 +1715,24 @@ __global__ void Marlin(
 }
 
   #define __CALL_IF(NUM_BITS, THREAD_M_BLOCKS, THREAD_N_BLOCKS,                \
-                    THREAD_K_BLOCKS, HAS_ACT_ORDER, GROUP_BLOCKS, NUM_THREADS) \
+                    THREAD_K_BLOCKS, HAS_ACT_ORDER, HAS_ZP, GROUP_BLOCKS,      \
+                    NUM_THREADS)                                               \
     else if (num_bits == NUM_BITS && thread_m_blocks == THREAD_M_BLOCKS &&     \
              thread_n_blocks == THREAD_N_BLOCKS &&                             \
              thread_k_blocks == THREAD_K_BLOCKS &&                             \
-             has_act_order == HAS_ACT_ORDER && group_blocks == GROUP_BLOCKS && \
-             num_threads == NUM_THREADS) {                                     \
+             has_act_order == HAS_ACT_ORDER && has_zp == HAS_ZP &&             \
+             group_blocks == GROUP_BLOCKS && num_threads == NUM_THREADS) {     \
       cudaFuncSetAttribute(                                                    \
           Marlin<scalar_t, NUM_BITS, NUM_THREADS, THREAD_M_BLOCKS,             \
                  THREAD_N_BLOCKS, THREAD_K_BLOCKS, pipe_stages, HAS_ACT_ORDER, \
-                 GROUP_BLOCKS>,                                                \
+                 HAS_ZP, GROUP_BLOCKS>,                                        \
           cudaFuncAttributeMaxDynamicSharedMemorySize, max_shared_mem);        \
       Marlin<scalar_t, NUM_BITS, NUM_THREADS, THREAD_M_BLOCKS,                 \
              THREAD_N_BLOCKS, THREAD_K_BLOCKS, pipe_stages, HAS_ACT_ORDER,     \
-             GROUP_BLOCKS><<<blocks, NUM_THREADS, max_shared_mem, stream>>>(   \
-          A_ptr, B_ptr, C_ptr, s_ptr, g_idx_ptr, num_groups, prob_m, prob_n,   \
-          prob_k, locks);                                                      \
+             HAS_ZP, GROUP_BLOCKS>                                             \
+          <<<blocks, NUM_THREADS, max_shared_mem, stream>>>(                   \
+              A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, zp_ptr, g_idx_ptr,        \
+              num_groups, prob_m, prob_n, prob_k, locks, use_fp32_reduce);     \
     }
 
 typedef struct {
@@ -1517,6 +1871,27 @@ bool is_valid_config(thread_config_t const& th_config, int max_m_blocks,
   return true;
 }
 
+int determine_reduce_max_m(int prob_m, int max_par) {
+  constexpr int tile_m_size = 16;
+
+  if (prob_m <= tile_m_size) {
+    return tile_m_size;
+
+  } else if (prob_m <= tile_m_size * 2) {
+    return tile_m_size * 2;
+
+  } else if (prob_m <= tile_m_size * 3) {
+    return tile_m_size * 3;
+
+  } else if (prob_m <= tile_m_size * 4) {
+    return tile_m_size * 4;
+
+  } else {
+    int cur_par = min(div_ceil(prob_m, tile_m_size * 4), max_par);
+    return tile_m_size * 4 * cur_par;
+  }
+}
+
 exec_config_t determine_thread_config(int prob_m, int prob_n, int prob_k,
                                       int num_bits, int group_size,
                                       bool has_act_order, bool is_k_full,
@@ -1548,44 +1923,77 @@ exec_config_t determine_thread_config(int prob_m, int prob_n, int prob_k,
   return exec_config_t{0, {-1, -1, -1}};
 }
 
-  #define CALL_IF(NUM_BITS, N_BLOCKS, K_BLOCKS, NUM_THREADS)           \
-    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, true, 0, NUM_THREADS)   \
-    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, true, 0, NUM_THREADS)   \
-    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, true, 0, NUM_THREADS)   \
-    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, true, 0, NUM_THREADS)   \
-                                                                       \
-    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, -1, NUM_THREADS) \
-    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, 2, NUM_THREADS)  \
-    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, 4, NUM_THREADS)  \
-    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, 8, NUM_THREADS)  \
-                                                                       \
-    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, -1, NUM_THREADS) \
-    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, 2, NUM_THREADS)  \
-    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, 4, NUM_THREADS)  \
-    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, 8, NUM_THREADS)  \
-                                                                       \
-    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, -1, NUM_THREADS) \
-    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, 2, NUM_THREADS)  \
-    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, 4, NUM_THREADS)  \
-    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, 8, NUM_THREADS)  \
-                                                                       \
-    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, -1, NUM_THREADS) \
-    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, 2, NUM_THREADS)  \
-    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, 4, NUM_THREADS)  \
-    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, 8, NUM_THREADS)
+  #define GPTQ_CALL_IF(NUM_BITS, N_BLOCKS, K_BLOCKS, NUM_THREADS)             \
+    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS)   \
+    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS)   \
+    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS)   \
+    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS)   \
+                                                                              \
+    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, false, -1, NUM_THREADS) \
+    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, false, 2, NUM_THREADS)  \
+    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, false, 4, NUM_THREADS)  \
+    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS)  \
+                                                                              \
+    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, false, -1, NUM_THREADS) \
+    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, false, 2, NUM_THREADS)  \
+    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, false, 4, NUM_THREADS)  \
+    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS)  \
+                                                                              \
+    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, false, -1, NUM_THREADS) \
+    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, false, 2, NUM_THREADS)  \
+    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, false, 4, NUM_THREADS)  \
+    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS)  \
+                                                                              \
+    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, false, -1, NUM_THREADS) \
+    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, false, 2, NUM_THREADS)  \
+    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, false, 4, NUM_THREADS)  \
+    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, false, 8, NUM_THREADS)
+
+  #define AWQ_CALL_IF(NUM_BITS, N_BLOCKS, K_BLOCKS, NUM_THREADS)             \
+    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, true, -1, NUM_THREADS) \
+    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, true, 2, NUM_THREADS)  \
+    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, true, 4, NUM_THREADS)  \
+    __CALL_IF(NUM_BITS, 1, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS)  \
+                                                                             \
+    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, true, -1, NUM_THREADS) \
+    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, true, 2, NUM_THREADS)  \
+    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, true, 4, NUM_THREADS)  \
+    __CALL_IF(NUM_BITS, 2, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS)  \
+                                                                             \
+    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, true, -1, NUM_THREADS) \
+    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, true, 2, NUM_THREADS)  \
+    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, true, 4, NUM_THREADS)  \
+    __CALL_IF(NUM_BITS, 3, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS)  \
+                                                                             \
+    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, true, -1, NUM_THREADS) \
+    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, true, 2, NUM_THREADS)  \
+    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, true, 4, NUM_THREADS)  \
+    __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS)
 
 template <typename scalar_t>
-void marlin_mm_f16i4(const void* A, const void* B, void* C, void* s,
-                     void* g_idx, void* perm, void* a_tmp, int prob_m,
-                     int prob_n, int prob_k, void* workspace, int num_bits,
-                     bool has_act_order, bool is_k_full, int num_groups,
-                     int group_size, int dev, cudaStream_t stream, int thread_k,
-                     int thread_n, int sms, int max_par) {
-  TORCH_CHECK(num_bits == 4 || num_bits == 8,
-              "num_bits must be 4 or 8. Got = ", num_bits);
+void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
+               void* zp, void* g_idx, void* perm, void* a_tmp, int prob_m,
+               int prob_n, int prob_k, void* workspace,
+               vllm::ScalarType const& q_type, bool has_act_order,
+               bool is_k_full, bool has_zp, int num_groups, int group_size,
+               int dev, cudaStream_t stream, int thread_k, int thread_n,
+               int sms, int max_par, bool use_fp32_reduce) {
+  if (has_zp) {
+    TORCH_CHECK(
+        q_type == vllm::kU4 || q_type == vllm::kU8,
+        "q_type must be u4 or u8 when has_zp = True. Got = ", q_type.str());
+  } else {
+    TORCH_CHECK(
+        q_type == vllm::kU4B8 || q_type == vllm::kU8B128,
+        "q_type must be uint4b8 or uint8b128 when has_zp = False. Got = ",
+        q_type.str());
+  }
+
   TORCH_CHECK(prob_m > 0 && prob_n > 0 && prob_k > 0, "Invalid MNK = [", prob_m,
               ", ", prob_n, ", ", prob_k, "]");
 
+  // TODO: remove alias when we start supporting other 8bit types
+  int num_bits = q_type.size_bits();
   int tot_m = prob_m;
   int tot_m_blocks = div_ceil(tot_m, 16);
   int pad = 16 * tot_m_blocks - tot_m;
@@ -1664,7 +2072,9 @@ void marlin_mm_f16i4(const void* A, const void* B, void* C, void* s,
   const int4* A_ptr = (const int4*)A;
   const int4* B_ptr = (const int4*)B;
   int4* C_ptr = (int4*)C;
+  int4* C_tmp_ptr = (int4*)C_tmp;
   const int4* s_ptr = (const int4*)s;
+  const int4* zp_ptr = (const int4*)zp;
   const int* g_idx_ptr = (const int*)g_idx;
   const int* perm_ptr = (const int*)perm;
   int4* a_tmp_ptr = (int4*)a_tmp;
@@ -1701,28 +2111,33 @@ void marlin_mm_f16i4(const void* A, const void* B, void* C, void* s,
       thread_m_blocks = exec_cfg.max_m_blocks;
     }
 
-    // Define kernel configurations
     if (false) {
     }
-    CALL_IF(4, 32, 2, 256)
-    CALL_IF(4, 16, 4, 256)
-    CALL_IF(4, 8, 8, 256)
-    CALL_IF(4, 8, 4, 128)
-    CALL_IF(4, 4, 8, 128)
-    CALL_IF(8, 32, 2, 256)
-    CALL_IF(8, 16, 4, 256)
-    CALL_IF(8, 8, 8, 256)
-    CALL_IF(8, 8, 4, 128)
-    CALL_IF(8, 4, 8, 128)
+    GPTQ_CALL_IF(4, 16, 4, 256)
+    GPTQ_CALL_IF(4, 8, 8, 256)
+    GPTQ_CALL_IF(4, 8, 4, 128)
+    GPTQ_CALL_IF(4, 4, 8, 128)
+    GPTQ_CALL_IF(8, 16, 4, 256)
+    GPTQ_CALL_IF(8, 8, 8, 256)
+    GPTQ_CALL_IF(8, 8, 4, 128)
+    GPTQ_CALL_IF(8, 4, 8, 128)
+
+    AWQ_CALL_IF(4, 16, 4, 256)
+    AWQ_CALL_IF(4, 8, 8, 256)
+    AWQ_CALL_IF(4, 8, 4, 128)
+    AWQ_CALL_IF(4, 4, 8, 128)
+    AWQ_CALL_IF(8, 16, 4, 256)
+    AWQ_CALL_IF(8, 8, 8, 256)
+    AWQ_CALL_IF(8, 8, 4, 128)
+    AWQ_CALL_IF(8, 4, 8, 128)
     else {
-      TORCH_CHECK(false, "Unsupported shapes: MNK = [" + str(prob_m) + ", " +
-                             str(prob_n) + ", " + str(prob_k) + "]" +
-                             ", has_act_order = " + str(has_act_order) +
-                             ", num_groups = " + str(num_groups) +
-                             ", group_size = " + str(group_size) +
-                             ", thread_m_blocks = " + str(thread_m_blocks) +
-                             ", thread_n_blocks = " + str(thread_n_blocks) +
-                             ", thread_k_blocks = " + str(thread_k_blocks));
+      TORCH_CHECK(false, "Unsupported shapes: MNK = [", prob_m, ", ", prob_n,
+                  ", ", prob_k, "]", ", has_act_order = ", has_act_order,
+                  ", num_groups = ", num_groups, ", group_size = ", group_size,
+                  ", thread_m_blocks = ", thread_m_blocks,
+                  ", thread_n_blocks = ", thread_n_blocks,
+                  ", thread_k_blocks = ", thread_k_blocks,
+                  ", num_bits = ", num_bits);
     }
 
     A_ptr += 16 * thread_m_blocks * (prob_k / 8) * par;
@@ -1730,17 +2145,28 @@ void marlin_mm_f16i4(const void* A, const void* B, void* C, void* s,
   }
 }
 
-}  // namespace gptq_marlin
+}  // namespace marlin
 
 torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
-                               torch::Tensor& b_scales, torch::Tensor& g_idx,
-                               torch::Tensor& perm, torch::Tensor& workspace,
-                               int64_t num_bits, int64_t size_m, int64_t size_n,
-                               int64_t size_k, bool is_k_full) {
-  // Verify num_bits
-  TORCH_CHECK(num_bits == 4 || num_bits == 8,
-              "num_bits must be 4 or 8. Got = ", num_bits);
-  int pack_factor = 32 / num_bits;
+                               torch::Tensor& b_scales, torch::Tensor& b_zeros,
+                               torch::Tensor& g_idx, torch::Tensor& perm,
+                               torch::Tensor& workspace,
+                               vllm::ScalarTypeTorchPtr const& b_q_type,
+                               int64_t size_m, int64_t size_n, int64_t size_k,
+                               bool is_k_full, bool has_zp,
+                               bool use_fp32_reduce) {
+  if (has_zp) {
+    TORCH_CHECK(*b_q_type == vllm::kU4 || *b_q_type == vllm::kU8,
+                "b_q_type must be u4 or u8 when has_zp = True. Got = ",
+                b_q_type->str());
+  } else {
+    TORCH_CHECK(
+        *b_q_type == vllm::kU4B8 || *b_q_type == vllm::kU8B128,
+        "b_q_type must be uint4b8 or uint8b128 when has_zp = False. Got = ",
+        b_q_type->str());
+  }
+
+  int pack_factor = 32 / b_q_type->size_bits();
 
   // Verify A
   TORCH_CHECK(a.size(0) == size_m, "Shape mismatch: a.size(0) = ", a.size(0),
@@ -1749,16 +2175,15 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
               ", size_k = ", size_k);
 
   // Verify B
-  TORCH_CHECK(size_k % gptq_marlin::tile_size == 0, "size_k = ", size_k,
-              " is not divisible by tile_size = ", gptq_marlin::tile_size);
-  TORCH_CHECK((size_k / gptq_marlin::tile_size) == b_q_weight.size(0),
+  TORCH_CHECK(size_k % marlin::tile_size == 0, "size_k = ", size_k,
+              " is not divisible by tile_size = ", marlin::tile_size);
+  TORCH_CHECK((size_k / marlin::tile_size) == b_q_weight.size(0),
               "Shape mismatch: b_q_weight.size(0) = ", b_q_weight.size(0),
-              ", size_k = ", size_k, ", tile_size = ", gptq_marlin::tile_size);
-  TORCH_CHECK(b_q_weight.size(1) % gptq_marlin::tile_size == 0,
+              ", size_k = ", size_k, ", tile_size = ", marlin::tile_size);
+  TORCH_CHECK(b_q_weight.size(1) % marlin::tile_size == 0,
               "b_q_weight.size(1) = ", b_q_weight.size(1),
-              " is not divisible by tile_size = ", gptq_marlin::tile_size);
-  int actual_size_n =
-      (b_q_weight.size(1) / gptq_marlin::tile_size) * pack_factor;
+              " is not divisible by tile_size = ", marlin::tile_size);
+  int actual_size_n = (b_q_weight.size(1) / marlin::tile_size) * pack_factor;
   TORCH_CHECK(size_n == actual_size_n, "size_n = ", size_n,
               ", actual_size_n = ", actual_size_n);
 
@@ -1772,6 +2197,9 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
   TORCH_CHECK(b_scales.device().is_cuda(), "b_scales is not on GPU");
   TORCH_CHECK(b_scales.is_contiguous(), "b_scales is not contiguous");
 
+  TORCH_CHECK(b_zeros.device().is_cuda(), "b_zeros is not on GPU");
+  TORCH_CHECK(b_zeros.is_contiguous(), "b_zeros is not contiguous");
+
   TORCH_CHECK(g_idx.device().is_cuda(), "g_idx is not on GPU");
   TORCH_CHECK(g_idx.is_contiguous(), "g_idx is not contiguous");
 
@@ -1783,6 +2211,17 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
   auto options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
   torch::Tensor c = torch::empty({size_m, size_n}, options);
   torch::Tensor a_tmp = torch::empty({size_m, size_k}, options);
+
+  // Alloc C tmp buffer that is going to be used for the global reduce
+  int reduce_max_m = marlin::determine_reduce_max_m(size_m, marlin::max_par);
+  int reduce_n = size_n;
+  auto options_fp32 =
+      torch::TensorOptions().dtype(at::kFloat).device(a.device());
+  if (!use_fp32_reduce) {
+    reduce_max_m = 0;
+    reduce_n = 0;
+  }
+  torch::Tensor c_tmp = torch::empty({reduce_max_m, reduce_n}, options_fp32);
 
   // thread_k: `k` size of a thread_tile in `weights` (can usually be left as
   // auto -1)
@@ -1805,8 +2244,8 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
   int group_size = -1;
   bool has_act_order = g_idx.size(0) != 0;
 
-  int b_rank = b_scales.sizes().size();
-  TORCH_CHECK(b_rank == 2, "b_scales rank = ", b_rank, " is not 2");
+  int rank = b_scales.sizes().size();
+  TORCH_CHECK(rank == 2, "b_scales rank = ", rank, " is not 2");
   TORCH_CHECK(b_scales.size(1) == size_n, "b_scales dim 1 = ", b_scales.size(1),
               " is not size_n = ", size_n);
   num_groups = b_scales.size(0);
@@ -1832,34 +2271,45 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
     }
   }
 
+  // Verify b_zeros
+  if (has_zp) {
+    int rank = b_zeros.sizes().size();
+    TORCH_CHECK(rank == 2, "b_zeros rank = ", rank, " is not 2");
+    TORCH_CHECK(b_zeros.size(0) == num_groups,
+                "b_zeros dim 0 = ", b_zeros.size(0),
+                " is not num_groups = ", num_groups);
+    TORCH_CHECK(b_zeros.size(1) == size_n / pack_factor,
+                "b_zeros dim 1 = ", b_scales.size(1),
+                " is not size_n / pack_factor = ", size_n / pack_factor);
+  }
+
   // Verify workspace size
-  TORCH_CHECK(
-      size_n % gptq_marlin::min_thread_n == 0, "size_n = ", size_n,
-      ", is not divisible by min_thread_n = ", gptq_marlin::min_thread_n);
-  int min_workspace_size =
-      (size_n / gptq_marlin::min_thread_n) * gptq_marlin::max_par;
+  TORCH_CHECK(size_n % marlin::min_thread_n == 0, "size_n = ", size_n,
+              ", is not divisible by min_thread_n = ", marlin::min_thread_n);
+  int min_workspace_size = (size_n / marlin::min_thread_n) * marlin::max_par;
   TORCH_CHECK(workspace.numel() >= min_workspace_size,
               "workspace.numel = ", workspace.numel(),
               " is below min_workspace_size = ", min_workspace_size);
 
   int dev = a.get_device();
   if (a.scalar_type() == at::ScalarType::Half) {
-    gptq_marlin::marlin_mm_f16i4<half>(
+    marlin::marlin_mm<half>(
         a.data_ptr<at::Half>(), b_q_weight.data_ptr(), c.data_ptr<at::Half>(),
-        b_scales.data_ptr<at::Half>(), g_idx.data_ptr(), perm.data_ptr(),
+        c_tmp.data_ptr<float>(), b_scales.data_ptr<at::Half>(),
+        b_zeros.data_ptr(), g_idx.data_ptr(), perm.data_ptr(),
         a_tmp.data_ptr<at::Half>(), size_m, size_n, size_k,
-        workspace.data_ptr(), num_bits, has_act_order, is_k_full, num_groups,
-        group_size, dev, at::cuda::getCurrentCUDAStream(dev), thread_k,
-        thread_n, sms, gptq_marlin::max_par);
+        workspace.data_ptr(), *b_q_type, has_act_order, is_k_full, has_zp,
+        num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
+        thread_k, thread_n, sms, marlin::max_par, use_fp32_reduce);
   } else if (a.scalar_type() == at::ScalarType::BFloat16) {
-    gptq_marlin::marlin_mm_f16i4<nv_bfloat16>(
+    marlin::marlin_mm<nv_bfloat16>(
         a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(),
-        c.data_ptr<at::BFloat16>(), b_scales.data_ptr<at::BFloat16>(),
-        g_idx.data_ptr(), perm.data_ptr(), a_tmp.data_ptr<at::BFloat16>(),
-        size_m, size_n, size_k, workspace.data_ptr(), num_bits, has_act_order,
-        is_k_full, num_groups, group_size, dev,
-        at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms,
-        gptq_marlin::max_par);
+        c.data_ptr<at::BFloat16>(), c_tmp.data_ptr<float>(),
+        b_scales.data_ptr<at::BFloat16>(), b_zeros.data_ptr(), g_idx.data_ptr(),
+        perm.data_ptr(), a_tmp.data_ptr<at::BFloat16>(), size_m, size_n, size_k,
+        workspace.data_ptr(), *b_q_type, has_act_order, is_k_full, has_zp,
+        num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
+        thread_k, thread_n, sms, marlin::max_par, use_fp32_reduce);
   } else {
     TORCH_CHECK(false, "gpt_marlin_gemm only supports bfloat16 and float16");
   }

@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from vllm import SamplingParams
+from vllm.config import ParallelConfig
 from vllm.engine.async_llm_engine import AsyncEngineArgs, AsyncLLMEngine
 
 from ..utils import wait_for_gpu_memory_to_clear
@@ -23,13 +24,19 @@ class MockEngine:
         self.add_request_calls = 0
         self.abort_request_calls = 0
         self.request_id = None
+        # Ugly, remove dependency when possible
+        self.parallel_config = ParallelConfig(1, 1, False)
 
-    async def step_async(self):
+    async def step_async(self, virtual_engine):
+        # PP size is 1, ignore virtual engine
         self.step_calls += 1
         return [RequestOutput(
             request_id=self.request_id)] if self.request_id else []
 
     async def process_model_inputs_async(self, *args, **kwargs):
+        pass
+
+    async def stop_remote_worker_execution_loop_async(self):
         pass
 
     def generate(self, request_id):
@@ -41,6 +48,7 @@ class MockEngine:
     def add_request(self, **kwargs):
         del kwargs  # Unused
         self.add_request_calls += 1
+        print(f'Request calls: {self.add_request_calls}')
 
     async def add_request_async(self, **kwargs):
         self.add_request_calls += 1
@@ -51,6 +59,9 @@ class MockEngine:
         self.abort_request_calls += 1
 
     def has_unfinished_requests(self):
+        return self.request_id is not None
+
+    def has_unfinished_requests_for_virtual_engine(self, virtual_engine):
         return self.request_id is not None
 
 
@@ -74,6 +85,7 @@ async def test_new_requests_event():
 
     await engine.add_request("2", "", None)
     engine.engine.generate("2")
+    await asyncio.sleep(0)
     await asyncio.sleep(0)
     await asyncio.sleep(0)
     assert engine.engine.add_request_calls == 2

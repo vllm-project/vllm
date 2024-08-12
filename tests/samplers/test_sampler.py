@@ -1,7 +1,7 @@
 import itertools
 import random
 from typing import Dict, List, Optional, Tuple
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -510,13 +510,16 @@ def test_sampler_mixed(seed: int, device: str):
             ))
         seq_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
 
+    generators: Dict[str, torch.Generator] = {}
+
     def test_sampling():
         sampling_metadata = SamplingMetadata.prepare(
             seq_group_metadata_list,
             seq_lens,
             query_lens=seq_lens,
             device=device,
-            pin_memory=is_pin_memory_available())
+            pin_memory=is_pin_memory_available(),
+            generators=generators)
         sampler_output = sampler(logits=fake_logits,
                                  sampling_metadata=sampling_metadata)
 
@@ -700,3 +703,28 @@ def test_sampler_repetition_penalty_mixed(device: str):
 
     assert tokens1[0] == tokens2[1]
     assert tokens1[1] == tokens2[0]
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_sampler_include_gpu_probs_tensor(device: str):
+    set_random_seed(42)
+    torch.set_default_device(device)
+    batch_size = random.randint(1, 256)
+    _, fake_logits, sampler = _prepare_test(batch_size)
+    sampler.include_gpu_probs_tensor = True
+    sampler.should_modify_greedy_probs_inplace = False
+
+    sampling_params = SamplingParams(temperature=0)
+
+    mock_inplace = Mock()
+    with patch(
+            "vllm.model_executor.layers.sampler._modify_greedy_probs_inplace",
+            mock_inplace):
+
+        sampler_output = _do_sample(batch_size, fake_logits, sampler,
+                                    sampling_params, device)
+        mock_inplace.assert_not_called()
+
+    assert sampler_output.sampled_token_probs is not None
+    assert sampler_output.logprobs is not None
+    assert sampler_output.sampled_token_ids is not None
