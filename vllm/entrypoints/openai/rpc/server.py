@@ -20,7 +20,7 @@ logger = init_logger(__name__)
 class AsyncEngineRPCServer:
 
     def __init__(self, async_engine_args: AsyncEngineArgs,
-                 usage_context: UsageContext, port: int):
+                 usage_context: UsageContext, rpc_path: str):
         # Initialize engine first.
         self.engine = AsyncLLMEngine.from_engine_args(async_engine_args,
                                                       usage_context)
@@ -30,9 +30,7 @@ class AsyncEngineRPCServer:
 
         # Init socket for readiness state.
         self.socket = self.context.socket(zmq.constants.ROUTER)
-        # Note numeric form of localhost should be used for zmq bind(),
-        # see https://stackoverflow.com/a/8958414
-        self.socket.bind(f"tcp://127.0.0.1:{port}")
+        self.socket.bind(rpc_path)
 
     def cleanup(self):
         """Cleanup all resources."""
@@ -98,14 +96,17 @@ class AsyncEngineRPCServer:
 
     async def abort(self, identity, request: RPCAbortRequest):
         """Abort request and notify the client of success."""
-        # Abort the request in the llm engine.
-        await self.engine.abort(request.request_id)
-
-        # Send confirmation to the client.
-        await self.socket.send_multipart([
-            identity,
-            cloudpickle.dumps(VLLM_RPC_SUCCESS_STR),
-        ])
+        try:
+            # Abort the request in the llm engine.
+            await self.engine.abort(request.request_id)
+        except Exception:
+            logger.warning("Failed to abort request %s", request.request_id)
+        finally:
+            # Send confirmation to the client.
+            await self.socket.send_multipart([
+                identity,
+                cloudpickle.dumps(VLLM_RPC_SUCCESS_STR),
+            ])
 
     async def generate(self, identity, generate_request: RPCGenerateRequest):
         try:
@@ -213,6 +214,6 @@ async def run_server(server: AsyncEngineRPCServer):
 
 
 def run_rpc_server(async_engine_args: AsyncEngineArgs,
-                   usage_context: UsageContext, port: int):
-    server = AsyncEngineRPCServer(async_engine_args, usage_context, port)
+                   usage_context: UsageContext, rpc_path: str):
+    server = AsyncEngineRPCServer(async_engine_args, usage_context, rpc_path)
     asyncio.run(run_server(server))

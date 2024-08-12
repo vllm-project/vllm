@@ -3,7 +3,9 @@ from contextlib import contextmanager
 from typing import (TYPE_CHECKING, Any, ClassVar, Dict, Iterable, List,
                     Mapping, Optional)
 from typing import Sequence as GenericSequence
-from typing import Set, Type, TypeVar, Union
+from typing import Set, Tuple, Type, TypeVar, Union
+
+from typing_extensions import assert_never
 
 import vllm.envs as envs
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
@@ -22,9 +24,12 @@ from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.ray_utils import initialize_ray_cluster
-from vllm.inputs import INPUT_REGISTRY, LLMInputs, PromptInputs
+from vllm.inputs import (INPUT_REGISTRY, EncoderDecoderLLMInputs, LLMInputs,
+                         PromptInputs, SingletonPromptInputs)
+from vllm.inputs.parse import is_explicit_encoder_decoder_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.multimodal import MultiModalDataDict
 from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
                           RequestOutputFactory)
 from vllm.pooling_params import PoolingParams
@@ -63,6 +68,11 @@ def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
 
 
 _O = TypeVar("_O", RequestOutput, EmbeddingRequestOutput)
+
+PromptComponents = Tuple[Optional[str], List[int],
+                         Optional[MultiModalDataDict]]
+DecoderPromptComponents = Tuple[Optional[str], Optional[List[int]],
+                                Optional[MultiModalDataDict]]
 
 
 class LLMEngine:
@@ -257,6 +267,7 @@ class LLMEngine:
             speculative_config=speculative_config,
             load_config=load_config,
             prompt_adapter_config=prompt_adapter_config,
+            observability_config=self.observability_config,
         )
 
         if not self.model_config.embedding_mode:
@@ -502,8 +513,19 @@ class LLMEngine:
             self.prompt_adapter_config.verify_with_model_config(
                 self.model_config)
 
-    def _get_eos_token_id(
-            self, lora_request: Optional[LoRARequest]) -> Optional[int]:
+    def _get_bos_token_id(self,
+                          lora_request: Optional[LoRARequest] = None
+                          ) -> Optional[int]:
+        if self.tokenizer is None:
+            logger.warning("Using None for BOS token id because tokenizer "
+                           "is not initialized")
+            return None
+
+        return self.tokenizer.get_lora_tokenizer(lora_request).bos_token_id
+
+    def _get_eos_token_id(self,
+                          lora_request: Optional[LoRARequest] = None
+                          ) -> Optional[int]:
         if self.tokenizer is None:
             logger.warning("Using None for EOS token id because tokenizer "
                            "is not initialized")
@@ -511,10 +533,36 @@ class LLMEngine:
 
         return self.tokenizer.get_lora_tokenizer(lora_request).eos_token_id
 
+    def _get_decoder_start_token_id(self) -> Optional[int]:
+        '''
+        Obtain the decoder start token id employed by an encoder/decoder
+        model. Returns None for non-encoder/decoder models or if the
+        model config is unavailable.
+        '''
+
+        if not self.is_encoder_decoder_model():
+            logger.warning("Using None for decoder start token id because "
+                           "this is not an encoder/decoder model.")
+            return None
+
+        if (self.model_config is None or self.model_config.hf_config is None):
+            logger.warning("Using None for decoder start token id because "
+                           "model config is not available.")
+            return None
+
+        dec_start_token_id = getattr(self.model_config.hf_config,
+                                     'decoder_start_token_id', None)
+        if dec_start_token_id is None:
+            logger.warning("Falling back on <BOS> for decoder start token id "
+                           "because decoder start token id is not available.")
+            dec_start_token_id = self._get_bos_token_id()
+
+        return dec_start_token_id
+
     def _add_processed_request(
         self,
         request_id: str,
-        processed_inputs: LLMInputs,
+        processed_inputs: Union[LLMInputs, EncoderDecoderLLMInputs],
         params: Union[SamplingParams, PoolingParams],
         arrival_time: float,
         lora_request: Optional[LoRARequest],
@@ -529,6 +577,16 @@ class LLMEngine:
         seq = Sequence(seq_id, processed_inputs, block_size, eos_token_id,
                        lora_request, prompt_adapter_request)
 
+        encoder_seq = None
+        if 'encoder_prompt_token_ids' in processed_inputs:
+            encoder_seq = Sequence(seq_id,
+                                   processed_inputs,
+                                   block_size,
+                                   eos_token_id,
+                                   lora_request,
+                                   prompt_adapter_request,
+                                   from_decoder_prompt=False)
+
         # Create a SequenceGroup based on SamplingParams or PoolingParams
         if isinstance(params, SamplingParams):
             seq_group = self._create_sequence_group_with_sampling(
@@ -538,7 +596,8 @@ class LLMEngine:
                 arrival_time=arrival_time,
                 lora_request=lora_request,
                 trace_headers=trace_headers,
-                prompt_adapter_request=prompt_adapter_request)
+                prompt_adapter_request=prompt_adapter_request,
+                encoder_seq=encoder_seq)
         elif isinstance(params, PoolingParams):
             seq_group = self._create_sequence_group_with_pooling(
                 request_id,
@@ -546,7 +605,8 @@ class LLMEngine:
                 params,
                 arrival_time=arrival_time,
                 lora_request=lora_request,
-                prompt_adapter_request=prompt_adapter_request)
+                prompt_adapter_request=prompt_adapter_request,
+                encoder_seq=encoder_seq)
         else:
             raise ValueError(
                 "Either SamplingParams or PoolingParams must be provided.")
@@ -562,36 +622,333 @@ class LLMEngine:
     def stop_remote_worker_execution_loop(self) -> None:
         self.model_executor.stop_remote_worker_execution_loop()
 
-    def process_model_inputs(
+    _LLMInputComponentsType = Tuple[str, List[int]]
+
+    def _prepare_decoder_input_ids_for_generation(
         self,
+        decoder_input_ids: Optional[List[int]],
+    ) -> List[int]:
+        """
+        Prepares `decoder_input_ids` for generation with encoder-decoder models.
+
+        Based on
+
+        https://github.com/huggingface/transformers/blob/
+        4037a2b5b1278736e566aec12e169100275545ea/
+        src/transformers/generation/utils.py
+
+        specifically GenerationMixin._prepare_decoder_input_ids_for_generation()
+
+        Arguments:
+
+        * decoder_input_ids: input token ids to preprocess
+
+        Returns:
+
+        * Processed token list
+        """
+
+        decoder_start_token_id = self._get_decoder_start_token_id()
+        assert decoder_start_token_id is not None
+
+        if decoder_input_ids is None:
+            # no decoder prompt input ->
+            # use decoder_start_token_id as decoder_input_ids
+            decoder_input_ids = self._get_default_enc_dec_decoder_prompt()
+
+        if (len(decoder_input_ids) == 0
+                or decoder_input_ids[0] != decoder_start_token_id):
+            decoder_input_ids = [decoder_start_token_id] + decoder_input_ids
+
+        return decoder_input_ids
+
+    def _tokenize_prompt(
+        self,
+        prompt: str,
         request_id: str,
+        lora_request: Optional[LoRARequest],
+    ) -> List[int]:
+        '''
+        Wrapper around application of the model's tokenizer.
+
+        Arguments:
+
+        * prompt
+        * request_id
+        * lora_request
+
+        Returns:
+
+        * prompt token ids
+        '''
+
+        tokenizer = self.get_tokenizer_group("prompts must be None if "
+                                             "skip_tokenizer_init is True")
+
+        return tokenizer.encode(request_id=request_id,
+                                prompt=prompt,
+                                lora_request=lora_request)
+
+    def _extract_prompt_components(
+        self,
+        inputs: SingletonPromptInputs,
+        request_id: str,
+        lora_request: Optional[LoRARequest] = None,
+    ) -> PromptComponents:
+        '''
+        Extract the components of any single encoder or decoder input prompt.
+
+        Arguments:
+
+        * request_id
+        * inputs: single encoder or decoder input prompt
+        * lora_request: this is only valid for decoder prompts
+
+        Returns:
+
+        * prompt
+        * prompt_token_ids
+        * multi_modal_data
+        '''
+
+        if isinstance(inputs, str):
+            prompt = inputs
+            prompt_token_ids = self._tokenize_prompt(
+                prompt,
+                request_id=request_id,
+                lora_request=lora_request,
+            )
+            multi_modal_data = None
+        elif isinstance(inputs, dict):
+            if "prompt_token_ids" in inputs:
+                prompt = None
+                prompt_token_ids = inputs["prompt_token_ids"]
+            else:
+                # NOTE: This extra assignment is required to pass mypy
+                prompt = parsed_prompt = inputs["prompt"]
+                prompt_token_ids = self._tokenize_prompt(
+                    parsed_prompt,
+                    request_id=request_id,
+                    lora_request=lora_request,
+                )
+
+            multi_modal_data = inputs.get("multi_modal_data")
+        else:
+            assert_never(inputs)
+
+        return prompt, prompt_token_ids, multi_modal_data
+
+    def _apply_prompt_adapter(
+        self,
+        prompt_token_ids: List[int],
+        prompt_adapter_request: Optional[PromptAdapterRequest],
+    ) -> List[int]:
+        if prompt_adapter_request:
+            prompt_token_ids = (
+                [0] * prompt_adapter_request.prompt_adapter_num_virtual_tokens
+                + prompt_token_ids)
+
+        return prompt_token_ids
+
+    def _get_default_enc_dec_decoder_prompt(self) -> List[int]:
+        '''
+        Specifically for encoder/decoder models:
+        generate a default decoder prompt for when
+        the user specifies only the encoder prompt.
+
+        Encoder/decoder models utilize the decoder
+        prompt in different ways; as new models are
+        added, it is intended that this function
+        will be extended to produce differing
+        default decoder prompts, depending on the
+        model variety.
+
+        Absent a special case, the default behavior
+        of this method is to mirror the behavior of
+        the HuggingFace (HF) GenerationMixin for a None
+        decoder prompt, which is to employ a logit processor
+        setting to force the first decoded token to be <BOS>.
+        Here, this behavior is approximated by having the
+        "default" decoder prompt be <BOS>.
+
+        However, it is possible that in the future
+        other models may have different or more 
+        complex logic for the default decoder prompt.
+        This motivates having a special helper method
+        for default decoder prompts.
+
+        Returns:
+
+        * prompt_token_ids
+        '''
+
+        bos_token_id = self._get_bos_token_id()
+        assert bos_token_id is not None
+        return [bos_token_id]
+
+    def _build_enc_dec_llm_inputs(
+        self,
+        encoder_comps: PromptComponents,
+        decoder_comps: DecoderPromptComponents,
+    ) -> EncoderDecoderLLMInputs:
+        encoder_prompt, encoder_prompt_ids, encoder_mm_data = encoder_comps
+        decoder_prompt, decoder_prompt_ids, decoder_mm_data = decoder_comps
+
+        if encoder_mm_data is not None or decoder_mm_data is not None:
+            raise ValueError("Multi-modal encoder-decoder models are "
+                             "not supported yet")
+
+        decoder_prompt_ids = (
+            self._prepare_decoder_input_ids_for_generation(decoder_prompt_ids))
+
+        return EncoderDecoderLLMInputs(
+            prompt_token_ids=decoder_prompt_ids,
+            prompt=decoder_prompt,
+            encoder_prompt_token_ids=encoder_prompt_ids,
+            encoder_prompt=encoder_prompt,
+        )
+
+    def _process_encoder_decoder_prompt(
+        self,
         inputs: PromptInputs,
+        request_id: str,
+    ) -> EncoderDecoderLLMInputs:
+        '''
+        For encoder/decoder models only:
+        Process an input prompt into an
+        :class:`EncoderDecoderLLMInputs` instance.
+
+        There are two types of input prompts:
+        singleton prompts which carry only the
+        encoder prompt, and explicit encoder/decoder
+        prompts which carry both the encoder and the
+        decoder prompts as member variables.
+
+        This function handles the following scenarios:
+        * Singleton encoder prompt: extract encoder prompt
+          token ids & infer default decoder prompt token ids
+        * Explicit encoder/decoder prompt: extract encoder
+          and decoder prompt token ids
+
+        Note that for Explicit encoder/decoder prompts,
+        each sub-prompt (encoder or decoder prompt) can
+        have any possible singleton type; thus this
+        method relies on helper functions to obtain
+        token ids for the sub-prompts.
+        
+        Arguments:
+
+        * inputs: an input prompt
+        * request_id
+
+        Returns:
+
+        * :class:`EncoderDecoderLLMInputs` instance
+        '''
+
+        encoder_comps: PromptComponents
+        decoder_comps: DecoderPromptComponents
+
+        if is_explicit_encoder_decoder_prompt(inputs):
+            encoder_comps = self._extract_prompt_components(
+                inputs["encoder_prompt"],
+                request_id=request_id,
+            )
+
+            if (decoder_input := inputs["decoder_prompt"]) is None:
+                decoder_comps = None, None, None
+            else:
+                decoder_comps = self._extract_prompt_components(
+                    decoder_input,
+                    request_id=request_id,
+                )
+        else:
+            encoder_comps = self._extract_prompt_components(
+                inputs,
+                request_id=request_id,
+            )
+
+            decoder_comps = None, None, None
+
+        return self._build_enc_dec_llm_inputs(encoder_comps, decoder_comps)
+
+    def _build_decoder_only_llm_inputs(
+        self,
+        prompt_comps: PromptComponents,
+        prompt_adapter_request: Optional[PromptAdapterRequest],
+    ) -> LLMInputs:
+        prompt, prompt_token_ids, multi_modal_data = prompt_comps
+
+        prompt_token_ids = self._apply_prompt_adapter(
+            prompt_token_ids, prompt_adapter_request=prompt_adapter_request)
+
+        return LLMInputs(prompt_token_ids=prompt_token_ids,
+                         prompt=prompt,
+                         multi_modal_data=multi_modal_data)
+
+    def _process_decoder_only_prompt(
+        self,
+        inputs: SingletonPromptInputs,
+        request_id: str,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> LLMInputs:
-        if isinstance(inputs, str):
-            inputs = {"prompt": inputs}
+        '''
+        For decoder-only models:
+        Process an input prompt into an :class:`LLMInputs` instance.
 
-        if "prompt_token_ids" not in inputs:
-            tokenizer = self.get_tokenizer_group("prompts must be None if "
-                                                 "skip_tokenizer_init is True")
+        Arguments:
 
-            prompt_token_ids = tokenizer.encode(request_id=request_id,
-                                                prompt=inputs["prompt"],
-                                                lora_request=lora_request)
+        * inputs: input prompt
+        * request_id
+        * lora_request
+        * prompt_adapter_request
+
+        Returns:
+
+        * :class:`LLMInputs` instance
+        '''
+
+        prompt_comps = self._extract_prompt_components(
+            inputs,
+            request_id=request_id,
+            lora_request=lora_request,
+        )
+
+        return self._build_decoder_only_llm_inputs(
+            prompt_comps,
+            prompt_adapter_request=prompt_adapter_request,
+        )
+
+    def process_model_inputs(
+        self,
+        inputs: PromptInputs,
+        request_id: str,
+        lora_request: Optional[LoRARequest] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+    ) -> Union[LLMInputs, EncoderDecoderLLMInputs]:
+
+        if self.is_encoder_decoder_model():
+            # Encoder-decoder model requires special mapping of
+            # input prompts to encoder & decoder
+            model_inputs = self._process_encoder_decoder_prompt(
+                inputs,
+                request_id=request_id,
+            )
         else:
-            prompt_token_ids = inputs["prompt_token_ids"]
+            if is_explicit_encoder_decoder_prompt(inputs):
+                raise ValueError("Cannot pass encoder-decoder prompt "
+                                 "to decoder-only models")
 
-        if prompt_adapter_request:
-            prompt_token_ids = \
-                [0] * prompt_adapter_request.prompt_adapter_num_virtual_tokens\
-                         + prompt_token_ids
+            # Decoder-only operation
+            model_inputs = self._process_decoder_only_prompt(
+                inputs,
+                request_id=request_id,
+                lora_request=lora_request,
+                prompt_adapter_request=prompt_adapter_request,
+            )
 
-        llm_inputs = LLMInputs(prompt_token_ids=prompt_token_ids,
-                               prompt=inputs.get("prompt"),
-                               multi_modal_data=inputs.get("multi_modal_data"))
-
-        return self.input_processor(llm_inputs)
+        return self.input_processor(model_inputs)
 
     def add_request(
         self,
@@ -652,10 +1009,11 @@ class LLMEngine:
             arrival_time = time.time()
 
         processed_inputs = self.process_model_inputs(
+            inputs,
             request_id=request_id,
-            inputs=inputs,
             lora_request=lora_request,
-            prompt_adapter_request=prompt_adapter_request)
+            prompt_adapter_request=prompt_adapter_request,
+        )
 
         self._add_processed_request(
             request_id=request_id,
@@ -676,6 +1034,7 @@ class LLMEngine:
         lora_request: Optional[LoRARequest],
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        encoder_seq: Optional[Sequence] = None,
     ) -> SequenceGroup:
         """Creates a SequenceGroup with SamplingParams."""
         max_logprobs = self.get_model_config().max_logprobs
@@ -701,7 +1060,8 @@ class LLMEngine:
             sampling_params=sampling_params,
             lora_request=lora_request,
             trace_headers=trace_headers,
-            prompt_adapter_request=prompt_adapter_request)
+            prompt_adapter_request=prompt_adapter_request,
+            encoder_seq=encoder_seq)
 
         return seq_group
 
@@ -713,6 +1073,7 @@ class LLMEngine:
         arrival_time: float,
         lora_request: Optional[LoRARequest],
         prompt_adapter_request: Optional[PromptAdapterRequest],
+        encoder_seq: Optional[Sequence] = None,
     ) -> SequenceGroup:
         """Creates a SequenceGroup with PoolingParams."""
         # Defensive copy of PoolingParams, which are used by the pooler
@@ -724,7 +1085,8 @@ class LLMEngine:
             arrival_time=arrival_time,
             lora_request=lora_request,
             pooling_params=pooling_params,
-            prompt_adapter_request=prompt_adapter_request)
+            prompt_adapter_request=prompt_adapter_request,
+            encoder_seq=encoder_seq)
         return seq_group
 
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
@@ -822,6 +1184,22 @@ class LLMEngine:
             seq_group = scheduled_seq_group.seq_group
             seq_group.update_num_computed_tokens(
                 scheduled_seq_group.token_chunk_size)
+            if output is not None and len(output) > 0:
+                for o in output:
+                    if (isinstance(o, SamplerOutput)
+                            and seq_group.metrics is not None):
+                        if seq_group.metrics.model_forward_time is not None:
+                            seq_group.metrics.model_forward_time += (
+                                o.model_forward_time)
+                        else:
+                            seq_group.metrics.model_forward_time = (
+                                o.model_forward_time)
+                        if seq_group.metrics.model_execute_time is not None:
+                            seq_group.metrics.model_execute_time += (
+                                o.model_execute_time)
+                        else:
+                            seq_group.metrics.model_execute_time = (
+                                o.model_execute_time)
             if self.model_config.embedding_mode:
                 self._process_sequence_group_outputs(seq_group, outputs)
                 continue
@@ -1214,3 +1592,21 @@ class LLMEngine:
             seq_span.set_attribute(
                 SpanAttributes.LLM_LATENCY_TIME_TO_FIRST_TOKEN, ttft)
             seq_span.set_attribute(SpanAttributes.LLM_LATENCY_E2E, e2e_time)
+            if metrics.scheduler_time is not None:
+                seq_span.set_attribute(
+                    SpanAttributes.LLM_LATENCY_TIME_IN_SCHEDULER,
+                    metrics.scheduler_time)
+            if metrics.model_forward_time is not None:
+                seq_span.set_attribute(
+                    SpanAttributes.LLM_LATENCY_TIME_IN_MODEL_FORWARD,
+                    metrics.model_forward_time / 1000.0)
+            if metrics.model_execute_time is not None:
+                seq_span.set_attribute(
+                    SpanAttributes.LLM_LATENCY_TIME_IN_MODEL_EXECUTE,
+                    metrics.model_execute_time)
+
+    def is_encoder_decoder_model(self):
+        return self.model_config.is_encoder_decoder_model
+
+    def is_embedding_model(self):
+        return self.model_config.is_embedding_model

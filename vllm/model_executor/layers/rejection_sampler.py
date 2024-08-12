@@ -84,8 +84,8 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         # overhead.
         target_probs = target_with_bonus_probs[:, :-1]
         if self._strict_mode:
-            self._raise_if_incorrect_input(target_probs, bonus_token_ids,
-                                           draft_probs, draft_token_ids)
+            self._raise_if_incorrect_input(target_probs, draft_token_ids,
+                                           bonus_token_ids, draft_probs)
 
         if chain_speculative_sampling:
             batch_size, k, _ = draft_probs.shape
