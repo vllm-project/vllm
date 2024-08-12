@@ -29,6 +29,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils import print_warning_once
 
 logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
@@ -509,6 +510,12 @@ class AsyncLLMEngine:
         self.engine_use_ray = engine_use_ray
         self.log_requests = log_requests
         self.engine = self._init_engine(*args, **kwargs)
+
+        if self.engine_use_ray:
+            print_warning_once(
+                "DEPRECATED. `--engine-use-ray` is deprecated and may "
+                "be removed in a future update. "
+                "See #7045.")
 
         self.background_loop: Optional[asyncio.Future] = None
         # We need to keep a reference to unshielded

@@ -923,7 +923,10 @@ class AsyncEngineArgs(EngineArgs):
         parser.add_argument('--engine-use-ray',
                             action='store_true',
                             help='Use Ray to start the LLM engine in a '
-                            'separate process as the server process.')
+                            'separate process as the server process.'
+                            '(DEPRECATED. This argument is deprecated '
+                            'and may be removed in a future update. '
+                            'See #7045.)')
         parser.add_argument('--disable-log-requests',
                             action='store_true',
                             help='Disable logging requests.')
