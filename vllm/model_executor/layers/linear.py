@@ -897,6 +897,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
+
 class _WeightWrapper:
     '''
     Wrapper for weight matrices. Helper class for
@@ -923,6 +924,7 @@ class _WeightWrapper:
     ) -> None:
         self.weight = torch.nn.Parameter(weight)
 
+
 class QCrossKVParallelLinear(QKVParallelLinear):
     """Linear layer for the linear transformation of the query, key, and
     value vectors in the cross-attention layer. 
@@ -942,16 +944,17 @@ class QCrossKVParallelLinear(QKVParallelLinear):
     head may be replicated while the query heads are partitioned.
     """
 
-    def __init__(self,
-                 hidden_size: int,
-                 head_size: int,
-                 total_num_heads: int,
-                 total_num_kv_heads: Optional[int] = None,
-                 bias: bool = True,
-                 skip_bias_add: bool = False,
-                 params_dtype: Optional[torch.dtype] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = "",
+    def __init__(
+        self,
+        hidden_size: int,
+        head_size: int,
+        total_num_heads: int,
+        total_num_kv_heads: Optional[int] = None,
+        bias: bool = True,
+        skip_bias_add: bool = False,
+        params_dtype: Optional[torch.dtype] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         '''
         The :class:`QKVParallelLinear` parent class packs [W_Q W_K W_V]
@@ -1111,6 +1114,7 @@ class QCrossKVParallelLinear(QKVParallelLinear):
             self._cached_q_bias if self.skip_bias_add else None,
             self._cached_kv_bias if self.skip_bias_add else None,
         )
+
 
 class RowParallelLinear(LinearBase):
     """Linear layer with row parallelism.
