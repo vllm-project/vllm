@@ -51,19 +51,25 @@ def fused_moe_marlin(
     - torch.Tensor: The output tensor after applying the MoE layer.
     """
     # Check constraints.
-    assert hidden_states.shape[0] == gating_output.shape[0], "Number of tokens mismatch"
-    assert hidden_states.shape[1] == w1.shape[1] * 16, "Hidden size mismatch w1"
-    assert hidden_states.shape[1] == w2.shape[2] // 2, "Hidden size mismatch w2"
+    assert hidden_states.shape[0] == gating_output.shape[
+        0], "Number of tokens mismatch"
+    assert hidden_states.shape[
+        1] == w1.shape[1] * 16, "Hidden size mismatch w1"
+    assert hidden_states.shape[
+        1] == w2.shape[2] // 2, "Hidden size mismatch w2"
     assert gating_output.shape[1] == w1.shape[0], "Number of experts mismatch"
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
     assert w1.is_contiguous(), "Expert weights1 must be contiguous"
     assert w2.is_contiguous(), "Expert weights2 must be contiguous"
-    assert hidden_states.dtype in [torch.float32, torch.float16, torch.bfloat16]
+    assert hidden_states.dtype in [
+        torch.float32, torch.float16, torch.bfloat16
+    ]
     M, K = hidden_states.shape
     E = w1.shape[0]
     N = w2.shape[1] * 16
 
-    topk_weights, topk_ids = fused_topk(hidden_states, gating_output, topk, renormalize)
+    topk_weights, topk_ids = fused_topk(hidden_states, gating_output, topk,
+                                        renormalize)
 
     get_config_func = functools.partial(
         try_get_optimal_moe_config,
@@ -81,9 +87,10 @@ def fused_moe_marlin(
     sorted_token_ids, _, _ = moe_align_block_size(topk_ids, block_size_m, E)
 
     max_workspace_size = ((M + 255) // 256) * (max(2 * N, K) // 64) * 16
-    workspace = torch.zeros(
-        max_workspace_size, dtype=torch.int, device="cuda", requires_grad=False
-    )
+    workspace = torch.zeros(max_workspace_size,
+                            dtype=torch.int,
+                            device="cuda",
+                            requires_grad=False)
 
     intermediate_cache2 = torch.empty(
         (M * topk_ids.shape[1], N),
@@ -135,4 +142,5 @@ def fused_moe_marlin(
         True,
     )
 
-    return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape), dim=1)
+    return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
+                     dim=1)

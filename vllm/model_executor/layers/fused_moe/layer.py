@@ -55,8 +55,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     """MoE method without quantization."""
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
-                    hidden_size: int, intermediate_size: int,
-                    params_dtype: torch.dtype, **extra_weight_attrs):
+                       hidden_size: int, intermediate_size: int,
+                       params_dtype: torch.dtype, **extra_weight_attrs):
         # Fused gate_up_proj (column parallel)
         w13_weight = torch.nn.Parameter(
             torch.empty(num_experts,
@@ -150,6 +150,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         assert num_expert_group is None
         assert topk_group is None
         return fused_moe(x, w1, w2, router_logits, top_k, renormalize)
+
 
 class FusedMoE(torch.nn.Module):
     """FusedMoE layer for MoE models.
@@ -259,8 +260,8 @@ class FusedMoE(torch.nn.Module):
         else:
             # Input scales can be loaded directly and should be equal.
             if "input_scale" in weight_name:
-                if (param_data[expert_id] != 1 and (param_data[expert_id] - 
-                                                    loaded_weight).abs() > 1e-5):
+                if (param_data[expert_id] != 1 and
+                    (param_data[expert_id] - loaded_weight).abs() > 1e-5):
                     raise ValueError(
                         "input_scales of w1 and w3 of a layer "
                         f"must be equal. But got {param_data[expert_id]} "
@@ -326,7 +327,7 @@ class FusedMoE(torch.nn.Module):
     def make_expert_params_mapping(
             cls, ckpt_gate_proj_name: str, ckpt_down_proj_name: str,
             ckpt_up_proj_name: str,
-            num_experts: int) -> List[Tuple[str, str, int, str]]:
+            num_experts: int) -> List[Tuple[str, str, int, int]]:
         gate_up = [ckpt_gate_proj_name, ckpt_up_proj_name]
         gate_down_up = [
             ckpt_gate_proj_name, ckpt_down_proj_name, ckpt_up_proj_name
