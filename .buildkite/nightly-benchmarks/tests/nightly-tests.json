@@ -25,7 +25,7 @@
             "max_batch_size": 256,
             "max_input_len": 4096,
             "max_output_len": 4096,
-            "trt_llm_version": "r24.04"
+            "trt_llm_version": "r24.07"
         },
         "trt_client_parameters": {
             "endpoint": "/v2/models/ensemble/generate_stream"
