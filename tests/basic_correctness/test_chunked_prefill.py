@@ -27,7 +27,6 @@ KV_CACHE_QUANTIZATION_PATHS = {
     "meta-llama/Llama-2-7b-chat-hf":
     "./tests/fp8_kv/llama2-7b-fp8-kv/kv_cache_scales.json"
 }
-NUM_FP8_KV_OUTPUTS_TO_CHECK = 4
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -53,12 +52,8 @@ def test_models(
     Checks exact match decode between huggingface model and vllm runner with
     chunked prefill.
     """
-    max_num_seqs = min(chunked_prefill_token_size, 256)
-    enable_chunked_prefill = False
-    max_num_batched_tokens = None
-    if chunked_prefill_token_size != 1:
-        enable_chunked_prefill = True
-        max_num_batched_tokens = chunked_prefill_token_size
+    max_num_seqs = chunked_prefill_token_size
+    max_num_batched_tokens = chunked_prefill_token_size
 
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
@@ -67,7 +62,7 @@ def test_models(
             model,
             dtype=dtype,
             max_num_batched_tokens=max_num_batched_tokens,
-            enable_chunked_prefill=enable_chunked_prefill,
+            enable_chunked_prefill=True,
             tensor_parallel_size=tensor_parallel_size,
             enforce_eager=enforce_eager,
             max_num_seqs=max_num_seqs,
@@ -85,7 +80,8 @@ def test_models(
 @pytest.mark.parametrize("kv_dtype_n_model",
                          ["fp8_e5m2" + "#+#" + m for m in E5M2_KV_MODELS] +
                          ["fp8_e4m3" + "#+#" + m for m in E4M3_KV_MODELS])
-@pytest.mark.parametrize("max_tokens", [NUM_FP8_KV_OUTPUTS_TO_CHECK])
+# Due to low-precision numerical divergence, we only test logprob of 4 tokens
+@pytest.mark.parametrize("max_tokens", [4])
 @pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16])
 @pytest.mark.parametrize("enforce_eager", [False, True])
 # NOTE: Increasing this in this suite will fail CI because we currently cannot
@@ -117,11 +113,7 @@ def test_models_with_fp8_kv_cache(
         )
 
     max_num_seqs = chunked_prefill_token_size
-    enable_chunked_prefill = False
-    max_num_batched_tokens = None
-    if chunked_prefill_token_size != 1:
-        enable_chunked_prefill = True
-        max_num_batched_tokens = chunked_prefill_token_size
+    max_num_batched_tokens = chunked_prefill_token_size
 
     extra_kwargs = {}
     if model in KV_CACHE_QUANTIZATION_PATHS:
@@ -142,7 +134,7 @@ def test_models_with_fp8_kv_cache(
     with vllm_runner(
             model,
             max_num_batched_tokens=max_num_batched_tokens,
-            enable_chunked_prefill=enable_chunked_prefill,
+            enable_chunked_prefill=True,
             tensor_parallel_size=tensor_parallel_size,
             enforce_eager=enforce_eager,
             max_num_seqs=max_num_seqs,
