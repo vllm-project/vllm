@@ -147,7 +147,7 @@ class SequenceData(msgspec.Struct, omit_defaults=True):
     _stage: SequenceStage = SequenceStage.PREFILL
     _cached_all_token_ids: List[int] = msgspec.field(default_factory=list)
 
-    # It is used to get delta input. It is reset when `reset_and_get_delta`
+    # It is used to get delta input. It is reset when `get_delta_and_reset`
     # is called.
     _new_appended_tokens: List[int] = msgspec.field(default_factory=list)
 
@@ -271,7 +271,7 @@ class SequenceData(msgspec.Struct, omit_defaults=True):
     def get_output_token_ids(self) -> Tuple[int, ...]:
         return self.output_token_ids
 
-    def reset_and_get_delta(self) -> SequenceDataDelta:
+    def get_delta_and_reset(self) -> SequenceDataDelta:
         delta = SequenceDataDelta(self._new_appended_tokens,
                                   self._cumulative_logprob,
                                   self.get_num_computed_tokens(), self.stage)

@@ -332,7 +332,7 @@ class Worker(LocalOrDistributedWorkerBase):
                     self._seq_group_metadata_cache[request_id].apply_delta(
                         metadata_or_delta)
                 else:
-                    # If metadata snapshot is sent again, it is either
+                    # If metadata snapshot is sent again, it is
                     # preempted. Reset the cache because we need to start
                     # from scratch.
                     assert isinstance(metadata_or_delta, SequenceGroupMetadata)
