@@ -4,6 +4,11 @@ import pytest
 
 from vllm import LLM, SamplingParams
 
+# NOTE: the order of the tests is important
+# the first test does not load any plugins
+# the second test loads the plugin
+# they share the same process, so the plugin is loaded for the second test
+
 
 def test_plugin(dummy_opt_path):
     os.environ["VLLM_GENERAL_PLUGINS"] = ""
