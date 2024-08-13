@@ -491,7 +491,6 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         layer.marlin_state = GPTQMarlinState.REPACK
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.marlin_state = GPTQMarlinState.READY
 
         # Process act_order
         if self.quant_config.desc_act:
@@ -546,7 +545,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         marlin_w13_qweight = ops.gptq_marlin_moe_repack(
             layer.w13_qweight,
             layer.w13_g_idx_sort_indices,
-            layer.w13_qweight.shape[1] * self.quant_config.pack_factor,
+            layer.w13_qweight.shape[1],
             layer.w13_qweight.shape[2],
             self.quant_config.weight_bits,
         )
@@ -554,7 +553,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         marlin_w2_qweight = ops.gptq_marlin_moe_repack(
             layer.w2_qweight,
             layer.w2_g_idx_sort_indices,
-            layer.w2_qweight.shape[1] * self.quant_config.pack_factor,
+            layer.w2_qweight.shape[1],
             layer.w2_qweight.shape[2],
             self.quant_config.weight_bits,
         )
@@ -568,7 +567,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             group_size=self.quant_config.group_size,
         )
         replace_tensor(layer, "w13_scales", marlin_w13_scales)
-        logger.error(f"{layer.w2_scales.size()}, {layer.intermediate_size_per_partition}, {self.quant_config.group_size}")
+        # logger.error(f"{layer.w2_scales.size()}, {layer.intermediate_size_per_partition}, {self.quant_config.group_size}")
         marlin_w2_scales = marlin_moe_permute_scales(
             s=layer.w2_scales,
             size_k=layer.w2_scales.shape[1] * self.quant_config.pack_factor,
@@ -576,6 +575,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             group_size=self.quant_config.group_size,
         )
         replace_tensor(layer, "w2_scales", marlin_w2_scales)
+        layer.marlin_state = GPTQMarlinState.READY
 
     def apply(
         self,
