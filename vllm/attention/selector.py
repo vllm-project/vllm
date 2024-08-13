@@ -10,8 +10,7 @@ import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import (STR_BACKEND_ENV_VAR, is_cpu, is_hip, is_openvino,
-                        is_tpu, is_xpu)
+from vllm.utils import STR_BACKEND_ENV_VAR, is_cpu, is_hip, is_openvino, is_xpu
 
 logger = init_logger(__name__)
 
@@ -194,7 +193,7 @@ def which_attn_to_use(
             logger.info("Cannot use %s backend on XPU.", selected_backend)
         return _Backend.IPEX
 
-    if is_tpu():
+    if current_platform.is_tpu():
         if selected_backend != _Backend.PALLAS:
             logger.info("Cannot use %s backend on TPU.", selected_backend)
         return _Backend.PALLAS
