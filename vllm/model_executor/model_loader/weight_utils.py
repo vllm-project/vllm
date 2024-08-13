@@ -522,7 +522,8 @@ def default_weight_loader(param: torch.Tensor,
 
         param.data.copy_(loaded_weight)
     except Exception:
-        # You can set a breakpoint here for debugging weight loading issues
+        # NOTE: This exception is added for the purpose of setting breakpoint to
+        # debug weight loading issues.
         raise
 
 
