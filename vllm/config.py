@@ -85,7 +85,7 @@ class ModelConfig:
             names provided, the first name will be used. If not specified, 
             the model name will be the same as `model`.
         enable_long_sequence: Whether to enable long sequence. If True, the 
-            length of a seqeunce is no longer limited to the max length of 
+            length of a sequence is no longer limited to the max length of 
             pagedattention-v2(such as 8192). And the distributed inference 
             is enable.
     """
