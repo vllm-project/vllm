@@ -341,7 +341,7 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
 
         self.config = config
         self.lora_config = lora_config
-
+        self.quant_config = quant_config
         self.model = MixtralModel(config,
                                   cache_config,
                                   quant_config,
