@@ -1,39 +1,14 @@
 import json
-from typing import Dict, List, Literal, Optional
+from typing import Dict, List, Optional
 
 import openai
 import pytest
-from openai.types.chat import ChatCompletionMessageParam
-from typing_extensions import NotRequired, TypedDict
+from openai.types.chat import (ChatCompletionMessageParam,
+                               ChatCompletionToolParam)
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from typing_extensions import TypedDict
 
 from ...utils import VLLM_PATH, RemoteOpenAIServer
-
-# we need this because this is more precise than the existing definition in
-# vll.entrypoints.openai.protocol which inherits BaseModel. for literals, I need
-# a dict to check against
-
-
-class OaiToolFunctionParamProperties(TypedDict):
-    type: str
-    description: Optional[str]
-    enum: NotRequired[List[str]]
-
-
-class OAiToolFunctionParams(TypedDict):
-    type: Literal["object"]
-    properties: Dict[str, OaiToolFunctionParamProperties]
-    required: NotRequired[List[str]]
-
-
-class OAiFunctionDefinition(TypedDict):
-    name: str
-    description: str
-    parameters: OAiToolFunctionParams
-
-
-class OpenAICompatibleToolDefinition(TypedDict):
-    type: Literal["function"]
-    function: OAiFunctionDefinition
 
 
 class ServerConfig(TypedDict):
@@ -75,6 +50,15 @@ CONFIGS: Dict[str, ServerConfig] = {
 
 MESSAGES_WITHOUT_TOOLS: List[ChatCompletionMessageParam] = [{
     "role":
+    "system",
+    "content":
+    "You are a helpful assistant with access to tools. If a tool"
+    " that you have would be helpful to answer a user query, "
+    "call the tool. Otherwise, answer the user's query directly "
+    "without calling a tool. DO NOT CALL A TOOL THAT IS IRRELEVANT "
+    "to the user's question - just respond to it normally."
+}, {
+    "role":
     "user",
     "content":
     "Hi! How are you?"
@@ -87,7 +71,7 @@ MESSAGES_WITHOUT_TOOLS: List[ChatCompletionMessageParam] = [{
     "role":
     "user",
     "content":
-    "Can you tell me a joke?"
+    "Can you tell me a joke please?"
 }]
 
 MESSAGES_ASKING_FOR_TOOLS: List[ChatCompletionMessageParam] = [{
@@ -97,7 +81,7 @@ MESSAGES_ASKING_FOR_TOOLS: List[ChatCompletionMessageParam] = [{
     "What is the weather in Dallas, Texas in Fahrenheit?"
 }]
 
-WEATHER_TOOL: OpenAICompatibleToolDefinition = {
+WEATHER_TOOL: ChatCompletionToolParam = {
     "type": "function",
     "function": {
         "name": "get_current_weather",
@@ -130,7 +114,7 @@ WEATHER_TOOL: OpenAICompatibleToolDefinition = {
     }
 }
 
-SEARCH_TOOL: OpenAICompatibleToolDefinition = {
+SEARCH_TOOL: ChatCompletionToolParam = {
     "type": "function",
     "function": {
         "name":
@@ -157,13 +141,23 @@ SEARCH_TOOL: OpenAICompatibleToolDefinition = {
     }
 }
 
-configKeys = CONFIGS.keys()
+
+# for each server config, download the model and return the config
+@pytest.fixture(scope="module", params=CONFIGS.keys())
+def server_config(request):
+    config = CONFIGS[request.param]
+
+    print(f'downloading model for {config["model"]}')
+
+    # download model and tokenizer using transformers
+    AutoTokenizer.from_pretrained(config["model"])
+    AutoModelForCausalLM.from_pretrained(config["model"])
+    yield CONFIGS[request.param]
 
 
-@pytest.fixture(scope="module", params=configKeys)
-def client_config(request):
-    print('param', request.param)
-    server_config: ServerConfig = CONFIGS["hermes"]
+# run this for each server config
+@pytest.fixture(scope="module")
+def client_config(request, server_config: ServerConfig):
     model = server_config["model"]
     args_for_model = server_config["arguments"]
     with RemoteOpenAIServer(model, ARGS + args_for_model) as server:
@@ -239,6 +233,7 @@ async def test_chat_completion_without_tools(client_config: TestConfig):
 # and that they won't be parsed as tools
 @pytest.mark.asyncio
 async def test_chat_completion_with_tools(client_config: TestConfig):
+    print(f'sending prompt {MESSAGES_WITHOUT_TOOLS}')
     chat_completion = await client_config["client"].chat.completions.create(
         messages=MESSAGES_WITHOUT_TOOLS,
         temperature=0,
@@ -249,6 +244,7 @@ async def test_chat_completion_with_tools(client_config: TestConfig):
     choice = chat_completion.choices[0]
     stop_reason = chat_completion.choices[0].finish_reason
     output_text = chat_completion.choices[0].message.content
+    print(chat_completion.choices[0])
 
     # check to make sure we got text
     assert output_text is not None
