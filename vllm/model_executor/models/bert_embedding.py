@@ -60,8 +60,8 @@ class BertEmbeddingModel(nn.Module):
         self.model = BertModel(config=kwargs["config"],
                                cache_config=kwargs.get("cache_config", None),
                                quant_config=kwargs.get("quant_config", None))
-        # self._pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
-        self._pooler = BertPooler( )
+        self._pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
+        # self._pooler = BertPooler(config=kwargs["config"])
 
     def forward(
         self,

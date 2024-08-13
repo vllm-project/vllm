@@ -750,9 +750,9 @@ class Scheduler:
             num_new_tokens = self._get_num_new_tokens(seq_group,
                                                       SequenceStatus.WAITING,
                                                       enable_chunking, budget)
-            if not enable_chunking:
-                num_prompt_tokens = waiting_seqs[0].get_len()
-                assert num_new_tokens == num_prompt_tokens
+            # if not enable_chunking:
+            #     num_prompt_tokens = waiting_seqs[0].get_len()
+            #     assert num_new_tokens == num_prompt_tokens
 
             prompt_limit = self._get_prompt_limit(seq_group)
             if num_new_tokens > prompt_limit:
@@ -1323,10 +1323,12 @@ class Scheduler:
         Returns 0 if the new token cannot be computed due to token budget.
         """
         num_new_tokens = 0
-        seqs = seq_group.get_seqs(status=status)
+        seqs = [seq_group.encoder_seq]
+        seqs.extend(seq_group.get_seqs(status=status))
         for seq in seqs:
             num_new_tokens += seq.get_num_new_tokens()
         assert num_new_tokens > 0
+
         # Chunk if a running request cannot fit in.
         # If number of seq > 1, it means it is doing beam search in a
         # decode phase. Do not chunk in that case.

@@ -16,6 +16,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (IntermediateTensors, PoolerOutput, SequenceData,
                            SequenceGroupMetadata)
 from vllm.utils import make_tensor_with_pad
+from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunnerBase
 from vllm.worker.model_runner import (GPUModelRunnerBase, ModelInputForGPU,
                                       ModelInputForGPUBuilder)
 from vllm.worker.model_runner import (_BATCH_SIZES_TO_CAPTURE, _PAD_SLOT_ID,
@@ -36,7 +37,7 @@ class ModelInputForGPUWithPoolingMetadata(ModelInputForGPU):
 
 
 class EmbeddingModelRunner(
-        GPUModelRunnerBase[ModelInputForGPUWithPoolingMetadata]):
+        EncoderDecoderModelRunnerBase[ModelInputForGPUWithPoolingMetadata]):
     _model_input_cls: Type[ModelInputForGPUWithPoolingMetadata] = (
         ModelInputForGPUWithPoolingMetadata)
     _builder_cls: Type[ModelInputForGPUBuilder] = ModelInputForGPUBuilder
@@ -157,8 +158,20 @@ class EmbeddingModelRunner(
         model_input = self._prepare_model_input_tensors(
             seq_group_metadata_list, finished_requests_ids)
 
-        model_input = self._prepare_encoder_model_input_tensors(
+        (
+            attn_metadata,
+            encoder_input_tokens_tensor,
+            encoder_input_positions_tensor,
+        ) = super()._prepare_encoder_model_input_tensors(
             seq_group_metadata_list, model_input)
+
+        model_input = dataclasses.replace(
+            model_input,
+            attn_metadata=attn_metadata,
+            encoder_input_tokens=encoder_input_tokens_tensor,
+            encoder_input_positions=encoder_input_positions_tensor,
+        )
+
         # Prepare PoolingMetadata.
         assert model_input.seq_lens is not None
         pooling_metadata = self._prepare_pooling(seq_group_metadata_list,
@@ -166,368 +179,6 @@ class EmbeddingModelRunner(
 
         return dataclasses.replace(model_input,
                                    pooling_metadata=pooling_metadata)
-
-    def _prepare_encoder_model_input_tensors(
-        self, seq_group_metadata_list: List[SequenceGroupMetadata],
-        model_input: ModelInputForGPUWithPoolingMetadata
-    ) -> ModelInputForGPUWithPoolingMetadata:
-        """Helper method to prepare the model input based on a given sequence
-        group. Prepares metadata needed for the base model forward pass but not
-        metadata for possible additional steps, e.g., sampling.
-
-        The API assumes seq_group_metadata_list is sorted by prefill -> decode.
-
-        The result tensors and data structure also batches input in prefill
-        -> decode order. For example,
-
-        - input_tokens[:num_prefill_tokens] contains prefill tokens.
-        - input_tokens[num_prefill_tokens:] contains decode tokens.
-
-        If cuda graph is required, this API automatically pads inputs.
-        """
-        input_tokens: List[int] = []
-        input_positions: List[int] = []
-        slot_mapping: List[int] = []
-        lora_index_mapping: List[int] = []
-        lora_prompt_mapping: List[int] = []
-        lora_requests: Set[LoRARequest] = set()
-        prompt_adapter_index_mapping: List[int] = []
-        prompt_adapter_prompt_mapping: List[int] = []
-        prompt_adapter_requests: Set[PromptAdapterRequest] = set()
-
-        seq_lens: List[int] = []
-        prefill_seq_lens: List[int] = []
-        decode_seq_lens: List[int] = []
-        context_lens: List[int] = []
-        query_lens: List[int] = []
-        block_tables: List[List[int]] = []
-        multi_modal_inputs_list: List[MultiModalInputs] = []
-        decode_only = True
-        num_prefills = 0
-        num_prefill_tokens = 0
-        num_decode_tokens = 0
-
-        if len(seq_group_metadata_list) == 0:
-            # Leave the encoder/cross-attention input
-            # fields at default values if the seq group
-            # metadata list arg is an empty list
-            return model_input
-
-        if self.sliding_window is not None:
-            raise NotImplementedError()
-            # sliding_window_blocks = (self.sliding_window + self.block_size -
-            #                          1) // self.block_size
-            # block_aligned_sliding_window = \
-            #     sliding_window_blocks * self.block_size
-
-        for seq_group_metadata in seq_group_metadata_list:
-            seq_ids = list(seq_group_metadata.seq_data.keys())
-            is_prompt = seq_group_metadata.is_prompt
-
-            computed_block_nums = None
-            if (self.scheduler_config is not None
-                    and self.scheduler_config.chunked_prefill_enabled
-                    and not (computed_block_nums is None
-                             or computed_block_nums == [])):
-                raise RuntimeError(
-                    "chunked prefill cannot be used with prefix caching "
-                    "now.")
-
-            seq_data = seq_group_metadata.encoder_seq_data
-            cross_block_table = seq_group_metadata.cross_block_table
-            if is_prompt:
-                context_len = seq_data.get_num_computed_tokens()
-            else:
-                # get_num_computed_tokens is incorrect for spec decoding.
-                # So, we should have a special logic here.
-                # TODO(sang): Fix it.
-                context_len = seq_data.get_len()
-
-            seq_len = seq_data.get_len()
-
-            if is_prompt:
-                tokens = seq_data.get_token_ids()[context_len:seq_len]
-            else:
-                # Optimization. get_token_ids requires the entire copy of
-                # tokens.
-                tokens = [seq_data.get_last_token_id()]
-
-            # Prefix cache was hit.
-            # Prefix is not supported with sliding_window
-            prefix_cache_hit = (computed_block_nums is not None
-                                and len(computed_block_nums) > 0
-                                and self.sliding_window is None and is_prompt)
-
-            # These are seq_len/context_len capped to the sliding window.
-            # They are passed to decode kernel.
-            # We still need original seq_len/context_len to compute slot
-            # mapping (and input position) below.
-            curr_sliding_window_blocks = None
-            sliding_seq_len = seq_len
-            sliding_context_len = context_len
-
-            # TODO(sang): This is a hack to make sliding window work with
-            # paged attn. We can remove it if we make paged attn kernel
-            # to properly handle slinding window attn.
-            # if (self.sliding_window is not None and not is_prompt):
-            #     curr_sliding_window_blocks = sliding_window_blocks
-            #     if self.scheduler_config.use_v2_block_manager:
-            #         # number of elements in last block
-            #         suff_len = seq_len % self.block_size
-            #         sliding_seq_len = min(
-            #             seq_len, block_aligned_sliding_window + suff_len)
-            #         if suff_len > 0:
-            #             curr_sliding_window_blocks += 1
-            #     else:
-            #         sliding_seq_len = min(seq_len, self.sliding_window)
-            #     sliding_context_len = sliding_seq_len - 1
-
-            # TODO(sang): Combine chunked prefill and prefix caching by
-            # only allowing multiple of block_size chunk size.
-            # NOTE: This only works for oooooooxxx style attention.
-            if prefix_cache_hit:
-                assert computed_block_nums is not None
-                context_len = len(computed_block_nums) * self.block_size
-                tokens = tokens[context_len:]
-
-                # need to think what to set it to when we have both sliding
-                # window and prefix caching...
-                assert self.sliding_window is None, \
-                    "Prefix caching is not supported with sliding window"
-                sliding_context_len = context_len
-
-                if self.attn_backend.get_name() == "flash-attn":
-                    # NOTE(woosuk): For flash-attn, the block table should
-                    # include the entries for the incoming prefill tokens.
-                    # TODO(woosuk): This is a temporary fix. We should
-                    # provide a unified interface for different backends.
-                    block_table = cross_block_table
-                else:
-                    block_table = computed_block_nums
-            elif (self.scheduler_config.chunked_prefill_enabled
-                  or not is_prompt):
-                if cross_block_table is not None:
-                    # chunked prefill or decode
-                    block_table = cross_block_table
-                    if curr_sliding_window_blocks is not None:
-                        block_table = block_table[-curr_sliding_window_blocks:]
-                else:
-                    # Only happens when memory profiling runs.
-                    block_table = []
-            else:
-                # Prefill without chunked prefill or memory profiling.
-                block_table = []
-            block_tables.append(block_table)
-
-            seq_lens.append(sliding_seq_len)
-            context_lens.append(sliding_context_len)
-            query_len = sliding_seq_len - sliding_context_len
-            query_lens.append(query_len)
-            input_tokens.extend(tokens)
-            input_positions.extend(list(range(context_len, seq_len)))
-            lora_id = seq_group_metadata.lora_int_id
-            prompt_adapter_id = seq_group_metadata.prompt_adapter_id
-
-            if is_prompt:
-                assert len(seq_ids) == 1
-                num_prefills += 1
-                num_prefill_tokens += len(tokens)
-                decode_only = False
-                prefill_seq_lens.append(seq_len)
-            else:
-                # assert is_encoder_seq or query_len == 1, (
-                #     "seq_len: {}, context_len: {}, query_len: {}".format(
-                #         seq_len, context_len, query_len))
-                num_decode_tokens += query_len
-                decode_seq_lens.append(sliding_seq_len)
-
-            if lora_id > 0:
-                lora_requests.add(seq_group_metadata.lora_request)
-
-            lora_index_mapping += [lora_id] * query_len
-            lora_prompt_mapping.extend(
-                [lora_id] *
-                (query_len if seq_group_metadata.sampling_params and
-                 seq_group_metadata.sampling_params.prompt_logprobs is not None
-                 else 1))
-
-            mm_data = seq_group_metadata.multi_modal_data
-            if mm_data:
-                # Process multi-modal data
-                mm_kwargs = self.multi_modal_input_mapper(mm_data)
-                multi_modal_inputs_list.append(mm_kwargs)
-
-            if prompt_adapter_id > 0 and is_prompt:
-                prompt_adapter_requests.add(
-                    seq_group_metadata.prompt_adapter_request)
-
-                num_tokens = seq_group_metadata.\
-                                        prompt_adapter_num_virtual_tokens
-                pm = [prompt_adapter_id
-                      ] * num_tokens + [0] * (query_len - num_tokens)
-                prompt_adapter_index_mapping += pm
-                prompt_adapter_prompt_mapping.extend(
-                    [prompt_adapter_id] *
-                    (query_len if seq_group_metadata.sampling_params
-                     and seq_group_metadata.sampling_params.prompt_logprobs
-                     else 1))
-
-            is_profile_run = _is_single_block_table_empty(
-                seq_group_metadata.block_tables)
-            if is_profile_run:
-                # During memory profiling, the block tables are not
-                # initialized yet. In this case, we just use a dummy
-                # slot mapping.
-                # In embeddings, the block tables are {seq_id: None}.
-                slot_mapping.extend([_PAD_SLOT_ID] * seq_len)
-                continue
-
-            # Compute the slot mapping.
-            if block_table := cross_block_table:
-
-                block_table = cross_block_table
-
-                # Mask the [0, start_idx) tokens of the prompt with
-                # _PAD_SLOT_ID, where start_idx is max(0, seq_len -
-                # sliding_window). For example, if the prompt len is 10,
-                # sliding window is 8, and block size is 4, the first two
-                # tokens are masked and the slot mapping will be
-                # [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
-                start_idx = 0
-                if self.sliding_window is not None:
-                    if is_prompt:
-                        assert self.scheduler_config.use_v2_block_manager \
-                            or context_len == 0, (
-                            "Prefix caching is currently not supported with "
-                            "sliding window attention in V1 block manager")
-                    # It is an optimization. When it is decoding, it is always
-                    # 0. When prefill, we use it to not write slots to kv cache
-                    # to save memory.
-                    start_idx = max(0, query_len - self.sliding_window)
-
-                for i in range(context_len, seq_len):
-                    if i < start_idx:
-                        slot_mapping.append(_PAD_SLOT_ID)
-                        continue
-
-                    block_number = block_table[i // self.block_size]
-                    block_offset = i % self.block_size
-                    slot = block_number * self.block_size + block_offset
-                    slot_mapping.append(slot)
-
-            # # Prepare input tensors for flashinfer
-            # if self.attn_backend.get_name() == "flashinfer":
-            #     assert False
-
-        batch_size = len(input_tokens)
-        max_query_len = max(query_lens)
-        max_seq_len = (max(prefill_seq_lens, default=0)
-                       if is_prompt else max(decode_seq_lens, default=0))
-
-        # If cuda graph can be used, pad tensors accordingly.
-        # See `capture_model` API for more details.
-        # vLLM uses cuda graph only for decoding requests.
-        use_captured_graph = (decode_only
-                              and not self.model_config.enforce_eager
-                              and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
-                              and max_seq_len <= self.max_seq_len_to_capture)
-        if use_captured_graph:
-            raise NotImplementedError("CUDAGraph is currently not supported "
-                                      "for encoder/decoder models.")
-
-        max_block_table_len = max(
-            len(block_table) for block_table in block_tables)
-        block_tables = make_tensor_with_pad(
-            block_tables,
-            max_len=max_block_table_len,
-            pad=0,
-            dtype=torch.int,
-            device=self.device,
-        )
-        assert (not is_prompt) or max_query_len > 0, (
-            "Decode-phase query_lens: {}".format(query_lens))
-
-        # context_lens_tensor = torch.tensor(context_lens,
-        #                                    dtype=torch.int,
-        #                                    device=self.device)
-
-        seq_lens_tensor = torch.tensor(seq_lens,
-                                       dtype=torch.int,
-                                       device=self.device)
-        query_lens_tensor = torch.tensor(query_lens,
-                                         dtype=torch.long,
-                                         device=self.device)
-        query_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
-                                      dtype=torch.int32,
-                                      device=self.device)
-        seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
-                                    dtype=torch.int32,
-                                    device=self.device)
-
-        torch.cumsum(seq_lens_tensor,
-                     dim=0,
-                     dtype=seq_start_loc.dtype,
-                     out=seq_start_loc[1:])
-        torch.cumsum(query_lens_tensor,
-                     dim=0,
-                     dtype=query_start_loc.dtype,
-                     out=query_start_loc[1:])
-
-        attn_metadata = model_input.attn_metadata
-        assert attn_metadata is not None
-
-        slot_mapping_tensor = torch.tensor(slot_mapping,
-                                           dtype=torch.long,
-                                           device=self.device)
-
-        # Set encoder-oriented attention metadata fields
-        attn_metadata.num_encoder_tokens = sum(seq_lens)
-        attn_metadata.encoder_seq_lens = seq_lens
-        attn_metadata.encoder_seq_lens_tensor = seq_lens_tensor
-        attn_metadata.max_encoder_seq_len = max_seq_len
-        attn_metadata.cross_slot_mapping = slot_mapping_tensor
-        attn_metadata.cross_block_tables = block_tables
-
-        if seq_group_metadata.is_prompt:
-
-            input_tokens_tensor = torch.tensor(input_tokens,
-                                               dtype=torch.long,
-                                               device=self.device)
-            input_positions_tensor = torch.tensor(input_positions,
-                                                  dtype=torch.long,
-                                                  device=self.device)
-
-        else:
-
-            input_tokens_tensor = torch.tensor([],
-                                               dtype=torch.long,
-                                               device=self.device)
-            input_positions_tensor = torch.tensor([],
-                                                  dtype=torch.long,
-                                                  device=self.device)
-
-        # Inject attn_metadata encoder/cross-attention fields &
-        # encoder input tokens/positions into model_input.
-        # Frozen dataclass fields cannot be modified, so use
-        # dataclasses.replace to construct a new model input
-        # instance.
-        model_input = dataclasses.replace(
-            model_input,
-            attn_metadata=attn_metadata,
-            encoder_input_tokens=input_tokens_tensor,
-            encoder_input_positions=input_positions_tensor,
-        )
-
-        logits_soft_cap = getattr(self.model_config.hf_config,
-                                  'attn_logit_softcapping', None)
-        if logits_soft_cap is not None and self.attn_backend.get_name(
-        ) != "flashinfer":
-            raise ValueError("Models with logits_soft_cap (i.e., Gemma-2)"
-                             " require FlashInfer backend, however vLLM"
-                             " currently only supports xFormers backend"
-                             " for encoder/decoder models.")
-
-        return model_input
 
     def _prepare_pooling(
         self,

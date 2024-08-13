@@ -279,8 +279,8 @@ class LLMEngine:
             observability_config=self.observability_config,
         )
 
-        if not self.model_config.embedding_mode:
-            self._initialize_kv_caches()
+        # if not self.model_config.embedding_mode:
+        self._initialize_kv_caches()
 
         # If usage stat is enabled, collect relevant info.
         if is_usage_stats_enabled():
@@ -579,8 +579,12 @@ class LLMEngine:
         seq_id = next(self.seq_counter)
         eos_token_id = self._get_eos_token_id(lora_request)
 
-        seq = Sequence(seq_id, processed_inputs, block_size, eos_token_id,
-                       lora_request, prompt_adapter_request)
+        seq = Sequence(seq_id,
+                       processed_inputs,
+                       block_size,
+                       eos_token_id,
+                       lora_request,
+                       prompt_adapter_request)
 
         encoder_seq = None
         if 'encoder_prompt_token_ids' in processed_inputs:
@@ -654,7 +658,9 @@ class LLMEngine:
         """
 
         decoder_start_token_id = self._get_decoder_start_token_id()
-        assert decoder_start_token_id is not None
+        # assert decoder_start_token_id is not None
+        if decoder_start_token_id is None:
+            return []
 
         if decoder_input_ids is None:
             # no decoder prompt input ->

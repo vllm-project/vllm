@@ -21,7 +21,8 @@ from vllm.sequence import (IntermediateTensors, PoolerOutput, SamplerOutput,
 from vllm.utils import STR_NOT_IMPL_ENC_DEC_BACKEND, make_tensor_with_pad
 from vllm.worker.model_runner import (_PAD_SLOT_ID, GPUModelRunnerBase,
                                       ModelInputForGPUBuilder,
-                                      ModelInputForGPUWithSamplingMetadata)
+                                      ModelInputForGPUWithSamplingMetadata,
+                                      TModelInputForGPU)
 from vllm.worker.model_runner_base import (
     _add_attn_metadata_broadcastable_dict,
     _add_sampling_metadata_broadcastable_dict)
@@ -64,7 +65,7 @@ class EncoderDecoderModelInput(ModelInputForGPUWithSamplingMetadata):
             super().from_broadcasted_tensor_dict(tensor_dict, attn_backend))
 
 
-class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
+class EncoderDecoderModelRunnerBase(GPUModelRunnerBase[TModelInputForGPU]):
     _model_input_cls: Type[EncoderDecoderModelInput] = (
         EncoderDecoderModelInput)
     _builder_cls: Type[ModelInputForGPUBuilder] = (ModelInputForGPUBuilder)
@@ -471,3 +472,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
 
         return (attn_metadata, encoder_input_tokens_tensor,
                 encoder_input_positions_tensor)
+
+
+class EncoderDecoderModelRunner(
+        EncoderDecoderModelRunnerBase[EncoderDecoderModelInput]):
+    pass
