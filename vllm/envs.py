@@ -358,7 +358,8 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     (os.environ.get("VLLM_TEST_FORCE_FP8_MARLIN", "0").strip().lower() in
      ("1", "true")),
 
-    # If set, allow running the engine as a separate ray actor, which is a deprecated feature soon to be removed
+    # If set, allow running the engine as a separate ray actor,
+    # which is a deprecated feature soon to be removed.
     # See https://github.com/vllm-project/vllm/issues/7045
     "VLLM_ALLOW_ENGINE_USE_RAY":
     lambda:
