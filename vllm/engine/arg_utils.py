@@ -189,7 +189,7 @@ class EngineArgs:
             default=EngineArgs.load_format,
             choices=[
                 'auto', 'pt', 'safetensors', 'npcache', 'dummy', 'tensorizer',
-                'bitsandbytes'
+                'bitsandbytes', 'sharded_state'
             ],
             help='The format of the model weights to load.\n\n'
             '* "auto" will try to load the weights in the safetensors format '
