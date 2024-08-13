@@ -1,6 +1,6 @@
 import os
 import tempfile
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 if TYPE_CHECKING:
     VLLM_HOST_IP: str = ""
@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_TEST_FORCE_FP8_MARLIN: bool = False
+    VLLM_PLUGINS: Optional[List[str]] = None
 
 
 def get_default_cache_root():
@@ -362,6 +363,13 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda:
     (os.environ.get("VLLM_TEST_FORCE_FP8_MARLIN", "0").strip().lower() in
      ("1", "true")),
+
+    # a list of plugin names to load, separated by commas.
+    # if this is not set, it means all plugins will be loaded
+    # if this is set to an empty string, no plugins will be loaded
+    "VLLM_PLUGINS":
+    lambda: None if "VLLM_PLUGINS" not in os.environ else os.environ[
+        "VLLM_PLUGINS"].split(","),
 }
 
 # end-env-vars-definition

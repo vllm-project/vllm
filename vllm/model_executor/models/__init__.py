@@ -166,7 +166,7 @@ class ModelRegistry:
 
     @staticmethod
     def get_supported_archs() -> List[str]:
-        return list(_MODELS.keys())
+        return list(_MODELS.keys()) + list(_OOT_MODELS.keys())
 
     @staticmethod
     def register_model(model_arch: str, model_cls: Type[nn.Module]):

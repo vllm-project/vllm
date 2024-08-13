@@ -23,4 +23,5 @@ pyzmq
 librosa # Required for audio processing
 soundfile # Required for audio processing
 gguf == 0.9.1
+importlib_metadata
 compressed-tensors == 0.5.0
