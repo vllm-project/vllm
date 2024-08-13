@@ -391,7 +391,7 @@ class MixtralForCausalLM(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, intermediate_tensors)
+                                   attn_metadata)
         return hidden_states
     
     def make_empty_intermediate_tensors(

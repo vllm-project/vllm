@@ -283,25 +283,14 @@ class MixtralModel(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
-        intermediate_tensors: Optional[IntermediateTensors],
     ) -> torch.Tensor:
-        if get_pp_group().is_first_rank:
-            hidden_states = self.embed_tokens(input_ids)
-            residual = None
-        else:
-            assert intermediate_tensors is not None
-            hidden_states = intermediate_tensors["hidden_states"]
-            residual = intermediate_tensors["residual"]
-        for i in range(self.start_layer, self.end_layer):
+        hidden_states = self.embed_tokens(input_ids)
+        residual = None
+        for i in range(len(self.layers)):
             layer = self.layers[i]
             hidden_states, residual = layer(positions, hidden_states,
-                                            kv_caches[i - self.start_layer],
-                                            attn_metadata, residual)
-        if not get_pp_group().is_last_rank:
-            return IntermediateTensors({
-                "hidden_states": hidden_states,
-                "residual": residual
-            })
+                                            kv_caches[i], attn_metadata,
+                                            residual)
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
@@ -373,7 +362,7 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, intermediate_tensors)
+                                   attn_metadata)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,
