@@ -25,7 +25,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
-from transformers import GraniteConfig
+# from transformers import GraniteConfig
+from vllm.transformers_utils.configs.granite import GraniteConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
