@@ -168,7 +168,6 @@ class ModelConfig:
         self.served_model_name = get_served_model_name(model,
                                                        served_model_name)
         self.multimodal_config = multimodal_config
-        
 
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()

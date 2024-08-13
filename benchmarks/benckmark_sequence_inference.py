@@ -181,18 +181,27 @@ def main(args: argparse.Namespace):
     # Sample the requests.
     tokenizer = get_tokenizer(args.tokenizer,
                               trust_remote_code=args.trust_remote_code)
-    requests = sample_requests(
-        args.dataset, args.num_prompts, tokenizer, args.output_len)
+    requests = sample_requests(args.dataset, args.num_prompts, tokenizer,
+                               args.output_len)
 
     if args.backend == "vllm":
-        elapsed_time = run_vllm(requests, args.model, args.tokenizer,
-                                args.quantization, args.tensor_parallel_size,
-                                args.seed, args.n, args.use_beam_search,
-                                args.trust_remote_code, args.dtype,
-                                args.max_num_batched_tokens, args.max_num_seqs,
-                                args.pipeline_parallel_size,
-                                args.sequence_parallel_size,
-                                args.max_model_len, args.enable_long_sequence,)
+        elapsed_time = run_vllm(
+            requests,
+            args.model,
+            args.tokenizer,
+            args.quantization,
+            args.tensor_parallel_size,
+            args.seed,
+            args.n,
+            args.use_beam_search,
+            args.trust_remote_code,
+            args.dtype,
+            args.max_num_batched_tokens,
+            args.max_num_seqs,
+            args.pipeline_parallel_size,
+            args.sequence_parallel_size,
+            args.max_model_len,
+            args.enable_long_sequence,)
     # elif args.backend == "hf":
     #     assert args.tensor_parallel_size == 1
     #     elapsed_time = run_hf(requests, args.model, tokenizer, args.n,

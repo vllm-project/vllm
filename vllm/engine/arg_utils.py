@@ -733,7 +733,8 @@ class EngineArgs:
             skip_tokenizer_init=self.skip_tokenizer_init,
             served_model_name=self.served_model_name,
             multimodal_config=vision_language_config,
-            enable_long_sequence=self.enable_long_sequence,)
+            enable_long_sequence=self.enable_long_sequence,
+            )
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
