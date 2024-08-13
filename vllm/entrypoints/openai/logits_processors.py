@@ -71,7 +71,7 @@ def get_logits_processors(
         # Check if token_id is within the vocab size
         for token_id, bias in clamped_logit_bias.items():
             if token_id < 0 or token_id >= tokenizer.vocab_size:
-                raise ValueError("token_id in logit_bias contains "
+                raise ValueError(f"token_id {token_id} in logit_bias contains "
                                  "out-of-vocab token id")
 
         logits_processors.append(
