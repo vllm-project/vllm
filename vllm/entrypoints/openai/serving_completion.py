@@ -224,9 +224,12 @@ class OpenAIServingCompletion(OpenAIServing):
         previous_text_lens = [0] * num_choices * num_prompts
         previous_num_tokens = [0] * num_choices * num_prompts
         has_echoed = [False] * num_choices * num_prompts
+        num_prompt_tokens = [0] * num_prompts
 
         try:
             async for prompt_idx, res in result_generator:
+                if res.prompt_token_ids is not None:
+                    num_prompt_tokens[prompt_idx] = len(res.prompt_token_ids)
 
                 for output in res.outputs:
                     i = output.index + prompt_idx * num_choices
@@ -290,7 +293,7 @@ class OpenAIServingCompletion(OpenAIServing):
                             and request.stream_options.include_usage):
                         if (request.stream_options.continuous_usage_stats
                                 or output.finish_reason is not None):
-                            prompt_tokens = len(res.prompt_token_ids)
+                            prompt_tokens = num_prompt_tokens[prompt_idx]
                             completion_tokens = previous_num_tokens[i]
                             usage = UsageInfo(
                                 prompt_tokens=prompt_tokens,
