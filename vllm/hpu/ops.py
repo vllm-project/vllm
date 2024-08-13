@@ -14,7 +14,7 @@ import torch.nn.functional as F
 import vllm.hpu.utils as hpu_utils
 from vllm.logger import init_logger
 
-logger = init_logger()
+logger = init_logger(__name__)
 HPUFusedRMSNorm = None
 try:
     from habana_frameworks.torch.hpex.normalization import FusedRMSNorm
