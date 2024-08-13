@@ -464,7 +464,12 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
 
                 param = params_dict[name]
 
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight, name, shard_id,
-                            expert_id, True)
+                if shard_id is not None:
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
+                    weight_loader(param, loaded_weight, name, shard_id,
+                                  expert_id, True)
+                else:
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
+                    weight_loader(param, loaded_weight)
