@@ -64,6 +64,13 @@ main() {
         exit 0
     fi
 
+    # run sglang
+    if [ -e /sgl-workspace ]; then
+        echo "SGLang is available, redirect to run-sgl-nightly.sh"
+        bash ../.buildkite/nightly-benchmarks/scripts/run-sgl-nightly.sh
+        exit 0
+    fi
+
     # run vllm
     if [ -e /vllm-workspace ]; then
         echo "vllm is available, redirect to run-vllm-nightly.sh"
