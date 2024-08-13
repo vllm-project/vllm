@@ -657,15 +657,13 @@ class BitnetForCausalLM(nn.Module):
                 # This is a trick to load weight scale for BitNet Models
                 if name.endswith(".sw") and name in params_dict:
                     param = params_dict[name]
-                    if param_name == ".qkv_proj":                    
-                        loaded_weight = loaded_weight.repeat((param.data.shape[0] // 3, *param.data.shape[1:]))
-                        shard_id = {
-                            "q": 0,
-                            "k": 1,
-                            "v": 2
-                        }[shard_id]
+                    if param_name == ".qkv_proj":
+                        loaded_weight = loaded_weight.repeat(
+                            (param.data.shape[0] // 3, *param.data.shape[1:]))
+                        shard_id = {"q": 0, "k": 1, "v": 2}[shard_id]
                     elif param_name == ".gate_up_proj":
-                        loaded_weight = loaded_weight.repeat((param.data.shape[0] // 2, *param.data.shape[1:]))
+                        loaded_weight = loaded_weight.repeat(
+                            (param.data.shape[0] // 2, *param.data.shape[1:]))
                     partital_weight_loader(param, loaded_weight, shard_id)
                     break
                 param = params_dict[name]
@@ -682,7 +680,8 @@ class BitnetForCausalLM(nn.Module):
                 # This is a trick to load weight scale for BitNet Models
                 if name.endswith(".sw") and name in params_dict:
                     param = params_dict[name]
-                    weight_loader(param, loaded_weight.repeat(param.data.shape))
+                    weight_loader(param,
+                                  loaded_weight.repeat(param.data.shape))
                     continue
                 # Remapping the name of FP8 kv-scale.
                 if name.endswith("kv_scale"):

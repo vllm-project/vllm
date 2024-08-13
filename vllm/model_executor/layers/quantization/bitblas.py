@@ -264,7 +264,7 @@ class BitBLASLinearMethod(LinearMethodBase):
 
         sw = Parameter(
             torch.empty(
-                (output_size_per_partition,),
+                (output_size_per_partition, ),
                 device="cuda",
                 dtype=params_dtype,
             ),

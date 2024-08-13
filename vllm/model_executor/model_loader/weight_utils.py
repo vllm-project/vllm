@@ -435,14 +435,17 @@ def default_weight_loader(param: torch.Tensor,
     assert param.size() == loaded_weight.size()
     param.data.copy_(loaded_weight)
 
-def partital_weight_loader(param: torch.Tensor,
-                          loaded_weight: torch.Tensor, id: int) -> None:
+
+def partital_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor,
+                           id: int) -> None:
     """Partition weight loader."""
     param_size = param.size().numel()
     loaded_weight_size = loaded_weight.size().numel()
     assert param_size % loaded_weight_size == 0
     assert id < (param_size // loaded_weight_size)
-    param.data[id*loaded_weight_size:(id+1)*loaded_weight_size].copy_(loaded_weight)
+    param.data[id * loaded_weight_size:(id + 1) *
+               loaded_weight_size].copy_(loaded_weight)
+
 
 def initialize_dummy_weights(
     model: torch.nn.Module,
