@@ -95,6 +95,7 @@ def flash_attn_with_kvcache(
     softmax_scale: Optional[float] = None,
     causal: bool = False,
     alibi_slopes: Optional[List[int]] = None,
+    softcap: float = 0.0,
 ) -> torch.Tensor:
     return _flash_attn_with_kvcache(
         decode_query,
@@ -105,6 +106,7 @@ def flash_attn_with_kvcache(
         softmax_scale=softmax_scale,
         causal=causal,
         alibi_slopes=alibi_slopes,
+        softcap=softcap,
     )
 
 
@@ -122,6 +124,7 @@ def _(
     softmax_scale: Optional[float] = None,
     causal: bool = False,
     alibi_slopes: Optional[List[int]] = None,
+    softcap: float = 0.0,
 ) -> torch.Tensor:
     # NOTE: shape can be incorrect.
     # just annotate the shape to pass Dynamo
