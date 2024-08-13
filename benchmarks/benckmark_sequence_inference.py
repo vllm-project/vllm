@@ -3,8 +3,9 @@ import argparse
 import json
 import random
 import time
-from typing import List, Optional, Tuple
 from transformers import PreTrainedTokenizerBase
+from typing import List, Optional, Tuple
+
 
 from vllm import LLM, SamplingParams
 from vllm.transformers_utils.tokenizer import get_tokenizer
