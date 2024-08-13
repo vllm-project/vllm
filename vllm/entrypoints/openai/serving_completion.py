@@ -232,7 +232,6 @@ class OpenAIServingCompletion(OpenAIServing):
                 prompt_token_ids = res.prompt_token_ids
                 prompt_logprobs = res.prompt_logprobs
                 prompt_text = res.prompt
-                assert prompt_text is not None
 
                 delta_token_ids: GenericSequence[int]
                 out_logprobs: Optional[GenericSequence[Optional[Dict[
@@ -245,6 +244,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
                     assert request.max_tokens is not None
                     if request.echo and request.max_tokens == 0:
+                        assert prompt_text is not None
                         # only return the prompt
                         delta_text = prompt_text
                         delta_token_ids = prompt_token_ids
@@ -252,6 +252,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         has_echoed[i] = True
                     elif (request.echo and request.max_tokens > 0
                           and not has_echoed[i]):
+                        assert prompt_text is not None
                         assert prompt_logprobs is not None
                         # echo the prompt and first token
                         delta_text = prompt_text + output.text
@@ -357,7 +358,6 @@ class OpenAIServingCompletion(OpenAIServing):
             prompt_token_ids = final_res.prompt_token_ids
             prompt_logprobs = final_res.prompt_logprobs
             prompt_text = final_res.prompt
-            assert prompt_text is not None
 
             token_ids: GenericSequence[int]
             out_logprobs: Optional[GenericSequence[Optional[Dict[int,
@@ -366,10 +366,12 @@ class OpenAIServingCompletion(OpenAIServing):
             for output in final_res.outputs:
                 assert request.max_tokens is not None
                 if request.echo and request.max_tokens == 0:
+                    assert prompt_text is not None
                     token_ids = prompt_token_ids
                     out_logprobs = prompt_logprobs
                     output_text = prompt_text
                 elif request.echo and request.max_tokens > 0:
+                    assert prompt_text is not None
                     token_ids = [*prompt_token_ids, *output.token_ids]
 
                     if request.logprobs is None:
