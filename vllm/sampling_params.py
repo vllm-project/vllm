@@ -31,7 +31,8 @@ first argument, and returns a modified tensor of logits
 to sample from."""
 
 
-class SamplingParams(msgspec.Struct, omit_defaults=True):
+class SamplingParams(msgspec.Struct,
+                     omit_defaults=True):  # type: ignore[call-arg]
     """Sampling parameters for text generation.
 
     Overall, we follow the sampling parameters from the OpenAI text completion

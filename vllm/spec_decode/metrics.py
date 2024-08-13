@@ -9,9 +9,10 @@ from vllm.model_executor.layers.spec_decode_base_sampler import (
 from vllm.utils import is_pin_memory_available
 
 
-class SpecDecodeWorkerMetrics(msgspec.Struct,
-                              omit_defaults=True,
-                              array_like=True):
+class SpecDecodeWorkerMetrics(
+        msgspec.Struct,
+        omit_defaults=True,  # type: ignore[call-arg]
+        array_like=True):  # type: ignore[call-arg]
     """Dataclass holding metrics emitted from the spec decode worker.
     """
 

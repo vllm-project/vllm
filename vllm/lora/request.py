@@ -6,7 +6,10 @@ import msgspec
 from vllm.adapter_commons.request import AdapterRequest
 
 
-class LoRARequest(msgspec.Struct, omit_defaults=True, array_like=True):
+class LoRARequest(
+        msgspec.Struct,
+        omit_defaults=True,  # type: ignore[call-arg]
+        array_like=True):  # type: ignore[call-arg]
     """
     Request for a LoRA adapter.
 
