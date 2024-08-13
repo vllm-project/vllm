@@ -1,5 +1,3 @@
-cmake >= 3.21
-ninja  # For faster builds.
 psutil
 sentencepiece  # Required for LLaMA tokenizer.
 numpy < 2.0.0

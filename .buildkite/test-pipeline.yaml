@@ -81,8 +81,7 @@ steps:
   fast_check: true
   mirror_hardwares: [amd]
   source_file_dependencies:
-  - vllm/entrypoints
-  - tests/entrypoints
+  - vllm/
   commands:
   - pip install -e ./plugins/vllm_add_dummy_model
   - pytest -v -s entrypoints/llm
