@@ -22,6 +22,7 @@ function wait_for(){
         max_retries=$((max_retries-1))
         if [[ max_retries -le 0 ]]; then
             echo "Timed out waiting for $name server" >&2
+            kill -9 ${server_pid}
             exit 1
         fi
     done
