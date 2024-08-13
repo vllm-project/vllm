@@ -17,28 +17,27 @@ MODEL_ARG_EXPTYPES = [
     ("TheBloke/Llama-2-7B-Chat-GPTQ", "awq", ["ERROR"]),
 ]
 
+
 @pytest.mark.parametrize("model_arg_exptype", MODEL_ARG_EXPTYPES)
 def test_speculative_model_quantization_config(
-    model_arg_exptype: Tuple[str, None, List[str]]
-) -> None:
+        model_arg_exptype: Tuple[str, None, List[str]]) -> None:
     model_path, quantization_arg, expected_type = model_arg_exptype
 
     try:
         target_model_name = 'JackFram/llama-68m'
-        target_model_config = ModelConfig(
-            model=target_model_name,
-            tokenizer=target_model_name,
-            tokenizer_mode="auto",
-            trust_remote_code=False,
-            seed=0,
-            dtype="float16",
-            revision=None,
-            quantization=None)
+        target_model_config = ModelConfig(model=target_model_name,
+                                          tokenizer=target_model_name,
+                                          tokenizer_mode="auto",
+                                          trust_remote_code=False,
+                                          seed=0,
+                                          dtype="float16",
+                                          revision=None,
+                                          quantization=None)
         target_parallel_config = ParallelConfig(
             pipeline_parallel_size=1,
             tensor_parallel_size=1,
         )
-        
+
         spec_config = SpeculativeConfig.maybe_create_spec_config(
             target_model_config=target_model_config,
             target_parallel_config=target_parallel_config,
