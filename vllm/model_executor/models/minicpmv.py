@@ -34,7 +34,7 @@ import torch.types
 from PIL import Image
 from torch import nn
 from torch.nn.init import trunc_normal_
-from transformers.configuration_utils import PretrainedConfig
+from transformers import PretrainedConfig
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
@@ -404,7 +404,7 @@ def get_version_by_config(config: PretrainedConfig) -> Tuple[int, ...]:
 
 
 def get_max_minicpmv_image_tokens(ctx: InputContext):
-    hf_config = ctx.get_hf_config(PretrainedConfig)
+    hf_config = ctx.get_hf_config()
     return getattr(hf_config, "query_num", 64)
 
 
@@ -420,7 +420,7 @@ def dummy_image_for_minicpmv(hf_config: PretrainedConfig):
 
 
 def dummy_data_for_minicpmv(ctx: InputContext, seq_len: int):
-    hf_config = ctx.get_hf_config(PretrainedConfig)
+    hf_config = ctx.get_hf_config()
 
     seq_data = dummy_seq_data_for_minicpmv(seq_len)
     mm_data = dummy_image_for_minicpmv(hf_config)
@@ -630,8 +630,11 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
         )
         return output
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits

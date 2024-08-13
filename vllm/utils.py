@@ -1101,9 +1101,9 @@ def cuda_device_count_stateless() -> int:
 
 
 #From: https://stackoverflow.com/a/4104188/2749989
-def run_once(f):
+def run_once(f: Callable[P, None]) -> Callable[P, None]:
 
-    def wrapper(*args, **kwargs) -> Any:
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
         if not wrapper.has_run:  # type: ignore[attr-defined]
             wrapper.has_run = True  # type: ignore[attr-defined]
             return f(*args, **kwargs)
