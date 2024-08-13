@@ -1,20 +1,20 @@
 Dockerfile
 ====================
 
-See `here <https://github.com/vllm-project/vllm/blob/main/Dockerfile>`_ for the main Dockerfile to construct 
-the image for running an OpenAI compatible server with vLLM.
+See `here <https://github.com/vllm-project/vllm/blob/main/Dockerfile>`__ for the main Dockerfile to construct 
+the image for running an OpenAI compatible server with vLLM. More information about deploying with Docker can be found `here <https://docs.vllm.ai/en/stable/serving/deploying_with_docker.html>`__.
 
--  Below is a visual representation of the multi-stage Dockerfile. The build graph contains the following nodes:
+Below is a visual representation of the multi-stage Dockerfile. The build graph contains the following nodes:
 
-   - All build stages
-   - The default build target (highlighted in grey)
-   - External images (with dashed borders)
+- All build stages
+- The default build target (highlighted in grey)
+- External images (with dashed borders)
    
-   The edges of the build graph represent:
-   
-   - FROM ... dependencies (with a solid line and a full arrow head)
-   - COPY --from=... dependencies (with a dashed line and an empty arrow head)
-   - RUN --mount=(.*)from=... dependencies (with a dotted line and an empty diamond arrow head)
+The edges of the build graph represent:
+
+- FROM ... dependencies (with a solid line and a full arrow head)
+- COPY --from=... dependencies (with a dashed line and an empty arrow head)
+- RUN --mount=(.*)from=... dependencies (with a dotted line and an empty diamond arrow head)
 
    .. figure:: ../../assets/dev/dockerfile-stages-dependency.png
       :alt: query

@@ -1,0 +1,22 @@
+FROM intel/oneapi-basekit:2024.1.0-devel-ubuntu20.04
+
+RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/intel-oneapi-archive-keyring.gpg > /dev/null && \
+    echo "deb [signed-by=/usr/share/keyrings/intel-oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main " | tee /etc/apt/sources.list.d/oneAPI.list && \
+    chmod 644 /usr/share/keyrings/intel-oneapi-archive-keyring.gpg && \
+    rm /etc/apt/sources.list.d/intel-graphics.list && \
+    wget -O- https://repositories.intel.com/graphics/intel-graphics.key | gpg --dearmor | tee /usr/share/keyrings/intel-graphics.gpg > /dev/null && \
+    echo "deb [arch=amd64,i386 signed-by=/usr/share/keyrings/intel-graphics.gpg] https://repositories.intel.com/graphics/ubuntu jammy arc" | tee /etc/apt/sources.list.d/intel.gpu.jammy.list && \
+    chmod 644 /usr/share/keyrings/intel-graphics.gpg
+
+RUN apt-get update  -y \
+&& apt-get install -y curl libicu70 lsb-release git wget vim numactl python3 python3-pip
+
+COPY ./ /workspace/vllm
+
+WORKDIR /workspace/vllm
+
+RUN pip install -v -r requirements-xpu.txt
+
+RUN VLLM_TARGET_DEVICE=xpu python3 setup.py install
+
+CMD ["/bin/bash"]

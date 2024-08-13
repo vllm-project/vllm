@@ -4,7 +4,7 @@ vLLM provides an HTTP server that implements OpenAI's [Completions](https://plat
 
 You can start the server using Python, or using [Docker](deploying_with_docker.rst):
 ```bash
-python -m vllm.entrypoints.openai.api_server --model NousResearch/Meta-Llama-3-8B-Instruct --dtype auto --api-key token-abc123
+vllm serve NousResearch/Meta-Llama-3-8B-Instruct --dtype auto --api-key token-abc123
 ```
 
 To call the server, you can use the official OpenAI Python client library, or any other HTTP client.
@@ -29,6 +29,8 @@ print(completion.choices[0].message)
 Please see the [OpenAI API Reference](https://platform.openai.com/docs/api-reference) for more information on the API. We support all parameters except:
 - Chat: `tools`, and `tool_choice`.
 - Completions: `suffix`.
+
+vLLM also provides experimental support for OpenAI Vision API compatible inference. See more details in [Using VLMs](../models/vlm.rst).
 
 ## Extra Parameters
 vLLM supports a set of parameters that are not part of the OpenAI API.
@@ -95,9 +97,7 @@ template, or the template in string form. Without a chat template, the server wi
 and all chat requests will error.
 
 ```bash
-python -m vllm.entrypoints.openai.api_server \
-  --model ... \
-  --chat-template ./path-to-chat-template.jinja
+vllm serve <model> --chat-template ./path-to-chat-template.jinja
 ```
 
 vLLM community provides a set of chat templates for popular models. You can find them in the examples
@@ -107,6 +107,17 @@ directory [here](https://github.com/vllm-project/vllm/tree/main/examples/)
 
 ```{argparse}
 :module: vllm.entrypoints.openai.cli_args
-:func: make_arg_parser
-:prog: -m vllm.entrypoints.openai.api_server
+:func: create_parser_for_docs
+:prog: vllm serve
 ```
+
+## Tool calling in the chat completion API
+vLLM supports only named function calling in the chat completion API. The `tool_choice` options `auto` and `required` are **not yet supported** but on the roadmap.
+
+To use a named function you need to define the function in the `tools` parameter and call it in the `tool_choice` parameter. 
+
+It is the callers responsibility to prompt the model with the tool information, vLLM will not automatically manipulate the prompt. **This may change in the future.**
+
+vLLM will use guided decoding to ensure the response matches the tool parameter object defined by the JSON schema in the `tools` parameter.
+
+Please refer to the OpenAI API reference documentation for more information.
