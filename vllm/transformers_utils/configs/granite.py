@@ -23,24 +23,27 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_rope_utils import rope_config_validation
 from transformers.utils import logging
 
-
 logger = logging.get_logger(__name__)
 
 
 class GraniteConfig(PretrainedConfig):
     r"""
-    This is the configuration class to store the configuration of a [`GraniteModel`]. It is used to instantiate an Granite
-    model according to the specified arguments, defining the model architecture. Instantiating a configuration with the
-    defaults will yield a similar configuration to that of the Granite-3B.
+    This is the configuration class to store the configuration of
+    a [`GraniteModel`]. It is used to instantiate an Granite
+    model according to the specified arguments, defining the model architecture.
+    Instantiating a configuration with the defaults will yield a similar
+    configuration to that of the Granite-3B.
 
-    Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
-    documentation from [`PretrainedConfig`] for more information.
+    Configuration objects inherit from [`PretrainedConfig`] and can be used to
+    control the model outputs. Read the documentation from [`PretrainedConfig`]
+    for more information.
 
 
     Args:
         vocab_size (`int`, *optional*, defaults to 32000):
-            Vocabulary size of the Granite model. Defines the number of different tokens that can be represented by the
-            `inputs_ids` passed when calling [`GraniteModel`]
+            Vocabulary size of the Granite model. Defines the number of
+            different tokens that can be represented by the `inputs_ids`
+            passed when calling [`GraniteModel`]
         hidden_size (`int`, *optional*, defaults to 4096):
             Dimension of the hidden representations.
         intermediate_size (`int`, *optional*, defaults to 11008):
@@ -48,26 +51,33 @@ class GraniteConfig(PretrainedConfig):
         num_hidden_layers (`int`, *optional*, defaults to 32):
             Number of hidden layers in the Transformer decoder.
         num_attention_heads (`int`, *optional*, defaults to 32):
-            Number of attention heads for each attention layer in the Transformer decoder.
+            Number of attention heads for each attention layer in the
+            Transformer decoder.
         num_key_value_heads (`int`, *optional*):
-            This is the number of key_value heads that should be used to implement Grouped Query Attention. If
-            `num_key_value_heads=num_attention_heads`, the model will use Multi Head Attention (MHA), if
-            `num_key_value_heads=1` the model will use Multi Query Attention (MQA) otherwise GQA is used. When
-            converting a multi-head checkpoint to a GQA checkpoint, each group key and value head should be constructed
-            by meanpooling all the original heads within that group. For more details checkout [this
-            paper](https://arxiv.org/pdf/2305.13245.pdf). If it is not specified, will default to
-            `num_attention_heads`.
+            This is the number of key_value heads that should be used to
+            implement Grouped Query Attention. If
+            `num_key_value_heads=num_attention_heads`, the model will use Multi
+            Head Attention (MHA), if `num_key_value_heads=1` the model will use
+            Multi Query Attention (MQA) otherwise GQA is used. When converting
+            a multi-head checkpoint to a GQA checkpoint, each group key and
+            value head should be constructed by meanpooling all the original
+            heads within that group. For more details checkout
+            [this paper](https://arxiv.org/pdf/2305.13245.pdf). If it is not
+            specified, will default to `num_attention_heads`.
         hidden_act (`str` or `function`, *optional*, defaults to `"silu"`):
-            The non-linear activation function (function or string) in the decoder.
+            The non-linear activation function (function or string) in the
+            decoder.
         max_position_embeddings (`int`, *optional*, defaults to 2048):
             The maximum sequence length that this model might ever be used with.
         initializer_range (`float`, *optional*, defaults to 0.02):
-            The standard deviation of the truncated_normal_initializer for initializing all weight matrices.
+            The standard deviation of the truncated_normal_initializer for
+            initializing all weight matrices.
         rms_norm_eps (`float`, *optional*, defaults to 1e-06):
             The epsilon used by the rms normalization layers.
         use_cache (`bool`, *optional*, defaults to `True`):
-            Whether or not the model should return the last key/values attentions (not used by all models). Only
-            relevant if `config.is_decoder=True`.
+            Whether or not the model should return the last key/values
+            attentions (not used by all models). Only relevant if
+            `config.is_decoder=True`.
         pad_token_id (`int`, *optional*):
             Padding token id.
         bos_token_id (`int`, *optional*, defaults to 1):
@@ -79,23 +89,33 @@ class GraniteConfig(PretrainedConfig):
         rope_theta (`float`, *optional*, defaults to 10000.0):
             The base period of the RoPE embeddings.
         rope_scaling (`Dict`, *optional*):
-            Dictionary containing the scaling configuration for the RoPE embeddings. Currently supports two scaling
-            strategies: linear and dynamic. Their scaling factor must be a float greater than 1. The expected format is
-            `{"type": strategy name, "factor": scaling factor}`. When using this flag, don't update
-            `max_position_embeddings` to the expected new maximum. See the following thread for more information on how
-            these scaling strategies behave:
-            https://www.reddit.com/r/LocalLLaMA/comments/14mrgpr/dynamically_scaled_rope_further_increases/. This is an
-            experimental feature, subject to breaking API changes in future versions.
+            Dictionary containing the scaling configuration for the RoPE
+            embeddings. Currently supports two scaling strategies: linear and
+            dynamic. Their scaling factor must be a float greater than 1. The
+            expected format is
+            `{"type": strategy name, "factor": scaling factor}`.
+            When using this flag, don't update `max_position_embeddings` to
+            the expected new maximum. See the following thread for more
+            information on how these scaling strategies behave:
+            https://www.reddit.com/r/LocalLLaMA/comments/14mrgpr/dynamically_scaled_rope_further_increases/.
+            This is an experimental feature, subject to breaking API changes
+            in future versions.
         attention_bias (`bool`, *optional*, defaults to `False`):
-            Whether to use a bias in the query, key, value and output projection layers during self-attention.
+            Whether to use a bias in the query, key, value and output
+            projection layers during self-attention.
         attention_dropout (`float`, *optional*, defaults to 0.0):
             The dropout ratio for the attention probabilities.
         mlp_bias (`bool`, *optional*, defaults to `False`):
-            Whether to use a bias in up_proj, down_proj and gate_proj layers in the MLP layers.
-        embedding_multiplier (`float`, *optional*, defaults to 1.0): embedding multiplier
-        logits_scaling (`float`, *optional*, defaults to 1.0): divisor for output logits
-        residual_multiplier (`float`, *optional*, defaults to 1.0): residual multiplier
-        attention_multiplier (`float`, *optional*, defaults to 1.0): attention multiplier
+            Whether to use a bias in up_proj, down_proj and gate_proj layers
+            in the MLP layers.
+        embedding_multiplier (`float`, *optional*, defaults to 1.0):
+            embedding multiplier
+        logits_scaling (`float`, *optional*, defaults to 1.0):
+            divisor for output logits
+        residual_multiplier (`float`, *optional*, defaults to 1.0):
+            residual multiplier
+        attention_multiplier (`float`, *optional*, defaults to 1.0):
+            attention multiplier
 
     ```python
     >>> from transformers import GraniteModel, GraniteConfig
