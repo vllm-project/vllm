@@ -1,12 +1,10 @@
-from typing import Optional
-
 import torch
 
 from vllm.utils import is_tpu
 
 from .interface import Platform, PlatformEnum, UnspecifiedPlatform
 
-current_platform: Optional[Platform]
+current_platform: Platform
 
 if torch.version.cuda is not None:
     from .cuda import CudaPlatform
