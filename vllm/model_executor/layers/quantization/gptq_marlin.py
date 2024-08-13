@@ -601,4 +601,5 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             renormalize=renormalize,
             w1_scale=layer.w13_scales,
             w2_scale=layer.w2_scales,
+            num_bits=self.quant_config.weight_bits,
         )

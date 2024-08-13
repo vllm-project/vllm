@@ -23,6 +23,7 @@ def fused_moe_marlin(
     use_fp8: bool = False,
     w1_scale: Optional[torch.Tensor] = None,
     w2_scale: Optional[torch.Tensor] = None,
+    num_bits: int = 8,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
@@ -56,7 +57,7 @@ def fused_moe_marlin(
     assert hidden_states.shape[
         1] == w1.shape[1] * 16, "Hidden size mismatch w1"
     assert hidden_states.shape[
-        1] == w2.shape[2] // 2, "Hidden size mismatch w2"
+        1] == w2.shape[2] // (num_bits // 2), "Hidden size mismatch w2"
     assert gating_output.shape[1] == w1.shape[0], "Number of experts mismatch"
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
     assert w1.is_contiguous(), "Expert weights1 must be contiguous"
@@ -86,7 +87,7 @@ def fused_moe_marlin(
 
     sorted_token_ids, _, _ = moe_align_block_size(topk_ids, block_size_m, E)
 
-    max_workspace_size = ((M + 255) // 256) * (max(2 * N, K) // 64) * 16
+    max_workspace_size = ((M + 255) // 256) * (max((num_bits // 2) * N, K) // 64) * 16
     workspace = torch.zeros(max_workspace_size,
                             dtype=torch.int,
                             device="cuda",
@@ -109,7 +110,7 @@ def fused_moe_marlin(
         rand_perm1,
         workspace,
         M,
-        2 * N,
+        (num_bits // 2) * N,
         K,
         True,
         E,
@@ -119,7 +120,7 @@ def fused_moe_marlin(
         False,
     )
 
-    ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, 2 * N))
+    ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, (num_bits // 2) * N))
 
     intermediate_cache3 = torch.ops._moe_C.marlin_gemm_moe(
         intermediate_cache2,
