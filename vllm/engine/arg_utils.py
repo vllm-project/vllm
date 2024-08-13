@@ -834,6 +834,7 @@ class EngineArgs:
             embedding_mode=model_config.embedding_mode,
             preemption_mode=self.preemption_mode,
             _send_delta_data=(envs.VLLM_USE_RAY_SPMD_WORKER
+                              and envs.VLLM_SPMD_SEND_DELTA_DATA
                               and parallel_config.use_ray))
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,

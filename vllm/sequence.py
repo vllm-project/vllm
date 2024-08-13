@@ -112,10 +112,14 @@ class RequestMetrics:
 
 
 class SequenceDataDelta(msgspec.Struct, array_like=True, omit_defaults=True):
-    """Delta SequenceGroupData to send to workers."""
+    """Delta SequenceData to send to workers per step."""
+    # A new token to be appended to existing SequenceData.
     new_output_token_ids: List[int]
+    # Overwriting existing `cumulative_logprob`
     new_cumulative_logprob: float
+    # Overwriting existing `num_computed_tokens`.
     new_num_computed_tokens: int
+    # Overwriting existing `stage`.
     new_stage: SequenceStage
 
 
@@ -151,7 +155,7 @@ class SequenceData(msgspec.Struct, omit_defaults=True):
     # is called.
     _new_appended_tokens: List[int] = msgspec.field(default_factory=list)
 
-    def __post_init__(self, ) -> None:
+    def __post_init__(self) -> None:
         self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(
             self._prompt_token_ids)
         self._update_cached_all_tokens()
@@ -892,7 +896,7 @@ class SequenceGroupMetadata(msgspec.Struct,
                     sequence_group_metadata_delta: SequenceGroupMetadataDelta):
         for id, delta in sequence_group_metadata_delta.seq_data_delta.items():
             self.seq_data[id].apply_delta(delta)
-        self.request_id = sequence_group_metadata_delta.request_id
+        assert self.request_id == sequence_group_metadata_delta.request_id
         self.block_tables = sequence_group_metadata_delta.block_tables
         self.token_chunk_size = sequence_group_metadata_delta.token_chunk_size
         self.do_sample = sequence_group_metadata_delta.do_sample
