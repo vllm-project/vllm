@@ -116,7 +116,7 @@ run_serving_tests() {
     cd $VLLM_SOURCE_CODE_LOC/benchmarks
     rm -rf /tokenizer_cache
     mkdir /tokenizer_cache
-    python ../.buildkite/nightly-benchmarks/scripts/download-tokenizer.py \
+    python3 ../.buildkite/nightly-benchmarks/scripts/download-tokenizer.py \
       --model "$model" \
       --cachedir /tokenizer_cache
     cd $VLLM_SOURCE_CODE_LOC/benchmarks
@@ -202,8 +202,8 @@ main() {
 
   export CURRENT_LLM_SERVING_ENGINE=trt
   run_serving_tests $BENCHMARK_ROOT/tests/nightly-tests.json
-  python -m pip install tabulate pandas
-  python $BENCHMARK_ROOT/scripts/summary-nightly-results.py
+  python3 -m pip install tabulate pandas
+  python3 $BENCHMARK_ROOT/scripts/summary-nightly-results.py
   upload_to_buildkite
 
 }
