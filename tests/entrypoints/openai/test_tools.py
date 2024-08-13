@@ -32,7 +32,7 @@ ARGS: List[str] = [
 CONFIGS: Dict[str, ServerConfig] = {
     "hermes": {
         "model":
-        "NousResearch/Hermes-2-Pro-Llama-3-8B",
+            "NousResearch/Hermes-2-Pro-Llama-3-8B",
         "arguments": [
             "--tool-call-parser", "hermes", "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_hermes.jinja")
@@ -40,46 +40,13 @@ CONFIGS: Dict[str, ServerConfig] = {
     },
     "mistral": {
         "model":
-        "mistralai/Mistral-7B-Instruct-v0.3",
+            "mistralai/Mistral-7B-Instruct-v0.3",
         "arguments": [
             "--tool-call-parser", "mistral", "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_mistral.jinja")
         ]
     }
 }
-
-MESSAGES_WITHOUT_TOOLS: List[ChatCompletionMessageParam] = [{
-    "role":
-    "system",
-    "content":
-    "You are a helpful assistant with access to tools. If a tool"
-    " that you have would be helpful to answer a user query, "
-    "call the tool. Otherwise, answer the user's query directly "
-    "without calling a tool. DO NOT CALL A TOOL THAT IS IRRELEVANT "
-    "to the user's question - just respond to it normally."
-}, {
-    "role":
-    "user",
-    "content":
-    "Hi! How are you?"
-}, {
-    "role":
-    "assistant",
-    "content":
-    "I'm doing great! How can I assist you?"
-}, {
-    "role":
-    "user",
-    "content":
-    "Can you tell me a joke please?"
-}]
-
-MESSAGES_ASKING_FOR_TOOLS: List[ChatCompletionMessageParam] = [{
-    "role":
-    "user",
-    "content":
-    "What is the weather in Dallas, Texas in Fahrenheit?"
-}]
 
 WEATHER_TOOL: ChatCompletionToolParam = {
     "type": "function",
@@ -91,18 +58,18 @@ WEATHER_TOOL: ChatCompletionToolParam = {
             "properties": {
                 "city": {
                     "type":
-                    "string",
+                        "string",
                     "description":
-                    "The city to find the weather for, "
-                    "e.g. 'San Francisco'"
+                        "The city to find the weather for, "
+                        "e.g. 'San Francisco'"
                 },
                 "state": {
                     "type":
-                    "string",
+                        "string",
                     "description":
-                    "the two-letter abbreviation for the state "
-                    "that the city is in, e.g. 'CA' which would "
-                    "mean 'California'"
+                        "the two-letter abbreviation for the state "
+                        "that the city is in, e.g. 'CA' which would "
+                        "mean 'California'"
                 },
                 "unit": {
                     "type": "string",
@@ -118,28 +85,82 @@ SEARCH_TOOL: ChatCompletionToolParam = {
     "type": "function",
     "function": {
         "name":
-        "web_search",
+            "web_search",
         "description":
-        "Search the internet and get a summary of the top "
-        "10 webpages. Should only be used if you don't know "
-        "the answer to a user query, and the results are likely"
-        "to be able to be found with a web search",
+            "Search the internet and get a summary of the top "
+            "10 webpages. Should only be used if you don't know "
+            "the answer to a user query, and the results are likely"
+            "to be able to be found with a web search",
         "parameters": {
             "type": "object",
             "properties": {
                 "search_term": {
                     "type":
-                    "string",
+                        "string",
                     "description":
-                    "The term to use in the search. This should"
-                    "ideally be keywords to search for, not a"
-                    "natural-language question"
+                        "The term to use in the search. This should"
+                        "ideally be keywords to search for, not a"
+                        "natural-language question"
                 }
             },
             "required": ["search_term"]
         }
     }
 }
+
+MESSAGES_WITHOUT_TOOLS: List[ChatCompletionMessageParam] = [{
+    "role":
+        "system",
+    "content":
+        "You are a helpful assistant with access to tools. If a tool"
+        " that you have would be helpful to answer a user query, "
+        "call the tool. Otherwise, answer the user's query directly "
+        "without calling a tool. DO NOT CALL A TOOL THAT IS IRRELEVANT "
+        "to the user's question - just respond to it normally."
+}, {
+    "role":
+        "user",
+    "content":
+        "Hi! How are you?"
+}, {
+    "role":
+        "assistant",
+    "content":
+        "I'm doing great! How can I assist you?"
+}, {
+    "role":
+        "user",
+    "content":
+        "Can you tell me a joke please?"
+}]
+
+MESSAGES_ASKING_FOR_TOOLS: List[ChatCompletionMessageParam] = [{
+    "role":
+        "user",
+    "content":
+        "What is the weather in Dallas, Texas in Fahrenheit?"
+}]
+
+MESSAGES_WITH_TOOL_RESPONSE: List[ChatCompletionMessageParam] = [{
+        "role": "user",
+        "content": "What is the weather in Dallas, Texas in Fahrenheit?"
+    },{
+        "role": "assistant",
+        "tool_calls": [{
+            "id": "chatcmpl-tool-03e6481b146e408e9523d9c956696295",
+            "type": "function",
+            "function": {
+                "name": WEATHER_TOOL["function"]["name"],
+                "arguments": '{"city": "Dallas", "state": "TX", '
+                             '"unit": "fahrenheit"}'
+            }
+        }]
+    },{
+        "role": "tool",
+        "tool_call_id": "chatcmpl-tool-03e6481b146e408e9523d9c956696295",
+        "content": "The weather in Dallas is 98 degrees fahrenheit, with partly"
+                   "cloudy skies and a low chance of rain."
+    }]
 
 
 # for each server config, download the model and return the config
@@ -157,24 +178,29 @@ def server_config(request):
 
 # run this for each server config
 @pytest.fixture(scope="module")
-def client_config(request, server_config: ServerConfig):
+def server(request, server_config: ServerConfig):
     model = server_config["model"]
     args_for_model = server_config["arguments"]
     with RemoteOpenAIServer(model, ARGS + args_for_model) as server:
-        client = server.get_async_client()
-        yield TestConfig(client=client, model=model)
+        yield server
+
+@pytest.fixture(scope="module")
+def client(server: RemoteOpenAIServer):
+    return server.get_async_client()
 
 
 # test: make sure chat completions without tools provided work even when tools
 # are enabled. This makes sure tool call chat templates work, AND that the tool
 # parser stream processing doesn't change the output of the model.
 @pytest.mark.asyncio
-async def test_chat_completion_without_tools(client_config: TestConfig):
-    chat_completion = await client_config["client"].chat.completions.create(
+async def test_chat_completion_without_tools(client: openai.AsyncOpenAI):
+    models = await client.models.list()
+    model_name: str = models.data[0].id
+    chat_completion = await client.chat.completions.create(
         messages=MESSAGES_WITHOUT_TOOLS,
         temperature=0,
         max_tokens=128,
-        model=client_config["model"],
+        model=model_name,
         logprobs=False)
     choice = chat_completion.choices[0]
     stop_reason = chat_completion.choices[0].finish_reason
@@ -189,11 +215,11 @@ async def test_chat_completion_without_tools(client_config: TestConfig):
             or len(choice.message.tool_calls) == 0)
 
     # make the same request, streaming
-    stream = await client_config["client"].chat.completions.create(
+    stream = await client.chat.completions.create(
         messages=MESSAGES_WITHOUT_TOOLS,
         temperature=0,
         max_tokens=128,
-        model=client_config["model"],
+        model=model_name,
         logprobs=False,
         stream=True,
     )
@@ -207,6 +233,7 @@ async def test_chat_completion_without_tools(client_config: TestConfig):
 
         # make sure the role is assistant
         if delta.role:
+            assert not role_sent
             assert delta.role == 'assistant'
             role_sent = True
 
@@ -215,6 +242,7 @@ async def test_chat_completion_without_tools(client_config: TestConfig):
 
         if chunk.choices[0].finish_reason is not None:
             finish_reason_count += 1
+            assert chunk.choices[0].finish_reason == choice.finish_reason
 
         # make sure tool call chunks aren't being streamed
         assert not delta.tool_calls or len(delta.tool_calls) == 0
@@ -223,7 +251,6 @@ async def test_chat_completion_without_tools(client_config: TestConfig):
     # were in fact sent, and that the chunks match non-streaming
     assert role_sent
     assert finish_reason_count == 1
-    assert chunk.choices[0].finish_reason == stop_reason
     assert len(chunks)
     assert "".join(chunks) == output_text
 
@@ -232,19 +259,19 @@ async def test_chat_completion_without_tools(client_config: TestConfig):
 # tools, to make sure we can still get normal chat completion responses
 # and that they won't be parsed as tools
 @pytest.mark.asyncio
-async def test_chat_completion_with_tools(client_config: TestConfig):
-    print(f'sending prompt {MESSAGES_WITHOUT_TOOLS}')
-    chat_completion = await client_config["client"].chat.completions.create(
+async def test_chat_completion_with_tools(client: openai.AsyncOpenAI):
+    models = await client.models.list()
+    model_name: str = models.data[0].id
+    chat_completion = await client.chat.completions.create(
         messages=MESSAGES_WITHOUT_TOOLS,
         temperature=0,
         max_tokens=128,
-        model=client_config["model"],
+        model=model_name,
         tools=[WEATHER_TOOL],
         logprobs=False)
     choice = chat_completion.choices[0]
     stop_reason = chat_completion.choices[0].finish_reason
     output_text = chat_completion.choices[0].message.content
-    print(chat_completion.choices[0])
 
     # check to make sure we got text
     assert output_text is not None
@@ -256,11 +283,11 @@ async def test_chat_completion_with_tools(client_config: TestConfig):
             or len(choice.message.tool_calls) == 0)
 
     # make the same request, streaming
-    stream = await client_config["client"].chat.completions.create(
+    stream = await client.chat.completions.create(
         messages=MESSAGES_WITHOUT_TOOLS,
         temperature=0,
         max_tokens=128,
-        model=client_config["model"],
+        model=model_name,
         logprobs=False,
         tools=[WEATHER_TOOL],
         stream=True,
@@ -301,12 +328,14 @@ async def test_chat_completion_with_tools(client_config: TestConfig):
 # test: request a chat completion that should return tool calls, so we know they
 # are parsable
 @pytest.mark.asyncio
-async def test_tool_call_and_choice(client_config: TestConfig):
-    chat_completion = await client_config["client"].chat.completions.create(
+async def test_tool_call_and_choice(client: openai.AsyncOpenAI):
+    models = await client.models.list()
+    model_name: str = models.data[0].id
+    chat_completion = await client.chat.completions.create(
         messages=MESSAGES_ASKING_FOR_TOOLS,
         temperature=0,
         max_tokens=500,
-        model=client_config["model"],
+        model=model_name,
         tools=[WEATHER_TOOL, SEARCH_TOOL],
         logprobs=False)
 
@@ -345,8 +374,8 @@ async def test_tool_call_and_choice(client_config: TestConfig):
     finish_reason_count: int = 0
 
     # make the same request, streaming
-    stream = await client_config["client"].chat.completions.create(
-        model=client_config["model"],
+    stream = await client.chat.completions.create(
+        model=model_name,
         messages=MESSAGES_ASKING_FOR_TOOLS,
         temperature=0,
         max_tokens=500,
@@ -423,6 +452,65 @@ async def test_tool_call_and_choice(client_config: TestConfig):
 
 # test: providing tools and results back to model to get a non-tool response
 # (streaming/not)
+@pytest.mark.asyncio
+async def test_tool_call_with_results(client: openai.AsyncOpenAI):
+    models = await client.models.list()
+    model_name: str = models.data[0].id
+    chat_completion = await client.chat.completions.create(
+        messages=MESSAGES_WITH_TOOL_RESPONSE,
+        temperature=0,
+        max_tokens=500,
+        model=model_name,
+        tools=[WEATHER_TOOL, SEARCH_TOOL],
+        logprobs=False
+    )
+
+    choice = chat_completion.choices[0]
+
+    assert choice.finish_reason != "tool_calls"  # "stop" or "length"
+    assert choice.message.role == "assistant"
+    assert choice.message.tool_calls is None \
+           or len(choice.message.tool_calls) == 0
+    assert choice.message.content is not None
+    assert "98" in choice.message.content  # the temperature from the response
+
+    stream = await client.chat.completions.create(
+        messages=MESSAGES_WITH_TOOL_RESPONSE,
+        temperature=0,
+        max_tokens=500,
+        model=model_name,
+        tools=[WEATHER_TOOL, SEARCH_TOOL],
+        logprobs=False,
+        stream=True
+    )
+
+    chunks: List[str] = []
+    finish_reason: Optional[str] == None
+    finish_reason_count = 0
+    role_sent: bool = False
+
+    async for chunk in stream:
+        delta = chunk.choices[0].delta
+
+        if delta.role:
+            assert not role_sent
+            assert delta.role == "assistant"
+            role_sent = True
+
+        if delta.content:
+            chunks.append(delta.content)
+
+        if chunk.choices[0].finish_reason is not None:
+            finish_reason_count += 1
+            assert chunk.choices[0].finish_reason == choice.finish_reason
+
+        assert not delta.tool_calls or len(delta.tool_calls) == 0
+
+    assert role_sent
+    assert finish_reason_count == 1
+    assert len(chunks)
+    assert "".join(chunks) == choice.message.content
+
 
 # test: getting the model to generate parallel tool calls (streaming/not)
 
