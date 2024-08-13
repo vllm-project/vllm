@@ -5,13 +5,12 @@ Run `pytest tests/quantization/test_compressed_tensors.py`.
 
 import pytest
 import torch
+from compressed_tensors.quantization import QuantizationType
 
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsLinearMethod, CompressedTensorsW4A16Sparse24,
     CompressedTensorsW8A8Fp8, CompressedTensorsW8A8Int8,
     CompressedTensorsW8A16Fp8, CompressedTensorsWNA16)
-from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
-    QuantizationType)
 
 
 @pytest.mark.parametrize("model_args", [
