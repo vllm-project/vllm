@@ -70,10 +70,6 @@ class ConversationMessage(TypedDict, total=False):
     tool_calls: Optional[List]
 
 
-ChatCompletionMessageParam = Union[OpenAIChatCompletionMessageParam,
-                                   CustomChatCompletionMessageParam]
-
-
 class CustomChatCompletionContentPartParam(TypedDict, total=False):
     __pydantic_config__ = ConfigDict(extra="allow")  # type: ignore
 
@@ -81,8 +77,26 @@ class CustomChatCompletionContentPartParam(TypedDict, total=False):
     """The type of the content part."""
 
 
+class AudioURL(TypedDict, total=False):
+    url: Required[str]
+    """
+    Either a URL of the audio or a data URL with base64 encoded audio data.
+    """
+
+
+class ChatCompletionContentPartAudioParam(TypedDict, total=False):
+    audio_url: Required[AudioURL]
+
+    type: Required[Literal["audio_url"]]
+    """The type of the content part."""
+
+
 ChatCompletionContentPartParam = Union[OpenAIChatCompletionContentPartParam,
+                                       ChatCompletionContentPartAudioParam,
                                        CustomChatCompletionContentPartParam]
+
+ChatCompletionMessageParam = Union[OpenAIChatCompletionMessageParam,
+                                   CustomChatCompletionMessageParam]
 
 
 class OpenAIBaseModel(BaseModel):

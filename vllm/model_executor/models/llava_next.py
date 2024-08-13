@@ -23,13 +23,13 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 from .clip import (CLIPVisionModel, dummy_image_for_clip,
                    dummy_seq_data_for_clip, get_clip_image_feature_size,
                    get_clip_patch_grid_length, input_processor_for_clip)
-from .interfaces import SupportsVision
+from .interfaces import SupportsMultiModal
 from .llava import LlavaMultiModalProjector
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_siglip_image_feature_size,
                      get_siglip_patch_grid_length, input_processor_for_siglip)
 from .utils import (filter_weights, init_vllm_registered_model,
-                    merge_vision_embeddings)
+                    merge_multimodal_embeddings)
 
 logger = init_logger(__name__)
 
@@ -60,7 +60,17 @@ class LlavaNextImagePixelInputs(TypedDict):
     """
 
 
-LlavaNextImageInputs = LlavaNextImagePixelInputs
+class LlavaNextImageEmbeddingInputs(TypedDict):
+    type: Literal["image_embeds"]
+    data: torch.Tensor
+    """Shape: `(batch_size, image_feature_size, hidden_size)`
+
+    `hidden_size` must match the hidden size of language model backbone.
+    """
+
+
+LlavaNextImageInputs = Union[LlavaNextImagePixelInputs,
+                             LlavaNextImageEmbeddingInputs]
 
 
 # Based on: https://github.com/huggingface/text-generation-inference/blob/v2.2.0/server/text_generation_server/models/vlm_causal_lm.py#L79
@@ -208,7 +218,7 @@ def input_processor_for_llava_next(ctx: InputContext, llm_inputs: LLMInputs):
             input_width=width,
         )
     elif isinstance(image_data, torch.Tensor):
-        raise NotImplementedError("Embeddings input is not supported yet")
+        image_feature_size = image_data.shape[0]
     else:
         raise TypeError(f"Invalid image type: {type(image_data)}")
 
@@ -265,7 +275,7 @@ def _init_vision_tower(hf_config: LlavaNextConfig):
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_llava_next_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_llava_next)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_llava_next)
-class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
+class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def __init__(self,
                  config: LlavaNextConfig,
@@ -320,26 +330,40 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
         return data
 
     def _parse_and_validate_image_input(
-            self, **kwargs: object) -> Optional[LlavaNextImagePixelInputs]:
+            self, **kwargs: object) -> Optional[LlavaNextImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
         image_sizes = kwargs.pop("image_sizes", None)
+        image_embeds = kwargs.pop("image_embeds", None)
 
-        if pixel_values is None:
+        if pixel_values is None and image_embeds is None:
             return None
 
-        if not isinstance(pixel_values, (torch.Tensor, list)):
-            raise ValueError("Incorrect type of pixel values. "
-                             f"Got type: {type(pixel_values)}")
+        if pixel_values is not None:
+            if not isinstance(pixel_values, (torch.Tensor, list)):
+                raise ValueError("Incorrect type of pixel values. "
+                                 f"Got type: {type(pixel_values)}")
 
-        if not isinstance(image_sizes, torch.Tensor):
-            raise ValueError("Incorrect type of image sizes. "
-                             f"Got type: {type(image_sizes)}")
+            if not isinstance(image_sizes, torch.Tensor):
+                raise ValueError("Incorrect type of image sizes. "
+                                 f"Got type: {type(image_sizes)}")
 
-        return LlavaNextImagePixelInputs(
-            type="pixel_values",
-            data=self._validate_pixel_values(pixel_values),
-            image_sizes=self._validate_image_sizes(image_sizes),
-        )
+            return LlavaNextImagePixelInputs(
+                type="pixel_values",
+                data=self._validate_pixel_values(pixel_values),
+                image_sizes=self._validate_image_sizes(image_sizes),
+            )
+
+        if image_embeds is not None:
+            if not isinstance(image_embeds, torch.Tensor):
+                raise ValueError("Incorrect type of image embeds. "
+                                 f"Got type: {type(image_embeds)}")
+
+            return LlavaNextImageEmbeddingInputs(
+                type="image_embeds",
+                data=image_embeds,
+            )
+
+        raise AssertionError("This line should be unreachable.")
 
     def _select_image_features(self, image_features: torch.Tensor, *,
                                strategy: str) -> torch.Tensor:
@@ -466,6 +490,10 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
         self,
         image_input: LlavaNextImageInputs,
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
+
+        if image_input["type"] == "image_embeds":
+            return [image_input["data"]]
+
         patch_embeddings = self._process_image_pixels(image_input)
 
         image_sizes = image_input.get("image_sizes")
@@ -543,7 +571,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
             inputs_embeds = self.language_model.model.get_input_embeddings(
                 input_ids)
 
-            inputs_embeds = merge_vision_embeddings(
+            inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, vision_embeddings,
                 self.config.image_token_index)
 
@@ -560,8 +588,11 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
 
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 

@@ -28,7 +28,7 @@ import torch
 import torch.nn as nn
 
 from vllm.model_executor.custom_op import CustomOp
-from vllm.utils import is_tpu
+from vllm.platforms import current_platform
 
 
 def _rotate_neox(x: torch.Tensor) -> torch.Tensor:
@@ -78,7 +78,7 @@ class RotaryEmbedding(CustomOp):
         self.dtype = dtype
 
         cache = self._compute_cos_sin_cache()
-        self.use_native2 = is_tpu() and is_neox_style
+        self.use_native2 = current_platform.is_tpu() and is_neox_style
         if not self.use_native2:
             cache = cache.to(dtype)
             self.register_buffer("cos_sin_cache", cache, persistent=False)

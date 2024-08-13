@@ -245,9 +245,18 @@ class LLMEngine:
         if not self.model_config.skip_tokenizer_init:
             self.tokenizer = self._init_tokenizer()
             self.detokenizer = Detokenizer(self.tokenizer)
+            tokenizer_group = self.get_tokenizer_group()
         else:
             self.tokenizer = None
             self.detokenizer = None
+            tokenizer_group = None
+
+        # Ensure that the function doesn't contain a reference to self,
+        # to avoid engine GC issues
+        def get_tokenizer_for_seq(sequence: Sequence) -> AnyTokenizer:
+            assert tokenizer_group, ("tokenizer_group cannot be None, "
+                                     "make sure skip_tokenizer_init is False")
+            return tokenizer_group.get_lora_tokenizer(sequence.lora_request)
 
         self.seq_counter = Counter()
         self.generation_config_fields = _load_generation_config_dict(
@@ -267,6 +276,7 @@ class LLMEngine:
             speculative_config=speculative_config,
             load_config=load_config,
             prompt_adapter_config=prompt_adapter_config,
+            observability_config=self.observability_config,
         )
 
         if not self.model_config.embedding_mode:
@@ -355,10 +365,10 @@ class LLMEngine:
                 self.detokenizer,
                 self.scheduler,
                 self.seq_counter,
-                self.get_tokenizer_for_seq,
+                get_tokenizer_for_seq,
                 stop_checker=StopChecker(
                     self.scheduler_config.max_model_len,
-                    self.get_tokenizer_for_seq,
+                    get_tokenizer_for_seq,
                 ),
             ))
 
@@ -489,10 +499,6 @@ class LLMEngine:
         lora_request: Optional[LoRARequest] = None,
     ) -> AnyTokenizer:
         return self.get_tokenizer_group().get_lora_tokenizer(lora_request)
-
-    def get_tokenizer_for_seq(self, sequence: Sequence) -> AnyTokenizer:
-        return self.get_tokenizer_group().get_lora_tokenizer(
-            sequence.lora_request)
 
     def _init_tokenizer(self) -> BaseTokenizerGroup:
         return init_tokenizer_from_configs(
@@ -1183,6 +1189,22 @@ class LLMEngine:
             seq_group = scheduled_seq_group.seq_group
             seq_group.update_num_computed_tokens(
                 scheduled_seq_group.token_chunk_size)
+            if output is not None and len(output) > 0:
+                for o in output:
+                    if (isinstance(o, SamplerOutput)
+                            and seq_group.metrics is not None):
+                        if seq_group.metrics.model_forward_time is not None:
+                            seq_group.metrics.model_forward_time += (
+                                o.model_forward_time)
+                        else:
+                            seq_group.metrics.model_forward_time = (
+                                o.model_forward_time)
+                        if seq_group.metrics.model_execute_time is not None:
+                            seq_group.metrics.model_execute_time += (
+                                o.model_execute_time)
+                        else:
+                            seq_group.metrics.model_execute_time = (
+                                o.model_execute_time)
             if self.model_config.embedding_mode:
                 self._process_sequence_group_outputs(seq_group, outputs)
                 continue
@@ -1575,6 +1597,18 @@ class LLMEngine:
             seq_span.set_attribute(
                 SpanAttributes.LLM_LATENCY_TIME_TO_FIRST_TOKEN, ttft)
             seq_span.set_attribute(SpanAttributes.LLM_LATENCY_E2E, e2e_time)
+            if metrics.scheduler_time is not None:
+                seq_span.set_attribute(
+                    SpanAttributes.LLM_LATENCY_TIME_IN_SCHEDULER,
+                    metrics.scheduler_time)
+            if metrics.model_forward_time is not None:
+                seq_span.set_attribute(
+                    SpanAttributes.LLM_LATENCY_TIME_IN_MODEL_FORWARD,
+                    metrics.model_forward_time / 1000.0)
+            if metrics.model_execute_time is not None:
+                seq_span.set_attribute(
+                    SpanAttributes.LLM_LATENCY_TIME_IN_MODEL_EXECUTE,
+                    metrics.model_execute_time)
 
     def is_encoder_decoder_model(self):
         return self.model_config.is_encoder_decoder_model

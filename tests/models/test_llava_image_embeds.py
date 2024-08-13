@@ -1,11 +1,9 @@
 from typing import List, Optional, Tuple, Type
 
 import pytest
-from transformers import AutoConfig, AutoTokenizer, BatchEncoding
+from transformers import AutoConfig, AutoTokenizer
 
-from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 
 from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
 from .utils import check_logprobs_close
@@ -21,8 +19,6 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
 
 models = [
     "llava-hf/llava-1.5-7b-hf",
-    # TODO: Get this model to produce meaningful output in vLLM
-    # "TIGER-Lab/Mantis-8B-siglip-llama3",
 ]
 
 
@@ -73,23 +69,22 @@ def run_test(
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """
-    # NOTE: For local use; this isn't tested in CI yet (see TODO above)
-    if model.startswith("TIGER-Lab/Mantis"):
-        from mantis.models.mllava import MLlavaProcessor
 
-        torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
-        mantis_processor = MLlavaProcessor.from_pretrained(
-            model, torch_dtype=torch_dtype)
-        assert isinstance(mantis_processor, MLlavaProcessor)
-    else:
-        mantis_processor = None
+    # vLLM to load from image embeddings
+    vllm_images = [asset.image_embeds for asset in image_assets]
 
-    images = [asset.pil_image for asset in image_assets]
+    # transformers to load from PIL images
+    hf_images = [asset.pil_image for asset in image_assets]
 
-    inputs_per_image = [(
+    vllm_inputs_per_image = [(
         [prompt for _ in size_factors],
-        [rescale_image_size(image, factor) for factor in size_factors],
-    ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
+        [image for _ in size_factors],
+    ) for image, prompt in zip(vllm_images, HF_IMAGE_PROMPTS)]
+
+    hf_inputs_per_image = [(
+        [prompt for _ in size_factors],
+        [image for _ in size_factors],
+    ) for image, prompt in zip(hf_images, HF_IMAGE_PROMPTS)]
 
     # NOTE: take care of the order. run vLLM first, and then run HF.
     # vLLM needs a fresh new process without cuda initialization.
@@ -107,30 +102,16 @@ def run_test(
                                                 max_tokens,
                                                 num_logprobs=num_logprobs,
                                                 images=images)
-            for prompts, images in inputs_per_image
+            for prompts, images in vllm_inputs_per_image
         ]
 
-    if mantis_processor is not None:
-
-        def process(hf_inputs: BatchEncoding):
-            hf_inputs["pixel_values"] = hf_inputs["pixel_values"] \
-                .to(torch_dtype)  # type: ignore
-            return hf_inputs
-    else:
-
-        def process(hf_inputs: BatchEncoding):
-            return hf_inputs
-
-    with hf_runner(model,
-                   dtype=dtype,
-                   postprocess_inputs=process,
-                   is_vision_model=True) as hf_model:
+    with hf_runner(model, dtype=dtype, is_vision_model=True) as hf_model:
         hf_outputs_per_image = [
             hf_model.generate_greedy_logprobs_limit(prompts,
                                                     max_tokens,
                                                     num_logprobs=num_logprobs,
                                                     images=images)
-            for prompts, images in inputs_per_image
+            for prompts, images in hf_inputs_per_image
         ]
 
     for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
@@ -158,8 +139,6 @@ def run_test(
         [1.0],
         # Single-scale, batched
         [1.0, 1.0, 1.0],
-        # Multi-scale
-        [0.25, 0.5, 1.0],
     ],
 )
 @pytest.mark.parametrize("dtype", ["half"])

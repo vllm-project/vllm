@@ -27,9 +27,9 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
                    get_clip_num_patches)
-from .interfaces import SupportsVision
+from .interfaces import SupportsMultiModal
 from .utils import (filter_weights, init_vllm_registered_model,
-                    merge_vision_embeddings)
+                    merge_multimodal_embeddings)
 
 IMG_START = '<img>'
 IMG_END = '</img>'
@@ -48,6 +48,19 @@ class InternVLImagePixelInputs(TypedDict):
     Note that `num_patches` may be different for each batch, in which case
     the data is passed as a list instead of a batched tensor.
     """
+
+
+class InternVLImageEmbeddingInputs(TypedDict):
+    type: Literal["image_embeds"]
+    data: Union[torch.Tensor, List[torch.Tensor]]
+    """Shape: `(batch_size, image_feature_size, hidden_size)`
+
+    `hidden_size` must match the hidden size of language model backbone.
+    """
+
+
+InternVLImageInputs = Union[InternVLImagePixelInputs,
+                            InternVLImageEmbeddingInputs]
 
 
 # copied from https://huggingface.co/OpenGVLab/InternVL2-1B
@@ -152,7 +165,7 @@ def get_internvl_num_patches(image_size: int, patch_size: int,
 
 
 def get_max_internvl_image_tokens(ctx: InputContext):
-    hf_config = ctx.get_hf_config(PretrainedConfig)
+    hf_config = ctx.get_hf_config()
     vision_config = hf_config.vision_config
 
     use_thumbnail = hf_config.use_thumbnail
@@ -174,7 +187,7 @@ def input_processor_for_internvl(ctx: InputContext, llm_inputs: LLMInputs):
         return llm_inputs
 
     model_config = ctx.model_config
-    hf_config = ctx.get_hf_config(PretrainedConfig)
+    hf_config = ctx.get_hf_config()
     vision_config = hf_config.vision_config
 
     image_size = vision_config.image_size
@@ -193,8 +206,10 @@ def input_processor_for_internvl(ctx: InputContext, llm_inputs: LLMInputs):
         # add thumbnail image if num_blocks > 1
         if hf_config.use_thumbnail and num_blocks > 1:
             num_blocks += 1
+        image_feature_size = num_blocks * num_patches
+
     elif isinstance(image_data, torch.Tensor):
-        raise NotImplementedError("Embeddings input is not supported yet")
+        image_feature_size = image_data.shape[0]
     else:
         raise TypeError(f"Invalid image type: {type(image_data)}")
 
@@ -205,7 +220,7 @@ def input_processor_for_internvl(ctx: InputContext, llm_inputs: LLMInputs):
     prompt_token_ids = llm_inputs["prompt_token_ids"]
     if prompt is None:
         prompt = tokenizer.decode(prompt_token_ids)
-    image_prompt = IMG_START + IMG_CONTEXT * num_blocks * num_patches + IMG_END
+    image_prompt = IMG_START + IMG_CONTEXT * image_feature_size + IMG_END
     new_prompt = prompt.replace('<image>', image_prompt, 1)
     new_prompt_token_ids = tokenizer.encode(new_prompt)
 
@@ -245,7 +260,7 @@ def dummy_data_for_internvl(ctx: InputContext, seq_len: int):
 
     image_feature_size = get_max_internvl_image_tokens(ctx)
     model_config = ctx.model_config
-    hf_config = ctx.get_hf_config(PretrainedConfig)
+    hf_config = ctx.get_hf_config()
     vision_config = hf_config.vision_config
     tokenizer = cached_get_tokenizer(model_config.tokenizer,
                                      trust_remote_code=True)
@@ -277,7 +292,7 @@ def dummy_data_for_internvl(ctx: InputContext, seq_len: int):
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_internvl_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_internvl)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_internvl)
-class InternVLChatModel(nn.Module, SupportsVision):
+class InternVLChatModel(nn.Module, SupportsMultiModal):
 
     def __init__(self,
                  config: PretrainedConfig,
@@ -378,23 +393,49 @@ class InternVLChatModel(nn.Module, SupportsVision):
         return data
 
     def _parse_and_validate_image_input(
-            self, **kwargs: object) -> Optional[InternVLImagePixelInputs]:
+            self, **kwargs: object) -> Optional[InternVLImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
         image_token_id = kwargs.pop("image_token_id", None)
+        image_embeds = kwargs.pop("image_embeds", None)
 
-        if pixel_values is None:
+        if pixel_values is None and image_embeds is None:
             return None
+
+        if image_embeds is not None:
+            if not isinstance(image_embeds, torch.Tensor):
+                raise ValueError("Incorrect type of image embeddings. "
+                                 f"Got type: {type(image_embeds)}")
+            return InternVLImageEmbeddingInputs(
+                type="image_embeds",
+                data=image_embeds,
+            )
 
         self.img_context_token_id = image_token_id[0]
 
-        if not isinstance(pixel_values, (torch.Tensor, list)):
-            raise ValueError("Incorrect type of pixel values. "
-                             f"Got type: {type(pixel_values)}")
+        if pixel_values is not None:
+            if not isinstance(pixel_values, (torch.Tensor, list)):
+                raise ValueError("Incorrect type of pixel values. "
+                                 f"Got type: {type(pixel_values)}")
 
-        return InternVLImagePixelInputs(
-            type="pixel_values",
-            data=self._validate_pixel_values(pixel_values),
-        )
+            return InternVLImagePixelInputs(
+                type="pixel_values",
+                data=self._validate_pixel_values(pixel_values),
+            )
+
+        raise AssertionError("This line should be unreachable.")
+
+    def _process_image_input(
+        self,
+        image_input: InternVLImageInputs,
+    ) -> torch.Tensor:
+
+        if image_input["type"] == "image_embeds":
+            return image_input["data"]
+
+        assert self.vision_model is not None
+        image_embeds = self.extract_feature(image_input["data"])
+
+        return image_embeds
 
     def forward(
         self,
@@ -409,10 +450,10 @@ class InternVLChatModel(nn.Module, SupportsVision):
         if image_input is not None:
             inputs_embeds = self.language_model.model.get_input_embeddings(
                 input_ids)
-            vit_embeds = self.extract_feature(image_input["data"])
-            inputs_embeds = merge_vision_embeddings(input_ids, inputs_embeds,
-                                                    vit_embeds,
-                                                    self.img_context_token_id)
+            vision_embeddings = self._process_image_input(image_input)
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, vision_embeddings,
+                self.img_context_token_id)
             input_ids = None
         else:
             inputs_embeds = None
@@ -425,8 +466,11 @@ class InternVLChatModel(nn.Module, SupportsVision):
                                                   inputs_embeds=inputs_embeds)
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
