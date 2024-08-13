@@ -540,6 +540,8 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
                             device=device),
                 requires_grad=False,
             )
+        logger.error(f"W13 qweight size - {layer.w13_qweight.size()}")
+        logger.error(f"Quant Config: {self.quant_config}")
         # Repack weights
         marlin_w13_qweight = ops.gptq_marlin_moe_repack(
             layer.w13_qweight,
