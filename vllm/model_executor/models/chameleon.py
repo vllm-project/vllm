@@ -35,7 +35,7 @@ from vllm.multimodal.image import (cached_get_tokenizer,
 from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
 from vllm.utils import print_warning_once
 
-from .interfaces import SupportsVision
+from .interfaces import SupportsMultiModal
 
 logger = init_logger(__name__)
 
@@ -886,7 +886,7 @@ class ChameleonModel(nn.Module):
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_chameleon_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_chameleon)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_chameleon)
-class ChameleonForConditionalGeneration(nn.Module, SupportsVision):
+class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def __init__(
         self,
