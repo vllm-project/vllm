@@ -102,6 +102,8 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         if batch_size == 0:
             return torch.empty(0, k + 1, device=draft_probs.device, dtype=int)
 
+        # If use Flashinfer chain_speculative_sampling kernel
+        # for rejection sampling
         if chain_speculative_sampling is not None:
             batch_size, k, _ = draft_probs.shape
             uniform_samples = self._create_uniform_samples(
@@ -109,6 +111,16 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
             output_token_ids = chain_speculative_sampling(
                 draft_probs, draft_token_ids, uniform_samples,
                 target_with_bonus_probs)
+
+            # Since we do not call _create_output any more,
+            # we need to update metrics here.
+            # The num_accepted_tokens is not updated because
+            # flashinfer kernel does not return this value.
+            # The metric is meaningless when using flashinfer
+            # rejection sampling.
+            self.num_accepted_tokens += batch_size * k
+            self.num_emitted_tokens += (output_token_ids != -1).sum()
+            self.num_draft_tokens += batch_size * k
         else:
             accepted, recovered_token_ids = (
                 self._batch_modified_rejection_sampling(
