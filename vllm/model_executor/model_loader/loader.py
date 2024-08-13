@@ -38,7 +38,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     safetensors_weights_iterator)
 from vllm.model_executor.models.interfaces import (has_inner_state,
                                                    supports_lora,
-                                                   supports_vision)
+                                                   supports_multimodal)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
@@ -131,7 +131,7 @@ def _get_model_initialization_kwargs(
             "be added in the future. If this is important to you, "
             "please open an issue on github.")
 
-    if supports_vision(model_class):
+    if supports_multimodal(model_class):
         if multimodal_config is None:
             raise ValueError("Provide vision related configurations "
                              "through LLM entrypoint or engine arguments.")
