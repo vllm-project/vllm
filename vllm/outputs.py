@@ -93,7 +93,7 @@ class RequestOutput:
         self,
         request_id: str,
         prompt: Optional[str],
-        prompt_token_ids: List[int],
+        prompt_token_ids: Optional[List[int]],
         prompt_logprobs: Optional[PromptLogprobs],
         outputs: List[CompletionOutput],
         finished: bool,
@@ -118,6 +118,7 @@ class RequestOutput:
         cls,
         seq_group: SequenceGroup,
         prior_output_lens: Dict[int, Tuple[int, int]],
+        include_prompt: bool = True,
     ) -> Optional["RequestOutput"]:
         sampling_params = seq_group.sampling_params
         if sampling_params is None:
@@ -176,11 +177,18 @@ class RequestOutput:
                     seq.stop_reason))
 
         # Every sequence in the sequence group should have the same prompt.
-        prompt = seq_group.prompt
-        prompt_token_ids = seq_group.prompt_token_ids
-        encoder_prompt = seq_group.encoder_prompt
-        encoder_prompt_token_ids = seq_group.encoder_prompt_token_ids
-        prompt_logprobs = seq_group.prompt_logprobs
+        if include_prompt:
+            prompt = seq_group.prompt
+            prompt_token_ids = seq_group.prompt_token_ids
+            encoder_prompt = seq_group.encoder_prompt
+            encoder_prompt_token_ids = seq_group.encoder_prompt_token_ids
+            prompt_logprobs = seq_group.prompt_logprobs
+        else:
+            prompt = None
+            prompt_token_ids = None
+            encoder_prompt = None
+            encoder_prompt_token_ids = None
+            prompt_logprobs = None
         finished_time = time.time() if finished else None
         seq_group.set_finished_time(finished_time)
         return cls(seq_group.request_id,
@@ -256,12 +264,15 @@ class EmbeddingRequestOutput:
 class RequestOutputFactory:
 
     @staticmethod
-    def create(seq_group,
-               previous_output_lens: Dict[int, Tuple[int, int]] = {}):  # noqa
+    def create(
+            seq_group,
+            previous_output_lens: Dict[int, Tuple[int, int]] = {},  # noqa
+            include_prompt: bool = True):
         # Determine the type based on a condition, for example:
         if hasattr(seq_group,
                    'embeddings') and seq_group.embeddings is not None:
             return EmbeddingRequestOutput.from_seq_group(seq_group)
         else:
             return RequestOutput.from_seq_group(seq_group,
-                                                previous_output_lens)
+                                                previous_output_lens,
+                                                include_prompt)

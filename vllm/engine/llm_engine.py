@@ -1182,9 +1182,12 @@ class LLMEngine:
         output_by_sequence_group = create_output_by_sequence_group(
             output, num_seq_groups=len(scheduled_seq_groups))
 
-        # seq_id to (output token count, text len)
+        # seq_id to (output token count, text len),
         # only for delta output seq groups
         previous_output_lens: Dict[int, Tuple[int, int]] = {}
+        # Seq groups whose outputs should not have prompt details included,
+        # only applies to delta output seq groups
+        exclude_prompt_seq_group_ids = set()
 
         # Update the scheduled sequence groups with the model outputs.
         for scheduled_seq_group, outputs, seq_group_meta in zip(
@@ -1196,8 +1199,13 @@ class LLMEngine:
                                        == RequestOutputKind.DELTA):
                 text_buffer_length = params.output_text_buffer_length
                 for seq in seq_group.seqs:
+                    output_len = seq.get_output_len()
+                    if output_len:
+                        # Exclude the prompt if the seq group already has
+                        # completion tokens
+                        exclude_prompt_seq_group_ids.add(seq_group.request_id)
                     previous_output_lens[seq.seq_id] = (
-                        seq.get_output_len(),
+                        output_len,
                         seq.get_output_text_to_return_len(text_buffer_length))
 
             seq_group.update_num_computed_tokens(
@@ -1236,23 +1244,27 @@ class LLMEngine:
         for scheduled_seq_group in scheduled_seq_groups:
             seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
+            include_prompt = seq_group.request_id not in (
+                exclude_prompt_seq_group_ids)
             request_output = RequestOutputFactory.create(
-                seq_group, previous_output_lens)
+                seq_group, previous_output_lens, include_prompt)
             if request_output:
                 request_outputs.append(request_output)
         for seq_group in ignored_seq_groups:
             params = seq_group.sampling_params
+            include_prompt = True
             if params is not None and params.output_kind == (
                     RequestOutputKind.DELTA):
                 if not seq_group.is_finished():
                     continue
                 # Ignored seq groups have no delta, but we must still return
                 # an "empty" RequestOutput when finished
+                include_prompt = False
                 for seq in seq_group.seqs:
                     previous_output_lens[seq.seq_id] = (seq.get_output_len(),
                                                         seq.output_text)
             request_output = RequestOutputFactory.create(
-                seq_group, previous_output_lens)
+                seq_group, previous_output_lens, include_prompt)
             if request_output:
                 request_outputs.append(request_output)
         return request_outputs
