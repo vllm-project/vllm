@@ -119,7 +119,8 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
             target=run_rpc_server,
             args=(engine_args, UsageContext.OPENAI_API_SERVER, rpc_path))
         rpc_server_process.start()
-
+        logger.info("Started engine process with PID %d",
+                    rpc_server_process.pid)
         # Build RPCClient, which conforms to AsyncEngineClient Protocol.
         async_engine_client = AsyncEngineRPCClient(rpc_path)
 
