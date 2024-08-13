@@ -125,7 +125,7 @@ def compare_cutlass_fp8_torch_mm_helper(
     cutlass_mm_time = time3 - time2
 
     if display:
-        print(f"{torch_mm_time=:.10f}", f"{scale_time=:.10f}",
+        print(f"{use_bias=}, {torch_mm_time=:.10f}", f"{scale_time=:.10f}",
               f"{cutlass_mm_time=:.10f}")
 
     assert baseline.shape == out.shape
