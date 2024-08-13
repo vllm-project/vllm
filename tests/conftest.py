@@ -1,5 +1,6 @@
 import contextlib
 import gc
+import json
 import os
 import sys
 from collections import UserList
@@ -11,6 +12,7 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from huggingface_hub import snapshot_download
 from PIL import Image
 from transformers import (AutoModelForCausalLM, AutoModelForSeq2SeqLM,
                           AutoModelForVision2Seq, AutoTokenizer, BatchEncoding,
@@ -761,5 +763,15 @@ def num_gpus_available():
 
 @pytest.fixture
 def dummy_opt_path():
-    cur_dir = os.path.dirname(__file__)
-    return os.path.join(cur_dir, "dummy_opt")
+    opt_path = snapshot_download(repo_id="facebook/opt-125m",
+                                 ignore_patterns=[
+                                     "*.bin", "*.bin.index.json", "*.pt",
+                                     "*.h5", "*.msgpack"
+                                 ])
+    json_path = os.path.join(opt_path, "config.json")
+    with open(json_path, "r") as f:
+        config = json.load(f)
+    config["architectures"] = ["MyOPTForCausalLM"]
+    with open(json_path, "w") as f:
+        json.dump(config, f)
+    return opt_path
