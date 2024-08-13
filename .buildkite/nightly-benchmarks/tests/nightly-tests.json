@@ -35,6 +35,8 @@
             "disable_log_requests": ""
         },
         "vllm_client_parameters": {
+        },
+        "sglang_server_parameters": {
         }
     }
 ]
