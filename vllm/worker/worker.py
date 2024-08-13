@@ -9,7 +9,7 @@ import torch.distributed
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig)
+                         SpeculativeConfig, ControlVectorConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
@@ -18,6 +18,7 @@ from vllm.model_executor import set_random_seed
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
+from vllm.control_vectors.request import ControlVectorRequest
 from vllm.sequence import ExecuteModelRequest
 from vllm.utils import (is_embedding_model_config,
                         is_encoder_decoder_model_config)
@@ -51,6 +52,7 @@ class Worker(LocalOrDistributedWorkerBase):
         multimodal_config: Optional[MultiModalConfig] = None,
         speculative_config: Optional[SpeculativeConfig] = None,
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
+        control_vector_config: Optional[ControlVectorConfig] = None,
         is_driver_worker: bool = False,
         model_runner_cls: Optional[Type[GPUModelRunnerBase]] = None,
     ) -> None:
@@ -66,6 +68,7 @@ class Worker(LocalOrDistributedWorkerBase):
         self.lora_config = lora_config
         self.load_config = load_config
         self.prompt_adapter_config = prompt_adapter_config
+        self.control_vector_config = control_vector_config
         self.is_driver_worker = is_driver_worker
         if parallel_config and is_driver_worker:
             assert rank % parallel_config.tensor_parallel_size == 0, \
@@ -103,6 +106,7 @@ class Worker(LocalOrDistributedWorkerBase):
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=is_driver_worker,
             prompt_adapter_config=prompt_adapter_config,
+            control_vector_config=control_vector_config,
             multimodal_config=multimodal_config,
             **speculative_args,
         )
@@ -327,6 +331,12 @@ class Worker(LocalOrDistributedWorkerBase):
 
     def list_prompt_adapters(self) -> Set[int]:
         return self.model_runner.list_prompt_adapters()
+    
+    def add_control_vector(self, control_vector_request: ControlVectorRequest) -> bool:
+        return self.model_runner.add_control_vector(control_vector_request)
+    
+    def remove_control_vector(self, cv_id: int) -> bool:
+        return self.model_runner.remove_control_vector(cv_id)
 
     @property
     def max_model_len(self) -> int:

@@ -8,7 +8,7 @@ from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
                          MultiModalConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig, TokenizerPoolConfig)
+                         SpeculativeConfig, TokenizerPoolConfig, ControlVectorConfig)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -85,6 +85,8 @@ class EngineArgs:
     enable_prompt_adapter: bool = False
     max_prompt_adapters: int = 1
     max_prompt_adapter_token: int = 0
+    enable_control_vector: bool = False
+    max_control_vectors: int = 1
     fully_sharded_loras: bool = False
     lora_extra_vocab_size: int = 256
     long_lora_scaling_factors: Optional[Tuple[float]] = None
@@ -849,12 +851,15 @@ class EngineArgs:
             max_prompt_adapter_token=self.max_prompt_adapter_token) \
                                         if self.enable_prompt_adapter else None
 
+        control_vector_config = ControlVectorConfig(
+            max_control_vectors=self.max_control_vectors,
+        ) if self.enable_control_vector else None
+
         decoding_config = DecodingConfig(
             guided_decoding_backend=self.guided_decoding_backend)
 
         observability_config = ObservabilityConfig(
             otlp_traces_endpoint=self.otlp_traces_endpoint)
-
         if (model_config.get_sliding_window() is not None
                 and scheduler_config.chunked_prefill_enabled
                 and not scheduler_config.use_v2_block_manager):
@@ -875,6 +880,7 @@ class EngineArgs:
             decoding_config=decoding_config,
             observability_config=observability_config,
             prompt_adapter_config=prompt_adapter_config,
+            control_vector_config=control_vector_config
         )
 
 

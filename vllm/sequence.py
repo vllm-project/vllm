@@ -15,6 +15,7 @@ from vllm.inputs import is_valid_encoder_decoder_llm_inputs
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
+from vllm.control_vectors.request import ControlVectorRequest
 from vllm.sampling_params import SamplingParams
 
 if TYPE_CHECKING:
@@ -511,6 +512,7 @@ class SequenceGroup:
         encoder_seq: Optional[Sequence] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        control_vector_request: Optional[ControlVectorRequest] = None,
     ) -> None:
         self.request_id = request_id
         self.seqs = seqs
@@ -526,6 +528,7 @@ class SequenceGroup:
         self.embeddings = embeddings
         self.pooling_params = pooling_params
         self.prompt_adapter_request = prompt_adapter_request
+        self.control_vector_request = control_vector_request
         self.encoder_seq = encoder_seq
         self.trace_headers = trace_headers
 
@@ -753,6 +756,7 @@ class SequenceGroupMetadata:
         encoder_seq_data: Optional[SequenceData] = None,
         cross_block_table: Optional[List[int]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        control_vector_request: Optional[ControlVectorRequest] = None,
     ) -> None:
         self.request_id = request_id
         self.is_prompt = is_prompt
@@ -762,6 +766,7 @@ class SequenceGroupMetadata:
         self.pooling_params = pooling_params
         self.lora_request = lora_request
         self.prompt_adapter_request = prompt_adapter_request
+        self.control_vector_request = control_vector_request
         self.computed_block_nums = computed_block_nums
         self.multi_modal_data = multi_modal_data
         self.encoder_seq_data = encoder_seq_data
@@ -800,6 +805,10 @@ class SequenceGroupMetadata:
         """Return the number of tokens to be processed (chunk size)."""
         assert self._token_chunk_size is not None
         return self._token_chunk_size
+
+    @property
+    def control_vector_id(self)->int:
+        return self.control_vector_request.adapter_id if self.control_vector_request else 0
 
 
 class SequenceOutput:

@@ -4,9 +4,10 @@ from typing import List, Optional, Set, Tuple
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig)
+                         SpeculativeConfig, ControlVectorConfig)
 from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
+from vllm.control_vectors.request import ControlVectorRequest
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 
 
@@ -32,6 +33,7 @@ class ExecutorBase(ABC):
         multimodal_config: Optional[MultiModalConfig],
         speculative_config: Optional[SpeculativeConfig],
         prompt_adapter_config: Optional[PromptAdapterConfig],
+        control_vector_config: Optional[ControlVectorConfig]
     ) -> None:
         self.model_config = model_config
         self.cache_config = cache_config
@@ -43,6 +45,7 @@ class ExecutorBase(ABC):
         self.multimodal_config = multimodal_config
         self.speculative_config = speculative_config
         self.prompt_adapter_config = prompt_adapter_config
+        self.control_vector_config = control_vector_config
 
         self._init_executor()
 
@@ -115,6 +118,14 @@ class ExecutorBase(ABC):
 
     @abstractmethod
     def list_prompt_adapters(self) -> Set[int]:
+        raise NotImplementedError
+    
+    @abstractmethod
+    def add_control_vector(self, control_vector_request: ControlVectorRequest) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
+    def remove_control_vector(self, cv_id: int) -> bool:
         raise NotImplementedError
 
     @abstractmethod
