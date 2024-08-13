@@ -566,9 +566,10 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             group_size=self.quant_config.group_size,
         )
         replace_tensor(layer, "w13_scales", marlin_w13_scales)
+        logger.error(f"{layer.w2_scales.size()}, {layer.intermediate_size_per_partition}, {self.quant_config.group_size}")
         marlin_w2_scales = marlin_moe_permute_scales(
             s=layer.w2_scales,
-            size_k=2 * layer.w2_scales.shape[1] * self.quant_config.pack_factor,
+            size_k=layer.w2_scales.shape[1] * self.quant_config.pack_factor,
             size_n=(layer.intermediate_size if self.quant_config.desc_act else
                     layer.intermediate_size_per_partition),
             group_size=self.quant_config.group_size,
