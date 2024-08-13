@@ -333,15 +333,6 @@ def is_neuron() -> bool:
 
 
 @lru_cache(maxsize=None)
-def is_tpu() -> bool:
-    try:
-        import libtpu
-    except ImportError:
-        libtpu = None
-    return libtpu is not None
-
-
-@lru_cache(maxsize=None)
 def is_xpu() -> bool:
     from importlib.metadata import PackageNotFoundError, version
     try:
