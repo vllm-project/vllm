@@ -19,6 +19,9 @@ class TpuCommunicator:
             return
         self.disabled = False
 
+        # NOTE(woosuk): When using TP > 1 on TPUs, every TPU on the same node
+        # must be used together. Therefore, the local rank and world size can
+        # be simply calculated as follows.
         global_rank = dist.get_rank(group)
         global_world_size = dist.get_world_size(group)
         num_nodes = len(ray.nodes())
