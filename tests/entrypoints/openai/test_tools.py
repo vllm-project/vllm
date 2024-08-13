@@ -32,7 +32,7 @@ ARGS: List[str] = [
 CONFIGS: Dict[str, ServerConfig] = {
     "hermes": {
         "model":
-            "NousResearch/Hermes-2-Pro-Llama-3-8B",
+        "NousResearch/Hermes-2-Pro-Llama-3-8B",
         "arguments": [
             "--tool-call-parser", "hermes", "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_hermes.jinja")
@@ -40,7 +40,7 @@ CONFIGS: Dict[str, ServerConfig] = {
     },
     "mistral": {
         "model":
-            "mistralai/Mistral-7B-Instruct-v0.3",
+        "mistralai/Mistral-7B-Instruct-v0.3",
         "arguments": [
             "--tool-call-parser", "mistral", "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_mistral.jinja")
@@ -58,18 +58,18 @@ WEATHER_TOOL: ChatCompletionToolParam = {
             "properties": {
                 "city": {
                     "type":
-                        "string",
+                    "string",
                     "description":
-                        "The city to find the weather for, "
-                        "e.g. 'San Francisco'"
+                    "The city to find the weather for, "
+                    "e.g. 'San Francisco'"
                 },
                 "state": {
                     "type":
-                        "string",
+                    "string",
                     "description":
-                        "the two-letter abbreviation for the state "
-                        "that the city is in, e.g. 'CA' which would "
-                        "mean 'California'"
+                    "the two-letter abbreviation for the state "
+                    "that the city is in, e.g. 'CA' which would "
+                    "mean 'California'"
                 },
                 "unit": {
                     "type": "string",
@@ -85,22 +85,22 @@ SEARCH_TOOL: ChatCompletionToolParam = {
     "type": "function",
     "function": {
         "name":
-            "web_search",
+        "web_search",
         "description":
-            "Search the internet and get a summary of the top "
-            "10 webpages. Should only be used if you don't know "
-            "the answer to a user query, and the results are likely"
-            "to be able to be found with a web search",
+        "Search the internet and get a summary of the top "
+        "10 webpages. Should only be used if you don't know "
+        "the answer to a user query, and the results are likely"
+        "to be able to be found with a web search",
         "parameters": {
             "type": "object",
             "properties": {
                 "search_term": {
                     "type":
-                        "string",
+                    "string",
                     "description":
-                        "The term to use in the search. This should"
-                        "ideally be keywords to search for, not a"
-                        "natural-language question"
+                    "The term to use in the search. This should"
+                    "ideally be keywords to search for, not a"
+                    "natural-language question"
                 }
             },
             "required": ["search_term"]
@@ -110,57 +110,65 @@ SEARCH_TOOL: ChatCompletionToolParam = {
 
 MESSAGES_WITHOUT_TOOLS: List[ChatCompletionMessageParam] = [{
     "role":
-        "system",
+    "system",
     "content":
-        "You are a helpful assistant with access to tools. If a tool"
-        " that you have would be helpful to answer a user query, "
-        "call the tool. Otherwise, answer the user's query directly "
-        "without calling a tool. DO NOT CALL A TOOL THAT IS IRRELEVANT "
-        "to the user's question - just respond to it normally."
+    "You are a helpful assistant with access to tools. If a tool"
+    " that you have would be helpful to answer a user query, "
+    "call the tool. Otherwise, answer the user's query directly "
+    "without calling a tool. DO NOT CALL A TOOL THAT IS IRRELEVANT "
+    "to the user's question - just respond to it normally."
 }, {
     "role":
-        "user",
+    "user",
     "content":
-        "Hi! How are you?"
+    "Hi! How are you?"
 }, {
     "role":
-        "assistant",
+    "assistant",
     "content":
-        "I'm doing great! How can I assist you?"
+    "I'm doing great! How can I assist you?"
 }, {
     "role":
-        "user",
+    "user",
     "content":
-        "Can you tell me a joke please?"
+    "Can you tell me a joke please?"
 }]
 
 MESSAGES_ASKING_FOR_TOOLS: List[ChatCompletionMessageParam] = [{
     "role":
-        "user",
+    "user",
     "content":
-        "What is the weather in Dallas, Texas in Fahrenheit?"
+    "What is the weather in Dallas, Texas in Fahrenheit?"
 }]
 
 MESSAGES_WITH_TOOL_RESPONSE: List[ChatCompletionMessageParam] = [{
-        "role": "user",
-        "content": "What is the weather in Dallas, Texas in Fahrenheit?"
-    },{
-        "role": "assistant",
-        "tool_calls": [{
-            "id": "chatcmpl-tool-03e6481b146e408e9523d9c956696295",
-            "type": "function",
-            "function": {
-                "name": WEATHER_TOOL["function"]["name"],
-                "arguments": '{"city": "Dallas", "state": "TX", '
-                             '"unit": "fahrenheit"}'
-            }
-        }]
-    },{
-        "role": "tool",
-        "tool_call_id": "chatcmpl-tool-03e6481b146e408e9523d9c956696295",
-        "content": "The weather in Dallas is 98 degrees fahrenheit, with partly"
-                   "cloudy skies and a low chance of rain."
+    "role":
+    "user",
+    "content":
+    "What is the weather in Dallas, Texas in Fahrenheit?"
+}, {
+    "role":
+    "assistant",
+    "tool_calls": [{
+        "id": "chatcmpl-tool-03e6481b146e408e9523d9c956696295",
+        "type": "function",
+        "function": {
+            "name":
+            WEATHER_TOOL["function"]["name"],
+            "arguments":
+            '{"city": "Dallas", "state": "TX", '
+            '"unit": "fahrenheit"}'
+        }
     }]
+}, {
+    "role":
+    "tool",
+    "tool_call_id":
+    "chatcmpl-tool-03e6481b146e408e9523d9c956696295",
+    "content":
+    "The weather in Dallas is 98 degrees fahrenheit, with partly"
+    "cloudy skies and a low chance of rain."
+}]
 
 
 # for each server config, download the model and return the config
@@ -183,6 +191,7 @@ def server(request, server_config: ServerConfig):
     args_for_model = server_config["arguments"]
     with RemoteOpenAIServer(model, ARGS + args_for_model) as server:
         yield server
+
 
 @pytest.fixture(scope="module")
 def client(server: RemoteOpenAIServer):
@@ -209,6 +218,7 @@ async def test_chat_completion_without_tools(client: openai.AsyncOpenAI):
     # check to make sure we got text
     assert output_text is not None
     assert len(output_text) > 0
+    assert stop_reason != "tool_calls"
 
     # check to make sure no tool calls were returned
     assert (choice.message.tool_calls is None
@@ -462,8 +472,7 @@ async def test_tool_call_with_results(client: openai.AsyncOpenAI):
         max_tokens=500,
         model=model_name,
         tools=[WEATHER_TOOL, SEARCH_TOOL],
-        logprobs=False
-    )
+        logprobs=False)
 
     choice = chat_completion.choices[0]
 
@@ -481,11 +490,9 @@ async def test_tool_call_with_results(client: openai.AsyncOpenAI):
         model=model_name,
         tools=[WEATHER_TOOL, SEARCH_TOOL],
         logprobs=False,
-        stream=True
-    )
+        stream=True)
 
     chunks: List[str] = []
-    finish_reason: Optional[str] == None
     finish_reason_count = 0
     role_sent: bool = False
 
