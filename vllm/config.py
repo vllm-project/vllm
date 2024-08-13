@@ -142,6 +142,7 @@ class ModelConfig:
         self.max_logprobs = max_logprobs
         self.disable_sliding_window = disable_sliding_window
         self.skip_tokenizer_init = skip_tokenizer_init
+        self.enable_long_sequence = enable_long_sequence
 
         self.hf_config = get_config(self.model, trust_remote_code, revision,
                                     code_revision, rope_scaling, rope_theta)
@@ -167,7 +168,7 @@ class ModelConfig:
         self.served_model_name = get_served_model_name(model,
                                                        served_model_name)
         self.multimodal_config = multimodal_config
-        self.enable_long_sequence = enable_long_sequence
+        
 
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
