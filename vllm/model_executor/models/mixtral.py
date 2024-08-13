@@ -22,7 +22,7 @@
 # limitations under the License.
 """Inference-only Mixtral model."""
 from typing import Iterable, List, Optional, Tuple
-
+import re
 import torch
 from torch import nn
 from transformers import MixtralConfig
@@ -432,50 +432,39 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                 if name.endswith(".bias") and name not in params_dict:
                     continue
 
-                if self.use_fused_moe:
-                    if ("block_sparse_moe.experts." in name
-                            and ".w1." not in name and ".w2." not in name
-                            and ".w3." not in name
-                            and name not in params_dict):
-                        continue
+                if ("block_sparse_moe.experts." in name
+                        and ".w1." not in name and ".w2." not in name
+                        and ".w3." not in name
+                        and name not in params_dict):
+                    continue
 
-                    if (".qzeros" in name):
-                        continue
+                if (".qzeros" in name):
+                    continue
 
-                    shard_id = None
-                    expert_id = 0
+                shard_id = None
+                expert_id = 0
 
-                    has_any_numbered = (".qweight" in name or ".scales" in name
-                                        or ".g_idx" in name)
-                    if (has_any_numbered and (".w1." in name)):
-                        name = name.replace(".w1.", ".w13_")
-                        shard_id = 0
-                    if (has_any_numbered and (".w2." in name)):
-                        name = name.replace(".w2.", ".w2_")
-                        shard_id = 0
-                    if (has_any_numbered and (".w3." in name)):
-                        name = name.replace(".w3.", ".w13_")
-                        shard_id = 1
+                has_any_numbered = (".qweight" in name or ".scales" in name
+                                    or ".g_idx" in name)
+                if (has_any_numbered and (".w1." in name)):
+                    name = name.replace(".w1.", ".w13_")
+                    shard_id = 0
+                if (has_any_numbered and (".w2." in name)):
+                    name = name.replace(".w2.", ".w2_")
+                    shard_id = 0
+                if (has_any_numbered and (".w3." in name)):
+                    name = name.replace(".w3.", ".w13_")
+                    shard_id = 1
 
-                    exp_string = re.search(r"\.experts\.\d+.", name)
-                    if exp_string:
-                        exp_string = exp_string.group(0)
-                        expert_id = int(exp_string.split(".")[2])
-                        name = name.replace(exp_string, ".experts.")
-
-                else:
-                    if ("block_sparse_moe.experts." in name
-                            and name not in params_dict):
-                        continue
+                exp_string = re.search(r"\.experts\.\d+.", name)
+                if exp_string:
+                    exp_string = exp_string.group(0)
+                    expert_id = int(exp_string.split(".")[2])
+                    name = name.replace(exp_string, ".experts.")
 
                 param = params_dict[name]
 
-                if self.use_fused_moe and shard_id is not None:
-                    weight_loader = getattr(param, "weight_loader",
-                                            default_weight_loader)
-                    weight_loader(param, loaded_weight, name, shard_id,
-                                  expert_id, True)
-                else:
-                    weight_loader = getattr(param, "weight_loader",
-                                            default_weight_loader)
-                    weight_loader(param, loaded_weight)
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight, name, shard_id,
+                            expert_id, True)
