@@ -262,8 +262,11 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
         return hidden_states
 
     # Copied from vllm/model_executor/models/gemma.py
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.language_model.embed_tokens,
                                        hidden_states, sampling_metadata)
         return logits
