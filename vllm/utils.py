@@ -29,7 +29,6 @@ import torch.types
 from typing_extensions import ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
-from vllm import _custom_ops as ops
 from vllm.logger import enable_trace_function_call, init_logger
 
 logger = init_logger(__name__)
@@ -359,6 +358,7 @@ def is_xpu() -> bool:
 @lru_cache(maxsize=None)
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
+    from vllm import _custom_ops as ops
     max_shared_mem = (
         ops.get_max_shared_memory_per_block_device_attribute(gpu))
     # value 0 will cause MAX_SEQ_LEN become negative and test_attention.py
