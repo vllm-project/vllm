@@ -9,15 +9,17 @@ try:
 except ImportError:
     libtpu = None
 
-if torch.version.cuda is not None:
+if libtpu is not None:
+    # people might install pytorch built with cuda but run on tpu
+    # so we need to check tpu first
+    from .tpu import TpuPlatform
+    current_platform = TpuPlatform()
+elif torch.version.cuda is not None:
     from .cuda import CudaPlatform
     current_platform = CudaPlatform()
 elif torch.version.hip is not None:
     from .rocm import RocmPlatform
     current_platform = RocmPlatform()
-elif libtpu is not None:
-    from .tpu import TpuPlatform
-    current_platform = TpuPlatform()
 else:
     current_platform = UnspecifiedPlatform()
 
