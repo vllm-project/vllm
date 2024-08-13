@@ -34,9 +34,6 @@ def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME,
         pytest.skip("Skipping multi-node pipeline parallel test for "
                     "multiprocessing distributed backend")
 
-    USE_RAY_ADAG_NCCL = 0
-    USE_RAY_ADAG = 0
-
     pp_args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -70,14 +67,13 @@ def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME,
         pp_args.append("--enforce-eager")
         tp_args.append("--enforce-eager")
     pp_env = None
-    if USE_RAY_ADAG:
-        assert DIST_BACKEND == "ray", (
-            "Ray ADAG is only supported with Ray distributed backend")
+    if (DIST_BACKEND == "ray" and TP_SIZE == 2 and PP_SIZE == 2
+            and CHUNKED_PREFILL):
+        # Test Ray ADAG for a subset of the tests
         pp_env = {
             "VLLM_USE_RAY_COMPILED_DAG": "1",
             "VLLM_USE_RAY_SPMD_WORKER": "1",
-            "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL":
-            str(int(USE_RAY_ADAG_NCCL)),
+            "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL": "1",
         }
 
     compare_two_settings(MODEL_NAME, pp_args, tp_args, pp_env)
