@@ -2,6 +2,7 @@
 
 Run `pytest tests/kernels/test_cutlass.py`.
 """
+import time
 from typing import Optional, Type
 
 import pytest
@@ -46,6 +47,16 @@ def baseline_scaled_mm(a: torch.Tensor,
     return output
 
 
+def baseline_torch_mm(a: torch.Tensor,
+                      b: torch.Tensor,
+                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    output = torch.mm(a, b)
+    if bias is not None:
+        output = output + bias
+
+    return output
+
+
 def cutlass_fp8_gemm_helper(m: int,
                             n: int,
                             k: int,
@@ -75,6 +86,46 @@ def cutlass_fp8_gemm_helper(m: int,
     baseline = baseline_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
 
     assert torch.allclose(out, baseline, rtol=1e-2, atol=5e-2)
+
+
+def compare_cutlass_fp8_torch_mm_helper(
+    m: int,
+    n: int,
+    k: int,
+    use_bias: bool,
+    out_dtype: Type[torch.dtype] = torch.bfloat16,
+    device: str = "cuda",
+    display: bool = False,
+):
+    if use_bias:
+        bias = torch.rand((n, ), device=device, dtype=out_dtype) * 10
+    else:
+        bias = None
+    a_f16 = torch.randn((m, k), dtype=torch.bfloat16, device=device)
+    b_f16 = torch.randn((n, k), dtype=torch.bfloat16, device=device)
+
+    time_s1 = time.time()
+    qa, scale_a = ops.scaled_fp8_quant(a_f16, None)
+    scale_time = time.time() - time_s1
+    qb, scale_b = ops.scaled_fp8_quant(b_f16, None)
+
+    b_f16 = b_f16.t()
+    qb = qb.t()
+
+    time1 = time.time()
+    baseline = baseline_torch_mm(a_f16, b_f16, bias)
+    time2 = time.time()
+    out = ops.cutlass_scaled_mm(qa, qb, scale_a, scale_b, out_dtype, bias)
+    time3 = time.time()
+
+    torch_mm_time = time2 - time1
+    cutlass_mm_time = time3 - time2
+
+    if display:
+        print(f"{torch_mm_time=:.10f}", f"{scale_time=:.10f}",
+              f"{cutlass_mm_time=:.10f}")
+
+    assert baseline.shape == out.shape
 
 
 def cutlass_int8_gemm_helper(m: int,
@@ -120,6 +171,19 @@ def cutlass_int8_gemm_helper(m: int,
 def test_cutlass_fp8_gemm(m: int, n: int, k: int, per_act_token: bool,
                           per_out_ch: bool, use_bias: bool):
     cutlass_fp8_gemm_helper(m, n, k, per_act_token, per_out_ch, use_bias)
+
+
+@pytest.mark.parametrize("m", [4096])
+@pytest.mark.parametrize("n", [4096])
+@pytest.mark.parametrize("k", [4096])
+@pytest.mark.parametrize("use_bias", [True, False])
+@pytest.mark.skipif(capability < 89,
+                    reason="FP8 is not supported on this GPU type.")
+def test_compare_cutlass_fp8_torch_mm(m: int, n: int, k: int, use_bias: bool):
+    for _ in range(20):
+        # warm up
+        compare_cutlass_fp8_torch_mm_helper(m, n, k, use_bias, display=False)
+    compare_cutlass_fp8_torch_mm_helper(m, n, k, use_bias, display=True)
 
 
 @pytest.mark.parametrize("m", [1, 16, 32, 64, 128, 256, 512, 222, 33, 1])
