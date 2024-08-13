@@ -77,11 +77,13 @@ steps:
   - pytest -v -s core
 
 - label: Entrypoints Test # 20min
+  working_dir: "/vllm-workspace/tests"
   fast_check: true
   mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   commands:
+  - pip install -e ./plugins/vllm_add_dummy_model
   - pytest -v -s entrypoints/llm
   - pytest -v -s entrypoints/openai
 
@@ -154,6 +156,7 @@ steps:
   - vllm/
   - tests/models
   commands:
+    - pip install -e ./plugins/vllm_add_dummy_model
     - pytest -v -s models -m \"not vlm\"
 
 - label: Vision Language Models Test # 42min
@@ -289,6 +292,7 @@ steps:
   - pytest -v -s distributed/test_chunked_prefill_distributed.py
   - pytest -v -s distributed/test_multimodal_broadcast.py
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp2.py
+  - pytest -v -s distributed/test_distributed_oot.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s distributed/test_utils.py
 

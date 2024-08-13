@@ -1,32 +1,27 @@
-from typing import Optional
+import os
 
-import torch
+import pytest
 
-from vllm import LLM, ModelRegistry, SamplingParams
-from vllm.model_executor.models.opt import OPTForCausalLM
-from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm import LLM, SamplingParams
 
-
-class MyOPTForCausalLM(OPTForCausalLM):
-
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[torch.Tensor]:
-        # this dummy model always predicts the first token
-        logits = super().compute_logits(hidden_states, sampling_metadata)
-        logits.zero_()
-        logits[:, 0] += 1.0
-        return logits
+# NOTE: the order of the tests is important
+# the first test does not load any plugins
+# the second test loads the plugin
+# they share the same process, so the plugin is loaded for the second test
 
 
-def test_oot_registration():
-    # register our dummy model
-    ModelRegistry.register_model("OPTForCausalLM", MyOPTForCausalLM)
+def test_plugin(dummy_opt_path):
+    os.environ["VLLM_PLUGINS"] = ""
+    with pytest.raises(Exception) as excinfo:
+        LLM(model=dummy_opt_path, load_format="dummy")
+    assert "are not supported for now" in str(excinfo.value)
+
+
+def test_oot_registration(dummy_opt_path):
+    os.environ["VLLM_PLUGINS"] = "register_dummy_model"
     prompts = ["Hello, my name is", "The text does not matter"]
     sampling_params = SamplingParams(temperature=0)
-    llm = LLM(model="facebook/opt-125m")
+    llm = LLM(model=dummy_opt_path, load_format="dummy")
     first_token = llm.get_tokenizer().decode(0)
     outputs = llm.generate(prompts, sampling_params)
 
