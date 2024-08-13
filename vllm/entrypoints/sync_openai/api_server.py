@@ -5,33 +5,35 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Dict, Iterable, List, Union, cast
+from typing import Dict, List, Union
 
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.routing import Mount
-from openai.types.chat import ChatCompletionContentPartTextParam
 from prometheus_client import make_asgi_app
 
 import vllm
 from vllm import FastSyncLLM as LLM
 from vllm import envs
+from vllm.config import EngineConfig
 from vllm.engine.arg_utils import EngineArgs
+from vllm.entrypoints.chat_utils import _parse_chat_message_content
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.entrypoints.openai.protocol import (
-    ChatCompletionContentPartParam, ChatCompletionMessageParam,
     ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse, ChatMessage, CompletionRequest,
-    CompletionResponse, CompletionResponseChoice, DeltaMessage, ErrorResponse,
-    ModelCard, ModelList, ModelPermission, UsageInfo)
-from vllm.entrypoints.openai.serving_chat import (ChatMessageParseResult,
-                                                  ConversationMessage)
+    CompletionResponse, CompletionResponseChoice,
+    CompletionResponseStreamChoice, CompletionStreamResponse, DeltaMessage,
+    ErrorResponse, ModelCard, ModelList, ModelPermission, UsageInfo)
+from vllm.entrypoints.openai.serving_chat import ConversationMessage
 from vllm.logger import init_logger
+from vllm.model_executor.guided_decoding import (
+    get_guided_decoding_logits_processor)
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.utils import random_uuid
+from vllm.utils import FlexibleArgumentParser, random_uuid
 
 mp = multiprocessing.get_context(envs.VLLM_WORKER_MULTIPROC_METHOD)
 
@@ -51,6 +53,7 @@ class BackgroundRunner:
     def __init__(self):
         self.value = 0
         self.engine_args: EngineArgs
+        self.engine_config: EngineConfig
         self.input_queue: multiprocessing.Queue = mp.Queue()
         self.result_queue: multiprocessing.Queue = mp.Queue()
         self.result_queues: Dict[str, asyncio.Queue] = {}
@@ -118,6 +121,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(runner.run_main())
     await runner.result_queues["Ready"].get()
     del runner.result_queues["Ready"]
+    runner.engine_config = runner.engine_args.create_engine_config()
 
     tokenizer = get_tokenizer(
         engine_args.tokenizer,
@@ -166,6 +170,14 @@ async def _check_model(request: Union[CompletionRequest,
     return None
 
 
+async def _guided_decode_logits_processor(request, tokenizer):
+    decoding_config = runner.engine_config.decoding_config
+    guided_decoding_backend = request.guided_decoding_backend \
+            or decoding_config.guided_decoding_backend
+    return await get_guided_decoding_logits_processor(guided_decoding_backend,
+                                                      request, tokenizer)
+
+
 async def completion_generator(model, result_queue, choices, created_time,
                                ids):
     completed = 0
@@ -174,18 +186,18 @@ async def completion_generator(model, result_queue, choices, created_time,
             request_id, token, stats = await result_queue.get()
 
             choice_idx = choices[request_id]
-            res = CompletionResponse(id=request_id,
-                                     created=created_time,
-                                     model=model,
-                                     choices=[
-                                         CompletionResponseChoice(
-                                             index=choice_idx,
-                                             text=token,
-                                             logprobs=None,
-                                             finish_reason=None,
-                                             stop_reason=None)
-                                     ],
-                                     usage=None)
+            res = CompletionStreamResponse(id=request_id,
+                                           created=created_time,
+                                           model=model,
+                                           choices=[
+                                               CompletionResponseStreamChoice(
+                                                   index=choice_idx,
+                                                   text=token,
+                                                   logprobs=None,
+                                                   finish_reason=None,
+                                                   stop_reason=None)
+                                           ],
+                                           usage=None)
             if stats is not None:
                 res.usage = UsageInfo()
                 res.usage.completion_tokens = stats.get("tokens", 0)
@@ -214,7 +226,11 @@ async def completions(request: CompletionRequest, raw_request: Request):
     if error_check_ret is not None:
         return JSONResponse(content=error_check_ret.model_dump(),
                             status_code=error_check_ret.code)
-    sampling_params = request.to_sampling_params()
+    guided_decode_logits_processor = (await _guided_decode_logits_processor(
+        request, runner.tokenizer))
+    sampling_params = request.to_sampling_params(
+        runner.tokenizer, guided_decode_logits_processor,
+        runner.engine_args.max_model_len)
     ids, result_queue = await runner.add_request(request.prompt,
                                                  sampling_params)
     res = CompletionResponse(model=request.model,
@@ -253,40 +269,6 @@ async def completions(request: CompletionRequest, raw_request: Request):
     res.usage.total_tokens = (  # type: ignore
         res.usage.completion_tokens + res.usage.prompt_tokens)  # type: ignore
     return res
-
-
-def parse_chat_message_content_parts(
-    role: str,
-    parts: Iterable[ChatCompletionContentPartParam],
-) -> ChatMessageParseResult:
-    texts: List[str] = []
-
-    for _, part in enumerate(parts):
-        part_type = part["type"]
-        if part_type == "text":
-            text = cast(ChatCompletionContentPartTextParam, part)["text"]
-
-            texts.append(text)
-        else:
-            raise NotImplementedError(f"Unknown part type: {part_type}")
-
-    messages = [ConversationMessage(role=role, content="\n".join(texts))]
-
-    return ChatMessageParseResult(messages=messages)
-
-
-def parse_chat_message_content(
-    message: ChatCompletionMessageParam, ) -> ChatMessageParseResult:
-    role = message["role"]
-    content = message.get("content")
-
-    if content is None:
-        return ChatMessageParseResult(messages=[])
-    if isinstance(content, str):
-        messages = [ConversationMessage(role=role, content=content)]
-        return ChatMessageParseResult(messages=messages)
-
-    return parse_chat_message_content_parts(role, content)
 
 
 async def chat_completion_generator(model, result_queue, created_time, id):
@@ -352,7 +334,11 @@ async def chat_completions(request: ChatCompletionRequest,
     if error_check_ret is not None:
         return JSONResponse(content=error_check_ret.model_dump(),
                             status_code=error_check_ret.code)
-    sampling_params = request.to_sampling_params()
+    guided_decode_logits_processor = (await _guided_decode_logits_processor(
+        request, runner.tokenizer))
+    sampling_params = request.to_sampling_params(
+        runner.tokenizer, guided_decode_logits_processor,
+        runner.engine_args.max_model_len)
     conversation: List[ConversationMessage] = []
 
     res = ChatCompletionResponse(model=request.model,
@@ -362,7 +348,8 @@ async def chat_completions(request: ChatCompletionRequest,
                                                  completion_tokens=0))
 
     for msg in request.messages:
-        parsed_msg = parse_chat_message_content(msg)
+        parsed_msg = _parse_chat_message_content(
+            msg, runner.engine_config.model_config, runner.tokenizer)
         conversation.extend(parsed_msg.messages)
 
     prompt = runner.tokenizer.apply_chat_template(  # type: ignore
@@ -403,7 +390,9 @@ async def chat_completions(request: ChatCompletionRequest,
 
 
 def parse_args():
-    parser = make_arg_parser()
+    parser = FlexibleArgumentParser(
+        description="vLLM OpenAI-Compatible RESTful API server.")
+    parser = make_arg_parser(parser)
     return parser.parse_args()
 
 
