@@ -300,7 +300,7 @@ if __name__ == "__main__":
                         type=int,
                         default=1,
                         help='sequence-parallel-size')
-    parser.add_argument('--max-model-length',
+    parser.add_argument('--max-model-len',
                         type=int,
                         default=None,
                         help='enbale the long sequence for the'
