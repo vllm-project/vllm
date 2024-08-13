@@ -14,6 +14,15 @@ Easy, fast, and cheap LLM serving for everyone
 
 </p>
 
+
+---
+
+**vLLM & NVIDIA Triton User Meetup (Monday, September 9, 5pm-9pm PT) at Fort Mason, San Francisco**
+
+We are excited to announce our sixth vLLM Meetup, in collaboration with NVIDIA Triton Team.
+Join us to hear the vLLM's recent update about performance.
+Register now [here](https://lu.ma/87q3nvnh) and be part of the event!
+
 ---
 
 *Latest News* 🔥
