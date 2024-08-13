@@ -545,7 +545,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             layer.w13_qweight,
             layer.w13_g_idx_sort_indices,
             layer.w13_qweight.shape[1] * self.quant_config.pack_factor,
-            layer.w13_qweight.shape[2] * 2,
+            layer.w13_qweight.shape[2],
             self.quant_config.weight_bits,
         )
         replace_tensor(layer, "w13_qweight", marlin_w13_qweight)
