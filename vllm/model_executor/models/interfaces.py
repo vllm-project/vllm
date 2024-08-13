@@ -1,7 +1,7 @@
 from typing import (ClassVar, Dict, List, Literal, Optional, Protocol, Type,
                     Union, overload, runtime_checkable)
 
-from typing_extensions import TypeGuard
+from typing_extensions import TypeIs
 
 from vllm.config import LoRAConfig, MultiModalConfig, SchedulerConfig
 from vllm.logger import init_logger
@@ -37,18 +37,18 @@ class _SupportsVisionType(Protocol):
 
 
 @overload
-def supports_vision(model: Type[object]) -> TypeGuard[Type[SupportsVision]]:
+def supports_vision(model: Type[object]) -> TypeIs[Type[SupportsVision]]:
     ...
 
 
 @overload
-def supports_vision(model: object) -> TypeGuard[SupportsVision]:
+def supports_vision(model: object) -> TypeIs[SupportsVision]:
     ...
 
 
 def supports_vision(
     model: Union[Type[object], object],
-) -> Union[TypeGuard[Type[SupportsVision]], TypeGuard[SupportsVision]]:
+) -> Union[TypeIs[Type[SupportsVision]], TypeIs[SupportsVision]]:
     if isinstance(model, type):
         return isinstance(model, _SupportsVisionType)
 
@@ -94,18 +94,18 @@ class _SupportsLoRAType(Protocol):
 
 
 @overload
-def supports_lora(model: Type[object]) -> TypeGuard[Type[SupportsLoRA]]:
+def supports_lora(model: Type[object]) -> TypeIs[Type[SupportsLoRA]]:
     ...
 
 
 @overload
-def supports_lora(model: object) -> TypeGuard[SupportsLoRA]:
+def supports_lora(model: object) -> TypeIs[SupportsLoRA]:
     ...
 
 
 def supports_lora(
     model: Union[Type[object], object],
-) -> Union[TypeGuard[Type[SupportsLoRA]], TypeGuard[SupportsLoRA]]:
+) -> Union[TypeIs[Type[SupportsLoRA]], TypeIs[SupportsLoRA]]:
     result = _supports_lora(model)
 
     if not result:
@@ -137,7 +137,7 @@ def supports_lora(
 
 def _supports_lora(
     model: Union[Type[object], object],
-) -> Union[TypeGuard[Type[SupportsLoRA]], TypeGuard[SupportsLoRA]]:
+) -> Union[TypeIs[Type[SupportsLoRA]], TypeIs[SupportsLoRA]]:
     if isinstance(model, type):
         return isinstance(model, _SupportsLoRAType)
 
@@ -172,18 +172,18 @@ class _HasInnerStateType(Protocol):
 
 
 @overload
-def has_inner_state(model: object) -> TypeGuard[HasInnerState]:
+def has_inner_state(model: object) -> TypeIs[HasInnerState]:
     ...
 
 
 @overload
-def has_inner_state(model: Type[object]) -> TypeGuard[Type[HasInnerState]]:
+def has_inner_state(model: Type[object]) -> TypeIs[Type[HasInnerState]]:
     ...
 
 
 def has_inner_state(
     model: Union[Type[object], object]
-) -> Union[TypeGuard[Type[HasInnerState]], TypeGuard[HasInnerState]]:
+) -> Union[TypeIs[Type[HasInnerState]], TypeIs[HasInnerState]]:
     if isinstance(model, type):
         return isinstance(model, _HasInnerStateType)
 

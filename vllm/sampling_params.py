@@ -224,6 +224,9 @@ class SamplingParams:
         if self.top_k < -1 or self.top_k == 0:
             raise ValueError(f"top_k must be -1 (disable), or at least 1, "
                              f"got {self.top_k}.")
+        if not isinstance(self.top_k, int):
+            raise TypeError(
+                f"top_k must be an integer, got {type(self.top_k).__name__}")
         if not 0.0 <= self.min_p <= 1.0:
             raise ValueError("min_p must be in [0, 1], got "
                              f"{self.min_p}.")
