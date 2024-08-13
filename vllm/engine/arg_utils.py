@@ -20,6 +20,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+ALLOWED_DETAILED_TRACE_MODULES = ["model", "worker", "all"]
+
 
 def nullable_str(val: str):
     if not val or val == "None":
@@ -30,7 +32,7 @@ def nullable_str(val: str):
 @dataclass
 class EngineArgs:
     """Arguments for vLLM engine."""
-    model: str
+    model: str = 'facebook/opt-125m'
     served_model_name: Optional[Union[List[str]]] = None
     tokenizer: Optional[str] = None
     skip_tokenizer_init: bool = False
@@ -56,8 +58,8 @@ class EngineArgs:
     enable_prefix_caching: bool = False
     disable_sliding_window: bool = False
     use_v2_block_manager: bool = False
-    swap_space: int = 4  # GiB
-    cpu_offload_gb: int = 0  # GiB
+    swap_space: float = 4  # GiB
+    cpu_offload_gb: float = 0  # GiB
     gpu_memory_utilization: float = 0.90
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: int = 256
@@ -69,7 +71,7 @@ class EngineArgs:
     rope_theta: Optional[float] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
-    enforce_eager: bool = False
+    enforce_eager: Optional[bool] = None
     max_context_len_to_capture: Optional[int] = None
     max_seq_len_to_capture: int = 8192
     disable_custom_all_reduce: bool = False
@@ -117,6 +119,7 @@ class EngineArgs:
     disable_logprobs_during_spec_decoding: Optional[bool] = None
 
     otlp_traces_endpoint: Optional[str] = None
+    collect_detailed_traces: Optional[str] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -130,7 +133,7 @@ class EngineArgs:
         parser.add_argument(
             '--model',
             type=str,
-            default='facebook/opt-125m',
+            default=EngineArgs.model,
             help='Name or path of the huggingface model to use.')
         parser.add_argument(
             '--tokenizer',
@@ -318,7 +321,7 @@ class EngineArgs:
                             default=EngineArgs.seed,
                             help='Random seed for operations.')
         parser.add_argument('--swap-space',
-                            type=int,
+                            type=float,
                             default=EngineArgs.swap_space,
                             help='CPU swap space size (GiB) per GPU.')
         parser.add_argument(
@@ -632,9 +635,9 @@ class EngineArgs:
             '--preemption-mode',
             type=str,
             default=None,
-            help='If \'recompute\', the engine performs preemption by block '
-            'swapping; If \'swap\', the engine performs preemption by block '
-            'swapping.')
+            help='If \'recompute\', the engine performs preemption by '
+            'recomputing; If \'swap\', the engine performs preemption by '
+            'block swapping.')
 
         parser.add_argument(
             "--served-model-name",
@@ -660,6 +663,16 @@ class EngineArgs:
             type=str,
             default=None,
             help='Target URL to which OpenTelemetry traces will be sent.')
+        parser.add_argument(
+            '--collect-detailed-traces',
+            type=str,
+            default=None,
+            help="Valid choices are " +
+            ",".join(ALLOWED_DETAILED_TRACE_MODULES) +
+            ". It makes sense to set this only if --otlp-traces-endpoint is"
+            " set. If set, it will collect detailed traces for the specified "
+            "modules. This involves use of possibly costly and or blocking "
+            "operations and hence might have a performance impact.")
 
         return parser
 
@@ -672,6 +685,9 @@ class EngineArgs:
         return engine_args
 
     def create_engine_config(self, ) -> EngineConfig:
+        # gguf file needs a specific model loader and doesn't use hf_repo
+        if self.model.endswith(".gguf"):
+            self.quantization = self.load_format = "gguf"
 
         # bitsandbytes quantization needs a specific model loader
         # so we make sure the quant method and the load format are consistent
@@ -754,10 +770,14 @@ class EngineArgs:
                 use_sliding_window = (model_config.get_sliding_window()
                                       is not None)
                 use_spec_decode = self.speculative_model is not None
+                has_seqlen_agnostic_layers = (
+                    model_config.contains_seqlen_agnostic_layers(
+                        parallel_config))
                 if (is_gpu and not use_sliding_window and not use_spec_decode
                         and not self.enable_lora
                         and not self.enable_prompt_adapter
-                        and not self.enable_prefix_caching):
+                        and not self.enable_prefix_caching
+                        and not has_seqlen_agnostic_layers):
                     self.enable_chunked_prefill = True
                     logger.warning(
                         "Chunked prefill is enabled by default for models with "
@@ -788,6 +808,7 @@ class EngineArgs:
             speculative_max_model_len=self.speculative_max_model_len,
             enable_chunked_prefill=self.enable_chunked_prefill,
             use_v2_block_manager=self.use_v2_block_manager,
+            disable_log_stats=self.disable_log_stats,
             ngram_prompt_lookup_max=self.ngram_prompt_lookup_max,
             ngram_prompt_lookup_min=self.ngram_prompt_lookup_min,
             draft_token_acceptance_method=\
@@ -844,8 +865,26 @@ class EngineArgs:
         decoding_config = DecodingConfig(
             guided_decoding_backend=self.guided_decoding_backend)
 
+        detailed_trace_modules = []
+        if self.collect_detailed_traces is not None:
+            detailed_trace_modules = self.collect_detailed_traces.split(",")
+        for m in detailed_trace_modules:
+            if m not in ALLOWED_DETAILED_TRACE_MODULES:
+                raise ValueError(
+                    f"Invalid module {m} in collect_detailed_traces. "
+                    f"Valid modules are {ALLOWED_DETAILED_TRACE_MODULES}")
+            if (m == "model"
+                    or m == "all") and self.pipeline_parallel_size > 1:
+                raise ValueError(
+                    "Collection of detailed traces for the 'model' module is "
+                    "not yet supported with pipeline parallelism.")
         observability_config = ObservabilityConfig(
-            otlp_traces_endpoint=self.otlp_traces_endpoint)
+            otlp_traces_endpoint=self.otlp_traces_endpoint,
+            collect_model_forward_time="model" in detailed_trace_modules
+            or "all" in detailed_trace_modules,
+            collect_model_execute_time="worker" in detailed_trace_modules
+            or "all" in detailed_trace_modules,
+        )
 
         if (model_config.get_sliding_window() is not None
                 and scheduler_config.chunked_prefill_enabled

@@ -117,7 +117,7 @@ Alternatively, wheels intended for vLLM use can be accessed under the releases.
 
         $ # Install PyTorch
         $ pip uninstall torch -y
-        $ pip install --no-cache-dir --pre torch==2.5.0.dev20240710 --index-url https://download.pytorch.org/whl/nightly/rocm6.1
+        $ pip install --no-cache-dir --pre torch==2.5.0.dev20240726 --index-url https://download.pytorch.org/whl/nightly/rocm6.1
 
         $ # Build & install AMD SMI
         $ pip install /opt/rocm/share/amd_smi
