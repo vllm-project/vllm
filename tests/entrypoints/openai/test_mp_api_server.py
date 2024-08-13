@@ -32,9 +32,6 @@ async def test_mp_cuda_init():
     parser = FlexibleArgumentParser(description="vLLM's remote OpenAI server.")
     parser = make_arg_parser(parser)
     args = parser.parse_args([])
-    # use an invalid tensor_parallel_size to trigger the
-    # error in the server
-    args.tensor_parallel_size = 65536
 
     async with build_async_engine_client(args):
         pass
