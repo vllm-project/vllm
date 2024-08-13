@@ -1333,7 +1333,11 @@ class Scheduler:
         if enable_chunking and len(seqs) == 1:
             num_new_tokens = min(num_new_tokens,
                                  budget.remaining_token_budget())
+        # When chunking is disabled in decode phase, schdule based on token budget.
         if not enable_chunking and status == SequenceStatus.RUNNING:
-            num_new_tokens = min(num_new_tokens,
-                                 budget.remaining_token_budget())
+            if len(seqs) == 1:  
+                num_new_tokens = min(num_new_tokens, budget.remaining_token_budget())
+            # For beam search with multiple sequences, schedule next time if not enough tokens are left
+            else:  
+                num_new_tokens = num_new_tokens if num_new_tokens <= budget.remaining_token_budget() else 0
         return num_new_tokens
