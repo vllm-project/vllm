@@ -1,4 +1,4 @@
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from typing import Any, AsyncGenerator, Mapping, Optional
 
 import cloudpickle
@@ -21,6 +21,10 @@ from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 
 # Time to wait before checking it the server process is alive.
 SERVER_START_TIMEOUT_MS = 1000
+
+
+class ClientClosedError(Exception):
+    """Exception class raised when the client is used post-shutdown"""
 
 
 class AsyncEngineRPCClient:
@@ -58,6 +62,12 @@ class AsyncEngineRPCClient:
     @contextmanager
     def socket(self):
         # Ensure client sockets are always closed after use
+
+        # Raise a sensible error if the client was already closed
+        # This can happen if a server shutdown is triggered but some coroutines
+        # are still running requests.
+        if self.context.closed:
+            raise ClientClosedError("The ZMQ client has already shut down")
 
         # Connect to RPC socket for Request-Reply pattern,
         # Note that we use DEALER to enable asynchronous communication
@@ -202,17 +212,17 @@ class AsyncEngineRPCClient:
 
     async def abort(self, request_id: str):
         """Send an ABORT_REQUEST signal to the RPC Server"""
-
-        await self._send_one_way_rpc_request(
-            request=RPCAbortRequest(request_id),
-            error_message=f"RPCAbortRequest {request_id} failed")
+        with suppress(ClientClosedError):
+            await self._send_one_way_rpc_request(
+                request=RPCAbortRequest(request_id),
+                error_message=f"RPCAbortRequest {request_id} failed")
 
     async def do_log_stats(self):
         """Send a DO_LOG_STATS signal to the RPC Server"""
-
-        await self._send_one_way_rpc_request(
-            request=RPCUtilityRequest.DO_LOG_STATS,
-            error_message="RPCRequest DO_LOG_STATS failed.")
+        with suppress(ClientClosedError):
+            await self._send_one_way_rpc_request(
+                request=RPCUtilityRequest.DO_LOG_STATS,
+                error_message="RPCRequest DO_LOG_STATS failed.")
 
     @property
     def is_running(self) -> bool:
