@@ -115,6 +115,9 @@ STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
 STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
 
+GiB_bytes = 1 << 30
+"""The number of bytes in one gibibyte (GiB)."""
+
 STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.half,
     "bfloat16": torch.bfloat16,
@@ -341,8 +344,11 @@ def is_tpu() -> bool:
 
 @lru_cache(maxsize=None)
 def is_xpu() -> bool:
-    from importlib.metadata import version
-    is_xpu_flag = "xpu" in version("vllm")
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        is_xpu_flag = "xpu" in version("vllm")
+    except PackageNotFoundError:
+        return False
     # vllm is not build with xpu
     if not is_xpu_flag:
         return False
@@ -1095,9 +1101,9 @@ def cuda_device_count_stateless() -> int:
 
 
 #From: https://stackoverflow.com/a/4104188/2749989
-def run_once(f):
+def run_once(f: Callable[P, None]) -> Callable[P, None]:
 
-    def wrapper(*args, **kwargs) -> Any:
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
         if not wrapper.has_run:  # type: ignore[attr-defined]
             wrapper.has_run = True  # type: ignore[attr-defined]
             return f(*args, **kwargs)
