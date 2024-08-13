@@ -201,7 +201,8 @@ def main(args: argparse.Namespace):
             args.pipeline_parallel_size,
             args.sequence_parallel_size,
             args.max_model_len,
-            args.enable_long_sequence,)
+            args.enable_long_sequence,
+        )
     # elif args.backend == "hf":
     #     assert args.tensor_parallel_size == 1
     #     elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
