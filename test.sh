@@ -15,7 +15,7 @@ do
                                 python benchmarks/benckmark_sequence_inference.py \
                                 --model /home/work05/Work/models/llm/Llama-2-7b-chat-hf \
                                 --dataset /home/work02/work02.new/llm/benchmarks/vllmfile-main/data/ShareGPT_V3_unfiltered_cleaned_split.json \
-                                --max-num-seqs ${numseqs[$k]} --output-len ${outputlen[$l]} --num-prompts ${numprompts[$j]} 
+                                --max-num-seqs ${numseqs[$k]} --output-len ${outputlen[$l]} --num-prompts ${numprompts[$j]} \
                                 --tensor-parallel-size ${parallelsize[$i]} --result /home/work02/work02.new/llm/vllm/result.csv 
                                 echo "parallel size:${parallelsize[$i]},num prompts:${numprompts[$j]},num batched seqs:${numseqs[$k]},\
                                 max output length:${outputlen[$l]}"
