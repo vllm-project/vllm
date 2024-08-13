@@ -1,14 +1,3 @@
-import sys
-import time
-
-import torch
-from openai import OpenAI, OpenAIError
-
-from vllm import ModelRegistry
-from vllm.model_executor.models.opt import OPTForCausalLM
-from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.utils import get_open_port
-
 from ...utils import VLLM_PATH, RemoteOpenAIServer
 
 chatml_jinja_path = VLLM_PATH / "examples/template_chatml.jinja"
