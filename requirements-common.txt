@@ -23,4 +23,5 @@ typing_extensions >= 4.10
 filelock >= 3.10.4 # filelock starts to support `mode` argument from 3.10.4
 pyzmq
 librosa # Required for audio processing
+soundfile # Required for audio processing
 gguf == 0.9.1

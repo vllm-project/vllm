@@ -8,7 +8,7 @@ import soundfile
 from PIL import Image
 
 from vllm.connections import global_http_connection
-from vllm.envs import VLLM_MULTIMODAL_FETCH_TIMEOUT
+from vllm.envs import VLLM_AUDIO_FETCH_TIMEOUT, VLLM_IMAGE_FETCH_TIMEOUT
 from vllm.multimodal.base import MultiModalDataDict
 
 
@@ -32,7 +32,7 @@ def fetch_image(image_url: str, *, image_mode: str = "RGB") -> Image.Image:
     """
     if image_url.startswith('http'):
         image_raw = global_http_connection.get_bytes(
-            image_url, timeout=VLLM_MULTIMODAL_FETCH_TIMEOUT)
+            image_url, timeout=VLLM_IMAGE_FETCH_TIMEOUT)
         image = _load_image_from_bytes(image_raw)
 
     elif image_url.startswith('data:image'):
@@ -54,7 +54,7 @@ async def async_fetch_image(image_url: str,
     """
     if image_url.startswith('http'):
         image_raw = await global_http_connection.async_get_bytes(
-            image_url, timeout=VLLM_MULTIMODAL_FETCH_TIMEOUT)
+            image_url, timeout=VLLM_IMAGE_FETCH_TIMEOUT)
         image = _load_image_from_bytes(image_raw)
 
     elif image_url.startswith('data:image'):
@@ -72,7 +72,7 @@ def fetch_audio(audio_url: str) -> Tuple[np.ndarray, Union[int, float]]:
     """
     if audio_url.startswith("http"):
         audio_bytes = global_http_connection.get_bytes(
-            audio_url, timeout=VLLM_MULTIMODAL_FETCH_TIMEOUT)
+            audio_url, timeout=VLLM_AUDIO_FETCH_TIMEOUT)
     elif audio_url.startswith("data:audio"):
         _, audio_base64 = audio_url.split(",", 1)
         audio_bytes = base64.b64decode(audio_base64)
@@ -90,7 +90,7 @@ async def async_fetch_audio(
     """
     if audio_url.startswith("http"):
         audio_bytes = await global_http_connection.async_get_bytes(
-            audio_url, timeout=VLLM_MULTIMODAL_FETCH_TIMEOUT)
+            audio_url, timeout=VLLM_AUDIO_FETCH_TIMEOUT)
     elif audio_url.startswith("data:audio"):
         _, audio_base64 = audio_url.split(",", 1)
         audio_bytes = base64.b64decode(audio_base64)

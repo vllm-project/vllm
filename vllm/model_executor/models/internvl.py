@@ -450,9 +450,9 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
         if image_input is not None:
             inputs_embeds = self.language_model.model.get_input_embeddings(
                 input_ids)
-            vit_embeds = self.extract_feature(image_input["data"])
+            vision_embeddings = self._process_image_input(image_input)
             inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, vit_embeds,
+                input_ids, inputs_embeds, vision_embeddings,
                 self.img_context_token_id)
             input_ids = None
         else:

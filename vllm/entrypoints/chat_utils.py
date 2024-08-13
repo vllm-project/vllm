@@ -31,7 +31,9 @@ logger = init_logger(__name__)
 
 class AudioURL(TypedDict, total=False):
     url: Required[str]
-    """Either a URL of the audio or the base64 encoded image data."""
+    """
+    Either a URL of the audio or a data URL with base64 encoded audio data.
+    """
 
 
 class ChatCompletionContentPartAudioParam(TypedDict, total=False):

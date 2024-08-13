@@ -150,7 +150,7 @@ A full code example can be found in `examples/openai_vision_api_client.py <https
 
     .. code-block:: shell
 
-        export VLLM_MULTIMODAL_FETCH_TIMEOUT=<timeout>
+        export VLLM_IMAGE_FETCH_TIMEOUT=<timeout>
 
 .. note::
     There is no need to format the prompt in the API request since it will be handled by the server.
