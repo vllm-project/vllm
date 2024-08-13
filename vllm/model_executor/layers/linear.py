@@ -21,12 +21,9 @@ from vllm.model_executor.utils import set_weight_attrs
 logger = init_logger(__name__)
 
 WEIGHT_LOADER_V2_SUPPORTED = [
-    "CompressedTensorsLinearMethod", 
-    "AWQMarlinLinearMethod", 
-    "AWQLinearMethod",
-    "GPTQMarlinLinearMethod"
+    "CompressedTensorsLinearMethod", "AWQMarlinLinearMethod",
+    "AWQLinearMethod", "GPTQMarlinLinearMethod"
 ]
-
 
 
 def adjust_marlin_shard(param, shard_size, shard_offset):
