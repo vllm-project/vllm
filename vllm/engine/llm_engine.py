@@ -449,6 +449,7 @@ class LLMEngine:
             enable_lora=bool(self.lora_config),
             max_num_seqs=self.scheduler_config.max_num_seqs,
             max_input_length=None,
+            model_max_length=self.model_config.max_model_len,
             tokenizer_mode=self.model_config.tokenizer_mode,
             trust_remote_code=self.model_config.trust_remote_code,
             revision=self.model_config.tokenizer_revision)

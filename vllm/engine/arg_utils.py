@@ -41,6 +41,7 @@ class EngineArgs:
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
     sequence_parallel_size: int = 1
+    enable_long_sequence = False
     max_parallel_loading_workers: Optional[int] = None
     block_size: int = 16
     enable_prefix_caching: bool = False
@@ -319,6 +320,10 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.sequence_parallel_size,
                             help='Number of sequence parallel replicas.')
+        parser.add_argument('--enable-long-sequence',
+                            type=bool,
+                            default=EngineArgs.enable_long_sequence,
+                            help='enbale the long sequence for the distributed inference.')
         parser.add_argument(
             '--max-parallel-loading-workers',
             type=int,
@@ -726,7 +731,8 @@ class EngineArgs:
             disable_sliding_window=self.disable_sliding_window,
             skip_tokenizer_init=self.skip_tokenizer_init,
             served_model_name=self.served_model_name,
-            multimodal_config=vision_language_config)
+            multimodal_config=vision_language_config,
+            enable_long_sequence=self.enable_long_sequence,)
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,

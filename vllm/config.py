@@ -84,6 +84,10 @@ class ModelConfig:
             matches the model name exposed via the APIs. If multiple model 
             names provided, the first name will be used. If not specified, 
             the model name will be the same as `model`.
+        enable_long_sequence: Whether to enable long sequence. If True, the 
+            length of a seqeunce is no longer limited to the max length of 
+            pagedattention-v2(such as 8192). And the distributed inference 
+            is enable.
     """
 
     def __init__(
@@ -110,6 +114,7 @@ class ModelConfig:
         skip_tokenizer_init: bool = False,
         served_model_name: Optional[Union[str, List[str]]] = None,
         multimodal_config: Optional["VisionLanguageConfig"] = None,
+        enable_long_sequence: bool = False,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -157,10 +162,12 @@ class ModelConfig:
             hf_config=self.hf_text_config,
             max_model_len=max_model_len,
             disable_sliding_window=self.disable_sliding_window,
-            sliding_window_len=self.get_hf_config_sliding_window())
+            sliding_window_len=self.get_hf_config_sliding_window(),
+            enable_long_sequence=self.enable_long_sequence)
         self.served_model_name = get_served_model_name(model,
                                                        served_model_name)
         self.multimodal_config = multimodal_config
+        self.enable_long_sequence = enable_long_sequence
 
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
@@ -1340,6 +1347,7 @@ def _get_and_verify_max_len(
     max_model_len: Optional[int],
     disable_sliding_window: bool,
     sliding_window_len: Optional[int],
+    enable_long_sequence: Optional[bool],
 ) -> int:
     """Get and verify the model's maximum length."""
     derived_max_model_len = float("inf")
@@ -1413,7 +1421,7 @@ def _get_and_verify_max_len(
     # derived length from the HF model config.
     if max_model_len is None:
         max_model_len = int(derived_max_model_len)
-    elif max_model_len > derived_max_model_len:
+    elif not enable_long_sequence and max_model_len > derived_max_model_len:
         # Some models might have a separate key for specifying model_max_length
         # that will be bigger than derived_max_model_len. We compare user input
         # with model_max_length and allow this override when it's smaller.
