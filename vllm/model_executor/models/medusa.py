@@ -30,6 +30,16 @@ class ResidualBlock(nn.Module):
 
 
 class Medusa(nn.Module):
+    """This class implements the Medusa draft model from the paper: https://arxiv.org/abs/2401.10774
+    Reference implementation: https://github.com/FasterDecoding/Medusa
+    
+    Differences from reference implementation:
+    1. Currently this only supports generating proposals from top-1 tokens.
+    2. We have an optional token_map which reduces draft vocab to most 
+       frequently used tokens to give some additional speed-up by reducing 
+       sampling overhead. This is disabled unless the checkpoint file has 
+       explicit token_map tensor and config has an optional attribute 
+       truncated_vocab_size < vocab_size."""
 
     def __init__(self, config: MedusaConfig, **_) -> None:
         super().__init__()
@@ -61,7 +71,8 @@ class Medusa(nn.Module):
         # the draft model. Using smaller vocab size for draft, containing
         # only most frequent tokens reduces the speculation overhead. This
         # doesn't affect the acceptance rate much and thus gives more speed
-        # -up.
+        # -up. By default, this is disabled and is only used if the EAGLE 
+        # checkpoint file has token_map tensor.
         self.token_map = None
 
     def forward(self, hidden_states: torch.Tensor) -> List[torch.Tensor]:

@@ -15,6 +15,20 @@ from vllm.transformers_utils.configs.eagle import EAGLEConfig
 
 
 class EAGLE(nn.Module):
+    """This class implements the EAGLE draft model from the paper: https://arxiv.org/pdf/2401.15077
+    Reference implementation: https://github.com/SafeAILab/EAGLE
+    
+    Differences from reference implementation:
+    1. In reference, LlamaDecoderLayer implementation doesn't have 
+       input_layernorm for 1st decoder layer (https://github.com/SafeAILab/EAGLE/blob/7d065d084443fbfd386f88839efd7193c12be869/eagle/model/cnets.py#L427) 
+       but we do as HF implementation also does.
+    2. We allow any decoder layer to be used in EAGLE whereas in reference 
+       decoder layer is fixed to be LlamaDecoderLayer.
+    3. We have an optional token_map which reduces draft vocab to most 
+       frequently used tokens to give some additional speed-up by reducing 
+       sampling overhead. This is disabled unless the checkpoint file has 
+       explicit token_map tensor and config has an optional attribute 
+       truncated_vocab_size < vocab_size."""
 
     def __init__(self, config: EAGLEConfig, *args, **kwargs) -> None:
         super().__init__()
@@ -48,7 +62,8 @@ class EAGLE(nn.Module):
         # the draft model. Using smaller vocab size for draft, containing
         # only most frequent tokens reduces the speculation overhead. This
         # doesn't affect the acceptance rate much and thus gives more speed
-        # -up.
+        # -up. By default, this is disabled and is only used if the EAGLE 
+        # checkpoint file has token_map tensor.
         self.token_map = None
 
     @property

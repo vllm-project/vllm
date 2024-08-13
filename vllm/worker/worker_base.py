@@ -404,6 +404,9 @@ class WorkerWrapperBase:
 
 def extract_previous_hidden_states(
         data: Union[ExecuteModelRequest, dict]) -> dict:
+    """If data contains previous_hidden_states, extract it. This returns a dict
+    which can be used directly as additional kwargs in any following 
+    execute_model calls."""
     output = {}
 
     if isinstance(data, dict):
