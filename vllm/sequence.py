@@ -23,7 +23,10 @@ if TYPE_CHECKING:
     from vllm.multimodal.base import MultiModalDataDict
 
 
-class Logprob(msgspec.Struct, omit_defaults=True, array_like=True):
+class Logprob(
+        msgspec.Struct,
+        omit_defaults=True,  # type: ignore[call-arg]
+        array_like=True):  # type: ignore[call-arg]
     """Infos for supporting OpenAI compatible logprobs and token ranks.
 
     Attributes:
@@ -111,15 +114,23 @@ class RequestMetrics:
     model_execute_time: Optional[float] = None
 
 
-class SequenceDataDelta(msgspec.Struct, array_like=True, omit_defaults=True):
-    """Delta SequenceGroupData to send to workers."""
+class SequenceDataDelta(
+        msgspec.Struct,
+        array_like=True,  # type: ignore[call-arg]
+        omit_defaults=True):  # type: ignore[call-arg]
+    """Delta SequenceData to send to workers per step."""
+    # A new token to be appended to existing SequenceData.
     new_output_token_ids: List[int]
+    # Overwriting existing `cumulative_logprob`
     new_cumulative_logprob: float
+    # Overwriting existing `num_computed_tokens`.
     new_num_computed_tokens: int
+    # Overwriting existing `stage`.
     new_stage: SequenceStage
 
 
-class SequenceData(msgspec.Struct, omit_defaults=True):
+class SequenceData(msgspec.Struct,
+                   omit_defaults=True):  # type: ignore[call-arg]
     """Data associated with a sequence.
 
     Args:
@@ -147,11 +158,11 @@ class SequenceData(msgspec.Struct, omit_defaults=True):
     _stage: SequenceStage = SequenceStage.PREFILL
     _cached_all_token_ids: List[int] = msgspec.field(default_factory=list)
 
-    # It is used to get delta input. It is reset when `reset_and_get_delta`
+    # It is used to get delta input. It is reset when `get_delta_and_reset`
     # is called.
     _new_appended_tokens: List[int] = msgspec.field(default_factory=list)
 
-    def __post_init__(self, ) -> None:
+    def __post_init__(self) -> None:
         self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(
             self._prompt_token_ids)
         self._update_cached_all_tokens()
@@ -271,7 +282,7 @@ class SequenceData(msgspec.Struct, omit_defaults=True):
     def get_output_token_ids(self) -> Tuple[int, ...]:
         return self.output_token_ids
 
-    def reset_and_get_delta(self) -> SequenceDataDelta:
+    def get_delta_and_reset(self) -> SequenceDataDelta:
         delta = SequenceDataDelta(self._new_appended_tokens,
                                   self._cumulative_logprob,
                                   self.get_num_computed_tokens(), self.stage)
@@ -790,10 +801,11 @@ class SequenceGroup:
                 f"num_seqs={len(self.seqs)})")
 
 
-class SequenceGroupMetadataDelta(msgspec.Struct,
-                                 tag=True,
-                                 array_like=True,
-                                 omit_defaults=True):
+class SequenceGroupMetadataDelta(
+        msgspec.Struct,
+        tag=True,  # type: ignore[call-arg]
+        array_like=True,  # type: ignore[call-arg]
+        omit_defaults=True):  # type: ignore[call-arg]
     """Delta of SequenceGroupMetadata.
 
     After sending the first SequenceGroupMetadata, vLLM scheduler
@@ -808,10 +820,11 @@ class SequenceGroupMetadataDelta(msgspec.Struct,
     computed_block_nums: Optional[List[int]] = None
 
 
-class SequenceGroupMetadata(msgspec.Struct,
-                            tag=True,
-                            array_like=True,
-                            omit_defaults=True):
+class SequenceGroupMetadata(
+        msgspec.Struct,
+        tag=True,  # type: ignore[call-arg]
+        array_like=True,  # type: ignore[call-arg]
+        omit_defaults=True):  # type: ignore[call-arg]
     """Metadata for a sequence group. Used to create `AttentionMetadata`.
 
     Args:
@@ -892,14 +905,17 @@ class SequenceGroupMetadata(msgspec.Struct,
                     sequence_group_metadata_delta: SequenceGroupMetadataDelta):
         for id, delta in sequence_group_metadata_delta.seq_data_delta.items():
             self.seq_data[id].apply_delta(delta)
-        self.request_id = sequence_group_metadata_delta.request_id
+        assert self.request_id == sequence_group_metadata_delta.request_id
         self.block_tables = sequence_group_metadata_delta.block_tables
         self.token_chunk_size = sequence_group_metadata_delta.token_chunk_size
         self.do_sample = sequence_group_metadata_delta.do_sample
         self.is_prompt = sequence_group_metadata_delta.is_prompt
 
 
-class SequenceOutput(msgspec.Struct, omit_defaults=True, array_like=True):
+class SequenceOutput(
+        msgspec.Struct,
+        omit_defaults=True,  # type: ignore[call-arg]
+        array_like=True):  # type: ignore[call-arg]
     """The model output associated with a sequence.
 
     Args:
@@ -939,9 +955,10 @@ class SequenceGroupOutput(ABC):
         pass
 
 
-class CompletionSequenceGroupOutput(msgspec.Struct,
-                                    omit_defaults=True,
-                                    array_like=True):
+class CompletionSequenceGroupOutput(
+        msgspec.Struct,
+        omit_defaults=True,  # type: ignore[call-arg]
+        array_like=True):  # type: ignore[call-arg]
     __metaclass__ = SequenceGroupOutput
     """The model output associated with a completion sequence group."""
     samples: List[SequenceOutput]
@@ -961,8 +978,8 @@ class CompletionSequenceGroupOutput(msgspec.Struct,
 
 class EmbeddingSequenceGroupOutput(
         msgspec.Struct,
-        omit_defaults=True,
-        array_like=True,
+        omit_defaults=True,  # type: ignore[call-arg]
+        array_like=True,  # type: ignore[call-arg]
 ):
     """The model output associated with an embedding sequence group."""
     __metaclass__ = SequenceGroupOutput
@@ -978,7 +995,10 @@ class EmbeddingSequenceGroupOutput(
         return self.embeddings == other.embeddings
 
 
-class IntermediateTensors(msgspec.Struct, omit_defaults=True, array_like=True):
+class IntermediateTensors(
+        msgspec.Struct,
+        omit_defaults=True,  # type: ignore[call-arg]
+        array_like=True):  # type: ignore[call-arg]
     """For all pipeline stages except the last, we need to return the hidden
     states and residuals to be sent to the next stage. This data structure
     contains the hidden states and residuals for a request.
@@ -1005,7 +1025,10 @@ class IntermediateTensors(msgspec.Struct, omit_defaults=True, array_like=True):
         return f"IntermediateTensors(tensors={self.tensors})"
 
 
-class SamplerOutput(msgspec.Struct, omit_defaults=True, array_like=True):
+class SamplerOutput(
+        msgspec.Struct,
+        omit_defaults=True,  # type: ignore[call-arg]
+        array_like=True):  # type: ignore[call-arg]
     """For each sequence group, we generate a list of SequenceOutput object,
     each of which contains one possible candidate for the next token.
 
@@ -1064,7 +1087,10 @@ class SamplerOutput(msgspec.Struct, omit_defaults=True, array_like=True):
             f"spec_decode_worker_metrics={self.spec_decode_worker_metrics})")
 
 
-class PoolerOutput(msgspec.Struct, omit_defaults=True, array_like=True):
+class PoolerOutput(
+        msgspec.Struct,
+        omit_defaults=True,  # type: ignore[call-arg]
+        array_like=True):  # type: ignore[call-arg]
     """The output from a pooling operation in the embedding model."""
     outputs: List[EmbeddingSequenceGroupOutput]
 
@@ -1107,7 +1133,8 @@ def get_all_seq_ids_and_request_ids(
     return seq_ids, request_id_seq_ids_mapping
 
 
-class HiddenStates(msgspec.Struct, array_like=True, omit_defaults=True):
+class HiddenStates(msgspec.Struct, array_like=True,
+                   omit_defaults=True):  # type: ignore[call-arg]
     """Hidden states corresponding to in-progress sequences.
     Used in speculative decoding to pass hidden states from
     the target model to the proposer model in the subsequent step.
@@ -1145,7 +1172,10 @@ class HiddenStates(msgspec.Struct, array_like=True, omit_defaults=True):
             self._seq_ids = seq_ids
 
 
-class ExecuteModelRequest(msgspec.Struct, array_like=True, omit_defaults=True):
+class ExecuteModelRequest(
+        msgspec.Struct,
+        array_like=True,  # type: ignore[call-arg]
+        omit_defaults=True):  # type: ignore[call-arg]
     """The model execution request, containing CPU metadata only. The LLM
     engine should create an instance of this class for each request batch."""
     # The sequence group metadata list.

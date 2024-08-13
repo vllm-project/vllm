@@ -3,7 +3,10 @@ from typing import Any, Optional
 import msgspec
 
 
-class PoolingParams(msgspec.Struct, omit_defaults=True, array_like=True):
+class PoolingParams(
+        msgspec.Struct,
+        omit_defaults=True,  # type: ignore[call-arg]
+        array_like=True):  # type: ignore[call-arg]
     """Pooling parameters for pooling.
 
     Attributes:

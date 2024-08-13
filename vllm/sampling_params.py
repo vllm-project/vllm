@@ -31,7 +31,8 @@ first argument, and returns a modified tensor of logits
 to sample from."""
 
 
-class SamplingParams(msgspec.Struct, omit_defaults=True):
+class SamplingParams(msgspec.Struct,
+                     omit_defaults=True):  # type: ignore[call-arg]
     """Sampling parameters for text generation.
 
     Overall, we follow the sampling parameters from the OpenAI text completion
@@ -163,6 +164,9 @@ class SamplingParams(msgspec.Struct, omit_defaults=True):
             self.stop_token_ids = []
         else:
             self.stop_token_ids = list(self.stop_token_ids)
+        self.logprobs = 1 if self.logprobs is True else self.logprobs
+        self.prompt_logprobs = (1 if self.prompt_logprobs is True else
+                                self.prompt_logprobs)
 
         # Number of characters to hold back for stop string evaluation
         # until sequence is finished.

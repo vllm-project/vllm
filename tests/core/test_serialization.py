@@ -18,5 +18,16 @@ def test_msgspec_serialization():
     decoder = msgspec.msgpack.Decoder(ExecuteModelRequest,
                                       dec_hook=decode_hook)
     req = decoder.decode(encoder.encode(execute_model_req))
-    assert (len(req.seq_group_metadata_list) == len(
-        execute_model_req.seq_group_metadata_list))
+    expected = execute_model_req.seq_group_metadata_list
+    actual = req.seq_group_metadata_list
+    assert (len(expected) == len(actual))
+    expected = expected[0]
+    actual = actual[0]
+
+    assert expected.block_tables == actual.block_tables
+    assert expected.is_prompt == actual.is_prompt
+    assert expected.request_id == actual.request_id
+    assert (expected.seq_data[0].prompt_token_ids ==
+            actual.seq_data[0].prompt_token_ids)
+    assert (expected.seq_data[0].output_token_ids ==
+            actual.seq_data[0].output_token_ids)

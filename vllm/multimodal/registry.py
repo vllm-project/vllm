@@ -6,6 +6,7 @@ import torch
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
 
+from .audio import AudioPlugin
 from .base import (MultiModalDataDict, MultiModalInputMapper, MultiModalInputs,
                    MultiModalPlugin, MultiModalTokensCalc)
 from .image import ImagePlugin
@@ -19,7 +20,7 @@ class MultiModalRegistry:
     :class:`~vllm.multimodal.MultiModalPlugin` for each modality.
     """
 
-    DEFAULT_PLUGINS = (ImagePlugin(), )
+    DEFAULT_PLUGINS = (ImagePlugin(), AudioPlugin())
 
     def __init__(
             self,

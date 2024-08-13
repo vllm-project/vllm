@@ -39,11 +39,13 @@ if TYPE_CHECKING:
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_FUSED_MOE_CHUNK_SIZE: int = 64 * 1024
     VLLM_USE_RAY_SPMD_WORKER: bool = False
+    VLLM_SPMD_SEND_DELTA_DATA: bool = False
     VLLM_USE_RAY_COMPILED_DAG: bool = False
     VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL: bool = True
     VLLM_WORKER_MULTIPROC_METHOD: str = "fork"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
+    VLLM_AUDIO_FETCH_TIMEOUT: int = 5
     VLLM_TARGET_DEVICE: str = "cuda"
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
@@ -290,6 +292,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_USE_RAY_SPMD_WORKER":
     lambda: bool(int(os.getenv("VLLM_USE_RAY_SPMD_WORKER", "0"))),
 
+    # If set, it sends delta data for SPMD workers.
+    "VLLM_SPMD_SEND_DELTA_DATA":
+    lambda: bool(int(os.getenv("VLLM_SPMD_SEND_DELTA_DATA", "1"))),
+
     # If the env var is set, it uses the Ray's compiled DAG API
     # which optimizes the control plane overhead.
     # Run vLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
@@ -320,6 +326,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Default is 5 seconds
     "VLLM_IMAGE_FETCH_TIMEOUT":
     lambda: int(os.getenv("VLLM_IMAGE_FETCH_TIMEOUT", "5")),
+
+    # Timeout for fetching audio when serving multimodal models
+    # Default is 5 seconds
+    "VLLM_AUDIO_FETCH_TIMEOUT":
+    lambda: int(os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "5")),
 
     # Path to the XLA persistent cache directory.
     # Only used for XLA devices such as TPUs.

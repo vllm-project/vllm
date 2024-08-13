@@ -40,7 +40,7 @@ from vllm.model_executor import SamplingMetadata, SamplingMetadataCache
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models.interfaces import (supports_lora,
-                                                   supports_vision)
+                                                   supports_multimodal)
 from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalInputs)
@@ -900,9 +900,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         if self.lora_config:
             assert supports_lora(self.model), "Model does not support LoRA"
-            assert not supports_vision(
+            assert not supports_multimodal(
                 self.model
-            ), "To be tested: vision language model with LoRA settings."
+            ), "To be tested: multimodal language model with LoRA settings."
 
             self.lora_manager = LRUCacheWorkerLoRAManager(
                 self.scheduler_config.max_num_seqs,
@@ -1054,7 +1054,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         # of images processed.
         model_config = self.model_config
 
-        if supports_vision(self.model):
+        if supports_multimodal(self.model):
             max_mm_tokens = MULTIMODAL_REGISTRY \
                 .get_max_multimodal_tokens(model_config)
             max_num_seqs_orig = max_num_seqs
