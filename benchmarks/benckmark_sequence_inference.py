@@ -4,9 +4,7 @@ import json
 import random
 import time
 from typing import List, Optional, Tuple
-import torch
-from transformers import AutoModelForCausalLM, PreTrainedTokenizerBase
-from tqdm import tqdm
+from transformers import PreTrainedTokenizerBase
 
 from vllm import LLM, SamplingParams
 from vllm.transformers_utils.tokenizer import get_tokenizer
@@ -45,7 +43,7 @@ def sample_requests(
         if prompt_len < 4 or output_len < 4:
             # Prune too short sequences.
             continue
-        if prompt_len > 8192 :
+        if prompt_len > 8192:
             # Prune too long sequences.
             continue
         filtered_dataset.append((prompt, prompt_len, output_len))
@@ -292,11 +290,13 @@ if __name__ == "__main__":
     parser.add_argument('--max-model-length',
                         type=int,
                         default=None,
-                        help='enbale the long sequence for the distributed inference.')
+                        help='enbale the long sequence for the'
+                        ' distributed inference.')
     parser.add_argument('--enable-long-sequence',
                         type=bool,
                         default=False,
-                        help='enbale the long sequence for the distributed inference.')
+                        help='enbale the long sequence for the '
+                        'distributed inference.')
     args = parser.parse_args()
 
     if args.backend == "vllm":

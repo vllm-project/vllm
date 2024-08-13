@@ -323,7 +323,8 @@ class EngineArgs:
         parser.add_argument('--enable-long-sequence',
                             type=bool,
                             default=EngineArgs.enable_long_sequence,
-                            help='enbale the long sequence for the distributed inference.')
+                            help='enbale the long sequence for the '
+                            'distributed inference.')
         parser.add_argument(
             '--max-parallel-loading-workers',
             type=int,
