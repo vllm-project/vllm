@@ -446,7 +446,7 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                 # logger.error(expert_params_mapping)
                 for mapping in expert_params_mapping:
                     param_name, weight_name, expert_id, shard_id = mapping
-                    if weight_name not in name:
+                    if weight_name not in name or ".qzeros" in name:
                         continue
                     # logger.error(f"{weight_name} {param_name} {name}")
                     name = name.replace(weight_name, param_name)
@@ -466,7 +466,10 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                     break
                 else:
                     # Skip loading extra bias for GPTQ models.
-                    if name.endswith(".bias") and name not in params_dict:
+                    if name.endswith(".bias") and name not in params_dict: 
+                        continue
+                    
+                    if ".qzeros" in name:
                         continue
                     # Skip layers on other devices.
                     if is_pp_missing_parameter(name, self):
