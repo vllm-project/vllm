@@ -399,8 +399,11 @@ class Phi3SmallForCausalLM(nn.Module):
     def get_decoder(self):
         return self.model
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         if self.dummy_token_indices is not None and logits is not None:
