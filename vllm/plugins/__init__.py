@@ -16,7 +16,7 @@ def load_general_plugins():
     else:
         from importlib.metadata import entry_points
 
-    allowed_plugins = envs.VLLM_GENERAL_PLUGINS
+    allowed_plugins = envs.VLLM_PLUGINS
 
     discovered_plugins = entry_points(group='vllm.general_plugins')
     for plugin in discovered_plugins:
