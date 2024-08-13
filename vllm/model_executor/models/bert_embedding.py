@@ -60,18 +60,21 @@ class BertEmbeddingModel(nn.Module):
         self.model = BertModel(config=kwargs["config"],
                                cache_config=kwargs.get("cache_config", None),
                                quant_config=kwargs.get("quant_config", None))
-        self._pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
+        # self._pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
+        self._pooler = BertPooler( )
 
     def forward(
         self,
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
+        encoder_input_ids: torch.Tensor,
+        encoder_positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        return self.model(input_ids=input_ids,
-                          position_ids=positions,
+        return self.model(input_ids=encoder_input_ids,
+                          position_ids=encoder_positions,
                           kv_caches=kv_caches,
                           inputs_embeds=inputs_embeds,
                           attn_metadata=attn_metadata)
@@ -304,7 +307,7 @@ class BertAttention(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         self_outputs = self.self(hidden_states, kv_cache, attn_metadata)
-        attn_output = self.output(self_outputs[0], hidden_states)
+        attn_output = self.output(self_outputs, hidden_states)
         return attn_output
 
 
@@ -363,7 +366,7 @@ class BertSelfAttention(nn.Module):
                            v,
                            kv_cache,
                            attn_metadata,
-                           attn_type=AttentionType)
+                           attn_type=AttentionType.ENCODER)
         return output
 
 
@@ -375,7 +378,8 @@ class BertSelfOutput(nn.Module):
         self.layernorm = nn.LayerNorm(config.hidden_size,
                                       eps=config.layer_norm_eps)
 
-    def forward(self, hidden_states, input_tensor):
+    def forward(self, hidden_states: torch.Tensor,
+                input_tensor: torch.Tensor) -> torch.Tensor:
         hidden_states = self.dense(hidden_states)
         hidden_states = self.layernorm(hidden_states + input_tensor)
         return hidden_states
@@ -410,3 +414,17 @@ class BertOutput(nn.Module):
         hidden_states = self.dense(hidden_states)
         hidden_states = self.layernorm(hidden_states + input_tensor)
         return hidden_states
+
+
+class BertPooler(nn.Module):
+
+    def __init__(self, config: BertConfig):
+        super().__init__()
+        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        self.activation = nn.Tanh()
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        first_token_tensor = hidden_states[:, 0]
+        pooled_output = self.dense(first_token_tensor)
+        pooled_output = self.activation(pooled_output)
+        return pooled_output

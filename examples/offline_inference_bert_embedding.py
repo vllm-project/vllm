@@ -3,6 +3,7 @@ from vllm import LLM
 # Sample prompts.
 prompts = [
     "This is an example sentence.",
+    # "A Good Day",
 ]
 
 # Create an LLM.

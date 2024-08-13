@@ -62,6 +62,12 @@ class EmbeddingModelBlockSpaceManager(BlockSpaceManager):
     def get_block_table(self, seq: Sequence) -> List[int]:
         return None  # type: ignore
 
+    def get_cross_block_table(self, seq: Sequence) -> List[int]:
+        return None  # type: ignore
+
+    def free_cross(self, seq_group: SequenceGroup) -> None:
+        return
+
     def get_num_free_gpu_blocks(self) -> int:
         return 1
 
