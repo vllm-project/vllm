@@ -415,10 +415,27 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                                                         requires_grad=False)
             return
 
-    def apply(self, layer: torch.nn.Module, x: torch.Tensor,
-              topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-              **kwargs) -> torch.Tensor:
+    def apply(self,
+              layer: torch.nn.Module,
+              x: torch.Tensor,
+              router_logits: torch.Tensor,
+              top_k: int,
+              renormalize: bool,
+              use_grouped_topk: bool,
+              topk_group: Optional[int] = None,
+              num_expert_group: Optional[int] = None) -> torch.Tensor:
+
         from vllm.model_executor.layers.fused_moe import fused_experts
+
+        topk_weights, topk_ids = FusedMoE.select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            use_grouped_topk=use_grouped_topk,
+            top_k=top_k,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group)
+
         return fused_experts(x,
                              layer.w13_weight,
                              layer.w2_weight,
