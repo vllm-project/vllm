@@ -661,6 +661,20 @@ class AsyncLLMEngine:
             partial(_log_task_completion, error_callback=self._error_callback))
         self.background_loop = asyncio.shield(self._background_loop_unshielded)
 
+    def shutdown_background_loop(self) -> None:
+        """
+        Shut down the background loop.
+
+        This method needs to be called during cleanup to remove
+        references to `self` and properly GC the resources held
+        by the async LLM engine (e.g., the executors as well as
+        their resources).
+        """
+        if self._background_loop_unshielded is not None:
+            self._background_loop_unshielded.cancel()
+            self._background_loop_unshielded = None
+        self.background_loop = None
+
     def _init_engine(self, *args,
                      **kwargs) -> Union[_AsyncLLMEngine, "ray.ObjectRef"]:
         if not self.engine_use_ray:
