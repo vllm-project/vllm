@@ -1,10 +1,10 @@
 import functools
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Callable, Dict, Optional, Tuple, Type,
-                    TypeVar)
+from typing import TYPE_CHECKING, Callable, Dict, Optional, Tuple, Type
 
 from torch import nn
 from transformers import PretrainedConfig
+from typing_extensions import TypeVar
 
 from vllm.logger import init_logger
 
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-C = TypeVar("C", bound=PretrainedConfig)
+C = TypeVar("C", bound=PretrainedConfig, default=PretrainedConfig)
 
 
 @dataclass(frozen=True)
@@ -44,7 +44,7 @@ class InputContext:
 
         return multimodal_config
 
-    def get_hf_config(self, hf_config_type: Type[C]) -> C:
+    def get_hf_config(self, hf_config_type: Type[C] = PretrainedConfig) -> C:
         """
         Get the HuggingFace configuration
         (:class:`transformers.PretrainedConfig`) of the model,

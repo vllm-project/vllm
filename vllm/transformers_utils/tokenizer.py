@@ -12,9 +12,9 @@ from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.tokenizers import BaichuanTokenizer
 from vllm.utils import make_async
 
-from .tokenizer_group import AnyTokenizer
-
 logger = init_logger(__name__)
+
+AnyTokenizer = Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
 
 
 def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
@@ -141,7 +141,7 @@ def get_tokenizer(
 
 
 def get_lora_tokenizer(lora_request: LoRARequest, *args,
-                       **kwargs) -> Optional[PreTrainedTokenizer]:
+                       **kwargs) -> Optional[AnyTokenizer]:
     if lora_request is None:
         return None
     try:
