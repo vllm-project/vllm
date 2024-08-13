@@ -169,7 +169,7 @@ class FusedMoE(torch.nn.Module):
     def weight_loader(self, param: torch.nn.Parameter,
                       loaded_weight: torch.Tensor, weight_name: str,
                       shard_id: str, expert_id: int) -> None:
-        if shard_id not in ["w1", "w2", "w3"]:
+        if shard_id not in ("w1", "w2", "w3"):
             raise ValueError(f"shard_id must be ['w1','w2','w3'] but "
                              f"got {shard_id}.")
 
@@ -190,11 +190,11 @@ class FusedMoE(torch.nn.Module):
 
         # Index the loaded weight for tp sharding.
         # down_proj: "RowParallel" so tp sharding on input_dim
-        if (shard_id == "w2"):
+        if shard_id == "w2":
             shard_dim = input_dim
             shard_size = expert_data.shape[shard_dim]
         # gate_up_proj: "MergedColumnParallel", so tp sharding on output_dim
-        elif (shard_id == "w1" or shard_id == "w3"):
+        elif shard_id in ("w1", "w3"):
             shard_dim = output_dim
             shard_size = expert_data.shape[output_dim] // 2
         offset = shard_size * tp_rank
@@ -294,7 +294,7 @@ class FusedMoE(torch.nn.Module):
         # Weight scales
         elif "weight_scale" in weight_name:
             # If we are in merged column case (gate_up_proj)
-            if shard_id == "w1" or shard_id == "w3":
+            if shard_id in ("w1", "w3"):
                 # We have to keep the weight scales of w1 and w3 because
                 # we need to re-quantize w1/w3 weights after weight loading.
                 idx = 0 if shard_id == "w1" else 1
