@@ -295,7 +295,9 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
 
 
 if envs.VLLM_TORCH_PROFILER_DIR:
-    logger.warning("Torch Profiler is enabled in the API server. This should ONLY be used for local development!")
+    logger.warning(
+        "Torch Profiler is enabled in the API server. This should ONLY be "
+        "used for local development!")
 
     @router.post("/start_profile")
     async def start_profile():
