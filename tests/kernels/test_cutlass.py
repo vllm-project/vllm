@@ -103,6 +103,7 @@ def compare_cutlass_fp8_torch_mm_helper(
         bias = None
     a_f16 = torch.randn((m, k), dtype=torch.bfloat16, device=device)
     b_f16 = torch.randn((n, k), dtype=torch.bfloat16, device=device)
+    torch.cuda.synchronize()
 
     time_s1 = time.time()
     qa, scale_a = ops.scaled_fp8_quant(a_f16, None)
@@ -114,8 +115,10 @@ def compare_cutlass_fp8_torch_mm_helper(
 
     time1 = time.time()
     baseline = baseline_torch_mm(a_f16, b_f16, bias)
+    torch.cuda.synchronize()
     time2 = time.time()
     out = ops.cutlass_scaled_mm(qa, qb, scale_a, scale_b, out_dtype, bias)
+    torch.cuda.synchronize()
     time3 = time.time()
 
     torch_mm_time = time2 - time1
@@ -176,7 +179,7 @@ def test_cutlass_fp8_gemm(m: int, n: int, k: int, per_act_token: bool,
 @pytest.mark.parametrize("m", [4096])
 @pytest.mark.parametrize("n", [4096])
 @pytest.mark.parametrize("k", [4096])
-@pytest.mark.parametrize("use_bias", [True, False])
+@pytest.mark.parametrize("use_bias", [False, True])
 @pytest.mark.skipif(capability < 89,
                     reason="FP8 is not supported on this GPU type.")
 def test_compare_cutlass_fp8_torch_mm(m: int, n: int, k: int, use_bias: bool):
