@@ -455,7 +455,7 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                     weight_loader = param.weight_loader
                     weight_loader(param,
                                   loaded_weight,
-                                  weight_name,
+                                  name,
                                   shard_id=shard_id,
                                   expert_id=expert_id)
                     break
