@@ -513,7 +513,7 @@ class AsyncLLMEngine:
 
         if self.engine_use_ray:
             print_warning_once(
-                "DEPRECATED. `--engine-use-ray` is deprecated and may "
+                "DEPRECATED. `--engine-use-ray` is deprecated and willl "
                 "be removed in a future update. "
                 "See https://github.com/vllm-project/vllm/issues/7045.")
 
