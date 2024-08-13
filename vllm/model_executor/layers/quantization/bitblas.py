@@ -264,7 +264,7 @@ class BitBLASLinearMethod(LinearMethodBase):
 
         sw = Parameter(
             torch.empty(
-                1,
+                (output_size_per_partition,),
                 device="cuda",
                 dtype=params_dtype,
             ),
@@ -488,7 +488,6 @@ class BitBLASLinearMethod(LinearMethodBase):
                 f"Unsupported quant_method {self.quant_config.quant_method}")
 
         matmul_config = MatmulConfig(
-            # M=self.OPT_FEATURES,
             N=outfeatures,
             K=infeatures,
             A_dtype=bitblas_dtype,
