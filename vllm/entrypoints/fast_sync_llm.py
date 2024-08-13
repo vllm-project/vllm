@@ -36,6 +36,7 @@ class FastSyncLLM:
         self.result_queue = result_queue
         self.finish = False
         self.need_restart = False
+        self.llm_engine: LLMEngine
 
     def _add_request(
         self,
