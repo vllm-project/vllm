@@ -27,9 +27,9 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
                    get_clip_num_patches)
-from .interfaces import SupportsVision
+from .interfaces import SupportsMultiModal
 from .utils import (filter_weights, init_vllm_registered_model,
-                    merge_vision_embeddings)
+                    merge_multimodal_embeddings)
 
 IMG_START = '<img>'
 IMG_END = '</img>'
@@ -292,7 +292,7 @@ def dummy_data_for_internvl(ctx: InputContext, seq_len: int):
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_internvl_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_internvl)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_internvl)
-class InternVLChatModel(nn.Module, SupportsVision):
+class InternVLChatModel(nn.Module, SupportsMultiModal):
 
     def __init__(self,
                  config: PretrainedConfig,
@@ -451,9 +451,9 @@ class InternVLChatModel(nn.Module, SupportsVision):
             inputs_embeds = self.language_model.model.get_input_embeddings(
                 input_ids)
             vision_embeddings = self._process_image_input(image_input)
-            inputs_embeds = merge_vision_embeddings(input_ids, inputs_embeds,
-                                                    vision_embeddings,
-                                                    self.img_context_token_id)
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, vision_embeddings,
+                self.img_context_token_id)
             input_ids = None
         else:
             inputs_embeds = None

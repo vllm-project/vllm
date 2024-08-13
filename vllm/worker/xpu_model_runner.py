@@ -12,7 +12,7 @@ from vllm.distributed import broadcast_tensor_dict
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
-from vllm.model_executor.models.interfaces import supports_vision
+from vllm.model_executor.models.interfaces import supports_multimodal
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalInputs)
 from vllm.sampling_params import SamplingParams
@@ -165,7 +165,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         # of images processed.
         model_config = self.model_config
 
-        if supports_vision(self.model):
+        if supports_multimodal(self.model):
             max_mm_tokens = MULTIMODAL_REGISTRY \
                 .get_max_multimodal_tokens(model_config)
             max_num_seqs_orig = max_num_seqs

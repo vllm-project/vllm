@@ -23,13 +23,13 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 from .clip import (CLIPVisionModel, dummy_image_for_clip,
                    dummy_seq_data_for_clip, get_clip_image_feature_size,
                    get_clip_patch_grid_length, input_processor_for_clip)
-from .interfaces import SupportsVision
+from .interfaces import SupportsMultiModal
 from .llava import LlavaMultiModalProjector
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_siglip_image_feature_size,
                      get_siglip_patch_grid_length, input_processor_for_siglip)
 from .utils import (filter_weights, init_vllm_registered_model,
-                    merge_vision_embeddings)
+                    merge_multimodal_embeddings)
 
 logger = init_logger(__name__)
 
@@ -275,7 +275,7 @@ def _init_vision_tower(hf_config: LlavaNextConfig):
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_llava_next_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_llava_next)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_llava_next)
-class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
+class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def __init__(self,
                  config: LlavaNextConfig,
@@ -571,7 +571,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsVision):
             inputs_embeds = self.language_model.model.get_input_embeddings(
                 input_ids)
 
-            inputs_embeds = merge_vision_embeddings(
+            inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, vision_embeddings,
                 self.config.image_token_index)
 
