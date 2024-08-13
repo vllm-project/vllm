@@ -3,9 +3,9 @@ from typing import Dict, List, Optional
 
 import openai
 import pytest
+from huggingface_hub import snapshot_download
 from openai.types.chat import (ChatCompletionMessageParam,
                                ChatCompletionToolParam)
-from transformers import AutoModelForCausalLM, AutoTokenizer
 from typing_extensions import TypedDict
 
 from ...utils import VLLM_PATH, RemoteOpenAIServer
@@ -22,10 +22,10 @@ class TestConfig(TypedDict):
 
 
 ARGS: List[str] = [
-    # "--dtype",
-    # "half",  # TODO change to BF16
-    # "--kv-cache-dtype",
-    # "fp8",
+    "--dtype",
+    "half",  # TODO change to BF16
+    "--kv-cache-dtype",
+    "fp8",
     "--enable-auto-tool-choice"
 ]
 
@@ -179,8 +179,7 @@ def server_config(request):
     print(f'downloading model for {config["model"]}')
 
     # download model and tokenizer using transformers
-    AutoTokenizer.from_pretrained(config["model"])
-    AutoModelForCausalLM.from_pretrained(config["model"])
+    snapshot_download(config["model"])
     yield CONFIGS[request.param]
 
 
