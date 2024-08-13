@@ -240,11 +240,11 @@ class FusedMoE(torch.nn.Module):
                     shard_size = loaded_weight.size()[-1]
                     if shard_id == 0:
                         param_data[expert_id, :, :shard_size] = loaded_weight
-                    elif shard_id == 2:
+                    elif shard_id == 2 or shard_id == 1:
                         param_data[expert_id, :, shard_size:] = loaded_weight
                     else:
                         raise ValueError(f"Invalid shard_id: {shard_id}: "
-                                         "must be 0 or 2.")
+                                         "must be 0, 1, or 2.")
                 elif "w2" in weight_name:
                     param_data[expert_id][:] = loaded_weight
                 else:
