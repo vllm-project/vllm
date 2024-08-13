@@ -227,7 +227,7 @@ class LLMEngine:
         )
         # TODO(woosuk): Print more configs in debug mode.
 
-        from vllm.utils import load_general_plugins
+        from vllm.plugins import load_general_plugins
         load_general_plugins()
 
         self.model_config = model_config

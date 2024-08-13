@@ -411,7 +411,7 @@ class WorkerWrapperBase:
         # see https://github.com/NVIDIA/nccl/issues/1234
         os.environ['NCCL_CUMEM_ENABLE'] = '0'
 
-        from vllm.utils import load_general_plugins
+        from vllm.plugins import load_general_plugins
         load_general_plugins()
 
         if self.worker_class_fn:
