@@ -6,13 +6,15 @@ import torch
 
 from vllm._core_ext import ScalarType
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
-try:
-    import vllm._C
-except ImportError as e:
-    logger.warning("Failed to import from vllm._C with %r", e)
+if not current_platform.is_tpu():
+    try:
+        import vllm._C
+    except ImportError as e:
+        logger.warning("Failed to import from vllm._C with %r", e)
 
 with contextlib.suppress(ImportError):
     # ruff: noqa: F401
