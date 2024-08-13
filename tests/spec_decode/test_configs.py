@@ -9,7 +9,6 @@ import pytest
 
 from vllm.config import ModelConfig, ParallelConfig, SpeculativeConfig
 
-
 # Model Id // Quantization Arg // Expected Type
 MODEL_ARG_EXPTYPES = [
     # The expected type could be different for various device capabilities.
