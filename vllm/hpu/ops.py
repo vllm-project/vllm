@@ -12,6 +12,16 @@ import torch
 import torch.nn.functional as F
 
 import vllm.hpu.utils as hpu_utils
+from vllm.logger import init_logger
+
+logger = init_logger()
+HPUFusedRMSNorm = None
+try:
+    from habana_frameworks.torch.hpex.normalization import FusedRMSNorm
+    HPUFusedRMSNorm = FusedRMSNorm
+except ImportError:
+    logger.warning("Could not import HPU FusedRMSNorm kernel. "
+                   "vLLM will use forward_native implementation of RMSNorm.")
 
 PA_SPLIT_VALUE = (os.environ.get('PA_SPLIT_VALUE', '1') == '1')
 
@@ -52,8 +62,7 @@ def paged_attention_v1(query,
         keys = [k.unflatten(1, (kv_heads, 1)) for k in keys]
         mask = mask.unsqueeze(2)
 
-    attn_weights = [torch.matmul(query, k) for k in keys]
-    attn_weights = torch.cat(attn_weights, dim=-1)
+    attn_weights = torch.cat([torch.matmul(query, k) for k in keys], dim=-1)
     if alibi_slopes is not None:
         attn_weights.add_(alibi_slopes[:, :, -attn_weights.size(2):,
                                        -attn_weights.size(3):])
@@ -128,7 +137,8 @@ def prompt_attention(
         query = query.unflatten(1, (kv_heads, -1))
         key = key.unflatten(1, (kv_heads, 1))
         value = value.unflatten(1, (kv_heads, 1))
-        attn_bias = attn_bias.unsqueeze(2)
+        if attn_bias is not None:
+            attn_bias = attn_bias.unsqueeze(2)
     attn_weights = torch.matmul(query * scale, key.transpose(-1, -2))
     if attn_bias is not None:
         attn_weights.add_(attn_bias)
