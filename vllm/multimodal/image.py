@@ -3,13 +3,12 @@ from typing import List, Optional, Tuple, TypeVar
 
 import torch
 from PIL import Image
-from transformers import PreTrainedTokenizerBase
 
 from vllm.config import ModelConfig
 from vllm.inputs.registry import InputContext
 from vllm.logger import init_logger
 from vllm.transformers_utils.image_processor import get_image_processor
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
 from vllm.utils import is_list_of
 
 from .base import MultiModalInputs, MultiModalPlugin
@@ -40,7 +39,7 @@ def repeat_and_pad_token(
 
 
 def repeat_and_pad_image_tokens(
-    tokenizer: PreTrainedTokenizerBase,
+    tokenizer: AnyTokenizer,
     prompt: Optional[str],
     prompt_token_ids: List[int],
     *,

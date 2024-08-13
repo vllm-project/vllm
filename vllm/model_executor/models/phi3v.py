@@ -341,7 +341,7 @@ def get_phi3v_image_feature_size(
 def get_max_phi3v_image_tokens(ctx: InputContext):
 
     return get_phi3v_image_feature_size(
-        ctx.get_hf_config(PretrainedConfig),
+        ctx.get_hf_config(),
         input_height=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
         input_width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
     )
@@ -391,7 +391,7 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
         return llm_inputs
 
     model_config = ctx.model_config
-    hf_config = ctx.get_hf_config(PretrainedConfig)
+    hf_config = ctx.get_hf_config()
 
     image_data = multi_modal_data["image"]
     if isinstance(image_data, Image.Image):

@@ -8,8 +8,7 @@ from .base_tokenizer_group import AnyTokenizer, BaseTokenizerGroup
 from .tokenizer_group import TokenizerGroup
 
 if ray:
-    from vllm.transformers_utils.tokenizer_group.ray_tokenizer_group import (
-        RayTokenizerGroupPool)
+    from .ray_tokenizer_group import RayTokenizerGroupPool
 else:
     RayTokenizerGroupPool = None  # type: ignore
 
