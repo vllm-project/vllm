@@ -371,7 +371,11 @@ class FlashAttentionMetadataBuilder(
                 block_table = block_tables[seq_id]
             elif ((chunked_prefill_enabled or not is_prompt)
                   and block_tables is not None):
-                block_table = block_tables[seq_id][-curr_sliding_window_block:]
+                if curr_sliding_window_block == 0:
+                    block_table = block_tables[seq_id]
+                else:
+                    block_table = block_tables[seq_id][
+                        -curr_sliding_window_block:]
             self.block_tables.append(block_table)
 
             # Compute slot mapping.
@@ -671,6 +675,7 @@ class FlashAttentionImpl(AttentionImpl):
                 softmax_scale=self.scale,
                 causal=True,
                 alibi_slopes=self.alibi_slopes,  # type: ignore
+                softcap=self.logits_soft_cap,
             ).squeeze(1)
 
         # Reshape the output tensor.
