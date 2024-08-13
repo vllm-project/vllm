@@ -22,10 +22,10 @@ class TestConfig(TypedDict):
 
 
 ARGS: List[str] = [
-    "--dtype",
-    "half",  # TODO change to BF16
-    "--kv-cache-dtype",
-    "fp8",
+    # "--dtype",
+    # "half",  # TODO change to BF16
+    # "--kv-cache-dtype",
+    # "fp8",
     "--enable-auto-tool-choice"
 ]
 
