@@ -105,7 +105,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                 dtype=params_dtype,
             )
         }
-        if self.group_size == -1:
+        if not partition_scales:
             weight_scale = ChannelQuantScaleParameter(output_dim=0,
                                                       **weight_scale_args)
         else:
