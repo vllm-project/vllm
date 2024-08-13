@@ -1,7 +1,7 @@
 from typing import List, Optional, Tuple, Type
 
 import pytest
-from transformers import AutoConfig, AutoTokenizer
+from transformers import AutoConfig, AutoTokenizer, BatchEncoding
 
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
@@ -110,16 +110,21 @@ def run_test(
             for prompts, images in inputs_per_image
         ]
 
-    with hf_runner(model, dtype=dtype, is_vision_model=True) as hf_model:
-        if mantis_processor is not None:
+    if mantis_processor is not None:
 
-            def process(*args, **kwargs):
-                output = mantis_processor(*args, **kwargs)
-                output["pixel_values"] = output["pixel_values"].to(torch_dtype)
-                return output
+        def process(hf_inputs: BatchEncoding):
+            hf_inputs["pixel_values"] = hf_inputs["pixel_values"] \
+                .to(torch_dtype)  # type: ignore
+            return hf_inputs
+    else:
 
-            hf_model.processor = process
+        def process(hf_inputs: BatchEncoding):
+            return hf_inputs
 
+    with hf_runner(model,
+                   dtype=dtype,
+                   postprocess_inputs=process,
+                   is_vision_model=True) as hf_model:
         hf_outputs_per_image = [
             hf_model.generate_greedy_logprobs_limit(prompts,
                                                     max_tokens,
