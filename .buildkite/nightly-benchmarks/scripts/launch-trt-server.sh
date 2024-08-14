@@ -78,7 +78,8 @@ fi
 
 
 trtllm-build \
---model_config ${model_path} \
+--checkpoint_dir ${trt_model_path} \
+--model_config ${trt_model_path} \
 --use_fused_mlp \
 --reduce_fusion disable \
 --workers 8 \
