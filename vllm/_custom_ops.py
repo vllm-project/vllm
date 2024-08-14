@@ -255,7 +255,7 @@ try:
                                   size_n: int, size_k: int) -> torch.Tensor:
         return torch.empty((size_m, size_n), device=a.device, dtype=a.dtype)
 
-    @torch.library.register_fake("_C::gptq_marlin_gemm")
+    #@torch.library.register_fake("_C::gptq_marlin_gemm")
     def _gptq_marlin_gemm_fake(a: torch.Tensor,
                                b_q_weight: torch.Tensor,
                                b_scales: torch.Tensor,
@@ -338,7 +338,7 @@ try:
     @torch.library.register_fake("_C::aqlm_gemm")
     def _aqlm_gemm_fake(input: torch.Tensor, codes: torch.Tensor,
                         codebooks: torch.Tensor, scales: torch.Tensor,
-                        codebook_partition_sizes: torch.Tensor,
+                        codebook_partition_sizes: List[int],
                         bias: Optional[torch.Tensor]) -> torch.Tensor:
         out_features = codes.size(0) * codebooks.size(2)
         flat_input = input.reshape((-1, input.size(-1)))
@@ -354,7 +354,7 @@ try:
     @torch.library.register_fake("_C::aqlm_dequant")
     def _aqlm_dequant_fake(
             codes: torch.Tensor, codebooks: torch.Tensor,
-            codebook_partition_sizes: torch.Tensor) -> torch.Tensor:
+            codebook_partition_sizes: List[int]) -> torch.Tensor:
         in_features = codes.size(1) * 8
         out_features = codes.size(0)
         return torch.empty((out_features, in_features),
