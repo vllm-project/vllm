@@ -6,7 +6,7 @@ import torch.distributed
 from .parallel_state import get_tp_group
 
 torch.library.define("vllm::tensor_model_parallel_all_reduce",
-                     ("(Tensor(a!) input_ ) -> Tensor(a)"))
+                     ("(Tensor(a!) input_ ) -> Tensor"))
 
 
 @torch.library.register_kernel("vllm::tensor_model_parallel_all_reduce",
