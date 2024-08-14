@@ -42,7 +42,9 @@ class MultiModalRegistry:
             plugins: Sequence[MultiModalPlugin] = DEFAULT_PLUGINS) -> None:
         self._plugins = {p.get_data_key(): p for p in plugins}
 
-        self._init_limits_per_plugin = {k: 0 for k in self._plugins}
+        # This is used for non-multimodal models
+        self._disabled_limits_per_plugin = {k: 0 for k in self._plugins}
+
         self._limits_by_model = _MultiModalLimits()
 
     def register_plugin(self, plugin: MultiModalPlugin) -> None:
@@ -191,7 +193,7 @@ class MultiModalRegistry:
                 "be overwritten by the new values.", model_config.model)
 
         if multimodal_config is None:
-            limits_per_plugin = self._init_limits_per_plugin
+            limits_per_plugin = self._disabled_limits_per_plugin
         else:
             config_limits_per_plugin = multimodal_config.limit_per_prompt
 
@@ -202,9 +204,9 @@ class MultiModalRegistry:
                     "are not registered as multi-modal plugins: %s. "
                     "They will be ignored.", extra_keys)
 
+            # NOTE: Currently the default is set to 1 for each plugin 
             # TODO: Automatically determine the limits based on budget
-            # once more models support multi-image inputs and thus we don't
-            # need to set a default of 1
+            # once more models support multi-image inputs
             limits_per_plugin = {
                 key: config_limits_per_plugin.get(key, 1)
                 for key in self._plugins
