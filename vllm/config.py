@@ -1,7 +1,8 @@
 import enum
 import json
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, ClassVar, List, Optional, Tuple, Type, Union
+from typing import (TYPE_CHECKING, ClassVar, List, Mapping, Optional, Tuple,
+                    Type, Union)
 
 import torch
 from transformers import PretrainedConfig
@@ -846,7 +847,8 @@ class SchedulerConfig:
                  delay_factor: float = 0.0,
                  enable_chunked_prefill: bool = False,
                  embedding_mode: Optional[bool] = False,
-                 preemption_mode: Optional[str] = None) -> None:
+                 preemption_mode: Optional[str] = None,
+                 num_scheduler_steps: int = 1) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
         else:
@@ -875,6 +877,7 @@ class SchedulerConfig:
         self.chunked_prefill_enabled = enable_chunked_prefill
         self.embedding_mode = embedding_mode
         self.preemption_mode = preemption_mode
+        self.num_scheduler_steps = num_scheduler_steps
         self._verify_args()
 
     def _verify_args(self) -> None:
@@ -899,6 +902,16 @@ class SchedulerConfig:
                 "num_lookahead_slots "
                 f"({self.num_lookahead_slots}) must be greater than or "
                 "equal to 0.")
+
+        if self.num_scheduler_steps < 1:
+            raise ValueError(
+                "num_scheduler_steps "
+                f"({self.num_scheduler_steps}) must be greater than or "
+                "equal to 1.")
+
+    @property
+    def is_multi_step(self) -> bool:
+        return self.num_scheduler_steps > 1
 
 
 class DeviceConfig:
@@ -1429,10 +1442,15 @@ class PromptAdapterConfig:
 
 @dataclass
 class MultiModalConfig:
-    """Configs the input data format and how models should run for
-    multimodal models."""
+    """Controls the behavior of multimodal models."""
+
+    limit_per_prompt: Mapping[str, int]
+    """
+    The maximum number of multi-modal input instances allowed per prompt
+    for each :class:`~vllm.multimodal.MultiModalPlugin`.
+    """
+
     # TODO: Add configs to init vision tower or not.
-    pass
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
