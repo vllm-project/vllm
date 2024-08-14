@@ -199,7 +199,8 @@ def server(request, server_config: ServerConfig):
     model = server_config["model"]
     args_for_model = server_config["arguments"]
     print(f"Starting server for {model}")
-    with RemoteOpenAIServer(model, ARGS + args_for_model) as server:
+    with RemoteOpenAIServer(model, ARGS + args_for_model,
+                            max_start_wait_s=240) as server:
         yield server
     print(f'shutting down server for {model}')
 

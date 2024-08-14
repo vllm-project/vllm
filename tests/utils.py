@@ -53,14 +53,13 @@ class RemoteOpenAIServer:
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
     MAX_START_WAIT_S = 120  # wait for server to start for 120 seconds
 
-    def __init__(
-        self,
-        model: str,
-        cli_args: List[str],
-        *,
-        env_dict: Optional[Dict[str, str]] = None,
-        auto_port: bool = True,
-    ) -> None:
+    def __init__(self,
+                 model: str,
+                 cli_args: List[str],
+                 *,
+                 env_dict: Optional[Dict[str, str]] = None,
+                 auto_port: bool = True,
+                 max_start_wait_s: Optional[int] = None) -> None:
         if auto_port:
             if "-p" in cli_args or "--port" in cli_args:
                 raise ValueError("You have manually specified the port"
@@ -74,6 +73,9 @@ class RemoteOpenAIServer:
         args = parser.parse_args(cli_args)
         self.host = str(args.host or 'localhost')
         self.port = int(args.port)
+
+        if max_start_wait_s:
+            self.MAX_START_WAIT_S = max_start_wait_s
 
         env = os.environ.copy()
         # the current process might initialize cuda,
