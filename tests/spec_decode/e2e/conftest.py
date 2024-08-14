@@ -1,4 +1,5 @@
 import asyncio
+import os
 from itertools import cycle
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
@@ -56,6 +57,11 @@ class AsyncLLM:
     ) -> None:
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
+
+        # Needed to engine_use_ray works as a deprecated feature,
+        # otherwise the following constructor will raise an exception
+        os.environ["VLLM_ALLOW_ENGINE_USE_RAY"] = "1"
+
         engine_args = AsyncEngineArgs(
             model=model,
             tokenizer=tokenizer,
