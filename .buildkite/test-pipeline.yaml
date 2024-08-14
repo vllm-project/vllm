@@ -36,6 +36,8 @@ steps:
   commands:
   - pip install -r requirements-docs.txt
   - SPHINXOPTS=\"-W\" make html
+  # Check API reference (if it fails, you may have missing mock imports)
+  - grep \"sig sig-object py\" build/html/dev/sampling_params.html
 
 - label: Async Engine, Inputs, Utils, Worker Test # 15min
   fast_check: true
@@ -292,6 +294,7 @@ steps:
   - pytest -v -s distributed/test_chunked_prefill_distributed.py
   - pytest -v -s distributed/test_multimodal_broadcast.py
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp2.py
+  - pip install -e ./plugins/vllm_add_dummy_model
   - pytest -v -s distributed/test_distributed_oot.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s distributed/test_utils.py
