@@ -22,7 +22,7 @@ MODELS: List[ModelWithQuantization]
 #AWQ quantization is currently not supported in ROCm.
 if is_hip(): 
     MODELS = [
-            ModelWithQuantization(model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ",
+        ModelWithQuantization(model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ",
                                   quantization="GPTQ"),
     ]
 else:
