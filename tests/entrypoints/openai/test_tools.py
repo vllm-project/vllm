@@ -188,7 +188,9 @@ def server_config(request):
 
     # download model and tokenizer using transformers
     snapshot_download(config["model"])
+    print(f'downloaded model {config["model"]}')
     yield CONFIGS[request.param]
+    print(f'Cleaning up vLLM server for {config["model"]} ')
 
 
 # run this for each server config
@@ -196,8 +198,10 @@ def server_config(request):
 def server(request, server_config: ServerConfig):
     model = server_config["model"]
     args_for_model = server_config["arguments"]
+    print(f"Starting server for {model}")
     with RemoteOpenAIServer(model, ARGS + args_for_model) as server:
         yield server
+    print(f'shutting down server for {model}')
 
 
 @pytest.fixture(scope="module")
@@ -543,7 +547,6 @@ async def test_parallel_tool_calls(client: openai.AsyncOpenAI):
         logprobs=False)
 
     choice = chat_completion.choices[0]
-    print('completion choice: ', choice)
     stop_reason = chat_completion.choices[0].finish_reason
     non_streamed_tool_calls = chat_completion.choices[0].message.tool_calls
 
@@ -589,8 +592,6 @@ async def test_parallel_tool_calls(client: openai.AsyncOpenAI):
     tool_call_id_count: int = 0
 
     async for chunk in stream:
-
-        print('got chunk', chunk.choices[0])
 
         # if there's a finish reason make sure it's tools
         if chunk.choices[0].finish_reason:
@@ -639,8 +640,6 @@ async def test_parallel_tool_calls(client: openai.AsyncOpenAI):
                     tool_call_args[
                         tool_call.index] += tool_call.function.arguments
 
-    print('tool call names', tool_call_names)
-    print('tool_call args', tool_call_args)
     assert finish_reason_count == 1
     assert role_name == 'assistant'
 
