@@ -1,4 +1,5 @@
 from abc import abstractmethod
+from enum import Enum
 from typing import List, Optional, Tuple
 
 import torch
@@ -13,6 +14,11 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
+
+
+class WeightScaleSupported(Enum):
+    TENSOR = "tensor"
+    CHANNEL = "channel"
 
 
 class FusedMoEMethodBase(QuantizeMethodBase):
@@ -199,21 +205,41 @@ class FusedMoE(torch.nn.Module):
             params_dtype=params_dtype,
             weight_loader=self.weight_loader)
 
-    def weight_loader(self, param: torch.nn.Parameter,
-                      loaded_weight: torch.Tensor, weight_name: str,
-                      shard_id: str, expert_id: int) -> None:
-        if shard_id not in ("w1", "w2", "w3"):
-            raise ValueError(f"shard_id must be ['w1','w2','w3'] but "
-                             f"got {shard_id}.")
+    def _load_per_tensor_weight_scale(self, shard_id: str,
+                                      param: torch.nn.Parameter,
+                                      loaded_weight: torch.Tensor,
+                                      expert_id: int):
+        param_data = param.data
+        # for per tensor weight quantization
+        if shard_id in ("w1", "w3"):
+            # We have to keep the weight scales of w1 and w3 because
+            # we need to re-quantize w1/w3 weights after weight loading.
+            idx = 0 if shard_id == "w1" else 1
+            param_data[expert_id][idx] = loaded_weight
+        # If we are in the row parallel case (down_proj)
+        else:
+            param_data[expert_id] = loaded_weight
 
-        # Special case for fp8 scales.
-        if getattr(param, "is_fp8_scale", False):
-            self._load_fp8_scale(param.data, loaded_weight, weight_name,
-                                 shard_id, expert_id)
-            return
+    def _load_per_channel_weight_scale(self, expert_data: torch.Tensor,
+                                       shard_id: str,
+                                       loaded_weight: torch.tensor,
+                                       tp_rank: int):
+        # for per channel weight quantization
+        loaded_weight = loaded_weight.t().contiguous()
+        if shard_id == "w2":
+            expert_data.copy_(loaded_weight)
+        elif shard_id in ("w1", "w3"):
+            shard_dim = 1
+            shard_size = expert_data.shape[-1]
+            offset = shard_size * tp_rank
+            loaded_weight = loaded_weight.narrow(shard_dim, offset, shard_size)
+            idx = 0 if shard_id == "w1" else 1
+            expert_data[idx] = loaded_weight
 
-        expert_data = param.data[expert_id]
-        tp_rank = get_tensor_model_parallel_rank()
+    def _load_model_weights(self, shard_id: str, param: torch.nn.Parameter,
+                            loaded_weight: torch.nn.Parameter,
+                            expert_data: torch.Tensor, tp_rank: int):
+        # TODO @dsikka: add packed parameter support for w1/w3
 
         # If transposed, weight is saved as [input_dim, output_dim]
         # Otherwise, weight is saved as     [output_dim, input_dim]
@@ -229,7 +255,8 @@ class FusedMoE(torch.nn.Module):
         # gate_up_proj: "MergedColumnParallel", so tp sharding on output_dim
         elif shard_id in ("w1", "w3"):
             shard_dim = output_dim
-            shard_size = expert_data.shape[output_dim] // 2
+            shard_size = expert_data.shape[shard_dim] // 2
+
         offset = shard_size * tp_rank
         loaded_weight = loaded_weight.narrow(shard_dim, offset, shard_size)
 
@@ -248,6 +275,70 @@ class FusedMoE(torch.nn.Module):
         else:
             raise ValueError(
                 f"Expected shard_id w1,w2 or w3 but got {shard_id}")
+
+    def _load_input_scales(self, param: torch.nn.Parameter,
+                           loaded_weight: torch.Tensor, expert_id: int):
+        param_data = param.data
+
+        # Input scales can be loaded directly and should be equal.
+        if param_data[expert_id] != 1 and (param_data[expert_id] -
+                                           loaded_weight).abs() > 1e-5:
+            raise ValueError("input_scales of w1 and w3 of a layer "
+                             f"must be equal. But got {param_data[expert_id]} "
+                             f"vs. {loaded_weight}")
+        param_data[expert_id] = loaded_weight
+
+    def weight_loader(self, param: torch.nn.Parameter,
+                      loaded_weight: torch.Tensor, weight_name: str,
+                      shard_id: str, expert_id: int) -> None:
+
+        WEIGHT_SCALE_SUPPORTED = [e.value for e in WeightScaleSupported]
+
+        if shard_id not in ("w1", "w2", "w3"):
+            raise ValueError(f"shard_id must be ['w1','w2','w3'] but "
+                             f"got {shard_id}.")
+
+        # Special case for fp8 scales.
+        if getattr(param, "is_fp8_scale", False):
+            self._load_fp8_scale(param.data, loaded_weight, weight_name,
+                                 shard_id, expert_id)
+            return
+
+        expert_data = param.data[expert_id]
+        tp_rank = get_tensor_model_parallel_rank()
+
+        if "weight_scale" in weight_name:
+            quant_method = getattr(param, "quant_method", None)
+            if quant_method == WeightScaleSupported.CHANNEL.value:
+                self._load_per_channel_weight_scale(
+                    shard_id=shard_id,
+                    loaded_weight=loaded_weight,
+                    expert_data=expert_data,
+                    tp_rank=tp_rank)
+            elif quant_method == WeightScaleSupported.TENSOR.value:
+                self._load_per_tensor_weight_scale(shard_id=shard_id,
+                                                   param=param,
+                                                   loaded_weight=loaded_weight,
+                                                   expert_id=expert_id)
+
+            else:
+                raise ValueError(
+                    f"quant method must be one of {WEIGHT_SCALE_SUPPORTED}")
+            return
+
+        if "input_scale" in weight_name:
+            self._load_input_scales(param=param,
+                                    loaded_weight=loaded_weight,
+                                    expert_id=expert_id)
+            return
+
+        if "weight" in weight_name:
+            self._load_model_weights(shard_id=shard_id,
+                                     param=param,
+                                     loaded_weight=loaded_weight,
+                                     expert_data=expert_data,
+                                     tp_rank=tp_rank)
+            return
 
     @staticmethod
     def select_experts(hidden_states: torch.Tensor,
