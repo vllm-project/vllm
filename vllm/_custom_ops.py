@@ -4,12 +4,11 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 
+import vllm.envs as envs
 from vllm._core_ext import ScalarType
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
-
-use_awq_triton = False
 
 try:
     import vllm._C
@@ -183,7 +182,7 @@ def advance_step(num_seqs: int, num_queries: int, block_size: int,
 def awq_dequantize(qweight: torch.Tensor, scales: torch.Tensor,
                    zeros: torch.Tensor, split_k_iters: int, thx: int,
                    thy: int) -> torch.Tensor:
-    if use_awq_triton:
+    if envs.VLLM_USE_TRITON_AWQ:
         from vllm.model_executor.layers.quantization.awq_triton import (
             awq_dequantize_triton)
         return awq_dequantize_triton(qweight, scales, zeros, split_k_iters,
@@ -194,7 +193,7 @@ def awq_dequantize(qweight: torch.Tensor, scales: torch.Tensor,
 
 def awq_gemm(input: torch.Tensor, qweight: torch.Tensor, qzeros: torch.Tensor,
              scales: torch.Tensor, split_k_iters: int) -> torch.Tensor:
-    if use_awq_triton:
+    if envs.VLLM_USE_TRITON_AWQ:
         from vllm.model_executor.layers.quantization.awq_triton import (
             awq_gemm_triton)
         return awq_gemm_triton(input, qweight, qzeros, scales, split_k_iters)
