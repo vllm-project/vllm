@@ -217,7 +217,7 @@ class EncoderDecoderModelRunnerBase(GPUModelRunnerBase[TModelInputForGPU]):
         seq_group_metadata_list: List[SequenceGroupMetadata],
         virtual_engine: int = 0,
         finished_requests_ids: Optional[List[str]] = None
-    ) -> EncoderDecoderModelInput:
+    ) -> TModelInputForGPU:
         """Prepare the model input based on a given sequence group, including
         metadata for the sampling step.
 
@@ -312,7 +312,7 @@ class EncoderDecoderModelRunnerBase(GPUModelRunnerBase[TModelInputForGPU]):
     def _prepare_encoder_model_input_tensors(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-        model_input: EncoderDecoderModelInput,
+        model_input: TModelInputForGPU,
     ) -> Tuple[AttentionMetadata, Optional[torch.Tensor],
                Optional[torch.Tensor]]:
         """Helper method to prepare the encoder- and cross-attn-related
@@ -476,4 +476,7 @@ class EncoderDecoderModelRunnerBase(GPUModelRunnerBase[TModelInputForGPU]):
 
 class EncoderDecoderModelRunner(
         EncoderDecoderModelRunnerBase[EncoderDecoderModelInput]):
-    pass
+
+    _model_input_cls: Type[EncoderDecoderModelInput] = (
+        EncoderDecoderModelInput)
+    _builder_cls: Type[ModelInputForGPUBuilder] = (ModelInputForGPUBuilder)

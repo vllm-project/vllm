@@ -55,6 +55,7 @@ enc_dec_prompt2 = ExplicitEncoderDecoderPrompt(
 )
 enc_dec_prompt3 = ExplicitEncoderDecoderPrompt(
     # Pass encoder prompt tokens directly, and
+    # prompts = zip_enc_dec_prompts(['Only encoder prompt'], ["Decoder prompt"])
     # pass TextPrompt to decoder
     encoder_prompt=single_tokens_prompt,
     decoder_prompt=single_text_prompt,
@@ -73,6 +74,9 @@ prompts = [
     single_text_prompt_raw, single_text_prompt, single_tokens_prompt,
     enc_dec_prompt1, enc_dec_prompt2, enc_dec_prompt3
 ] + zipped_prompt_list
+
+# prompts = zip_enc_dec_prompts(['Only encoder prompt'], ["Decoder prompt"])
+prompts = zip_enc_dec_prompts(['Only encoder prompt'], [None])
 
 print(prompts)
 

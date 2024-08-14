@@ -526,7 +526,11 @@ class LLMEngine:
                            "is not initialized")
             return None
 
-        return self.tokenizer.get_lora_tokenizer(lora_request).bos_token_id
+        bos_token_id = self.tokenizer.get_lora_tokenizer(
+            lora_request).bos_token_id
+        if bos_token_id is None:
+            bos_token_id = 1
+        return bos_token_id
 
     def _get_eos_token_id(self,
                           lora_request: Optional[LoRARequest] = None
@@ -544,6 +548,11 @@ class LLMEngine:
         model. Returns None for non-encoder/decoder models or if the
         model config is unavailable.
         '''
+
+        if self.is_encoder_model():
+            logger.warning("Using 1 for decoder start token id because "
+                           "this is an encoder model.")
+            return 1
 
         if not self.is_encoder_decoder_model():
             logger.warning("Using None for decoder start token id because "
@@ -579,12 +588,8 @@ class LLMEngine:
         seq_id = next(self.seq_counter)
         eos_token_id = self._get_eos_token_id(lora_request)
 
-        seq = Sequence(seq_id,
-                       processed_inputs,
-                       block_size,
-                       eos_token_id,
-                       lora_request,
-                       prompt_adapter_request)
+        seq = Sequence(seq_id, processed_inputs, block_size, eos_token_id,
+                       lora_request, prompt_adapter_request)
 
         encoder_seq = None
         if 'encoder_prompt_token_ids' in processed_inputs:
@@ -658,9 +663,7 @@ class LLMEngine:
         """
 
         decoder_start_token_id = self._get_decoder_start_token_id()
-        # assert decoder_start_token_id is not None
-        if decoder_start_token_id is None:
-            return []
+        assert decoder_start_token_id is not None
 
         if decoder_input_ids is None:
             # no decoder prompt input ->
@@ -1618,6 +1621,9 @@ class LLMEngine:
 
     def is_encoder_decoder_model(self):
         return self.model_config.is_encoder_decoder_model
+
+    def is_encoder_model(self):
+        return self.model_config.is_encoder_model
 
     def is_embedding_model(self):
         return self.model_config.is_embedding_model

@@ -176,3 +176,9 @@ def to_enc_dec_tuple_list(
     return [(enc_dec_prompt["encoder_prompt"],
              enc_dec_prompt["decoder_prompt"])
             for enc_dec_prompt in enc_dec_prompts]
+
+
+def build_encoder_prompt(
+        encoder_prompt: _T1) -> ExplicitEncoderDecoderPrompt[_T1, _T2]:
+    return ExplicitEncoderDecoderPrompt(encoder_prompt=encoder_prompt,
+                                        decoder_prompt=None)

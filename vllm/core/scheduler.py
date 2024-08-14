@@ -309,8 +309,8 @@ class Scheduler:
         version = "v1"
         if self.scheduler_config.use_v2_block_manager:
             version = "v2"
-        if self.scheduler_config.embedding_mode:
-            version = "embedding"
+        # if self.scheduler_config.embedding_mode:
+        #     version = "embedding"
 
         BlockSpaceManagerImpl = BlockSpaceManager.get_block_space_manager_class(
             version)
@@ -1323,8 +1323,9 @@ class Scheduler:
         Returns 0 if the new token cannot be computed due to token budget.
         """
         num_new_tokens = 0
-        seqs = [seq_group.encoder_seq]
-        seqs.extend(seq_group.get_seqs(status=status))
+        seqs = seq_group.get_seqs(status=status)
+        # seqs = [seq_group.encoder_seq]
+        # seqs.extend(seq_group.get_seqs(status=status))
         for seq in seqs:
             num_new_tokens += seq.get_num_new_tokens()
         assert num_new_tokens > 0

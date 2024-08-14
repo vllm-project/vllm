@@ -1,7 +1,8 @@
 from .data import (EncoderDecoderLLMInputs, ExplicitEncoderDecoderPrompt,
                    LLMInputs, PromptInputs, SingletonPromptInputs, TextPrompt,
                    TokensPrompt, build_explicit_enc_dec_prompt,
-                   to_enc_dec_tuple_list, zip_enc_dec_prompts)
+                   build_encoder_prompt, to_enc_dec_tuple_list,
+                   zip_enc_dec_prompts)
 from .registry import InputContext, InputRegistry
 
 INPUT_REGISTRY = InputRegistry()
@@ -21,6 +22,7 @@ __all__ = [
     "ExplicitEncoderDecoderPrompt",
     "LLMInputs",
     "EncoderDecoderLLMInputs",
+    "build_encoder_prompt",
     "build_explicit_enc_dec_prompt",
     "to_enc_dec_tuple_list",
     "zip_enc_dec_prompts",
