@@ -1,13 +1,13 @@
 import asyncio
 import importlib
 import inspect
+import multiprocessing
 import os
 import re
 import tempfile
 from argparse import Namespace
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from multiprocessing import Process
 from typing import AsyncIterator, Set
 
 from fastapi import APIRouter, FastAPI, Request
@@ -129,12 +129,15 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
                     rpc_path)
 
         # Start RPCServer in separate process (holds the AsyncLLMEngine).
-        rpc_server_process = Process(target=run_rpc_server,
-                                     args=(engine_args,
-                                           UsageContext.OPENAI_API_SERVER,
-                                           rpc_path))
+        context = multiprocessing.get_context("spawn")
+        # the current process might have CUDA context,
+        # so we need to spawn a new process
+        rpc_server_process = context.Process(
+            target=run_rpc_server,
+            args=(engine_args, UsageContext.OPENAI_API_SERVER, rpc_path))
         rpc_server_process.start()
-
+        logger.info("Started engine process with PID %d",
+                    rpc_server_process.pid)
         # Build RPCClient, which conforms to AsyncEngineClient Protocol.
         async_engine_client = AsyncEngineRPCClient(rpc_path)
 
@@ -392,6 +395,7 @@ async def run_server(args, **uvicorn_kwargs) -> None:
 
         shutdown_task = await serve_http(
             app,
+            engine=async_engine_client,
             host=args.host,
             port=args.port,
             log_level=args.uvicorn_log_level,
