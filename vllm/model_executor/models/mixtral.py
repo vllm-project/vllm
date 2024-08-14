@@ -427,6 +427,9 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
 
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
+            if "weight_shape" in name:
+                continue
+
             if "rotary_emb.inv_freq" in name:
                 continue
 
@@ -455,6 +458,8 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                     if is_pp_missing_parameter(name, self):
                         continue
                     param = params_dict[name]
+                    if "scale" in name:
+                        print("replace name", name, param.shape)
                     weight_loader = param.weight_loader
                     weight_loader(param,
                                   loaded_weight,
