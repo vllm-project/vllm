@@ -1,16 +1,8 @@
 [build-system]
-# Should be mirrored in requirements-build.txt
-requires = [
-    "cmake>=3.26",
-    "ninja",
-    "packaging",
-    "setuptools>=61",
-    "setuptools-scm>=8.0",
-    "torch == 2.5.1",
-    "wheel",
-    "jinja2",
-]
-build-backend = "setuptools.build_meta"
+requires = ["setuptools>=61", "setuptools-scm>=8"]
+build-backend = "vllm"
+# per-target build dependencies are defined dynamically in `build_backend/vllm.py`
+backend-path = ["_build_backend"]
 
 [project]
 name = "vllm"
@@ -65,6 +57,7 @@ exclude = [
 [tool.ruff.lint.per-file-ignores]
 "vllm/version.py" = ["F401"]
 "vllm/_version.py" = ["ALL"]
+"_build_backend/vllm.py" = ["E501"]
 
 [tool.ruff.lint]
 select = [
