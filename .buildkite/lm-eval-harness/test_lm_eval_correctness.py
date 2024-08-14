@@ -48,11 +48,20 @@ def test_lm_eval_correctness():
     # Launch eval requests.
     results = launch_lm_eval(eval_config)
 
+    # Print all results before failing
+    success = True
+
     # Confirm scores match ground truth.
     for task in eval_config["tasks"]:
         for metric in task["metrics"]:
             ground_truth = metric["value"]
             measured_value = results["results"][task["name"]][metric["name"]]
-            print(f'{task["name"]} | {metric["name"]}: '
-                  f'ground_truth={ground_truth} | measured={measured_value}')
-            assert numpy.isclose(ground_truth, measured_value, rtol=RTOL)
+            isclose = numpy.isclose(ground_truth, measured_value, rtol=RTOL)
+            print(f'{task["name"]} | {metric["name"]}:'
+                  f' ground_truth={ground_truth}'
+                  f' | measured={measured_value}'
+                  f' | isclose={isclose}')
+            success = success and isclose
+
+    # Make sure all tasks succeeded
+    assert success
