@@ -202,8 +202,8 @@ class InputRegistry:
                 num_items = len(v) if isinstance(v, list) else 1
                 num_expected = mm_counts[k]
                 assert num_items >= num_expected, (
-                    f"Expected at least {num_expected} dummy {k} instances for "
-                    f"profiling, but found {num_items} instances instead.")
+                    f"Expected at least {num_expected} dummy '{k}' instances "
+                    f"for profiling, but found {num_items} instances instead.")
 
         return seq_data, mm_data
 

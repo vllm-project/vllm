@@ -182,8 +182,8 @@ class MultiModalRegistry:
         multimodal_config: Optional[MultiModalConfig],
     ) -> None:
         """
-        Initialize the maximum number of multi-modal inputs for each modality
-        that are allowed per prompt for a model class.
+        Initialize the maximum number of multi-modal input instances for each
+        modality that are allowed per prompt for a model class.
         """
         if model_config in self._limits_by_model:
             logger.warning(
@@ -217,7 +217,7 @@ class MultiModalRegistry:
         model_config: ModelConfig,
     ) -> Mapping[str, int]:
         """
-        Get the maximum number of multi-modal inputs for each modality
+        Get the maximum number of multi-modal input instances for each modality
         that are allowed per prompt for a model class.
 
         Note:

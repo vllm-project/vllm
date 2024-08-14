@@ -1434,7 +1434,7 @@ class MultiModalConfig:
 
     limit_per_prompt: Mapping[str, int]
     """
-    The maximum number of multi-modal inputs allowed per prompt
+    The maximum number of multi-modal input instances allowed per prompt
     for each :class:`~vllm.multimodal.MultiModalPlugin`.
     """
 

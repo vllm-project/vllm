@@ -463,8 +463,8 @@ class EngineArgs:
                             type=nullable_kvs,
                             default=EngineArgs.limit_mm_per_prompt,
                             help='For each multimodal plugin, limit how many '
-                            'inputs to allow for each prompt. Expects a '
-                            'comma-separated list of items, e.g.: '
+                            'input instances to allow for each prompt. Expects '
+                            'a comma-separated list of items, e.g.: '
                             '`KEY1=VALUE1,KEY2=VALUE2`')
 
         # LoRA related configs
