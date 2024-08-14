@@ -4,35 +4,28 @@ from typing import Optional, Tuple
 import pytest
 import torch
 
-from vllm._C import cache_ops, ops
+from vllm import _custom_ops as ops
 from vllm._custom_C import paged_attention_custom
-from vllm.utils import get_max_shared_memory_bytes, is_hip
+from vllm.utils import is_hip
 
 from .allclose_default import get_default_atol, get_default_rtol
 
-FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
-# This will change depending on the compute capability.
-# - 512 as a buffer
-MAX_SEQ_LEN = get_max_shared_memory_bytes() // FLOAT32_BYTES - 512
+MAX_SEQ_LEN = 32 * 1024
 # There may not be enough gpu memory due to large NUM_BLOCKS.
 # Reduce NUM_BLOCKS when it happens.
-NUM_BLOCKS = 4321  # Arbitrary values for testing
+NUM_BLOCKS = 128 * 1024 + 4321  # Arbitrary values for testing
 PARTITION_SIZE = 256
-# flshattF and tritonflashattF supported: {torch.float16, torch.bfloat16}
-DTYPES = [torch.half, torch.bfloat16, torch.float
-          ] if not is_hip() else [torch.half]
-NUM_GEN_SEQS = [1, 17, 64]  # Arbitrary values for testing
+DTYPES = [torch.bfloat16, torch.half]
+NUM_GEN_SEQS = [1, 17]  # Arbitrary values for testing
 NUM_HEADS = [(8 * x, 8) for x in range(1, 17)]  # Arbitrary values for testing
 
-# FlashAttention forward only supports head dimension at most 128
-# https://github.com/ROCmSoftwarePlatform/flash-attention/blob/3d2b6f5d037782cc2c906909a46fb7e2e1b48b25/csrc/flash_attn_rocm/flash_api.cpp#L62
-HEAD_SIZES = [128]
-BLOCK_SIZES = [16]
-USE_ALIBI = [False, True]
+HEAD_SIZES = [64, 128]
+BLOCK_SIZES = [16, 32]
+USE_ALIBI = [True, False]
 KV_CACHE_DTYPE = ["auto"]
-SEEDS = [0]
+SEEDS = [37]
 CUDA_DEVICES = [
-    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
+    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 1)
 ]
 
 
@@ -255,14 +248,14 @@ def test_paged_attention(
         dequantized_key_cache = torch.empty(size=key_cache_shape,
                                             dtype=dtype,
                                             device=device)
-        cache_ops.convert_fp8(key_cache, dequantized_key_cache)
+        ops.convert_fp8(key_cache, dequantized_key_cache)
         key_cache = dequantized_key_cache
 
         value_cache_shape = value_cache.shape
         dequantized_value_cache = torch.empty(size=value_cache_shape,
                                               dtype=dtype,
                                               device=device)
-        cache_ops.convert_fp8(value_cache, dequantized_value_cache)
+        ops.convert_fp8(value_cache, dequantized_value_cache)
         value_cache = dequantized_value_cache
 
     ref_output = torch.empty_like(query)
@@ -286,8 +279,14 @@ def test_paged_attention(
 
     # NOTE(zhaoyang): FP8 KV Cache will introduce quantization error,
     # so we use a relaxed tolerance for the test.
-    atol, rtol = 1e-3, 1e-5
-    atol = 5e-3
+    atol, rtol = 1e-4, 1e-5
+    if dtype == torch.bfloat16:
+        atol, rtol = 2e-4, 1e-5
+    if use_alibi:
+        if dtype == torch.half:
+            atol, rtol = 5e-4, 1e-5
+        if dtype == torch.bfloat16:
+            atol, rtol = 1e-3, 1e-5
     if kv_cache_dtype == "fp8":
         atol, rtol = 1e-2, 1e-5
     assert torch.allclose(output, ref_output, atol=atol, rtol=rtol)
