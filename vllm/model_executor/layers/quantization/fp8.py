@@ -411,12 +411,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     layer.w2_input_scale.max(), requires_grad=False)
             # If rocm, normalize the weights and scales to e4m3fnuz
             if is_hip():
-                w13_weight, w13_weight_scale, w13_input_scale = convert_to_e4m3fnuz(
-                    layer.w13_weight, layer.w13_weight_scale,
-                    layer.w13_input_scale)
-                w2_weight, w2_weight_scale, w2_input_scale = convert_to_e4m3fnuz(
-                    layer.w2_weight, layer.w2_weight_scale,
-                    layer.w2_input_scale)
+                # Normalize the weights and scales
+                w13_weight, w13_weight_scale, w13_input_scale = \
+                    convert_to_e4m3fnuz(
+                        layer.w13_weight, layer.w13_weight_scale,
+                        layer.w13_input_scale)
+                w2_weight, w2_weight_scale, w2_input_scale = \
+                    convert_to_e4m3fnuz(
+                        layer.w2_weight, layer.w2_weight_scale,
+                        layer.w2_input_scale)
+                # reset the parameter
                 layer.w13_weight = torch.nn.Parameter(w13_weight,
                                                       requires_grad=False)
                 layer.w13_weight_scale = torch.nn.Parameter(
