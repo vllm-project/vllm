@@ -133,7 +133,7 @@ def _get_model_initialization_kwargs(
 
     if supports_multimodal(model_class):
         if multimodal_config is None:
-            raise ValueError("Provide vision related configurations "
+            raise ValueError("Provide multi-modal related configurations "
                              "through LLM entrypoint or engine arguments.")
 
         extra_kwargs["multimodal_config"] = multimodal_config

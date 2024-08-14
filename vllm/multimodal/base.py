@@ -1,9 +1,9 @@
 import sys
 from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
-from typing import Any, Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Mapping, Optional
 from typing import Sequence as GenericSequence
-from typing import Tuple, Type, TypedDict, TypeVar, Union, cast
+from typing import Tuple, Type, TypedDict, TypeVar, Union, cast, final
 
 import numpy as np
 import torch
@@ -116,17 +116,30 @@ class MultiModalInputs(_MultiModalInputsBase):
                                batched_inputs)
 
 
+_T = TypeVar("_T")
+
+MultiModalData: TypeAlias = Union[_T, List[_T]]
+"""
+Either a single data instance, or a list of data instances.
+
+The number of data instances allowed per modality is restricted by
+`--limit-mm-per-prompt`.
+"""
+
+
+@final
 class MultiModalDataBuiltins(TypedDict, total=False):
     """Modality types that are predefined by vLLM."""
 
-    image: Image.Image
-    """The input image."""
+    image: MultiModalData[Image.Image]
+    """The input image(s)."""
 
-    audio: Tuple[np.ndarray, Union[int, float]]
-    """The input audio and its sampling rate."""
+    audio: MultiModalData[Tuple[np.ndarray, Union[int, float]]]
+    """The input audio item(s) and corresponding sampling rate(s)."""
 
 
-MultiModalDataDict = Union[MultiModalDataBuiltins, Dict[str, Any]]
+MultiModalDataDict = Union[MultiModalDataBuiltins,
+                           Mapping[str, MultiModalData[object]]]
 """
 A dictionary containing an item for each modality type to input.
 
@@ -137,7 +150,8 @@ Note:
     Read more on that :ref:`here <adding_multimodal_plugin>`.
 """
 
-MultiModalInputMapper = Callable[[InputContext, object], MultiModalInputs]
+MultiModalInputMapper = Callable[[InputContext, MultiModalData[object]],
+                                 MultiModalInputs]
 """
 Return a dictionary to be passed as keyword arguments to
 :meth:`~torch.nn.Module.forward`. This is similar in concept to tokenizers
@@ -181,8 +195,11 @@ class MultiModalPlugin(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def _default_input_mapper(self, ctx: InputContext,
-                              data: object) -> MultiModalInputs:
+    def _default_input_mapper(
+        self,
+        ctx: InputContext,
+        data: MultiModalData[object],
+    ) -> MultiModalInputs:
         """
         Return a dictionary to be passed as keyword arguments to
         :meth:`~torch.nn.Module.forward`. This is similar in concept to
@@ -225,7 +242,7 @@ class MultiModalPlugin(ABC):
         return wrapper
 
     def map_input(self, model_config: ModelConfig,
-                  data: object) -> MultiModalInputs:
+                  data: MultiModalData[object]) -> MultiModalInputs:
         """
         Transform the data into a dictionary of model inputs using the
         input mapper registered for that model.
@@ -254,8 +271,8 @@ class MultiModalPlugin(ABC):
     @abstractmethod
     def _default_max_multimodal_tokens(self, ctx: InputContext) -> int:
         """
-        Calculate the maximum number of multimodal tokens input to the language
-        model. This does not include tokens that correspond to the input text.
+        Calculate the maximum number of tokens, corresponding to a single
+        instance of multimodal data, that are passed to the language model.
         """
         raise NotImplementedError
 
@@ -269,8 +286,9 @@ class MultiModalPlugin(ABC):
         max_mm_tokens: Optional[MultiModalTokensCalc] = None,
     ):
         """
-        Register the maximum number of multi-modal tokens input to the
-        language model for a model class.
+        Register the maximum number of tokens, corresponding to a single
+        instance of multimodal data, that are passed to the language model
+        for a model class.
 
         If `None` is provided, then the default calculation is used instead.
 
