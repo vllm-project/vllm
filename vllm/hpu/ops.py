@@ -179,7 +179,7 @@ def prompt_attention(
         attn_weights = softmax_op(attn_weights, dim=-1)
         attn_weights = matmul_av_op(attn_weights, value)
         if query_heads != kv_heads:
-           attn_weights = attn_weights.flatten(1, 2)
+            attn_weights = attn_weights.flatten(1, 2)
     else:
         #TODO: remove after SW-195415 fix
         if query_heads != kv_heads:
