@@ -172,7 +172,8 @@ def prompt_attention(
             query = query.unflatten(1, (kv_heads, -1))
             key = key.unflatten(1, (kv_heads, 1))
             value = value.unflatten(1, (kv_heads, 1))
-            attn_bias = attn_bias.unsqueeze(2)
+            if attn_bias is not None:
+                attn_bias = attn_bias.unsqueeze(2)
         attn_weights = torch.matmul(query * scale, key.transpose(-1, -2))
         if attn_bias is not None:
             attn_weights.add_(attn_bias)
