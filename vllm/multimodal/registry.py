@@ -204,7 +204,7 @@ class MultiModalRegistry:
                     "are not registered as multi-modal plugins: %s. "
                     "They will be ignored.", extra_keys)
 
-            # NOTE: Currently the default is set to 1 for each plugin 
+            # NOTE: Currently the default is set to 1 for each plugin
             # TODO: Automatically determine the limits based on budget
             # once more models support multi-image inputs
             limits_per_plugin = {
