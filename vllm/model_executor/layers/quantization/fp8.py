@@ -420,7 +420,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     convert_to_e4m3fnuz(
                         layer.w2_weight, layer.w2_weight_scale,
                         layer.w2_input_scale)
-                # reset the parameter
+                # Reset the parameter
                 layer.w13_weight = torch.nn.Parameter(w13_weight,
                                                       requires_grad=False)
                 layer.w13_weight_scale = torch.nn.Parameter(
