@@ -29,7 +29,6 @@ import torch.types
 from typing_extensions import ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
-from vllm import _custom_ops as ops
 from vllm.logger import enable_trace_function_call, init_logger
 
 logger = init_logger(__name__)
@@ -114,6 +113,9 @@ STR_ROCM_FLASH_ATTN_VAL: str = "ROCM_FLASH"
 STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
 STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
+
+GiB_bytes = 1 << 30
+"""The number of bytes in one gibibyte (GiB)."""
 
 STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.half,
@@ -331,18 +333,12 @@ def is_neuron() -> bool:
 
 
 @lru_cache(maxsize=None)
-def is_tpu() -> bool:
-    try:
-        import libtpu
-    except ImportError:
-        libtpu = None
-    return libtpu is not None
-
-
-@lru_cache(maxsize=None)
 def is_xpu() -> bool:
-    from importlib.metadata import version
-    is_xpu_flag = "xpu" in version("vllm")
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        is_xpu_flag = "xpu" in version("vllm")
+    except PackageNotFoundError:
+        return False
     # vllm is not build with xpu
     if not is_xpu_flag:
         return False
@@ -362,6 +358,7 @@ def is_xpu() -> bool:
 @lru_cache(maxsize=None)
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
+    from vllm import _custom_ops as ops
     max_shared_mem = (
         ops.get_max_shared_memory_per_block_device_attribute(gpu))
     # value 0 will cause MAX_SEQ_LEN become negative and test_attention.py
@@ -1095,9 +1092,9 @@ def cuda_device_count_stateless() -> int:
 
 
 #From: https://stackoverflow.com/a/4104188/2749989
-def run_once(f):
+def run_once(f: Callable[P, None]) -> Callable[P, None]:
 
-    def wrapper(*args, **kwargs) -> Any:
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
         if not wrapper.has_run:  # type: ignore[attr-defined]
             wrapper.has_run = True  # type: ignore[attr-defined]
             return f(*args, **kwargs)
