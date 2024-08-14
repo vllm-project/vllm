@@ -17,9 +17,10 @@ from typing_extensions import ParamSpec
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.entrypoints.openai.cli_args import make_arg_parser
+from vllm.platforms import current_platform
 from vllm.utils import FlexibleArgumentParser, get_open_port, is_hip
 
-if is_hip():
+if current_platform.is_rocm():
     from amdsmi import (amdsmi_get_gpu_vram_usage,
                         amdsmi_get_processor_handles, amdsmi_init,
                         amdsmi_shut_down)
@@ -31,7 +32,7 @@ if is_hip():
             yield
         finally:
             amdsmi_shut_down()
-else:
+elif current_platform.is_cuda():
     from pynvml import (nvmlDeviceGetHandleByIndex, nvmlDeviceGetMemoryInfo,
                         nvmlInit, nvmlShutdown)
 
@@ -42,6 +43,11 @@ else:
             yield
         finally:
             nvmlShutdown()
+else:
+
+    @contextmanager
+    def _nvml():
+        yield
 
 
 VLLM_PATH = Path(__file__).parent.parent
