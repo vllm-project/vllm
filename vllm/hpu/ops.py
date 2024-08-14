@@ -149,7 +149,6 @@ def repeat_kv(kv: torch.Tensor, n_rep: int) -> torch.Tensor:
     return kv.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
-@hpu_utils.with_mark_steps
 def prompt_attention(
     query: torch.Tensor,
     key: torch.Tensor,
