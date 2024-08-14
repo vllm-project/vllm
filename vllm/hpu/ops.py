@@ -173,13 +173,13 @@ def prompt_attention(
             value = value.unflatten(1, (kv_heads, 1))
             if attn_bias is not None:
                 attn_bias = attn_bias.unsqueeze(2)
-        attn_weights = torch.matmul(query * scale, key.transpose(-1, -2))
+        attn_weights = matmul_qk_op(query * scale, key.transpose(-1, -2))
         if attn_bias is not None:
             attn_weights.add_(attn_bias)
-        attn_weights = torch.softmax(attn_weights, dim=-1)
-        attn_weights = torch.matmul(attn_weights, value)
+        attn_weights = softmax_op(attn_weights, dim=-1)
+        attn_weights = matmul_av_op(attn_weights, value)
         if query_heads != kv_heads:
-            attn_weights = attn_weights.flatten(1, 2)
+           attn_weights = attn_weights.flatten(1, 2)
     else:
         #TODO: remove after SW-195415 fix
         if query_heads != kv_heads:
