@@ -32,7 +32,7 @@ def nullable_str(val: str):
 @dataclass
 class EngineArgs:
     """Arguments for vLLM engine."""
-    model: str
+    model: str = 'facebook/opt-125m'
     served_model_name: Optional[Union[List[str]]] = None
     tokenizer: Optional[str] = None
     skip_tokenizer_init: bool = False
@@ -58,8 +58,8 @@ class EngineArgs:
     enable_prefix_caching: bool = False
     disable_sliding_window: bool = False
     use_v2_block_manager: bool = False
-    swap_space: int = 4  # GiB
-    cpu_offload_gb: int = 0  # GiB
+    swap_space: float = 4  # GiB
+    cpu_offload_gb: float = 0  # GiB
     gpu_memory_utilization: float = 0.90
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: int = 256
@@ -133,7 +133,7 @@ class EngineArgs:
         parser.add_argument(
             '--model',
             type=str,
-            default='facebook/opt-125m',
+            default=EngineArgs.model,
             help='Name or path of the huggingface model to use.')
         parser.add_argument(
             '--tokenizer',
@@ -321,7 +321,7 @@ class EngineArgs:
                             default=EngineArgs.seed,
                             help='Random seed for operations.')
         parser.add_argument('--swap-space',
-                            type=int,
+                            type=float,
                             default=EngineArgs.swap_space,
                             help='CPU swap space size (GiB) per GPU.')
         parser.add_argument(
