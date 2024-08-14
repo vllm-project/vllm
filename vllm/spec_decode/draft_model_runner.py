@@ -23,8 +23,8 @@ except ImportError:
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, MultiModalConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig)
+                         ModelConfig, MultiModalConfig, ObservabilityConfig,
+                         ParallelConfig, PromptAdapterConfig, SchedulerConfig)
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalInputs
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
@@ -69,6 +69,7 @@ class TP1DraftModelRunner(ModelRunner):
         multimodal_config: Optional[MultiModalConfig] = None,
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         return_hidden_states: bool = False,
+        observability_config: Optional[ObservabilityConfig] = None,
     ):
         if return_hidden_states:
             raise ValueError(
@@ -88,6 +89,7 @@ class TP1DraftModelRunner(ModelRunner):
             multimodal_config=multimodal_config,
             prompt_adapter_config=prompt_adapter_config,
             return_hidden_states=return_hidden_states,
+            observability_config=observability_config,
         )
 
         self.flashinfer_decode_workspace_buffer = None
