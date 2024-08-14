@@ -17,6 +17,7 @@ class ModelWithQuantization:
     model_path: str
     quantization: str
 
+
 MODELS: List[ModelWithQuantization]
 #AWQ quantization is currently not supported in ROCm.
 if is_hip(): 
