@@ -1,4 +1,5 @@
 import asyncio
+import os
 from dataclasses import dataclass
 
 import pytest
@@ -106,10 +107,15 @@ async def test_new_requests_event():
     assert engine.engine.add_request_calls == 3
     assert engine.engine.step_calls == old_step_calls + 1
 
+    # Allow deprecated engine_use_ray to not raise exception
+    os.environ["VLLM_ALLOW_ENGINE_USE_RAY"] = "1"
+
     engine = MockAsyncLLMEngine(worker_use_ray=True, engine_use_ray=True)
     assert engine.get_model_config() is not None
     assert engine.get_tokenizer() is not None
     assert engine.get_decoding_config() is not None
+
+    os.environ.pop("VLLM_ALLOW_ENGINE_USE_RAY")
 
 
 def test_asyncio_run():
