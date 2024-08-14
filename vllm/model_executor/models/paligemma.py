@@ -22,7 +22,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 from .interfaces import SupportsMultiModal
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_max_siglip_image_tokens)
-from .utils import merge_vision_embeddings
+from .utils import merge_multimodal_embeddings
 
 logger = init_logger(__name__)
 
@@ -247,7 +247,7 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
             inputs_embeds = self.language_model.get_input_embeddings(input_ids)
 
-            inputs_embeds = merge_vision_embeddings(
+            inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, vision_embeddings,
                 self.config.image_token_index)
 

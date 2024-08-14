@@ -40,7 +40,7 @@ from vllm.multimodal.image import (cached_get_image_processor,
 from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
 
 from .interfaces import SupportsMultiModal
-from .utils import merge_vision_embeddings
+from .utils import merge_multimodal_embeddings
 
 logger = init_logger(__name__)
 
@@ -276,9 +276,9 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal):
         if image_input is not None:
             vision_embeddings = self._process_image_input(image_input)
             inputs_embeds = self.language_model.model.embed_tokens(input_ids)
-            inputs_embeds = merge_vision_embeddings(input_ids, inputs_embeds,
-                                                    vision_embeddings,
-                                                    self.image_token_id)
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, vision_embeddings,
+                self.image_token_id)
 
         else:
             inputs_embeds = None

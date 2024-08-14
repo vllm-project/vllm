@@ -22,7 +22,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
 from .blip import (BlipVisionModel, dummy_image_for_blip,
                    get_max_blip_image_tokens)
 from .interfaces import SupportsMultiModal
-from .utils import merge_vision_embeddings
+from .utils import merge_multimodal_embeddings
 
 _KEYS_TO_MODIFY_MAPPING = {
     "language_model.lm_head": "lm_head",
@@ -644,9 +644,9 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal):
             vision_embeddings = self._process_image_input(image_input)
             inputs_embeds = self.language_model.get_input_embeddings(input_ids)
 
-            inputs_embeds = merge_vision_embeddings(input_ids, inputs_embeds,
-                                                    vision_embeddings,
-                                                    BLIP2_IMAGE_TOKEN_ID)
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, vision_embeddings,
+                BLIP2_IMAGE_TOKEN_ID)
 
             input_ids = None
         else:
