@@ -133,8 +133,9 @@ def _get_model_initialization_kwargs(
 
     if supports_multimodal(model_class):
         if multimodal_config is None:
-            raise ValueError("Provide multi-modal related configurations "
-                             "through LLM entrypoint or engine arguments.")
+
+            # Default multimodal config for multimodal models
+            multimodal_config = MultiModalConfig()
 
         extra_kwargs["multimodal_config"] = multimodal_config
 

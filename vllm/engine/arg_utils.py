@@ -746,8 +746,11 @@ class EngineArgs:
             "CPU offload space must be non-negative"
             f", but got {self.cpu_offload_gb}")
 
-        multimodal_config = MultiModalConfig(
-            limit_per_prompt=self.limit_mm_per_prompt or {})
+        if self.limit_mm_per_prompt is not None:
+            multimodal_config = MultiModalConfig(
+                limit_per_prompt=self.limit_mm_per_prompt)
+        else:
+            multimodal_config = None
 
         device_config = DeviceConfig(device=self.device)
         model_config = ModelConfig(
