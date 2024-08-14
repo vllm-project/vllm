@@ -162,6 +162,8 @@ RUN pip --verbose wheel -r requirements-mamba.txt \
 FROM nvidia/cuda:${CUDA_VERSION}-base-ubuntu20.04 AS vllm-base
 ARG CUDA_VERSION=12.4.1
 ARG PYTHON_VERSION=3.10
+# Python version without the dot, e.g. 3.10 -> 310
+ENV PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | tr -d .)
 WORKDIR /vllm-workspace
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -205,7 +207,7 @@ RUN --mount=type=bind,from=mamba-builder,src=/usr/src/mamba,target=/usr/src/mamb
     python3 -m pip install /usr/src/mamba/*.whl --no-cache-dir
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.1.3/flashinfer-0.1.3+cu121torch2.4-cp310-cp310-linux_x86_64.whl
+    python3 -m pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.1.3/flashinfer-0.1.3+cu121torch2.4-cp${PYTHON_VERSION_STR}-cp${PYTHON_VERSION_STR}-linux_x86_64.whl
 #################### vLLM installation IMAGE ####################
 
 
