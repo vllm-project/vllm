@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_TEST_FORCE_FP8_MARLIN: bool = False
+    VLLM_ALLOW_ENGINE_USE_RAY: bool = False
     VLLM_PLUGINS: Optional[List[str]] = None
 
 
@@ -362,6 +363,14 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_TEST_FORCE_FP8_MARLIN":
     lambda:
     (os.environ.get("VLLM_TEST_FORCE_FP8_MARLIN", "0").strip().lower() in
+     ("1", "true")),
+
+    # If set, allow running the engine as a separate ray actor,
+    # which is a deprecated feature soon to be removed.
+    # See https://github.com/vllm-project/vllm/issues/7045
+    "VLLM_ALLOW_ENGINE_USE_RAY":
+    lambda:
+    (os.environ.get("VLLM_ALLOW_ENGINE_USE_RAY", "0").strip().lower() in
      ("1", "true")),
 
     # a list of plugin names to load, separated by commas.
