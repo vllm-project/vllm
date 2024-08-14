@@ -42,6 +42,9 @@ struct PrepackedLayoutBTemplate {
       AccumulatorT;  // Element type for internal accumulation
   using ElementMma = MmaType;
 
+  // Only use interleaved layouts for subbyte weights, prmt instructions makes
+  // non-interleaved layouts for 8bit+ weights efficient enough we don't need
+  // iterleaved layouts
   using IlvdBlkLayout = std::conditional_t<
       std::is_same_v<IlvBlkLayout_, IlvBlkLayoutAuto>,
       std::conditional_t<sizeof_bits_v<ElementB> <= 4,

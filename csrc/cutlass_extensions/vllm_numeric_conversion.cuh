@@ -451,59 +451,6 @@ struct NumericArrayConverter<cutlass::half_t, vllm_uint8b128_t, N, Round> {
   result_type operator()(source_type const& s) const { return convert(s); }
 };
 
-// for Array<cutlass::half_t, N> <= Array<vllm_uint8b128_t, N>
-//   for IlvdLayout: (2, 2):(2, 1)
-template <FloatRoundStyle Round, int N>
-struct InterleavedNumericArrayConverter<Layout<Shape<_2, _4>, Stride<_4, _1>>,
-                                        cutlass::half_t, vllm_uint8b128_t, N,
-                                        Round> {
-  using result_type = Array<cutlass::half_t, N>;
-  using source_type = Array<vllm_uint8b128_t, N>;
-
-  struct RegConvert {
-    template <typename PackedResultType>
-    CUTLASS_DEVICE static PackedResultType convert(uint32_t src) {
-      // Hold output FP16s in reg. We need 1 reg for every 2 elements
-      using RegArray =
-          cutlass::AlignedArray<uint32_t, PackedResultType::kElements / 2,
-                                sizeof(PackedResultType)>;
-      RegArray r;
-
-      uint32_t const prmt_indices[2] = {0x5250, 0x5351};
-      static constexpr uint32_t start_byte_for_fp16 = 0x64646464;
-
-      for (int ii = 0; ii < RegArray::kElements; ++ii) {
-        asm volatile("prmt.b32 %0,%1,%2,%3;\n"
-                     : "=r"(r[ii])
-                     : "r"(src), "n"(start_byte_for_fp16),
-                       "r"(prmt_indices[ii]));
-      }
-
-      // -128 is folded into bias subtraction, i.e. the 0x80 in the low bytes
-      static constexpr uint32_t bias_rep = 0x64806480;
-      const half2& bias = reinterpret_cast<const half2&>(bias_rep);
-      CUTLASS_PRAGMA_UNROLL
-      for (int ii = 0; ii < RegArray::kElements; ++ii) {
-        half2& fp16x2_val = reinterpret_cast<__half2&>(r[ii]);
-        fp16x2_val = __hsub2(fp16x2_val, bias);
-      }
-
-      return reinterpret_cast<PackedResultType&>(r);
-    };
-  };
-
- public:
-  CUTLASS_DEVICE
-  static result_type convert(source_type const& source) {
-    return ArrayConverterPacked32Bit<RegConvert, typename result_type::Element,
-                                     typename source_type::Element,
-                                     N>::convert(source);
-  }
-
-  CUTLASS_DEVICE
-  result_type operator()(source_type const& s) const { return convert(s); }
-};
-
 // for Array<cutlass::float, N> <= Array<vllm_uint8b128_t, N>
 template <FloatRoundStyle Round, int N>
 struct NumericArrayConverter<float, vllm_uint8b128_t, N, Round> {
