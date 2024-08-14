@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Mapping, Optional
+from typing import Mapping, MutableMapping, Optional
 from urllib.parse import urlparse
 
 import aiohttp
@@ -40,7 +40,7 @@ class HTTPConnection:
             raise ValueError("Invalid HTTP URL: A valid HTTP URL "
                              "must have scheme 'http' or 'https'.")
 
-    def _headers(self, **extras: str) -> Mapping[str, str]:
+    def _headers(self, **extras: str) -> MutableMapping[str, str]:
         return {"User-Agent": f"vLLM/{VLLM_VERSION}", **extras}
 
     def get_response(

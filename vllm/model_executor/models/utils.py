@@ -87,6 +87,7 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
 
     # offload parameters to CPU
     # use pin_memory if possible, which helps cudagraph capture speed
+    offloaded_parameters = False
     for p in module.parameters():
         if _CPU_OFFLOAD_BYTES >= _CPU_OFFLOAD_MAX_BYTES:
             # we use per-parameter offloading
@@ -94,35 +95,36 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
             break
 
         # `torch.empty_like` does not support `pin_memory` argument
-        cpu_data = torch.empty(size=p.data.size(),
-                               dtype=p.data.dtype,
-                               layout=p.data.layout,
-                               device='cpu',
-                               pin_memory=pin_memory)
+        cpu_data = torch.empty_strided(size=p.data.size(),
+                                       stride=p.data.stride(),
+                                       dtype=p.data.dtype,
+                                       layout=p.data.layout,
+                                       device='cpu',
+                                       pin_memory=pin_memory)
         cpu_data.copy_(p.data)
         p.data = cpu_data
         _CPU_OFFLOAD_BYTES += p.data.numel() * p.data.element_size()
+        offloaded_parameters = True
 
-    state_dict: Dict[str, torch.Tensor] = module.state_dict()
+    if offloaded_parameters:
+        original_forward = module.forward
 
-    original_forward = module.forward
+        def forward(*args, **kwargs):
+            module.forward = original_forward
+            device_state = {
+                # here we blindly call `to(device)`
+                # if the parameter is already on the device, it will be a no-op
+                k: v.to(device, non_blocking=True)
+                for k, v in module.state_dict().items()
+            }
+            output = functional_call(module,
+                                     device_state,
+                                     args=args,
+                                     kwargs=kwargs)
+            module.forward = forward
+            return output
 
-    def forward(*args, **kwargs):
-        module.forward = original_forward
-        device_state = {
-            # here we blindly call `to(device)`
-            # if the parameter is already on the device, it will be a no-op
-            k: v.to(device, non_blocking=True)
-            for k, v in state_dict.items()
-        }
-        output = functional_call(module,
-                                 device_state,
-                                 args=args,
-                                 kwargs=kwargs)
         module.forward = forward
-        return output
-
-    module.forward = forward
 
     return module
 

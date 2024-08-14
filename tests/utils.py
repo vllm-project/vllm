@@ -1,4 +1,6 @@
+import functools
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -178,6 +180,37 @@ def compare_two_settings(model: str, arg1: List[str], arg2: List[str]):
                 "usage": completion.usage,
             })
 
+            # test seeded random sampling
+            completion = client.completions.create(model=model,
+                                                   prompt=prompt,
+                                                   max_tokens=5,
+                                                   seed=33,
+                                                   temperature=1.0)
+
+            results.append({
+                "test": "seeded_sampling",
+                "text": completion.choices[0].text,
+                "finish_reason": completion.choices[0].finish_reason,
+                "usage": completion.usage,
+            })
+
+            # test seeded random sampling with multiple prompts
+            completion = client.completions.create(model=model,
+                                                   prompt=[prompt, prompt],
+                                                   max_tokens=5,
+                                                   seed=33,
+                                                   temperature=1.0)
+
+            results.append({
+                "test":
+                "seeded_sampling",
+                "text": [choice.text for choice in completion.choices],
+                "finish_reason":
+                [choice.finish_reason for choice in completion.choices],
+                "usage":
+                completion.usage,
+            })
+
             # test simple list
             batch = client.completions.create(
                 model=model,
@@ -305,3 +338,40 @@ def wait_for_gpu_memory_to_clear(devices: List[int],
                              f'{dur_s=:.02f} ({threshold_bytes/2**30=})')
 
         time.sleep(5)
+
+
+def fork_new_process_for_each_test(f):
+
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        # Make the process the leader of its own process group
+        # to avoid sending SIGTERM to the parent process
+        os.setpgrp()
+        from _pytest.outcomes import Skipped
+        pid = os.fork()
+        if pid == 0:
+            try:
+                f(*args, **kwargs)
+            except Skipped as e:
+                # convert Skipped to exit code 0
+                print(str(e))
+                os._exit(0)
+            except Exception:
+                import traceback
+                traceback.print_exc()
+                os._exit(1)
+            else:
+                os._exit(0)
+        else:
+            pgid = os.getpgid(pid)
+            _pid, _exitcode = os.waitpid(pid, 0)
+            # ignore SIGTERM signal itself
+            old_singla_handler = signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            # kill all child processes
+            os.killpg(pgid, signal.SIGTERM)
+            # restore the signal handler
+            signal.signal(signal.SIGTERM, old_singla_handler)
+            assert _exitcode == 0, (f"function {f} failed when called with"
+                                    f" args {args} and kwargs {kwargs}")
+
+    return wrapper

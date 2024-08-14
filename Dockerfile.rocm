@@ -53,10 +53,10 @@ RUN apt-get purge -y sccache; python3 -m pip uninstall -y sccache; rm -f "$(whic
 # Install torch == 2.5.0 on ROCm
 RUN case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \
         *"rocm-6.1"*) \
-            python3 -m pip uninstall -y torch torchaudio torchvision \
+            python3 -m pip uninstall -y torch torchvision \
             && python3 -m pip install --no-cache-dir --pre \
-                torch==2.5.0.dev20240710 torchaudio==2.4.0.dev20240710 \
-                torchvision==0.20.0.dev20240710 \
+                torch==2.5.0.dev20240726 \
+                torchvision==0.20.0.dev20240726 \
                --index-url https://download.pytorch.org/whl/nightly/rocm6.1;; \
         *) ;; esac
 
@@ -127,19 +127,11 @@ FROM base AS final
 # Import the vLLM development directory from the build context
 COPY . .
 
-# Error related to odd state for numpy 1.20.3 where there is no METADATA etc, but an extra LICENSES_bundled.txt.
-# Manually remove it so that later steps of numpy upgrade can continue
-RUN case "$(which python3)" in \
-        *"/opt/conda/envs/py_3.9"*) \
-            rm -rf /opt/conda/envs/py_3.9/lib/python3.9/site-packages/numpy-1.20.3.dist-info/;; \
-        *) ;; esac
-
 # Package upgrades for useful functionality or to avoid dependency issues
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install --upgrade numba scipy huggingface-hub[cli]
 
-# Make sure punica kernels are built (for LoRA)
-ENV VLLM_INSTALL_PUNICA_KERNELS=1
+
 # Workaround for ray >= 2.10.0
 ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
 # Silences the HF Tokenizers warning
