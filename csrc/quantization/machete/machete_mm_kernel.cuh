@@ -84,10 +84,9 @@ struct MacheteKernelTemplate {
   using ArchTag = cutlass::arch::Sm90;
   using OperatorClass = cutlass::arch::OpClassTensorOp;
 
-  using PrepackedLayoutB = PrepackedLayoutBTemplate<
-      ElementA_, ElementB_, ElementD_, AccumulatorT,
-      decltype(get_interleaved_blk_layout<ElementB, 8, 32>()),
-      LayoutA_Transpose, KernelSchedule>;
+  using PrepackedLayoutB =
+      PrepackedLayoutBTemplate<ElementA_, ElementB_, ElementD_, AccumulatorT,
+                               LayoutA_Transpose, KernelSchedule>;
 
   static int constexpr TileShapeK =
       128 * 8 / cutlass::sizeof_bits<MmaType>::value;

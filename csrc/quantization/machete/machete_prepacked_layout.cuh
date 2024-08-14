@@ -21,6 +21,7 @@
 
 #include "cutlass_extensions/cute_utils.cuh"
 #include "machete_collective_builder.cuh"
+#include "machete_interleaving_utils.cuh"
 
 namespace machete {
 
@@ -29,8 +30,8 @@ using namespace cute;
 struct IlvBlkLayoutAuto {};
 
 template <typename ElementA_, typename ElementB_, typename ElementD_,
-          typename AccumulatorT, class LayoutB,class KernelSchedule, typename IlvBlkLayout_ = IlvBlkLayoutAuto
-          >
+          typename AccumulatorT, class LayoutB, class KernelSchedule,
+          typename IlvBlkLayout_ = IlvBlkLayoutAuto>
 // clang-format on
 struct PrepackedLayoutBTemplate {
   using MmaType = ElementA_;
@@ -41,7 +42,13 @@ struct PrepackedLayoutBTemplate {
       AccumulatorT;  // Element type for internal accumulation
   using ElementMma = MmaType;
 
-  using IlvdBlkLayout = IlvBlkLayout_;
+  using IlvdBlkLayout = std::conditional_t<
+      std::is_same_v<IlvBlkLayout_, IlvBlkLayoutAuto>,
+      std::conditional_t<sizeof_bits_v<ElementB> <= 4,
+                         decltype(get_interleaved_blk_layout<
+                                  ElementB, sizeof_bits_v<ElementA>, 32>()),
+                         void>,
+      IlvBlkLayout_>;
 
   // TODO (Lucas): compare the performance for other sizes
   // Prepacked block shape, smallest layout atom for loading into registers

@@ -69,6 +69,8 @@ struct MacheteCollectiveMma {
       size<0>(TileShape_MNK{}) / size<0>(PPBlockShape_MK{}),
       size<2>(TileShape_MNK{}) / size<1>(PPBlockShape_MK{})));
 
+  using IlvdBlkLayout = typename GmemLayoutA::IlvdBlkLayout;
+
   static_assert(size<0>(TileShape_MNK{}) % size<0>(PPBlockShape_MK{}) == 0,
                 "M in PPBlockShape_MK must evenly divide M TileShape_MNK");
   static_assert(size<2>(TileShape_MNK{}) % size<1>(PPBlockShape_MK{}) == 0,
@@ -980,13 +982,12 @@ struct MacheteCollectiveMma {
 
     static constexpr int A_CPY_VEC =
         decltype(max_common_vector(tCsA, tCrA_load)){};
-    // static constexpr int K_BLOCKS_PER_COPY = size<0>(group<0, 2>(tCrA_load))
-    // / A_CPY_VEC;
+
     static constexpr int COVERSION_WIDTH =
         std::min(A_CPY_VEC, int(size<0>(tCrA_mma)));
 
     auto load_A_to_registers = [&](int read_stage) {
-      copy(AutoVectorizingCopyWithAssumedAlignment<A_CPY_VEC>{},
+      copy(create_auto_vectorizing_copy<ElementA, decltype(A_CPY_VEC)>(),
            tCsA(_, _, _, read_stage), tCrA_load(_, _, _));
     };
 
@@ -1030,7 +1031,6 @@ struct MacheteCollectiveMma {
       pipeline.consumer_wait(smem_pipe_read, barrier_token);
 
       int read_stage = smem_pipe_read.index();
-
       ++smem_pipe_read;
       barrier_token = pipeline.consumer_try_wait(smem_pipe_read);
 
@@ -1330,7 +1330,7 @@ struct MacheteCollectiveMma {
     auto out = tCrA_mma(_, _, k_block);
 
     if constexpr (KernelConversionMode == ConversionMode::DirectConvert) {
-      convert_tensor(in, out, vec_A);
+      convert_tensor<IlvdBlkLayout>(in, out, vec_A);
     } else if constexpr (ModeHasScales) {
       auto tCrS = cute::get<1>(partitioned_extra_info);
       auto converted_inputs =
@@ -1338,10 +1338,21 @@ struct MacheteCollectiveMma {
       auto scales = tCrS(_, _, 0);
 
       // First, we upcast the inputs to the scale type
-      convert_tensor(in, converted_inputs, vec_A);
+      convert_tensor<IlvdBlkLayout>(in, converted_inputs, vec_A);
       // Apply scales and broadcast across inputs, store in converted_inputs
-      cute::transform(converted_inputs, scales, converted_inputs,
-                      cute::multiplies{});
+
+      // We need to cast to nv_bfloat16 for the multiply since
+      // `cutlass::bfloat16_t` has an overloaded operator* that upconverts to
+      // float, which nvcc will not optimize to useing vectorized fma
+      // instructions (i.e. hfma.bf16_v2)
+      if constexpr (std::is_same_v<ElementScale, cutlass::bfloat16_t>) {
+        cute::transform(
+            recast<nv_bfloat16>(converted_inputs), recast<nv_bfloat16>(scales),
+            recast<nv_bfloat16>(converted_inputs), cute::multiplies{});
+      } else {
+        cute::transform(converted_inputs, scales, converted_inputs,
+                        cute::multiplies{});
+      }
 
       // Apply zeros if required
       if constexpr (KernelConversionMode ==
@@ -1349,13 +1360,19 @@ struct MacheteCollectiveMma {
         auto tCrZ = cute::get<3>(partitioned_extra_info);
         auto converted_zeros = make_fragment_like<ElementScale>(tCrZ)(_, _, 0);
 
-        convert_tensor(tCrZ(_, _, 0), converted_zeros);
-        cute::transform(converted_inputs, converted_zeros, converted_inputs,
-                        cute::plus{});
+        convert_tensor<void>(tCrZ(_, _, 0), converted_zeros);
+        if constexpr (std::is_same_v<ElementScale, cutlass::bfloat16_t>) {
+          cute::transform(recast<nv_bfloat16>(converted_inputs),
+                          recast<nv_bfloat16>(converted_zeros),
+                          recast<nv_bfloat16>(converted_inputs), cute::plus{});
+        } else {
+          cute::transform(converted_inputs, converted_zeros, converted_inputs,
+                          cute::plus{});
+        }
       }
 
       // Finally, we convert the scaled inputs to the mma type.
-      convert_tensor(converted_inputs, out);
+      convert_tensor<void>(converted_inputs, out);
     } else {
       static_assert(cutlass::detail::dependent_false<KernelSchedule>,
                     "No A data is loaded.");
@@ -1363,7 +1380,8 @@ struct MacheteCollectiveMma {
   }
 
   /// Utilities for transforming the A operand prior to issuing tensorcore math.
-  template <class EngineIn, class EngineOut, class TensorLayout,
+  template <typename IlvdBlkLayout, class EngineIn, class EngineOut,
+            class TensorLayout,
             int ConversionVectorWidth = cosize_v<TensorLayout>>
   CUTLASS_DEVICE void convert_tensor(
       Tensor<EngineIn, TensorLayout> const& in,
@@ -1395,9 +1413,9 @@ struct MacheteCollectiveMma {
 
     constexpr cutlass::FloatRoundStyle RoundStyle =
         cutlass::FloatRoundStyle::round_to_nearest;
-    using Converter =
-        cutlass::NumericArrayConverter<DstType, SrcType, ConversionVectorWidth,
-                                       RoundStyle>;
+
+    using Converter = cutlass::InterleavedNumericArrayConverter<
+        IlvdBlkLayout, DstType, SrcType, ConversionVectorWidth, RoundStyle>;
 
     constexpr int NumIterations = N / ConversionVectorWidth;
 
