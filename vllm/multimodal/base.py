@@ -134,8 +134,8 @@ class MultiModalDataBuiltins(TypedDict, total=False):
     image: MultiModalData[Image.Image]
     """The input image(s)."""
 
-    audio: Tuple[np.ndarray, Union[int, float]]
-    """The input audio and its sampling rate."""
+    audio: MultiModalData[Tuple[np.ndarray, Union[int, float]]]
+    """The input audio item(s) and corresponding sampling rate(s)."""
 
 
 MultiModalDataDict = Union[MultiModalDataBuiltins,
