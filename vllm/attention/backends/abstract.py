@@ -151,6 +151,7 @@ class AttentionImpl(ABC, Generic[T]):
         kv_cache_dtype: str = "auto",
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
+        **kwargs,
     ) -> None:
         raise NotImplementedError
 
