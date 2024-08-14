@@ -338,11 +338,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         #   process_weights_after_loading()
         if self.quant_config.is_checkpoint_fp8_serialized:
             set_weight_attrs(w13_weight_scale, {
-                "is_fp8_scale": True,
+                "quant_method": "tensor",
                 **extra_weight_attrs
             })
             set_weight_attrs(w2_weight_scale, {
-                "is_fp8_scale": True,
+                "quant_method": "tensor",
                 **extra_weight_attrs
             })
 
@@ -357,19 +357,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 num_experts, dtype=torch.float32),
                                                  requires_grad=False)
             layer.register_parameter("w13_input_scale", w13_input_scale)
-            set_weight_attrs(w13_input_scale, {
-                "is_fp8_scale": True,
-                **extra_weight_attrs
-            })
+            set_weight_attrs(w13_input_scale, extra_weight_attrs)
 
             w2_input_scale = torch.nn.Parameter(torch.ones(
                 num_experts, dtype=torch.float32),
                                                 requires_grad=False)
             layer.register_parameter("w2_input_scale", w2_input_scale)
-            set_weight_attrs(w2_input_scale, {
-                "is_fp8_scale": True,
-                **extra_weight_attrs
-            })
+            set_weight_attrs(w2_input_scale, extra_weight_attrs)
+
         else:
             layer.w13_input_scale = None
             layer.w2_input_scale = None

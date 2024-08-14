@@ -298,12 +298,6 @@ class FusedMoE(torch.nn.Module):
             raise ValueError(f"shard_id must be ['w1','w2','w3'] but "
                              f"got {shard_id}.")
 
-        # Special case for fp8 scales.
-        if getattr(param, "is_fp8_scale", False):
-            self._load_fp8_scale(param.data, loaded_weight, weight_name,
-                                 shard_id, expert_id)
-            return
-
         expert_data = param.data[expert_id]
         tp_rank = get_tensor_model_parallel_rank()
 
