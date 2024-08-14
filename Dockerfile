@@ -14,6 +14,7 @@ ARG CUDA_VERSION=12.4.1
 ARG PYTHON_VERSION=3.10
 
 ENV DEBIAN_FRONTEND=noninteractive
+ENV PIP_USE_DEPRECATED=legacy-resolver
 
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
@@ -21,9 +22,14 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && apt-get install -y ccache software-properties-common \
     && add-apt-repository ppa:deadsnakes/ppa \
     && apt-get update -y \
-    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
-    && if [ "${PYTHON_VERSION}" != "3" ]; then update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1; fi \
-    && python3 --version
+    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv python3-pip \
+    && if [ "${PYTHON_VERSION}" != "3" ]; then \
+            update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1; \
+            update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION}; \
+            ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config; \
+        fi \
+    && python3 --version \ 
+    && python3 -m pip --version
 
 RUN apt-get update -y \
     && apt-get install -y git curl sudo
@@ -95,6 +101,7 @@ ARG buildkite_commit
 ENV BUILDKITE_COMMIT=${buildkite_commit}
 
 ARG USE_SCCACHE
+ARG SCCACHE_BUCKET_NAME
 # if USE_SCCACHE is set, use sccache to speed up compilation
 RUN --mount=type=cache,target=/root/.cache/pip \
     if [ "$USE_SCCACHE" = "1" ]; then \
@@ -103,11 +110,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         && tar -xzf sccache.tar.gz \
         && sudo mv sccache-v0.8.1-x86_64-unknown-linux-musl/sccache /usr/bin/sccache \
         && rm -rf sccache.tar.gz sccache-v0.8.1-x86_64-unknown-linux-musl \
-        && if [ "$CUDA_VERSION" = "11.8.0" ]; then \
-            export SCCACHE_BUCKET=vllm-build-sccache-2; \
-           else \
-            export SCCACHE_BUCKET=vllm-build-sccache; \
-           fi \
+        && export SCCACHE_BUCKET=${SCCACHE_BUCKET_NAME} \
         && export SCCACHE_REGION=us-west-2 \
         && export CMAKE_BUILD_TYPE=Release \
         && sccache --show-stats \
@@ -161,18 +164,26 @@ ARG CUDA_VERSION=12.4.1
 ARG PYTHON_VERSION=3.10
 WORKDIR /vllm-workspace
 
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PIP_USE_DEPRECATED=legacy-resolver
+
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
     && apt-get update -y \
     && apt-get install -y ccache software-properties-common \
     && add-apt-repository ppa:deadsnakes/ppa \
     && apt-get update -y \
-    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
-    && if [ "${PYTHON_VERSION}" != "3" ]; then update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1; fi \
-    && python3 --version
+    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv python3-pip
+    && if [ "${PYTHON_VERSION}" != "3" ]; then \
+            update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1; \
+            update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION}; \
+            ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config; \
+        fi \
+    && python3 --version \
+    && python3 -m pip --version
 
 RUN apt-get update -y \
-    && apt-get install -y python3-pip git vim curl libibverbs-dev
+    && apt-get install -y git vim curl libibverbs-dev
 
 # Install pip s.t. it will be compatible with our PYTHON_VERSION
 RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION}
