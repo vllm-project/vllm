@@ -90,7 +90,7 @@ trtllm-build \
 --max_input_len ${max_input_len} \
 --max_seq_len ${max_seq_len} \
 --max_num_tokens ${max_num_tokens} \
---output_dir ${trt_engine_path} 
+--output_dir ${trt_engine_path}  2>&1 | tee ~/log.txt
 
 
 
