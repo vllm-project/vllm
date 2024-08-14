@@ -1,6 +1,6 @@
 from collections import defaultdict
 from functools import cached_property
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import torch
 
@@ -14,6 +14,7 @@ from vllm.model_executor.layers.typical_acceptance_sampler import (
     TypicalAcceptanceSampler)
 from vllm.sequence import (CompletionSequenceGroupOutput, ExecuteModelRequest,
                            HiddenStates, SamplerOutput, SequenceGroupMetadata,
+                           IntermediateTensors, SequenceGroupMetadataDelta,
                            get_all_seq_ids, get_all_seq_ids_and_request_ids)
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
 from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
@@ -143,6 +144,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                     "model_config"].hf_config.model_type == "medusa":
                 proposer_worker = MedusaWorker(**draft_worker_kwargs)
             else:
+                print(f"SANG-TODO {draft_tp=}")
                 if draft_tp == 1:
                     draft_worker_kwargs[
                         "model_runner_cls"] = TP1DraftModelRunner
@@ -220,6 +222,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         """
         self.proposer_worker = proposer_worker
         self.scorer_worker = scorer_worker
+        print(f"SANG-TODO {proposer_worker=} {scorer_worker=}")
         scorer_runner = getattr(self.scorer_worker, "model_runner", None)
         self.generators = scorer_runner.get_generators(
         ) if scorer_runner else None
@@ -248,6 +251,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.previous_hidden_states: Optional[HiddenStates] = None
         self._disable_logprobs = disable_logprobs
         self._disable_log_stats = disable_log_stats
+        self._seq_group_metadata_cache: Dict[str, SequenceGroupMetadata] = {}
 
     def init_device(self) -> None:
         """Initialize both scorer and proposer models.
@@ -330,25 +334,66 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.proposer_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks,
                                               num_cpu_blocks=num_cpu_blocks)
 
+    def _get_cached_seq_group_metadata(
+            self,
+            seq_group_metadata_list: List[Union[SequenceGroupMetadata,
+                                                SequenceGroupMetadataDelta]],
+            finished_request_ids: List[str]) -> List[SequenceGroupMetadata]:
+        """Return a list of cached Sequence Group Metadata after updating its
+        state.
+
+        It is used because scheduler only sends delta to workers to reduce
+        the data payload size. The function also cleans up cache based on
+        a given `finished_request_ids`.
+        """
+        new_seq_group_metadata_list = []
+        for metadata_or_delta in seq_group_metadata_list:
+            request_id = metadata_or_delta.request_id
+            if request_id not in self._seq_group_metadata_cache:
+                # The first prefill.
+                assert isinstance(metadata_or_delta, SequenceGroupMetadata)
+                self._seq_group_metadata_cache[request_id] = metadata_or_delta
+            else:
+                # The first prefill is already cached.
+                if isinstance(metadata_or_delta, SequenceGroupMetadataDelta):
+                    self._seq_group_metadata_cache[request_id].apply_delta(
+                        metadata_or_delta)
+                else:
+                    # If metadata snapshot is sent again, it is
+                    # preempted. Reset the cache because we need to start
+                    # from scratch.
+                    assert isinstance(metadata_or_delta, SequenceGroupMetadata)
+                    self._seq_group_metadata_cache[
+                        request_id] = metadata_or_delta
+
+            new_seq_group_metadata_list.append(
+                self._seq_group_metadata_cache[request_id])
+
+        # Clean up finished ids
+        for finished_id in finished_request_ids:
+            del self._seq_group_metadata_cache[finished_id]
+
+        return new_seq_group_metadata_list
+
     @torch.inference_mode()
-    def _execute_model_spmd(self, execute_model_req: ExecuteModelRequest, ) -> List[SamplerOutput]:
-        # NOTE(cade): Performance: this separates the API server and scheduler from rank0 process,
-        # which significantly reduces variance in step time due to less gil interrupts.
-        # However, currently this still invokes the NCCL control plane for the scoring model,
-        # because not all ranks  have perfect information (don't have the proposal tokens).
-        # This can be fixed by either communicating the proposal tokens to other ranks,
-        # or by running the draft model + sampling in all ranks. The latter is preferred
-        # for performance reasons.
+    def _execute_model_spmd(
+        self,
+        execute_model_req: ExecuteModelRequest,
+        intermediate_tensors: Optional[IntermediateTensors] = None
+    ) -> List[SamplerOutput]:
+        """Execute the spec decoding model in spmd manner."""
+        if execute_model_req is not None:
+            new_seq_group_metadata_list = self._get_cached_seq_group_metadata(
+                execute_model_req.seq_group_metadata_list,
+                execute_model_req.finished_requests_ids)
+            # It should be only set from workers.
+            assert execute_model_req.previous_hidden_states is None
 
-        # Workaround for other ranks not running sampler.
-        if self.rank != self._driver_rank:
-            self._run_non_driver_rank_spmd(execute_model_req.num_lookahead_slots)
-            return []
+            execute_model_req.seq_group_metadata_list = (
+                new_seq_group_metadata_list)
 
-        # TODO how to handle shutdown? need to signal to workers that we're done.
-        # in non-spmd case this is None execute_model_req
-        # We may not need to handle this if it's handled by ray
-
+        assert intermediate_tensors is None, (
+            "Pipeline parallelism is not supported with spec decoding.")
         self._track_finished_requests(execute_model_req)
 
         disable_all_speculation = self._should_disable_all_speculation(
@@ -357,13 +402,19 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         self._maybe_disable_speculative_tokens(
             disable_all_speculation, execute_model_req.seq_group_metadata_list)
-
+        # print(f"SANG-TODO {execute_model_req.seq_group_metadata_list=}")
         if num_lookahead_slots == 0 or len(
                 execute_model_req.seq_group_metadata_list
         ) == 0 or disable_all_speculation:
+            print(f"SANG-TODO _run_no_spec {num_lookahead_slots=}")
+            print(
+                f"SANG-TODO Scheduled! {execute_model_req.seq_group_metadata_list=}"
+            )
             return self._run_no_spec(execute_model_req,
                                      skip_proposer=disable_all_speculation)
 
+        print(
+            f"SANG-TODO _run_speculative_decoding_step {num_lookahead_slots=}")
         return self._run_speculative_decoding_step(execute_model_req,
                                                    num_lookahead_slots)
 
@@ -450,6 +501,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             return
 
         for seq_group_metadata in seq_group_metadata_list:
+            print(f"SANG-TODO {type(seq_group_metadata)=}")
             # Once num_speculative_tokens is set to 0, the spec decode
             # of this request will be disabled forever.
             # TODO(comaniac): We currently store spec decoding specific
@@ -502,10 +554,22 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         not called, meaning that the kv-cache in proposer for requests is not
         updated, so they cannot enable spec decode in the rest decoding.
         """
+        print(f"SANG-TODO {self.scorer_worker=} {skip_proposer=}")
+        print(f"SANG-TODO draft model execute before")
         if not skip_proposer:
             self.proposer_worker.execute_model(execute_model_req)
+        print(f"SANG-TODO draft model execute done")
 
-        sampler_output = self.scorer_worker.execute_model(execute_model_req)
+        print(f"SANG-TODO  target model _execute_model_spmd")
+        sampler_output = self.scorer_worker._execute_model_spmd(
+            execute_model_req)
+        print(
+            f"SANG-TODO  target model _execute_model_spmd {len(sampler_output)=}"
+        )
+        if len(sampler_output) == 0:
+            return []
+
+        print(f"SANG-TODO {sampler_output=} {len(sampler_output)=}")
         assert len(sampler_output) == 1
         sampler_output = sampler_output[0]
 
@@ -556,30 +620,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.scorer_worker.execute_model()
         return True
 
-    def _run_non_driver_rank_spmd(self, num_lookahead_slots: int) -> bool:
-        """Run proposer and verifier model in non-driver workers. This is used
-        for both speculation cases (num_lookahead_slots>0) and non-speculation
-        cases (e.g. prefill).
-        Returns True iff there are remaining sequences to process.
-        """
-        assert self.rank != self._driver_rank
-
-        #data = broadcast_tensor_dict(src=self._driver_rank)
-        #if not data:
-        #    return False
-        #num_lookahead_slots = data["num_lookahead_slots"]
-
-        # Even if num_lookahead_slots is zero, we want to run the proposer model
-        # as it may have KV.
-        #
-        # We run the proposer once per lookahead slot. In the future we should
-        # delegate how many times it runs to the proposer.
-        for _ in range(max(num_lookahead_slots, 1)):
-            self.proposer_worker.execute_model()
-
-        self.scorer_worker.execute_model()
-        return True
-
     @nvtx_range("spec_decode_worker._run_speculative_decoding_step")
     def _run_speculative_decoding_step(
             self, execute_model_req: ExecuteModelRequest,
@@ -602,7 +642,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             # Generate proposals using draft worker.
             proposals = self.proposer_worker.get_spec_proposals(
                 execute_model_req, self._seq_with_bonus_token_in_last_step)
-
+        print(f"SANG-TODO draft {proposals=}")
         if not self._allow_zero_draft_token_step and proposals.no_proposals:
             #TODO: Fix it #5814
             raise RuntimeError("Cannot handle cases where distributed draft "
@@ -613,12 +653,15 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 execute_model_req,
                 proposals,
             )
-
+        if proposal_scores is None:
+            return []
+        print(f"SANG-TODO {proposal_scores=}")
         with Timer() as verification_timer:
             accepted_token_ids, target_logprobs = self._verify_tokens(
                 execute_model_req.seq_group_metadata_list, proposal_scores,
                 proposals, execute_model_req.num_lookahead_slots)
 
+        print(f"SANG-TODO {accepted_token_ids=}")
         stage_times = (proposal_timer.elapsed_time_ms / num_lookahead_slots,
                        scoring_timer.elapsed_time_ms,
                        verification_timer.elapsed_time_ms)
@@ -695,6 +738,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         # Append output tokens from non-speculative sequences to
         # the accepted token ids tensor.
+        print(f"SANG-TODO {non_spec_token_ids=} {non_spec_token_ids.shape=}")
         non_spec_token_ids = non_spec_token_ids.expand(-1, max_proposal_len +
                                                        1).clone()
         non_spec_token_ids[:, 1:] = -1

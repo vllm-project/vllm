@@ -1196,6 +1196,9 @@ class ExecuteModelRequest(
     # The number of requests in the running queue.
     running_queue_size: int = 0
     # Optional hidden states from prior step.
+    # NOTE: It should not be passed from scheduler -> worker. It is only
+    # used when ExecuteModelRequest is constructed within a worker
+    # for spec decoding.
     previous_hidden_states: Optional[HiddenStates] = None
     # The number of forward steps to run.
     num_steps: int = 1

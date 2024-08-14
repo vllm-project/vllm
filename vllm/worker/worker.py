@@ -359,9 +359,12 @@ class Worker(LocalOrDistributedWorkerBase):
             new_seq_group_metadata_list = self._get_cached_seq_group_metadata(
                 execute_model_req.seq_group_metadata_list,
                 execute_model_req.finished_requests_ids)
+            # It should be only set from workers.
+            assert execute_model_req.previous_hidden_states is None
 
             execute_model_req.seq_group_metadata_list = (
                 new_seq_group_metadata_list)
+        print("SANG-TODO worker _execute_model_spmd")
         output = super()._execute_model_spmd(execute_model_req,
                                              intermediate_tensors)
         return output

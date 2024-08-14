@@ -51,14 +51,12 @@ class Top1Proposer(SpeculativeProposer):
         """
         proposal_len = execute_model_req.num_lookahead_slots
         seq_group_metadata_list = execute_model_req.seq_group_metadata_list
-
         # Split speculative- and non-speculative- sequences.
         (
             proposal_lens,
             nonzero_proposal_len_seqs,
             nonzero_proposal_len_indices,
         ) = self._split_by_proposal_len(seq_group_metadata_list, proposal_len)
-
         if nonzero_proposal_len_seqs:
             # Speculate tokens using the draft worker for the speculative
             # sequences.

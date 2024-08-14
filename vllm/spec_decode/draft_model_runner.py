@@ -272,13 +272,14 @@ class TP1DraftModelRunner(ModelRunner):
         # iteration invokes this function only once
         # (Look at multi-step-worker code)
         is_fallback = num_steps == 1
+        print("SANG-TODO draft 1")
         if not is_fallback:
             # Since we do not broadcast data inside execute_model anymore,
             # we need to figure out the best way to support TP > 1 in this
             # case, because we will at least need to broadcast the sampled
             # tokens to all workers.
-            if not self.is_driver_worker:
-                raise ValueError("TP1DraftModelRunner only supports TP=1.")
+            # if not self.is_driver_worker:
+            # raise ValueError("TP1DraftModelRunner only supports TP=1.")
 
             # Sanity
             if self.lora_config is not None:
@@ -334,6 +335,7 @@ class TP1DraftModelRunner(ModelRunner):
                     model_input.attn_metadata.decode_wrapper = \
                         self.flashinfer_decode_wrapper
                 model_input.attn_metadata.begin_forward()
+            print("SANG-TODO draft 2")
 
         # Detect exec mode
         assert model_input.attn_metadata is not None
@@ -362,6 +364,7 @@ class TP1DraftModelRunner(ModelRunner):
         else:
             model_executable = self.model
 
+        print("SANG-TODO draft 3")
         outputs: List[SamplerOutput] = []
         for step in range(num_steps):
             multi_modal_kwargs = model_input.multi_modal_kwargs or {}
@@ -376,20 +379,23 @@ class TP1DraftModelRunner(ModelRunner):
                 **MultiModalInputs.as_kwargs(multi_modal_kwargs,
                                              device=self.device),
             )
+            print(f"SANG-TODO draft 4 {step=}")
 
             # Compute the logits.
             logits = self.model.compute_logits(hidden_states,
                                                model_input.sampling_metadata)
-
+            print("SANG-TODO draft 5")
             # Sample the next token.
             outputs.append(
                 self.model.sample(
                     logits=logits,
                     sampling_metadata=model_input.sampling_metadata,
                 ))
+            print("SANG-TODO draft 6")
 
             # Prepare inputs for the next step
             if step != num_steps - 1:
                 model_input = self._gpu_advance_step(model_input, outputs[-1])
+                print("SANG-TODO draft 7")
 
         return outputs

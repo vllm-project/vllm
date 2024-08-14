@@ -34,12 +34,12 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
             return worker
 
         # gpu ranks that will generate draft tokens together
-        draft_ranks = list(range(draft_tensor_parallel_size))
 
         logger.info("Wrapping {%s} in {%s}", type(worker), cls)
-        return cls(worker, draft_ranks)
+        return cls(worker, draft_tensor_parallel_size)
 
-    def __init__(self, worker: MultiStepWorker, draft_ranks: List[int]):
+    def __init__(self, worker: MultiStepWorker,
+                 draft_tensor_parallel_size: int):
         """Create a SmallerTpProposerWorker.
 
         Args:
@@ -48,11 +48,12 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
             written in this value participate in draft generation
         """
         self._worker = worker
-        self._draft_ranks = draft_ranks
+        self.draft_tensor_parallel_size = draft_tensor_parallel_size
 
         # init during init_device
         self._is_dummy = False
         self._tp_group = None
+        self._draft_ranks: List[int]
 
     def _patch_tensor_parallel_group(self):
         """Temporarily patch the global tp group state with its own tp group
@@ -61,7 +62,11 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
         return patch_tensor_parallel_group(self._tp_group)
 
     def init_device(self) -> None:
-        self._is_dummy = get_tp_group().rank not in self._draft_ranks
+        local_rank = get_tp_group().local_rank
+        self._draft_ranks = list(
+            range(local_rank, local_rank + self.draft_tensor_parallel_size))
+        print(f"SANG-TODO {self._draft_ranks=}")
+        # self._is_dummy = get_tp_group().rank not in self._draft_ranks
 
         # dummy workers do nothing
         if self._is_dummy:
@@ -144,9 +149,9 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
     ) -> List[SamplerOutput]:
         if self._is_dummy:
             return []
-
+        print("SANG-TODO execute model tp 1 draft model!")
         with self._patch_tensor_parallel_group():
-            return self._worker.execute_model(execute_model_req)
+            return self._worker._execute_model_spmd(execute_model_req)
 
     def get_cache_block_size_bytes(self) -> int:
         if self._is_dummy:

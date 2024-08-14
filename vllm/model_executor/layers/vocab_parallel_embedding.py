@@ -397,7 +397,9 @@ class VocabParallelEmbedding(torch.nn.Module):
         if self.tp_size > 1:
             output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
         # Reduce across all the model parallel GPUs.
+        print("SANG-TODO before tensor_model_parallel_all_reduce")
         output = tensor_model_parallel_all_reduce(output_parallel)
+        print("SANG-TODO after tensor_model_parallel_all_reduce")
         return output
 
     def extra_repr(self) -> str:
