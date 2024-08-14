@@ -1,9 +1,10 @@
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
-from vllm.sequence import ExecuteModelRequest
-from vllm.utils import get_ip, is_hip, is_tpu, is_xpu
+from vllm.platforms import current_platform
+from vllm.sequence import ExecuteModelRequest, IntermediateTensors
+from vllm.utils import get_ip, is_hip, is_xpu
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
@@ -31,9 +32,17 @@ try:
             gpu_ids = ray.get_gpu_ids()
             return node_id, gpu_ids
 
-        def execute_model_spmd(self, execute_model_req: ExecuteModelRequest):
-            """Used only when SPMD worker and compiled DAG are both
-            enabled."""
+        def execute_model_spmd(
+            self, req_or_tuple: Union[ExecuteModelRequest,
+                                      Tuple[ExecuteModelRequest,
+                                            IntermediateTensors]]):
+            """Execute model in SPMD fashion: used only when SPMD worker and
+            compiled DAG are both enabled.
+
+            Args:
+                req_or_tuple: The request to execute the model, or a tuple
+                    containing the request and intermediate tensors.
+            """
             # TODO(swang): This is needed right now because Ray aDAG executes
             # on a background thread, so we need to reset torch's current
             # device.
@@ -42,7 +51,17 @@ try:
                 torch.cuda.set_device(self.worker.device)
                 self.compiled_dag_cuda_device_set = True
 
-            return self.worker._execute_model_spmd(execute_model_req)
+            if isinstance(req_or_tuple, tuple):
+                execute_model_req, intermediate_tensors = req_or_tuple
+            else:
+                execute_model_req = req_or_tuple
+                intermediate_tensors = None
+
+            output = self.worker._execute_model_spmd(execute_model_req,
+                                                     intermediate_tensors)
+            if isinstance(output, IntermediateTensors):
+                return execute_model_req, output
+            return output
 
     ray_import_err = None
 
@@ -93,7 +112,7 @@ def initialize_ray_cluster(
         # Placement group is already set.
         return
 
-    device_str = "GPU" if not is_tpu() else "TPU"
+    device_str = "GPU" if not current_platform.is_tpu() else "TPU"
     # Create placement group for worker processes
     current_placement_group = ray.util.get_current_placement_group()
     if current_placement_group:

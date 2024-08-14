@@ -5,13 +5,12 @@ Run `pytest tests/quantization/test_compressed_tensors.py`.
 
 import pytest
 import torch
+from compressed_tensors.quantization import QuantizationType
 
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsLinearMethod, CompressedTensorsW4A16Sparse24,
     CompressedTensorsW8A8Fp8, CompressedTensorsW8A8Int8,
-    CompressedTensorsWNA16)
-from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
-    QuantizationType)
+    CompressedTensorsW8A16Fp8, CompressedTensorsWNA16)
 
 
 @pytest.mark.parametrize("model_args", [
@@ -109,7 +108,7 @@ def test_compressed_tensors_wNa16(vllm_runner, wNa16_args):
 
         assert qkv_proj.weight_packed.dtype is torch.int32
         assert qkv_proj.weight_scale.dtype is torch.float16
-        assert qkv_proj.weight_packed.pack_factor == pack_factor
+        assert qkv_proj.scheme.pack_factor == pack_factor
 
         output = llm.generate_greedy("Hello my name is", max_tokens=20)
         assert output
@@ -140,13 +139,17 @@ def test_compressed_tensors_fp8(vllm_runner):
         qkv_proj = layer.self_attn.qkv_proj
 
         assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
-        assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8Fp8)
-        assert qkv_proj.weight.dtype is torch.float8_e4m3fn
+        assert isinstance(
+            qkv_proj.scheme,
+            (CompressedTensorsW8A8Fp8, CompressedTensorsW8A16Fp8))
+
         assert qkv_proj.input_scale.dtype is torch.float32
-        assert qkv_proj.weight_scale.dtype is torch.float32
-        # should be scalars after processing
-        assert len(qkv_proj.input_scale.shape) == 0
-        assert len(qkv_proj.weight_scale.shape) == 0
+
+        if isinstance(qkv_proj.scheme, CompressedTensorsW8A8Fp8):
+            assert len(qkv_proj.input_scale.shape) == 0
+            assert qkv_proj.weight.dtype is torch.float8_e4m3fn
+            assert qkv_proj.weight_scale.dtype is torch.float32
+            assert len(qkv_proj.weight_scale.shape) == 0
 
         output = llm.generate_greedy("Hello my name is", max_tokens=20)
         assert output

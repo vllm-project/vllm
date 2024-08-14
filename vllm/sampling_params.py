@@ -13,6 +13,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 _SAMPLING_EPS = 1e-5
+_MAX_TEMP = 1e-2
 
 
 class SamplingType(IntEnum):
@@ -145,6 +146,12 @@ class SamplingParams:
         self.presence_penalty = presence_penalty
         self.frequency_penalty = frequency_penalty
         self.repetition_penalty = repetition_penalty
+        if 0 < temperature < _MAX_TEMP:
+            logger.warning(
+                "temperature %s is less than %s, which may cause numerical "
+                "errors nan or inf in tensors. We have maxed it out to %s.",
+                temperature, _MAX_TEMP, _MAX_TEMP)
+            temperature = max(temperature, _MAX_TEMP)
         self.temperature = temperature
         self.top_p = top_p
         self.top_k = top_k
@@ -224,6 +231,9 @@ class SamplingParams:
         if self.top_k < -1 or self.top_k == 0:
             raise ValueError(f"top_k must be -1 (disable), or at least 1, "
                              f"got {self.top_k}.")
+        if not isinstance(self.top_k, int):
+            raise TypeError(
+                f"top_k must be an integer, got {type(self.top_k).__name__}")
         if not 0.0 <= self.min_p <= 1.0:
             raise ValueError("min_p must be in [0, 1], got "
                              f"{self.min_p}.")

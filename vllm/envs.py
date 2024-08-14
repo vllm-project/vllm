@@ -1,9 +1,11 @@
 import os
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
+import tempfile
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 if TYPE_CHECKING:
     VLLM_HOST_IP: str = ""
     VLLM_PORT: Optional[int] = None
+    VLLM_RPC_BASE_PATH: str = tempfile.gettempdir()
     VLLM_USE_MODELSCOPE: bool = False
     VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
     VLLM_INSTANCE_ID: Optional[str] = None
@@ -38,16 +40,23 @@ if TYPE_CHECKING:
     VLLM_FUSED_MOE_CHUNK_SIZE: int = 64 * 1024
     VLLM_USE_RAY_SPMD_WORKER: bool = False
     VLLM_USE_RAY_COMPILED_DAG: bool = False
+    VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL: bool = True
     VLLM_WORKER_MULTIPROC_METHOD: str = "fork"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
+    VLLM_AUDIO_FETCH_TIMEOUT: int = 5
     VLLM_TARGET_DEVICE: str = "cuda"
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
     VLLM_USE_PRECOMPILED: bool = False
     VLLM_NO_DEPRECATION_WARNING: bool = False
+    VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: bool = False
     CMAKE_BUILD_TYPE: Optional[str] = None
     VERBOSE: bool = False
+    VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
+    VLLM_TEST_FORCE_FP8_MARLIN: bool = False
+    VLLM_ALLOW_ENGINE_USE_RAY: bool = False
+    VLLM_PLUGINS: Optional[List[str]] = None
 
 
 def get_default_cache_root():
@@ -139,6 +148,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv('VLLM_PORT', '0'))
     if 'VLLM_PORT' in os.environ else None,
 
+    # path used for ipc when the frontend api server is running in
+    # multi-processing mode to communicate with the backend engine process.
+    'VLLM_RPC_BASE_PATH':
+    lambda: os.getenv('VLLM_RPC_BASE_PATH', tempfile.gettempdir()),
+
     # If true, will load models from ModelScope instead of Hugging Face Hub.
     # note that the value is true or false, not numbers
     "VLLM_USE_MODELSCOPE":
@@ -172,6 +186,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_USE_TRITON_FLASH_ATTN":
     lambda: (os.environ.get("VLLM_USE_TRITON_FLASH_ATTN", "True").lower() in
              ("true", "1")),
+
+    # Internal flag to enable Dynamo graph capture
+    "VLLM_TEST_DYNAMO_GRAPH_CAPTURE":
+    lambda: int(os.environ.get("VLLM_TEST_DYNAMO_GRAPH_CAPTURE", "0")),
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
@@ -273,13 +291,20 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # execution on all workers.
     # Run vLLM with VLLM_USE_RAY_SPMD_WORKER=1 to enable it.
     "VLLM_USE_RAY_SPMD_WORKER":
-    lambda: bool(os.getenv("VLLM_USE_RAY_SPMD_WORKER", 0)),
+    lambda: bool(int(os.getenv("VLLM_USE_RAY_SPMD_WORKER", "0"))),
 
     # If the env var is set, it uses the Ray's compiled DAG API
     # which optimizes the control plane overhead.
     # Run vLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
     "VLLM_USE_RAY_COMPILED_DAG":
-    lambda: bool(os.getenv("VLLM_USE_RAY_COMPILED_DAG", 0)),
+    lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG", "0"))),
+
+    # If the env var is set, it uses NCCL for communication in
+    # Ray's compiled DAG. This flag is ignored if
+    # VLLM_USE_RAY_COMPILED_DAG is not set.
+    "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL":
+    lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL", "1"))
+                 ),
 
     # Use dedicated multiprocess context for workers.
     # Both spawn and fork work
@@ -299,6 +324,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_IMAGE_FETCH_TIMEOUT":
     lambda: int(os.getenv("VLLM_IMAGE_FETCH_TIMEOUT", "5")),
 
+    # Timeout for fetching audio when serving multimodal models
+    # Default is 5 seconds
+    "VLLM_AUDIO_FETCH_TIMEOUT":
+    lambda: int(os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "5")),
+
     # Path to the XLA persistent cache directory.
     # Only used for XLA devices such as TPUs.
     "VLLM_XLA_CACHE_PATH":
@@ -313,6 +343,42 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # If set, vllm will skip the deprecation warnings.
     "VLLM_NO_DEPRECATION_WARNING":
     lambda: bool(int(os.getenv("VLLM_NO_DEPRECATION_WARNING", "0"))),
+
+    # If set, the OpenAI API server will stay alive even after the underlying
+    # AsyncLLMEngine errors and stops serving requests
+    "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH":
+    lambda: bool(os.getenv("VLLM_KEEP_ALIVE_ON_ENGINE_DEATH", 0)),
+
+    # If the env var VLLM_ALLOW_LONG_MAX_MODEL_LEN is set, it allows
+    # the user to specify a max sequence length greater than
+    # the max length derived from the model's config.json.
+    # To enable this, set VLLM_ALLOW_LONG_MAX_MODEL_LEN=1.
+    "VLLM_ALLOW_LONG_MAX_MODEL_LEN":
+    lambda:
+    (os.environ.get("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "0").strip().lower() in
+     ("1", "true")),
+
+    # If set, forces FP8 Marlin to be used for FP8 quantization regardless
+    # of the hardware support for FP8 compute.
+    "VLLM_TEST_FORCE_FP8_MARLIN":
+    lambda:
+    (os.environ.get("VLLM_TEST_FORCE_FP8_MARLIN", "0").strip().lower() in
+     ("1", "true")),
+
+    # If set, allow running the engine as a separate ray actor,
+    # which is a deprecated feature soon to be removed.
+    # See https://github.com/vllm-project/vllm/issues/7045
+    "VLLM_ALLOW_ENGINE_USE_RAY":
+    lambda:
+    (os.environ.get("VLLM_ALLOW_ENGINE_USE_RAY", "0").strip().lower() in
+     ("1", "true")),
+
+    # a list of plugin names to load, separated by commas.
+    # if this is not set, it means all plugins will be loaded
+    # if this is set to an empty string, no plugins will be loaded
+    "VLLM_PLUGINS":
+    lambda: None if "VLLM_PLUGINS" not in os.environ else os.environ[
+        "VLLM_PLUGINS"].split(","),
 }
 
 # end-env-vars-definition

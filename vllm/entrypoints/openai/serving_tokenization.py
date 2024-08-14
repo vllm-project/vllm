@@ -1,13 +1,13 @@
 from typing import List, Optional, Union
 
 from vllm.config import ModelConfig
-from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.engine.protocol import AsyncEngineClient
+from vllm.entrypoints.chat_utils import (apply_chat_template,
+                                         load_chat_template,
+                                         parse_chat_messages)
+from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.entrypoints.chat_utils import (ConversationMessage,
-                                         load_chat_template,
-                                         parse_chat_message_content)
-from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (DetokenizeRequest,
                                               DetokenizeResponse,
                                               ErrorResponse,
@@ -17,14 +17,17 @@ from vllm.entrypoints.openai.protocol import (DetokenizeRequest,
 # yapf: enable
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing)
+from vllm.logger import init_logger
 from vllm.utils import random_uuid
+
+logger = init_logger(__name__)
 
 
 class OpenAIServingTokenization(OpenAIServing):
 
     def __init__(
         self,
-        engine: AsyncLLMEngine,
+        async_engine_client: AsyncEngineClient,
         model_config: ModelConfig,
         served_model_names: List[str],
         *,
@@ -32,7 +35,7 @@ class OpenAIServingTokenization(OpenAIServing):
         request_logger: Optional[RequestLogger],
         chat_template: Optional[str],
     ):
-        super().__init__(engine=engine,
+        super().__init__(async_engine_client=async_engine_client,
                          model_config=model_config,
                          served_model_names=served_model_names,
                          lora_modules=lora_modules,
@@ -57,24 +60,24 @@ class OpenAIServingTokenization(OpenAIServing):
             prompt_adapter_request,
         ) = self._maybe_get_adapters(request)
 
-        tokenizer = await self.engine.get_tokenizer(lora_request)
+        tokenizer = await self.async_engine_client.get_tokenizer(lora_request)
 
         if isinstance(request, TokenizeChatRequest):
             model_config = self.model_config
 
-            conversation: List[ConversationMessage] = []
+            conversation, mm_futures = parse_chat_messages(
+                request.messages, model_config, tokenizer)
 
-            for message in request.messages:
-                result = parse_chat_message_content(message, model_config,
-                                                    tokenizer)
-                conversation.extend(result.messages)
+            if mm_futures:
+                logger.warning(
+                    "Multi-modal inputs are ignored during tokenization")
 
-            prompt = tokenizer.apply_chat_template(
-                add_generation_prompt=request.add_generation_prompt,
+            prompt = apply_chat_template(
+                tokenizer,
                 conversation=conversation,
-                tokenize=False,
-                chat_template=self.chat_template)
-            assert isinstance(prompt, str)
+                chat_template=self.chat_template,
+                add_generation_prompt=request.add_generation_prompt,
+            )
         else:
             prompt = request.prompt
 
@@ -113,7 +116,7 @@ class OpenAIServingTokenization(OpenAIServing):
             prompt_adapter_request,
         ) = self._maybe_get_adapters(request)
 
-        tokenizer = await self.engine.get_tokenizer(lora_request)
+        tokenizer = await self.async_engine_client.get_tokenizer(lora_request)
 
         self._log_inputs(request_id,
                          request.tokens,

@@ -1,6 +1,10 @@
 from typing import Any, Dict, List, Optional
 
 import torch
+from compressed_tensors.config import CompressionFormat
+from compressed_tensors.quantization import (QuantizationArgs,
+                                             QuantizationStrategy,
+                                             QuantizationType)
 from pydantic import BaseModel
 
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
@@ -13,11 +17,12 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW8A8Int8, CompressedTensorsW8A16Fp8,
     CompressedTensorsWNA16)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
-    CompressionFormat, QuantizationArgs, QuantizationStrategy,
-    QuantizationType, find_matched_target, is_activation_quantization_format,
+    find_matched_target, is_activation_quantization_format,
     should_ignore_layer)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.platforms import current_platform
+
+__all__ = ["CompressedTensorsLinearMethod"]
 
 
 class CompressedTensorsConfig(QuantizationConfig):
@@ -146,18 +151,15 @@ class CompressedTensorsConfig(QuantizationConfig):
         if weight_quant is None or input_quant is None:
             return False
 
-        # Confirm we have floating points.
-        if not (weight_quant.type == QuantizationType.FLOAT
-                and input_quant.type == QuantizationType.FLOAT):
-            return False
-
         # Confirm weight scheme is supported.
+        is_floating_point = (weight_quant.type == QuantizationType.FLOAT
+                             and input_quant.type == QuantizationType.FLOAT)
         is_symmetric_weight = weight_quant.symmetric
         is_static_weight = not weight_quant.dynamic
         is_per_tensor_or_channel_weight = (weight_quant.strategy in [
             QuantizationStrategy.TENSOR, QuantizationStrategy.CHANNEL
         ])
-        if not (is_symmetric_weight and is_static_weight
+        if not (is_floating_point and is_symmetric_weight and is_static_weight
                 and is_per_tensor_or_channel_weight):
             return False
 
@@ -169,11 +171,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         is_symmetric_activation = input_quant.symmetric
         is_per_tensor_activation = (
             input_quant.strategy == QuantizationStrategy.TENSOR)
-        if not (is_symmetric_activation and is_per_tensor_activation):
-            return False
-
-        # All conditions satisfied.
-        return True
+        return is_symmetric_activation and is_per_tensor_activation
 
     def _is_fp8_w8a16(self, weight_quant: BaseModel,
                       input_quant: BaseModel) -> bool:
@@ -230,6 +228,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                     group_size=weight_quant.group_size)
 
         # Detect If Activation Quantization.
+        # TODO @dsikka: clean-up conditions
         if is_activation_quantization_format(self.quant_format):
             if self._is_fp8_w8a8(weight_quant, input_quant):
                 is_fp8_w8a8_supported = self._check_scheme_supported(
@@ -237,7 +236,8 @@ class CompressedTensorsConfig(QuantizationConfig):
                 if is_fp8_w8a8_supported:
                     return CompressedTensorsW8A8Fp8(
                         strategy=weight_quant.strategy,
-                        is_static_input_scheme=(not input_quant.dynamic))
+                        is_static_input_scheme=(input_quant
+                                                and not input_quant.dynamic))
                 else:
                     return CompressedTensorsW8A16Fp8(
                         strategy=weight_quant.strategy,

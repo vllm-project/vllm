@@ -40,8 +40,8 @@ from vllm.multimodal.image import (cached_get_image_processor,
                                    cached_get_tokenizer)
 from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
 
-from .interfaces import SupportsVision
-from .utils import merge_vision_embeddings
+from .interfaces import SupportsMultiModal
+from .utils import merge_multimodal_embeddings
 
 logger = init_logger(__name__)
 
@@ -209,7 +209,7 @@ def input_mapper_for_fuyu(ctx: InputContext, data: object):
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_fuyu_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_fuyu)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_fuyu)
-class FuyuForCausalLM(nn.Module, SupportsVision):
+class FuyuForCausalLM(nn.Module, SupportsMultiModal):
 
     def __init__(self,
                  config: FuyuConfig,
@@ -234,7 +234,8 @@ class FuyuForCausalLM(nn.Module, SupportsVision):
                                                    cache_config=cache_config,
                                                    quant_config=quant_config)
 
-    def _parse_and_validate_image_input(self, **kwargs: object):
+    def _parse_and_validate_image_input(
+            self, **kwargs: object) -> Optional[FuyuImagePixelInputs]:
         image_patches = kwargs.pop("image_patches", None)
 
         if isinstance(image_patches, torch.Tensor):
@@ -249,6 +250,13 @@ class FuyuForCausalLM(nn.Module, SupportsVision):
                                         data=image_patches)
         return None
 
+    def _process_image_input(
+            self, image_input: FuyuImagePixelInputs) -> torch.Tensor:
+
+        assert self.vision_embed_tokens is not None
+        vision_embeddings, _ = self.vision_embed_tokens(image_input["data"])
+        return vision_embeddings
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -261,12 +269,11 @@ class FuyuForCausalLM(nn.Module, SupportsVision):
         image_input = self._parse_and_validate_image_input(**kwargs)
 
         if image_input is not None:
-            vision_embeddings, _ = self.vision_embed_tokens(
-                image_input["data"])
+            vision_embeddings = self._process_image_input(image_input)
             inputs_embeds = self.language_model.model.embed_tokens(input_ids)
-            inputs_embeds = merge_vision_embeddings(input_ids, inputs_embeds,
-                                                    vision_embeddings,
-                                                    self.image_token_id)
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, vision_embeddings,
+                self.image_token_id)
 
         else:
             inputs_embeds = None
@@ -280,8 +287,11 @@ class FuyuForCausalLM(nn.Module, SupportsVision):
         )
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
         logits = self.language_model.logits_processor(
             self.language_model.lm_head, hidden_states, sampling_metadata)
         return logits
