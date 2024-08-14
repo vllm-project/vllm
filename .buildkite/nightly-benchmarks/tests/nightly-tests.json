@@ -3,7 +3,7 @@
         "test_name": "llama8B_tp1",
         "qps_list": [4],
         "common_parameters": {
-            "model": "meta-llama/Meta-Llama-3-8B-Instruct",
+            "model": "meta-llama/Llama-2-7b",
             "tp": 1,
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
