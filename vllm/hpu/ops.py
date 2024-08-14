@@ -18,15 +18,18 @@ except ImportError:
     FusedSDPA = None
 
 import vllm.hpu.utils as hpu_utils
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+HPUFusedRMSNorm = None
+try:
+    from habana_frameworks.torch.hpex.normalization import FusedRMSNorm
+    HPUFusedRMSNorm = FusedRMSNorm
+except ImportError:
+    logger.warning("Could not import HPU FusedRMSNorm kernel. "
+                   "vLLM will use forward_native implementation of RMSNorm.")
 
 PA_SPLIT_VALUE = (os.environ.get('PA_SPLIT_VALUE', '1') == '1')
-
-
-def silu_and_mul(output, input):
-    d = input.shape[-1] // 2
-    silu = torch.nn.SiLU().to(input.device)
-    x, y = torch.split(input, d, dim=-1)
-    output.copy_(silu(x) * y)
 
 
 def fetch_from_cache(cache, blocks, permutations):
@@ -65,8 +68,7 @@ def paged_attention_v1(query,
         keys = [k.unflatten(1, (kv_heads, 1)) for k in keys]
         mask = mask.unsqueeze(2)
 
-    attn_weights = [torch.matmul(query, k) for k in keys]
-    attn_weights = torch.cat(attn_weights, dim=-1)
+    attn_weights = torch.cat([torch.matmul(query, k) for k in keys], dim=-1)
     if alibi_slopes is not None:
         attn_weights.add_(alibi_slopes[:, :, -attn_weights.size(2):,
                                        -attn_weights.size(3):])
@@ -87,12 +89,9 @@ def paged_attention_v1(query,
     return attn_weights.squeeze(-2)
 
 
-def silu_and_mul_wrapper(x: torch.Tensor) -> torch.Tensor:
+def silu_and_mul(x: torch.Tensor) -> torch.Tensor:
     d = x.shape[-1] // 2
-    output_shape = (x.shape[:-1] + (d, ))
-    out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-    silu_and_mul(out, x)
-    return out
+    return F.silu(x[..., :d]) * x[..., d:]
 
 
 def static_fused_moe(hidden_states, w1, w2, score, topk):
@@ -117,13 +116,10 @@ def static_fused_moe(hidden_states, w1, w2, score, topk):
     htorch.core.mark_step()
 
     for expert_idx in range(num_experts):
-        padded_weight = padded_weights[expert_idx]
-        current_state_static = hidden_states.reshape(-1, D)
-        w_output = silu_and_mul_wrapper(
-            torch.matmul(current_state_static, w1[expert_idx].transpose(0, 1)))
+        w_output = torch.matmul(hidden_states, w1[expert_idx].transpose(0, 1))
+        w_output = silu_and_mul(w_output)
         w_output = torch.matmul(w_output, w2[expert_idx].transpose(0, 1))
-        current_hidden_states_static = w_output * padded_weight
-        final_hidden_states += current_hidden_states_static
+        final_hidden_states += w_output * padded_weights[expert_idx]
         htorch.core.mark_step()
 
     return final_hidden_states.view(-1, D)
@@ -182,5 +178,6 @@ def prompt_attention(
         attn_weights = FusedSDPA.apply(query, key, value, None, 0.0, True,
                                        scale, softmax_mode, recompute_mode,
                                        valid_seq_lengths, 'right')
+
     attn_weights = attn_weights.transpose(1, 2)
     return attn_weights
