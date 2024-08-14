@@ -116,7 +116,6 @@ class GGUFLinearMethod(LinearMethodBase):
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         shard_size = getattr(layer.qweight, "shard_size", None)
         shard_id = getattr(layer.qweight, "shard_id", None)
-        print(shard_id, shard_size, layer.qweight.shape)
 
         if shard_id and shard_size:
             result = []
@@ -127,11 +126,9 @@ class GGUFLinearMethod(LinearMethodBase):
                 shard_weight = layer.qweight[
                     offset:offset +
                     shard_size[id][0], :shard_size[id][1]].contiguous()
-            
                 qweight_type = layer.qweight_type.shard_weight_type[id]
                 result.append(_fuse_mul_mat(x, shard_weight, qweight_type))
                 offset += shard_size[id][0]
-                print(_fuse_mul_mat(x, shard_weight, qweight_type).shape)
             out = torch.cat(result, axis=1)
         else:
             qweight = layer.qweight

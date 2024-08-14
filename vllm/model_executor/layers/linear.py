@@ -503,11 +503,16 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     loaded_shard_id
 
             if is_gguf_weight:
-                shard_size = loaded_weight.shape[output_dim] // tp_size
-                shard_offset = loaded_weight.shape[output_dim] * \
-                    loaded_shard_id // tp_size
+                tp_size = get_tensor_model_parallel_world_size()
+                output_dim = getattr(param, "output_dim", None)
+                shard_shape = list(loaded_weight.shape)
+                shard_shape[output_dim] = shard_shape[output_dim] // tp_size
                 param.shard_id.append(loaded_shard_id)
-                param.shard_size[loaded_shard_id] = loaded_weight.shape
+                param.shard_size[loaded_shard_id] = shard_shape
+
+                input_dim = getattr(param, "input_dim", None)
+                input_size = loaded_weight.shape[input_dim]
+                param_data = param_data.narrow(input_dim, 0, input_size)
 
             param_data = param_data.narrow(output_dim, shard_offset,
                                            shard_size)
