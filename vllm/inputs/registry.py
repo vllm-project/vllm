@@ -41,8 +41,7 @@ class InputContext:
         """
 
         multimodal_config = self.model_config.multimodal_config
-        if multimodal_config is None:
-            raise ValueError("No multimodal config found")
+        assert multimodal_config is not None
 
         return multimodal_config
 

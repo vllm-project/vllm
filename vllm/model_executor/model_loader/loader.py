@@ -132,10 +132,7 @@ def _get_model_initialization_kwargs(
             "please open an issue on github.")
 
     if supports_multimodal(model_class):
-        if multimodal_config is None:
-
-            # Default multimodal config for multimodal models
-            multimodal_config = MultiModalConfig()
+        assert multimodal_config is not None
 
         extra_kwargs["multimodal_config"] = multimodal_config
 

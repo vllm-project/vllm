@@ -181,7 +181,7 @@ class MultiModalRegistry:
     def init_mm_limits_per_prompt(
         self,
         model_config: ModelConfig,
-        multimodal_config: Optional[MultiModalConfig],
+        multimodal_config: MultiModalConfig,
     ) -> None:
         """
         Initialize the maximum number of multi-modal input instances for each
@@ -192,7 +192,7 @@ class MultiModalRegistry:
                 "`mm_limits` has already been set for model=%s, and will "
                 "be overwritten by the new values.", model_config.model)
 
-        if multimodal_config is None:
+        if not multimodal_config.limit_per_prompt:
             limits_per_plugin = self._disabled_limits_per_plugin
         else:
             config_limits_per_plugin = multimodal_config.limit_per_prompt
