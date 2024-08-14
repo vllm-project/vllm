@@ -76,8 +76,8 @@ class Gemm:
                                        self.outdtype)
         elif libtype == 'rocblas':
             c = rocsolidxgemm.rocb_mm(self.inp, self.weights.t(), solidx)
-        if torch.allclose(c.to(torch.float32),
-                          ref.to(torch.float32),
+        if torch.allclose(c.to(self.outdtype),
+                          ref.to(self.outdtype),
                           atol=self.atol,
                           rtol=self.rtol):
             return True
