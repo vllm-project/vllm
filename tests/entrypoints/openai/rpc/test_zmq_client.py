@@ -61,11 +61,25 @@ async def test_client_data_methods_use_timeouts(monkeypatch, dummy_server,
         m.setattr(client, "_data_timeout", 10)
 
         # And ensure the task completes anyway
+        # (client.setup() invokes server.get_model_config())
         client_task = asyncio.get_running_loop().create_task(client.setup())
-        done, pending = await asyncio.wait([client_task], timeout=0.05)
-        assert len(done) > 0
-        with pytest.raises(TimeoutError):
-            list(done)[0].result()
+        with pytest.raises(TimeoutError, match="server didn't reply within"):
+            await asyncio.wait_for(client_task, timeout=0.05)
+
+
+@pytest.mark.asyncio
+async def test_client_aborts_use_timeouts(monkeypatch, dummy_server,
+                                          client: AsyncEngineRPCClient):
+    with monkeypatch.context() as m:
+        # Hang all abort requests
+        m.setattr(dummy_server, "abort", lambda x: None)
+        m.setattr(client, "_data_timeout", 10)
+
+        # Ensure the client doesn't hang
+        client_task = asyncio.get_running_loop().create_task(
+            client.abort("test request id"))
+        with pytest.raises(TimeoutError, match="server didn't reply within"):
+            await asyncio.wait_for(client_task, timeout=0.05)
 
 
 # TODO: needs changes from https://github.com/vllm-project/vllm/pull/7394
@@ -85,13 +99,9 @@ async def test_client_data_methods_reraise_exceptions(
         m.setattr(client, "_data_timeout", 10)
 
         client_task = asyncio.get_running_loop().create_task(client.setup())
-        done, pending = await asyncio.wait([client_task], timeout=0.05)
-        assert len(done) > 0
-
-        # And ensure the task completes anyway
+        # And ensure the task completes, raising the exception
         with pytest.raises(RuntimeError, match=str(exception)):
-            for t in done:
-                t.result()
+            await asyncio.wait_for(client_task, timeout=0.05)
 
 
 @pytest.mark.asyncio
@@ -105,10 +115,8 @@ async def test_client_health_check_times_out(monkeypatch, dummy_server,
         # And ensure the health check times out
         client_task = asyncio.get_running_loop().create_task(
             client.check_health())
-        done, pending = await asyncio.wait([client_task], timeout=0.05)
-        assert len(done) > 0
-        with pytest.raises(TimeoutError):
-            list(done)[0].result()
+        with pytest.raises(TimeoutError, match="server didn't reply within"):
+            await asyncio.wait_for(client_task, timeout=0.05)
 
 
 @pytest.mark.asyncio
@@ -127,3 +135,26 @@ async def test_client_errors_after_closing(monkeypatch, dummy_server,
     # But no-ops like aborting will pass
     await client.abort("test-request-id")
     await client.do_log_stats()
+
+
+@pytest.mark.asyncio
+async def test_generation_timeout(monkeypatch, dummy_server,
+                                  client: AsyncEngineRPCClient):
+    with monkeypatch.context() as m:
+        # Make the server _not_ reply with generation results
+        m.setattr(dummy_server, "generate", lambda x: None)
+        m.setattr(client, "_generate_timeout", 10)
+        # make sure client aborts are a no-op to avoid failure
+        # after generation timeout
+        m.setattr(client, "abort", unittest.mock.AsyncMock())
+
+        generator = client.generate(None, None, None)
+
+        async def generate():
+            async for _ in generator:
+                pass
+
+        # Ensure we time out
+        client_task = asyncio.get_running_loop().create_task(generate())
+        with pytest.raises(TimeoutError, match="server didn't reply within"):
+            await asyncio.wait_for(client_task, timeout=0.05)

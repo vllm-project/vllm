@@ -11,7 +11,8 @@ from vllm.entrypoints.openai.rpc import (RPC_REQUEST_TYPE,
                                          VLLM_RPC_HEALTHY_STR,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCGenerateRequest, RPCUtilityRequest)
-from vllm.envs import VLLM_RPC_GET_DATA_TIMEOUT_MS
+from vllm.envs import (VLLM_RPC_GENERATE_TIMEOUT_MS,
+                       VLLM_RPC_GET_DATA_TIMEOUT_MS)
 from vllm.inputs import PromptInputs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
@@ -33,6 +34,7 @@ class AsyncEngineRPCClient:
         self.context = zmq.asyncio.Context()
         self.rpc_path = rpc_path
         self._data_timeout = VLLM_RPC_GET_DATA_TIMEOUT_MS
+        self._generate_timeout = VLLM_RPC_GENERATE_TIMEOUT_MS
 
     async def setup(self):
         """Setup the client before it starts sending server requests."""
@@ -131,7 +133,8 @@ class AsyncEngineRPCClient:
             await socket.send(cloudpickle.dumps(request))
 
             # Await acknowledgement from RPCServer.
-            if timeout is not None and await socket.poll(timeout=timeout) == 0:
+            timeout = timeout or self._data_timeout
+            if await socket.poll(timeout=timeout) == 0:
                 raise TimeoutError(f"server didn't reply within {timeout} ms")
 
             response = cloudpickle.loads(await socket.recv())
@@ -266,6 +269,9 @@ class AsyncEngineRPCClient:
                 # Stream back the results from the RPC Server.
                 while not finished:
                     # TODO: timeouts
+                    if await socket.poll(timeout=self._generate_timeout) == 0:
+                        raise TimeoutError("server didn't reply within "
+                                           f"{self._generate_timeout} ms")
                     message = await socket.recv()
                     request_output = cloudpickle.loads(message)
 
