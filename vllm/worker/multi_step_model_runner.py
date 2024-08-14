@@ -78,6 +78,7 @@ class ModelOutput:
             input_metadata: "MutableModelInputForGPUWithMultiStepMetadata",
             copy_stream: torch.cuda.Stream,
             pinned_sampled_token_buffer: torch.Tensor) -> None:
+        assert self.sampled_token_ids is not None
         self.sampler_output_ready_event.synchronize()
         with torch.cuda.stream(copy_stream):
             _pythonize_sampler_output(input_metadata, self.sampler_output,
@@ -90,6 +91,7 @@ class ModelOutput:
             copy_stream: torch.cuda.Stream,
             pinned_sampled_token_buffer: torch.Tensor) -> bool:
         if self.sampler_output_ready_event.query():
+            assert self.sampled_token_ids is not None
             with torch.cuda.stream(copy_stream):
                 _pythonize_sampler_output(input_metadata, self.sampler_output,
                                           pinned_sampled_token_buffer,
@@ -456,12 +458,11 @@ class MultiStepModelRunner(
 def _pythonize_sampler_output(
         model_input: MutableModelInputForGPUWithMultiStepMetadata,
         output: SamplerOutput, pinned_sampled_token_buffer: torch.Tensor,
-        sampled_token_ids: Optional[torch.Tensor]) -> SamplerOutput:
+        sampled_token_ids: torch.Tensor) -> SamplerOutput:
     """ This function is only called when the output tensors are ready. 
     See ModelOutput
     """
 
-    assert sampled_token_ids is not None
     assert model_input.frozen_model_input is not None
 
     frozen_model_input = model_input.frozen_model_input

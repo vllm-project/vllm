@@ -367,27 +367,21 @@ class _AsyncLLMEngine(LLMEngine):
         if not self.scheduler_config.is_multi_step:
             return False
 
-        if seq_group_metadata_list is None:
-            return False
-
         if not seq_group_metadata_list:
             return False
 
         # TODO(will) this is a sanity check for nowto make sure that all the
         # seqs are on the same steps. Eventually we will want to do some sort of
         # dynamic scheduling when doing multi-step decoding.
-        # ref_remaining_steps = seq_group_metadata_list[0].state.remaining_steps
-        # if any([
-        #         seq_group.state.remaining_steps != ref_remaining_steps
-        #         for seq_group in seq_group_metadata_list[1:]
-        # ]):
-        #     raise AssertionError(("All running sequence groups should "
-        #                           "have the same remaining steps."))
+        ref_remaining_steps = seq_group_metadata_list[0].state.remaining_steps
+        if any([
+                seq_group.state.remaining_steps != ref_remaining_steps
+                for seq_group in seq_group_metadata_list[1:]
+        ]):
+            raise AssertionError(("All running sequence groups should "
+                                  "have the same remaining steps."))
 
-        if any(seq_group.state.remaining_steps > 0
-               for seq_group in seq_group_metadata_list):
-            return True
-        return False
+        return ref_remaining_steps > 0
 
     def _cache_scheduler_outputs_for_multi_step(
             self, virtual_engine: int,

@@ -1155,9 +1155,7 @@ class ExecuteModelRequest:
         # steps
         assert len(self.seq_group_metadata_list) > 0
         first_seq_group = self.seq_group_metadata_list[0]
-        num_steps = first_seq_group.state.num_steps
-        current_step = first_seq_group.state.current_step
-        return num_steps - current_step == 1
+        return first_seq_group.state.remaining_steps == 1
 
     @property
     def current_step(self) -> int:
