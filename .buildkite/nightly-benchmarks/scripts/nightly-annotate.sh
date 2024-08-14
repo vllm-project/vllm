@@ -8,6 +8,7 @@ main() {
 
     (which wget && which curl) || (apt-get update && apt-get install -y wget curl)
     (which jq) || (apt-get update && apt-get -y install jq)
+    (which zip) || (apt-get install -y zip)
 
     if [ ! -f /workspace/buildkite-agent ]; then
         echo "buildkite-agent binary not found. Skip plotting the results."
@@ -23,6 +24,9 @@ main() {
     /workspace/buildkite-agent artifact download 'results/*nightly_results.json' results/
     ls
     ls results/
+
+    zip -r results.zip results/
+    /workspace/buildkite-agent artifact upload "results.zip"
 
     # generate figures
     python3 -m pip install tabulate pandas matplotlib
