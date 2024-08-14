@@ -1,4 +1,5 @@
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
+from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
+                    TypedDict, Union)
 
 import torch
 from torch import nn
@@ -9,8 +10,7 @@ from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.gemma import GemmaModel
@@ -57,17 +57,20 @@ def get_max_paligemma_image_tokens(ctx: InputContext):
     return get_max_siglip_image_tokens(vision_config)
 
 
-def dummy_data_for_paligemma(ctx: InputContext, seq_len: int):
+def dummy_data_for_paligemma(ctx: InputContext, seq_len: int,
+                             mm_counts: Mapping[str, int]):
     hf_config = ctx.get_hf_config(PaliGemmaConfig)
     vision_config = hf_config.vision_config
+    num_images = mm_counts["image"]
 
     seq_data = dummy_seq_data_for_siglip(
         vision_config,
         seq_len,
+        num_images,
         image_token_id=hf_config.image_token_index,
     )
 
-    mm_data = dummy_image_for_siglip(vision_config)
+    mm_data = dummy_image_for_siglip(vision_config, num_images)
     return seq_data, mm_data
 
 

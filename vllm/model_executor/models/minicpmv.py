@@ -24,8 +24,8 @@
 import math
 import re
 from functools import partial
-from typing import (Any, Callable, Iterable, List, Optional, Tuple, TypedDict,
-                    Union)
+from typing import (Any, Callable, Iterable, List, Mapping, Optional, Tuple,
+                    TypedDict, Union)
 
 import numpy as np
 import torch
@@ -42,8 +42,7 @@ from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
@@ -408,22 +407,24 @@ def get_max_minicpmv_image_tokens(ctx: InputContext):
     return getattr(hf_config, "query_num", 64)
 
 
-def dummy_seq_data_for_minicpmv(seq_len: int):
+def dummy_seq_data_for_minicpmv(seq_len: int, num_images: int):
     token_ids = [0] * seq_len
     return SequenceData(token_ids)
 
 
-def dummy_image_for_minicpmv(hf_config: PretrainedConfig):
+def dummy_image_for_minicpmv(hf_config: PretrainedConfig, num_images: int):
     width = height = hf_config.image_size
     image = Image.new("RGB", (width, height), color=0)
-    return {"image": image}
+    return {"image": image if num_images == 1 else [image] * num_images}
 
 
-def dummy_data_for_minicpmv(ctx: InputContext, seq_len: int):
+def dummy_data_for_minicpmv(ctx: InputContext, seq_len: int,
+                            mm_counts: Mapping[str, int]):
     hf_config = ctx.get_hf_config()
+    num_images = mm_counts["image"]
 
-    seq_data = dummy_seq_data_for_minicpmv(seq_len)
-    mm_data = dummy_image_for_minicpmv(hf_config)
+    seq_data = dummy_seq_data_for_minicpmv(seq_len, num_images)
+    mm_data = dummy_image_for_minicpmv(hf_config, num_images)
 
     return seq_data, mm_data
 

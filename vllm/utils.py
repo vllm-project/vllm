@@ -13,7 +13,6 @@ import threading
 import uuid
 import warnings
 from asyncio import FIRST_COMPLETED, ensure_future
-from collections import defaultdict
 from functools import lru_cache, partial, wraps
 from platform import uname
 from typing import (Any, AsyncGenerator, Awaitable, Callable, Dict, Generic,
@@ -760,16 +759,6 @@ class CudaMemoryProfiler:
         gc.collect()
 
 
-def str_to_int_tuple(s: str) -> Tuple[int, ...]:
-    """Convert a string to a tuple of integers."""
-    try:
-        return tuple(map(int, s.split(",")))
-    except ValueError as e:
-        raise ValueError(
-            "String must be a series of integers separated by commas "
-            f"(e.g., 1, 2, 3). Given input: {s}") from e
-
-
 def make_ndarray_with_pad(
     x: List[List[T]],
     pad: T,
@@ -861,23 +850,6 @@ def is_list_of(
         return all(isinstance(v, typ) for v in value)
 
     assert_never(check)
-
-
-def merge_dicts(dict1: Dict[K, List[T]],
-                dict2: Dict[K, List[T]]) -> Dict[K, List[T]]:
-    """Merge 2 dicts that have key -> List of items.
-
-    When a key conflicts, the values in dict1 is prioritized.
-    """
-    merged_dict: Dict[K, List[T]] = defaultdict(list)
-
-    for key, value in dict1.items():
-        merged_dict[key].extend(value)
-
-    for key, value in dict2.items():
-        merged_dict[key].extend(value)
-
-    return dict(merged_dict)
 
 
 JSONTree = Union[Dict[str, "JSONTree[T]"], List["JSONTree[T]"],
