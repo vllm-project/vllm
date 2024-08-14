@@ -458,8 +458,6 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                     if is_pp_missing_parameter(name, self):
                         continue
                     param = params_dict[name]
-                    if "scale" in name:
-                        print("replace name", name, param.shape)
                     weight_loader = param.weight_loader
                     weight_loader(param,
                                   loaded_weight,
