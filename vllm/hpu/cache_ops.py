@@ -43,6 +43,37 @@ def reshape_and_cache(key,
             value[start_idx:end_idx])
 
 
+def prepare_to_cache(cache, slot_mapping):
+    num_blocks = cache.size(0)
+    block_size = cache.size(1)
+    slot_mapping = slot_mapping.flatten()
+    indices = torch.div(slot_mapping, block_size, rounding_mode="floor")
+    offsets = torch.fmod(slot_mapping, block_size)
+    num_slots_requested = slot_mapping.size(0)
+    num_slots_available = num_blocks * block_size
+    # NOTE(kzawora): HPU PT bridge crashes with
+    # RuntimeError: Invalid inputs for scatter_nd_onnx
+    # on index_put when num_slots_requested > num_slots_available.
+    # This case might occur when we have little kv cache blocks and
+    # lots of padding, or are doing warmup.
+    # This loop is a workaround for this issue. Please remove it
+    # once key_cache.index_put_(indices, offsets), key) works.
+    num_kv_cache_passes = torch.div(num_slots_requested,
+                                    num_slots_available).ceil().int().item()
+
+    return num_kv_cache_passes, num_slots_available, indices, offsets
+
+
+def insert_or_update_cache(input, cache, num_kv_cache_passes,
+                           num_slots_available, block_indices, block_offsets):
+    for i in range(num_kv_cache_passes):
+        start_idx = i * num_slots_available
+        end_idx = (i + 1) * num_slots_available
+        cache.index_put_((block_indices[start_idx:end_idx],
+                          block_offsets[start_idx:end_idx]),
+                         input[start_idx:end_idx])
+
+
 def swap_blocks(src, dst, block_mapping):
     index_src = torch.zeros((1, ), dtype=torch.int32, device=src.device)
     index_dst = torch.zeros((1, ), dtype=torch.int32, device=dst.device)

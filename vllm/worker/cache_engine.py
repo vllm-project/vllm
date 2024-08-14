@@ -91,9 +91,11 @@ class CacheEngine:
                 # null block in CpuGpuBlockAllocator requires at least that
                 # block to be zeroed-out.
                 # We zero-out everything for simplicity.
+                dtype = torch.uint8 if self.dtype == torch.float8_e4m3fn else \
+                        self.dtype
                 kv_cache.append(
                     torch.zeros(kv_cache_shape,
-                                dtype=self.dtype,
+                                dtype=dtype,
                                 pin_memory=pin_memory,
                                 device=device))
         return kv_cache

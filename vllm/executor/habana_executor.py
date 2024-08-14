@@ -90,6 +90,9 @@ class HabanaExecutor(ExecutorBase):
         msg = f"init_cache_engine took {cache_init_m.get_summary_string()}"
         logger.info(msg)
 
+    def finish_measurements(self):
+        self.driver_worker.finish_measurements()
+
     def execute_model(
             self,
             execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
@@ -179,6 +182,12 @@ class HabanaExecutor(ExecutorBase):
         # GPUExecutor will always be healthy as long as
         # it's running.
         return
+
+    def shutdown(self) -> None:
+        self.driver_worker.shutdown_inc()
+
+    def __del__(self):
+        self.shutdown()
 
 
 class HabanaExecutorAsync(HabanaExecutor, ExecutorAsyncBase):

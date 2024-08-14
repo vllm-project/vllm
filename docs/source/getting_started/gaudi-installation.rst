@@ -26,7 +26,8 @@ To verify that the Intel Gaudi software was correctly installed, run:
 
    $ hl-smi # verify that hl-smi is in your PATH and each Gaudi accelerator is visible
    $ apt list --installed | grep habana # verify that habanalabs-firmware-tools, habanalabs-graph, habanalabs-rdma-core and habanalabs-thunk are installed
-   $ pip list | habana # verify that habana-torch-plugin, habana-torch-dataloader, habana-pyhlml, habana-media-loader and habana_quantization_toolkit are installed
+   $ pip list | grep habana # verify that habana-torch-plugin, habana-torch-dataloader, habana-pyhlml and habana-media-loader are installed
+   $ pip list | grep neural # verify that neural_compressor is installed
 
 Refer to `Intel Gaudi Software Stack
 Verification <https://docs.habana.ai/en/latest/Installation_Guide/SW_Verification.html#platform-upgrade>`__

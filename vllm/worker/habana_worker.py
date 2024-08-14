@@ -91,6 +91,16 @@ class HabanaWorker(LocalOrDistributedWorkerBase):
         # Initialize gpu_cache as embedding models don't initialize kv_caches
         self.hpu_cache: Optional[List[List[torch.tensor]]] = None
 
+    def _set_env_vars(self):
+        local_rank = self.local_rank
+        if self.parallel_config.world_size == 1:
+            local_rank = -1
+        import os
+        os.environ["LOCAL_RANK"] = str(local_rank)
+        os.environ["ID"] = str(local_rank)
+        os.environ["WORLD_SIZE"] = str(self.parallel_config.world_size)
+        os.environ["RANK"] = str(self.rank)
+
     def init_device(self) -> None:
         if self.device_config.device.type == "hpu":
             self.device = torch.device("hpu")
@@ -99,6 +109,8 @@ class HabanaWorker(LocalOrDistributedWorkerBase):
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
+        if self.model_config.quantization == 'inc':
+            self._set_env_vars()
         init_worker_distributed_environment(self.parallel_config, self.rank,
                                             self.distributed_init_method,
                                             self.local_rank)
@@ -211,6 +223,9 @@ class HabanaWorker(LocalOrDistributedWorkerBase):
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
 
+    def finish_measurements(self):
+        self.model_runner.finish_measurements()
+
     @property
     def do_metadata_broadcast(self) -> bool:
         return self.parallel_config.tensor_parallel_size > 1
@@ -287,6 +302,12 @@ class HabanaWorker(LocalOrDistributedWorkerBase):
 
     def list_prompt_adapters(self) -> Set[int]:
         raise NotImplementedError("LoRA is not implemented for HPU backend.")
+
+    def shutdown_inc(self):
+        self.model_runner.shutdown_inc()
+
+    def __del__(self):
+        self.shutdown_inc()
 
     @property
     def max_model_len(self) -> int:
