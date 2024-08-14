@@ -163,7 +163,7 @@ FROM nvidia/cuda:${CUDA_VERSION}-base-ubuntu20.04 AS vllm-base
 ARG CUDA_VERSION=12.4.1
 ARG PYTHON_VERSION=3.10
 # Python version without the dot, e.g. 3.10 -> 310
-ENV PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | tr -d .)
+ARG PYTHON_VERSION_STR=${PYTHON_VERSION//./}
 WORKDIR /vllm-workspace
 
 ENV DEBIAN_FRONTEND=noninteractive
