@@ -17,7 +17,7 @@ peft
 requests
 ray
 sentence-transformers # required for embedding
-compressed-tensors==0.5.0 # required for compressed-tensors
+compressed-tensors==0.4.0 # required for compressed-tensors
 timm # required for internvl test
 
 # TODO: Add this after fully implementing llava(mantis)
