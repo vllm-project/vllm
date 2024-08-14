@@ -13,7 +13,8 @@ model_dtype=$(echo "$server_params" | jq -r '.model_dtype')
 model_tp_size=$(echo "$common_params" | jq -r '.tp')
 max_batch_size=$(echo "$server_params" | jq -r '.max_batch_size')
 max_input_len=$(echo "$server_params" | jq -r '.max_input_len')
-max_output_len=$(echo "$server_params" | jq -r '.max_output_len')
+max_seq_len=$(echo "$server_params" | jq -r '.max_seq_len')
+max_num_tokens=$(echo "$server_params" | jq -r '.max_num_tokens')
 trt_llm_version=$(echo "$server_params" | jq -r '.trt_llm_version')
 
 cd ~
@@ -25,21 +26,6 @@ trt_model_path=${models_dir}/${model_name}-trt-ckpt
 trt_engine_path=${models_dir}/${model_name}-trt-engine
 
 
-# get protobuf files from tensorrt-demo
-cd ~
-rm -rf tensorrt-demo
-git clone https://github.com/neuralmagic/tensorrt-demo.git
-cd tensorrt-demo
-tensorrt_demo_dir=$(pwd)
-
-# adjust tokenizer and max_batch_size in protobuf files
-sed -i.bak "/key: \"tokenizer_dir\"/,/string_value:/s|string_value: \".*\"|string_value: \"$model_path\"|" ./triton_model_repo/postprocessing/config.pbtxt
-sed -i.bak "/key: \"tokenizer_dir\"/,/string_value:/s|string_value: \".*\"|string_value: \"$model_path\"|" ./triton_model_repo/preprocessing/config.pbtxt
-sed -i.bak "s|\(max_batch_size:\s*\)[0-9]*|\1$max_batch_size|g" ./triton_model_repo/ensemble/config.pbtxt
-sed -i.bak "s|\(max_batch_size:\s*\)[0-9]*|\1$max_batch_size|g" ./triton_model_repo/preprocessing/config.pbtxt
-sed -i.bak "s|\(max_batch_size:\s*\)[0-9]*|\1$max_batch_size|g" ./triton_model_repo/postprocessing/config.pbtxt
-sed -i.bak "s|\(max_batch_size:\s*\)[0-9]*|\1$max_batch_size|g" ./triton_model_repo/tensorrt_llm_bls/config.pbtxt
-
 
 
 cd /
@@ -50,7 +36,15 @@ cd tensorrtllm_backend
 git checkout $trt_llm_version
 tensorrtllm_backend_dir=$(pwd)
 git submodule update --init --recursive
-cp -r ${tensorrt_demo_dir}/triton_model_repo ${tensorrtllm_backend_dir}/
+
+
+mkdir triton_model_repo
+cp -r all_models/inflight_batcher_llm/* triton_model_repo/
+python3 ../tools/fill_template.py -i tensorrt_llm/config.pbtxt triton_backend:tensorrtllm,engine_dir:OUTPUT,decoupled_mode:true,batching_strategy:inflight_fused_batching,batch_scheduler_policy:guaranteed_no_evict,exclude_input_in_output:true,triton_max_batch_size:2048,max_queue_delay_microseconds:0,max_beam_width:1,max_queue_size:2048,enable_kv_cache_reuse:false
+python3 ../tools/fill_template.py -i preprocessing/config.pbtxt triton_max_batch_size:2048,tokenizer_dir:$model_path,preprocessing_instance_count:5
+python3 ../tools/fill_template.py -i postprocessing/config.pbtxt triton_max_batch_size:2048,tokenizer_dir:$model_path,postprocessing_instance_count:5,skip_special_tokens:false
+python3 ../tools/fill_template.py -i ensemble/config.pbtxt triton_max_batch_size:$max_batch_size
+python3 ../tools/fill_template.py -i tensorrt_llm_bls/config.pbtxt triton_max_batch_size:$max_batch_size,decoupled_mode:true,accumulate_tokens:"False",bls_instance_count:1
 
 
 cd /tensorrtllm_backend
@@ -82,20 +76,21 @@ else
 fi
 
 
-
 trtllm-build \
 --checkpoint_dir=${trt_model_path} \
---gpt_attention_plugin=${model_dtype} \
---gemm_plugin=${model_dtype} \
---remove_input_padding=enable \
---paged_kv_cache=enable \
---tp_size=${model_tp_size} \
---max_batch_size=${max_batch_size} \
---max_input_len=${max_input_len} \
---max_output_len=${max_output_len} \
---max_num_tokens=${max_output_len} \
---opt_num_tokens=${max_output_len} \
---output_dir=${trt_engine_path} 
+--use_fused_mlp \
+--reduce_fusion disable \
+--workers 8 \
+--gpt_attention_plugin ${model_dtype} \
+--gemm_plugin ${model_dtype} \
+--tp_size ${model_tp_size} \
+--max_batch_size ${max_batch_size} \
+--max_input_len ${max_input_len} \
+--max_seq_len ${max_seq_len} \
+--max_num_tokens ${max_num_tokens} \
+--output_dir ${trt_engine_path} 
+
+
 
 cd /tensorrtllm_backend/triton_model_repo
 rm -rf ./tensorrt_llm/1/*
