@@ -71,7 +71,7 @@ wait_for_server() {
 kill_gpu_processes() {
   # kill all processes on GPU.
 
-  pkill -f python3
+  ps aux | grep python | grep openai | awk '{print $2}' | xargs -r kill -9
   ps -e | grep pt_main_thread | awk '{print $1}' | xargs kill -9
 
   sleep 5
