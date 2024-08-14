@@ -61,12 +61,21 @@ class CacheEngine:
             cache_config.cache_dtype,
             self.block_size,
         )
-
+        from debugging_utils import *
         # Initialize the cache.
+        print_memory_usage("before allocate gpu cache")
         self.gpu_cache = self._allocate_kv_cache(
             self.num_gpu_blocks, self.device_config.device_type)
-        self.cpu_cache = self._allocate_kv_cache(self.num_cpu_blocks, "cpu")
+        print_shape('gpu_cache',self.gpu_cache[0])
 
+        print_memory_usage("after allocate gpu cache")
+
+        print_memory_usage("before allocate cpu cache")
+        self.cpu_cache = self._allocate_kv_cache(self.num_cpu_blocks, "cpu")
+        print_memory_usage("after allocate cpu cache")
+
+
+    # print_memory_usage func
     def _allocate_kv_cache(
         self,
         num_blocks: int,

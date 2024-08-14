@@ -189,9 +189,11 @@ class Worker(LocalOrDistributedWorkerBase):
             "not properly cleaned up before initializing the vLLM instance.")
 
         cache_block_size = self.get_cache_block_size_bytes()
-        num_gpu_blocks = int(
-            (total_gpu_memory * self.cache_config.gpu_memory_utilization -
-             peak_memory) // cache_block_size)
+        # num_gpu_blocks = int(
+        #     (total_gpu_memory * self.cache_config.gpu_memory_utilization -
+        #      peak_memory) // cache_block_size)
+
+        num_gpu_blocks=888
         num_cpu_blocks = int(self.cache_config.swap_space_bytes //
                              cache_block_size)
         num_gpu_blocks = max(num_gpu_blocks, 0)
