@@ -22,7 +22,7 @@ ENV LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:/usr/local/li
 
 RUN echo 'ulimit -c 0' >> ~/.bashrc
 
-RUN pip install intel_extension_for_pytorch==2.5.0
+RUN pip install intel_extension_for_pytorch==2.5.0 # FIXME: should this be a dependency in requirements-cpu.txt?
 
 WORKDIR /workspace
 
@@ -54,9 +54,7 @@ ENV VLLM_CPU_DISABLE_AVX512=${VLLM_CPU_DISABLE_AVX512}
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=bind,source=.git,target=.git \
-    VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel && \
-    pip install dist/*.whl && \
-    rm -rf dist
+    VLLM_TARGET_DEVICE=cpu pip install -v --no-build-isolation .
 
 WORKDIR /workspace/
 
