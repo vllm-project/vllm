@@ -76,6 +76,8 @@ docker run \
         --shm-size=16gb \
         --rm \
         -e HIP_VISIBLE_DEVICES=0 \
+        -e BUILDKITE_PARALLEL_JOB \
+        -e BUILDKITE_PARALLEL_JOB_COUNT \
         -e HF_TOKEN \
         -v ${HF_CACHE}:${HF_MOUNT} \
         -e HF_HOME=${HF_MOUNT} \
