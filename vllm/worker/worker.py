@@ -107,7 +107,6 @@ class Worker(LocalOrDistributedWorkerBase):
             observability_config=observability_config,
             **speculative_args,
         )
-
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine: List[CacheEngine]
