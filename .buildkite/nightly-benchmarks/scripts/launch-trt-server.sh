@@ -1,6 +1,9 @@
 #!/bin/bash
 
 
+set -xe
+
+
 server_params=$1
 common_params=$2
 
@@ -16,6 +19,8 @@ max_input_len=$(echo "$server_params" | jq -r '.max_input_len')
 max_seq_len=$(echo "$server_params" | jq -r '.max_seq_len')
 max_num_tokens=$(echo "$server_params" | jq -r '.max_num_tokens')
 trt_llm_version=$(echo "$server_params" | jq -r '.trt_llm_version')
+
+sleep 100
 
 cd ~
 rm -rf models
