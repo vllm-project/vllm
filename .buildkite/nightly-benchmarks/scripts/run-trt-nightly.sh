@@ -200,9 +200,6 @@ main() {
   mkdir -p $RESULTS_FOLDER
   BENCHMARK_ROOT=../.buildkite/nightly-benchmarks/
 
-  # update transformers package, to make sure mixtral tokenizer is available
-  python3 -m pip install transformers -U
-
   export CURRENT_LLM_SERVING_ENGINE=trt
   run_serving_tests $BENCHMARK_ROOT/tests/nightly-tests.json
   python3 -m pip install tabulate pandas
