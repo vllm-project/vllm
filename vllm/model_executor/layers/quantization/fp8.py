@@ -19,7 +19,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d, apply_fp8_linear, convert_to_channelwise,
-    convert_to_e4m3fnuz, create_per_tensor_scale_param, cutlass_fp8_supported,
+    normalize_e4m3fn_to_e4m3fnuz, create_per_tensor_scale_param, cutlass_fp8_supported,
     per_tensor_dequantize, requantize_with_max_scale)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
@@ -212,10 +212,11 @@ class Fp8LinearMethod(LinearMethodBase):
 
                 # If rocm, use float8_e4m3fnuz.
                 if is_hip():
-                    weight, weight_scale, input_scale = convert_to_e4m3fnuz(
-                        weight=weight,
-                        weight_scale=weight_scale,
-                        input_scale=layer.input_scale)
+                    weight, weight_scale, input_scale = \
+                        normalize_e4m3fn_to_e4m3fnuz(
+                            weight=weight,
+                            weight_scale=weight_scale,
+                            input_scale=layer.input_scale)
                     if input_scale is not None:
                         layer.input_scale = Parameter(input_scale,
                                                       requires_grad=False)
@@ -416,11 +417,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             if is_hip():
                 # Normalize the weights and scales
                 w13_weight, w13_weight_scale, w13_input_scale = \
-                    convert_to_e4m3fnuz(
+                    normalize_e4m3fn_to_e4m3fnuz(
                         layer.w13_weight, layer.w13_weight_scale,
                         layer.w13_input_scale)
                 w2_weight, w2_weight_scale, w2_input_scale = \
-                    convert_to_e4m3fnuz(
+                    normalize_e4m3fn_to_e4m3fnuz(
                         layer.w2_weight, layer.w2_weight_scale,
                         layer.w2_input_scale)
                 # Reset the parameter

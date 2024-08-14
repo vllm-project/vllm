@@ -225,11 +225,12 @@ def apply_int8_linear(
                                  bias=bias)
 
 
-def convert_to_e4m3fnuz(
+def normalize_e4m3fn_to_e4m3fnuz(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     input_scale: Optional[torch.Tensor] = None
 ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    assert weight.dtype == torch.float8_e4m3fn
     # The bits pattern 10000000(-128) represents zero in e4m3fn
     # but NaN in e4m3fnuz. So here we set it to 0.
     # https://onnx.ai/onnx/technical/float8.html
