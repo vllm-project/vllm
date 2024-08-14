@@ -372,7 +372,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda:
     (os.environ.get("VLLM_ALLOW_ENGINE_USE_RAY", "0").strip().lower() in
      ("1", "true")),
-  
+
     # a list of plugin names to load, separated by commas.
     # if this is not set, it means all plugins will be loaded
     # if this is set to an empty string, no plugins will be loaded
