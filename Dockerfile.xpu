@@ -28,9 +28,9 @@ WORKDIR /workspace/vllm
 COPY requirements-xpu.txt /workspace/vllm/requirements-xpu.txt
 COPY requirements-common.txt /workspace/vllm/requirements-common.txt
 
+
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --no-cache-dir \
-    -r requirements-xpu.txt
+    pip install -r requirements-xpu.txt
 
 RUN git clone https://github.com/intel/pti-gpu && \
     cd pti-gpu/sdk && \
@@ -48,11 +48,9 @@ ARG GIT_REPO_CHECK
 RUN --mount=type=bind,source=.git,target=.git \
     if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh; fi
 
-ENV VLLM_TARGET_DEVICE=xpu
-
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,source=.git,target=.git \
-    python3 setup.py install
+    VLLM_TARGET_DEVICE=xpu pip install -v .
 
 CMD ["/bin/bash"]
 

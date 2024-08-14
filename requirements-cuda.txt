@@ -6,5 +6,9 @@ ray[adag] == 2.40.0 # Required for pipeline parallelism in V1.
 torch == 2.5.1
 torchaudio==2.5.1
 # These must be updated alongside torch
-torchvision == 0.20.1 # Required for phi3v processor. See https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
+torchvision == 0.20.1; platform_machine != "aarch64" # Required for phi3v processor. See https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
 xformers == 0.0.28.post3; platform_system == 'Linux' and platform_machine == 'x86_64'  # Requires PyTorch 2.5.1
+
+# FIXME: add torchaudio dependency
+# aarch64 cuda deps
+--pre --extra-index-url https://download.pytorch.org/whl/nightly/cu126 torch==2.7.0.dev20250121+cu126 torchvision==0.22.0.dev20250121; platform_system == "Linux" and platform_machine == "aarch64"
