@@ -13,7 +13,7 @@ You can quantize your own models by installing AutoAWQ or picking one of the `30
 
     $ pip install autoawq
 
-After installing AutoAWQ, you are ready to quantize a model. Plesae refer to the `AutoAWQ documentation <https://casper-hansen.github.io/AutoAWQ/examples/#basic-quantization>`_ for further details. Here is an example of how to quantize Vicuna 7B v1.5:
+After installing AutoAWQ, you are ready to quantize a model. Please refer to the `AutoAWQ documentation <https://casper-hansen.github.io/AutoAWQ/examples/#basic-quantization>`_ for further details. Here is an example of how to quantize Vicuna 7B v1.5:
 
 .. code-block:: python
 
