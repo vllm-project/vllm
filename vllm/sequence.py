@@ -1078,16 +1078,15 @@ class HiddenStates:
     # case of no bonus tokens, these are ignored.
     second_last_token_hidden_states: Optional[torch.Tensor] = None
 
-    def __post_init__(self, 
+    def __post_init__(self,
                       seq_group_metadata_list: List[SequenceGroupMetadata]):
         assert len(seq_group_metadata_list) == len(self.hidden_states)
         self.seq_ids: List[int] = get_all_seq_ids(seq_group_metadata_list)
 
-    def update(
-            self,
-            seq_group_metadata_list: List[SequenceGroupMetadata],
-            hidden_states: torch.Tensor,
-            second_last_token_hidden_states: Optional[torch.Tensor] = None):
+    def update(self,
+               seq_group_metadata_list: List[SequenceGroupMetadata],
+               hidden_states: torch.Tensor,
+               second_last_token_hidden_states: Optional[torch.Tensor] = None):
         """Update hidden states from target model invocation."""
         assert len(seq_group_metadata_list) == len(hidden_states)
         self.seq_ids.extend(get_all_seq_ids(seq_group_metadata_list))
@@ -1129,8 +1128,7 @@ class HiddenStates:
             index.append(i)
 
         self.hidden_states = torch.cat(
-            [self.hidden_states,
-             self.second_last_token_hidden_states])[index]
+            [self.hidden_states, self.second_last_token_hidden_states])[index]
 
 
 @dataclass

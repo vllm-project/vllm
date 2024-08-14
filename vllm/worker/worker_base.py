@@ -220,8 +220,9 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         raise NotImplementedError
 
     def _get_worker_input_from_broadcast(
-            self) -> Optional[Tuple[ModelRunnerInputBase, WorkerInput, 
-                                    Dict[str, torch.Tensor]]]:
+        self
+    ) -> Optional[Tuple[ModelRunnerInputBase, WorkerInput, Dict[
+            str, torch.Tensor]]]:
         """ Get the worker input from the broadcasted tensor dict. """
         assert self.do_metadata_broadcast
         assert not self.is_driver_worker
@@ -233,7 +234,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         model_input = (
             self.model_runner.make_model_input_from_broadcasted_tensor_dict(
                 broadcast_data))
-        
+
         kwargs = extract_previous_hidden_states(broadcast_data)
 
         return model_input, worker_input, kwargs
@@ -265,8 +266,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
     def prepare_input(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> Optional[Tuple[ModelRunnerInputBase, WorkerInput, 
-                        Dict[str, torch.Tensor]]]:
+    ) -> Optional[Tuple[ModelRunnerInputBase, WorkerInput, Dict[
+            str, torch.Tensor]]]:
         """
         Prepare the inputs to ModelRunner and workers.
         """

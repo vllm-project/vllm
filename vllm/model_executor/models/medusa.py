@@ -71,7 +71,7 @@ class Medusa(nn.Module):
         # the draft model. Using smaller vocab size for draft, containing
         # only most frequent tokens reduces the speculation overhead. This
         # doesn't affect the acceptance rate much and thus gives more speed
-        # -up. By default, this is disabled and is only used if the EAGLE 
+        # -up. By default, this is disabled and is only used if the EAGLE
         # checkpoint file has token_map tensor.
         self.token_map = None
 
