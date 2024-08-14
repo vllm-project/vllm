@@ -36,6 +36,8 @@ steps:
   commands:
   - pip install -r requirements-docs.txt
   - SPHINXOPTS=\"-W\" make html
+  # Check API reference (if it fails, you may have missing mock imports)
+  - grep \"sig sig-object py\" build/html/dev/sampling_params.html
 
 - label: Async Engine, Inputs, Utils, Worker Test # 15min
   fast_check: true
@@ -77,11 +79,13 @@ steps:
   - pytest -v -s core
 
 - label: Entrypoints Test # 20min
+  working_dir: "/vllm-workspace/tests"
   fast_check: true
   mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   commands:
+  - pip install -e ./plugins/vllm_add_dummy_model
   - pytest -v -s entrypoints/llm
   - pytest -v -s entrypoints/openai
 
@@ -154,6 +158,7 @@ steps:
   - vllm/
   - tests/models
   commands:
+    - pip install -e ./plugins/vllm_add_dummy_model
     - pytest -v -s models -m \"not vlm\"
 
 - label: Vision Language Models Test # 42min
@@ -289,6 +294,8 @@ steps:
   - pytest -v -s distributed/test_chunked_prefill_distributed.py
   - pytest -v -s distributed/test_multimodal_broadcast.py
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp2.py
+  - pip install -e ./plugins/vllm_add_dummy_model
+  - pytest -v -s distributed/test_distributed_oot.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s distributed/test_utils.py
 
@@ -313,6 +320,16 @@ steps:
     # before the fix, we need to use spawn to test it
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s -x lora/test_long_context.py
+
+- label: Weight Loading Multiple GPU Test
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 2
+  source_file_dependencies:
+  - vllm/
+  - tests/weight_loading
+  commands:
+    - bash weight_loading/run_model_weight_loading_test.sh
+
 
 ##### multi gpus test #####
 ##### A100 test #####
