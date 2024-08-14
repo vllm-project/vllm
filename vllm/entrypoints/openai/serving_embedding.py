@@ -71,7 +71,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                          lora_modules=None,
                          prompt_adapters=None,
                          request_logger=request_logger)
-        self._check_embedding_mode(model_config.embedding_mode)
+        self._enabled = self._check_embedding_mode(model_config.embedding_mode)
 
     async def create_embedding(
         self,
@@ -83,6 +83,8 @@ class OpenAIServingEmbedding(OpenAIServing):
         See https://platform.openai.com/docs/api-reference/embeddings/create
         for the API specification. This API mimics the OpenAI Embedding API.
         """
+        if not self._enabled:
+            return self.create_error_response("Embedding API disabled")
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
@@ -179,3 +181,4 @@ class OpenAIServingEmbedding(OpenAIServing):
                 "embedding_mode is False. Embedding API will not work.")
         else:
             logger.info("Activating the server engine with embedding enabled.")
+        return embedding_mode
