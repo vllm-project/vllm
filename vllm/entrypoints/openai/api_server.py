@@ -170,6 +170,7 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
             from prometheus_client import multiprocess
             multiprocess.mark_process_dead(rpc_server_process.pid)
 
+
 router = APIRouter()
 
 
