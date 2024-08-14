@@ -79,18 +79,15 @@ class RMSNorm(CustomOp):
         if HPUFusedRMSNorm is None:
             return self.forward_native(x, residual)
         if residual is not None:
-            orig_dtype = x.dtype
             orig_shape = x.shape
             residual += x.view(residual.shape)
             # Note: HPUFusedRMSNorm requires 3D tensors as inputs
-            x = HPUFusedRMSNorm.apply(residual.float(), self.weight.float(),
+            x = HPUFusedRMSNorm.apply(residual, self.weight,
                                       self.variance_epsilon)
-            return x.to(orig_dtype).view(orig_shape), residual
+            return x.view(orig_shape), residual
 
-        orig_dtype = x.dtype
-        x = HPUFusedRMSNorm.apply(x.float(), self.weight.float(),
-                                  self.variance_epsilon)
-        return x.to(orig_dtype)
+        x = HPUFusedRMSNorm.apply(x, self.weight, self.variance_epsilon)
+        return x
 
     def forward_xpu(
         self,

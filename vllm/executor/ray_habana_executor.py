@@ -237,6 +237,9 @@ class RayHabanaExecutor(DistributedGPUExecutor):
         return self.driver_worker.execute_method("execute_model",
                                                  execute_model_req)
 
+    def finish_measurements(self):
+        self._run_workers("finish_measurements")
+
     def execute_model(
             self,
             execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:

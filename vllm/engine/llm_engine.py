@@ -182,7 +182,7 @@ class LLMEngine:
             "download_dir=%r, load_format=%s, tensor_parallel_size=%d, "
             "pipeline_parallel_size=%d, "
             "disable_custom_all_reduce=%s, quantization=%s, "
-            "enforce_eager=%s, kv_cache_dtype=%s, "
+            "weights_load_device=%s, enforce_eager=%s, kv_cache_dtype=%s, "
             "quantization_param_path=%s, device_config=%s, "
             "decoding_config=%r, observability_config=%r, "
             "seed=%d, served_model_name=%s, use_v2_block_manager=%s, "
@@ -206,6 +206,7 @@ class LLMEngine:
             parallel_config.pipeline_parallel_size,
             parallel_config.disable_custom_all_reduce,
             model_config.quantization,
+            load_config.device,
             model_config.enforce_eager,
             cache_config.cache_dtype,
             model_config.quantization_param_path,
@@ -852,6 +853,9 @@ class LLMEngine:
             request_output = RequestOutputFactory.create(seq_group)
             request_outputs.append(request_output)
         return request_outputs
+
+    def finish_measurements(self):
+        self.model_executor.finish_measurements()
 
     def step(self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
