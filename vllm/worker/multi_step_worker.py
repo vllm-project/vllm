@@ -51,6 +51,7 @@ class MultiStepWorker(Worker):
         virtual_engine = execute_model_req.virtual_engine
         is_first_multi_step = execute_model_req.is_first_multi_step
         if is_first_multi_step:
+            # on first step we prepare the worker input and model input normally
             worker_input: WorkerInput = self.prepare_worker_input(
                 execute_model_req=execute_model_req)
             model_input: MutableModelInputForGPUWithMultiStepMetadata = (
@@ -59,55 +60,72 @@ class MultiStepWorker(Worker):
                     execute_model_req.virtual_engine,
                     execute_model_req.finished_requests_ids))
         else:
+            # on subsequent steps we reuse the worker input and model input
             multi_step_state = self.multi_step_states[virtual_engine]
             worker_input = multi_step_state.worker_input
             model_input = multi_step_state.model_input
             frozen_model_input = model_input.frozen_model_input
             assert frozen_model_input is not None
             assert frozen_model_input.attn_metadata is not None
-            # clear the cached decode metadata so that it can be recomputed
+            # clear the cached decode metadata so that it can be recomputed on
+            # the workers
             frozen_model_input.attn_metadata._cached_decode_metadata = None
 
         model_input.is_first_multi_step = is_first_multi_step
         model_input.is_last_step = execute_model_req.is_last_step
 
-        # we broadcast the last sampled token ids to all TP workers so they can
-        # update their model input metadata inplace.
         if not is_first_multi_step:
-            if get_pp_group().is_last_rank:
-                assert model_input.outputs[
-                    -1].sampler_output.sampled_token_ids is None
-                assert model_input.outputs[-1].sampled_token_ids is not None
-                model_input.last_sampled_token_ids = model_input.outputs[
-                    -1].sampled_token_ids
-                # free sampled token ids from the previous step if it has been
-                # pythonized. Cannot free the last sampled token ids because
-                # we need it for GPU advance_step.
-                for output in model_input.outputs[:-1]:
-                    if output.pythonized:
-                        output.sampled_token_ids = None
-            else:
-                # otherwise we need to get the cached sampled token ids from the
-                # execute_model_req
-                assert execute_model_req.last_sampled_token_ids is not None
-                model_input.last_sampled_token_ids = (
-                    execute_model_req.last_sampled_token_ids.cuda())
-                model_input.add_sampler_output(
-                    SamplerOutput(outputs=[], sampled_token_ids=None),
-                    model_input.last_sampled_token_ids)
+            # we broadcast the last sampled token ids to all TP workers so they
+            # can update their model input metadata in-place.
+            self._prepare_last_sampled_token_ids_for_tp_workers(
+                execute_model_req=execute_model_req, model_input=model_input)
 
-                # free sampled token ids from the previous step.
-                # TODO(will) we could reuse the sampled token ids tensor from
-                # the previous step instead.
-                for output in model_input.outputs[:-1]:
-                    output.sampled_token_ids = None
-                assert model_input.outputs[-1].sampled_token_ids is not None
         if self.do_metadata_broadcast:
             broadcast_data = worker_input.as_broadcastable_tensor_dict()
             broadcast_data.update(model_input.as_broadcastable_tensor_dict())
             broadcast_tensor_dict(broadcast_data, src=0)
 
         return model_input, worker_input
+
+    def _prepare_last_sampled_token_ids_for_tp_workers(
+        self,
+        execute_model_req: ExecuteModelRequest,
+        model_input: MutableModelInputForGPUWithMultiStepMetadata,
+    ) -> None:
+        """ 
+        Prepare the last sampled token ids for TP workers. If it's the last 
+        PP rank, then the last sampled token ids are already in the model_input.
+        If it is NOT the last PP rank, then we need to get the last sampled
+        token that is cached in the execute_model_req.
+        """
+        if get_pp_group().is_last_rank:
+            assert model_input.outputs[
+                -1].sampler_output.sampled_token_ids is None
+            assert model_input.outputs[-1].sampled_token_ids is not None
+            model_input.last_sampled_token_ids = model_input.outputs[
+                -1].sampled_token_ids
+            # free sampled token ids from the previous step if it has been
+            # pythonized. Cannot free the last sampled token ids because
+            # we need it for GPU advance_step.
+            for output in model_input.outputs[:-1]:
+                if output.pythonized:
+                    output.sampled_token_ids = None
+        else:
+            # otherwise we need to get the cached sampled token ids from the
+            # execute_model_req
+            assert execute_model_req.last_sampled_token_ids is not None
+            model_input.last_sampled_token_ids = (
+                execute_model_req.last_sampled_token_ids.cuda())
+            model_input.add_sampler_output(
+                SamplerOutput(outputs=[], sampled_token_ids=None),
+                model_input.last_sampled_token_ids)
+
+            # free sampled token ids from the previous step.
+            # TODO(will) we could reuse the sampled token ids tensor from
+            # the previous step instead.
+            for output in model_input.outputs[:-1]:
+                output.sampled_token_ids = None
+            assert model_input.outputs[-1].sampled_token_ids is not None
 
     def prepare_input(
         self,
