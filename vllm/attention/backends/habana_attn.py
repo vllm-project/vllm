@@ -159,8 +159,8 @@ class HabanaAttentionImpl(AttentionImpl):
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-        self.prefill_usefusedsdpa = os.getenv('VLLM_PREFILL_USE_FUSEDSDPA',
-                                              '0') in ['1', 'true']
+        self.prefill_usefusedsdpa = os.getenv('VLLM_PROMPT_USE_FUSEDSDPA',
+                                              '0').lower() in ['1', 'true']
         if self.prefill_usefusedsdpa:
             assert alibi_slopes is None, \
                 'Prefill with FusedSDPA not supported with alibi slopes!'

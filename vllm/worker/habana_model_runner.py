@@ -151,8 +151,8 @@ class HpuModelAdapter():
 
     def __init__(self, model, enforce_eager):
         self.model = model
-        self.prefill_use_fusedsdpa = os.getenv('VLLM_PREFILL_USE_FUSEDSDPA',
-                                               '0') in ['1', 'true']
+        self.prefill_use_fusedsdpa = os.getenv('VLLM_PROMPT_USE_FUSEDSDPA',
+                                               '0').lower() in ['1', 'true']
 
         if not htorch.utils.internal.is_lazy() and not enforce_eager:
             self.model = torch.compile(self.model,
@@ -579,7 +579,6 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             # actual prompt lens
             context_lens.append(context_len)
             query_lens.append(seq_len - context_len)
-
             input_tokens.append(prompt_tokens)
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
@@ -652,7 +651,6 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         max_prompt_len = max(
             find_bucket(max(seq_lens), self.prompt_seq_bucket_cfg),
             self.block_size)
-
         input_tokens = make_tensor_with_pad(input_tokens,
                                             max_len=max_prompt_len,
                                             pad=0,
