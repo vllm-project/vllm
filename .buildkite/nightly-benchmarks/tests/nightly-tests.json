@@ -26,7 +26,7 @@
             "max_input_len": 4096,
             "max_seq_len": 6144,
             "max_num_tokens": 16384,
-            "trt_llm_version": "r24.07"
+            "trt_llm_version": "v0.11.0"
         },
         "trt_client_parameters": {
             "endpoint": "/v2/models/ensemble/generate_stream"
