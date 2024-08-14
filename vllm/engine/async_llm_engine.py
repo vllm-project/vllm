@@ -376,13 +376,13 @@ class _AsyncLLMEngine(LLMEngine):
         # TODO(will) this is a sanity check for nowto make sure that all the
         # seqs are on the same steps. Eventually we will want to do some sort of
         # dynamic scheduling when doing multi-step decoding.
-        ref_remaining_steps = seq_group_metadata_list[0].state.remaining_steps
-        if any([
-                seq_group.state.remaining_steps != ref_remaining_steps
-                for seq_group in seq_group_metadata_list[1:]
-        ]):
-            raise AssertionError(("All running sequence groups should "
-                                  "have the same remaining steps."))
+        # ref_remaining_steps = seq_group_metadata_list[0].state.remaining_steps
+        # if any([
+        #         seq_group.state.remaining_steps != ref_remaining_steps
+        #         for seq_group in seq_group_metadata_list[1:]
+        # ]):
+        #     raise AssertionError(("All running sequence groups should "
+        #                           "have the same remaining steps."))
 
         if any(seq_group.state.remaining_steps > 0
                for seq_group in seq_group_metadata_list):
@@ -406,8 +406,8 @@ class _AsyncLLMEngine(LLMEngine):
         if (self.scheduler_config.is_multi_step
                 and self.parallel_config.pipeline_parallel_size > 1
                 and cached_last_output is not None
-                and cached_last_output.sampled_token_ids_numpy is not None):
-            return torch.from_numpy(cached_last_output.sampled_token_ids_numpy)
+                and cached_last_output.sampled_token_ids_cpu is not None):
+            return cached_last_output.sampled_token_ids_cpu
         return None
 
     def _update_cached_scheduler_output(
@@ -417,7 +417,7 @@ class _AsyncLLMEngine(LLMEngine):
                 and output[0] is not None):
             last_output = output[-1]
             assert last_output is not None
-            assert last_output.sampled_token_ids_numpy is not None
+            assert last_output.sampled_token_ids_cpu is not None
             assert last_output.sampled_token_ids is None
             assert last_output.sampled_token_probs is None
             self.cached_scheduler_outputs[

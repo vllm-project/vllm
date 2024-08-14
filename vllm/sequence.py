@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from typing import (TYPE_CHECKING, Dict, List, Mapping, Optional, Set, Tuple,
                     Union, cast)
 
-import numpy
 import torch
 
 from vllm.inputs.parse import is_valid_encoder_decoder_llm_inputs
@@ -997,7 +996,7 @@ class SamplerOutput:
 
     # On-device tensor containing the sampled token ids.
     sampled_token_ids: Optional[torch.Tensor] = None
-    sampled_token_ids_numpy: Optional[numpy.ndarray] = None
+    sampled_token_ids_cpu: Optional[torch.Tensor] = None
 
     # Spec decode metrics populated by workers.
     spec_decode_worker_metrics: Optional["SpecDecodeWorkerMetrics"] = None
