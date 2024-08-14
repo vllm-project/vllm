@@ -548,8 +548,8 @@ class Sequence:
                 f"num_blocks={self.n_blocks}, ")
 
 
-@dataclass
-class SequenceGroupState:
+class SequenceGroupState(msgspec.Struct,
+                         omits_default=True):  # type: ignore[call-arg]
     """Mutable state tied to a specific sequence group"""
 
     # for multi-step decoding
@@ -837,6 +837,8 @@ class SequenceGroupMetadataDelta(
     do_sample: bool = True
     token_chunk_size: Optional[int] = None
     computed_block_nums: Optional[List[int]] = None
+    state: Optional[SequenceGroupState] = msgspec.field(
+        default_factory=lambda: SequenceGroupState())
 
 
 class SequenceGroupMetadata(
@@ -934,6 +936,7 @@ class SequenceGroupMetadata(
         self.is_prompt = sequence_group_metadata_delta.is_prompt
 
     def finish_step(self) -> None:
+        assert self.state is not None
         assert self.state.current_step < self.state.num_steps
         self.state.current_step += 1
 
@@ -1237,6 +1240,7 @@ class ExecuteModelRequest(
         # steps
         assert len(self.seq_group_metadata_list) > 0
         first_seq_group = self.seq_group_metadata_list[0]
+        assert first_seq_group.state is not None
         return first_seq_group.state.current_step == 0
 
     @property
@@ -1245,6 +1249,7 @@ class ExecuteModelRequest(
         # steps
         assert len(self.seq_group_metadata_list) > 0
         first_seq_group = self.seq_group_metadata_list[0]
+        assert first_seq_group.state is not None
         num_steps = first_seq_group.state.num_steps
         current_step = first_seq_group.state.current_step
         return num_steps - current_step == 1
@@ -1254,7 +1259,9 @@ class ExecuteModelRequest(
         # TODO(will) make this be able to handle batches with variable number of
         # steps
         assert len(self.seq_group_metadata_list) > 0
-        return self.seq_group_metadata_list[0].state.current_step
+        state = self.seq_group_metadata_list[0].state
+        assert state is not None
+        return state.current_step
 
     def clone(
         self, seq_group_metadata_list: List[Union[SequenceGroupMetadata,

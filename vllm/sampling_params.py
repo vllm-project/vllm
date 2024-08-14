@@ -151,12 +151,12 @@ class SamplingParams(msgspec.Struct,
 
     def __post_init__(self) -> None:
         self.best_of = self.best_of or self.n
-        if 0 < temperature < _MAX_TEMP:
+        if 0 < self.temperature < _MAX_TEMP:
             logger.warning(
                 "temperature %s is less than %s, which may cause numerical "
                 "errors nan or inf in tensors. We have maxed it out to %s.",
-                temperature, _MAX_TEMP, _MAX_TEMP)
-            temperature = max(temperature, _MAX_TEMP)
+                self.temperature, _MAX_TEMP, _MAX_TEMP)
+            self.temperature = max(self.temperature, _MAX_TEMP)
         if self.seed == -1:
             self.seed = None
         else:

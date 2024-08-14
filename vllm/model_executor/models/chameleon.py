@@ -71,7 +71,7 @@ def dummy_seq_data_for_chameleon(
     else:
         image_feature_size = image_feature_size_override
 
-    token_ids = array("I",[image_token_id]) * image_feature_size * num_images
+    token_ids = array("I", [image_token_id]) * image_feature_size * num_images
     token_ids += array("I", [0]) * (seq_len - image_feature_size * num_images)
     return SequenceData(token_ids)
 
