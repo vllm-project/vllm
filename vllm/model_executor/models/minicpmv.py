@@ -48,7 +48,7 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import SupportsVision
+from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.models.minicpm import MiniCPMModel
 from vllm.model_executor.models.qwen2 import Qwen2Model
@@ -479,7 +479,7 @@ def input_processor_for_minicpmv(ctx: InputContext, llm_inputs: LLMInputs):
     return llm_inputs
 
 
-class MiniCPMVBaseModel(nn.Module, SupportsVision):
+class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
     """
     The abstract class of MiniCPMV can only be inherited, but cannot be
     instantiated.
@@ -630,8 +630,11 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
         )
         return output
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
