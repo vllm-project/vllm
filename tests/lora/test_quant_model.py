@@ -22,7 +22,7 @@ MODELS: List[ModelWithQuantization]
 if is_hip(): 
     MODELS = [
             ModelWithQuantization(model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ",
-                            quantization="GPTQ"),
+                                  quantization="GPTQ"),
     ]
 else:
     MODELS = [
