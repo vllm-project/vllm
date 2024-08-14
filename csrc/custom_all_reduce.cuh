@@ -145,18 +145,17 @@ DINLINE O downcast(array_t<float, O::size> val) {
 template <int ngpus>
 #ifdef USE_ROCM
 DINLINE void start_sync(const RankSignals& sg, Signal* self_sg, int rank) {
-  uint32_t flag = self_sg->_flag[blockIdx.x] + 1;
   if (threadIdx.x < ngpus) {
-    __scoped_atomic_store_n(&self_sg->end[blockIdx.x][threadIdx.x], 0,
-                            __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE);
+    __atomic_store_n(&self_sg->end[blockIdx.x][threadIdx.x], 0,
+                     __ATOMIC_RELAXED);
     // simultaneously write to the corresponding flag of all ranks.
     // Latency = 1 p2p write
-    __scoped_atomic_store_n(&sg.signals[threadIdx.x]->start[blockIdx.x][rank],
-                            1, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM);
+    __atomic_store_n(&sg.signals[threadIdx.x]->start[blockIdx.x][rank], 1,
+                     __ATOMIC_RELAXED);
     __atomic_thread_fence(__ATOMIC_ACQ_REL);
     // wait until we got true from all ranks
-    while (!__scoped_atomic_load_n(&self_sg->start[blockIdx.x][threadIdx.x],
-                                   __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE));
+    while (!__atomic_load_n(&self_sg->start[blockIdx.x][threadIdx.x],
+                                   __ATOMIC_RELAXED);
   }
   __syncthreads();
 }
@@ -190,16 +189,16 @@ DINLINE void end_sync(const RankSignals& sg, Signal* self_sg, int rank) {
   // the memory model.
   if (threadIdx.x < ngpus) {
     // reset flag for next time
-    __scoped_atomic_store_n(&self_sg->start[blockIdx.x][threadIdx.x], 0,
-                            __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE);
+    __atomic_store_n(&self_sg->start[blockIdx.x][threadIdx.x], 0,
+                     __ATOMIC_RELAXED);
     // simultaneously write to the corresponding flag of all ranks.
     // Latency = 1 p2p write
-    __scoped_atomic_store_n(&sg.signals[threadIdx.x]->end[blockIdx.x][rank], 1,
-                            __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM);
+    __atomic_store_n(&sg.signals[threadIdx.x]->end[blockIdx.x][rank], 1,
+                     __ATOMIC_RELAXED);
     __atomic_thread_fence(__ATOMIC_ACQ_REL);
     // wait until we got true from all ranks
-    while (!__scoped_atomic_load_n(&self_sg->end[blockIdx.x][threadIdx.x],
-                                   __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE));
+    while (!__atomic_load_n(&self_sg->end[blockIdx.x][threadIdx.x],
+                            __ATOMIC_RELAXED));
   }
   if constexpr (!final_sync) __syncthreads();
 }

@@ -330,7 +330,7 @@ int main(int argc, char** argv) {
   //     run<half>(myRank, nRanks, comm, threads, block_limit, 4096 * 1024);
   //   }
   // }
-#ifdef USE _ROCM
+#ifdef USE_ROCM
   for (int sz = 512; sz <= (8 << 22); sz *= 2) {
     run<half>(myRank, nRanks, comm, 512, 18, sz + 8 * 47, performance_test);
   }
