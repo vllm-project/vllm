@@ -79,7 +79,6 @@ fi
 
 trtllm-build \
 --checkpoint_dir ${trt_model_path} \
---model_config ${trt_model_path} \
 --use_fused_mlp \
 --reduce_fusion disable \
 --workers 8 \
@@ -90,8 +89,7 @@ trtllm-build \
 --max_input_len ${max_input_len} \
 --max_seq_len ${max_seq_len} \
 --max_num_tokens ${max_num_tokens} \
---output_dir ${trt_engine_path}  2>&1 | tee ~/log.txt
-
+--output_dir ${trt_engine_path}  
 
 
 cd /tensorrtllm_backend/triton_model_repo
@@ -100,4 +98,4 @@ cp -r ${trt_engine_path}/* ./tensorrt_llm/1
 cd /tensorrtllm_backend
 python3 scripts/launch_triton_server.py \
 --world_size=${model_tp_size} \
---model_repo=/tensorrtllm_backend/triton_model_repo &
+--model_repo=/tensorrtllm_backend/triton_model_repo 2>&1 | tee ~/log.txt &
