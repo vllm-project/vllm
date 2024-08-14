@@ -404,9 +404,13 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
 
 class CompressedTensorsMoEMethod(FusedMoEMethodBase):
 
-    def __init__(self, quant_config: QuantizationConfig):
+    def __init__(self, quant_config: CompressedTensorsConfig):
         self.quant_config = quant_config
-        self.packed_factor = 4
+        # TODO: fix this to use the above
+        config = self.quant_config.target_scheme_map["Linear"].get("weights")
+        self.packed_factor = 32 // config.num_bits
+        self.strategy = config.strategy
+        self.group_size = config.group_size
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size: int,
@@ -430,18 +434,26 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         layer.register_parameter("w2_weight_packed", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
+        if self.strategy == "channel":
+            num_groups_w2 = num_groups_w13 = 1
+            extra_weight_attrs.update({"quant_method": "channel"})
+        else:
+            extra_weight_attrs.update({"quant_method": "group"})
+            num_groups_w2 = intermediate_size // self.group_size
+            num_groups_w13 = hidden_size // self.group_size
+
         w13_scale = torch.nn.Parameter(torch.ones(num_experts,
                                                   2,
                                                   intermediate_size,
+                                                  num_groups_w13,
                                                   dtype=torch.float32),
                                        requires_grad=False)
         layer.register_parameter("w13_weight_scale", w13_scale)
-        extra_weight_attrs.update({"quant_method": "channel"})
         set_weight_attrs(w13_scale, extra_weight_attrs)
 
         w2_scale = torch.nn.Parameter(torch.ones(num_experts,
-                                                 1,
                                                  hidden_size,
+                                                 num_groups_w2,
                                                  dtype=torch.float32),
                                       requires_grad=False)
         layer.register_parameter("w2_weight_scale", w2_scale)
