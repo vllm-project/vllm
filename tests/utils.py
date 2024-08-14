@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import openai
-import ray
 import requests
 from transformers import AutoTokenizer
 from typing_extensions import ParamSpec
@@ -293,6 +292,8 @@ def multi_process_parallel(
     pp_size: int,
     test_target: Any,
 ) -> None:
+    import ray
+
     # Using ray helps debugging the error when it failed
     # as compared to multiprocessing.
     # NOTE: We need to set working_dir for distributed tests,
