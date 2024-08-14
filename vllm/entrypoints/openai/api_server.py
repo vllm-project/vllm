@@ -163,6 +163,12 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
             # Wait for server process to join
             rpc_server_process.join()
 
+            # Lazy import for prometheus multiprocessing.
+            # We need to set PROMETHEUS_MULTIPROC_DIR environment variable
+            # before prometheus_client is imported.
+            # See https://prometheus.github.io/client_python/multiprocess/
+            from prometheus_client import multiprocess
+            multiprocess.mark_process_dead(rpc_server_process.pid)
 
 router = APIRouter()
 
