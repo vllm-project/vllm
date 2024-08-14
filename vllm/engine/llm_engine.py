@@ -226,6 +226,9 @@ class LLMEngine:
             cache_config.enable_prefix_caching,
         )
         # TODO(woosuk): Print more configs in debug mode.
+        from vllm.plugins import load_general_plugins
+        load_general_plugins()
+
         self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config
