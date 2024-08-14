@@ -462,10 +462,14 @@ class EngineArgs:
         parser.add_argument('--limit-mm-per-prompt',
                             type=nullable_kvs,
                             default=EngineArgs.limit_mm_per_prompt,
+                            # The default value is given in
+                            # MultiModalRegistry.init_mm_limits_per_prompt
                             help='For each multimodal plugin, limit how many '
-                            'input instances to allow for each prompt. Expects '
-                            'a comma-separated list of items, e.g.: '
-                            '`KEY1=VALUE1,KEY2=VALUE2`')
+                            'input instances to allow for each prompt. '
+                            'Expects a comma-separated list of items, '
+                            'e.g.: `image=16,video=2` allows a maximum of 16 '
+                            'images and 2 videos per prompt. Defaults to 1 for '
+                            'each modality.')
 
         # LoRA related configs
         parser.add_argument('--enable-lora',
