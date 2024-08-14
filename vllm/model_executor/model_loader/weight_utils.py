@@ -517,7 +517,9 @@ def default_weight_loader(param: torch.Tensor,
     """Default weight loader."""
     try:
         if param.numel() == 1 and loaded_weight.numel() == 1:
-            # If loaded_weight is a scalar or shape [1], broadcast it
+            # Sometimes scalar values aren't tensors with shapes
+            # so if both param and loaded_weight is a scalar,
+            # "broadcast" instead of copy
             param.data.fill_(loaded_weight.item())
         else:
             assert param.size() == loaded_weight.size(), (
