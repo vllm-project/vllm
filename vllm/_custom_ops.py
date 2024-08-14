@@ -255,7 +255,7 @@ try:
                                   size_n: int, size_k: int) -> torch.Tensor:
         return torch.empty((size_m, size_n), device=a.device, dtype=a.dtype)
 
-    #@torch.library.register_fake("_C::gptq_marlin_gemm")
+    @torch.library.register_fake("_C::gptq_marlin_gemm")
     def _gptq_marlin_gemm_fake(a: torch.Tensor,
                                b_q_weight: torch.Tensor,
                                b_scales: torch.Tensor,
