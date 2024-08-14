@@ -11,8 +11,6 @@ import habana_frameworks.torch as htorch
 import torch
 import torch.nn.functional as F
 
-import vllm.hpu.utils as hpu_utils
-
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -23,12 +21,14 @@ try:
 except ImportError:
     logger.warning("Could not import HPU FusedRMSNorm kernel. "
                    "vLLM will use forward_native implementation of RMSNorm.")
-HPUFusedSDPA = None   
+HPUFusedSDPA = None
 try:
     from habana_frameworks.torch.hpex.kernels import FusedSDPA
     HPUFusedSDPA = FusedSDPA
 except ImportError:
-    logger.warning("Could not import HPU FusedSDPA kernel. vLLM will use native implementation.")
+    logger.warning(
+        "Could not import HPU FusedSDPA kernel. vLLM will use native implementation."
+    )
 
 PA_SPLIT_VALUE = (os.environ.get('PA_SPLIT_VALUE', '1') == '1')
 
@@ -132,6 +132,7 @@ def static_fused_moe(hidden_states, w1, w2, score, topk):
         htorch.core.mark_step()
 
     return final_hidden_states.view(-1, D)
+
 
 #TODO: remove after SW-195415 fix
 def repeat_kv(kv: torch.Tensor, n_rep: int) -> torch.Tensor:
