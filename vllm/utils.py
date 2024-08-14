@@ -13,7 +13,6 @@ import threading
 import uuid
 import warnings
 from asyncio import FIRST_COMPLETED, ensure_future
-from collections import defaultdict
 from functools import lru_cache, partial, wraps
 from platform import uname
 from typing import (Any, AsyncGenerator, Awaitable, Callable, Dict, Generic,
@@ -29,7 +28,6 @@ import torch.types
 from typing_extensions import ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
-from vllm import _custom_ops as ops
 from vllm.logger import enable_trace_function_call, init_logger
 
 logger = init_logger(__name__)
@@ -114,6 +112,9 @@ STR_ROCM_FLASH_ATTN_VAL: str = "ROCM_FLASH"
 STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
 STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
+
+GiB_bytes = 1 << 30
+"""The number of bytes in one gibibyte (GiB)."""
 
 STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.half,
@@ -261,6 +262,44 @@ class LRUCache(Generic[T]):
         self.cache.clear()
 
 
+class PyObjectCache:
+    """Used to cache python objects to avoid object allocations 
+    across scheduler iterations.
+    """
+
+    def __init__(self, obj_builder):
+        self._obj_builder = obj_builder
+        self._index = 0
+
+        self._obj_cache = []
+        for _ in range(128):
+            self._obj_cache.append(self._obj_builder())
+
+    def _grow_cache(self):
+        # Double the size of the cache
+        num_objs = len(self._obj_cache)
+        for _ in range(num_objs):
+            self._obj_cache.append(self._obj_builder())
+
+    def get_object(self):
+        """Returns a pre-allocated cached object. If there is not enough 
+        objects, then the cache size will double.
+        """
+        if self._index >= len(self._obj_cache):
+            self._grow_cache()
+            assert self._index < len(self._obj_cache)
+
+        obj = self._obj_cache[self._index]
+        self._index += 1
+
+        return obj
+
+    def reset(self):
+        """Makes all cached-objects available for the next scheduler iteration.
+        """
+        self._index = 0
+
+
 def is_hip() -> bool:
     return torch.version.hip is not None
 
@@ -293,18 +332,12 @@ def is_neuron() -> bool:
 
 
 @lru_cache(maxsize=None)
-def is_tpu() -> bool:
-    try:
-        import libtpu
-    except ImportError:
-        libtpu = None
-    return libtpu is not None
-
-
-@lru_cache(maxsize=None)
 def is_xpu() -> bool:
-    from importlib.metadata import version
-    is_xpu_flag = "xpu" in version("vllm")
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        is_xpu_flag = "xpu" in version("vllm")
+    except PackageNotFoundError:
+        return False
     # vllm is not build with xpu
     if not is_xpu_flag:
         return False
@@ -324,6 +357,7 @@ def is_xpu() -> bool:
 @lru_cache(maxsize=None)
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
+    from vllm import _custom_ops as ops
     max_shared_mem = (
         ops.get_max_shared_memory_per_block_device_attribute(gpu))
     # value 0 will cause MAX_SEQ_LEN become negative and test_attention.py
@@ -725,16 +759,6 @@ class CudaMemoryProfiler:
         gc.collect()
 
 
-def str_to_int_tuple(s: str) -> Tuple[int, ...]:
-    """Convert a string to a tuple of integers."""
-    try:
-        return tuple(map(int, s.split(",")))
-    except ValueError as e:
-        raise ValueError(
-            "String must be a series of integers separated by commas "
-            f"(e.g., 1, 2, 3). Given input: {s}") from e
-
-
 def make_ndarray_with_pad(
     x: List[List[T]],
     pad: T,
@@ -826,23 +850,6 @@ def is_list_of(
         return all(isinstance(v, typ) for v in value)
 
     assert_never(check)
-
-
-def merge_dicts(dict1: Dict[K, List[T]],
-                dict2: Dict[K, List[T]]) -> Dict[K, List[T]]:
-    """Merge 2 dicts that have key -> List of items.
-
-    When a key conflicts, the values in dict1 is prioritized.
-    """
-    merged_dict: Dict[K, List[T]] = defaultdict(list)
-
-    for key, value in dict1.items():
-        merged_dict[key].extend(value)
-
-    for key, value in dict2.items():
-        merged_dict[key].extend(value)
-
-    return dict(merged_dict)
 
 
 JSONTree = Union[Dict[str, "JSONTree[T]"], List["JSONTree[T]"],
@@ -1057,9 +1064,9 @@ def cuda_device_count_stateless() -> int:
 
 
 #From: https://stackoverflow.com/a/4104188/2749989
-def run_once(f):
+def run_once(f: Callable[P, None]) -> Callable[P, None]:
 
-    def wrapper(*args, **kwargs) -> Any:
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
         if not wrapper.has_run:  # type: ignore[attr-defined]
             wrapper.has_run = True  # type: ignore[attr-defined]
             return f(*args, **kwargs)
