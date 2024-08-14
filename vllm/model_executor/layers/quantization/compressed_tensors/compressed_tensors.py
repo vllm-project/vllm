@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
+from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
 from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
@@ -17,6 +18,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     QuantizationType, find_matched_target, is_activation_quantization_format,
     should_ignore_layer)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
 __all__ = ["CompressedTensorsLinearMethod"]
@@ -69,6 +71,8 @@ class CompressedTensorsConfig(QuantizationConfig):
             return CompressedTensorsLinearMethod(self)
         if isinstance(layer, Attention):
             return CompressedTensorsKVCacheMethod(self)
+        if isinstance(layer, FusedMoE):
+            return CompressedTensorsMoEMethod(self)
         return None
 
     @classmethod
@@ -396,3 +400,64 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
                 "Only support symmetric scaling factor "
                 "for compressed-tensors KV cache. "
                 f"However found symmetric: {is_symmetric}")
+
+
+class CompressedTensorsMoEMethod(FusedMoEMethodBase):
+
+    def __init__(self, quant_config: QuantizationConfig):
+        self.quant_config = quant_config
+        self.packed_factor = 4
+
+    def create_weights(self, layer: torch.nn.Module, num_experts: int,
+                       hidden_size: int, intermediate_size: int,
+                       params_dtype: torch.dtype, **extra_weight_attrs):
+
+        w13_weight = torch.nn.Parameter(torch.empty(num_experts,
+                                                    2 * intermediate_size,
+                                                    hidden_size //
+                                                    self.packed_factor,
+                                                    dtype=params_dtype),
+                                        requires_grad=False)
+        layer.register_parameter("w13_weight_packed", w13_weight)
+        set_weight_attrs(w13_weight, extra_weight_attrs)
+
+        w2_weight = torch.nn.Parameter(torch.empty(num_experts,
+                                                   hidden_size,
+                                                   intermediate_size //
+                                                   self.packed_factor,
+                                                   dtype=params_dtype),
+                                       requires_grad=False)
+        layer.register_parameter("w2_weight_packed", w2_weight)
+        set_weight_attrs(w2_weight, extra_weight_attrs)
+
+        w13_scale = torch.nn.Parameter(torch.ones(num_experts,
+                                                  2,
+                                                  intermediate_size,
+                                                  dtype=torch.float32),
+                                       requires_grad=False)
+        layer.register_parameter("w13_weight_scale", w13_scale)
+        extra_weight_attrs.update({"quant_method": "channel"})
+        set_weight_attrs(w13_scale, extra_weight_attrs)
+
+        w2_scale = torch.nn.Parameter(torch.ones(num_experts,
+                                                 1,
+                                                 hidden_size,
+                                                 dtype=torch.float32),
+                                      requires_grad=False)
+        layer.register_parameter("w2_weight_scale", w2_scale)
+        set_weight_attrs(w2_scale, extra_weight_attrs)
+        layer.a13_scale = None
+        layer.a2_scale = None
+
+    def apply(self,
+              layer: torch.nn.Module,
+              x: torch.Tensor,
+              router_logits: torch.Tensor,
+              top_k: int,
+              renormalize: bool = True,
+              use_grouped_topk: bool = False,
+              num_expert_group: Optional[int] = None,
+              topk_group: Optional[int] = None) -> torch.Tensor:
+
+        # hook-up fused moe kernel
+        pass
