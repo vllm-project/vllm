@@ -101,7 +101,7 @@ ARG buildkite_commit
 ENV BUILDKITE_COMMIT=${buildkite_commit}
 
 ARG USE_SCCACHE
-ARG SCCACHE_BUCKET_NAME
+ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
 # if USE_SCCACHE is set, use sccache to speed up compilation
 RUN --mount=type=cache,target=/root/.cache/pip \
     if [ "$USE_SCCACHE" = "1" ]; then \
