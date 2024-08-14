@@ -116,7 +116,7 @@ def test_machete_all_schedules(shape, atype: torch.dtype,
         )
 
         # Relax atol as our reduction dim becomes larger (more rounding error)
-        # Relax atol when we have zeropoints since the way machete applies 
+        # Relax atol when we have zeropoints since the way machete applies
         #  zeropoints (after scales) causes noise around 0
         atol = 1 if zero_points else min(5e-2 * math.sqrt(size_k), 1)
         torch.testing.assert_close(output, output_ref, rtol=1e-1, atol=atol),\
@@ -162,7 +162,7 @@ def test_machete_heuristic(shape, atype: torch.dtype,
     )
 
     # Relax atol as our reduction dim becomes larger (more rounding error)
-    # Relax atol when we have zeropoints since the way machete applies 
+    # Relax atol when we have zeropoints since the way machete applies
     #  zeropoints (after scales) causes noise around 0
     atol = 1 if zero_points else min(5e-2 * math.sqrt(size_k), 1)
     torch.testing.assert_close(output, output_ref, rtol=1e-1, atol=atol)
