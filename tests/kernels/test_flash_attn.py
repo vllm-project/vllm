@@ -2,7 +2,7 @@ from typing import List, Optional, Tuple
 
 import pytest
 import torch
-from vllm_flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
+import vllm_flash_attn  # noqa: F401
 
 NUM_HEADS = [(16, 16), (32, 8), (64, 8)]
 HEAD_SIZES = [128, 256]
@@ -105,7 +105,7 @@ def test_flash_attn_with_paged_kv(
                                  (num_seqs, max_num_blocks_per_seq),
                                  dtype=torch.int32)
 
-    output = flash_attn_with_kvcache(
+    output = torch.ops.vllm.flash_attn_with_kvcache(
         q=query.unsqueeze(1),
         k_cache=key_cache,
         v_cache=value_cache,
@@ -185,7 +185,7 @@ def test_varlen_with_paged_kv(
                                  (num_seqs, max_num_blocks_per_seq),
                                  dtype=torch.int32)
 
-    output = flash_attn_varlen_func(
+    output = torch.ops.vllm.flash_attn_varlen_func(
         q=query,
         k=key_cache,
         v=value_cache,

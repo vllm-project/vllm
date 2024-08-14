@@ -2,11 +2,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type
 
 try:
+    import vllm_flash_attn  # noqa
     from flashinfer import BatchDecodeWithPagedKVCacheWrapper
     from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper
-    from vllm_flash_attn import flash_attn_varlen_func
 except ImportError:
-    flash_attn_varlen_func = None
     BatchDecodeWithPagedKVCacheWrapper = None
     BatchPrefillWithPagedKVCacheWrapper = None
 
@@ -520,7 +519,7 @@ class FlashInferImpl(AttentionImpl):
             # This happens when vllm runs the profiling to
             # determine the number of blocks.
             if kv_cache is None:
-                output = flash_attn_varlen_func(
+                output = torch.ops.vllm.flash_attn_varlen_func(
                     q=query,
                     k=key,
                     v=value,
