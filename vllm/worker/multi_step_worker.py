@@ -5,7 +5,7 @@ from vllm.distributed import broadcast_tensor_dict, get_pp_group
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.worker.model_runner_base import BroadcastableModelInput
 from vllm.worker.multi_step_model_runner import (
-    MutableModelInputForGPUWithMultiStepMetadata)
+    MultiStepModelRunner, MutableModelInputForGPUWithMultiStepMetadata)
 from vllm.worker.worker import Worker, WorkerInput
 
 
@@ -19,6 +19,23 @@ class MultiStepWorker(Worker):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        base_model_runner = self.model_runner
+        # for multi-step model, wrap the model runner with MultiStepModelRunner
+        self.model_runner = MultiStepModelRunner(
+            base_model_runner,
+            base_model_runner.model_config,
+            base_model_runner.parallel_config,
+            base_model_runner.scheduler_config,
+            base_model_runner.device_config,
+            base_model_runner.cache_config,
+            load_config=base_model_runner.load_config,
+            lora_config=self.lora_config,
+            kv_cache_dtype=self.cache_config.cache_dtype,
+            is_driver_worker=base_model_runner.is_driver_worker,
+            prompt_adapter_config=base_model_runner.prompt_adapter_config,
+            multimodal_config=base_model_runner.multimodal_config,
+        )
+
         pipeline_parallel_size = self.parallel_config.pipeline_parallel_size
         self.multi_step_states: List[
             Optional[MultiStepState]] = [None] * pipeline_parallel_size

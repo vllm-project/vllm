@@ -156,6 +156,14 @@ class MutableModelInputForGPUWithMultiStepMetadata(BroadcastableModelInput):
         self.step_cuda_events[self.current_step % 2].record(current_stream)
 
     def wait_previous_step(self):
+        # These cuda events are an explicit synchronization to ensure that
+        # advance_step() (for other attn backends that may be supported in the
+        # future) do not clobber any data structures that is also used by any
+        # enqueued forwards steps. For distributed case, only a single event is
+        # needed, but for single GPU case, since we can let the CPU run much
+        # further ahead, two events allow us to overlap the advance_step with
+        # the previous forward (ie using two DecodeWrappers for flashinfer
+        # backend)
         self.step_cuda_events[(self.current_step + 1) % 2].wait()
 
     def add_sampler_output(self,
