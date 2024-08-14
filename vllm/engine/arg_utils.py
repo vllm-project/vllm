@@ -58,8 +58,8 @@ class EngineArgs:
     enable_prefix_caching: bool = False
     disable_sliding_window: bool = False
     use_v2_block_manager: bool = False
-    swap_space: int = 4  # GiB
-    cpu_offload_gb: int = 0  # GiB
+    swap_space: float = 4  # GiB
+    cpu_offload_gb: float = 0  # GiB
     gpu_memory_utilization: float = 0.90
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: int = 256
@@ -321,7 +321,7 @@ class EngineArgs:
                             default=EngineArgs.seed,
                             help='Random seed for operations.')
         parser.add_argument('--swap-space',
-                            type=int,
+                            type=float,
                             default=EngineArgs.swap_space,
                             help='CPU swap space size (GiB) per GPU.')
         parser.add_argument(
@@ -923,7 +923,13 @@ class AsyncEngineArgs(EngineArgs):
         parser.add_argument('--engine-use-ray',
                             action='store_true',
                             help='Use Ray to start the LLM engine in a '
-                            'separate process as the server process.')
+                            'separate process as the server process.'
+                            '(DEPRECATED. This argument is deprecated '
+                            'and will be removed in a future update. '
+                            'Set `VLLM_ALLOW_ENGINE_USE_RAY=1` to force '
+                            'use it. See '
+                            'https://github.com/vllm-project/vllm/issues/7045.'
+                            ')')
         parser.add_argument('--disable-log-requests',
                             action='store_true',
                             help='Disable logging requests.')
