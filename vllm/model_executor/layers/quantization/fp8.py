@@ -408,27 +408,29 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 layer.w13_input_scale = torch.nn.Parameter(
                     layer.w13_input_scale.max(), requires_grad=False)
                 layer.w2_input_scale = torch.nn.Parameter(
-                                                    requires_grad=False)
+                    layer.w2_input_scale.max(), requires_grad=False)
             # If rocm, normalize the weights and scales to e4m3fnuz
             if is_hip():
-                w13_weight, w13_scale, a13_scale = convert_to_e4m3fnuz(
-                    layer.w13_weight, layer.w13_scale, layer.a13_scale)
-                w2_weight, w2_scale, a2_scale = convert_to_e4m3fnuz(
-                    layer.w2_weight, layer.w2_scale, layer.a2_scale)
+                w13_weight, w13_weight_scale, w13_input_scale = convert_to_e4m3fnuz(
+                    layer.w13_weight, layer.w13_weight_scale,
+                    layer.w13_input_scale)
+                w2_weight, w2_weight_scale, w2_input_scale = convert_to_e4m3fnuz(
+                    layer.w2_weight, layer.w2_weight_scale,
+                    layer.w2_input_scale)
                 layer.w13_weight = torch.nn.Parameter(w13_weight,
                                                       requires_grad=False)
-                layer.w13_scale = torch.nn.Parameter(w13_scale,
-                                                     requires_grad=False)
-                if a13_scale is not None:
-                    layer.a13_scale = torch.nn.Parameter(a13_scale,
-                                                         requires_grad=False)
+                layer.w13_weight_scale = torch.nn.Parameter(
+                    w13_weight_scale, requires_grad=False)
+                if w13_input_scale is not None:
+                    layer.w13_input_scale = torch.nn.Parameter(
+                        w13_input_scale, requires_grad=False)
                 layer.w2_weight = torch.nn.Parameter(w2_weight,
                                                      requires_grad=False)
-                layer.w2_scale = torch.nn.Parameter(w2_scale,
-                                                    requires_grad=False)
-                if a2_scale is not None:
-                    layer.a2_scale = torch.nn.Parameter(a2_scale,
-                        layer.w2_input_scale.max(), requires_grad=False)
+                layer.w2_weight_scale = torch.nn.Parameter(w2_weight_scale,
+                                                           requires_grad=False)
+                if w2_input_scale is not None:
+                    layer.w2_input_scale = torch.nn.Parameter(
+                        w2_input_scale, requires_grad=False)
 
             # Fp8 moe kernel needs single weight scale for w13 per expert.
             # We take the max then dequant and requant each expert.
