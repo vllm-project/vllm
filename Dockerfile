@@ -44,17 +44,7 @@ RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 
 WORKDIR /workspace
 
-# install build and runtime dependencies
-
-# arm64 (GH200) build follows the practice of "use existing pytorch" build,
-# we need to install torch and torchvision from the nightly builds first,
-# pytorch will not appear as a vLLM dependency in all of the following steps
-# after this step
-RUN --mount=type=cache,target=/root/.cache/pip \
-    if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-        python3 -m pip install --index-url https://download.pytorch.org/whl/nightly/cu126 "torch==2.7.0.dev20250121+cu126" "torchvision==0.22.0.dev20250121";  \
-    fi
-
+# install runtime dependencies
 COPY requirements-common.txt requirements-common.txt
 COPY requirements-cuda.txt requirements-cuda.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
@@ -79,7 +69,7 @@ ARG TARGETPLATFORM
 COPY requirements-build.txt requirements-build.txt
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install -r requirements-build.txt
+    python3 -m pip install build -r requirements-build.txt
 
 COPY . .
 ARG GIT_REPO_CHECK=0
@@ -112,7 +102,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         && export SCCACHE_IDLE_TIMEOUT=0 \
         && export CMAKE_BUILD_TYPE=Release \
         && sccache --show-stats \
-        && python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 \
+        && PIP_EXTRA_INDEX_URL="$([ "${TARGETPLATFORM}" = "linux/arm64" ] && echo "https://download.pytorch.org/whl/nightly/cu124")" \
+            python3 -m build --wheel --outdir=dist --no-isolation -v --config-setting py-limited-api=38  \
         && sccache --show-stats; \
     fi
 
@@ -121,7 +112,8 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,source=.git,target=.git  \
     if [ "$USE_SCCACHE" != "1" ]; then \
-        python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
+        PIP_EXTRA_INDEX_URL="$([ "${TARGETPLATFORM}" = "linux/arm64" ] && echo "https://download.pytorch.org/whl/nightly/cu124")" \
+            python3 -m build --wheel --outdir=dist --no-isolation -v --config-setting py-limited-api=38 -v ;\
     fi
 
 # Check the size of the wheel if RUN_WHEEL_CHECK is true
@@ -180,15 +172,6 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 # this won't be needed for future versions of this docker image
 # or future versions of triton.
 RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
-
-# arm64 (GH200) build follows the practice of "use existing pytorch" build,
-# we need to install torch and torchvision from the nightly builds first,
-# pytorch will not appear as a vLLM dependency in all of the following steps
-# after this step
-RUN --mount=type=cache,target=/root/.cache/pip \
-    if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-        python3 -m pip install --index-url https://download.pytorch.org/whl/nightly/cu124 "torch==2.6.0.dev20241210+cu124" "torchvision==0.22.0.dev20241215";  \
-    fi
 
 # Install vllm wheel first, so that torch etc will be installed.
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
