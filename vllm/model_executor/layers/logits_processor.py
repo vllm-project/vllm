@@ -84,7 +84,7 @@ class LogitsProcessor(nn.Module):
                                              hidden_states,
                                              bias=embedding_bias)
         print("SANG-TODO before logits gather")
-        if self.use_gather:
+        if self.use_gather and False:
             # None may be returned for rank > 0
             logits = tensor_model_parallel_gather(logits)
         else:

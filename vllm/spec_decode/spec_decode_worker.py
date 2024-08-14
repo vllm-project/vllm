@@ -653,8 +653,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 execute_model_req,
                 proposals,
             )
-        if proposal_scores is None:
-            return []
+        # if proposal_scores is None:
+        #     return []
         print(f"SANG-TODO {proposal_scores=}")
         with Timer() as verification_timer:
             accepted_token_ids, target_logprobs = self._verify_tokens(

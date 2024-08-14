@@ -86,8 +86,6 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             execute_model_req=execute_model_req.clone(
                 seq_group_metadata_list=target_seq_group_metadata_list))
         print(f"SANG-TODO after execute target model")
-        if len(target_sampler_output) == 0:
-            return None
         assert len(target_sampler_output) == 1, "expected single-step output"
         target_sampler_output = target_sampler_output[0]
 

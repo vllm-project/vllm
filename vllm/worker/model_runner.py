@@ -1558,8 +1558,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                                            model_input.sampling_metadata)
         print(f"SANG-TODO model runner after compute logits")
 
-        if not self.is_driver_worker:
-            return []
+        # if not self.is_driver_worker:
+        #     return []
 
         # Sample the next token.
         output: SamplerOutput = self.model.sample(
