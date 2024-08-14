@@ -21,7 +21,7 @@ struct InterleavedNumericArrayConverter {
   CUTLASS_DEVICE
   static result_type convert(source_type const& source) {
     CUTE_INVALID_CONTROL_PATH(
-        "InterleavedNumericArrayConverter not impleted\n");
+        "InterleavedNumericArrayConverter not implemented\n");
     return {};
   }
 
@@ -73,7 +73,7 @@ struct ArrayConverterPacked32Bit {
 
   // Maybe not Valid,. ScalarConverter will not actually work unless
   //  NumericConverter<T, S, Round> is implemented
-  // but it won't be used since we assert N % 2 == 0, jus here for compliance
+  // but it won't be used since we assert N % 2 == 0, just here for compliance
   // with VectorizedConverter
   using ScalarConverter = NumericConverter<T, S>;
 

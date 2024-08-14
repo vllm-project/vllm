@@ -1343,7 +1343,7 @@ struct MacheteCollectiveMma {
 
       // We need to cast to nv_bfloat16 for the multiply since
       // `cutlass::bfloat16_t` has an overloaded operator* that upconverts to
-      // float, which nvcc will not optimize to useing vectorized fma
+      // float, which nvcc will not optimize to using vectorized fma
       // instructions (i.e. hfma.bf16_v2)
       if constexpr (std::is_same_v<ElementScale, cutlass::bfloat16_t>) {
         cute::transform(
