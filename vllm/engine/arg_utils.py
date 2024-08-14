@@ -115,6 +115,7 @@ class EngineArgs:
     lora_dtype: str = 'auto'
     max_cpu_loras: Optional[int] = None
     device: str = 'auto'
+    num_scheduler_steps: int = 1
     ray_workers_use_nsight: bool = False
     num_gpu_blocks_override: Optional[int] = None
     num_lookahead_slots: int = 0
@@ -543,6 +544,11 @@ class EngineArgs:
                                 "tpu", "xpu"
                             ],
                             help='Device type for vLLM execution.')
+        parser.add_argument('--num-scheduler-steps',
+                            type=int,
+                            default=1,
+                            help=('Maximum number of forward steps per '
+                                  'scheduler call.'))
 
         parser.add_argument(
             '--scheduler-delay-factor',
@@ -858,18 +864,34 @@ class EngineArgs:
             disable_logprobs=self.disable_logprobs_during_spec_decoding,
         )
 
+        if self.num_scheduler_steps > 1:
+            raise NotImplementedError("Multi-step is not yet supported.")
+            if speculative_config is not None:
+                raise ValueError("Speculative decoding is not supported with "
+                                 "multi-step (--num-scheduler-steps > 1)")
+            if self.enable_chunked_prefill:
+                raise ValueError("Chunked prefill is not supported with "
+                                 "multi-step (--num-scheduler-steps > 1)")
+
+        # make sure num_lookahead_slots is set the higher value depending on
+        # if we are using speculative decoding or multi-step
+        num_lookahead_slots = max(self.num_lookahead_slots,
+                                  self.num_scheduler_steps - 1)
+        num_lookahead_slots = num_lookahead_slots \
+            if speculative_config is None \
+            else speculative_config.num_lookahead_slots
+
         scheduler_config = SchedulerConfig(
             max_num_batched_tokens=self.max_num_batched_tokens,
             max_num_seqs=self.max_num_seqs,
             max_model_len=model_config.max_model_len,
             use_v2_block_manager=self.use_v2_block_manager,
-            num_lookahead_slots=(self.num_lookahead_slots
-                                 if speculative_config is None else
-                                 speculative_config.num_lookahead_slots),
+            num_lookahead_slots=num_lookahead_slots,
             delay_factor=self.scheduler_delay_factor,
             enable_chunked_prefill=self.enable_chunked_prefill,
             embedding_mode=model_config.embedding_mode,
             preemption_mode=self.preemption_mode,
+            num_scheduler_steps=self.num_scheduler_steps,
         )
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
