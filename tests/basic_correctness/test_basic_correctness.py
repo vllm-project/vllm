@@ -9,6 +9,7 @@ import pytest
 
 from vllm import LLM
 from vllm.utils import is_hip
+from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 
 from ..models.utils import check_outputs_equal
 
@@ -20,7 +21,9 @@ MODELS = [
 
 def test_vllm_gc_ed():
     """Verify vllm instance is GC'ed when it is deleted"""
-    llm = LLM("facebook/opt-125m")
+    model = "facebook/opt-125m"
+    path_to_tensors = f"s3://vllm-model-cache/vllm/{model}/v1/model.tensors"
+    llm = LLM(model, load_format="tensorizer", model_loader_extra_config=TensorizerConfig(tensorizer_uri=path_to_tensors, num_readers=4, s3_endpoint="https://vllm-model-cache.s3.us-west-2.amazonaws.com"))
     weak_llm = weakref.ref(llm)
     del llm
     # If there's any circular reference to vllm, this fails

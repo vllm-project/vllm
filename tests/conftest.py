@@ -29,6 +29,7 @@ from vllm.outputs import RequestOutput
 from vllm.sequence import SampleLogprobs
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, cuda_device_count_stateless,
                         identity, is_cpu)
+from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 
 logger = init_logger(__name__)
 
@@ -541,6 +542,7 @@ class VllmRunner:
         enforce_eager: Optional[bool] = False,
         **kwargs,
     ) -> None:
+        path_to_tensors = f"s3://vllm-model-cache/vllm/{model_name}/v1/model.tensors"
         self.model = LLM(
             model=model_name,
             tokenizer=tokenizer_name,
@@ -553,6 +555,8 @@ class VllmRunner:
             max_model_len=max_model_len,
             block_size=block_size,
             enable_chunked_prefill=enable_chunked_prefill,
+            load_format="tensorizer", 
+            model_loader_extra_config=TensorizerConfig(tensorizer_uri=path_to_tensors, num_readers=4, s3_endpoint="https://vllm-model-cache.s3.us-west-2.amazonaws.com")
             **kwargs,
         )
 
