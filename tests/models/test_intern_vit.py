@@ -1,4 +1,3 @@
-import tempfile
 from typing import Optional
 
 import pytest
@@ -7,11 +6,9 @@ import torch.nn as nn
 from huggingface_hub import snapshot_download
 from transformers import AutoConfig, AutoModel, CLIPImageProcessor
 
-from vllm.distributed import (init_distributed_environment,
-                              initialize_model_parallel)
 from vllm.model_executor.models.intern_vit import InternVisionModel
 
-from ..conftest import _ImageAssets, cleanup
+from ..conftest import _ImageAssets, cleanup, dist_init
 
 pytestmark = pytest.mark.vlm
 
@@ -39,16 +36,6 @@ def run_intern_vit_test(
         img_processor(images, return_tensors='pt').pixel_values.to(dtype)
         for images in images
     ]
-
-    temp_file = tempfile.mkstemp()[1]
-    init_distributed_environment(
-        world_size=1,
-        rank=0,
-        distributed_init_method=f"file://{temp_file}",
-        local_rank=0,
-        backend=distributed_executor_backend,
-    )
-    initialize_model_parallel(1, 1)
 
     config = AutoConfig.from_pretrained(model, trust_remote_code=True)
     if not getattr(config, "norm_type", None):
@@ -85,7 +72,7 @@ def run_intern_vit_test(
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("dtype", [torch.half])
 @torch.inference_mode()
-def test_models(image_assets, model, dtype: str) -> None:
+def test_models(dist_init, image_assets, model, dtype: str) -> None:
     run_intern_vit_test(
         image_assets,
         model,
