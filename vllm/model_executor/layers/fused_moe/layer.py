@@ -247,6 +247,12 @@ class FusedMoE(torch.nn.Module):
                                        tp_rank: int):
         # for per channel weight quantization
         if shard_id == "w2":
+            shard_dim = 1
+            shard_size = expert_data.shape[1]
+            # move this to a group size function
+            loaded_weight = loaded_weight.narrow(shard_dim,
+                                                 tp_rank * shard_size,
+                                                 shard_size)
             expert_data.copy_(loaded_weight)
         elif shard_id in ("w1", "w3"):
             self._load_w13(shard_id=shard_id,
@@ -410,8 +416,9 @@ class FusedMoE(torch.nn.Module):
 
         if "weight_scale" in weight_name:
             quant_method = getattr(param, "quant_method", None)
-            if quant_method == WeightScaleSupported.CHANNEL.value:
-                self._load_per_channel_weight_scale(
+            if (quant_method == WeightScaleSupported.CHANNEL.value
+                    or quant_method == WeightScaleSupported.GROUP.value):
+                self._load_per_channel_group_weight_scale(
                     shard_id=shard_id,
                     loaded_weight=loaded_weight,
                     expert_data=expert_data,
