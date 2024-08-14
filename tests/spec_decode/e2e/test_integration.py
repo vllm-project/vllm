@@ -57,6 +57,7 @@ def test_spec_decode_cuda_graph(baseline_llm_generator, test_llm_generator,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [
     {
+        "speculative_model": "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit",
         "num_speculative_tokens": 5,
     },
 ])
@@ -65,21 +66,15 @@ def test_spec_decode_cuda_graph(baseline_llm_generator, test_llm_generator,
     [
         # Explicitly specify draft model quantization
         {
-            "speculative_model": "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit",
             "speculative_model_quantization": "gptq",
         },
+        # Explicitly specify GPTQ-based draft model to use marlin quantization
         {
-            "speculative_model": "neuralmagic/TinyLlama-1.1B-Chat-v1.0-marlin",
             "speculative_model_quantization": "marlin",
         },
         # Not explicitly specify draft model quantization
         {
-            "speculative_model": "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit",
-            "speculative_model_quantization": "None",
-        },
-        {
-            "speculative_model": "neuralmagic/TinyLlama-1.1B-Chat-v1.0-marlin",
-            "speculative_model_quantization": "None",
+            "speculative_model_quantization": None,
         },
     ])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
