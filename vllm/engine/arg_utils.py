@@ -865,7 +865,6 @@ class EngineArgs:
         )
 
         if self.num_scheduler_steps > 1:
-            raise NotImplementedError("Multi-step is not yet supported.")
             if speculative_config is not None:
                 raise ValueError("Speculative decoding is not supported with "
                                  "multi-step (--num-scheduler-steps > 1)")
