@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 
 import torch
 
@@ -272,7 +272,7 @@ class ipex_ops:
     @staticmethod
     def copy_blocks(key_caches: List[torch.Tensor],
                     value_caches: List[torch.Tensor],
-                    block_mapping: torch.Tensor) -> None:
+                    block_mapping) -> None:
         # torch.xpu.copy_blocks(  # type: ignore
         #     key_caches,
         #     value_caches,
@@ -282,6 +282,6 @@ class ipex_ops:
 
     @staticmethod
     def swap_blocks(src: torch.Tensor, dst: torch.Tensor,
-                    block_mapping: torch.Tensor) -> None:
+                    block_mapping) -> None:
         # torch.xpu.swap_blocks(src, dst, block_mapping)  # type: ignore
         vllm._C.cache_ops.swap_blocks(key_caches, value_caches, block_mapping)
