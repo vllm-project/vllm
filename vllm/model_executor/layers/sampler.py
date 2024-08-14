@@ -118,8 +118,9 @@ class Sampler(nn.Module):
                                       sampling_tensors.frequency_penalties,
                                       sampling_tensors.repetition_penalties)
 
-        # Apply temperature scaling.
+        # Use float32 to apply temperature scaling.
         # Use in-place division to avoid creating a new tensor.
+        logits = logits.to(torch.float)
         logits.div_(sampling_tensors.temperatures.unsqueeze(dim=1))
 
         if do_top_p_top_k:
