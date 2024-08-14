@@ -98,7 +98,7 @@ HIDDEN_SIZES = [
     128256,
 ]
 #The size of TP
-divisibility = [1, 2, 4, 8, 16, 32, 64]
+divisibility = [1, 2, 8, 16, 64]
 
 all_hidden_size = []
 for div in divisibility:
