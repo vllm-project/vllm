@@ -24,7 +24,7 @@ from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 SERVER_START_TIMEOUT_MS = 1000
 
 # Inprocess path
-INPROC_PATH = f"inproc://{uuid4()}"
+INPROC_PROXY_PATH = f"inproc://{uuid4()}"
 
 
 class AsyncEngineRPCClient:
@@ -34,18 +34,25 @@ class AsyncEngineRPCClient:
         self.context.set(zmq.constants.MAX_SOCKETS,
                          self.context.get(zmq.constants.SOCKET_LIMIT))
 
-        # PROXY
+        # In process proxy to RPC Server.
         self.from_client = self.context.socket(zmq.constants.ROUTER)
-        self.from_client.bind(INPROC_PATH)
+        self.from_client.bind(INPROC_PROXY_PATH)
 
-        # Connection to RPC Server.
+        # IPC connection to RPC Server.
         self.to_server = self.context.socket(zmq.constants.DEALER)
         self.to_server.connect(rpc_path)
 
+        # Background task for proxy.
         self.proxy_task = asyncio.create_task(
             self.run_proxy(self.from_client, self.to_server))
 
+        # Maximum number of requests that can be active.
+        # Note: used to set uvicorn --limit-concurrency
+        self.limit_concurrency = self.context.get(
+            zmq.constants.SOCKET_LIMIT)
+
     async def run_proxy(self, socket_from, socket_to):
+        """Background task that runs a proxy"""
         poller = zmq.asyncio.Poller()
         poller.register(socket_from, zmq.constants.POLLIN)
         poller.register(socket_to, zmq.constants.POLLIN)
@@ -93,7 +100,7 @@ class AsyncEngineRPCClient:
         # to enable streaming.
         socket = self.context.socket(zmq.constants.DEALER)
         try:
-            socket.connect(INPROC_PATH)
+            socket.connect(INPROC_PROXY_PATH)
             yield socket
         finally:
             # linger == 0 means discard unsent messages

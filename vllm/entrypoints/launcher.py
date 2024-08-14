@@ -26,7 +26,11 @@ async def serve_http(app: FastAPI, engine: AsyncEngineClient,
 
         logger.info("Route: %s, Methods: %s", path, ', '.join(methods))
 
-    config = uvicorn.Config(app, **uvicorn_kwargs)
+    logger.info("Launching uvicorn with --limit-concurrency %s", 
+                engine.limit_concurrency)
+    config = uvicorn.Config(app, 
+                            limit_concurrency=engine.limit_concurrency,
+                            **uvicorn_kwargs)
     server = uvicorn.Server(config)
     _add_shutdown_handlers(app, server, engine)
 
