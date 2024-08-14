@@ -178,19 +178,62 @@ MESSAGES_ASKING_FOR_PARALLEL_TOOLS: List[ChatCompletionMessageParam] = [{
     "Fahrenheit?"
 }]
 
+MESSAGES_WITH_PARALLEL_TOOL_RESPONSE: List[ChatCompletionMessageParam] = [{
+    "role":
+    "user",
+    "content":
+    "What is the weather in Dallas, Texas and Orlando, Florida in "
+    "Fahrenheit?"
+}, {
+    "role":
+    "assistant",
+    "tool_calls": [{
+        "id": "chatcmpl-tool-03e6481b146e408e9523d9c956696295",
+        "type": "function",
+        "function": {
+            "name":
+            WEATHER_TOOL["function"]["name"],
+            "arguments":
+            '{"city": "Dallas", "state": "TX", '
+            '"unit": "fahrenheit"}'
+        }
+    }, {
+        "id": "chatcmpl-tool-d027061e1bd21cda48bee7da829c1f5b",
+        "type": "function",
+        "function": {
+            "name":
+            WEATHER_TOOL["function"]["name"],
+            "arguments":
+            '{"city": "Orlando", "state": "Fl", '
+            '"unit": "fahrenheit"}'
+        }
+    }]
+}, {
+    "role":
+    "tool",
+    "tool_call_id":
+    "chatcmpl-tool-03e6481b146e408e9523d9c956696295",
+    "content":
+    "The weather in Dallas TX is 98 degrees fahrenheit with mostly "
+    "cloudy skies and a chance of rain in the evening."
+}, {
+    "role":
+    "tool",
+    "tool_call_id":
+    "chatcmpl-tool-d027061e1bd21cda48bee7da829c1f5b",
+    "content":
+    "The weather in Orlando FL is 78 degrees fahrenheit with clear"
+    "skies."
+}]
+
 
 # for each server config, download the model and return the config
 @pytest.fixture(scope="module", params=CONFIGS.keys())
 def server_config(request):
     config = CONFIGS[request.param]
-
-    print(f'downloading model for {config["model"]}')
-
     # download model and tokenizer using transformers
     snapshot_download(config["model"])
-    print(f'downloaded model {config["model"]}')
     yield CONFIGS[request.param]
-    print(f'Cleaning up vLLM server for {config["model"]} ')
 
 
 # run this for each server config
@@ -198,11 +241,9 @@ def server_config(request):
 def server(request, server_config: ServerConfig):
     model = server_config["model"]
     args_for_model = server_config["arguments"]
-    print(f"Starting server for {model}")
     with RemoteOpenAIServer(model, ARGS + args_for_model,
                             max_start_wait_s=240) as server:
         yield server
-    print(f'shutting down server for {model}')
 
 
 @pytest.fixture(scope="module")
@@ -657,3 +698,59 @@ async def test_parallel_tool_calls(client: openai.AsyncOpenAI):
 
 # test: providing parallel tool calls back to the model to get a response
 # (streaming/not)
+@pytest.mark.asyncio
+async def test_parallel_tool_calls_with_results(client: openai.AsyncOpenAI):
+    models = await client.models.list()
+    model_name: str = models.data[0].id
+    chat_completion = await client.chat.completions.create(
+        messages=MESSAGES_WITH_PARALLEL_TOOL_RESPONSE,
+        temperature=0,
+        max_tokens=500,
+        model=model_name,
+        tools=[WEATHER_TOOL, SEARCH_TOOL],
+        logprobs=False)
+
+    choice = chat_completion.choices[0]
+
+    assert choice.finish_reason != "tool_calls"  # "stop" or "length"
+    assert choice.message.role == "assistant"
+    assert choice.message.tool_calls is None \
+           or len(choice.message.tool_calls) == 0
+    assert choice.message.content is not None
+    assert "98" in choice.message.content  # Dallas temp in tool response
+    assert "78" in choice.message.content  # Orlando temp in tool response
+
+    stream = await client.chat.completions.create(
+        messages=MESSAGES_WITH_PARALLEL_TOOL_RESPONSE,
+        temperature=0,
+        max_tokens=500,
+        model=model_name,
+        tools=[WEATHER_TOOL, SEARCH_TOOL],
+        logprobs=False,
+        stream=True)
+
+    chunks: List[str] = []
+    finish_reason_count = 0
+    role_sent: bool = False
+
+    async for chunk in stream:
+        delta = chunk.choices[0].delta
+
+        if delta.role:
+            assert not role_sent
+            assert delta.role == "assistant"
+            role_sent = True
+
+        if delta.content:
+            chunks.append(delta.content)
+
+        if chunk.choices[0].finish_reason is not None:
+            finish_reason_count += 1
+            assert chunk.choices[0].finish_reason == choice.finish_reason
+
+        assert not delta.tool_calls or len(delta.tool_calls) == 0
+
+    assert role_sent
+    assert finish_reason_count == 1
+    assert len(chunks)
+    assert "".join(chunks) == choice.message.content
