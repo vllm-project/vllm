@@ -138,16 +138,27 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor _zeros, int split_k_iters, int thx, int thy) -> Tensor");
   ops.impl("awq_dequantize", torch::kCUDA, &awq_dequantize);
 
+  // Note about marlin kernel 'workspace' arguments:
+  // Technically these should be mutable since they are modified by the kernel.
+  // But since they are set back to zero once the kernel is finished we can
+  // hand wave and say that they have no net effect.
+  //
+  // The reason to mark 'workspace' as immutable is so that they don't interfere
+  // with using ScalarType arguments in the ops. If they are marked as mutable,
+  // pytorch throws an assert in
+  // 'torch._higher_order_ops._register_effectful_op' that prevents these
+  // kernels from being torch.compile'd.
+
   // Marlin (Dense) Optimized Quantized GEMM for GPTQ.
   ops.def(
       "marlin_gemm(Tensor a, Tensor b_q_weight, Tensor b_scales, "
-      "Tensor! workspace, int size_m, int size_n, int size_k) -> Tensor");
+      "Tensor workspace, int size_m, int size_n, int size_k) -> Tensor");
   ops.impl("marlin_gemm", torch::kCUDA, &marlin_gemm);
 
   // Marlin_24 (Sparse) Optimized Quantized GEMM for GPTQ.
   ops.def(
       "gptq_marlin_24_gemm(Tensor a, Tensor b_q_weight, Tensor b_meta, "
-      "Tensor b_scales, Tensor! workspace, "
+      "Tensor b_scales, Tensor workspace, "
       "__torch__.torch.classes._core_C.ScalarType b_q_type, "
       "int size_m, int size_n, int size_k) -> Tensor");
   ops.impl("gptq_marlin_24_gemm", torch::kCUDA, &gptq_marlin_24_gemm);
@@ -170,7 +181,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // gptq_marlin Optimized Quantized GEMM for GPTQ.
   ops.def(
       "gptq_marlin_gemm(Tensor a, Tensor b_q_weight, Tensor b_scales, "
-      "Tensor b_zeros, Tensor g_idx, Tensor perm, Tensor! workspace, "
+      "Tensor b_zeros, Tensor g_idx, Tensor perm, Tensor workspace, "
       "__torch__.torch.classes._core_C.ScalarType b_q_type, "
       "int size_m, int size_n, int size_k, bool is_k_full, "
       "bool has_zp, bool use_fp32_reduce) -> Tensor");
@@ -207,7 +218,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // fp8_marlin Optimized Quantized GEMM for FP8 weight-only.
   ops.def(
       "fp8_marlin_gemm(Tensor a, Tensor b_q_weight, Tensor b_scales, "
-      "Tensor! workspace, int num_bits, int size_m, int size_n, "
+      "Tensor workspace, int num_bits, int size_m, int size_n, "
       "int size_k) -> Tensor");
   ops.impl("fp8_marlin_gemm", torch::kCUDA, &fp8_marlin_gemm);
 
@@ -215,7 +226,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "marlin_qqq_gemm(Tensor a, Tensor b_q_weight, "
       "Tensor s_tok, Tensor s_ch, Tensor s_group, "
-      "Tensor! workspace, int size_m, int size_n, "
+      "Tensor workspace, int size_m, int size_n, "
       "int size_k) -> Tensor");
   ops.impl("marlin_qqq_gemm", torch::kCUDA, &marlin_qqq_gemm);
 
