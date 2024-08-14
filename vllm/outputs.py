@@ -118,7 +118,6 @@ class RequestOutput:
         cls,
         seq_group: SequenceGroup,
         prior_output_lens: Dict[int, Tuple[int, int]],
-        include_prompt: bool = True,
     ) -> Optional["RequestOutput"]:
         sampling_params = seq_group.sampling_params
         if sampling_params is None:
@@ -151,6 +150,7 @@ class RequestOutput:
         text_buffer_length = sampling_params.output_text_buffer_length
 
         outputs = []
+        include_prompt = True
         for seq in top_n_seqs:
             output_token_ids = seq.data._output_token_ids
             output_logprobs = seq.output_logprobs if include_logprobs else None
@@ -160,6 +160,7 @@ class RequestOutput:
             prior_out_token_len, prior_text_len = prior_output_lens.get(
                 seq.seq_id, (0, 0))
             if prior_out_token_len:
+                include_prompt = False
                 output_token_ids = output_token_ids[prior_out_token_len:]
                 if output_logprobs:
                     output_logprobs = output_logprobs[prior_out_token_len:]
@@ -274,5 +275,4 @@ class RequestOutputFactory:
             return EmbeddingRequestOutput.from_seq_group(seq_group)
         else:
             return RequestOutput.from_seq_group(seq_group,
-                                                previous_output_lens,
-                                                include_prompt)
+                                                previous_output_lens)
