@@ -30,6 +30,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     return generated_texts
 
+
 @pytest.mark.xfail(is_hip(), reason="There can be output mismatch on ROCm")
 def test_gemma_lora(gemma_lora_files):
     llm = vllm.LLM(MODEL_PATH,
