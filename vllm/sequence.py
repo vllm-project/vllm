@@ -4,7 +4,7 @@ import enum
 from abc import ABC, abstractmethod
 from array import array
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 from typing import (TYPE_CHECKING, Dict, List, Mapping, Optional, Set, Tuple,
                     Union, cast)
 
@@ -1040,6 +1040,7 @@ def get_all_seq_ids_and_request_ids(
     return seq_ids, request_id_seq_ids_mapping
 
 
+@dataclass
 class HiddenStates:
     """Hidden states corresponding to in-progress sequences.
     Used in speculative decoding to pass hidden states from
@@ -1047,35 +1048,38 @@ class HiddenStates:
 
     seq_ids are the sequence ids of each entry of the batch
     dimension of the hidden_states tensor"""
+    # The sequence group metadata list.
+    seq_group_metadata_list: InitVar[List[SequenceGroupMetadata]]
+    # Scorer hidden states of the last token accepted by the scorer.
+    hidden_states: torch.Tensor
+    # Scorer hidden states of the 2nd last token proposed by the proposer (
+    # irrespective of whether it was accepted or not). Only used for cases when
+    # last proposed token is accepted (i.e., in case of bonus tokens). For the
+    # case of no bonus tokens, these are ignored.
+    second_last_token_hidden_states: Optional[torch.Tensor] = None
 
-    def __init__(
-            self,
-            seq_group_metadata_list: List[SequenceGroupMetadata],
-            hidden_states: torch.Tensor,
-            last_non_bonus_token_hidden_states: Optional[torch.Tensor] = None):
-        assert len(seq_group_metadata_list) == len(hidden_states)
+    def __post_init__(self, 
+                      seq_group_metadata_list: List[SequenceGroupMetadata]):
+        assert len(seq_group_metadata_list) == len(self.hidden_states)
         self.seq_ids: List[int] = get_all_seq_ids(seq_group_metadata_list)
-        self.hidden_states: torch.Tensor = hidden_states
-        self.last_non_bonus_token_hidden_states: Optional[
-            torch.Tensor] = last_non_bonus_token_hidden_states
 
     def update(
             self,
             seq_group_metadata_list: List[SequenceGroupMetadata],
             hidden_states: torch.Tensor,
-            last_non_bonus_token_hidden_states: Optional[torch.Tensor] = None):
+            second_last_token_hidden_states: Optional[torch.Tensor] = None):
         """Update hidden states from target model invocation."""
         assert len(seq_group_metadata_list) == len(hidden_states)
         self.seq_ids.extend(get_all_seq_ids(seq_group_metadata_list))
         self.hidden_states = torch.cat([self.hidden_states, hidden_states])
 
-        if self.last_non_bonus_token_hidden_states is not None:
+        if self.second_last_token_hidden_states is not None:
             # Adding dummy hidden_states to this to maintain same shape
-            self.last_non_bonus_token_hidden_states = torch.cat([
-                self.last_non_bonus_token_hidden_states,
+            self.second_last_token_hidden_states = torch.cat([
+                self.second_last_token_hidden_states,
                 torch.zeros_like(hidden_states)
-                if last_non_bonus_token_hidden_states is None else
-                last_non_bonus_token_hidden_states
+                if second_last_token_hidden_states is None else
+                second_last_token_hidden_states
             ])
 
     def prune(self,
@@ -1086,14 +1090,14 @@ class HiddenStates:
             # Batch contents changed - prune removed sequences.
             index = [self.seq_ids.index(seq_id) for seq_id in seq_ids]
             self.hidden_states = self.hidden_states[index]
-            if self.last_non_bonus_token_hidden_states is not None:
-                self.last_non_bonus_token_hidden_states = self\
-                    .last_non_bonus_token_hidden_states[index]
+            if self.second_last_token_hidden_states is not None:
+                self.second_last_token_hidden_states = self\
+                    .second_last_token_hidden_states[index]
             self.seq_ids = seq_ids
 
     def expand_with_bonus_tokens(
             self, seq_with_bonus_token_in_last_step: set) -> None:
-        if self.last_non_bonus_token_hidden_states is None \
+        if self.second_last_token_hidden_states is None \
             or not seq_with_bonus_token_in_last_step:
             return
 
@@ -1106,7 +1110,7 @@ class HiddenStates:
 
         self.hidden_states = torch.cat(
             [self.hidden_states,
-             self.last_non_bonus_token_hidden_states])[index]
+             self.second_last_token_hidden_states])[index]
 
 
 @dataclass
