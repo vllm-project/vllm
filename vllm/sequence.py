@@ -678,8 +678,7 @@ class SequenceGroup:
 
     def get_num_uncomputed_tokens(self) -> int:
         num_uncomputed_tokens = 0
-        seqs = self.seqs + self.encoder_seq
-        for seq in seqs:
+        for seq in self.seqs:
             if not seq.is_finished():
                 num_uncomputed_tokens += seq.data.get_num_uncomputed_tokens()
         return num_uncomputed_tokens
@@ -759,7 +758,7 @@ class SequenceGroupMetadata:
             used in prefix caching.
         multi_modal_data: Multi modal data.
         encoder_seq_data: Optional sequence data for encoder prompt
-                          (SequenceGroup.encoder_seq). Should be None 
+                          (SequenceGroup.encoder_seq). Should be None
                           unless you are working with an encoder/decoder
                           model.
         cross_block_table: Optional cross-attention block table associated
