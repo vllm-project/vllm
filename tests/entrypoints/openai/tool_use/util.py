@@ -34,7 +34,8 @@ CONFIGS: Dict[str, ServerConfig] = {
         "mistralai/Mistral-7B-Instruct-v0.3",
         "arguments": [
             "--tool-call-parser", "mistral", "--chat-template",
-            str(VLLM_PATH / "examples/tool_chat_template_mistral.jinja")
+            str(VLLM_PATH / "examples/tool_chat_template_mistral.jinja"),
+            "--ignore-patterns=\"consolidated.safetensors\""
         ]
     }
 }
