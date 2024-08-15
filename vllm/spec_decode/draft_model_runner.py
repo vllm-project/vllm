@@ -134,7 +134,7 @@ class TP1DraftModelRunner(ModelRunner):
         # Update attn_metadata
         attn_metadata = model_input.attn_metadata
         assert isinstance(attn_metadata, FlashAttentionMetadata)
-        attn_metadata.update_flash_attn_metadata(num_seqs, num_queries)
+        attn_metadata.advance_step(num_seqs, num_queries)
 
         # Update GPU tensors
         ops.advance_step(num_seqs=num_seqs,
