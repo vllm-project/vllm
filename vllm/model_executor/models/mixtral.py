@@ -289,7 +289,6 @@ class MixtralDecoderLayer(nn.Module):
         # )
         self.block_sparse_moe = QuantMixtralMoE(
             config,
-            use_fused_moe=True,
             quant_config=quant_config,
             prefix=f"{prefix}.block_sparse_moe",
         )
@@ -426,7 +425,6 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
 
         self.config = config
         self.lora_config = lora_config
-        self.use_fused_moe = config.torch_dtype != torch.float8_e4m3fn
         self.model = MixtralModel(
             config, cache_config, quant_config, lora_config=lora_config, prefix="model"
         )
