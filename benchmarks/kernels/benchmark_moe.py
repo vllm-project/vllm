@@ -181,7 +181,9 @@ class BenchmarkWorker:
         use_int8_w8a16: bool,
     ) -> Tuple[Dict[str, int], float]:
         torch.cuda.manual_seed_all(self.seed)
-        dtype_str = get_config_dtype_str(dtype, use_int8_w8a16, use_int8_w8a16)
+        dtype_str = get_config_dtype_str(dtype,
+                                         use_int8_w8a16=use_int8_w8a16,
+                                         use_fp8_w8a8=use_fp8_w8a8)
         # NOTE(woosuk): The current naming convention uses w2.shape[2], which
         # is the intermediate size after silu_and_mul.
         op_config = get_moe_configs(num_experts, shard_intermediate_size // 2,
@@ -253,7 +255,9 @@ def save_configs(configs: Dict[int, BenchmarkConfig], num_experts: int,
                  shard_intermediate_size: int, hidden_size: int, topk: int,
                  dtype: torch.dtype, use_fp8_w8a8: bool,
                  use_int8_w8a16: bool) -> None:
-    dtype_str = get_config_dtype_str(dtype, use_int8_w8a16, use_int8_w8a16)
+    dtype_str = get_config_dtype_str(dtype,
+                                     use_int8_w8a16=use_int8_w8a16,
+                                     use_fp8_w8a8=use_fp8_w8a8)
 
     # NOTE(woosuk): The current naming convention uses w2.shape[2], which
     # is the intermediate size after silu_and_mul.
