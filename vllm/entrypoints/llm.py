@@ -276,7 +276,7 @@ class LLM:
     def generate(
         self,
         prompts: Union[Union[PromptInputs, Sequence[PromptInputs]],
-                       Optional[Union[str, List[str]]], ] = None,
+                       Optional[Union[str, List[str]]]] = None,
         sampling_params: Optional[Union[SamplingParams,
                                         Sequence[SamplingParams]]] = None,
         prompt_token_ids: Optional[Union[List[int], List[List[int]]]] = None,
@@ -485,7 +485,7 @@ class LLM:
     def encode(
         self,
         prompts: Union[Union[PromptInputs, Sequence[PromptInputs]],
-                       Optional[Union[str, List[str]]], ] = None,
+                       Optional[Union[str, List[str]]]] = None,
         pooling_params: Optional[Union[PoolingParams,
                                        Sequence[PoolingParams]]] = None,
         prompt_token_ids: Optional[Union[List[int], List[List[int]]]] = None,
@@ -565,8 +565,8 @@ class LLM:
         if prompts is not None:
             num_requests = len(prompts)
         if prompt_token_ids is not None:
-            if num_requests is not None and num_requests != len(
-                    prompt_token_ids):
+            if (num_requests is not None
+                    and num_requests != len(prompt_token_ids)):
                 raise ValueError("The lengths of prompts and prompt_token_ids "
                                  "must be the same.")
 
@@ -592,7 +592,7 @@ class LLM:
         self,
         inputs: Union[PromptInputs, Sequence[PromptInputs]],
         params: Union[SamplingParams, Sequence[SamplingParams], PoolingParams,
-                      Sequence[PoolingParams], ],
+                      Sequence[PoolingParams]],
         lora_request: Optional[Union[Sequence[LoRARequest], LoRARequest]],
         prompt_adapter_request: Optional[PromptAdapterRequest],
         guided_options: Optional[GuidedDecodingRequest] = None,
