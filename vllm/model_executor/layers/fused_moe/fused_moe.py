@@ -473,7 +473,7 @@ def fused_experts(hidden_states: torch.Tensor,
     if use_fp8_w8a8:
         config_dtype = "float8"
     elif use_int8_w8a16:
-        config_dtype = "int8"
+        config_dtype = "int8_w8a16"
     elif hidden_states.dtype == torch.float:
         # avoiding cases where kernel fails when float32 MoE
         # use fp16/bfloat16 configs
