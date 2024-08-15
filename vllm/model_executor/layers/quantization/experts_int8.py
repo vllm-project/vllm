@@ -105,20 +105,30 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
               use_grouped_topk: bool = False,
               num_expert_group: Optional[int] = None,
               topk_group: Optional[int] = None) -> torch.Tensor:
-        from vllm.model_executor.layers.fused_moe import fused_moe
-        return fused_moe(x,
-                         layer.w13_weight,
-                         layer.w2_weight,
-                         router_logits,
-                         top_k,
-                         renormalize=renormalize,
-                         inplace=True,
-                         use_int8_w8a16=True,
-                         w1_scale=layer.w13_scale,
-                         w2_scale=layer.w2_scale,
-                         use_grouped_topk=use_grouped_topk,
-                         num_expert_group=num_expert_group,
-                         topk_group=topk_group)
+        from vllm.model_executor.layers.fused_moe import fused_experts
+
+        topk_weights, topk_ids = FusedMoE.select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            use_grouped_topk=use_grouped_topk,
+            top_k=top_k,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group)
+
+        return fused_experts(x,
+                             layer.w13_weight,
+                             layer.w2_weight,
+                             topk_weights=topk_weights,
+                             topk_ids=topk_ids,
+                             inplace=True,
+                             use_int8_w8a16=True,
+                             w1_scale=layer.w13_scale,
+                             w2_scale=layer.w2_scale,
+                             a1_scale=layer.w13_input_scale,
+                             a2_scale=layer.w2_input_scale)
+
+
 
     @staticmethod
     def quantizing_weight_loader(layer, weight_loader):
