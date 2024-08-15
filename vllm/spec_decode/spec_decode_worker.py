@@ -581,6 +581,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         return outputs
     
     def _create_speculative_proposer_sampler_outputs(self, proposals: SpeculativeProposals) -> list[SpeculativeProposerSamplerOutput]:
+        # Transform data from batch index major to step major such
+        # that we return list of outputs where each item in list represent
+        # particular step and contains token of this step for every element in the batch
         speculative_proposer_sampler_outputs = [
             SpeculativeProposerSamplerOutput(token_indices=token_indices)
             for token_indices in proposals.proposal_token_ids.T
@@ -589,6 +592,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         return speculative_proposer_sampler_outputs
 
     def _create_speculative_scorer_sampler_outputs(self, proposal_scores: SpeculativeScores) -> list[SpeculativeScorerSamplerOutput]:
+        # Transform data from batch index major to step major such
+        # that we return list of outputs where each item in list represent
+        # particular step and contains token of this step for every element in the batch
         speculative_scorer_sampler_outputs = [
             SpeculativeScorerSamplerOutput(token_indices=token_indices)
             for token_indices in proposal_scores.token_ids.T
