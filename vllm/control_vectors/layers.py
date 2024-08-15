@@ -11,12 +11,8 @@ from vllm.control_vectors.request import ControlVectorRequest
 class ControlVectorMapping:
     layer_mapping: Dict[int, torch.Tensor]
     
-
-
 class BaseLayerWithControlVector(nn.Module):
     pass
-
-
 
 class MLPWithControlVector(BaseLayerWithControlVector):
 

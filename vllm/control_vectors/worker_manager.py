@@ -154,8 +154,6 @@ class LRUCacheWorkerControlVectorManager(WorkerControlVectorManager):
 
     def add_adapter(self,
                     control_vector_request: ControlVectorRequest) -> bool:
-        print("CV control id ", control_vector_request.control_vector_id)
-        print(self.list_adapters())
         if control_vector_request.control_vector_id not in self.list_adapters(
         ):
             # Remove before we load the new control vector to save memory
@@ -164,10 +162,7 @@ class LRUCacheWorkerControlVectorManager(WorkerControlVectorManager):
             control_vector = self._load_adapter(control_vector_request)
             loaded = self._adapter_manager.add_adapter(control_vector)
         else:
-            # If the control vector is already loaded, just touch it to
-            # update its position in the caches
-            loaded = self._adapter_manager.get_adapter(
-                control_vector_request.control_vector_id) is not None
+            loaded = self._adapter_manager.get_adapter(control_vector_request.adapter_id)
         self._adapter_manager.activate_adapter(
             control_vector_request.control_vector_id)
         return loaded

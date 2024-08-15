@@ -85,11 +85,11 @@ class ControlVectorModelManager(AdapterModelManager):
     
     @property
     def adapter_slots(self)->int:
-        return self.control_vector_config.max_control_vectors
+        return self.capacity
     
     @property
     def capacity(self)->int:
-        return self.control_vector_config.max_control_vectors - len(self._active_adapters)
+        return self.control_vector_config.max_control_vectors
     
     def activate_adapter(
         self,
@@ -106,14 +106,13 @@ class ControlVectorModelManager(AdapterModelManager):
         index, _ = first_free_slot
         self._active_adapters[control_vector_id] = None
         control_vector_model = (self._registered_adapters[control_vector_id])
-        # logger.debug("Activating control vector. int id: %d, slot index: %d",
-        #              control_vector_model.id, index)
+        logger.debug("Activating control vector. int id: %d, slot index: %d",
+                     control_vector_model.id, index)
         self.control_vector_index_to_id[index] = control_vector_model.id
-        # print("MODULES", self.modules.items())
         for k, v in self.modules.items():
-            index = parse_number_from_string(k)
-            if index < len(control_vector_model.control_vector_weights):
-                v.set_control_vector(index, control_vector_model.control_vector_weights[index] * control_vector_model.scale_factor)
+            layer_index = parse_number_from_string(k)
+            if layer_index < len(control_vector_model.control_vector_weights):
+                v.set_control_vector(index, control_vector_model.control_vector_weights[layer_index] * control_vector_model.scale_factor)
         return True
         
     def _deactivate_adapter(self, control_vector_id: int):
@@ -143,8 +142,6 @@ class ControlVectorModelManager(AdapterModelManager):
     def remove_adapter(self, adapter_id: int)-> bool:
         if adapter_id in self._registered_adapters:
             del self._registered_adapters[adapter_id]
-
-
     
     def _create_cv_modules(self):
         for module_name, module in self.model.named_modules():
@@ -181,10 +178,6 @@ class ControlVectorModelManager(AdapterModelManager):
     def add_adapter(self, adapter: ControlVectorModel) -> bool:
         return add_adapter(adapter, self._registered_adapters, self.capacity,
                            self._add_adapter)
-
-    def deactivate_adapter(self, adapter_id: int) -> bool:
-        return self._deactivate_adapter(adapter_id, self._active_adapters,
-                                  self._deactivate_adapter)
     
     def set_adapter_mapping(self, mapping: ControlVectorMapping) -> None:
         self._last_mapping = set_adapter_mapping(mapping, self._last_mapping,
@@ -195,7 +188,7 @@ class ControlVectorModelManager(AdapterModelManager):
                               self.deactivate_adapter)
     
     def list_adapters(self) -> Dict[int, Any]:
-        return self.list_adapters(self._registered_adapters)
+        return list_adapters(self._registered_adapters)
     
     def get_adapter(self, adapter_id: int) -> Optional[Any]:
         return get_adapter(adapter_id, self._registered_adapters)
