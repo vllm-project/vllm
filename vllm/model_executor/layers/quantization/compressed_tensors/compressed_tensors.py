@@ -415,17 +415,33 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
 
     def __init__(self, quant_config: CompressedTensorsConfig):
         self.quant_config = quant_config
-        # TODO: fix this to use the above
+        # TODO: @dsikka: refactor this to use the above methods/expand
+        # to use schemes as other kernels are supported
         config = self.quant_config.target_scheme_map["Linear"].get("weights")
         self.num_bits = config.num_bits
         self.packed_factor = 32 // config.num_bits
         self.strategy = config.strategy.value
         self.group_size = config.group_size
 
+        if not (self.quant_config.quant_format
+                == CompressionFormat.pack_quantized.value
+                and self.num_bits in WNA16_SUPPORTED_BITS):
+            raise ValueError("For Fused MoE layers, only ",
+                             f"{CompressionFormat.pack_quantized.value} ",
+                             "is supported for the following bits: ",
+                             f"{WNA16_SUPPORTED_BITS}")
+
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
 
+        # Will transpose the loaded weight along the
+        # intermediate and hidden dim sizes. Will
+        # shard for TP along the transposed dims
+        extra_weight_attrs.update({
+            "is_transposed": True,
+            "quant_method": self.strategy
+        })
         w13_weight = torch.nn.Parameter(torch.empty(num_experts,
                                                     hidden_size //
                                                     self.packed_factor,
@@ -446,12 +462,8 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
 
         if self.strategy == "channel":
             num_groups_w2 = num_groups_w13 = 1
-            extra_weight_attrs.update({"quant_method": self.strategy})
             self.group_size = -1
-            print(self.group_size, self.packed_factor, self.strategy,
-                  self.num_bits)
         else:
-            extra_weight_attrs.update({"quant_method": self.strategy})
             num_groups_w2 = intermediate_size // self.group_size
             num_groups_w13 = hidden_size // self.group_size
 
