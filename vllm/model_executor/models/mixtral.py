@@ -80,20 +80,21 @@ class MixtralMoE(nn.Module):
         top_k: int,
         hidden_size: int,
         intermediate_size: int,
-        params_dtype: Optional[torch.dtype] = None,
+        params_dtype: Optional[torch.dtype] = torch.float16,
         quant_config: Optional[QuantizationConfig] = None,
         tp_size: Optional[int] = None,
         prefix: str = "",
     ):
         super().__init__()
         self.hidden_size = hidden_size
-
+        self.params_dtype = params_dtype
         # Gate always runs at half / full precision for now.
         self.gate = ReplicatedLinear(
             hidden_size,
             num_experts,
             bias=False,
             quant_config=None,
+            params_dtype=params_dtype,
             prefix=f"{prefix}.gate",
         )
 
@@ -112,12 +113,12 @@ class MixtralMoE(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.
-        orig_shape = hidden_states.shape
-        hidden_states = hidden_states.view(-1, self.hidden_size)
+        orig_shape, orig_type = hidden_states.shape, hidden_states.dtype
+        hidden_states = hidden_states.view(-1, self.hidden_size).to(self.params_dtype)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = self.experts(hidden_states.half(), router_logits)
-        return final_hidden_states.view(orig_shape).bfloat16()
+        final_hidden_states = self.experts(hidden_states, router_logits)
+        return final_hidden_states.view(orig_shape).to(orig_type)
 class MixtralAttention(nn.Module):
     def __init__(
         self,
