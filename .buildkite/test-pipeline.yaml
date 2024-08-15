@@ -85,6 +85,15 @@ steps:
   - pytest -v -s entrypoints/llm
   - pytest -v -s entrypoints/openai
 
+- label: Entrypoints Test (Tools, Extensions) # 20 min
+  fast_check: false
+  mirror_hardwares: [ amd ]
+  source_file_dependencies:
+    - vllm/
+    - tests/entrypoints_extended
+  commands:
+    - pytest -v -s entrypoints_extended/openai
+
 - label: Distributed Tests (4 GPUs) # 10min
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
