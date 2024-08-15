@@ -1,4 +1,5 @@
 import asyncio
+import os
 from itertools import cycle
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
@@ -56,6 +57,11 @@ class AsyncLLM:
     ) -> None:
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
+
+        # Needed to engine_use_ray works as a deprecated feature,
+        # otherwise the following constructor will raise an exception
+        os.environ["VLLM_ALLOW_ENGINE_USE_RAY"] = "1"
+
         engine_args = AsyncEngineArgs(
             model=model,
             tokenizer=tokenizer,
@@ -191,7 +197,8 @@ def create_llm_generator(baseline_or_test, request, common_llm_kwargs,
                 and llm.llm_engine.log_stats):
             for sate_logger in llm.llm_engine.stat_loggers.values():
                 sate_logger.local_interval = 0
-        set_random_seed(seed)
+        if seed is not None:
+            set_random_seed(seed)
 
         yield llm
         del llm

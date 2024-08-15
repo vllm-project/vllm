@@ -1,24 +1,24 @@
 import contextlib
 import functools
-from typing import List, Optional, Tuple, Type
+from typing import List, Optional, Tuple, Union
 
 import torch
 
+from vllm._core_ext import ScalarType
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
-try:
-    import vllm._C
-except ImportError as e:
-    logger.warning("Failed to import from vllm._C with %r", e)
-
-with contextlib.suppress(ImportError):
-    import vllm._moe_C
+if not current_platform.is_tpu():
+    try:
+        import vllm._C
+    except ImportError as e:
+        logger.warning("Failed to import from vllm._C with %r", e)
 
 with contextlib.suppress(ImportError):
     # ruff: noqa: F401
-    import vllm._punica_C
+    import vllm._moe_C
 
 
 def is_custom_op_supported(op_name: str) -> bool:
@@ -223,10 +223,10 @@ def marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
 # marlin_24
 def gptq_marlin_24_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                         b_meta: torch.Tensor, b_scales: torch.Tensor,
-                        workspace: torch.Tensor, num_bits: int, size_m: int,
-                        size_n: int, size_k: int) -> torch.Tensor:
+                        workspace: torch.Tensor, b_q_type: ScalarType,
+                        size_m: int, size_n: int, size_k: int) -> torch.Tensor:
     return torch.ops._C.gptq_marlin_24_gemm(a, b_q_weight, b_meta, b_scales,
-                                            workspace, num_bits, size_m,
+                                            workspace, b_q_type, size_m,
                                             size_n, size_k)
 
 
@@ -239,10 +239,12 @@ def cutlass_scaled_mm(a: torch.Tensor,
                       b: torch.Tensor,
                       scale_a: torch.Tensor,
                       scale_b: torch.Tensor,
-                      out_dtype: Type[torch.dtype],
+                      out_dtype: torch.dtype,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
     assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
+    assert bias is None or bias.shape[0] == b.shape[
+        1] and bias.dtype == out_dtype
 
     m = a.shape[0]
     n = b.shape[1]
@@ -250,6 +252,28 @@ def cutlass_scaled_mm(a: torch.Tensor,
 
     torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
 
+    return out
+
+
+def cutlass_scaled_mm_azp(a: torch.Tensor,
+                          b: torch.Tensor,
+                          scale_a: torch.Tensor,
+                          scale_b: torch.Tensor,
+                          out_dtype: torch.dtype,
+                          azp_adj: torch.Tensor,
+                          azp: Optional[torch.Tensor] = None,
+                          bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
+    assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
+    assert bias is None or bias.numel(
+    ) == b.shape[1] and bias.dtype == out_dtype
+
+    m = a.shape[0]
+    n = b.shape[1]
+    out = torch.empty((m, n), dtype=out_dtype, device=a.device)
+
+    torch.ops._C.cutlass_scaled_mm_azp(out, a, b, scale_a, scale_b, azp_adj,
+                                       azp, bias)
     return out
 
 
@@ -276,14 +300,30 @@ def gptq_marlin_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
                                            num_bits)
 
 
-def gptq_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
-                     b_scales: torch.Tensor, g_idx: torch.Tensor,
-                     perm: torch.Tensor, workspace: torch.Tensor,
-                     num_bits: int, size_m: int, size_n: int, size_k: int,
-                     is_k_full: bool) -> torch.Tensor:
-    return torch.ops._C.gptq_marlin_gemm(a, b_q_weight, b_scales, g_idx, perm,
-                                         workspace, num_bits, size_m, size_n,
-                                         size_k, is_k_full)
+# gptq_marlin
+def awq_marlin_repack(b_q_weight: torch.Tensor, size_k: int, size_n: int,
+                      num_bits: int) -> torch.Tensor:
+    return torch.ops._C.awq_marlin_repack(b_q_weight, size_k, size_n, num_bits)
+
+
+def gptq_marlin_gemm(a: torch.Tensor,
+                     b_q_weight: torch.Tensor,
+                     b_scales: torch.Tensor,
+                     b_zeros: torch.Tensor,
+                     g_idx: torch.Tensor,
+                     perm: torch.Tensor,
+                     workspace: torch.Tensor,
+                     b_q_type: ScalarType,
+                     size_m: int,
+                     size_n: int,
+                     size_k: int,
+                     is_k_full: bool,
+                     has_zp: bool = False,
+                     use_fp32_reduce: bool = False) -> torch.Tensor:
+    return torch.ops._C.gptq_marlin_gemm(a, b_q_weight, b_scales, b_zeros,
+                                         g_idx, perm, workspace, b_q_type,
+                                         size_m, size_n, size_k, is_k_full,
+                                         has_zp, use_fp32_reduce)
 
 
 # fp8 marlin
@@ -299,7 +339,9 @@ def fp8_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
 def scaled_fp8_quant(
     input: torch.Tensor,
     scale: Optional[torch.Tensor] = None,
-    batch_dim_padding: Optional[int] = None,
+    num_token_padding: Optional[int] = None,
+    scale_ub: Optional[torch.Tensor] = None,
+    use_per_token_if_dynamic: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize input tensor to FP8 and return quantized tensor and scale.
@@ -307,43 +349,46 @@ def scaled_fp8_quant(
     This function supports both static and dynamic quantization: If you
     provide the scale, it will use static scaling and if you omit it,
     the scale will be determined dynamically. The function also allows
-    optional padding of the output tensor for downstream kernels that
+    optional padding of the output tensors for downstream kernels that
     will benefit from padding.
 
     Args:
         input: The input tensor to be quantized to FP8
         scale: Optional scaling factor for the FP8 quantization
-        batch_dim_padding: If specified, pad the first dimension
+        scale_ub: Optional upper bound for scaling factor in dynamic 
+            per token case
+        num_token_padding: If specified, pad the first dimension
             of the output to at least this value.
+        use_per_token_if_dynamic: Whether to do per_tensor or per_token 
+            in the dynamic quantization case.
 
     Returns:
         Tuple[torch.Tensor, torch.Tensor]: The output tensor in FP8 and
             scaling factor.
     """
-    if batch_dim_padding:
-        shape = (max(batch_dim_padding, input.shape[0]), *input.shape[1:])
-        output = torch.empty(shape,
-                             device=input.device,
-                             dtype=torch.float8_e4m3fn)
-    else:
-        output = torch.empty_like(input, dtype=torch.float8_e4m3fn)
+    # This code assumes batch_dim and num_tokens are flattened
+    assert (input.ndim == 2)
+    shape: Union[Tuple[int, int], torch.Size] = input.shape
+    if num_token_padding:
+        shape = (max(num_token_padding, input.shape[0]), shape[1])
+    output = torch.empty(shape, device=input.device, dtype=torch.float8_e4m3fn)
+
     if scale is None:
-        scale = torch.zeros(1, device=input.device, dtype=torch.float32)
-        torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
+        if use_per_token_if_dynamic:
+            scale = torch.empty((shape[0], 1),
+                                device=input.device,
+                                dtype=torch.float32)
+            torch.ops._C.dynamic_per_token_scaled_fp8_quant(
+                output, input, scale, scale_ub)
+        else:
+            scale = torch.zeros(1, device=input.device, dtype=torch.float32)
+            torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
     else:
+        # num_token_padding not implemented for this case
+        assert (scale.numel() == 1 or num_token_padding is None)
         torch.ops._C.static_scaled_fp8_quant(output, input, scale)
+
     return output, scale
-
-
-def dynamic_per_token_scaled_fp8_quant(
-        input: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-
-    output = torch.empty_like(input, dtype=torch.float8_e4m3fn)
-    scales = torch.empty((input.numel() // input.shape[-1], 1),
-                         device=input.device,
-                         dtype=torch.float32)
-    torch.ops._C.dynamic_per_token_scaled_fp8_quant(output, input, scales)
-    return output, scales
 
 
 # int8
@@ -374,6 +419,47 @@ def scaled_int8_quant(
                                dtype=torch.float32)
     torch.ops._C.dynamic_scaled_int8_quant(output, input, input_scales)
     return output, input_scales
+
+
+# qqq ops
+def marlin_qqq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
+                    s_tok: torch.Tensor, s_ch: torch.Tensor,
+                    s_group: torch.Tensor, workspace: torch.Tensor,
+                    size_m: int, size_n: int, size_k: int) -> torch.Tensor:
+    return torch.ops._C.marlin_qqq_gemm(a, b_q_weight, s_tok, s_ch, s_group,
+                                        workspace, size_m, size_n, size_k)
+
+
+# gguf
+def ggml_dequantize(W: torch.Tensor, quant_type: int, m: int, n: int):
+    return torch.ops._C.ggml_dequantize(W, quant_type, m, n)
+
+
+def ggml_mul_mat_vec(
+    W: torch.Tensor,
+    X: torch.Tensor,
+    quant_type: int,
+    row: int,
+):
+    return torch.ops._C.ggml_mul_mat_vec(W, X, quant_type, row)
+
+
+def ggml_mul_mat_vec_a8(
+    W: torch.Tensor,
+    X: torch.Tensor,
+    quant_type: int,
+    row: int,
+):
+    return torch.ops._C.ggml_mul_mat_vec_a8(W, X, quant_type, row)
+
+
+def ggml_mul_mat_a8(
+    W: torch.Tensor,
+    X: torch.Tensor,
+    quant_type: int,
+    row: int,
+):
+    return torch.ops._C.ggml_mul_mat_a8(W, X, quant_type, row)
 
 
 # moe
@@ -415,10 +501,13 @@ def reshape_and_cache_flash(
     value_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
     kv_cache_dtype: str,
+    k_scale: float,
+    v_scale: float,
 ) -> None:
     torch.ops._C_cache_ops.reshape_and_cache_flash(key, value, key_cache,
                                                    value_cache, slot_mapping,
-                                                   kv_cache_dtype)
+                                                   kv_cache_dtype, k_scale,
+                                                   v_scale)
 
 
 def copy_blocks(key_caches: List[torch.Tensor],
@@ -494,43 +583,6 @@ def register_graph_buffers(fa: int, handles: List[str],
     torch.ops._C_custom_ar.register_graph_buffers(fa, handles, offsets)
 
 
-# punica
-def dispatch_bgmv(
-    y: torch.Tensor,
-    x: torch.Tensor,
-    w_t_all: torch.Tensor,
-    indicies: torch.Tensor,
-    layer_idx: int,
-    scale: float,
-) -> None:
-    torch.ops._punica_C.dispatch_bgmv(y, x, w_t_all, indicies, layer_idx,
-                                      scale)
-
-
-def dispatch_bgmv_low_level(
-    y: torch.Tensor,
-    x: torch.Tensor,
-    w_t_all: torch.Tensor,
-    indicies: torch.Tensor,
-    layer_idx: int,
-    scale: float,
-    h_in: int,
-    h_out: int,
-    y_offset: int,
-) -> None:
-    torch.ops._punica_C.dispatch_bgmv_low_level(
-        y,
-        x,
-        w_t_all,
-        indicies,
-        layer_idx,
-        scale,
-        h_in,
-        h_out,
-        y_offset,
-    )
-
-
 # temporary fix for https://github.com/vllm-project/vllm/issues/5456
 # TODO: remove this in v0.6.0
 names_and_values = globals()
@@ -546,7 +598,7 @@ for k, v in names_and_values.items():
     if isinstance(v, fn_type) \
         and v.__code__.co_filename == __file__ \
         and any(arg is torch.Tensor or arg == "torch.Tensor"
-                   for arg in v.__annotations__.values()):
+                for arg in v.__annotations__.values()):
         names_and_values_to_update[k] = hint_on_error(v)
 
 names_and_values.update(names_and_values_to_update)

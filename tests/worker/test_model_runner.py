@@ -24,6 +24,7 @@ def _create_model_runner(model: str, *args, **kwargs) -> ModelRunner:
         load_config=engine_config.load_config,
         lora_config=engine_config.lora_config,
         prompt_adapter_config=engine_config.prompt_adapter_config,
+        observability_config=engine_config.observability_config,
         is_driver_worker=True,
     )
     return model_runner
@@ -193,6 +194,7 @@ def test_prepare_decode_cuda_graph(batch_size):
     for _ in range(expected_bs - len(seq_lens)):
         seq_lens.append(1)
     assert attn_metadata.seq_lens == seq_lens
+    assert attn_metadata.num_decode_tokens == len(seq_lens)
     start_idx = 0
     start_loc = [start_idx]
     for _ in context_lens:

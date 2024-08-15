@@ -23,6 +23,8 @@ def create_worker(worker_module_name, worker_class_name, **kwargs):
 
 class GPUExecutor(ExecutorBase):
 
+    uses_ray: bool = False
+
     def _init_executor(self) -> None:
         """Initialize the worker and load the model.
         """
@@ -58,6 +60,7 @@ class GPUExecutor(ExecutorBase):
             prompt_adapter_config=self.prompt_adapter_config,
             is_driver_worker=(not self.parallel_config)
             or (rank % self.parallel_config.tensor_parallel_size == 0),
+            observability_config=self.observability_config,
         )
 
     def _get_create_worker_kwargs(

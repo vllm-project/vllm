@@ -4,18 +4,23 @@ import torch
 from torch.nn import Module
 from torch.nn.parameter import Parameter
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
-                                                  fused_moe)
-from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
+from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
+                                               UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear, prepare_fp8_layer_for_marlin)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    is_layer_skipped)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    all_close_1d, apply_fp8_linear, create_per_tensor_scale_param,
-    cutlass_fp8_supported, per_tensor_dequantize, requantize_with_max_scale)
+    all_close_1d, apply_fp8_linear, convert_to_channelwise,
+    create_per_tensor_scale_param, cutlass_fp8_supported,
+    per_tensor_dequantize, requantize_with_max_scale)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils import print_warning_once
@@ -32,6 +37,7 @@ class Fp8Config(QuantizationConfig):
         self,
         is_checkpoint_fp8_serialized: bool = False,
         activation_scheme: str = "dynamic",
+        ignored_layers: Optional[List[str]] = None,
     ) -> None:
         self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
         if is_checkpoint_fp8_serialized:
@@ -41,6 +47,7 @@ class Fp8Config(QuantizationConfig):
             raise ValueError(
                 f"Unsupported activation scheme {activation_scheme}")
         self.activation_scheme = activation_scheme
+        self.ignored_layers = ignored_layers or []
 
     @classmethod
     def get_name(cls) -> str:
@@ -63,14 +70,18 @@ class Fp8Config(QuantizationConfig):
         quant_method = cls.get_from_keys(config, ["quant_method"])
         is_checkpoint_fp8_serialized = ("fp8" in quant_method)
         activation_scheme = cls.get_from_keys(config, ["activation_scheme"])
+        ignored_layers = cls.get_from_keys_or(config, ["ignored_layers"], None)
         return cls(is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
-                   activation_scheme=activation_scheme)
+                   activation_scheme=activation_scheme,
+                   ignored_layers=ignored_layers)
 
-    def get_quant_method(
-            self, layer: torch.nn.Module) -> Optional["QuantizeMethodBase"]:
+    def get_quant_method(self, layer: torch.nn.Module,
+                         prefix: str) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
 
         if isinstance(layer, LinearBase):
+            if is_layer_skipped(prefix, self.ignored_layers):
+                return UnquantizedLinearMethod()
             return Fp8LinearMethod(self)
         elif isinstance(layer, FusedMoE):
             return Fp8MoEMethod(self)
@@ -108,7 +119,7 @@ class Fp8LinearMethod(LinearMethodBase):
         # kernel for fast weight-only FP8 quantization
         capability = current_platform.get_device_capability()
         capability = capability[0] * 10 + capability[1]
-        self.use_marlin = capability < 89
+        self.use_marlin = capability < 89 or envs.VLLM_TEST_FORCE_FP8_MARLIN
 
     def create_weights(
         self,
@@ -164,24 +175,42 @@ class Fp8LinearMethod(LinearMethodBase):
             qweight, weight_scale = ops.scaled_fp8_quant(layer.weight,
                                                          scale=None)
 
+            # If using marlin (w8a16), kernel uses channelwise weights,
+            # so extend the weight scales to be channelwise.
+            if self.use_marlin:
+                assert weight_scale.numel() == 1
+                weight_scale = convert_to_channelwise(
+                    weight_scale.expand(len(layer.logical_widths)),
+                    layer.logical_widths)
+
             # Update the layer with the new values.
             layer.weight = Parameter(qweight.t(), requires_grad=False)
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
             layer.input_scale = None
 
-        # If checkpoint is fp8, requantize the separately quantized logical
-        # weights into a single fp8 weight with a single weight scale.
+        # If checkpoint is fp8, handle that there are N scales for N
+        # shards in a fused module
         else:
-            # Dequant -> Quant with max scale.
-            max_w_scale, weight = requantize_with_max_scale(
-                weight=layer.weight,
-                weight_scale=layer.weight_scale,
-                logical_widths=layer.logical_widths,
-            )
+            # If using marlin (w8a16), kernel uses channelwise weights,
+            # so extend the weight scales to be channelwise.
+            if self.use_marlin:
+                weight = layer.weight
+                weight_scale = convert_to_channelwise(layer.weight_scale,
+                                                      layer.logical_widths)
+
+            # If using w8a8, torch._scaled_mm needs per tensor, so
+            # requantize the logical shards as a single weight.
+            else:
+                # Dequant -> Quant with max scale so we can run per tensor.
+                weight_scale, weight = requantize_with_max_scale(
+                    weight=layer.weight,
+                    weight_scale=layer.weight_scale,
+                    logical_widths=layer.logical_widths,
+                )
 
             # Update layer with new values.
             layer.weight = Parameter(weight.t(), requires_grad=False)
-            layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
+            layer.weight_scale = Parameter(weight_scale, requires_grad=False)
             if self.quant_config.activation_scheme == "static":
                 layer.input_scale = Parameter(layer.input_scale.max(),
                                               requires_grad=False)
@@ -214,7 +243,8 @@ class Fp8LinearMethod(LinearMethodBase):
             weight_scale=layer.weight_scale,
             input_scale=layer.input_scale,
             bias=bias,
-            cutlass_fp8_supported=self.cutlass_fp8_supported)
+            cutlass_fp8_supported=self.cutlass_fp8_supported,
+            use_per_token_if_dynamic=False)
 
 
 class Fp8MoEMethod(FusedMoEMethodBase):
@@ -260,23 +290,29 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # WEIGHT_SCALES
         # Allocate 2 scales for w1 and w3 respectively.
         # They will be combined to a single scale after weight loading.
-        w13_scale = torch.nn.Parameter(torch.ones(num_experts,
-                                                  2,
-                                                  dtype=torch.float32),
-                                       requires_grad=False)
-        layer.register_parameter("w13_scale", w13_scale)
+        w13_weight_scale = torch.nn.Parameter(torch.ones(num_experts,
+                                                         2,
+                                                         dtype=torch.float32),
+                                              requires_grad=False)
+        layer.register_parameter("w13_weight_scale", w13_weight_scale)
 
-        w2_scale = torch.nn.Parameter(torch.ones(num_experts,
-                                                 dtype=torch.float32),
-                                      requires_grad=False)
-        layer.register_parameter("w2_scale", w2_scale)
+        w2_weight_scale = torch.nn.Parameter(torch.ones(num_experts,
+                                                        dtype=torch.float32),
+                                             requires_grad=False)
+        layer.register_parameter("w2_weight_scale", w2_weight_scale)
 
         # If loading fp8 checkpoint, pass the weight loaders.
         # If loading an fp16 checkpoint, do not (we will quantize in
         #   process_weights_after_loading()
         if self.quant_config.is_checkpoint_fp8_serialized:
-            set_weight_attrs(w13_scale, extra_weight_attrs)
-            set_weight_attrs(w2_scale, extra_weight_attrs)
+            set_weight_attrs(w13_weight_scale, {
+                "is_fp8_scale": True,
+                **extra_weight_attrs
+            })
+            set_weight_attrs(w2_weight_scale, {
+                "is_fp8_scale": True,
+                **extra_weight_attrs
+            })
 
         # INPUT_SCALES
         if self.quant_config.activation_scheme == "static":
@@ -285,20 +321,26 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     "Found static activation scheme for checkpoint that "
                     "was not serialized fp8.")
 
-            a13_scale = torch.nn.Parameter(torch.ones(num_experts,
-                                                      dtype=torch.float32),
-                                           requires_grad=False)
-            layer.register_parameter("a13_scale", a13_scale)
-            set_weight_attrs(a13_scale, extra_weight_attrs)
+            w13_input_scale = torch.nn.Parameter(torch.ones(
+                num_experts, dtype=torch.float32),
+                                                 requires_grad=False)
+            layer.register_parameter("w13_input_scale", w13_input_scale)
+            set_weight_attrs(w13_input_scale, {
+                "is_fp8_scale": True,
+                **extra_weight_attrs
+            })
 
-            a2_scale = torch.nn.Parameter(torch.ones(num_experts,
-                                                     dtype=torch.float32),
-                                          requires_grad=False)
-            layer.register_parameter("a2_scale", a2_scale)
-            set_weight_attrs(a2_scale, extra_weight_attrs)
+            w2_input_scale = torch.nn.Parameter(torch.ones(
+                num_experts, dtype=torch.float32),
+                                                requires_grad=False)
+            layer.register_parameter("w2_input_scale", w2_input_scale)
+            set_weight_attrs(w2_input_scale, {
+                "is_fp8_scale": True,
+                **extra_weight_attrs
+            })
         else:
-            layer.a13_scale = None
-            layer.a2_scale = None
+            layer.w13_input_scale = None
+            layer.w2_input_scale = None
 
     def process_weights_after_loading(self, layer: Module) -> None:
 
@@ -311,16 +353,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
             # Re-initialize w13_scale because we directly quantize
             # merged w13 weights and generate a single scaling factor.
-            layer.w13_scale = torch.nn.Parameter(torch.ones(
+            layer.w13_weight_scale = torch.nn.Parameter(torch.ones(
                 layer.num_experts,
                 dtype=torch.float32,
                 device=w13_weight.device),
-                                                 requires_grad=False)
+                                                        requires_grad=False)
             for expert in range(layer.num_experts):
-                w13_weight[expert, :, :], layer.w13_scale[
+                w13_weight[expert, :, :], layer.w13_weight_scale[
                     expert] = ops.scaled_fp8_quant(
                         layer.w13_weight.data[expert, :, :])
-                w2_weight[expert, :, :], layer.w2_scale[
+                w2_weight[expert, :, :], layer.w2_weight_scale[
                     expert] = ops.scaled_fp8_quant(
                         layer.w2_weight.data[expert, :, :])
             layer.w13_weight = torch.nn.Parameter(w13_weight,
@@ -336,40 +378,41 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             # Fp8 moe kernels require a single activation scale.
             # We take the max of all the scales in case they differ.
             if self.quant_config.activation_scheme == "static":
-                if layer.a13_scale is None or layer.a2_scale is None:
+                if (layer.w13_input_scale is None
+                        or layer.w2_input_scale is None):
                     raise ValueError(
                         "QuantConfig has static quantization, but found "
                         "activation scales are None.")
-                if (not all_close_1d(layer.a13_scale)
-                        or not all_close_1d(layer.a2_scale)):
+                if (not all_close_1d(layer.w13_input_scale)
+                        or not all_close_1d(layer.w2_input_scale)):
                     print_warning_once(
                         "Found input_scales that are not equal for "
                         "fp8 MoE layer. Using the maximum across experts "
                         "for each layer. ")
-                layer.a13_scale = torch.nn.Parameter(layer.a13_scale.max(),
-                                                     requires_grad=False)
-                layer.a2_scale = torch.nn.Parameter(layer.a2_scale.max(),
-                                                    requires_grad=False)
+                layer.w13_input_scale = torch.nn.Parameter(
+                    layer.w13_input_scale.max(), requires_grad=False)
+                layer.w2_input_scale = torch.nn.Parameter(
+                    layer.w2_input_scale.max(), requires_grad=False)
 
             # Fp8 moe kernel needs single weight scale for w13 per expert.
             # We take the max then dequant and requant each expert.
-            assert layer.w13_scale is not None
+            assert layer.w13_weight_scale is not None
             shard_size = layer.intermediate_size_per_partition
-            max_w13_scales = layer.w13_scale.max(dim=1).values
+            max_w13_scales = layer.w13_weight_scale.max(dim=1).values
             for expert_id in range(layer.num_experts):
                 start = 0
                 for shard_id in range(2):
                     dq_weight = per_tensor_dequantize(
                         layer.w13_weight[expert_id][start:start +
                                                     shard_size, :],
-                        layer.w13_scale[expert_id][shard_id])
+                        layer.w13_weight_scale[expert_id][shard_id])
                     layer.w13_weight[expert_id][
                         start:start + shard_size, :], _ = ops.scaled_fp8_quant(
                             dq_weight, max_w13_scales[expert_id])
                     start += shard_size
 
-            layer.w13_scale = torch.nn.Parameter(max_w13_scales,
-                                                 requires_grad=False)
+            layer.w13_weight_scale = torch.nn.Parameter(max_w13_scales,
+                                                        requires_grad=False)
             return
 
     def apply(self,
@@ -377,86 +420,39 @@ class Fp8MoEMethod(FusedMoEMethodBase):
               x: torch.Tensor,
               router_logits: torch.Tensor,
               top_k: int,
-              renormalize: bool = True,
-              use_grouped_topk: bool = False,
-              num_expert_group: Optional[int] = None,
-              topk_group: Optional[int] = None) -> torch.Tensor:
+              renormalize: bool,
+              use_grouped_topk: bool,
+              topk_group: Optional[int] = None,
+              num_expert_group: Optional[int] = None) -> torch.Tensor:
 
-        return fused_moe(x,
-                         layer.w13_weight,
-                         layer.w2_weight,
-                         router_logits,
-                         top_k,
-                         renormalize=renormalize,
-                         inplace=True,
-                         use_fp8=True,
-                         w1_scale=layer.w13_scale,
-                         w2_scale=layer.w2_scale,
-                         a1_scale=layer.a13_scale,
-                         a2_scale=layer.a2_scale,
-                         use_grouped_topk=use_grouped_topk,
-                         num_expert_group=num_expert_group,
-                         topk_group=topk_group)
+        from vllm.model_executor.layers.fused_moe import fused_experts
+
+        topk_weights, topk_ids = FusedMoE.select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            use_grouped_topk=use_grouped_topk,
+            top_k=top_k,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group)
+
+        return fused_experts(x,
+                             layer.w13_weight,
+                             layer.w2_weight,
+                             topk_weights=topk_weights,
+                             topk_ids=topk_ids,
+                             inplace=True,
+                             use_fp8=True,
+                             w1_scale=layer.w13_weight_scale,
+                             w2_scale=layer.w2_weight_scale,
+                             a1_scale=layer.w13_input_scale,
+                             a2_scale=layer.w2_input_scale)
 
 
-class Fp8KVCacheMethod(QuantizeMethodBase):
-    """Supports loading kv-cache scaling factors from FP8 checkpoints.
+class Fp8KVCacheMethod(BaseKVCacheMethod):
+    """
+    Supports loading kv-cache scaling factors from FP8 checkpoints.
     """
 
     def __init__(self, quant_config: Fp8Config):
-        self.quant_config = quant_config
-
-    def create_weights(self, layer: torch.nn.Module):
-        """Create "weight" (aka k_scale and v_scale) for an attention layer.
-
-        Args:
-            layer: The layer that is using the QuantizeMethodBase factory.
-        """
-        # Initialize the KV cache scales to -1.0, which is an invalid value.
-        # If the k/v_scale appears in the checkpoint, it will be
-        # overwritten when loading weights.
-        layer.k_scale = Parameter(torch.tensor(-1.0), requires_grad=False)
-        layer.v_scale = Parameter(torch.tensor(-1.0), requires_grad=False)
-
-    def apply(self, layer: torch.nn.Module) -> torch.Tensor:
-        raise RuntimeError("Fp8KVCacheMethod.apply should not be called.")
-
-    def process_weights_after_loading(self, layer: Module) -> None:
-        # If the kv-cache dtype is auto, we enforce the k/v_scale to be 1.0
-        # regardless whether the kv-scale is available in the checkpoint.
-        if layer.kv_cache_dtype != "auto":
-            if layer.k_scale > 0.0 and layer.v_scale > 0.0:
-                # We prefer to use separate k_scale and v_scale if present
-                k_scale = layer.k_scale.to("cpu").tolist()
-                v_scale = layer.v_scale.to("cpu").tolist()
-            elif layer.k_scale < 0.0 and layer.v_scale < 0.0:
-                # If no scales were loaded (both scales are invalid negative
-                # values), use the default value of 1.0
-                k_scale = Parameter(torch.tensor(1.0), requires_grad=False)
-                v_scale = Parameter(torch.tensor(1.0), requires_grad=False)
-            else:
-                # If we find a single kv_scale in the checkpoint, we remap
-                # kv_scale to k_scale during weight loading, and duplicate
-                # k_scale to v_scale here
-                assert layer.k_scale > 0.0
-                scale_to_duplicate = max(layer.k_scale, layer.v_scale)
-                k_scale = scale_to_duplicate.to("cpu").tolist()
-                v_scale = scale_to_duplicate.to("cpu").tolist()
-
-            if not isinstance(k_scale, float) or not isinstance(
-                    v_scale, float):
-                raise ValueError("Only support per-tensor scaling factor "
-                                 "for fp8 KV cache")
-
-            # These are used in the final Attention.forward()
-            layer._k_scale = k_scale
-            layer._v_scale = v_scale
-            if (layer._k_scale == 1.0 and layer._v_scale == 1.0
-                    and "e5m2" not in layer.kv_cache_dtype):
-                print_warning_once(
-                    "Using KV cache scaling factor 1.0 for fp8_e4m3. This "
-                    "may cause accuracy issues. Please make sure k/v_scale "
-                    "scaling factors are available in the fp8 checkpoint.")
-
-        del layer.k_scale
-        del layer.v_scale
+        super().__init__(quant_config)

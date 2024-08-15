@@ -3,7 +3,6 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 import torch_xla.core.xla_model as xm
-import torch_xla.experimental.dynamo_set_buffer_donor  # noqa: F401
 import torch_xla.runtime as xr
 
 import vllm.envs as envs
@@ -70,13 +69,13 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
     def init_device(self) -> None:
         os.environ["PJRT_DEVICE"] = "TPU"
-        self.device = xm.xla_device()
-        self.device_config.device = self.device
         torch.set_grad_enabled(False)
         torch.set_default_dtype(self.model_config.dtype)
 
-        # NOTE(woosuk): This is just a hack to initialize the TP group.
-        # This cannot perform the actual communication ops.
+        # NOTE(woosuk): This is just to initialize the TP group and broadcast
+        # the input objects on CPU. The all-reduce and all-gather ops on TPU
+        # are invoked by `xm.all_reduce` and `xm.all_gather` which use their
+        # own context.
         init_distributed_environment(
             world_size=self.parallel_config.world_size,
             rank=self.rank,
@@ -88,6 +87,11 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             self.parallel_config.tensor_parallel_size,
             self.parallel_config.pipeline_parallel_size)
 
+        # Device initialization should happen after initializing the distributed
+        # runtime.
+        self.device = xm.xla_device()
+        self.device_config.device = self.device
+
         # Set random seed.
         set_random_seed(self.model_config.seed)
         xm.set_rng_state(self.model_config.seed, self.device)
@@ -98,9 +102,12 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         # 30-40 graphs for decode. 128 is an arbitrary safe number.
         torch._dynamo.config.cache_size_limit = 128
         # Use persistent cache to avoid XLA recompilation.
-        # NOTE(woosuk): This does not completely eliminate the recompilation
-        # overhead because dynamo does not cache the compiled results.
-        xr.initialize_cache(envs.VLLM_XLA_CACHE_PATH, readonly=False)
+        # NOTE(woosuk): Set per-rank cache path since different ranks
+        # can have slightly different XLA graphs.
+        world_size = self.parallel_config.world_size
+        per_rank_path = os.path.join(envs.VLLM_XLA_CACHE_PATH,
+                                     f"tp{world_size}_rank{self.rank}")
+        xr.initialize_cache(per_rank_path, readonly=False)
 
     def load_model(self):
         self.model_runner.load_model()
@@ -136,8 +143,8 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         num_tpu_blocks = (num_tpu_blocks // 8) * 8  # Round down to 8.
 
         # Calculate the CPU KV cache size based on the config.
-        num_cpu_blocks = (self.cache_config.swap_space_bytes //
-                          block_size_bytes)
+        num_cpu_blocks = int(self.cache_config.swap_space_bytes //
+                             block_size_bytes)
         num_cpu_blocks = (num_cpu_blocks // 8) * 8  # Round down to 8.
         return num_tpu_blocks, num_cpu_blocks
 
@@ -200,8 +207,7 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
     @property
     def do_metadata_broadcast(self) -> bool:
-        # TODO(woosuk): Support TP.
-        return False
+        return self.parallel_config.tensor_parallel_size > 1
 
     @property
     def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
