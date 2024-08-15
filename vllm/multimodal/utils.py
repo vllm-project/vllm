@@ -1,11 +1,14 @@
 import base64
 from io import BytesIO
-from typing import Union
+from typing import Tuple, Union
 
+import librosa
+import numpy as np
+import soundfile
 from PIL import Image
 
 from vllm.connections import global_http_connection
-from vllm.envs import VLLM_IMAGE_FETCH_TIMEOUT
+from vllm.envs import VLLM_AUDIO_FETCH_TIMEOUT, VLLM_IMAGE_FETCH_TIMEOUT
 from vllm.multimodal.base import MultiModalDataDict
 
 
@@ -63,9 +66,60 @@ async def async_fetch_image(image_url: str,
     return image.convert(image_mode)
 
 
+def fetch_audio(audio_url: str) -> Tuple[np.ndarray, Union[int, float]]:
+    """
+    Load audio from a URL.
+    """
+    if audio_url.startswith("http"):
+        audio_bytes = global_http_connection.get_bytes(
+            audio_url, timeout=VLLM_AUDIO_FETCH_TIMEOUT)
+    elif audio_url.startswith("data:audio"):
+        _, audio_base64 = audio_url.split(",", 1)
+        audio_bytes = base64.b64decode(audio_base64)
+    else:
+        raise ValueError("Invalid 'audio_url': A valid 'audio_url' must start "
+                         "with either 'data:audio' or 'http'.")
+
+    return librosa.load(BytesIO(audio_bytes), sr=None)
+
+
+async def async_fetch_audio(
+        audio_url: str) -> Tuple[np.ndarray, Union[int, float]]:
+    """
+    Asynchronously fetch audio from a URL.
+    """
+    if audio_url.startswith("http"):
+        audio_bytes = await global_http_connection.async_get_bytes(
+            audio_url, timeout=VLLM_AUDIO_FETCH_TIMEOUT)
+    elif audio_url.startswith("data:audio"):
+        _, audio_base64 = audio_url.split(",", 1)
+        audio_bytes = base64.b64decode(audio_base64)
+    else:
+        raise ValueError("Invalid 'audio_url': A valid 'audio_url' must start "
+                         "with either 'data:audio' or 'http'.")
+
+    return librosa.load(BytesIO(audio_bytes), sr=None)
+
+
+async def async_get_and_parse_audio(audio_url: str) -> MultiModalDataDict:
+    audio, sr = await async_fetch_audio(audio_url)
+    return {"audio": (audio, sr)}
+
+
 async def async_get_and_parse_image(image_url: str) -> MultiModalDataDict:
     image = await async_fetch_image(image_url)
     return {"image": image}
+
+
+def encode_audio_base64(
+    audio: np.ndarray,
+    sampling_rate: int,
+) -> str:
+    """Encode audio as base64."""
+    buffered = BytesIO()
+    soundfile.write(buffered, audio, sampling_rate, format="WAV")
+
+    return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
 
 def encode_image_base64(
