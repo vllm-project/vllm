@@ -131,32 +131,6 @@ RUN python3 check-wheel-size.py dist
 
 #################### EXTENSION Build IMAGE ####################
 
-#################### DEV IMAGE ####################
-FROM base as dev
-
-COPY requirements-lint.txt requirements-lint.txt
-COPY requirements-test.txt requirements-test.txt
-COPY requirements-dev.txt requirements-dev.txt
-RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install -r requirements-dev.txt
-
-#################### DEV IMAGE ####################
-#################### MAMBA Build IMAGE ####################
-FROM dev as mamba-builder
-# max jobs used for build
-ARG max_jobs=2
-ENV MAX_JOBS=${max_jobs}
-
-WORKDIR /usr/src/mamba
-
-COPY requirements-mamba.txt requirements-mamba.txt
-
-# Download the wheel or build it if a pre-compiled release doesn't exist
-RUN pip --verbose wheel -r requirements-mamba.txt \
-    --no-build-isolation --no-deps --no-cache-dir
-
-#################### MAMBA Build IMAGE ####################
-
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
 FROM nvidia/cuda:${CUDA_VERSION}-base-ubuntu20.04 AS vllm-base
@@ -244,3 +218,29 @@ ENV VLLM_USAGE_SOURCE production-docker-image
 
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
 #################### OPENAI API SERVER ####################
+
+#################### DEV IMAGE ####################
+FROM base as dev
+
+COPY requirements-lint.txt requirements-lint.txt
+COPY requirements-test.txt requirements-test.txt
+COPY requirements-dev.txt requirements-dev.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install -r requirements-dev.txt
+
+#################### DEV IMAGE ####################
+#################### MAMBA Build IMAGE ####################
+FROM dev as mamba-builder
+# max jobs used for build
+ARG max_jobs=2
+ENV MAX_JOBS=${max_jobs}
+
+WORKDIR /usr/src/mamba
+
+COPY requirements-mamba.txt requirements-mamba.txt
+
+# Download the wheel or build it if a pre-compiled release doesn't exist
+RUN pip --verbose wheel -r requirements-mamba.txt \
+    --no-build-isolation --no-deps --no-cache-dir
+
+#################### MAMBA Build IMAGE ####################
