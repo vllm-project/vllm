@@ -600,7 +600,6 @@ class LoRAEnabledMixtralForCausalLM(nn.Module, SupportsLoRA):
         self.lm_head = ParallelLMHead(
             self.unpadded_vocab_size,
             config.hidden_size,
-            org_num_embeddings=config.vocab_size,
             padding_size=DEFAULT_VOCAB_PADDING_SIZE
             # We need bigger padding if using lora for kernel
             # compatibility
@@ -608,7 +607,7 @@ class LoRAEnabledMixtralForCausalLM(nn.Module, SupportsLoRA):
             quant_config=quant_config,
         )
         self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size
+            self.unpadded_vocab_size
         )
         self.sampler = Sampler()
 
