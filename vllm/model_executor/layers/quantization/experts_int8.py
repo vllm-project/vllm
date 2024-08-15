@@ -126,8 +126,6 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
                              w1_scale=layer.w13_scale,
                              w2_scale=layer.w2_scale)
 
-
-
     @staticmethod
     def quantizing_weight_loader(layer, weight_loader):
 

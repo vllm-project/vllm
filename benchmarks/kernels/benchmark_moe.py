@@ -200,7 +200,8 @@ class BenchmarkWorker:
                                    key=lambda x: abs(x - num_tokens))]
         kernel_time = benchmark_config(config, num_tokens, num_experts,
                                        shard_intermediate_size, hidden_size,
-                                       topk, dtype, use_fp8_w8a8, use_int8_w8a16)
+                                       topk, dtype, use_fp8_w8a8,
+                                       use_int8_w8a16)
         return config, kernel_time
 
     def tune(
@@ -255,9 +256,10 @@ def sort_config(config: BenchmarkConfig) -> BenchmarkConfig:
 
 def save_configs(configs: Dict[int, BenchmarkConfig], num_experts: int,
                  shard_intermediate_size: int, hidden_size: int, topk: int,
-                 dtype: torch.dtype, use_fp8_w8a8: bool, use_int8_w8a16: bool) -> None:
+                 dtype: torch.dtype, use_fp8_w8a8: bool,
+                 use_int8_w8a16: bool) -> None:
     dtype_str = get_config_dtype_str(dtype, use_int8_w8a16, use_int8_w8a16)
-    
+
     # NOTE(woosuk): The current naming convention uses w2.shape[2], which
     # is the intermediate size after silu_and_mul.
     filename = get_config_file_name(num_experts, shard_intermediate_size // 2,
@@ -336,10 +338,10 @@ def main(args: argparse.Namespace):
         end = time.time()
         print(f"Tuning took {end - start:.2f} seconds")
     else:
-        outputs = _distribute("benchmark",
-                              [(batch_size, E, shard_intermediate_size,
-                                hidden_size, topk, dtype, use_fp8_w8a8, use_int8_w8a16)
-                               for batch_size in batch_sizes])
+        outputs = _distribute(
+            "benchmark", [(batch_size, E, shard_intermediate_size, hidden_size,
+                           topk, dtype, use_fp8_w8a8, use_int8_w8a16)
+                          for batch_size in batch_sizes])
 
         for batch_size, (config, kernel_time) in zip(batch_sizes, outputs):
             print(f"Batch size: {batch_size}, config: {config}")

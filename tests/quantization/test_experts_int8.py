@@ -2,9 +2,9 @@
 """Tests experts_int8 quantization startup and generation, 
 doesn't test correctness
 """
-from tests.quantization.utils import is_quant_method_supported
-
 import pytest
+
+from tests.quantization.utils import is_quant_method_supported
 
 MODELS = ["ai21labs/Jamba-tiny-random"]
 

@@ -285,6 +285,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
         **config,
     )
 
+
 def get_config_file_name(E: int, N: int, dtype: Optional[str]) -> str:
     device_name = torch.cuda.get_device_name().replace(" ", "_")
     dtype_selector = "" if not dtype else f",dtype={dtype}"
@@ -438,11 +439,10 @@ def grouped_topk(hidden_states: torch.Tensor,
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
     return topk_weights, topk_ids
 
-def get_config_dtype_str(
-        dtype:torch.dtype,
-        use_int8_w8a16: Optional[bool]= False,
-        use_fp8_w8a8:Optional[bool] = False
-):
+
+def get_config_dtype_str(dtype: torch.dtype,
+                         use_int8_w8a16: Optional[bool] = False,
+                         use_fp8_w8a8: Optional[bool] = False):
     if use_fp8_w8a8:
         return "fp8"
     elif use_int8_w8a16:
@@ -452,6 +452,7 @@ def get_config_dtype_str(
         # use fp16/bfloat16 configs
         return "float32"
     return None
+
 
 def fused_experts(hidden_states: torch.Tensor,
                   w1: torch.Tensor,
@@ -482,9 +483,9 @@ def fused_experts(hidden_states: torch.Tensor,
     # https://github.com/vllm-project/vllm/issues/5938
     CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
     M = min(num_tokens, CHUNK_SIZE)
-    config_dtype = get_config_dtype_str(use_fp8_w8a8 = use_fp8_w8a8,
-                                        use_int8_w8a16 = use_int8_w8a16, 
-                                        dtype = hidden_states.dtype)
+    config_dtype = get_config_dtype_str(use_fp8_w8a8=use_fp8_w8a8,
+                                        use_int8_w8a16=use_int8_w8a16,
+                                        dtype=hidden_states.dtype)
 
     get_config_func = functools.partial(
         try_get_optimal_moe_config,
