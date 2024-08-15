@@ -582,7 +582,6 @@ class BitBLASLinearMethod(LinearMethodBase):
 
         sw = layer.sw
 
-        # if / (si * sw) will cause inf in some cases
         output = self.post_quant_process(output, si, sw)
 
         output = output.view(x.shape[:-1] + (output.shape[1], ))

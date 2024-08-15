@@ -319,13 +319,21 @@ class BITNETBitBLASLinearMethod(LinearMethodBase):
         result = (weight * s).round().clamp(-1, 1)
         return result.type(torch.int8)
 
-    def activation_quant(self, x, num_bits=8):
+    @torch.compile
+    def activation_quant(self, x):
         x = x.float()
         Qn = self.Qn
         Qp = self.Qp
         s = Qp / x.abs().max(dim=-1, keepdim=True).values.clamp(min=1e-5)
-        result = (x * s).round().clamp(Qn, Qp)
-        return result.type(torch.int8)
+        result = (x * s).round().clamp(Qn, Qp).type(torch.int8)
+        return result, s
+
+    @torch.compile
+    def post_quant_process(self, input, si, sw):
+        out = input / si
+        out = out / sw
+        out = out.half()
+        return out
 
     def repack_bitblas_from_bitnet(self,
                                    b_q_weight: torch.Tensor,
@@ -381,8 +389,7 @@ class BITNETBitBLASLinearMethod(LinearMethodBase):
 
         part_size_n = layer.output_size_per_partition
         out_shape = x.shape[:-1] + (part_size_n, )
-        quant_input = self.activation_quant(
-            x, self.quant_config.input_bits).detach()
+        quant_input, si = self.activation_quant(x)
 
         if layer.bitblas_state == BITNETBitBLASState.REPACK:
             layer.bitblas_state = BITNETBitBLASState.READY
@@ -411,15 +418,8 @@ class BITNETBitBLASLinearMethod(LinearMethodBase):
             free_tensor("weight")
             replace_tensor("qweight", bitblas_qweight)
 
-        fp32_out = self.bitblas_matmul(quant_input, layer.qweight)
-        sw = self.sw
-        Qp = self.Qp
-        si = Qp / x.abs().max(dim=-1, keepdim=True).values.clamp(min=1e-5)
-        # if / (si * sw) it will inf in some cases
-        output = fp32_out / si
-        output = output / sw
-        output = output.half()
-        output = output.type(x.dtype)
+        output = self.bitblas_matmul(quant_input, layer.qweight)
+        output = self.post_quant_process(output, si, self.sw)
 
         if bias is not None:
             output.add_(bias)  # In-place add
