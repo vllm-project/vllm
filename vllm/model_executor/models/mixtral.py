@@ -323,6 +323,50 @@ class MixtralModel(nn.Module):
         return hidden_states
 
 
+class QuantMixtralModel(nn.Module):
+    def __init__(
+        self,
+        config: MixtralConfig,
+        use_fused_moe: bool,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+    ) -> None:
+        super().__init__()
+        self.padding_idx = config.pad_token_id
+        self.vocab_size = config.vocab_size
+
+        self.embed_tokens = VocabParallelEmbedding(
+            config.vocab_size,
+            config.hidden_size,
+        )
+        self.layers = nn.ModuleList(
+            [
+                MixtralDecoderLayer(
+                    config, use_fused_moe, cache_config, quant_config=quant_config
+                )
+                for _ in range(config.num_hidden_layers)
+            ]
+        )
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+    ) -> torch.Tensor:
+        hidden_states = self.embed_tokens(input_ids)
+        residual = None
+        for i in range(len(self.layers)):
+            layer = self.layers[i]
+            hidden_states, residual = layer(
+                positions, hidden_states, kv_caches[i], attn_metadata, residual
+            )
+        hidden_states, _ = self.norm(hidden_states, residual)
+        return hidden_states
+
+
 class MixtralForCausalLM(nn.Module, SupportsLoRA):
     fall_back_to_pt_during_load = False
 
@@ -513,8 +557,8 @@ class QuantizedMixtralForCausalLM(nn.Module):
 
         self.config = config
         self.quant_config = quant_config
-        self.model = MixtralModel(
-            config, cache_config, quant_config, None, prefix="model"
+        self.model = QuantMixtralModel(
+            config, self.use_fused_moe, cache_config, quant_config
         )
         self.lm_head = ParallelLMHead(
             config.vocab_size, config.hidden_size, quant_config=quant_config
@@ -530,7 +574,7 @@ class QuantizedMixtralForCausalLM(nn.Module):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, kv_caches, attn_metadata, intermediate_tensors)
+        hidden_states = self.model(input_ids, positions, kv_caches, attn_metadata)
         return hidden_states
 
     def compute_logits(
@@ -539,19 +583,19 @@ class QuantizedMixtralForCausalLM(nn.Module):
         logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
         return logits
 
-    def make_empty_intermediate_tensors(
-        self, batch_size: int, dtype: torch.dtype, device: torch.device
-    ) -> IntermediateTensors:
-        return IntermediateTensors(
-            {
-                "hidden_states": torch.zeros(
-                    (batch_size, self.config.hidden_size), dtype=dtype, device=device
-                ),
-                "residual": torch.zeros(
-                    (batch_size, self.config.hidden_size), dtype=dtype, device=device
-                ),
-            }
-        )
+    # def make_empty_intermediate_tensors(
+    #     self, batch_size: int, dtype: torch.dtype, device: torch.device
+    # ) -> IntermediateTensors:
+    #     return IntermediateTensors(
+    #         {
+    #             "hidden_states": torch.zeros(
+    #                 (batch_size, self.config.hidden_size), dtype=dtype, device=device
+    #             ),
+    #             "residual": torch.zeros(
+    #                 (batch_size, self.config.hidden_size), dtype=dtype, device=device
+    #             ),
+    #         }
+    #     )
 
     def sample(
         self,
