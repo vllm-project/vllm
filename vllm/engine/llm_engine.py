@@ -1186,7 +1186,7 @@ class LLMEngine:
             elif isinstance(item, SamplerOutput) or isinstance(item, PoolerOutput):
                 non_speculative_outputs.append(item)
             else:
-                raise ValueError("output has indefined type %s" % type(item))
+                raise ValueError("Output item has indefined type %s" % type(item))
 
         # Update speculative decode states
         for scheduled_seq_group_index, scheduled_seq_group in enumerate(scheduled_seq_groups):
