@@ -530,7 +530,7 @@ class QuantizedMixtralForCausalLM(nn.Module):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, kv_caches, attn_metadata)
+        hidden_states = self.model(input_ids, positions, kv_caches, attn_metadata, intermediate_tensors)
         return hidden_states
 
     def compute_logits(
@@ -538,6 +538,20 @@ class QuantizedMixtralForCausalLM(nn.Module):
     ) -> torch.Tensor:
         logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
         return logits
+
+    def make_empty_intermediate_tensors(
+        self, batch_size: int, dtype: torch.dtype, device: torch.device
+    ) -> IntermediateTensors:
+        return IntermediateTensors(
+            {
+                "hidden_states": torch.zeros(
+                    (batch_size, self.config.hidden_size), dtype=dtype, device=device
+                ),
+                "residual": torch.zeros(
+                    (batch_size, self.config.hidden_size), dtype=dtype, device=device
+                ),
+            }
+        )
 
     def sample(
         self,
