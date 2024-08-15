@@ -83,18 +83,18 @@ def _fused_moe_kernel_a16w4_perchannel(
     offs_token = tl.load(sorted_token_ids_ptr + offs_token_id)
     token_mask = offs_token < num_valid_tokens
 
-    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N * 2) // 2) % N
     offs_k = tl.arange(0, BLOCK_SIZE_K)
     a_ptrs = A + (offs_token[:, None] // top_k * stride_am +
                   offs_k[None, :] * stride_ak)
 
     off_experts = tl.load(expert_ids_ptr + pid_m)
-    b_ptrs = B + off_experts * stride_be + (offs_k[:, None] * stride_bk +
-                                            offs_bn[None, :] * stride_bn)
+    b_ptrs = (B + off_experts * stride_be +
+              (offs_k[None, :] * stride_bk + offs_bn[:, None] * stride_bn))
 
     if add_zero_points:
-        offs_zero_points = pid_n * BLOCK_SIZE_N * 2 + tl.arange(
-            0, 2 * BLOCK_SIZE_N)
+        offs_zero_points = (pid_n * BLOCK_SIZE_N * 2 +
+                            tl.arange(0, 2 * BLOCK_SIZE_N))
         zero_points_ptrs = (zero_points_ptr +
                             off_experts * stride_zero_points_e +
                             offs_zero_points)
@@ -102,37 +102,34 @@ def _fused_moe_kernel_a16w4_perchannel(
         zero_points_vals = tl.load(zero_points_ptrs,
                                    mask=offs_zero_points < 2 * N,
                                    other=_ZERO_POINT0)
-
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
     _A0 = tl.zeros([1, 1], dtype=A.dtype.element_ty)
     _B0 = tl.zeros([1, 1], dtype=B.dtype.element_ty)
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N * 2), dtype=tl.float32)
-    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        # Load the next block of A and B,
-        # generate a mask by checking the K dimension.
-        a = tl.load(a_ptrs,
-                    mask=token_mask[:, None] &
-                    (offs_k[None, :] < K - k * BLOCK_SIZE_K),
-                    other=_A0)
-        b_int4_two = tl.load(b_ptrs,
-                             mask=offs_k[:, None] < K - k * BLOCK_SIZE_K,
-                             other=_B0)
-
-        b_int4_l = b_int4_two.__lshift__(4).to(tl.int8).__rshift__(4)
-        b_int4_h = b_int4_two.__rshift__(4)
-        b = tl.interleave(b_int4_l, b_int4_h).to(A.dtype.element_ty)
-
+    l_shifter = (1 - tl.arange(0, BLOCK_SIZE_N * 2) % 2) * 4
+    for k in range(tl.cdiv(K, BLOCK_SIZE_K)):
+        # Load the next block of A and B, generate a mask by checking the K
+        # dimension.
+        a = tl.load(
+            a_ptrs,
+            mask=token_mask[:, None] &
+            (offs_k[None, :] < K - k * BLOCK_SIZE_K),
+            other=_A0,
+        )
+        b = tl.load(b_ptrs,
+                    mask=offs_k[None, :] < K - k * BLOCK_SIZE_K,
+                    other=_B0)
+        b = (b << l_shifter[:, None]).to(tl.int8).__rshift__(4)
         if add_zero_points:
-            b -= zero_points_vals[None, :]
-
+            b -= zero_points_vals[:, None]
+        b = tl.trans(b)
+        b = b.to(a_ptrs.dtype.element_ty)
         # We accumulate along the K dimension.
         accumulator += tl.dot(a, b, out_dtype=tl.float32)
-
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
-
     offs_scale = pid_n * BLOCK_SIZE_N * 2 + tl.arange(0, BLOCK_SIZE_N * 2)
     scale_ptrs = (scale_b_ptr + off_experts * stride_scale_be +
                   offs_scale * stride_scale_bn)
@@ -220,51 +217,48 @@ def _fused_moe_kernel_a16w4_subchannel(
     offs_token = tl.load(sorted_token_ids_ptr + offs_token_id)
     token_mask = offs_token < num_valid_tokens
 
-    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N * 2) // 2) % N
     offs_k = tl.arange(0, BLOCK_SIZE_K)
     a_ptrs = A + (offs_token[:, None] // top_k * stride_am +
                   offs_k[None, :] * stride_ak)
 
     off_experts = tl.load(expert_ids_ptr + pid_m)
-    b_ptrs = B + off_experts * stride_be + (offs_k[:, None] * stride_bk +
-                                            offs_bn[None, :] * stride_bn)
+    b_ptrs = (B + off_experts * stride_be +
+              (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn))
+
+    if add_zero_points:
+        offs_zp_n = (pid_n * BLOCK_SIZE_N * 2 +
+                     tl.arange(0, 2 * BLOCK_SIZE_N)) % (2 * N)
+        _ZERO_POINT0 = tl.zeros([1], dtype=zero_points_ptr.dtype.element_ty)
 
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
     _A0 = tl.zeros([1, 1], dtype=A.dtype.element_ty)
     _B0 = tl.zeros([1, 1], dtype=B.dtype.element_ty)
+    _SCALE0 = tl.zeros([1], dtype=scale_b_ptr.dtype.element_ty)
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N * 2), dtype=tl.float32)
-    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        # Load the next block of A and B,
-        # generate a mask by checking the K dimension.
-        a = tl.load(a_ptrs,
-                    mask=token_mask[:, None] &
-                    (offs_k[None, :] < K - k * BLOCK_SIZE_K),
-                    other=_A0)
-        b_int4_two = tl.load(b_ptrs,
-                             mask=offs_k[:, None] < K - k * BLOCK_SIZE_K,
-                             other=_B0)  # [K x N]
-
-        b_int4_l = b_int4_two.__lshift__(4).to(tl.int8).__rshift__(4)
-        b_int4_h = b_int4_two.__rshift__(4)
-        b = tl.interleave(b_int4_l,
-                          b_int4_h).to(A.dtype.element_ty)  # [K x 2N]
-
+    l_shifter = (1 - tl.arange(0, BLOCK_SIZE_N * 2) % 2) * 4
+    for k in range(tl.cdiv(K, BLOCK_SIZE_K)):
+        # Load the next block of A and B, generate a mask by checking the K
+        # dimension.
+        a = tl.load(
+            a_ptrs,
+            mask=token_mask[:, None] &
+            (offs_k[None, :] < K - k * BLOCK_SIZE_K),
+            other=_A0,
+        )
+        b = tl.load(b_ptrs,
+                    mask=offs_k[:, None] < K - k * BLOCK_SIZE_K,
+                    other=_B0)  # [K x 2N]
+        b = (b << l_shifter[None, :]).to(tl.int8).__rshift__(4)
         # dequantize weight
         if add_zero_points:
-            offs_zp_n = (pid_n * BLOCK_SIZE_N * 2 +
-                         tl.arange(0, 2 * BLOCK_SIZE_N)) % (2 * N)
-            _ZERO_POINT0 = tl.zeros([1],
-                                    dtype=zero_points_ptr.dtype.element_ty)
-            # offs_zp_k = tl.arange(0, 1)
             zp_ptrs = (zero_points_ptr + off_experts * stride_zero_points_e +
                        offs_zp_n * stride_zero_points_n + k)
             zero_points_vals = tl.load(zp_ptrs)
-            b = b - zero_points_vals
-
+            b = b - zero_points_vals[None, :]
         offs_scale_n = pid_n * BLOCK_SIZE_N * 2 + tl.arange(
             0, 2 * BLOCK_SIZE_N)
-        _SCALE0 = tl.zeros([1], dtype=scale_b_ptr.dtype.element_ty)
         scale_b_ptrs = (scale_b_ptr + off_experts * stride_scale_be +
                         offs_scale_n * stride_scale_bn + k)
         scales_val = tl.load(scale_b_ptrs,
@@ -274,7 +268,6 @@ def _fused_moe_kernel_a16w4_subchannel(
 
         # We accumulate along the K dimension.
         accumulator += tl.dot(a, b, out_dtype=tl.float32)
-        # accumulator *= scales_val[None, :]
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
@@ -319,12 +312,10 @@ def fused_moe_a16w4_forward(
         dimension of each token.
     - B: The stacked MOE weight tensor with shape (E, N, K),
         where E is the number of experts, K is the input feature dimension, 
-        and N is the output feature dimension.
-        It should pack alone N dimension
+        and N is the output feature dimension. It should pack alone N dimension
     - C: The output cache tensor with shape (M, topk, N),
         where M is the total number of tokens post padding, topk is the number
-        of times each token is repeated,
-        and N is the output feature dimension.
+        of times each token is repeated, and N is the output feature dimension
     - scale_b / zero_points: Tensors that used to dequant int4 B, 
                              where dequant_B = (B - zero_points) * scale_b,
         for perchannel case, the shape of scale_b and zero_points is (E, N),
@@ -349,15 +340,15 @@ def fused_moe_a16w4_forward(
     assert sorted_token_ids.stride(0) == 1
     assert B.shape[1] % 16 == 0 and B.shape[2] % 16 == 0
 
+    N, K, EM, num_valid_tokens = (
+        B.shape[1],
+        B.shape[2],
+        sorted_token_ids.shape[0],
+        topk_ids.numel(),
+    )
+
     add_zero_points = zero_points is not None
     is_perchannel = scale_b.dim() == 2  # (E, N)
-
-    grid = (
-        triton.cdiv(sorted_token_ids.shape[0], config['BLOCK_SIZE_M']) *
-        triton.cdiv(B.shape[1], config['BLOCK_SIZE_N']),
-        1,
-        1,
-    )
 
     kwargs = [
         A,
@@ -369,10 +360,10 @@ def fused_moe_a16w4_forward(
         sorted_token_ids,
         expert_ids,
         num_tokens_post_padded,
-        B.shape[1],
-        B.shape[2],
-        sorted_token_ids.shape[0],
-        topk_ids.numel(),
+        N,
+        K,
+        EM,
+        num_valid_tokens,
         A.stride(0),
         A.stride(1),
         B.stride(0),  # E
@@ -384,36 +375,33 @@ def fused_moe_a16w4_forward(
         scale_b.stride(1),  # N
         scale_b.stride(-1),  # K
     ]
-
     kwargs += ([1, 1, 1] if not add_zero_points else [
         zero_points.stride(0),
         zero_points.stride(1),
         zero_points.stride(-1)
     ])
 
-    const_kwargs = {
-        "MUL_ROUTED_WEIGHT": mul_routed_weight,
-        "top_k": top_k,
-        "num_warps": 4
-    }
-
-    if add_zero_points:
-        const_kwargs.update({"add_zero_points": True})
-    else:
-        const_kwargs.update({"add_zero_points": False})
+    const_kwargs = {"MUL_ROUTED_WEIGHT": mul_routed_weight, "top_k": top_k}
+    const_kwargs.update({"add_zero_points": add_zero_points})
 
     if not is_perchannel:
         k_per_scale = B.shape[-1] // scale_b.shape[-1]
-        config['BLOCK_SIZE_K'] = k_per_scale
+        const_kwargs.update({"BLOCK_SIZE_K": k_per_scale})
 
     const_kwargs.update(config)
 
-    if is_perchannel:
-        fuse_moe_a16w4 = _fused_moe_kernel_a16w4_perchannel
-    else:
-        fuse_moe_a16w4 = _fused_moe_kernel_a16w4_subchannel
+    grid = (
+        triton.cdiv(sorted_token_ids.shape[0], config['BLOCK_SIZE_M']) *
+        triton.cdiv(B.shape[1], config['BLOCK_SIZE_N']),
+        1,
+        1,
+    )
 
-    fuse_moe_a16w4[grid](*kwargs, **const_kwargs)
+    fuse_moe_a16w4_kernel = (_fused_moe_kernel_a16w4_perchannel
+                             if is_perchannel else
+                             _fused_moe_kernel_a16w4_subchannel)
+
+    fuse_moe_a16w4_kernel[grid](*kwargs, **const_kwargs)
 
 
 def fused_experts_gptq(hidden_states: torch.Tensor,

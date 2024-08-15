@@ -38,6 +38,7 @@ class GPTQMarlinConfig(QuantizationConfig):
             # (since we have only one group per output channel)
             desc_act = False
 
+        self.weight_bits = weight_bits
         self.pack_factor = 32 // weight_bits  # packed into int32
         self.group_size = group_size
         self.desc_act = desc_act
