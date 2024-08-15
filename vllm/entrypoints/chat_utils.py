@@ -2,7 +2,7 @@ import codecs
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import (Any, Awaitable, Iterable, List, Literal, Optional, Sequence, Tuple,
+from typing import (Any, Awaitable, Iterable, List, Optional, Sequence, Tuple,
                     Union, cast)
 
 # yapf conflicts with isort for this block
