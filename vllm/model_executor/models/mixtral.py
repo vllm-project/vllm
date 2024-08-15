@@ -586,7 +586,7 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
         )
 
         params_dict = dict(self.named_parameters())
-        logger.error(params_dict)
+        logger.error(params_dict.keys())
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -594,8 +594,8 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-                param = params_dict[name]
                 name = name.replace(weight_name, param_name)
+                param = params_dict[name]
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
@@ -607,6 +607,7 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                 weight_loader(param, loaded_weight, shard_id, is_quantized=True)
                 break
             else:
+                logger.error(expert_params_mapping)
                 for mapping in expert_params_mapping:
                     param_name, weight_name, expert_id, shard_id = mapping
                     if weight_name not in name:
@@ -614,9 +615,9 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                     # Skip layers on other devices.
                     if is_pp_missing_parameter(name, self):
                         continue
+                    name = name.replace(weight_name, param_name)
                     logger.error(name)
                     param = params_dict[name]
-                    name = name.replace(weight_name, param_name)
                     weight_loader = param.weight_loader
                     weight_loader(
                         param,
