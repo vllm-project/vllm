@@ -1170,7 +1170,11 @@ class LLMEngine:
 
         Returns RequestOutputs that can be returned to the client.
         """
-        output = [o for o in output if isinstance(o, SamplerOutput) or isinstance(o, PoolerOutput)]
+        _output = output
+
+        output = [o for o in _output if isinstance(o, SamplerOutput) or isinstance(o, PoolerOutput)]
+        proposer_output = [o for o in _output if isinstance(o, SpeculativeProposerSamplerOutput)]
+        scorer_output = [o for o in _output if isinstance(o, SpeculativeScorerSamplerOutput)]
 
         now = time.time()
 
@@ -1193,6 +1197,11 @@ class LLMEngine:
             self.output_processor.process_prompt_logprob(seq_group, outputs)
             if seq_group_meta.do_sample:
                 self.output_processor.process_outputs(seq_group, outputs)
+
+        for scheduled_seq_group, outputs in zip(scheduled_seq_groups, output_by_sequence_group):
+            # Speculative deocode does not produce many sequences from same prompt
+            # mock for now with draft only, what if there is not
+            scheduled_seq_group.seq_group.seqs[0].data.last_draft_token_ids = [1, 2, 3, 4]
 
         # Free the finished sequence groups.
         for scheduler in self.scheduler:

@@ -34,6 +34,7 @@ class CompletionOutput:
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
     lora_request: Optional[LoRARequest] = None
+    last_draft_token_ids: list[int] = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -112,6 +113,8 @@ class RequestOutput:
 
     @classmethod
     def from_seq_group(cls, seq_group: SequenceGroup) -> "RequestOutput":
+        # seq_group.seqs[0].data.last_draft_token_ids
+        # [1, 2, 3, 4]
         if seq_group.sampling_params is None:
             raise ValueError(
                 "Sampling parameters are missing for a CompletionRequest.")
@@ -143,7 +146,7 @@ class RequestOutput:
                 seq.get_cumulative_logprob() if include_logprobs else None,
                 seq.output_logprobs if include_logprobs else None,
                 SequenceStatus.get_finished_reason(seq.status),
-                seq.stop_reason) for seq in top_n_seqs
+                seq.stop_reason, None, seq.data.last_draft_token_ids) for seq in top_n_seqs
         ]
 
         # Every sequence in the sequence group should have the same prompt.
