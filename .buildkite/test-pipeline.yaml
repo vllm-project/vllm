@@ -85,14 +85,6 @@ steps:
   - pytest -v -s entrypoints/llm
   - pytest -v -s entrypoints/openai
 
-- label: OpenAI-Compatible Tool Use # 20 min
-  fast_check: false
-  mirror_hardwares: [ amd ]
-  source_file_dependencies:
-    - vllm/
-    - tests/tool_use
-  commands:
-    - pytest -v -s tool_use
 
 - label: Distributed Tests (4 GPUs) # 10min
   working_dir: "/vllm-workspace/tests"
@@ -256,6 +248,14 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - bash ./run-tests.sh -c configs/models-small.txt -t 1
 
+- label: OpenAI-Compatible Tool Use # 20 min
+  fast_check: false
+  mirror_hardwares: [ amd ]
+  source_file_dependencies:
+    - vllm/
+    - tests/tool_use
+  commands:
+    - pytest -v -s tool_use
 
 #####  1 GPU test  #####
 #####  multi gpus test  #####
