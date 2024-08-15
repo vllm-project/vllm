@@ -154,7 +154,7 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         choices=["mistral", "hermes"],
         default=None,
         help=
-        "Select the tool call parser depending on the model that you\'re using."
+        "Select the tool call parser depending on the model that you're using."
         " This is used to parse the model-generated tool call into OpenAI API "
         "format. Required for --enable-auto-tool-choice. Options: 'hermes', "
         "'mistral'")
