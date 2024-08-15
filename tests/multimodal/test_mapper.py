@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from transformers import CLIPImageProcessor, LlavaNextImageProcessor
 
-from vllm.config import ModelConfig, MultiModalConfig
+from vllm.config import ModelConfig
 from vllm.multimodal import MultiModalRegistry
 from vllm.multimodal.utils import rescale_image_size
 
@@ -31,7 +31,6 @@ def test_clip_image_processor(image_assets, mm_registry, dtype, size_factor):
         dtype=dtype,
         revision=None,
     )
-    mm_config = MultiModalConfig(limit_per_prompt={"image": 1})
 
     mm_registry.init_mm_limits_per_prompt(model_config)
 
@@ -74,7 +73,6 @@ def test_llava_next_image_processor(image_assets, mm_registry, dtype,
         dtype=dtype,
         revision=None,
     )
-    mm_config = MultiModalConfig(limit_per_prompt={"image": 1})
 
     mm_registry.init_mm_limits_per_prompt(model_config)
 
@@ -116,7 +114,6 @@ def test_mm_limits(image_assets, mm_registry, num_images, limit, is_valid):
         dtype="half",
         revision=None,
     )
-    mm_config = MultiModalConfig(limit_per_prompt={"image": limit})
 
     mm_registry.init_mm_limits_per_prompt(model_config)
 
@@ -146,7 +143,6 @@ def test_image_mapper_multi(image_assets, mm_registry, num_images):
         dtype="half",
         revision=None,
     )
-    mm_config = MultiModalConfig(limit_per_prompt={"image": num_images})
 
     mm_registry.init_mm_limits_per_prompt(model_config)
 
