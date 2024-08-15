@@ -16,7 +16,6 @@ from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
-from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -868,8 +867,6 @@ class JambaForCausalLM(nn.Module, HasInnerState):
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
         ]
 
         # Params for weights, fp8 weight scales, fp8 activation scales
@@ -891,6 +888,10 @@ class JambaForCausalLM(nn.Module, HasInnerState):
             if ".self_attn." in name:
                 name = name.replace(".self_attn", "")
 
+            if "feed_forward" in name and not _is_moe_layer(name):
+                ## map MLP layers to expert with ID=0
+                name = name.replace("feed_forward", "feed_forward.experts.0")
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -905,10 +906,15 @@ class JambaForCausalLM(nn.Module, HasInnerState):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                for mapping in expert_params_mapping:
-                    param_name, weight_name, expert_id, shard_id = mapping
+                for (
+                        param_name,
+                        weight_name,
+                        expert_id,
+                        shard_id,
+                ) in expert_params_mapping:
                     if weight_name not in name:
                         continue
+
                     name = name.replace(weight_name, param_name)
                     param = params_dict[name]
                     weight_loader = param.weight_loader
@@ -927,3 +933,11 @@ class JambaForCausalLM(nn.Module, HasInnerState):
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
                     weight_loader(param, loaded_weight)
+
+
+def _is_moe_layer(name: str):
+    return any(
+        [experts_name in name for experts_name in [
+            "experts",
+            "router",
+        ]])
