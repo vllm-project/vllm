@@ -1170,18 +1170,48 @@ class LLMEngine:
 
         Returns RequestOutputs that can be returned to the client.
         """
-        _output = output
-
-        output = [o for o in _output if isinstance(o, SamplerOutput) or isinstance(o, PoolerOutput)]
-        proposer_output = [o for o in _output if isinstance(o, SpeculativeProposerSamplerOutput)]
-        scorer_output = [o for o in _output if isinstance(o, SpeculativeScorerSamplerOutput)]
 
         now = time.time()
 
+        # Separate ouptuts to apply correct post process method
+        speculative_proposer_outputs: list[SpeculativeProposerSamplerOutput] = []
+        speculative_scorer_outputs: list[SpeculativeScorerSamplerOutput] = []
+        non_speculative_outputs: list[Union[SamplerOutput, PoolerOutput]] = []
+
+        for item in output:
+            if isinstance(item, SpeculativeProposerSamplerOutput):
+                speculative_proposer_outputs.append(item)
+            elif isinstance(item, SpeculativeScorerSamplerOutput):
+                speculative_scorer_outputs.append(item)
+            elif isinstance(item, SamplerOutput) or isinstance(item, PoolerOutput):
+                non_speculative_outputs.append(item)
+            else:
+                raise ValueError("output has indefined type %s" % type(item))
+
+        # Update speculative decode states
+        for scheduled_seq_group_index, scheduled_seq_group in enumerate(scheduled_seq_groups):
+            # Update draft model state
+            scheduled_seq_group_draft_token_ids = [
+                output.token_indices[scheduled_seq_group_index].tolist()
+                for output in speculative_proposer_outputs
+            ]
+
+            # Speculative decode does not support beam search and thus always has single sequence
+            scheduled_seq_group.seq_group.seqs[0].data.draft_token_ids = scheduled_seq_group_draft_token_ids
+
+            # Update scorer model state
+            scheduled_seq_group_scorer_token_ids = [
+                output.token_indices[scheduled_seq_group_index].tolist()
+                for output in speculative_scorer_outputs
+            ]
+
+            scheduled_seq_group.seq_group.seqs[0].data.scorer_token_ids = scheduled_seq_group_scorer_token_ids
+
+        # Default default decode states
         # Organize outputs by [sequence group][step] instead of
         # [step][sequence group].
         output_by_sequence_group = create_output_by_sequence_group(
-            output, num_seq_groups=len(scheduled_seq_groups))
+            non_speculative_outputs, num_seq_groups=len(scheduled_seq_groups))
 
         # Update the scheduled sequence groups with the model outputs.
         for scheduled_seq_group, outputs, seq_group_meta in zip(
@@ -1197,12 +1227,6 @@ class LLMEngine:
             self.output_processor.process_prompt_logprob(seq_group, outputs)
             if seq_group_meta.do_sample:
                 self.output_processor.process_outputs(seq_group, outputs)
-
-        for scheduled_seq_group_index, scheduled_seq_group in enumerate(scheduled_seq_groups):
-            scheduled_seq_group_draft_token_ids = [o.token_indices[scheduled_seq_group_index].tolist() for o in proposer_output]
-            scheduled_seq_group.seq_group.seqs[0].data.draft_token_ids = scheduled_seq_group_draft_token_ids
-            scheduled_seq_group_scorer_token_ids = [o.token_indices[scheduled_seq_group_index].tolist() for o in scorer_output]
-            scheduled_seq_group.seq_group.seqs[0].data.scorer_token_ids = scheduled_seq_group_scorer_token_ids
 
         # Free the finished sequence groups.
         for scheduler in self.scheduler:
