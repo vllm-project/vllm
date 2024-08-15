@@ -93,7 +93,6 @@ class MixtralMoE(nn.Module):
             hidden_size,
             num_experts,
             bias=False,
-            params_dtype=params_dtype,
             quant_config=None,
             prefix=f"{prefix}.gate",
         )
@@ -117,8 +116,8 @@ class MixtralMoE(nn.Module):
         hidden_states = hidden_states.view(-1, self.hidden_size)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = self.experts(hidden_states, router_logits)
-        return final_hidden_states.view(orig_shape)
+        final_hidden_states = self.experts(hidden_states.half(), router_logits)
+        return final_hidden_states.view(orig_shape).bfloat16()
 
 class QuantMixtralMoE(nn.Module):
     def __init__(
@@ -275,6 +274,7 @@ class MixtralDecoderLayer(nn.Module):
             intermediate_size=config.intermediate_size,
             quant_config=quant_config,
             tp_size=get_tensor_model_parallel_world_size(),
+            params_dtype=torch.float16,
             prefix=f"{prefix}.block_sparse_moe",
         )
         # self.block_sparse_moe = QuantMixtralMoE(
