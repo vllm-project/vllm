@@ -125,7 +125,7 @@ async def test_parallel_tool_calls(client: openai.AsyncOpenAI):
     assert (len(non_streamed_tool_calls) == len(tool_call_names) ==
             len(tool_call_args))
 
-    for i in range(0, 2):
+    for i in range(2):
         assert non_streamed_tool_calls[i].function.name == tool_call_names[i]
         streamed_args = json.loads(tool_call_args[i])
         non_streamed_args = json.loads(
