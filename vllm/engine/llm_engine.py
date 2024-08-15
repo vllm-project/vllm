@@ -1202,6 +1202,7 @@ class LLMEngine:
             # Speculative deocode does not produce many sequences from same prompt
             # mock for now with draft only, what if there is not
             scheduled_seq_group.seq_group.seqs[0].data.last_draft_token_ids = [1, 2, 3, 4]
+            scheduled_seq_group.seq_group.seqs[0].data.last_scorer_token_ids = [1, 2, 3, 4]
 
         # Free the finished sequence groups.
         for scheduler in self.scheduler:

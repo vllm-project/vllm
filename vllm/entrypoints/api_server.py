@@ -79,6 +79,7 @@ async def generate(request: Request) -> Response:
         return Response(status_code=499)
 
     assert final_output is not None
+    # TODO: CHAGE FROM LAST TO CURRENT DRAFT AND SCORER
     prompt = final_output.prompt
     text_outputs = [prompt + output.text for output in final_output.outputs]
     ret = {"text": text_outputs}

@@ -35,6 +35,7 @@ class CompletionOutput:
     stop_reason: Union[int, str, None] = None
     lora_request: Optional[LoRARequest] = None
     last_draft_token_ids: list[int] = None
+    last_scorer_token_ids: list[int] = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -146,8 +147,10 @@ class RequestOutput:
                 seq.get_cumulative_logprob() if include_logprobs else None,
                 seq.output_logprobs if include_logprobs else None,
                 SequenceStatus.get_finished_reason(seq.status),
-                seq.stop_reason, None, seq.data.last_draft_token_ids) for seq in top_n_seqs
+                seq.stop_reason, None, seq.data.last_draft_token_ids, seq.data.last_scorer_token_ids) for seq in top_n_seqs
         ]
+
+        # todo: replace last draft with just draft since in order to get history u can hust use streaming
 
         # Every sequence in the sequence group should have the same prompt.
         prompt = seq_group.prompt
