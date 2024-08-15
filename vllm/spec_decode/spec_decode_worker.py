@@ -569,16 +569,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             target_logprobs=target_logprobs,
             k=execute_model_req.num_lookahead_slots,
             stage_times=stage_times)
-        
-        # sampler outputs bs2
-        # len(sampler_outputs) = accepted tokens count
-        # len(sampler_outputs[i].outputs) = 2 
-        #
-        # for next_token in sampler_outputs:
-        #     for bs in next_token.result:
-        #           ....
-        #
-        # sampler_outputs[token_index][batch_element_index]
 
         speculative_proposer_sampler_outputs = self._create_speculative_proposer_sampler_outputs(proposals=proposals)
         speculative_scorer_sampler_outputs = self._create_speculative_scorer_sampler_outputs(proposal_scores=proposal_scores)
@@ -591,29 +581,14 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         return outputs
     
     def _create_speculative_proposer_sampler_outputs(self, proposals: SpeculativeProposals) -> list[SpeculativeProposerSamplerOutput]:
-        # bs2
-        # proposals.proposal_token_ids
-        # tensor([[317,   7, 697,   4],
-        # [317,   7, 697,   4]], device='cuda:0')
-        # By default we get proposals in format proposals[batch_element_index][token_index] but to make it similar to sampler outputs
-        # where we have [token_index][batch_element_index] we transpose it
         speculative_proposer_sampler_outputs = [
             SpeculativeProposerSamplerOutput(token_indices=token_indices)
             for token_indices in proposals.proposal_token_ids.T
         ]
 
-        # not len(speculative_proposer_sampler_outputs) = tokens in proposal
-        # len(speculative_proposer_sampler_outputs[2]) = bs (i.e proposed token in step 2 for every sequence in batch)
-
         return speculative_proposer_sampler_outputs
 
     def _create_speculative_scorer_sampler_outputs(self, proposal_scores: SpeculativeScores) -> list[SpeculativeScorerSamplerOutput]:
-        # proposal_scores.token_ids
-        # tensor([[ 317,    7,  697,    4, 1437],
-        # [ 317,    7,  697,    4, 1437]], device='cuda:0')
-
-        # same thing as in _create_speculative_proposer_sampler_outputs, return step major, not batch major
-
         speculative_scorer_sampler_outputs = [
             SpeculativeScorerSamplerOutput(token_indices=token_indices)
             for token_indices in proposal_scores.token_ids.T
