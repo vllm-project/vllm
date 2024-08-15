@@ -380,6 +380,14 @@ class LLMEngine:
                 num_gpu_blocks_override)
             num_gpu_blocks = num_gpu_blocks_override
 
+        if self.cache_config.num_cpu_blocks_override is not None:
+            num_cpu_blocks_override = self.cache_config.num_cpu_blocks_override
+            logger.info(
+                "Overriding num_cpu_blocks=%d with "
+                "num_cpu_blocks_override=%d", num_cpu_blocks,
+                num_cpu_blocks_override)
+            num_cpu_blocks = num_cpu_blocks
+
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 

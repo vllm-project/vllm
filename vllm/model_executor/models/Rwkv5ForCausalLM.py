@@ -24,6 +24,7 @@ from torch import nn
 from transformers import RwkvConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.attention.backends.rwkv5linear_attn import LinearFlashAttentionMetadata
 from vllm.config import CacheConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
@@ -78,13 +79,31 @@ class RWKVAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata
+        attn_metadata: AttentionMetadata,
+        position_ids:torch.Tensor
     ) -> torch.Tensor:
         x = hidden_states
-        ott = torch.arange(x.shape[0])
-        ott = ott-1
-        state = x[ott]
-        state[ott==-1] = kv_cache[1,0,0,:,:,0].reshape_as(state[ott==-1]) if kv_cache != None else torch.zeros_like(state[ott==-1])
+        
+        
+        blocknum = attn_metadata.slot_mapping // 16
+        blockidx = attn_metadata.slot_mapping % 16
+        blocknum = blocknum.to(x.device)
+        blockidx = blockidx.to(x.device)
+
+        if(attn_metadata.num_decode_tokens > 0):
+            if kv_cache != None:
+                state = kv_cache[blocknum,blockidx,:,:,0]
+                kv_cache[blocknum,blockidx,:,:,0] = x.reshape_as(state)
+                state = state.reshape_as(x)
+        else:
+            ott = torch.arange(x.shape[0]).to(x.device)
+            ott = ott-1
+            state = x[ott]
+            state[position_ids==0]*=0 # for start of sequence
+            if(kv_cache != None):
+                kv_cache[blocknum[ott[position_ids==0]],blockidx[ott[position_ids==0]],:,:,0] = x[ott[position_ids==0]-1].reshape_as(kv_cache[blocknum[ott[position_ids==0]],blockidx[ott[position_ids==0]],:,:,0])
+                state = state.reshape_as(x)
+
         # state[position_ids.query_start_loc] = cache
         # cache = state[position_ids.query_start_loc + position_ids.seq_lens]
         
@@ -115,29 +134,29 @@ class RWKVAttention(nn.Module):
         #     print(attn_metadata.num_prefill_tokens)
         
         T = attn_metadata.num_prefill_tokens
+        # print(attn_metadata)
         
         if (T == 0): T = attn_metadata.num_decode_tokens
         
         if(attn_metadata.num_prefill_tokens != 0):
         # print(kv_cache.shape if kv_cache != None else None)
-            s = kv_cache[0,0,0] if kv_cache != None else torch.zeros(self.num_heads, self.head_dim, self.head_dim, device=at.device, dtype=at.dtype)
+            s = kv_cache[blocknum,blockidx,:,:,2:] if kv_cache != None else torch.zeros(1,self.num_heads, self.head_dim, self.head_dim, device=at.device, dtype=at.dtype)
             # print(kv_cache.shape if kv_cache != None else None)
             for t in range(T):
-                # print(out[t].shape, r[t].shape, s.shape)
-                out[t] += r[t] @ s
-                s *= w
-                s += at[t]
+                print(out[t].shape, r[t].shape, s.shape)
+                out[t] += r[t] @ s[0]
+                s[0] *= w
+                s[0] += at[t]
             
             if(kv_cache != None):
-                kv_cache[1,0,0,:,:,0] = x[attn_metadata.num_prefill_tokens-1].reshape_as(kv_cache[1,0,0,:,:,0])
-                kv_cache[0,0,0] = s
+                kv_cache[blocknum,blockidx,:,:,2:] = s
 
         else:
             # print(kv_cache.shape if kv_cache != None else None)
        
             
             for t in range(T):
-                s = kv_cache[0,0,0] if kv_cache != None else torch.zeros(self.num_heads, self.head_dim, self.head_dim, device=at.device, dtype=at.dtype)
+                s = kv_cache[blocknum[t],blockidx[t],:,:,2:] if kv_cache != None else torch.zeros(self.num_heads, self.head_dim, self.head_dim, device=at.device, dtype=at.dtype)
             
                 # print(out[t].shape, r[t].shape, s.shape)
                 out[t] += r[t] @ s
@@ -145,32 +164,12 @@ class RWKVAttention(nn.Module):
                 s += at[t]
             
                 if(kv_cache != None):
-                    kv_cache[1,0,0,:,:,0] = x[attn_metadata.num_prefill_tokens-1].reshape_as(kv_cache[1,0,0,:,:,0])
-                    kv_cache[0,0,0] = s
+                    kv_cache[blocknum[t],blockidx[t],:,:,2:] = s
         out = out.view(-1, self.hidden_size)
         out = self.ln_x(out/self.head_size_divisor)
         hidden_states = self.output(out*g)
 
         
-        # print(attn_metadata.num_decode_tokens)
-        # print(attn_metadata.num_prefill_tokens)
-        # for i in range(attn_metadata.slot_mapping.__len__()):
-        #     pass
-        #     # if(attn_metadata.slot_mapping[i] == -1):
-        #     #     attn_metadata.slot_mapping[i] = i
-        #     # else:
-        #     #     pass
-            
-        # if(kv_cache != None):
-        #     print(kv_cache.shape)
-        #     print(kv_cache[0,0,0,0,0])
-        #     kv_cache[0,0,0,0,0] += 1
-        # exit()
-        # state = hidden_states[ott]
-
-        # state[attn_metadata.query_start_loc] = kv_cache
-        # kv_cache = state[attn_metadata.query_start_loc + attn_metadata.seq_lens]
-
         return kv_cache, hidden_states
 
 
@@ -208,14 +207,26 @@ class RWKVMLP(nn.Module):
             # quant_config=quant_config,
         )
 
-    def forward(self, x, kv_cache, attn_metadata:AttentionMetadata):
+    def forward(self, x, kv_cache, attn_metadata:LinearFlashAttentionMetadata, position_ids:torch.Tensor):
     
-        ott = torch.arange(x.shape[0])
-        ott = ott-1
-        state = x[ott]
-        state[ott==-1] = kv_cache[1,0,0,:,:,1].reshape_as(state[ott==-1]) if kv_cache != None else torch.zeros_like(state[ott==-1])
-        # state[position_ids.query_start_loc] = cache
-        # cache = state[position_ids.query_start_loc + position_ids.seq_lens]
+        blocknum = attn_metadata.slot_mapping // 16
+        blockidx = attn_metadata.slot_mapping % 16
+
+        blocknum = blocknum.to(x.device)
+        blockidx = blockidx.to(x.device)
+        if(attn_metadata.num_decode_tokens > 0):
+            if kv_cache != None:
+                state = kv_cache[blocknum,blockidx,:,:,1]
+                kv_cache[blocknum,blockidx,:,:,1] = x.reshape_as(state)
+                state = state.reshape_as(x)
+        else:
+            ott = torch.arange(x.shape[0]).to(x.device)
+            ott = ott-1
+            state = x[ott]
+            state[position_ids==0]*=0 # for start of sequence
+            if kv_cache != None:
+                kv_cache[blocknum[ott[position_ids==0]],blockidx[ott[position_ids==0]],:,:,1] = x[ott[position_ids==0]-1].reshape_as(kv_cache[blocknum[ott[position_ids==0]],blockidx[ott[position_ids==0]],:,:,1])
+                state = state.reshape_as(x)
 
         xx =  state - x
         xk = x + xx * (1-self.time_mix_key[0])
@@ -225,8 +236,6 @@ class RWKVMLP(nn.Module):
         k = torch.relu(k) ** 2
         kv = self.value(k)
 
-        if(kv_cache != None):
-            kv_cache[1,0,0,:,:,1] = x[attn_metadata.num_prefill_tokens-1].reshape_as(kv_cache[1,0,0,:,:,1])
 
         return torch.sigmoid(self.receptance(xr)) * kv
 
@@ -266,14 +275,15 @@ class RWKVBlock(nn.Module):
         kv_cache,attn_output = self.attention(
             hidden_states=hidden_states,
             kv_cache=kv_cache,
-            attn_metadata=attn_metadata
+            attn_metadata=attn_metadata,
+            position_ids=position_ids
         )
         # residual connection
         hidden_states = attn_output + residual
 
         residual = hidden_states
         hidden_states = self.ln2(hidden_states)
-        feed_forward_hidden_states = self.feed_forward(hidden_states, kv_cache, attn_metadata)
+        feed_forward_hidden_states = self.feed_forward(hidden_states, kv_cache, attn_metadata, position_ids)
         # residual connection
         hidden_states = residual + feed_forward_hidden_states
         return hidden_states
@@ -296,20 +306,25 @@ class RWKV5Model(nn.Module):
             for _ in range(config.num_hidden_layers)
         ])
         self.ln_out = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
-        self.head = nn.Linear(self.embed_dim,config.vocab_size, False)
+        self.head = VocabParallelEmbedding(config.vocab_size, self.embed_dim)
 
     def forward(
         self,
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
         kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
+        attn_metadata: LinearFlashAttentionMetadata,
     ) -> torch.Tensor:
         # print(position_ids.size(),position_ids)
         # print(attn_metadata)
         inputs_embeds = self.embeddings(input_ids)
 
+        print(position_ids)
+
         hidden_states = self.blocks[0].pre_ln(inputs_embeds)
+        print(attn_metadata.query_start_loc)
+        print(attn_metadata.seq_start_loc)
+        print(attn_metadata.slot_mapping)
 
         for i in range(len(self.blocks)):
             layer = self.blocks[i]
@@ -334,8 +349,9 @@ class Rwkv5ForCausalLM(nn.Module):
         print(config)
         print(cache_config)
         print(quant_config)
+        cache_config.num_gpu_blocks_override = 16
+        cache_config.num_cpu_blocks_override = 16
         self.rwkv = RWKV5Model(config, cache_config, quant_config)
-        self.lm_head_weight = self.rwkv.head.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
@@ -345,14 +361,17 @@ class Rwkv5ForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        *args,
+        **kwargs
     ) -> torch.Tensor:
         hidden_states = self.rwkv(input_ids, positions, kv_caches,
                                          attn_metadata)
+        print(hidden_states)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head_weight, hidden_states,
+        logits = self.logits_processor(self.rwkv.head, hidden_states,
                                        sampling_metadata)
         return logits
 
@@ -362,6 +381,7 @@ class Rwkv5ForCausalLM(nn.Module):
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
         next_tokens = self.sampler(logits, sampling_metadata)
+        print(next_tokens)
         return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):

@@ -503,6 +503,7 @@ class CacheConfig:
         self.gpu_memory_utilization = gpu_memory_utilization
         self.swap_space_bytes = swap_space * _GB
         self.num_gpu_blocks_override = num_gpu_blocks_override
+        self.num_cpu_blocks_override = None
         self.cache_dtype = cache_dtype
         self.sliding_window = sliding_window
         self.enable_prefix_caching = enable_prefix_caching

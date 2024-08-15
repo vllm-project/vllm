@@ -7,7 +7,10 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata)
+                                              AttentionMetadata, AttentionMetadataBuilder)
+from vllm.attention.backends.utils import PAD_SLOT_ID, compute_slot_mapping, compute_slot_mapping_start_idx, is_block_tables_empty
+from vllm.utils import async_tensor_h2d, make_tensor_with_pad
+from vllm.worker.model_runner import ModelInputForGPUBuilder
 
 
 class RWKVFlashAttentionBackend(AttentionBackend):
@@ -29,6 +32,10 @@ class RWKVFlashAttentionBackend(AttentionBackend):
         return LinearFlashAttentionMetadata
 
     @staticmethod
+    def get_builder_cls() -> Type["FlashLinearAttentionMetadataBuilder"]:
+        return FlashLinearAttentionMetadataBuilder
+
+    @staticmethod
     def get_kv_cache_shape(
         num_blocks: int,
         block_size: int,
@@ -37,7 +44,7 @@ class RWKVFlashAttentionBackend(AttentionBackend):
     ) -> Tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        return (2, 1, block_size, num_kv_heads, head_size, head_size)
+        return (min(num_blocks,16),block_size, num_kv_heads, head_size, head_size+2)
 
     @staticmethod
     def swap_blocks(
@@ -251,3 +258,170 @@ class LinearFlashAttentionImpl(AttentionImpl):
         output = query
    
         return output.view(num_tokens, hidden_size)
+
+
+class FlashLinearAttentionMetadataBuilder(
+        AttentionMetadataBuilder[LinearFlashAttentionMetadata]):
+
+    def __init__(self, input_builder: "ModelInputForGPUBuilder"):
+        self.slot_mapping: List[int] = []
+        self.prefill_seq_lens: List[int] = []
+        self.context_lens: List[int] = []
+        self.block_tables: List[List[int]] = []
+        self.curr_seq_lens: List[int] = []
+        self.num_prefills = 0
+        self.num_prefill_tokens = 0
+        self.num_decode_tokens = 0
+        self.has_prefix_cache_hit = False
+
+        self.input_builder = input_builder
+        self.runner = input_builder.runner
+        self.sliding_window = input_builder.sliding_window
+        self.block_size = input_builder.block_size
+        self.use_v2_block_manager = (
+            input_builder.scheduler_config.use_v2_block_manager)
+
+    def _add_seq_group(
+            self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
+            chunked_prefill_enabled: bool, prefix_cache_hit: bool):
+        """Add a sequence group to the metadata. Specifically update/append
+        1. context length.
+        2. block table.
+        3. slot mapping.
+        """
+        is_prompt = inter_data.is_prompt
+        block_tables = inter_data.block_tables
+
+        for (seq_id, token_len, seq_len, curr_seq_len, query_len, context_len,
+             curr_sliding_window_block) in zip(
+                 inter_data.seq_ids, [len(t) for t in inter_data.input_tokens],
+                 inter_data.orig_seq_lens, inter_data.seq_lens,
+                 inter_data.query_lens, inter_data.context_lens,
+                 inter_data.curr_sliding_window_blocks):
+            self.context_lens.append(context_len)
+
+            if is_prompt:
+                self.num_prefills += 1
+                self.num_prefill_tokens += token_len
+                self.prefill_seq_lens.append(seq_len)
+            else:
+                assert query_len == 1, (
+                    "seq_len: {}, context_len: {}, query_len: {}".format(
+                        seq_len, context_len, query_len))
+                self.num_decode_tokens += query_len
+                self.curr_seq_lens.append(curr_seq_len)
+
+            # Compute block table.
+            # TODO(sang): Combine chunked prefill and prefix caching by
+            # only allowing multiple of block_size chunk size.
+            # NOTE: This only works for oooooooxxx style attention.
+            block_table = []
+            if prefix_cache_hit:
+                # NOTE(woosuk): For flash-attn, the block table should
+                # include the entries for the incoming prefill tokens.
+                block_table = block_tables[seq_id]
+            elif ((chunked_prefill_enabled or not is_prompt)
+                  and block_tables is not None):
+                block_table = block_tables[seq_id]
+                
+            self.block_tables.append(block_table)
+
+            # Compute slot mapping.
+            is_profile_run = is_block_tables_empty(block_tables)
+            start_idx = compute_slot_mapping_start_idx(
+                False, 1, 1, False,
+                self.use_v2_block_manager)
+            compute_slot_mapping(is_profile_run, self.slot_mapping, seq_id,
+                                 1, 0, start_idx,
+                                 self.block_size, inter_data.block_tables)
+
+    def build(self, seq_lens: List[int], query_lens: List[int],
+              cuda_graph_pad_size: int, batch_size: int):
+        """Build attention metadata with on-device tensors.
+
+        Args:
+            seq_lens: The maybe padded sequence lengths of the input sequences.
+            query_lens: The query lengths of the input sequences.
+            cuda_graph_pad_size: The padding size for cuda graph.
+                                 -1 if cuda graph is not used.
+            batch_size: The maybe padded batch size.
+        """
+        prefix_cache_hit = any([
+            inter_data.prefix_cache_hit
+            for inter_data in self.input_builder.inter_data_list
+        ])
+        for inter_data in self.input_builder.inter_data_list:
+            self._add_seq_group(inter_data,
+                                self.input_builder.chunked_prefill_enabled,
+                                prefix_cache_hit)
+
+        device = self.runner.device
+        use_captured_graph = cuda_graph_pad_size != -1
+
+        max_query_len = max(query_lens)
+        max_prefill_seq_len = max(self.prefill_seq_lens, default=0)
+        max_decode_seq_len = max(self.curr_seq_lens, default=0)
+        num_decode_tokens = self.num_decode_tokens
+
+        if use_captured_graph:
+            self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
+            self.block_tables.extend([] * cuda_graph_pad_size)
+            num_decode_tokens = batch_size
+
+            # The shape of graph_block_tables is
+            # [max batch size, max context len // block size].
+            input_block_tables = self.runner.graph_block_tables[:batch_size]
+            for i, block_table in enumerate(self.block_tables):
+                if block_table:
+                    input_block_tables[i, :len(block_table)] = block_table
+            block_tables = torch.from_numpy(input_block_tables).to(
+                device=device, non_blocking=True)
+        else:
+            block_tables = make_tensor_with_pad(
+                self.block_tables,
+                pad=0,
+                dtype=torch.int,
+                device=device,
+            )
+        assert max_query_len > 0, ("query_lens: {}".format(query_lens))
+
+        assert device is not None
+        context_lens_tensor = async_tensor_h2d(self.context_lens, torch.int,
+                                               device, self.runner.pin_memory)
+        seq_lens_tensor = async_tensor_h2d(seq_lens, torch.int, device,
+                                           self.runner.pin_memory)
+        query_lens_tensor = async_tensor_h2d(query_lens, torch.long, device,
+                                             self.runner.pin_memory)
+        slot_mapping_tensor = async_tensor_h2d(self.slot_mapping, torch.long,
+                                               device, self.runner.pin_memory)
+        query_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
+                                      dtype=torch.int32,
+                                      device=device)
+        seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
+                                    dtype=torch.int32,
+                                    device=device)
+        torch.cumsum(seq_lens_tensor,
+                     dim=0,
+                     dtype=seq_start_loc.dtype,
+                     out=seq_start_loc[1:])
+        torch.cumsum(query_lens_tensor,
+                     dim=0,
+                     dtype=query_start_loc.dtype,
+                     out=query_start_loc[1:])
+
+        return LinearFlashAttentionMetadata(
+            num_prefills=self.num_prefills,
+            slot_mapping=slot_mapping_tensor,
+            num_prefill_tokens=self.num_prefill_tokens,
+            num_decode_tokens=num_decode_tokens,
+            seq_lens=seq_lens,
+            seq_lens_tensor=seq_lens_tensor,
+            max_query_len=max_query_len,
+            max_prefill_seq_len=max_prefill_seq_len,
+            max_decode_seq_len=max_decode_seq_len,
+            query_start_loc=query_start_loc,
+            seq_start_loc=seq_start_loc,
+            context_lens_tensor=context_lens_tensor,
+            block_tables=block_tables,
+            use_cuda_graph=use_captured_graph,
+        )
