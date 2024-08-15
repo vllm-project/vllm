@@ -2,9 +2,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type
 
 try:
-    import vllm_flash_attn  # noqa
     from flashinfer import BatchDecodeWithPagedKVCacheWrapper
     from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper
+
+    import vllm.attention.backends.flash_attn  # noqa
 except ImportError:
     BatchDecodeWithPagedKVCacheWrapper = None
     BatchPrefillWithPagedKVCacheWrapper = None
