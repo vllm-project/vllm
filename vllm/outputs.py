@@ -34,8 +34,10 @@ class CompletionOutput:
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
     lora_request: Optional[LoRARequest] = None
-    last_draft_token_ids: list[int] = None
-    last_scorer_token_ids: list[int] = None
+    draft_token_ids: list[int] = None
+    scorer_token_ids: list[int] = None
+    decoded_draft_token_ids: list[str] = None
+    decoded_scorer_token_ids: list[str] = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -47,6 +49,10 @@ class CompletionOutput:
                 f"cumulative_logprob={self.cumulative_logprob}, "
                 f"logprobs={self.logprobs}, "
                 f"finish_reason={self.finish_reason}, "
+                f"draft_token_ids={self.draft_token_ids})"
+                f"scorer_token_ids={self.scorer_token_ids})"
+                f"decoded_draft_token_ids={self.decoded_draft_token_ids})"
+                f"decoded_scorer_token_ids={self.decoded_scorer_token_ids})"
                 f"stop_reason={self.stop_reason})")
 
 
@@ -147,7 +153,10 @@ class RequestOutput:
                 seq.get_cumulative_logprob() if include_logprobs else None,
                 seq.output_logprobs if include_logprobs else None,
                 SequenceStatus.get_finished_reason(seq.status),
-                seq.stop_reason, None, seq.data.last_draft_token_ids, seq.data.last_scorer_token_ids) for seq in top_n_seqs
+                seq.stop_reason, None, seq.data.draft_token_ids, 
+                seq.data.scorer_token_ids, 
+                seq.data.decoded_draft_token_ids,
+                seq.data.decoded_scorer_token_ids) for seq in top_n_seqs
         ]
 
         # todo: replace last draft with just draft since in order to get history u can hust use streaming

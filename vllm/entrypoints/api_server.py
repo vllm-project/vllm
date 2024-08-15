@@ -63,7 +63,7 @@ async def generate(request: Request) -> Response:
             prompt = request_output.prompt
             text_outputs = [
                 prompt + output.text for output in request_output.outputs
-            ]
+            ] # it means concat common prefix to multiple completions produces from beam search results
             ret = {"text": text_outputs}
             yield (json.dumps(ret) + "\0").encode("utf-8")
 
@@ -79,11 +79,53 @@ async def generate(request: Request) -> Response:
         return Response(status_code=499)
 
     assert final_output is not None
-    # TODO: CHAGE FROM LAST TO CURRENT DRAFT AND SCORER
     prompt = final_output.prompt
     text_outputs = [prompt + output.text for output in final_output.outputs]
     ret = {"text": text_outputs}
     return JSONResponse(ret)
+
+
+@app.post("/speculative_decode_generate")
+async def speculative_decode_generate(request: Request) -> Response:
+    # curl -N --output - http://localhost:8044/speculative_decode_generate     -H "Content-Type: application/json"     -X POST     -d '{
+    #     "prompt": "San Francisco is a",
+    #     "max_tokens": 32,
+    #     "temperature": 0
+    # }' | sed 's/}/}\n/g'
+
+    request_dict = await request.json()
+    prompt = request_dict.pop("prompt")
+    sampling_params = SamplingParams(**request_dict)
+    request_id = random_uuid()
+    assert engine is not None
+    results_generator = engine.generate(prompt, sampling_params, request_id)
+    results_generator = iterate_with_cancellation(results_generator, is_cancelled=request.is_disconnected)
+
+
+    async def stream_results() -> AsyncGenerator[bytes, None]:
+        async for request_output in results_generator:
+            prompt = request_output.prompt
+            # Speculative deocde does not support beam search so there is always only one completion
+            # Does response gurantees to return at least one output?
+            text_output = prompt + request_output.outputs[0].text
+
+            ret = {
+                "text": text_output, 
+
+                "speculative_draft_token_indices": request_output.outputs[0].draft_token_ids, 
+                "speculative_scorer_token_indices": request_output.outputs[0].scorer_token_ids,
+
+                "decoded_speculative_draft_token_indices": request_output.outputs[0].decoded_draft_token_ids,
+                "decoded_speculative_scorer_token_indices": request_output.outputs[0].decoded_scorer_token_ids
+
+                # "accepted_token_indices": list(request_output.outputs[0].token_ids),
+
+                # "accepted_text": request_output.outputs[0].text
+            }
+
+            yield (json.dumps(ret) + "\0").encode("utf-8")
+    
+    return StreamingResponse(stream_results())
 
 
 def build_app(args: Namespace) -> FastAPI:

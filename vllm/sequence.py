@@ -119,15 +119,19 @@ class SequenceData:
         self,
         prompt_token_ids: List[int],
         output_token_ids: Optional[List[int]] = None,
-        last_draft_token_ids: list[int] = None,
-        last_scorer_token_ids: list[int] = None
+        draft_token_ids: list[int] = None,
+        scorer_token_ids: list[int] = None,
+        decoded_draft_token_ids: list[str] = None,
+        decoded_scorer_token_ids: list[str] = None
     ) -> None:
         self._prompt_token_ids = array('l', prompt_token_ids)
         self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(prompt_token_ids)
         self._output_token_ids = array(
             'l', output_token_ids if output_token_ids is not None else [])
-        self._last_draft_token_ids = last_draft_token_ids
-        self._last_scorer_token_ids = last_scorer_token_ids
+        self._draft_token_ids = draft_token_ids
+        self._scorer_token_ids = scorer_token_ids
+        self._decoded_draft_token_ids = decoded_draft_token_ids
+        self._decoded_scorer_token_ids = decoded_scorer_token_ids
 
         self.cumulative_logprob = 0.0
         # The number of tokens that are computed (that run against the model).
@@ -168,20 +172,36 @@ class SequenceData:
         return self._output_token_ids
 
     @property
-    def last_draft_token_ids(self) -> list[int]:
-        return self._last_draft_token_ids
+    def draft_token_ids(self) -> list[int]:
+        return self._draft_token_ids
     
-    @last_draft_token_ids.setter
-    def last_draft_token_ids(self, new_last_draft_token_ids: list[int]) -> None:
-        self._last_draft_token_ids = new_last_draft_token_ids
+    @draft_token_ids.setter
+    def draft_token_ids(self, new_draft_token_ids: list[int]) -> None:
+        self._draft_token_ids = new_draft_token_ids
     
     @property
-    def last_scorer_token_ids(self) -> list[int]:
-        return self._last_scorer_token_ids
+    def scorer_token_ids(self) -> list[int]:
+        return self._scorer_token_ids
 
-    @last_scorer_token_ids.setter
-    def last_scorer_token_ids(self, new_last_scorer_token_ids: list[int]) -> None:
-        self._last_scorer_token_ids = new_last_scorer_token_ids
+    @scorer_token_ids.setter
+    def scorer_token_ids(self, new_scorer_token_ids: list[int]) -> None:
+        self._scorer_token_ids = new_scorer_token_ids
+
+    @property
+    def decoded_draft_token_ids(self) -> list[str]:
+        return self._decoded_draft_token_ids
+
+    @decoded_draft_token_ids.setter
+    def decoded_draft_token_ids(self, new_decoded_draft_token_ids: list[str]) -> None:
+        self._decoded_draft_token_ids = new_decoded_draft_token_ids
+    
+    @property
+    def decoded_scorer_token_ids(self) -> list[str]:
+        return self._decoded_scorer_token_ids
+    
+    @decoded_scorer_token_ids.setter
+    def decoded_scorer_token_ids(self, new_decoded_scorer_token_ids: list[str]) -> None:
+        self._decoded_scorer_token_ids = new_decoded_scorer_token_ids
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self._output_token_ids.append(token_id)
