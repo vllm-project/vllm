@@ -248,22 +248,6 @@ class JambaMambaMixer(nn.Module):
         return hidden_states
 
 
-class JambaMLP(JambaMoE):
-
-    def __init__(self,
-                 config: JambaConfig,
-                 params_dtype: Optional[torch.dtype] = None,
-                 tp_size: Optional[int] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
-        super().__init__(config,
-                         num_experts=1,
-                         top_k=1,
-                         params_dtype=params_dtype,
-                         tp_size=tp_size,
-                         quant_config=quant_config)
-
-
-
 class JambaMoE(nn.Module):
 
     def __init__(self,
@@ -309,6 +293,22 @@ class JambaMoE(nn.Module):
                                        dtype=hidden_states.dtype)
         hidden_states = self.experts(hidden_states, router_logits)
         return hidden_states.view(orig_shape)
+
+
+class JambaMLP(JambaMoE):
+
+    def __init__(self,
+                 config: JambaConfig,
+                 params_dtype: Optional[torch.dtype] = None,
+                 tp_size: Optional[int] = None,
+                 quant_config: Optional[QuantizationConfig] = None):
+        super().__init__(config,
+                         num_experts=1,
+                         top_k=1,
+                         params_dtype=params_dtype,
+                         tp_size=tp_size,
+                         quant_config=quant_config)
+
 
 class JambaMambaDecoderLayer(nn.Module):
 
