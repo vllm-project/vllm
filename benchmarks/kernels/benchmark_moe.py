@@ -289,7 +289,7 @@ def main(args: argparse.Namespace):
 
     hidden_size = config.hidden_size
     dtype = config.torch_dtype
-    use_fp8_w8a8 = args.dtype == "fp8"
+    use_fp8_w8a8 = args.dtype == "fp8_w8a8"
     use_int8_w8a16 = args.dtype == "int8_w8a16"
 
     if args.batch_size is None:
@@ -351,7 +351,7 @@ if __name__ == "__main__":
     parser.add_argument("--tp-size", "-tp", type=int, default=2)
     parser.add_argument("--dtype",
                         type=str,
-                        choices=["auto", "fp8", "int8"],
+                        choices=["auto", "fp8_w8a8", "int8_w8a16"],
                         default="auto")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--batch-size", type=int, required=False)
