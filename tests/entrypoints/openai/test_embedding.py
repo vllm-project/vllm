@@ -26,8 +26,8 @@ def embedding_server():
 
 
 @pytest_asyncio.fixture
-async def client(server):
-    async with server.get_async_client() as async_client:
+async def embedding_client(embedding_server):
+    async with embedding_server.get_async_client() as async_client:
         yield async_client
 
 

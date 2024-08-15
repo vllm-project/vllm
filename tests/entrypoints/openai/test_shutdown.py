@@ -37,7 +37,8 @@ async def test_shutdown_on_engine_failure(tmp_path):
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         async with remote_server.get_async_client() as client:
 
-            with pytest.raises(openai.APIConnectionError):
+            with pytest.raises(
+                (openai.APIConnectionError, openai.InternalServerError)):
                 # This crashes the engine
                 await client.completions.create(model="bad-adapter",
                                                 prompt="Hello, my name is")

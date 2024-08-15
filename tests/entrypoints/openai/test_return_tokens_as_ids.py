@@ -60,7 +60,7 @@ async def test_completion_return_tokens_as_token_ids_completion(
 @pytest.mark.asyncio
 async def test_chat_return_tokens_as_token_ids_completion(
         server_with_return_tokens_as_token_ids_flag):
-    with server_with_return_tokens_as_token_ids_flag.get_async_client(
+    async with server_with_return_tokens_as_token_ids_flag.get_async_client(
     ) as client:
         response = await client.chat.completions.create(
             model=MODEL_NAME,
