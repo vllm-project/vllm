@@ -399,29 +399,40 @@ class FusedMoE(torch.nn.Module):
                       loaded_weight: torch.Tensor, weight_name: str,
                       shard_id: str, expert_id: int) -> None:
 
-        WEIGHT_SCALE_SUPPORTED = [e.value for e in WeightScaleSupported]
-
         if shard_id not in ("w1", "w2", "w3"):
             raise ValueError(f"shard_id must be ['w1','w2','w3'] but "
                              f"got {shard_id}.")
 
+        WEIGHT_SCALE_SUPPORTED = [
+            e.value for e in FusedMoeWeightScaleSupported
+        ]
+        SHARD_ID_TO_SHARDED_DIM = {"w1": 0, "w2": 1, "w3": 0}
+
         expert_data = param.data[expert_id]
         tp_rank = get_tensor_model_parallel_rank()
 
+        is_transposed = getattr(param, "is_transposed", False)
+        shard_dim = SHARD_ID_TO_SHARDED_DIM[shard_id]
+        if is_transposed:
+            loaded_weight = loaded_weight.t().contiguous()
+            shard_dim = ~shard_dim
+
         if "weight_scale" in weight_name:
             quant_method = getattr(param, "quant_method", None)
-            if quant_method == WeightScaleSupported.CHANNEL.value:
+            if quant_method == FusedMoeWeightScaleSupported.CHANNEL.value:
                 self._load_per_channel_weight_scale(
                     shard_id=shard_id,
+                    shard_dim=shard_dim,
                     loaded_weight=loaded_weight,
                     expert_data=expert_data,
                     tp_rank=tp_rank)
-            elif quant_method == WeightScaleSupported.GROUP.value:
+            elif quant_method == FusedMoeWeightScaleSupported.GROUP.value:
                 self._load_group_weight_scale(shard_id=shard_id,
+                                              shard_dim=shard_dim,
                                               loaded_weight=loaded_weight,
                                               expert_data=expert_data,
                                               tp_rank=tp_rank)
-            elif quant_method == WeightScaleSupported.TENSOR.value:
+            elif quant_method == FusedMoeWeightScaleSupported.TENSOR.value:
                 self._load_per_tensor_weight_scale(shard_id=shard_id,
                                                    param=param,
                                                    loaded_weight=loaded_weight,
@@ -439,7 +450,7 @@ class FusedMoE(torch.nn.Module):
 
         if "weight" in weight_name:
             self._load_model_weights(shard_id=shard_id,
-                                     param=param,
+                                     shard_dim=shard_dim,
                                      loaded_weight=loaded_weight,
                                      expert_data=expert_data,
                                      tp_rank=tp_rank)
