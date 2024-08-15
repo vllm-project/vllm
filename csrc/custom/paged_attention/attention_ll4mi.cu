@@ -6,9 +6,18 @@
 
 #include <algorithm>
 
-#if defined(__HIPCC__) && \
-    (defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__))
-  #define __HIP__MI300__
+#if defined(__HIPCC__) && (defined(__gfx90a) || defined(__gfx940__) || \
+                           defined(__gfx941__) || defined(__gfx942__))
+  #define __HIP__MI300_MI250__
+#endif
+
+#if defined(NDEBUG)
+  #undef NDEBUG
+  #include <assert.h>
+  #define UNREACHABLE_CODE assert(false);
+  #define NDEBUG
+#else
+  #define UNREACHABLE_CODE assert(false);
 #endif
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
@@ -16,7 +25,7 @@
 #define DIVIDE_ROUND_UP(a, b) (((a) + (b) - 1) / (b))
 #define WARP_SIZE 64
 
-#if defined(__HIP__MI300__)  // TODO: Add NAVI support
+#if defined(__HIP__MI300_MI250__)  // TODO: Add NAVI support
 
   #define GCN_MFMA_INSTR1 __builtin_amdgcn_mfma_f32_16x16x4f32
   #define GCN_MFMA_INSTR __builtin_amdgcn_mfma_f32_4x4x4f16
@@ -863,7 +872,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
   out_ptr[threadIdx.x] = from_float<scalar_t>(acc);
 }
 
-#else  // !defined(__HIP__MI300__) TODO: Add NAVI support
+#else  // !defined(__HIP__MI300_MI250__) TODO: Add NAVI support
 
 template <typename scalar_t, int BLOCK_SIZE, int HEAD_SIZE, int NUM_THREADS,
           int GQA_RATIO>
@@ -889,7 +898,7 @@ __global__ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_kernel(
   scalar_t* __restrict__ qk_out,             // [num_heads, num_seqs, max_ctx_blocks,block_size]
   #endif
     int max_ctx_blocks) {
-  assert(false);
+  UNREACHABLE_CODE
 }
 
 // Grid: (num_heads, num_seqs).
@@ -905,11 +914,9 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
     const scalar_t* __restrict__ tmp_out,  // [num_seqs, num_heads,
                                            // max_num_partitions, head_size]
     const int* __restrict__ context_lens,  // [num_seqs]
-    const int max_num_partitions) {
-  assert(false);
-}
+    const int max_num_partitions){UNREACHABLE_CODE}
 
-#endif  // defined(__HIP__MI300__) TODO: Add NAVI support
+#endif  // defined(__HIP__MI300_MI250__) TODO: Add NAVI support
 
 #define LAUNCH_CUSTOM_ATTENTION(GQA_RATIO)                                    \
   paged_attention_ll4mi_QKV_kernel<T, BLOCK_SIZE, HEAD_SIZE, NTHR, GQA_RATIO> \
