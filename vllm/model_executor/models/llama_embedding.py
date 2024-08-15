@@ -34,6 +34,8 @@ class LlamaEmbeddingModel(nn.Module):
         self,
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
+        encoder_input_ids: Optional[torch.Tensor],
+        encoder_positions: Optional[torch.Tensor],
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         inputs_embeds: Optional[torch.Tensor] = None,

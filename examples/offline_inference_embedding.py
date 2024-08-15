@@ -9,7 +9,9 @@ prompts = [
 ]
 
 # Create an LLM.
-model = LLM(model="intfloat/e5-mistral-7b-instruct", enforce_eager=True)
+model = LLM(model="intfloat/e5-mistral-7b-instruct",
+            enforce_eager=True,
+            disable_sliding_window=True)
 # Generate embedding. The output is a list of EmbeddingRequestOutputs.
 outputs = model.encode(prompts)
 # Print the outputs.
