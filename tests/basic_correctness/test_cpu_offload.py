@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 import pytest
 
 from tests.quantization.utils import is_quant_method_supported
@@ -29,9 +31,12 @@ def test_cpu_offload_gptq():
     compare_two_settings("Qwen/Qwen2-1.5B-Instruct-GPTQ-Int4", [],
                          ["--cpu-offload-gb", "1"])
     # Test GPTQ
-    compare_two_settings("Qwen/Qwen2-1.5B-Instruct-GPTQ-Int4",
-                         ["--quantization", "gptq"],
-                         ["--quantization", "gptq", "--cpu-offload-gb", "1"])
+    # The model output logits has small variance between runs, which do not play
+    # well with the flashinfer sampler.
+    with patch.dict("os.environ", {"VLLM_DISABLE_FLASHINFER_SAMPLER": "1"}):
+        compare_two_settings(
+            "Qwen/Qwen2-1.5B-Instruct-GPTQ-Int4", ["--quantization", "gptq"],
+            ["--quantization", "gptq", "--cpu-offload-gb", "1"])
 
 
 @pytest.mark.skipif(not is_quant_method_supported("awq_marlin"),
