@@ -78,6 +78,10 @@ class ModelOutput:
             input_metadata: "MutableModelInputForGPUWithMultiStepMetadata",
             copy_stream: torch.cuda.Stream,
             pinned_sampled_token_buffer: torch.Tensor) -> None:
+        """
+        Block until the forward pass for the output is ready and pythonize the
+        output.  
+        """
         assert self.sampled_token_ids is not None
         self.sampler_output_ready_event.synchronize()
         with torch.cuda.stream(copy_stream):
@@ -90,6 +94,10 @@ class ModelOutput:
             input_metadata: "MutableModelInputForGPUWithMultiStepMetadata",
             copy_stream: torch.cuda.Stream,
             pinned_sampled_token_buffer: torch.Tensor) -> bool:
+        """
+        Check if the forward pass for this output is finished and only pythonize
+        the output if it is.  
+        """
         if self.sampler_output_ready_event.query():
             assert self.sampled_token_ids is not None
             with torch.cuda.stream(copy_stream):
@@ -115,6 +123,7 @@ class MutableModelInputForGPUWithMultiStepMetadata(BroadcastableModelInput):
     is_multi_step: bool = True
     is_last_step: bool = False
     is_first_multi_step: bool = False
+    # ping-pong data structures for multi-step to wait on the previous step
     step_cuda_events: List[torch.cuda.Event] = field(
         default_factory=lambda: [torch.cuda.Event(blocking=True)] * 2)
     num_seqs: int = -1
@@ -151,9 +160,13 @@ class MutableModelInputForGPUWithMultiStepMetadata(BroadcastableModelInput):
         return cls(**tensor_dict)
 
     def record_step_event(self, current_stream: torch.cuda.Stream):
-        self.step_cuda_events[self.current_step %
-                              2] = torch.cuda.Event(blocking=True)
-        self.step_cuda_events[self.current_step % 2].record(current_stream)
+        # record the event for the current step so that the next step can sync
+        # on it. We modulo by 2 to keep the events in a circular buffer and
+        # support any attn backends that may be supported in the future. ie
+        # Flashinfer would want two DecodeWrappers to overlap the CPU and GPU.
+        self.step_cuda_events[self.current_step & 1] = \
+            torch.cuda.Event(blocking=True)
+        self.step_cuda_events[self.current_step & 1].record(current_stream)
 
     def wait_previous_step(self):
         # These cuda events are an explicit synchronization to ensure that
@@ -164,7 +177,7 @@ class MutableModelInputForGPUWithMultiStepMetadata(BroadcastableModelInput):
         # further ahead, two events allow us to overlap the advance_step with
         # the previous forward (ie using two DecodeWrappers for flashinfer
         # backend)
-        self.step_cuda_events[(self.current_step + 1) % 2].wait()
+        self.step_cuda_events[(self.current_step + 1) & 1].wait()
 
     def add_sampler_output(self,
                            sampler_output: SamplerOutput,
@@ -278,9 +291,10 @@ class MultiStepModelRunner(
                     False)
         else:
             # This is not needed for flashattn backend, but for other attn
-            # backends such as flashinfer that performs we may need to
-            # synchronize any CPU operations that might clobber enqueued
-            # forwards. (prevents CPU from running too far ahead if needed)
+            # backends such as flashinfer that performs extra CPU operations on
+            # input metadata we may need to synchronize any CPU operations that
+            # might clobber enqueued forwards. (prevents CPU from running too
+            # far ahead if needed)
             model_input.wait_previous_step()
             model_input = self._advance_step(
                 model_input, model_input.outputs[-1].sampler_output)
@@ -350,6 +364,9 @@ class MultiStepModelRunner(
                                     num_queries):
         assert isinstance(attn_metadata, FlashAttentionMetadata)
 
+        # When using cudagraph, the num_seqs is padded to the next captured
+        # batch sized, but num_queries tracks the actual number of requests in
+        # the batch. For --enforce-eager mode, num_seqs == num_queries
         if num_seqs != num_queries:
             assert num_seqs > num_queries
             assert attn_metadata.use_cuda_graph
