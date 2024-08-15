@@ -120,7 +120,7 @@ def fused_moe_marlin(
         False,
     )
 
-    ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, (num_bits // 2) * N))
+    ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, 2 * N))
 
     intermediate_cache3 = torch.ops._moe_C.marlin_gemm_moe(
         intermediate_cache2,

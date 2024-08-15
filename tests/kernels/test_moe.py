@@ -239,6 +239,7 @@ def test_fused_marlin_moe(
         renormalize=False,
         w1_scale=scales1,
         w2_scale=scales2,
+        num_bits=num_bits,
     )
 
     assert compute_max_diff(marlin_output, triton_output) < 4e-2
