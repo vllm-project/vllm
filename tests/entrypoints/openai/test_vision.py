@@ -2,6 +2,7 @@ from typing import Dict, List
 
 import openai
 import pytest
+import pytest_asyncio
 
 from vllm.multimodal.utils import encode_image_base64, fetch_image
 
@@ -36,9 +37,10 @@ def server():
         yield remote_server
 
 
-@pytest.fixture(scope="module")
-def client(server):
-    return server.get_async_client()
+@pytest_asyncio.fixture
+async def client(server):
+    async with server.get_async_client() as async_client:
+        yield async_client
 
 
 @pytest.fixture(scope="session")

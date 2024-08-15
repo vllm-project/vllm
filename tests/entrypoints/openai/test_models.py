@@ -1,5 +1,6 @@
 import openai  # use the official client for correctness check
 import pytest
+import pytest_asyncio
 # downloading lora to test lora requests
 from huggingface_hub import snapshot_download
 
@@ -43,9 +44,10 @@ def server(zephyr_lora_files):
         yield remote_server
 
 
-@pytest.fixture(scope="module")
-def client(server):
-    return server.get_async_client()
+@pytest_asyncio.fixture
+async def client(server):
+    async with server.get_async_client() as async_client:
+        yield async_client
 
 
 @pytest.mark.asyncio
