@@ -4,7 +4,7 @@ from openai.types.chat import (ChatCompletionMessageParam,
                                ChatCompletionToolParam)
 from typing_extensions import TypedDict
 
-from ....utils import VLLM_PATH
+from tests.utils import VLLM_PATH
 
 
 class ServerConfig(TypedDict):
