@@ -118,52 +118,6 @@ class MixtralMoE(nn.Module):
         router_logits, _ = self.gate(hidden_states)
         final_hidden_states = self.experts(hidden_states.half(), router_logits)
         return final_hidden_states.view(orig_shape).bfloat16()
-
-class QuantMixtralMoE(nn.Module):
-    def __init__(
-        self,
-        config: MixtralConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ):
-        super().__init__()
-        self.config = config
-        self.quant_config = quant_config
-        self.rank = get_tensor_model_parallel_rank()
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.num_total_experts = config.num_local_experts
-        self.top_k = config.num_experts_per_tok
-
-        params_dtype = torch.float16
-        self.gate = ReplicatedLinear(
-            config.hidden_size,
-            self.num_total_experts,
-            bias=False,
-            quant_config=None,
-            prefix=f"{prefix}.gate",
-        )
-        self.experts = FusedMoE(
-            num_experts=self.num_total_experts,
-            top_k=self.top_k,
-            hidden_size=config.hidden_size,
-            intermediate_size=config.intermediate_size,
-            params_dtype=params_dtype,
-            reduce_results=True,
-            renormalize=True,
-            quant_config=quant_config,
-            tp_size=self.tp_size,
-            prefix=f"{prefix}.experts",
-        )
-
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        _, hidden_dim = hidden_states.shape
-        hidden_states = hidden_states.view(-1, hidden_dim)
-        router_logits, _ = self.gate(hidden_states)
-
-        ret = self.experts(hidden_states.half(), router_logits)
-        return ret.bfloat16()
-
 class MixtralAttention(nn.Module):
     def __init__(
         self,
@@ -277,11 +231,6 @@ class MixtralDecoderLayer(nn.Module):
             params_dtype=torch.float16,
             prefix=f"{prefix}.block_sparse_moe",
         )
-        # self.block_sparse_moe = QuantMixtralMoE(
-        #     config,
-        #     quant_config=quant_config,
-        #     prefix=f"{prefix}.block_sparse_moe",
-        # )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
