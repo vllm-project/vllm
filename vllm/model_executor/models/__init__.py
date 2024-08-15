@@ -5,9 +5,8 @@ from typing import Dict, List, Optional, Tuple, Type
 import torch.nn as nn
 
 from vllm.logger import init_logger
+from vllm.model_executor.models.interfaces import supports_multimodal
 from vllm.utils import is_hip
-
-from .interfaces import supports_multimodal
 
 logger = init_logger(__name__)
 
