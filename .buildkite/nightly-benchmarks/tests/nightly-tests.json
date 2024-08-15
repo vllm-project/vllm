@@ -38,6 +38,8 @@
         "vllm_client_parameters": {
         },
         "sglang_server_parameters": {
+            "disable_radix_cache": "",
+            "enable_torch_compile": ""
         }
     }
 ]
