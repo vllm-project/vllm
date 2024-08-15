@@ -497,8 +497,9 @@ def _pythonize_sampler_output(
         next_token_ids = sample_result
         parent_ids = [0]
         seq_outputs: List[SequenceOutput] = []
-        assert len(seq_group.sampling_params.logits_processors) == 0, (
-            "Logits Processors are not supported in multi-step decoding")
+        if seq_group.sampling_params.logits_processors:
+            assert len(seq_group.sampling_params.logits_processors) == 0, (
+                "Logits Processors are not supported in multi-step decoding")
         for parent_id, next_token_id in zip(parent_ids, next_token_ids):
             # TODO(will): support logprobs
             # Hard coded logprob
