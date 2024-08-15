@@ -63,7 +63,7 @@ async def generate(request: Request) -> Response:
             prompt = request_output.prompt
             text_outputs = [
                 prompt + output.text for output in request_output.outputs
-            ] # it means concat common prefix to multiple completions produces from beam search results
+            ]
             ret = {"text": text_outputs}
             yield (json.dumps(ret) + "\0").encode("utf-8")
 
