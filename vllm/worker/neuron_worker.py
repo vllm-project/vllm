@@ -7,8 +7,8 @@ import torch.distributed
 
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
-from vllm.distributed import (init_distributed_environment,
-                              ensure_model_parallel_initialized)
+from vllm.distributed import (ensure_model_parallel_initialized,
+                              init_distributed_environment)
 from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest
 from vllm.worker.neuron_model_runner import NeuronModelRunner

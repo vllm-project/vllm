@@ -4,8 +4,8 @@ from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
-from vllm.utils import (make_async, get_distributed_init_method,
-                        get_open_port, get_ip)
+from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
+                        make_async)
 
 logger = init_logger(__name__)
 
