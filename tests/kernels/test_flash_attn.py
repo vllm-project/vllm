@@ -2,7 +2,8 @@ from typing import List, Optional, Tuple
 
 import pytest
 import torch
-import vllm_flash_attn  # noqa: F401
+
+import vllm.attention.backends.flash_attn  # noqa: F401
 
 NUM_HEADS = [(16, 16), (32, 8), (64, 8)]
 HEAD_SIZES = [128, 256]
