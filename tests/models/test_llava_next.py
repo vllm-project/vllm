@@ -6,7 +6,7 @@ from transformers import AutoConfig, AutoTokenizer
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
 
-from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
+from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets, PromptImageInput
 from .utils import check_logprobs_close
 
 pytestmark = pytest.mark.vlm
@@ -114,19 +114,42 @@ def run_test(
     else:
         raise ValueError("You must provide either `size_factors` or `sizes`")
 
+    _run_test(hf_runner,
+              vllm_runner,
+              inputs_per_image,
+              model,
+              dtype=dtype,
+              max_tokens=max_tokens,
+              num_logprobs=num_logprobs,
+              tensor_parallel_size=tensor_parallel_size,
+              distributed_executor_backend=distributed_executor_backend)
+
+
+def _run_test(
+    hf_runner: Type[HfRunner],
+    vllm_runner: Type[VllmRunner],
+    inputs: List[Tuple[List[str], PromptImageInput]],
+    model: str,
+    dtype: str,
+    max_tokens: int,
+    num_logprobs: int,
+    tensor_parallel_size: int,
+    distributed_executor_backend: Optional[str] = None,
+):
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model,
                      dtype=dtype,
                      max_model_len=4096,
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
-                     enforce_eager=True) as vllm_model:
+                     enforce_eager=True,
+                     limit_mm_per_prompt={"image": 2}) as vllm_model:
         vllm_outputs_per_image = [
             vllm_model.generate_greedy_logprobs(prompts,
                                                 max_tokens,
                                                 num_logprobs=num_logprobs,
                                                 images=images)
-            for prompts, images in inputs_per_image
+            for prompts, images in inputs
         ]
 
     with hf_runner(model, dtype=dtype, is_vision_model=True) as hf_model:
@@ -135,7 +158,7 @@ def run_test(
                                                     max_tokens,
                                                     num_logprobs=num_logprobs,
                                                     images=images)
-            for prompts, images in inputs_per_image
+            for prompts, images in inputs
         ]
 
     for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
@@ -176,7 +199,7 @@ def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
 
     All the image fixtures for the test is under tests/images.
     For huggingface runner, we provide the PIL images as input.
-    For vllm runner, we provide MultiModalDataDict objects 
+    For vllm runner, we provide MultiModalDataDict objects
     and corresponding MultiModalConfig as input.
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
@@ -210,6 +233,29 @@ def test_models_fixed_sizes(hf_runner, vllm_runner, image_assets, model, sizes,
         image_assets,
         model,
         sizes=sizes,
+        dtype=dtype,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        tensor_parallel_size=1,
+    )
+
+
+@pytest.mark.parametrize("model", models)
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("num_logprobs", [5])
+def test_models_multiple_image_inputs(hf_runner, vllm_runner, image_assets,
+                                      model, dtype, max_tokens,
+                                      num_logprobs) -> None:
+    inputs = [([
+        f"{_PREFACE} USER: What's the content of the two images?\n<image><image> ASSISTANT:"
+    ], [[asset.pil_image.resize((183, 488)) for asset in image_assets]])]
+
+    _run_test(
+        hf_runner,
+        vllm_runner,
+        inputs,
+        model,
         dtype=dtype,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,

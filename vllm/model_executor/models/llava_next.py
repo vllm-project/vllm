@@ -224,13 +224,13 @@ def input_processor_for_llava_next(ctx: InputContext, llm_inputs: LLMInputs):
             input_width=width,
         )
     elif isinstance(image_data, list):
-            width, height = image_data[0].size
+        width, height = image_data[0].size
 
-            image_feature_size = get_llava_next_image_feature_size(
-                hf_config,
-                input_height=height,
-                input_width=width,
-            )
+        image_feature_size = get_llava_next_image_feature_size(
+            hf_config,
+            input_height=height,
+            input_width=width,
+        )
     elif isinstance(image_data, torch.Tensor):
         image_feature_size = image_data.shape[0]
     else:
@@ -504,7 +504,6 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
         self,
         image_input: LlavaNextImageInputs,
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
-
         if image_input["type"] == "image_embeds":
             return [image_input["data"]]
 

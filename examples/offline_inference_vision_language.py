@@ -190,19 +190,22 @@ def main(args):
             "prompt": f"[INST] What is the content of this image? [/INST]",
         },
         {
-            "prompt": f"[INST] <image>\nWhat is the content of this image? [/INST]",
+            "prompt":
+            f"[INST] <image>\nWhat is the content of this image? [/INST]",
             "multi_modal_data": {
                 "image": cherry_blossom_image
             }
         },
         {
-            "prompt": f"[INST] <image>\nWhat is the content of this image? [/INST]",
+            "prompt":
+            f"[INST] <image>\nWhat is the content of this image? [/INST]",
             "multi_modal_data": {
                 "image": stop_sign_image
             }
         },
         {
-            "prompt": f"[INST] <image> \n <image> \nWhat are the contents of the two images? [/INST]",
+            "prompt":
+            f"[INST] <image> \n <image> \nWhat are the contents of the two images? [/INST]",
             "multi_modal_data": {
                 "image": [cherry_blossom_image, stop_sign_image]
             }
