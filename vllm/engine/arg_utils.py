@@ -868,9 +868,6 @@ class EngineArgs:
             if speculative_config is not None:
                 raise ValueError("Speculative decoding is not supported with "
                                  "multi-step (--num-scheduler-steps > 1)")
-            if self.enable_chunked_prefill:
-                raise ValueError("Chunked prefill is not supported with "
-                                 "multi-step (--num-scheduler-steps > 1)")
             if not self.use_v2_block_manager:
                 raise ValueError("BlockSpaceManagerV2 is required for "
                                  "multi-step (--num-scheduler-steps > 1)")

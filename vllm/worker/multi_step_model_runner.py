@@ -481,7 +481,10 @@ def _pythonize_sampler_output(
     # samples generation should have been skipped
     assert not output.outputs
 
-    pinned_buffer = pinned_sampled_token_buffer[:model_input.num_queries]
+    # dont use num-queries as some of the sequence's may not need sampling.
+    # Like, chunked prefill seqs.
+    n_sampled_token_ids = sampled_token_ids.shape[0]
+    pinned_buffer = pinned_sampled_token_buffer[:n_sampled_token_ids]
 
     # CPU GPU sync
     pinned_buffer = pinned_buffer.copy_(sampled_token_ids, non_blocking=False)
@@ -491,20 +494,23 @@ def _pythonize_sampler_output(
 
     sampling_metadata = frozen_model_input.sampling_metadata
 
-    for (seq_group, sample_result) in zip(sampling_metadata.seq_groups,
-                                          samples_list):
-        seq_ids = seq_group.seq_ids
-        next_token_ids = sample_result
-        parent_ids = [0]
+    sample_result_it = iter(samples_list)
+    for seq_group in sampling_metadata.seq_groups:
         seq_outputs: List[SequenceOutput] = []
         if seq_group.sampling_params.logits_processors:
             assert len(seq_group.sampling_params.logits_processors) == 0, (
                 "Logits Processors are not supported in multi-step decoding")
-        for parent_id, next_token_id in zip(parent_ids, next_token_ids):
-            # TODO(will): support logprobs
-            # Hard coded logprob
-            seq_outputs.append(
-                SequenceOutput(seq_ids[parent_id], next_token_id,
-                               {next_token_id: Logprob(logprob=42)}))
+        if seq_group.do_sample:
+            sample_result = next(sample_result_it)
+            seq_ids = seq_group.seq_ids
+            next_token_ids = sample_result
+            parent_ids = [0]
+            for parent_id, next_token_id in zip(parent_ids, next_token_ids):
+                # TODO(will): support logprobs
+                # Hard coded logprob
+                seq_outputs.append(
+                    SequenceOutput(seq_ids[parent_id], next_token_id,
+                                   {next_token_id: Logprob(logprob=42)}))
         output.outputs.append(CompletionSequenceGroupOutput(seq_outputs, None))
+
     assert len(output.outputs) > 0

@@ -294,10 +294,10 @@ class _AsyncLLMEngine(LLMEngine):
             seq_group_metadata_list, scheduler_outputs = self.scheduler[
                 virtual_engine].schedule()
 
-            if (self.scheduler_config.is_multi_step
-                    and scheduler_outputs.num_lookahead_slots > 0):
+            if self.scheduler_config.is_multi_step and \
+                self._remaining_steps(seq_group_metadata_list) > 1:
                 # cache the scheduler outputs for the next iteration if we have
-                # lookahead slots
+                # one.
                 self._cache_scheduler_outputs_for_multi_step(
                     virtual_engine, seq_group_metadata_list, scheduler_outputs)
 
@@ -361,14 +361,15 @@ class _AsyncLLMEngine(LLMEngine):
 
         return request_outputs
 
-    def _has_remaining_steps(
-        self, seq_group_metadata_list: Optional[List[SequenceGroupMetadata]]
-    ) -> bool:
+    def _remaining_steps(
+            self,
+            seq_group_metadata_list: Optional[List[SequenceGroupMetadata]]
+    ) -> int:
         if not self.scheduler_config.is_multi_step:
-            return False
+            return 0
 
         if not seq_group_metadata_list:
-            return False
+            return 0
 
         # TODO(will) this is a sanity check for nowto make sure that all the
         # seqs are on the same steps. Eventually we will want to do some sort of
@@ -381,7 +382,12 @@ class _AsyncLLMEngine(LLMEngine):
             raise AssertionError(("All running sequence groups should "
                                   "have the same remaining steps."))
 
-        return ref_remaining_steps > 0
+        return ref_remaining_steps
+
+    def _has_remaining_steps(
+        self, seq_group_metadata_list: Optional[List[SequenceGroupMetadata]]
+    ) -> bool:
+        return self._remaining_steps(seq_group_metadata_list) > 0
 
     def _cache_scheduler_outputs_for_multi_step(
             self, virtual_engine: int,

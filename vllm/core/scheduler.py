@@ -981,6 +981,21 @@ class Scheduler:
             [s.seq_group for s in swapped_in.prefill_seq_groups])
         # Update swapped requests.
         self.swapped.extend(running_scheduled.swapped_out)
+
+        if self.scheduler_config.is_multi_step:
+            # It maybe the case that prefills are scheduled along
+            # with decodes. In that case update the multi-step state
+            # of all the scheduled sequences to perform just a single
+            # decoding step.
+            has_prefills = len(prefills.seq_groups) + \
+                  len(running_scheduled.prefill_seq_groups) + \
+                  len(swapped_in.prefill_seq_groups) > 0
+            if has_prefills:
+                for sg in running_scheduled.decode_seq_groups:
+                    sg.seq_group.init_multi_step(1)
+                for sg in swapped_in.decode_seq_groups:
+                    sg.seq_group.init_multi_step(1)
+
         return SchedulerOutputs(
             scheduled_seq_groups=(prefills.seq_groups +
                                   running_scheduled.prefill_seq_groups +
@@ -1187,7 +1202,8 @@ class Scheduler:
                 the new source and destination block indices for the appended
                 slots.
         """
-        num_lookahead_slots = self._get_num_lookahead_slots(is_prefill=False)
+        num_lookahead_slots = self._get_num_lookahead_slots(\
+            is_prefill=seq_group.is_prefill())
         seq_group.init_multi_step(num_scheduler_steps=num_lookahead_slots + 1)
 
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
