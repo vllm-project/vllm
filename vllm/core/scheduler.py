@@ -1096,7 +1096,7 @@ class Scheduler:
 
             # It assumes the scheduled_seq_groups is ordered by
             # prefill < decoding.
-            if is_first_prefill or not self.scheduler_config._send_delta_data:
+            if is_first_prefill or not self.scheduler_config.send_delta_data:
                 seq_group_metadata = SequenceGroupMetadata(
                     request_id=seq_group.request_id,
                     is_prompt=is_prompt,

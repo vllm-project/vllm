@@ -549,7 +549,7 @@ class Sequence:
 
 
 class SequenceGroupState(msgspec.Struct,
-                         omits_default=True):  # type: ignore[call-arg]
+                         omit_defaults=True):  # type: ignore[call-arg]
     """Mutable state tied to a specific sequence group"""
 
     # for multi-step decoding
