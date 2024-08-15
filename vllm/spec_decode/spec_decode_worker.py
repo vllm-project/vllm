@@ -33,7 +33,6 @@ from vllm.spec_decode.util import (Timer, create_sequence_group_output,
                                    split_batch_by_proposal_len)
 from vllm.worker.worker import Worker
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
-from vllm.worker.worker_response import SpeculativeWorkerResponse
 
 logger = init_logger(__name__)
 
