@@ -31,9 +31,11 @@ from torch import nn
 from transformers import MixtralConfig
 
 from .interfaces import SupportsLoRA
+from .utils import is_pp_missing_parameter, make_layers
+
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
-from vllm.distributed import (get_tensor_model_parallel_rank,
+from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -360,6 +362,74 @@ class MixtralModel(nn.Module):
         return hidden_states
 
 
+
+class LoRAMixtralModel(nn.Module):
+    def __init__(
+        self,
+        config: MixtralConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        lora_config: Optional[LoRAConfig] = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.padding_idx = config.pad_token_id
+        lora_vocab = (
+            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
+            if lora_config
+            else 0
+        )
+        self.vocab_size = config.vocab_size + lora_vocab
+        self.org_vocab_size = config.vocab_size
+
+        self.embed_tokens = VocabParallelEmbedding(
+            self.vocab_size,
+            config.hidden_size,
+            org_num_embeddings=config.vocab_size,
+        )
+
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            config.num_hidden_layers,
+            lambda prefix: MixtralDecoderLayer(
+                config, cache_config, quant_config=quant_config, prefix=prefix
+            ),
+            prefix=f"{prefix}.layers",
+        )
+
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors],
+    ) -> torch.Tensor:
+        if get_pp_group().is_first_rank:
+            hidden_states = self.embed_tokens(input_ids)
+            residual = None
+        else:
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
+            residual = intermediate_tensors["residual"]
+        for i in range(self.start_layer, self.end_layer):
+            layer = self.layers[i]
+            hidden_states, residual = layer(
+                positions,
+                hidden_states,
+                kv_caches[i - self.start_layer],
+                attn_metadata,
+                residual,
+            )
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors(
+                {"hidden_states": hidden_states, "residual": residual}
+            )
+        hidden_states, _ = self.norm(hidden_states, residual)
+        return hidden_states
+
+
 class MixtralForCausalLM(nn.Module):
     fall_back_to_pt_during_load = False
 
@@ -521,7 +591,7 @@ class LoRAEnabledMixtralForCausalLM(nn.Module, SupportsLoRA):
         self.config = config
         self.lora_config = lora_config
 
-        self.model = MixtralModel(
+        self.model = LoRAMixtralModel(
             config, cache_config, quant_config, lora_config=lora_config, prefix="model"
         )
         self.unpadded_vocab_size = config.vocab_size
