@@ -1,10 +1,9 @@
-from collections import UserDict
 from typing import List, Optional, Tuple, Type
 
 import pytest
 import torch
 import torch.types
-from transformers import BatchFeature
+from transformers import BatchEncoding
 
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
@@ -13,18 +12,6 @@ from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
 from .utils import check_logprobs_close
 
 pytestmark = pytest.mark.vlm
-
-
-class NestedInputs(UserDict):
-
-    def __init__(self, model_inputs: BatchFeature):
-        super().__init__({"model_inputs": model_inputs})
-
-        self.model_inputs = model_inputs
-
-    def to(self, device: torch.types.Device):
-        return NestedInputs(self.model_inputs.to(device))
-
 
 # The image token is placed before "user" on purpose so that the test can pass
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
@@ -39,6 +26,10 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
 })
 
 models = ["openbmb/MiniCPM-Llama3-V-2_5"]
+
+
+def _wrap_inputs(hf_inputs: BatchEncoding) -> BatchEncoding:
+    return BatchEncoding({"model_inputs": hf_inputs})
 
 
 def trunc_hf_output(hf_output: Tuple[List[int], str,
@@ -70,7 +61,7 @@ def run_test(
     All the image fixtures for the test is under tests/images.
     For huggingface runner, we provide the PIL images as input.
     For vllm runner, we provide MultiModalDataDict objects 
-    and corresponding vision language config as input.
+    and corresponding MultiModalConfig as input.
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """
@@ -105,11 +96,8 @@ def run_test(
             for prompts, images in inputs_per_image
         ]
 
-    with hf_runner(model, dtype=dtype) as hf_model, torch.no_grad():
-        hf_processor = hf_model.processor
-        hf_model.processor = lambda **kw: NestedInputs(
-            hf_processor(**kw)  # type: ignore
-        )
+    hf_model = hf_runner(model, dtype=dtype, postprocess_inputs=_wrap_inputs)
+    with hf_model, torch.no_grad():
         hf_outputs_per_image = [
             hf_model.generate_greedy_logprobs_limit(prompts,
                                                     max_tokens,
@@ -188,7 +176,7 @@ def run_multi_image_test(
     All the image fixtures for the test is under tests/images.
     For huggingface runner, we provide the PIL images as input.
     For vllm runner, we provide MultiModalDataDict objects 
-    and corresponding vision language config as input.
+    and corresponding MultiModalConfig as input.
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """
@@ -209,6 +197,7 @@ def run_multi_image_test(
     with vllm_runner(model,
                      max_model_len=4096,
                      max_num_seqs=1,
+                     limit_mm_per_prompt={"image": len(images)},
                      dtype=dtype,
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
@@ -224,11 +213,8 @@ def run_multi_image_test(
             for prompts, images in inputs_per_case
         ]
 
-    with hf_runner(model, dtype=dtype) as hf_model, torch.no_grad():
-        hf_processor = hf_model.processor
-        hf_model.processor = lambda **kw: NestedInputs(
-            hf_processor(**kw)  # type: ignore
-        )
+    hf_model = hf_runner(model, dtype=dtype, postprocess_inputs=_wrap_inputs)
+    with hf_model, torch.no_grad():
         hf_outputs_per_case = [
             hf_model.generate_greedy_logprobs_limit(prompts,
                                                     max_tokens,
