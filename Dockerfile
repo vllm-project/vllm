@@ -162,8 +162,9 @@ RUN pip --verbose wheel -r requirements-mamba.txt \
 FROM nvidia/cuda:${CUDA_VERSION}-base-ubuntu20.04 AS vllm-base
 ARG CUDA_VERSION=12.4.1
 ARG PYTHON_VERSION=3.10
-# Python version without the dot, e.g. 3.10 -> 310
-ARG PYTHON_VERSION_STR=${PYTHON_VERSION//./}
+# Python version without the dot, e.g. 3.10 -> 310, 3.9 -> 39
+ARG PYTHON_VERSION_STR=$(echo $(PYTHON_VERSION) | sed 's/\.//g')
+RUN echo "PYTHON_VERSION_STR=${PYTHON_VERSION_STR}"
 WORKDIR /vllm-workspace
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -175,7 +176,7 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && apt-get install -y ccache software-properties-common \
     && add-apt-repository ppa:deadsnakes/ppa \
     && apt-get update -y \
-    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv python3-pip
+    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv python3-pip \
     && if [ "${PYTHON_VERSION}" != "3" ]; then \
             update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1; \
             update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION}; \
