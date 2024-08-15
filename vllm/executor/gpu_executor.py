@@ -155,7 +155,9 @@ class GPUExecutorAsync(GPUExecutor, ExecutorAsyncBase):
     async def execute_model_async(
         self,
         execute_model_req: ExecuteModelRequest,
-    ) -> List[Union[SamplerOutput, PoolerOutput, SpeculativeProposerSamplerOutput, SpeculativeScorerSamplerOutput]]:
+    ) -> List[Union[SamplerOutput, PoolerOutput,
+                    SpeculativeProposerSamplerOutput,
+                    SpeculativeScorerSamplerOutput]]:
         output = await make_async(self.driver_worker.execute_model
                                   )(execute_model_req=execute_model_req, )
         return output

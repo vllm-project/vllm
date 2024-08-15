@@ -164,15 +164,19 @@ class Detokenizer:
         seq.read_offset = read_offset
         seq.output_text += new_decoded_token_text
 
-        # Decode draft from proposer 
+        # Decode draft from proposer
         if seq.data.draft_token_ids is not None:
-            seq.data.decoded_draft_token_ids = tokenizer.convert_ids_to_tokens(ids=seq.data.draft_token_ids)
-            seq.data.decoded_draft_sequence = tokenizer.decode(token_ids=seq.data.draft_token_ids)
+            seq.data.decoded_draft_token_ids = tokenizer.convert_ids_to_tokens(
+                ids=seq.data.draft_token_ids)
+            seq.data.decoded_draft_sequence = tokenizer.decode(
+                token_ids=seq.data.draft_token_ids)
 
         # Decode target model results from scorer
         if seq.data.scorer_token_ids is not None:
-            seq.data.decoded_scorer_token_ids = tokenizer.convert_ids_to_tokens(ids=seq.data.scorer_token_ids)
-            seq.data.decoded_scorer_sequence = tokenizer.decode(token_ids=seq.data.scorer_token_ids)
+            seq.data.decoded_scorer_token_ids = tokenizer.convert_ids_to_tokens(
+                ids=seq.data.scorer_token_ids)
+            seq.data.decoded_scorer_sequence = tokenizer.decode(
+                token_ids=seq.data.scorer_token_ids)
 
         return len(new_decoded_token_text)
 

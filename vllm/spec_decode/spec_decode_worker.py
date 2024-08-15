@@ -13,10 +13,11 @@ from vllm.model_executor.layers.spec_decode_base_sampler import (
 from vllm.model_executor.layers.typical_acceptance_sampler import (
     TypicalAcceptanceSampler)
 from vllm.sequence import (CompletionSequenceGroupOutput, ExecuteModelRequest,
-                           HiddenStates, SamplerOutput, 
-                           SpeculativeProposerSamplerOutput, 
-                           SpeculativeScorerSamplerOutput, SequenceGroupMetadata,
-                           get_all_seq_ids, get_all_seq_ids_and_request_ids)
+                           HiddenStates, SamplerOutput,
+                           SpeculativeProposerSamplerOutput,
+                           SpeculativeScorerSamplerOutput,
+                           SequenceGroupMetadata, get_all_seq_ids,
+                           get_all_seq_ids_and_request_ids)
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
 from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
@@ -336,7 +337,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> List[Union[SamplerOutput, SpeculativeProposerSamplerOutput, SpeculativeScorerSamplerOutput]]:
+    ) -> List[Union[SamplerOutput, SpeculativeProposerSamplerOutput,
+                    SpeculativeScorerSamplerOutput]]:
         """Perform speculative decoding on the input batch.
         """
         if self.rank != self._driver_rank:
@@ -522,8 +524,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
     @nvtx_range("spec_decode_worker._run_speculative_decoding_step")
     def _run_speculative_decoding_step(
-            self, execute_model_req: ExecuteModelRequest,
-            num_lookahead_slots: int) -> List[Union[SamplerOutput, SpeculativeProposerSamplerOutput, SpeculativeScorerSamplerOutput]]:
+        self, execute_model_req: ExecuteModelRequest, num_lookahead_slots: int
+    ) -> List[Union[SamplerOutput, SpeculativeProposerSamplerOutput,
+                    SpeculativeScorerSamplerOutput]]:
         """Execute a single step of speculative decoding.
 
         This invokes the proposer worker to get k speculative tokens for each
@@ -570,8 +573,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             k=execute_model_req.num_lookahead_slots,
             stage_times=stage_times)
 
-        speculative_proposer_sampler_outputs = self._create_speculative_proposer_sampler_outputs(proposals=proposals)
-        speculative_scorer_sampler_outputs = self._create_speculative_scorer_sampler_outputs(proposal_scores=proposal_scores)
+        speculative_proposer_sampler_outputs = self._create_speculative_proposer_sampler_outputs(
+            proposals=proposals)
+        speculative_scorer_sampler_outputs = self._create_speculative_scorer_sampler_outputs(
+            proposal_scores=proposal_scores)
 
         outputs = []
         outputs.extend(sampler_outputs)
@@ -579,8 +584,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         outputs.extend(speculative_scorer_sampler_outputs)
 
         return outputs
-    
-    def _create_speculative_proposer_sampler_outputs(self, proposals: SpeculativeProposals) -> list[SpeculativeProposerSamplerOutput]:
+
+    def _create_speculative_proposer_sampler_outputs(
+        self, proposals: SpeculativeProposals
+    ) -> list[SpeculativeProposerSamplerOutput]:
         # Transform data from batch index major to step major such
         # that we return list of outputs where each item in list represent
         # particular step and contains token of this step for every element in the batch
@@ -591,7 +598,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         return speculative_proposer_sampler_outputs
 
-    def _create_speculative_scorer_sampler_outputs(self, proposal_scores: SpeculativeScores) -> list[SpeculativeScorerSamplerOutput]:
+    def _create_speculative_scorer_sampler_outputs(
+        self, proposal_scores: SpeculativeScores
+    ) -> list[SpeculativeScorerSamplerOutput]:
         # Transform data from batch index major to step major such
         # that we return list of outputs where each item in list represent
         # particular step and contains token of this step for every element in the batch

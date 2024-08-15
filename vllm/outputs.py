@@ -34,10 +34,10 @@ class CompletionOutput:
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
     lora_request: Optional[LoRARequest] = None
-    draft_token_ids: Optional[list[int]] = None
-    scorer_token_ids: Optional[list[int]] = None
-    decoded_draft_token_ids: Optional[list[str]] = None
-    decoded_scorer_token_ids: Optional[list[str]] = None
+    draft_token_ids: Optional[List[int]] = None
+    scorer_token_ids: Optional[List[int]] = None
+    decoded_draft_token_ids: Optional[List[str]] = None
+    decoded_scorer_token_ids: Optional[List[str]] = None
     decoded_draft_sequence: Optional[str] = None
     decoded_scorer_sequence: Optional[str] = None
 
@@ -155,10 +155,12 @@ class RequestOutput:
                 seq.get_cumulative_logprob() if include_logprobs else None,
                 seq.output_logprobs if include_logprobs else None,
                 SequenceStatus.get_finished_reason(seq.status),
-                seq.stop_reason, None, seq.data.draft_token_ids, 
-                seq.data.scorer_token_ids, 
+                seq.stop_reason,
+                None,
+                seq.data.draft_token_ids,
+                seq.data.scorer_token_ids,
                 seq.data.decoded_draft_token_ids,
-                seq.data.decoded_scorer_token_ids, 
+                seq.data.decoded_scorer_token_ids,
                 seq.data.decoded_draft_sequence,
                 seq.data.decoded_scorer_sequence) for seq in top_n_seqs
         ]
