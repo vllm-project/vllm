@@ -62,7 +62,8 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .interfaces import SupportsLoRA
 from .utils import is_pp_missing_parameter, make_layers
-
+import logging
+logger = logging.getLogger(__name__)
 
 class MixtralMoE(nn.Module):
     """A tensor-parallel MoE implementation for Mixtral that shards each expert
@@ -585,6 +586,7 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
         )
 
         params_dict = dict(self.named_parameters())
+        logger.error(params_dict)
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -612,6 +614,7 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                     # Skip layers on other devices.
                     if is_pp_missing_parameter(name, self):
                         continue
+                    logger.error(name)
                     param = params_dict[name]
                     name = name.replace(weight_name, param_name)
                     weight_loader = param.weight_loader
