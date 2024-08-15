@@ -48,7 +48,7 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import SupportsVision
+from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.models.minicpm import MiniCPMModel
 from vllm.model_executor.models.qwen2 import Qwen2Model
@@ -479,7 +479,7 @@ def input_processor_for_minicpmv(ctx: InputContext, llm_inputs: LLMInputs):
     return llm_inputs
 
 
-class MiniCPMVBaseModel(nn.Module, SupportsVision):
+class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
     """
     The abstract class of MiniCPMV can only be inherited, but cannot be
     instantiated.
