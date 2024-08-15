@@ -27,7 +27,8 @@ try:
     HPUFusedSDPA = FusedSDPA
 except ImportError:
     logger.warning(
-        "Could not import HPU FusedSDPA kernel. vLLM will use native implementation."
+        "Could not import HPU FusedSDPA kernel. "
+        "vLLM will use native implementation."
     )
 
 PA_SPLIT_VALUE = (os.environ.get('PA_SPLIT_VALUE', '1') == '1')
