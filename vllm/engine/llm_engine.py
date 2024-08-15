@@ -99,13 +99,13 @@ class LLMEngine:
         scheduler_config: The configuration related to the request scheduler.
         device_config: The configuration related to the device.
         lora_config (Optional): The configuration related to serving multi-LoRA.
-        multimodal_config (Optional): The configuration related to multimodal 
+        multimodal_config (Optional): The configuration related to multimodal
             models.
         speculative_config (Optional): The configuration related to speculative
             decoding.
         executor_class: The model executor class for managing distributed
             execution.
-        prompt_adapter_config (Optional): The configuration related to serving 
+        prompt_adapter_config (Optional): The configuration related to serving
             prompt adapters.
         log_stats: Whether to log statistics.
         usage_context: Specified entry point, used for usage info collection.
@@ -526,11 +526,7 @@ class LLMEngine:
                            "is not initialized")
             return None
 
-        bos_token_id = self.tokenizer.get_lora_tokenizer(
-            lora_request).bos_token_id
-        if bos_token_id is None:
-            bos_token_id = 1
-        return bos_token_id
+        return self.tokenizer.get_lora_tokenizer(lora_request).bos_token_id
 
     def _get_eos_token_id(self,
                           lora_request: Optional[LoRARequest] = None
@@ -786,7 +782,7 @@ class LLMEngine:
         "default" decoder prompt be <BOS>.
 
         However, it is possible that in the future
-        other models may have different or more 
+        other models may have different or more
         complex logic for the default decoder prompt.
         This motivates having a special helper method
         for default decoder prompts.
@@ -849,7 +845,7 @@ class LLMEngine:
         have any possible singleton type; thus this
         method relies on helper functions to obtain
         token ids for the sub-prompts.
-        
+
         Arguments:
 
         * inputs: an input prompt

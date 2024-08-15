@@ -1141,19 +1141,3 @@ async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
     """Utility function to run async task in a lock"""
     async with lock:
         return await task(*args, **kwargs)
-
-
-# TODO():
-def is_encoder_decoder_model_config(model_config) -> bool:
-    '''
-    Extract the HF encoder/decoder model flag from the ModelConfig instance.
-    Return False if model_config is None.
-    '''
-    if model_config is None:
-        return False
-
-    is_encoder_decoder = getattr(model_config.hf_config, "is_encoder_decoder",
-                                 False)
-    is_decoder = getattr(model_config.hf_config, "is_decoder", False)
-
-    return is_encoder_decoder or not is_decoder
