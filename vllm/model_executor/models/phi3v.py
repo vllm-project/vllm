@@ -15,7 +15,8 @@
 # limitations under the License.
 import re
 from functools import lru_cache
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
+from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
+                    TypedDict, Union)
 
 import numpy as np
 import torch
@@ -28,8 +29,7 @@ from vllm.config import CacheConfig, ModelConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -42,8 +42,8 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
                    input_processor_for_clip)
-from .interfaces import SupportsVision
-from .utils import merge_vision_embeddings
+from .interfaces import SupportsMultiModal
+from .utils import merge_multimodal_embeddings
 
 logger = init_logger(__name__)
 
@@ -68,6 +68,36 @@ CLIP_VIT_LARGE_PATCH14_336_CONFIG = CLIPVisionConfig(dropout=0.0,
                                                      num_hidden_layers=24,
                                                      patch_size=14,
                                                      projection_dim=768)
+
+
+class Phi3VImagePixelInputs(TypedDict):
+    type: Literal["pixel_values"]
+    data: Union[torch.Tensor, List[torch.Tensor]]
+    """
+    Shape: `(batch_size, 1 + num_patches, num_channels, height, width)`
+
+    Note that `num_patches` may be different for each batch, in which case
+    the data is passed as a list instead of a batched tensor.
+    """
+
+    image_sizes: torch.Tensor
+    """
+    Shape: `(batch_size, 2)`
+
+    This should be in `(height, width)` format.
+    """
+
+
+class Phi3VImageEmbeddingInputs(TypedDict):
+    type: Literal["image_embeds"]
+    data: Union[torch.Tensor, List[torch.Tensor]]
+    """Shape: `(batch_size, image_feature_size, hidden_size)`
+
+    `hidden_size` must match the hidden size of language model backbone.
+    """
+
+
+Phi3VImageInputs = Union[Phi3VImagePixelInputs, Phi3VImageEmbeddingInputs]
 
 
 class Phi3ImageEmbeddingBase(nn.Module):
@@ -257,24 +287,6 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
         return image_features_hd_newline
 
 
-class Phi3VImagePixelInputs(TypedDict):
-    type: Literal["pixel_values"]
-    data: Union[torch.Tensor, List[torch.Tensor]]
-    """
-    Shape: `(batch_size, 1 + num_patches, num_channels, height, width)`
-
-    Note that `num_patches` may be different for each batch, in which case
-    the data is passed as a list instead of a batched tensor.
-    """
-
-    image_sizes: torch.Tensor
-    """
-    Shape: `(batch_size, 2)`
-
-    This should be in `(height, width)` format.
-    """
-
-
 # Based on https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py#L57
 def _calc_padded_size(*, width: int, height: int, padding_unit: int = 336):
     target_height = int(np.ceil(height / padding_unit) * padding_unit)
@@ -329,24 +341,28 @@ def get_phi3v_image_feature_size(
 def get_max_phi3v_image_tokens(ctx: InputContext):
 
     return get_phi3v_image_feature_size(
-        ctx.get_hf_config(PretrainedConfig),
+        ctx.get_hf_config(),
         input_height=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
         input_width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
     )
 
 
-def dummy_data_for_phi3v(ctx: InputContext, seq_len: int):
+def dummy_data_for_phi3v(ctx: InputContext, seq_len: int,
+                         mm_counts: Mapping[str, int]):
+    num_images = mm_counts["image"]
 
     image_feature_size = get_max_phi3v_image_tokens(ctx)
 
     seq_data = dummy_seq_data_for_clip(
         CLIP_VIT_LARGE_PATCH14_336_CONFIG,
         seq_len,
+        num_images,
         image_token_id=_IMAGE_TOKEN_ID,
         image_feature_size_override=image_feature_size,
     )
     mm_data = dummy_image_for_clip(
         CLIP_VIT_LARGE_PATCH14_336_CONFIG,
+        num_images,
         image_width_override=MAX_IMAGE_FEATURE_SIZE_WIDTH,
         image_height_override=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
     )
@@ -379,7 +395,7 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
         return llm_inputs
 
     model_config = ctx.model_config
-    hf_config = ctx.get_hf_config(PretrainedConfig)
+    hf_config = ctx.get_hf_config()
 
     image_data = multi_modal_data["image"]
     if isinstance(image_data, Image.Image):
@@ -390,7 +406,7 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
                                                           input_width=w,
                                                           input_height=h)
     elif isinstance(image_data, torch.Tensor):
-        raise NotImplementedError("Embeddings input is not supported yet")
+        image_feature_size = image_data.shape[0]
     else:
         raise TypeError(f"Invalid image type: {type(image_data)}")
 
@@ -441,7 +457,7 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_phi3v_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_phi3v)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_phi3v)
-class Phi3VForCausalLM(nn.Module, SupportsVision):
+class Phi3VForCausalLM(nn.Module, SupportsMultiModal):
 
     def __init__(self,
                  config: PretrainedConfig,
@@ -494,25 +510,55 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
         return data
 
     def _parse_and_validate_image_input(
-            self, **kwargs: object) -> Optional[Phi3VImagePixelInputs]:
+            self, **kwargs: object) -> Optional[Phi3VImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
         image_sizes = kwargs.pop("image_sizes", None)
+        image_embeds = kwargs.pop("image_embeds", None)
 
         if pixel_values is None:
             return None
 
-        if not isinstance(pixel_values, (torch.Tensor, list)):
-            raise ValueError("Incorrect type of pixel values. "
-                             f"Got type: {type(pixel_values)}")
+        if pixel_values is None and image_embeds is None:
+            return None
 
-        if not isinstance(image_sizes, torch.Tensor):
-            raise ValueError("Incorrect type of image sizes. "
-                             f"Got type: {type(image_sizes)}")
+        if pixel_values is not None:
+            if not isinstance(pixel_values, (torch.Tensor, list)):
+                raise ValueError("Incorrect type of pixel values. "
+                                 f"Got type: {type(pixel_values)}")
 
-        return Phi3VImagePixelInputs(
-            type="pixel_values",
-            data=self._validate_pixel_values(pixel_values),
-            image_sizes=self._validate_image_sizes(image_sizes))
+            if not isinstance(image_sizes, torch.Tensor):
+                raise ValueError("Incorrect type of image sizes. "
+                                 f"Got type: {type(image_sizes)}")
+
+            return Phi3VImagePixelInputs(
+                type="pixel_values",
+                data=self._validate_pixel_values(pixel_values),
+                image_sizes=self._validate_image_sizes(image_sizes))
+
+        if image_embeds is not None:
+            if not isinstance(image_embeds, torch.Tensor):
+                raise ValueError("Incorrect type of image embeddings. "
+                                 f"Got type: {type(image_embeds)}")
+            return Phi3VImageEmbeddingInputs(
+                type="image_embeds",
+                data=image_embeds,
+            )
+
+        raise AssertionError("This line should be unreachable.")
+
+    def _process_image_input(
+        self,
+        image_input: Phi3VImageInputs,
+    ) -> torch.Tensor:
+
+        if image_input["type"] == "image_embeds":
+            return image_input["data"]
+
+        assert self.vision_embed_tokens is not None
+        image_embeds = self.vision_embed_tokens(image_input["data"],
+                                                image_input["image_sizes"])
+
+        return image_embeds
 
     def forward(self,
                 input_ids: torch.Tensor,
@@ -524,12 +570,11 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
         image_input = self._parse_and_validate_image_input(**kwargs)
 
         if image_input is not None:
-            vision_embeddings = self.vision_embed_tokens(
-                image_input["data"], image_input["image_sizes"])
+            vision_embeddings = self._process_image_input(image_input)
             inputs_embeds = self.model.get_input_embeddings(input_ids)
-            inputs_embeds = merge_vision_embeddings(input_ids, inputs_embeds,
-                                                    vision_embeddings,
-                                                    self.image_token_id)
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, vision_embeddings,
+                self.image_token_id)
             input_ids = None
         else:
             inputs_embeds = None
@@ -543,8 +588,11 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
 
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits

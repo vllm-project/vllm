@@ -7,19 +7,20 @@ import time
 import warnings
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import openai
-import ray
 import requests
 from transformers import AutoTokenizer
+from typing_extensions import ParamSpec
 
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.entrypoints.openai.cli_args import make_arg_parser
+from vllm.platforms import current_platform
 from vllm.utils import FlexibleArgumentParser, get_open_port, is_hip
 
-if is_hip():
+if current_platform.is_rocm():
     from amdsmi import (amdsmi_get_gpu_vram_usage,
                         amdsmi_get_processor_handles, amdsmi_init,
                         amdsmi_shut_down)
@@ -31,7 +32,7 @@ if is_hip():
             yield
         finally:
             amdsmi_shut_down()
-else:
+elif current_platform.is_cuda():
     from pynvml import (nvmlDeviceGetHandleByIndex, nvmlDeviceGetMemoryInfo,
                         nvmlInit, nvmlShutdown)
 
@@ -42,6 +43,11 @@ else:
             yield
         finally:
             nvmlShutdown()
+else:
+
+    @contextmanager
+    def _nvml():
+        yield
 
 
 VLLM_PATH = Path(__file__).parent.parent
@@ -292,6 +298,8 @@ def multi_process_parallel(
     pp_size: int,
     test_target: Any,
 ) -> None:
+    import ray
+
     # Using ray helps debugging the error when it failed
     # as compared to multiprocessing.
     # NOTE: We need to set working_dir for distributed tests,
@@ -360,13 +368,17 @@ def wait_for_gpu_memory_to_clear(devices: List[int],
         time.sleep(5)
 
 
-def fork_new_process_for_each_test(f):
+_P = ParamSpec("_P")
+
+
+def fork_new_process_for_each_test(
+        f: Callable[_P, None]) -> Callable[_P, None]:
     """Decorator to fork a new process for each test function.
     See https://github.com/vllm-project/vllm/issues/7053 for more details.
     """
 
     @functools.wraps(f)
-    def wrapper(*args, **kwargs):
+    def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> None:
         # Make the process the leader of its own process group
         # to avoid sending SIGTERM to the parent process
         os.setpgrp()

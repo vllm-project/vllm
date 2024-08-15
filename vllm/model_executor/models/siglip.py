@@ -52,6 +52,7 @@ def get_max_siglip_image_tokens(hf_config: SiglipVisionConfig) -> int:
 def dummy_seq_data_for_siglip(
     hf_config: SiglipVisionConfig,
     seq_len: int,
+    num_images: int,
     *,
     image_token_id: int,
     image_feature_size_override: Optional[int] = None,
@@ -61,13 +62,14 @@ def dummy_seq_data_for_siglip(
     else:
         image_feature_size = image_feature_size_override
 
-    token_ids = [image_token_id] * image_feature_size
-    token_ids += [0] * (seq_len - image_feature_size)
+    token_ids = [image_token_id] * image_feature_size * num_images
+    token_ids += [0] * (seq_len - image_feature_size * num_images)
     return SequenceData(token_ids)
 
 
 def dummy_image_for_siglip(
     hf_config: SiglipVisionConfig,
+    num_images: int,
     *,
     image_width_override: Optional[int] = None,
     image_height_override: Optional[int] = None,
@@ -79,7 +81,7 @@ def dummy_image_for_siglip(
         height = image_height_override
 
     image = Image.new("RGB", (width, height), color=0)
-    return {"image": image}
+    return {"image": image if num_images == 1 else [image] * num_images}
 
 
 def input_processor_for_siglip(
@@ -97,7 +99,13 @@ def input_processor_for_siglip(
     tokenizer = cached_get_tokenizer(model_config.tokenizer)
 
     if image_feature_size_override is None:
-        image_feature_size = get_siglip_image_feature_size(hf_config)
+        image_data = multi_modal_data["image"]
+        if isinstance(image_data, Image.Image):
+            image_feature_size = get_siglip_image_feature_size(hf_config)
+        elif isinstance(image_data, torch.Tensor):
+            image_feature_size = image_data.shape[0]
+        else:
+            raise TypeError(f"Invalid image type: {type(image_data)}")
     else:
         image_feature_size = image_feature_size_override
 
