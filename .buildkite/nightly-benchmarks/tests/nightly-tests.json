@@ -1,7 +1,7 @@
 [
     {
         "test_name": "llama8B_tp1",
-        "qps_list": [4],
+        "qps_list": [2,4,8,16,"inf"],
         "common_parameters": {
             "model": "meta-llama/Llama-2-7b-hf",
             "tp": 1,
