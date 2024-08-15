@@ -391,7 +391,7 @@ class LoRAMixtralModel(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: MixtralDecoderLayer(
-                config, cache_config, quant_config=quant_config
+                config, use_fused_moe=True, cache_config=cache_config, quant_config=quant_config
             ),
             prefix=f"{prefix}.layers",
         )
@@ -592,7 +592,7 @@ class LoRAEnabledMixtralForCausalLM(nn.Module, SupportsLoRA):
         self.lora_config = lora_config
         self.use_fused_moe = (config.torch_dtype != torch.float8_e4m3fn)
         self.model = LoRAMixtralModel(
-            config, cache_config, quant_config, lora_config=lora_config, prefix="model"
+            config=config, cache_config=cache_config, quant_config=quant_config, lora_config=lora_config, prefix="model"
         )
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
@@ -600,6 +600,7 @@ class LoRAEnabledMixtralForCausalLM(nn.Module, SupportsLoRA):
         self.lm_head = ParallelLMHead(
             self.unpadded_vocab_size,
             config.hidden_size,
+            org_num_embeddings=config.vocab_size,
             padding_size=DEFAULT_VOCAB_PADDING_SIZE
             # We need bigger padding if using lora for kernel
             # compatibility
@@ -607,7 +608,7 @@ class LoRAEnabledMixtralForCausalLM(nn.Module, SupportsLoRA):
             quant_config=quant_config,
         )
         self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size
+            self.unpadded_vocab_size, config.vocab_size
         )
         self.sampler = Sampler()
 
