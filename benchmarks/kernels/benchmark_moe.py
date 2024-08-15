@@ -256,11 +256,8 @@ def sort_config(config: BenchmarkConfig) -> BenchmarkConfig:
 def save_configs(configs: Dict[int, BenchmarkConfig], num_experts: int,
                  shard_intermediate_size: int, hidden_size: int, topk: int,
                  dtype: torch.dtype, use_fp8_w8a8: bool, use_int8_w8a16: bool) -> None:
-    dtype_str = None
-    if use_fp8_w8a8:
-        dtype_str = "float8"
-    elif use_int8_w8a16:
-        dtype_str = "int8"
+    dtype_str = get_config_dtype_str(dtype, use_int8_w8a16, use_int8_w8a16)
+    
     # NOTE(woosuk): The current naming convention uses w2.shape[2], which
     # is the intermediate size after silu_and_mul.
     filename = get_config_file_name(num_experts, shard_intermediate_size // 2,
@@ -296,7 +293,7 @@ def main(args: argparse.Namespace):
     hidden_size = config.hidden_size
     dtype = config.torch_dtype
     use_fp8_w8a8 = args.dtype == "fp8"
-    use_int8_w8a16 = args.dtype == "int8"
+    use_int8_w8a16 = args.dtype == "int8_w8a16"
 
     if args.batch_size is None:
         batch_sizes = [
