@@ -53,8 +53,8 @@ def fused_moe_kernel(
         MUL_ROUTED_WEIGHT: tl.constexpr,
         top_k: tl.constexpr,
         compute_type: tl.constexpr,
-        use_fp8: tl.constexpr,
-        use_int8: tl.constexpr):
+        use_fp8_w8a8: tl.constexpr,
+        use_int8_w8a16: tl.constexpr):
     """
     Implements the fused computation for a Mixture of Experts (MOE) using
     token and expert matrices.
@@ -115,12 +115,12 @@ def fused_moe_kernel(
     off_experts = tl.load(expert_ids_ptr + pid_m)
     b_ptrs = b_ptr + off_experts * stride_be + (offs_k[:, None] * stride_bk +
                                                 offs_bn[None, :] * stride_bn)
-    if use_int8:
+    if use_int8_w8a16:
         b_scale_ptrs = b_scale_ptr + off_experts * stride_bse + offs_bn[
             None, :] * stride_bsn
         b_scale = tl.load(b_scale_ptrs)
 
-    if use_fp8:
+    if use_fp8_w8a8:
         a_scale = tl.load(a_scale_ptr)
         b_scale = tl.load(b_scale_ptr + off_experts)
 
@@ -142,9 +142,9 @@ def fused_moe_kernel(
                     mask=offs_k[:, None] < K - k * BLOCK_SIZE_K,
                     other=0.0)
         # We accumulate along the K dimension.
-        if use_int8:
+        if use_int8_w8a16:
             accumulator = tl.dot(a, b.to(compute_type), acc=accumulator)
-        elif use_fp8:
+        elif use_fp8_w8a8:
             accumulator = tl.dot(a, b, acc=accumulator)
         else:
             accumulator += tl.dot(a, b)
@@ -157,9 +157,9 @@ def fused_moe_kernel(
                              mask=token_mask,
                              other=0)
         accumulator = accumulator * moe_weight[:, None]
-    if use_int8:
+    if use_int8_w8a16:
         accumulator = (accumulator * b_scale).to(compute_type)
-    elif use_fp8:
+    elif use_fp8_w8a8:
         accumulator = (accumulator * a_scale * b_scale).to(compute_type)
     else:
         accumulator = accumulator.to(compute_type)
@@ -238,14 +238,14 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
                             num_tokens_post_padded: torch.Tensor,
                             mul_routed_weight: bool, top_k: int,
                             config: Dict[str, Any], compute_type: tl.dtype,
-                            use_fp8: bool, use_int8: bool) -> None:
+                            use_fp8_w8a8: bool, use_int8_w8a16: bool) -> None:
     assert topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1
 
-    if not use_fp8 and not use_int8:
+    if not use_fp8_w8a8 and not use_int8_w8a16:
         assert A_scale is None
         assert B_scale is None
-    elif use_int8:
+    elif use_int8_w8a16:
         assert B_scale is not None
     else:
         A, A_scale = ops.scaled_fp8_quant(A, A_scale)
@@ -275,13 +275,13 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
         B.stride(1),
         C.stride(1),
         C.stride(2),
-        B_scale.stride(0) if B_scale is not None and use_int8 else 0,
-        B_scale.stride(1) if B_scale is not None and use_int8 else 0,
+        B_scale.stride(0) if B_scale is not None and use_int8_w8a16 else 0,
+        B_scale.stride(1) if B_scale is not None and use_int8_w8a16 else 0,
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         top_k=top_k,
         compute_type=compute_type,
-        use_fp8=use_fp8,
-        use_int8=use_int8,
+        use_fp8_w8a8=use_fp8_w8a8,
+        use_int8_w8a16=use_int8_w8a16,
         **config,
     )
 
@@ -447,8 +447,8 @@ def fused_experts(hidden_states: torch.Tensor,
                   topk_ids: torch.Tensor,
                   inplace: bool = False,
                   override_config: Optional[Dict[str, Any]] = None,
-                  use_fp8: bool = False,
-                  use_int8: bool = False,
+                  use_fp8_w8a8: bool = False,
+                  use_int8_w8a16: bool = False,
                   w1_scale: Optional[torch.Tensor] = None,
                   w2_scale: Optional[torch.Tensor] = None,
                   a1_scale: Optional[torch.Tensor] = None,
@@ -470,9 +470,9 @@ def fused_experts(hidden_states: torch.Tensor,
     CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
     M = min(num_tokens, CHUNK_SIZE)
     config_dtype = None
-    if use_fp8:
+    if use_fp8_w8a8:
         config_dtype = "float8"
-    elif use_int8:
+    elif use_int8_w8a16:
         config_dtype = "int8"
     elif hidden_states.dtype == torch.float:
         # avoiding cases where kernel fails when float32 MoE
@@ -548,8 +548,8 @@ def fused_experts(hidden_states: torch.Tensor,
                                 topk_ids.shape[1],
                                 config,
                                 compute_type=compute_type,
-                                use_fp8=use_fp8,
-                                use_int8=use_int8)
+                                use_fp8_w8a8=use_fp8_w8a8,
+                                use_int8_w8a16=use_int8_w8a16)
 
         ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
 
@@ -567,8 +567,8 @@ def fused_experts(hidden_states: torch.Tensor,
                                 1,
                                 config,
                                 compute_type=compute_type,
-                                use_fp8=use_fp8,
-                                use_int8=use_int8)
+                                use_fp8_w8a8=use_fp8_w8a8,
+                                use_int8_w8a16=use_int8_w8a16)
 
         torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
                   dim=1,
@@ -588,8 +588,8 @@ def fused_moe(
     use_grouped_topk: bool = False,
     num_expert_group: Optional[int] = None,
     topk_group: Optional[int] = None,
-    use_fp8: bool = False,
-    use_int8: bool = False,
+    use_fp8_w8a8: bool = False,
+    use_int8_w8a16: bool = False,
     w1_scale: Optional[torch.Tensor] = None,
     w2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
@@ -615,7 +615,9 @@ def fused_moe(
     - topk_group: Optional[int]: additional parameter for grouped_topk
     - use_grouped_topk: If True, use grouped_topk instead of fused_topk
         note: Deepseekv2 model uses grouped_topk
-    - use_fp8 (bool): If True, use fp8 arithmetic to compute the inner
+    - use_fp8_w8a8 (bool): If True, use fp8 arithmetic to compute the inner
+        products for w1 and w2. Defaults to False.
+    - use_int8_w8a16 (bool): If True, use fp8 arithmetic to compute the inner
         products for w1 and w2. Defaults to False.
     - w1_scale (Optional[torch.Tensor]): Optional scale to be used for
         w1.
@@ -644,8 +646,8 @@ def fused_moe(
                          topk_ids,
                          inplace=inplace,
                          override_config=override_config,
-                         use_fp8=use_fp8,
-                         use_int8=use_int8,
+                         use_fp8_w8a8=use_fp8_w8a8,
+                         use_int8_w8a16=use_int8_w8a16,
                          w1_scale=w1_scale,
                          w2_scale=w2_scale,
                          a1_scale=a1_scale,

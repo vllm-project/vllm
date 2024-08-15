@@ -30,13 +30,13 @@ def benchmark_config(
     hidden_size: int,
     topk: int,
     dtype: torch.dtype,
-    use_fp8: bool,
-    use_int8: bool,
+    use_fp8_w8a8: bool,
+    use_int8_w8a16: bool,
     num_iters: int = 100,
 ) -> float:
-    init_dtype = torch.float16 if use_fp8 else dtype
+    init_dtype = torch.float16 if use_fp8_w8a8 else dtype
     x = torch.randn(num_tokens, hidden_size, dtype=dtype)
-    if use_int8:
+    if use_int8_w8a16:
         w1 = torch.randint(-127,
                            127, (
                                num_experts,
@@ -69,11 +69,11 @@ def benchmark_config(
     w2_scale = None
     a1_scale = None
     a2_scale = None
-    if use_int8:
+    if use_int8_w8a16:
         w1_scale = torch.randn((num_experts, 2 * shard_intermediate_size),
                                dtype=torch.float32)
         w2_scale = torch.randn((hidden_size, num_experts), dtype=torch.float32)
-    if use_fp8:
+    if use_fp8_w8a8:
         w1_scale = torch.randn(num_experts, dtype=torch.float32)
         w2_scale = torch.randn(num_experts, dtype=torch.float32)
         a1_scale = torch.randn(1, dtype=torch.float32)
@@ -97,8 +97,8 @@ def benchmark_config(
             renormalize=True,
             inplace=True,
             override_config=config,
-            use_fp8=use_fp8,
-            use_int8=use_int8,
+            use_fp8_w8a8=use_fp8_w8a8,
+            use_int8_w8a16=use_int8_w8a16,
             w1_scale=w1_scale,
             w2_scale=w2_scale,
             a1_scale=a1_scale,
@@ -177,12 +177,16 @@ class BenchmarkWorker:
         hidden_size: int,
         topk: int,
         dtype: torch.dtype,
-        use_fp8: bool,
-        use_int8: bool,
+        use_fp8_w8a8: bool,
+        use_int8_w8a16: bool,
     ) -> Tuple[Dict[str, int], float]:
         torch.cuda.manual_seed_all(self.seed)
 
-        dtype_str = "float8" if use_fp8 else ("int8" if use_int8 else None)
+        dtype_str = None
+        if use_fp8_w8a8:
+            dtype_str = "float8"
+        elif use_int8_w8a16:
+            dtype_str = "int8"
         # NOTE(woosuk): The current naming convention uses w2.shape[2], which
         # is the intermediate size after silu_and_mul.
         op_config = get_moe_configs(num_experts, shard_intermediate_size // 2,
@@ -196,7 +200,7 @@ class BenchmarkWorker:
                                    key=lambda x: abs(x - num_tokens))]
         kernel_time = benchmark_config(config, num_tokens, num_experts,
                                        shard_intermediate_size, hidden_size,
-                                       topk, dtype, use_fp8, use_int8)
+                                       topk, dtype, use_fp8_w8a8, use_int8_w8a16)
         return config, kernel_time
 
     def tune(
@@ -207,8 +211,8 @@ class BenchmarkWorker:
         hidden_size: int,
         topk: int,
         dtype: torch.dtype,
-        use_fp8: bool,
-        use_int8: bool,
+        use_fp8_w8a8: bool,
+        use_int8_w8a16: bool,
         search_space: List[Dict[str, int]],
     ) -> Dict[str, int]:
         best_config = None
@@ -222,8 +226,8 @@ class BenchmarkWorker:
                                                hidden_size,
                                                topk,
                                                dtype,
-                                               use_fp8,
-                                               use_int8,
+                                               use_fp8_w8a8,
+                                               use_int8_w8a16,
                                                num_iters=10)
             except triton.runtime.autotuner.OutOfResources:
                 # Some configurations may be invalid and fail to compile.
@@ -251,11 +255,11 @@ def sort_config(config: BenchmarkConfig) -> BenchmarkConfig:
 
 def save_configs(configs: Dict[int, BenchmarkConfig], num_experts: int,
                  shard_intermediate_size: int, hidden_size: int, topk: int,
-                 dtype: torch.dtype, use_fp8: bool, use_int8: bool) -> None:
+                 dtype: torch.dtype, use_fp8_w8a8: bool, use_int8_w8a16: bool) -> None:
     dtype_str = None
-    if use_fp8:
+    if use_fp8_w8a8:
         dtype_str = "float8"
-    elif use_int8:
+    elif use_int8_w8a16:
         dtype_str = "int8"
     # NOTE(woosuk): The current naming convention uses w2.shape[2], which
     # is the intermediate size after silu_and_mul.
@@ -291,8 +295,8 @@ def main(args: argparse.Namespace):
 
     hidden_size = config.hidden_size
     dtype = config.torch_dtype
-    use_fp8 = args.dtype == "fp8"
-    use_int8 = args.dtype == "int8"
+    use_fp8_w8a8 = args.dtype == "fp8"
+    use_int8_w8a16 = args.dtype == "int8"
 
     if args.batch_size is None:
         batch_sizes = [
@@ -324,20 +328,20 @@ def main(args: argparse.Namespace):
         start = time.time()
         configs = _distribute(
             "tune", [(batch_size, E, shard_intermediate_size, hidden_size,
-                      topk, dtype, use_fp8, use_int8, search_space)
+                      topk, dtype, use_fp8_w8a8, use_int8_w8a16, search_space)
                      for batch_size in batch_sizes])
         best_configs = {
             M: sort_config(config)
             for M, config in zip(batch_sizes, configs)
         }
         save_configs(best_configs, E, shard_intermediate_size, hidden_size,
-                     topk, dtype, use_fp8, use_int8)
+                     topk, dtype, use_fp8_w8a8, use_int8_w8a16)
         end = time.time()
         print(f"Tuning took {end - start:.2f} seconds")
     else:
         outputs = _distribute("benchmark",
                               [(batch_size, E, shard_intermediate_size,
-                                hidden_size, topk, dtype, use_fp8, use_int8)
+                                hidden_size, topk, dtype, use_fp8_w8a8, use_int8_w8a16)
                                for batch_size in batch_sizes])
 
         for batch_size, (config, kernel_time) in zip(batch_sizes, outputs):

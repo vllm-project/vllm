@@ -113,7 +113,7 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
                          top_k,
                          renormalize=renormalize,
                          inplace=True,
-                         use_int8=True,
+                         use_int8_w8a16=True,
                          w1_scale=layer.w13_scale,
                          w2_scale=layer.w2_scale,
                          use_grouped_topk=use_grouped_topk,
