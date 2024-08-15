@@ -196,14 +196,14 @@ class FlashAttentionMetadata(AttentionMetadata):
         )
         return self._cached_decode_metadata
 
-    def advance_step(self, num_seqs: int , num_queries: int):
+    def advance_step(self, num_seqs: int, num_queries: int):
         """
         Update metadata in-place to advance one decode step.
         """
         # GPU in-place update is currently called separately through
         # custom_ops.advance_step(). See draft_model_runner. TODO(will): Move
         # this logic to the backend.
-        
+
         # When using cudagraph, the num_seqs is padded to the next captured
         # batch sized, but num_queries tracks the actual number of requests in
         # the batch. For --enforce-eager mode, num_seqs == num_queries
