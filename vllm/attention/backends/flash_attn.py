@@ -38,7 +38,7 @@ def flash_attn_varlen_func(
     causal: bool = False,
     window_size: Optional[List[int]] = None,
     softcap: float = 0.0,
-    alibi_slopes: Optional[List[float]] = None,
+    alibi_slopes: Optional[torch.Tensor] = None,
     block_table: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     # custom op does not support tuple input
@@ -78,7 +78,7 @@ def _(
     causal: bool = False,
     window_size: Optional[List[int]] = None,
     softcap: float = 0.0,
-    alibi_slopes: Optional[List[float]] = None,
+    alibi_slopes: Optional[torch.Tensor] = None,
     block_table: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     return torch.empty_like(q)
@@ -100,7 +100,7 @@ def flash_attn_with_kvcache(
     block_table: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
     causal: bool = False,
-    alibi_slopes: Optional[List[int]] = None,
+    alibi_slopes: Optional[torch.Tensor] = None,
     softcap: float = 0.0,
 ) -> torch.Tensor:
     return _flash_attn_with_kvcache(
@@ -125,7 +125,7 @@ def _(
     block_table: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
     causal: bool = False,
-    alibi_slopes: Optional[List[int]] = None,
+    alibi_slopes: Optional[torch.Tensor] = None,
     softcap: float = 0.0,
 ) -> torch.Tensor:
     return torch.empty_like(decode_query)
