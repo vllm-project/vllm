@@ -52,6 +52,7 @@ from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
+_DEFAULT_BOS_TOKEN_ID = 1
 
 
 def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
@@ -521,6 +522,9 @@ class LLMEngine:
     def _get_bos_token_id(self,
                           lora_request: Optional[LoRARequest] = None
                           ) -> Optional[int]:
+        if self.is_encoder_model():
+            return _DEFAULT_BOS_TOKEN_ID
+
         if self.tokenizer is None:
             logger.warning("Using None for BOS token id because tokenizer "
                            "is not initialized")
@@ -546,9 +550,7 @@ class LLMEngine:
         '''
 
         if self.is_encoder_model():
-            logger.warning("Using 1 for decoder start token id because "
-                           "this is an encoder model.")
-            return 1
+            return self._get_bos_token_id()
 
         if not self.is_encoder_decoder_model():
             logger.warning("Using None for decoder start token id because "
