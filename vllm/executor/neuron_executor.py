@@ -100,9 +100,8 @@ class NeuronExecutorAsync(NeuronExecutor, ExecutorAsyncBase):
         self,
         execute_model_req: ExecuteModelRequest,
     ) -> List[SamplerOutput]:
-        output = await make_async(
-            self.driver_worker.execute_model
-        )(seq_group_metadata_list=execute_model_req.seq_group_metadata_list, )
+        output = await make_async(self.driver_worker.execute_model
+                                  )(execute_model_req=execute_model_req, )
         return output
 
     async def check_health_async(self) -> None:
