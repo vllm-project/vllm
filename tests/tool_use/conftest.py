@@ -2,6 +2,7 @@ import pytest
 from huggingface_hub import snapshot_download
 
 from tests.utils import RemoteOpenAIServer
+
 from .util import ARGS, CONFIGS, ServerConfig
 
 
