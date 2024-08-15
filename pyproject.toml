@@ -1,11 +1,11 @@
 [build-system]
 # Should be mirrored in requirements-build.txt
 requires = [
-    "cmake>=3.21",
+    "cmake>=3.26",
     "ninja",
     "packaging",
     "setuptools >= 49.4.0",
-    "torch == 2.3.0",
+    "torch == 2.4.0",
     "wheel",
 ]
 build-backend = "setuptools.build_meta"
@@ -48,9 +48,22 @@ python_version = "3.8"
 
 ignore_missing_imports = true
 check_untyped_defs = true
-follow_imports = "skip"
+follow_imports = "silent"
 
-files = "vllm"
+# After fixing type errors resulting from follow_imports: "skip" -> "silent",
+# move the directory here and remove it from format.sh and mypy.yaml
+files = [
+    "vllm/*.py",
+    "vllm/adapter_commons",
+    "vllm/assets",
+    "vllm/inputs",
+    "vllm/logging",
+    "vllm/multimodal",
+    "vllm/platforms",
+    "vllm/transformers_utils",
+    "vllm/triton_utils",
+    "vllm/usage",
+]
 # TODO(woosuk): Include the code from Megatron and HuggingFace.
 exclude = [
     "vllm/model_executor/parallel_utils/|vllm/model_executor/models/",

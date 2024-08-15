@@ -1,35 +1,34 @@
 import openai  # use the official client for correctness check
 import pytest
-# using Ray for overall ease of process management, parallel requests,
-# and debugging.
-import ray
 
 from ..utils import VLLM_PATH, RemoteOpenAIServer
 
 # any model with a chat template should work here
 MODEL_NAME = "facebook/opt-125m"
+chatml_jinja_path = VLLM_PATH / "examples/template_chatml.jinja"
+assert chatml_jinja_path.exists()
 
 
 @pytest.fixture(scope="module")
-def ray_ctx():
-    ray.init(runtime_env={"working_dir": VLLM_PATH})
-    yield
-    ray.shutdown()
-
-
-@pytest.fixture(scope="module")
-def server(ray_ctx):
-    return RemoteOpenAIServer([
-        "--model",
-        MODEL_NAME,
+def server():
+    args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         "float16",
         "--max-model-len",
         "2048",
         "--enforce-eager",
-        "--engine-use-ray"
-    ])
+        "--engine-use-ray",
+        "--chat-template",
+        str(chatml_jinja_path),
+    ]
+
+    # Allow `--engine-use-ray`, otherwise the launch of the server throw
+    # an error due to try to use a deprecated feature
+    env_dict = {"VLLM_ALLOW_ENGINE_USE_RAY": "1"}
+    with RemoteOpenAIServer(MODEL_NAME, args,
+                            env_dict=env_dict) as remote_server:
+        yield remote_server
 
 
 @pytest.fixture(scope="module")
@@ -92,7 +91,7 @@ async def test_single_chat_session(client: openai.AsyncOpenAI):
     choice = chat_completion.choices[0]
     assert choice.finish_reason == "length"
     assert chat_completion.usage == openai.types.CompletionUsage(
-        completion_tokens=10, prompt_tokens=13, total_tokens=23)
+        completion_tokens=10, prompt_tokens=55, total_tokens=65)
 
     message = choice.message
     assert message.content is not None and len(message.content) >= 10

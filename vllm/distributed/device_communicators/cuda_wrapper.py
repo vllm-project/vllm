@@ -33,6 +33,27 @@ class Function:
     argtypes: List[Any]
 
 
+def find_loaded_library(lib_name) -> Optional[str]:
+    """
+    According to according to https://man7.org/linux/man-pages/man5/proc_pid_maps.5.html,
+    the file `/proc/self/maps` contains the memory maps of the process, which includes the
+    shared libraries loaded by the process. We can use this file to find the path of the
+    a loaded library.
+    """ # noqa
+    found = False
+    with open("/proc/self/maps") as f:
+        for line in f:
+            if lib_name in line:
+                found = True
+                break
+    if not found:
+        # the library is not loaded in the current process
+        return None
+    start = line.index("/")
+    path = line[start:].strip()
+    return path
+
+
 class CudaRTLibrary:
     exported_functions = [
         # ​cudaError_t cudaSetDevice ( int  device )
@@ -77,9 +98,9 @@ class CudaRTLibrary:
 
     def __init__(self, so_file: Optional[str] = None):
         if so_file is None:
-            assert torch.version.cuda is not None
-            major_version = torch.version.cuda.split(".")[0]
-            so_file = f"libcudart.so.{major_version}"
+            so_file = find_loaded_library("libcudart.so")
+            assert so_file is not None, \
+                "libcudart.so is not loaded in the current process"
         if so_file not in CudaRTLibrary.path_to_library_cache:
             lib = ctypes.CDLL(so_file)
             CudaRTLibrary.path_to_library_cache[so_file] = lib

@@ -11,7 +11,7 @@ DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [42]  # Arbitrary values for testing
 NUM_LAYERS = [1]  # Arbitrary values for testing
 NUM_HEADS = [8]  # Arbitrary values for testing
-HEAD_SIZES = [64, 80, 96, 112, 128, 192, 256]
+HEAD_SIZES = [64, 80, 96, 112, 120, 128, 192, 256]
 BLOCK_SIZES = [8, 16, 32]
 
 # Arbitrary values for testing
@@ -52,6 +52,8 @@ def test_copy_blocks(
     kv_cache_dtype: str,
     device: str,
 ) -> None:
+    if kv_cache_dtype == "fp8" and head_size % 16:
+        pytest.skip()
     random.seed(seed)
     torch.random.manual_seed(seed)
     if torch.cuda.is_available():
@@ -124,6 +126,8 @@ def test_reshape_and_cache(
     device: str,
     kv_cache_dtype: str,
 ) -> None:
+    if kv_cache_dtype == "fp8" and head_size % 16:
+        pytest.skip()
     random.seed(seed)
     torch.random.manual_seed(seed)
     if torch.cuda.is_available():
@@ -155,11 +159,11 @@ def test_reshape_and_cache(
         cloned_value_cache = value_cache.clone()
 
     # Using default kv_scale
-    kv_scale = 1.0
+    k_scale = v_scale = 1.0
 
     # Call the reshape_and_cache kernel.
     ops.reshape_and_cache(key, value, key_cache, value_cache, slot_mapping,
-                          kv_cache_dtype, kv_scale)
+                          kv_cache_dtype, k_scale, v_scale)
 
     if kv_cache_dtype == "fp8":
         result_key_cache = torch.empty_like(key_cache, dtype=torch.float16)
@@ -215,8 +219,6 @@ def test_reshape_and_cache_flash(
     device: str,
     kv_cache_dtype: str,
 ) -> None:
-    if kv_cache_dtype == "fp8":
-        pytest.skip()
     random.seed(seed)
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
@@ -248,15 +250,33 @@ def test_reshape_and_cache_flash(
         dtype,
         device=device,
     )
-    key_cache, value_cache = key_caches[0], value_caches[0]
+    key_cache, value_cache = key_caches[0].contiguous(
+    ), value_caches[0].contiguous()
+    del key_caches
+    del value_caches
 
     # Clone the KV caches.
-    cloned_key_cache = key_cache.clone()
-    cloned_value_cache = value_cache.clone()
+    if kv_cache_dtype == "fp8":
+        cloned_key_cache = torch.empty_like(key_cache, dtype=torch.float16)
+        ops.convert_fp8(cloned_key_cache, key_cache)
+        cloned_value_cache = torch.empty_like(value_cache, dtype=torch.float16)
+        ops.convert_fp8(cloned_value_cache, value_cache)
+    else:
+        cloned_key_cache = key_cache.clone()
+        cloned_value_cache = value_cache.clone()
+
+    # Using default kv_scale
+    k_scale = v_scale = 1.0
 
     # Call the reshape_and_cache kernel.
     ops.reshape_and_cache_flash(key, value, key_cache, value_cache,
-                                slot_mapping, kv_cache_dtype)
+                                slot_mapping, kv_cache_dtype, k_scale, v_scale)
+
+    if kv_cache_dtype == "fp8":
+        result_key_cache = torch.empty_like(key_cache, dtype=torch.float16)
+        ops.convert_fp8(result_key_cache, key_cache)
+        result_value_cache = torch.empty_like(value_cache, dtype=torch.float16)
+        ops.convert_fp8(result_value_cache, value_cache)
 
     # Run the reference implementation.
     block_indicies = torch.div(slot_mapping, block_size, rounding_mode="floor")
@@ -269,8 +289,18 @@ def test_reshape_and_cache_flash(
         cloned_key_cache[block_idx, block_offset, :, :] = key[i]
         cloned_value_cache[block_idx, block_offset, :, :] = value[i]
 
-    assert torch.allclose(key_cache, cloned_key_cache)
-    assert torch.allclose(value_cache, cloned_value_cache)
+    if kv_cache_dtype == "fp8":
+        assert torch.allclose(result_key_cache,
+                              cloned_key_cache,
+                              atol=0.001,
+                              rtol=0.1)
+        assert torch.allclose(result_value_cache,
+                              cloned_value_cache,
+                              atol=0.001,
+                              rtol=0.1)
+    else:
+        assert torch.allclose(key_cache, cloned_key_cache)
+        assert torch.allclose(value_cache, cloned_value_cache)
 
 
 @pytest.mark.parametrize("direction", COPYING_DIRECTION)
@@ -298,6 +328,8 @@ def test_swap_blocks(
     kv_cache_dtype: str,
 ) -> None:
     if kv_cache_dtype == "fp8" and "cpu" in direction:
+        pytest.skip()
+    if kv_cache_dtype == "fp8" and head_size % 16:
         pytest.skip()
     random.seed(seed)
     torch.random.manual_seed(seed)

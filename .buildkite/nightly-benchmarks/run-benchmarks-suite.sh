@@ -34,6 +34,15 @@ check_hf_token() {
   fi
 }
 
+ensure_sharegpt_downloaded() {
+  local FILE=ShareGPT_V3_unfiltered_cleaned_split.json
+  if [ ! -f "$FILE" ]; then
+      wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/$FILE
+  else
+      echo "$FILE already exists."
+  fi
+}
+
 json2args() {
   # transforms the JSON string to command line args, and '_' is replaced to '-'
   # example:
@@ -54,7 +63,7 @@ wait_for_server() {
   # wait for vllm server to start
   # return 1 if vllm server crashes
   timeout 1200 bash -c '
-    until curl localhost:8000/v1/completions; do
+    until curl -X POST localhost:8000/v1/completions; do
       sleep 1
     done' && return 0 || return 1
 }
@@ -74,7 +83,11 @@ kill_gpu_processes() {
   fi
 
   # waiting for GPU processes to be fully killed
-  sleep 10
+  # loop while nvidia-smi returns any processes
+  while [ -n "$(nvidia-smi --query-compute-apps=pid --format=csv,noheader)" ]; do
+    sleep 1
+    echo "Waiting for GPU processes to be killed"
+  done
 
   # remove vllm config file
   rm -rf ~/.config/vllm
@@ -90,12 +103,19 @@ upload_to_buildkite() {
   # upload the benchmarking results to buildkite
 
   # if the agent binary is not found, skip uploading the results, exit 0
-  if [ ! -f /workspace/buildkite-agent ]; then
+  # Check if buildkite-agent is available in the PATH or at /workspace/buildkite-agent
+  if command -v buildkite-agent >/dev/null 2>&1; then
+    BUILDKITE_AGENT_COMMAND="buildkite-agent"
+  elif [ -f /workspace/buildkite-agent ]; then
+    BUILDKITE_AGENT_COMMAND="/workspace/buildkite-agent"
+  else
     echo "buildkite-agent binary not found. Skip uploading the results."
     return 0
   fi
-  /workspace/buildkite-agent annotate --style "info" --context "benchmark-results" < $RESULTS_FOLDER/benchmark_results.md
-  /workspace/buildkite-agent artifact upload "$RESULTS_FOLDER/*"
+
+  # Use the determined command to annotate and upload artifacts
+  $BUILDKITE_AGENT_COMMAND annotate --style "info" --context "$BUILDKITE_LABEL-benchmark-results" < $RESULTS_FOLDER/benchmark_results.md
+  $BUILDKITE_AGENT_COMMAND artifact upload "$RESULTS_FOLDER/*"
 }
 
 run_latency_tests() {
@@ -269,6 +289,7 @@ run_serving_tests() {
     echo "Running test case $test_name"
     echo "Server command: $server_command"
     eval "$server_command" &
+    server_pid=$!
 
     # wait until the server is alive
     wait_for_server
@@ -318,6 +339,7 @@ run_serving_tests() {
     done
 
     # clean up
+    kill -9 $server_pid
     kill_gpu_processes
   done
 }
@@ -337,7 +359,7 @@ main() {
 
   # prepare for benchmarking
   cd benchmarks || exit 1
-  wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
+  ensure_sharegpt_downloaded
   declare -g RESULTS_FOLDER=results/
   mkdir -p $RESULTS_FOLDER
   QUICK_BENCHMARK_ROOT=../.buildkite/nightly-benchmarks/

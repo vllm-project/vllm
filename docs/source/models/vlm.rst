@@ -3,7 +3,8 @@
 Using VLMs
 ==========
 
-vLLM provides experimental support for Vision Language Models (VLMs). This document shows you how to run and serve these models using vLLM.
+vLLM provides experimental support for Vision Language Models (VLMs). See the :ref:`list of supported VLMs here <supported_vlms>`.
+This document shows you how to run and serve these models using vLLM.
 
 .. important::
     We are actively iterating on VLM support. Expect breaking changes to VLM usage and development in upcoming releases without prior deprecation.
@@ -25,16 +26,11 @@ To initialize a VLM, the aforementioned arguments must be passed to the ``LLM`` 
 
 .. important::
     We have removed all vision language related CLI args in the ``0.5.1`` release. **This is a breaking change**, so please update your code to follow
-    the above snippet. Specifically, ``image_feature_size`` is no longer required to be specified, and internally we will construct data structures for
-    every model to perform profiling with.
-
-    This work is still ongoing. In the meantime, we internally hardcode ``image_feature_size = 3000`` through 
-    :meth:`MULTIMODAL_REGISTRY.get_num_input_tokens <vllm.multimodal.MultiModalRegistry.get_num_input_tokens>` 
-    for every model to be conservative in terms of GPU memory consumption. This hardcoded value will be replaced 
-    with a more accurate profiling strategy in the future.
+    the above snippet. Specifically, ``image_feature_size`` is no longer required to be specified as we now calculate that
+    internally for each model.
 
 
-To pass an image to the model, note the following in :class:`vllm.inputs.PromptStrictInputs`:
+To pass an image to the model, note the following in :class:`vllm.inputs.PromptInputs`:
 
 * ``prompt``: The prompt should follow the format that is documented on HuggingFace.
 * ``multi_modal_data``: This is a dictionary that follows the schema defined in :class:`vllm.multimodal.MultiModalDataDict`. 
@@ -51,6 +47,17 @@ To pass an image to the model, note the following in :class:`vllm.inputs.PromptS
     outputs = llm.generate({
         "prompt": prompt,
         "multi_modal_data": {"image": image},
+    })
+
+    for o in outputs:
+        generated_text = o.outputs[0].text
+        print(generated_text)
+
+    # Inference with image embeddings as input
+    image_embeds = torch.load(...) # torch.Tensor of shape (1, image_feature_size, hidden_size of LM)
+    outputs = llm.generate({
+        "prompt": prompt,
+        "multi_modal_data": {"image": image_embeds},
     })
 
     for o in outputs:
@@ -77,7 +84,7 @@ To pass an image to the model, note the following in :class:`vllm.inputs.PromptS
         generated_text = o.outputs[0].text
         print(generated_text)
 
-A code example can be found in `examples/llava_example.py <https://github.com/vllm-project/vllm/blob/main/examples/llava_example.py>`_.
+A code example can be found in `examples/offline_inference_vision_language.py <https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_vision_language.py>`_.
 
 
 Online OpenAI Vision API Compatible Inference
@@ -98,19 +105,12 @@ Below is an example on how to launch the same ``llava-hf/llava-1.5-7b-hf`` with 
 
 .. code-block:: bash
 
-    python -m vllm.entrypoints.openai.api_server \
-        --model llava-hf/llava-1.5-7b-hf \
-        --chat-template template_llava.jinja
+    vllm serve llava-hf/llava-1.5-7b-hf --chat-template template_llava.jinja
 
 .. important::
     We have removed all vision language related CLI args in the ``0.5.1`` release. **This is a breaking change**, so please update your code to follow
-    the above snippet. Specifically, ``image_feature_size`` is no longer required to be specified, and internally we will construct data structures for
-    every model to perform profiling with.
-
-    This work is still ongoing. In the meantime, we internally hardcode ``image_feature_size = 3000`` through 
-    :meth:`MULTIMODAL_REGISTRY.get_num_input_tokens <vllm.multimodal.MultiModalRegistry.get_num_input_tokens>` 
-    for every model to be conservative in terms of GPU memory consumption. This hardcoded value will be replaced 
-    with a more accurate profiling strategy in the future.
+    the above snippet. Specifically, ``image_feature_size`` is no longer required to be specified as we now calculate that
+    internally for each model.
 
 To consume the server, you can use the OpenAI client like in the example below:
 

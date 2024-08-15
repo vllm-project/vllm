@@ -19,9 +19,6 @@ If you have already taken care of the above issues, but the vLLM instance still 
 - Set the environment variable ``export NCCL_DEBUG=TRACE`` to turn on more logging for NCCL.
 - Set the environment variable ``export VLLM_TRACE_FUNCTION=1``. All the function calls in vLLM will be recorded. Inspect these log files, and tell which function crashes or hangs.
 
-  .. warning::
-    vLLM function tracing will generate a lot of logs and slow down the system. Only use it for debugging purposes.
-
 With more logging, hopefully you can find the root cause of the issue.
 
 If it crashes, and the error trace shows somewhere around ``self.graph.replay()`` in ``vllm/worker/model_runner.py``, it is a cuda error inside cudagraph. To know the particular cuda operation that causes the error, you can add ``--enforce-eager`` to the command line, or ``enforce_eager=True`` to the ``LLM`` class, to disable the cudagraph optimization. This way, you can locate the exact cuda operation that causes the error.
@@ -33,22 +30,59 @@ Here are some common issues that can cause hangs:
 
 .. code-block:: python
 
+    # Test PyTorch NCCL
     import torch
     import torch.distributed as dist
     dist.init_process_group(backend="nccl")
     local_rank = dist.get_rank() % torch.cuda.device_count()
-    data = torch.FloatTensor([1,] * 128).to(f"cuda:{local_rank}")
+    torch.cuda.set_device(local_rank)
+    data = torch.FloatTensor([1,] * 128).to("cuda")
     dist.all_reduce(data, op=dist.ReduceOp.SUM)
     torch.cuda.synchronize()
     value = data.mean().item()
     world_size = dist.get_world_size()
     assert value == world_size, f"Expected {world_size}, got {value}"
 
+    print("PyTorch NCCL is successful!")
+
+    # Test PyTorch GLOO
     gloo_group = dist.new_group(ranks=list(range(world_size)), backend="gloo")
     cpu_data = torch.FloatTensor([1,] * 128)
     dist.all_reduce(cpu_data, op=dist.ReduceOp.SUM, group=gloo_group)
     value = cpu_data.mean().item()
     assert value == world_size, f"Expected {world_size}, got {value}"
+
+    print("PyTorch GLOO is successful!")
+
+    # Test vLLM NCCL, with cuda graph
+    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+
+    pynccl = PyNcclCommunicator(group=gloo_group, device=local_rank)
+    pynccl.disabled = False
+
+    s = torch.cuda.Stream()
+    with torch.cuda.stream(s):
+        data.fill_(1)
+        pynccl.all_reduce(data, stream=s)
+        value = data.mean().item()
+        assert value == world_size, f"Expected {world_size}, got {value}"
+
+    print("vLLM NCCL is successful!")
+
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(cuda_graph=g, stream=s):
+        pynccl.all_reduce(data, stream=torch.cuda.current_stream())
+
+    data.fill_(1)
+    g.replay()
+    torch.cuda.current_stream().synchronize()
+    value = data.mean().item()
+    assert value == world_size, f"Expected {world_size}, got {value}"
+
+    print("vLLM NCCL with cuda graph is successful!")
+
+    dist.destroy_process_group(gloo_group)
+    dist.destroy_process_group()
 
 .. tip::
 
@@ -62,4 +96,14 @@ Here are some common issues that can cause hangs:
     - is reachable from all nodes
     - is set before running the script.
 
+    If the script runs successfully, you should see the message ``sanity check is successful!``.
+
 If the problem persists, feel free to `open an issue on GitHub <https://github.com/vllm-project/vllm/issues/new/choose>`_, with a detailed description of the issue, your environment, and the logs.
+
+Some known issues:
+
+- In ``v0.5.2``, ``v0.5.3``, and ``v0.5.3.post1``, there is a bug caused by `zmq <https://github.com/zeromq/pyzmq/issues/2000>`_ , which can cause hangs at a low probability (once in about 20 times, depending on the machine configuration). The solution is to upgrade to the latest version of ``vllm`` to include the `fix <https://github.com/vllm-project/vllm/pull/6759>`_ .
+
+.. warning::
+
+    After you find the root cause and solve the issue, remember to turn off all the debugging environment variables defined above, or simply start a new shell to avoid being affected by the debugging settings. If you don't do this, the system might be slow because many debugging functionalities are turned on.

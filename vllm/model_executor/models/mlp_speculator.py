@@ -56,6 +56,15 @@ class MLPSpeculatorLayerNorm(nn.Module):
 
 
 class MLPSpeculator(nn.Module):
+    """
+    An implementation of the speculative models introduced in
+    "Accelerating Production LLMs with Combined Token/Embedding
+    Speculators"
+    https://arxiv.org/pdf/2404.19124
+
+    Trained speculators of this type are available on HF hub at:
+    https://huggingface.co/ibm-fms and https://huggingface.co/ibm-granite
+    """
 
     def __init__(self, config: MLPSpeculatorConfig, **kwargs) -> None:
         super().__init__()
@@ -110,7 +119,7 @@ class MLPSpeculator(nn.Module):
             ])
 
             self.head = nn.ModuleList([
-                nn.Linear(self.inner_dim, self.vocab_size, bias=False)
+                ParallelLMHead(self.vocab_size, self.inner_dim, bias=False)
                 for _ in range(self.max_speculative_tokens)
             ])
             self.ln = nn.ModuleList([
@@ -166,13 +175,14 @@ class MLPSpeculator(nn.Module):
             states.add_(z, alpha=self.emb_weight / self.state_weight)
 
             states = self.activation(self.ln[head_index](states))  # b k d
-            # TODO: not yet supporting top_k_tokens_per_head
             previous_hidden_states = states
+            # TODO: not yet supporting top_k_tokens_per_head
+            states = states.flatten(0, 1)
 
             logits = self.logits_processor(self.head[head_index], states,
                                            sampling_metadata)
 
-            output = self.sampler(logits.flatten(0, 1), sampling_metadata)
+            output = self.sampler(logits, sampling_metadata)
             last_tokens = output.sampled_token_ids
             next_tokens.append(output)
 
