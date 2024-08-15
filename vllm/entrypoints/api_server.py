@@ -93,7 +93,7 @@ async def speculative_decode_generate(request: Request) -> Response:
     request_id = random_uuid()
     assert engine is not None
     results_generator = engine.generate(prompt, sampling_params, request_id)
-    results_generator: AsyncGenerator = iterate_with_cancellation(
+    results_generator = iterate_with_cancellation(
         results_generator, is_cancelled=request.is_disconnected)
     return StreamingResponse(
         _stream_speculative_decode_response(

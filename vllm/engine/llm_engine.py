@@ -1174,7 +1174,7 @@ class LLMEngine:
 
         now = time.time()
 
-        # Separate ouptuts to apply correct post process method
+        # Separate outputs to apply correct post process method
         speculative_proposer_outputs: List[
             SpeculativeProposerSamplerOutput] = []
         speculative_scorer_outputs: List[SpeculativeScorerSamplerOutput] = []
