@@ -196,7 +196,8 @@ class FlashAttentionMetadata(AttentionMetadata):
         )
         return self._cached_decode_metadata
 
-    def update_flash_attn_metadata(self, num_seqs, num_queries):
+    def advance_step(self, num_seqs, num_queries):
+        """Update metadata in-place to advance one decode step."""
         # When using cudagraph, the num_seqs is padded to the next captured
         # batch sized, but num_queries tracks the actual number of requests in
         # the batch. For --enforce-eager mode, num_seqs == num_queries
