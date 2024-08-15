@@ -1198,11 +1198,11 @@ class LLMEngine:
             if seq_group_meta.do_sample:
                 self.output_processor.process_outputs(seq_group, outputs)
 
-        for scheduled_seq_group, outputs in zip(scheduled_seq_groups, output_by_sequence_group):
-            # Speculative deocode does not produce many sequences from same prompt
-            # mock for now with draft only, what if there is not
-            scheduled_seq_group.seq_group.seqs[0].data.draft_token_ids = [1, 2, 3, 4]
-            scheduled_seq_group.seq_group.seqs[0].data.scorer_token_ids = [1, 2, 3, 4]
+        for scheduled_seq_group_index, scheduled_seq_group in enumerate(scheduled_seq_groups):
+            scheduled_seq_group_draft_token_ids = [o.token_indices[scheduled_seq_group_index].tolist() for o in proposer_output]
+            scheduled_seq_group.seq_group.seqs[0].data.draft_token_ids = scheduled_seq_group_draft_token_ids
+            scheduled_seq_group_scorer_token_ids = [o.token_indices[scheduled_seq_group_index].tolist() for o in scorer_output]
+            scheduled_seq_group.seq_group.seqs[0].data.scorer_token_ids = scheduled_seq_group_scorer_token_ids
 
         # Free the finished sequence groups.
         for scheduler in self.scheduler:

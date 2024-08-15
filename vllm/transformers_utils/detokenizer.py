@@ -166,9 +166,11 @@ class Detokenizer:
 
         if seq.data.draft_token_ids is not None:
             seq.data.decoded_draft_token_ids = tokenizer.convert_ids_to_tokens(ids=seq.data.draft_token_ids)
+            seq.data.decoded_draft_sequence = tokenizer.decode(token_ids=seq.data.draft_token_ids)
 
         if seq.data.scorer_token_ids is not None:
             seq.data.decoded_scorer_token_ids = tokenizer.convert_ids_to_tokens(ids=seq.data.scorer_token_ids)
+            seq.data.decoded_scorer_sequence = tokenizer.decode(token_ids=seq.data.scorer_token_ids)
 
         return len(new_decoded_token_text)
 

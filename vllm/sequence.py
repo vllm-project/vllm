@@ -119,10 +119,12 @@ class SequenceData:
         self,
         prompt_token_ids: List[int],
         output_token_ids: Optional[List[int]] = None,
-        draft_token_ids: list[int] = None,
-        scorer_token_ids: list[int] = None,
-        decoded_draft_token_ids: list[str] = None,
-        decoded_scorer_token_ids: list[str] = None
+        draft_token_ids: Optional[list[int]] = None,
+        scorer_token_ids: Optional[list[int]] = None,
+        decoded_draft_token_ids: Optional[list[str]] = None,
+        decoded_scorer_token_ids: Optional[list[str]] = None,
+        decoded_draft_sequence: Optional[str] = None,
+        decoded_scorer_sequence: Optional[str] = None
     ) -> None:
         self._prompt_token_ids = array('l', prompt_token_ids)
         self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(prompt_token_ids)
@@ -132,6 +134,8 @@ class SequenceData:
         self._scorer_token_ids = scorer_token_ids
         self._decoded_draft_token_ids = decoded_draft_token_ids
         self._decoded_scorer_token_ids = decoded_scorer_token_ids
+        self._decoded_draft_sequence = decoded_draft_sequence
+        self._decoded_scorer_sequence = decoded_scorer_sequence
 
         self.cumulative_logprob = 0.0
         # The number of tokens that are computed (that run against the model).
@@ -202,6 +206,22 @@ class SequenceData:
     @decoded_scorer_token_ids.setter
     def decoded_scorer_token_ids(self, new_decoded_scorer_token_ids: list[str]) -> None:
         self._decoded_scorer_token_ids = new_decoded_scorer_token_ids
+
+    @property
+    def decoded_draft_sequence(self) -> str:
+        return self._decoded_draft_sequence
+    
+    @decoded_draft_sequence.setter
+    def decoded_draft_sequence(self, new_decoded_draft_sequence: str) -> None:
+        self._decoded_draft_sequence = new_decoded_draft_sequence
+
+    @property
+    def decoded_scorer_sequence(self) -> str:
+        return self._decoded_scorer_sequence
+    
+    @decoded_scorer_sequence.setter
+    def decoded_scorer_sequence(self, new_decoded_scorer_sequence: str) -> None:
+        self._decoded_scorer_sequence = new_decoded_scorer_sequence
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self._output_token_ids.append(token_id)

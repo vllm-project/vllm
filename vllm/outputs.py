@@ -34,10 +34,12 @@ class CompletionOutput:
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
     lora_request: Optional[LoRARequest] = None
-    draft_token_ids: list[int] = None
-    scorer_token_ids: list[int] = None
-    decoded_draft_token_ids: list[str] = None
-    decoded_scorer_token_ids: list[str] = None
+    draft_token_ids: Optional[list[int]] = None
+    scorer_token_ids: Optional[list[int]] = None
+    decoded_draft_token_ids: Optional[list[str]] = None
+    decoded_scorer_token_ids: Optional[list[str]] = None
+    decoded_draft_sequence: Optional[str] = None
+    decoded_scorer_sequence: Optional[str] = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -53,6 +55,8 @@ class CompletionOutput:
                 f"scorer_token_ids={self.scorer_token_ids})"
                 f"decoded_draft_token_ids={self.decoded_draft_token_ids})"
                 f"decoded_scorer_token_ids={self.decoded_scorer_token_ids})"
+                f"decoded_draft_sequence={self.decoded_draft_sequence})"
+                f"decoded_scorer_sequence={self.decoded_scorer_sequence})"
                 f"stop_reason={self.stop_reason})")
 
 
@@ -156,7 +160,9 @@ class RequestOutput:
                 seq.stop_reason, None, seq.data.draft_token_ids, 
                 seq.data.scorer_token_ids, 
                 seq.data.decoded_draft_token_ids,
-                seq.data.decoded_scorer_token_ids) for seq in top_n_seqs
+                seq.data.decoded_scorer_token_ids, 
+                seq.data.decoded_draft_sequence,
+                seq.data.decoded_scorer_sequence) for seq in top_n_seqs
         ]
 
         # todo: replace last draft with just draft since in order to get history u can hust use streaming

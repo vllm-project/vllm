@@ -91,7 +91,7 @@ async def speculative_decode_generate(request: Request) -> Response:
     #     "prompt": "San Francisco is a",
     #     "max_tokens": 32,
     #     "temperature": 0
-    # }' | sed 's/}/}\n/g'
+    # }' | sed 's/}/}\n\n/g'
 
     request_dict = await request.json()
     prompt = request_dict.pop("prompt")
@@ -116,7 +116,10 @@ async def speculative_decode_generate(request: Request) -> Response:
                 "speculative_scorer_token_indices": request_output.outputs[0].scorer_token_ids,
 
                 "decoded_speculative_draft_token_indices": request_output.outputs[0].decoded_draft_token_ids,
-                "decoded_speculative_scorer_token_indices": request_output.outputs[0].decoded_scorer_token_ids
+                "decoded_speculative_scorer_token_indices": request_output.outputs[0].decoded_scorer_token_ids,
+
+                "decoded_draft_sequence": request_output.outputs[0].decoded_draft_sequence,
+                "decoded_scorer_sequence": request_output.outputs[0].decoded_scorer_sequence
 
                 # "accepted_token_indices": list(request_output.outputs[0].token_ids),
 
