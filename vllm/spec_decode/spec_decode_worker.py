@@ -1,6 +1,6 @@
 from collections import defaultdict
 from functools import cached_property
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import torch
 
@@ -13,7 +13,9 @@ from vllm.model_executor.layers.spec_decode_base_sampler import (
 from vllm.model_executor.layers.typical_acceptance_sampler import (
     TypicalAcceptanceSampler)
 from vllm.sequence import (CompletionSequenceGroupOutput, ExecuteModelRequest,
-                           HiddenStates, SamplerOutput, SequenceGroupMetadata,
+                           HiddenStates, SamplerOutput, 
+                           SpeculativeProposerSamplerOutput, 
+                           SpeculativeScorerSamplerOutput, SequenceGroupMetadata,
                            get_all_seq_ids, get_all_seq_ids_and_request_ids)
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
 from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
@@ -334,7 +336,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> List[SamplerOutput]:
+    ) -> List[Union[SamplerOutput, SpeculativeProposerSamplerOutput, SpeculativeScorerSamplerOutput]]:
         """Perform speculative decoding on the input batch.
         """
         if self.rank != self._driver_rank:
@@ -521,7 +523,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     @nvtx_range("spec_decode_worker._run_speculative_decoding_step")
     def _run_speculative_decoding_step(
             self, execute_model_req: ExecuteModelRequest,
-            num_lookahead_slots: int) -> List[SamplerOutput]:
+            num_lookahead_slots: int) -> List[Union[SamplerOutput, SpeculativeProposerSamplerOutput, SpeculativeScorerSamplerOutput]]:
         """Execute a single step of speculative decoding.
 
         This invokes the proposer worker to get k speculative tokens for each
@@ -561,12 +563,28 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                        scoring_timer.elapsed_time_ms,
                        verification_timer.elapsed_time_ms)
 
-        return self._create_output_sampler_list(
+        sampler_outputs = self._create_output_sampler_list(
             execute_model_req.seq_group_metadata_list,
             accepted_token_ids,
             target_logprobs=target_logprobs,
             k=execute_model_req.num_lookahead_slots,
             stage_times=stage_times)
+        
+        speculative_proposer_sampler_outputs = self._create_speculative_proposer_sampler_outputs(proposals=proposals)
+        speculative_scorer_sampler_outputs = self._create_speculative_scorer_sampler_outputs(proposal_scores=proposal_scores)
+
+        outputs = []
+        outputs.extend(sampler_outputs)
+        outputs.extend(speculative_proposer_sampler_outputs)
+        outputs.extend(speculative_scorer_sampler_outputs)
+        
+        return outputs
+    
+    def _create_speculative_proposer_sampler_outputs(self, proposals: SpeculativeProposals) -> list[SpeculativeProposerSamplerOutput]:
+        return []
+
+    def _create_speculative_scorer_sampler_outputs(self, proposal_scores: SpeculativeScores) -> list[SpeculativeScorerSamplerOutput]:
+        return []
 
     @nvtx_range("spec_decode_worker._verify_tokens")
     def _verify_tokens(

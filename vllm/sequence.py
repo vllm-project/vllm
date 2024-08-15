@@ -992,6 +992,14 @@ class SamplerOutput:
             f"spec_decode_worker_metrics={self.spec_decode_worker_metrics})")
 
 
+class SpeculativeProposerSamplerOutput:
+    ...
+
+
+class SpeculativeScorerSamplerOutput:
+    ...
+
+
 @dataclass
 class PoolerOutput:
     """The output from a pooling operation in the embedding model."""
