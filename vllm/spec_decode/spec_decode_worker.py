@@ -577,11 +577,11 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         outputs.extend(sampler_outputs)
         outputs.extend(speculative_proposer_sampler_outputs)
         outputs.extend(speculative_scorer_sampler_outputs)
-        
+
         return outputs
     
     def _create_speculative_proposer_sampler_outputs(self, proposals: SpeculativeProposals) -> list[SpeculativeProposerSamplerOutput]:
-        return []
+        return [1]
 
     def _create_speculative_scorer_sampler_outputs(self, proposal_scores: SpeculativeScores) -> list[SpeculativeScorerSamplerOutput]:
         return []

@@ -993,11 +993,11 @@ class SamplerOutput:
 
 
 class SpeculativeProposerSamplerOutput:
-    ...
+    token_indices: torch.Tensor
 
 
 class SpeculativeScorerSamplerOutput:
-    ...
+    token_indices: torch.Tensor
 
 
 @dataclass

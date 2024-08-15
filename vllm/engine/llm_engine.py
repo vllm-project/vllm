@@ -37,6 +37,8 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
                            PoolerOutput, SamplerOutput, Sequence,
+                           SpeculativeProposerSamplerOutput, 
+                           SpeculativeScorerSamplerOutput,
                            SequenceGroup, SequenceGroupMetadata,
                            SequenceStatus)
 from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
@@ -1159,7 +1161,7 @@ class LLMEngine:
 
     def _process_model_outputs(
         self,
-        output: GenericSequence[Union[SamplerOutput, PoolerOutput]],
+        output: GenericSequence[Union[SamplerOutput, PoolerOutput, SpeculativeProposerSamplerOutput, SpeculativeScorerSamplerOutput]],
         scheduled_seq_groups: List[ScheduledSequenceGroup],
         ignored_seq_groups: List[SequenceGroup],
         seq_group_metadata_list: List[SequenceGroupMetadata],
@@ -1168,6 +1170,7 @@ class LLMEngine:
 
         Returns RequestOutputs that can be returned to the client.
         """
+        output = [o for o in output if isinstance(o, SamplerOutput) or isinstance(o, PoolerOutput)]
 
         now = time.time()
 
