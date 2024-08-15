@@ -316,7 +316,7 @@ class EngineArgs:
         parser.add_argument('--block-size',
                             type=int,
                             default=EngineArgs.block_size,
-                            choices=[8, 16, 32],
+                            choices=[8, 16, 32, 128, 256, 512, 1024, 2048],
                             help='Token block size for contiguous chunks of '
                             'tokens.')
 
