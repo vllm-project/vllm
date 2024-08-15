@@ -514,7 +514,7 @@ class QuantizedMixtralForCausalLM(nn.Module):
         self.config = config
         self.quant_config = quant_config
         self.model = MixtralModel(
-            config, self.use_fused_moe, cache_config, quant_config
+            config, cache_config, quant_config, None, prefix="model"
         )
         self.lm_head = ParallelLMHead(
             config.vocab_size, config.hidden_size, quant_config=quant_config
