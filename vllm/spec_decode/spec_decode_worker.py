@@ -13,10 +13,9 @@ from vllm.model_executor.layers.spec_decode_base_sampler import (
 from vllm.model_executor.layers.typical_acceptance_sampler import (
     TypicalAcceptanceSampler)
 from vllm.sequence import (CompletionSequenceGroupOutput, ExecuteModelRequest,
-                           HiddenStates, SamplerOutput,
+                           HiddenStates, SamplerOutput, SequenceGroupMetadata,
                            SpeculativeProposerSamplerOutput,
-                           SpeculativeScorerSamplerOutput,
-                           SequenceGroupMetadata, get_all_seq_ids,
+                           SpeculativeScorerSamplerOutput, get_all_seq_ids,
                            get_all_seq_ids_and_request_ids)
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
 from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
@@ -573,24 +572,25 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             k=execute_model_req.num_lookahead_slots,
             stage_times=stage_times)
 
-        speculative_proposer_sampler_outputs = self._create_speculative_proposer_sampler_outputs(
+        proposer_sampler_outputs = self._create_proposer_sampler_outputs(
             proposals=proposals)
-        speculative_scorer_sampler_outputs = self._create_speculative_scorer_sampler_outputs(
+        scorer_sampler_outputs = self._create_scorer_sampler_outputs(
             proposal_scores=proposal_scores)
 
         outputs = []
         outputs.extend(sampler_outputs)
-        outputs.extend(speculative_proposer_sampler_outputs)
-        outputs.extend(speculative_scorer_sampler_outputs)
+        outputs.extend(proposer_sampler_outputs)
+        outputs.extend(scorer_sampler_outputs)
 
         return outputs
 
-    def _create_speculative_proposer_sampler_outputs(
+    def _create_proposer_sampler_outputs(
         self, proposals: SpeculativeProposals
     ) -> List[SpeculativeProposerSamplerOutput]:
         # Transform data from batch index major to step major such
         # that we return list of outputs where each item in list represent
-        # particular step and contains token of this step for every element in the batch
+        # particular step and contains token of this step for every element
+        # in the batch
         speculative_proposer_sampler_outputs = [
             SpeculativeProposerSamplerOutput(token_indices=token_indices)
             for token_indices in proposals.proposal_token_ids.T
@@ -598,12 +598,13 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         return speculative_proposer_sampler_outputs
 
-    def _create_speculative_scorer_sampler_outputs(
+    def _create_scorer_sampler_outputs(
         self, proposal_scores: SpeculativeScores
     ) -> List[SpeculativeScorerSamplerOutput]:
         # Transform data from batch index major to step major such
         # that we return list of outputs where each item in list represent
-        # particular step and contains token of this step for every element in the batch
+        # particular step and contains token of this step for every element
+        # in the batch
         speculative_scorer_sampler_outputs = [
             SpeculativeScorerSamplerOutput(token_indices=token_indices)
             for token_indices in proposal_scores.token_ids.T

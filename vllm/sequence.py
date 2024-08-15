@@ -1074,14 +1074,16 @@ class SamplerOutput:
 @dataclass
 class SpeculativeProposerSamplerOutput:
     # Each instance of this class represents step of proposer decode and
-    # stores token that corresponds to particular step for every element in batch
+    # stores token that corresponds to particular step for every element
+    # in batch
     token_indices: torch.Tensor
 
 
 @dataclass
 class SpeculativeScorerSamplerOutput:
     # Each instance of this class represents step of scorer decode and
-    # stores token that corresponds to particular step for every element in batch
+    # stores token that corresponds to particular step for every element
+    # in batch
     token_indices: torch.Tensor
 
 

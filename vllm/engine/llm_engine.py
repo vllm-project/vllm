@@ -37,9 +37,9 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
                            PoolerOutput, SamplerOutput, Sequence,
-                           SpeculativeProposerSamplerOutput,
-                           SpeculativeScorerSamplerOutput, SequenceGroup,
-                           SequenceGroupMetadata, SequenceStatus)
+                           SequenceGroup, SequenceGroupMetadata,
+                           SequenceStatus, SpeculativeProposerSamplerOutput,
+                           SpeculativeScorerSamplerOutput)
 from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
 from vllm.transformers_utils.config import try_get_generation_config
@@ -1185,8 +1185,10 @@ class LLMEngine:
                 speculative_proposer_outputs.append(item)
             elif isinstance(item, SpeculativeScorerSamplerOutput):
                 speculative_scorer_outputs.append(item)
-            elif isinstance(item, SamplerOutput) or isinstance(
-                    item, PoolerOutput):
+            elif isinstance(item, (
+                    SamplerOutput,
+                    PoolerOutput,
+            )):
                 non_speculative_outputs.append(item)
             else:
                 raise ValueError("Output item has indefined type %s" %
@@ -1201,7 +1203,8 @@ class LLMEngine:
                 for output in speculative_proposer_outputs
             ]
 
-            # Speculative decode does not support beam search and thus always has single sequence
+            # Speculative decode does not support beam
+            # search and thus always has single sequence
             scheduled_seq_group.seq_group.seqs[
                 0].data.draft_token_ids = scheduled_seq_group_draft_token_ids
 
