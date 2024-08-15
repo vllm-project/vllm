@@ -158,6 +158,7 @@ class QuantMixtralMoE(nn.Module):
         config: MixtralConfig,
         use_fused_moe: bool,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.config = config
@@ -188,7 +189,8 @@ class QuantMixtralMoE(nn.Module):
                                     reduce_results=True,
                                     renormalize=True,
                                     quant_config=quant_config,
-                                    tp_size=self.tp_size)
+                                    tp_size=self.tp_size,
+                                    prefix=f"{prefix}.experts")
         else:
             self.experts = nn.ModuleList([
                 MixtralMLP(self.num_total_experts,
@@ -202,7 +204,8 @@ class QuantMixtralMoE(nn.Module):
         self.gate = ReplicatedLinear(config.hidden_size,
                                      self.num_total_experts,
                                      bias=False,
-                                     quant_config=None)
+                                     quant_config=None,
+                                     prefix=f"{prefix}.gate")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
@@ -351,7 +354,7 @@ class MixtralDecoderLayer(nn.Module):
         #     prefix=f"{prefix}.block_sparse_moe",
         # )
         self.block_sparse_moe = QuantMixtralMoE(
-            config, use_fused_moe=True, quant_config=quant_config
+            config, use_fused_moe=True, quant_config=quant_config, prefix=f"{prefix}.block_sparse_moe",
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
