@@ -259,7 +259,6 @@ class MultiStepModelRunner(
         # make sure we skip the sampler on the lask rank and only pythonize
         # if CPU is ahead.
         if self.is_driver_worker and get_pp_group().is_last_rank:
-
             if self.pinned_sampled_token_ids is None:
                 self.pinned_sampled_token_ids = torch.zeros(
                     (self.scheduler_config.max_num_seqs, 1),
@@ -279,17 +278,10 @@ class MultiStepModelRunner(
         #   appended sampler output from last iteration
         #   - also maybe pythonize if CPU is ahead of GPU
 
-        # explicitly block on the previous step's forward to make sure we
-        # don't clobber any GPU tensors still in use
         current_stream = torch.cuda.current_stream()
-        if model_input.is_first_multi_step:
-            # TODO(will) Need to double check that this is not possible due to
-            # changing batch sizes, will remove afterwards and potentially leave
-            # comment for future optimization
-            if frozen_model_input.sampling_metadata:
-                frozen_model_input.sampling_metadata.reuse_sampling_tensors = (
-                    False)
-        else:
+        if not model_input.is_first_multi_step:
+            # Explicitly block on the previous step's forward to make sure we
+            # don't clobber any GPU tensors still in use.
             # This is not needed for flashattn backend, but for other attn
             # backends such as flashinfer that performs extra CPU operations on
             # input metadata we may need to synchronize any CPU operations that
@@ -298,12 +290,6 @@ class MultiStepModelRunner(
             model_input.wait_previous_step()
             model_input = self._advance_step(
                 model_input, model_input.outputs[-1].sampler_output)
-            # TODO(will) Need to double check that this is not possible due to
-            # changing batch sizes, will remove afterwards and potentially leave
-            # comment for future optimization
-            if frozen_model_input.sampling_metadata:
-                frozen_model_input.sampling_metadata.reuse_sampling_tensors = (
-                    False)
 
         # Execute the model
         output = self._base_model_runner.execute_model(frozen_model_input,
