@@ -5,7 +5,8 @@
 #include <torch/all.h>
 
 // clang-format off
-// The cutlass include order 
+// The cutlass include order matters (annoyingly)
+
 #include "cutlass/cutlass.h"
 
 #include "cute/tensor.hpp"
@@ -53,7 +54,7 @@ struct PrepackedLayoutBTemplate {
                          void>,
       IlvBlkLayout_>;
 
-  // TODO (Lucas): compare the performance for other sizes
+  // TODO (LucasWilkinson): compare the performance for other sizes
   // Prepacked block shape, smallest layout atom for loading into registers
   //   (can contain multiple wgmma instructions worth of data in one block)
   using PPBlockShape_NK = Shape<_128, _64>;

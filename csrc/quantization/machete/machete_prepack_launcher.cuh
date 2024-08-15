@@ -9,6 +9,7 @@ template <typename PrepackedLayoutB>
 torch::Tensor prepack_impl(torch::Tensor const B) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(B));
   using ElementB = typename PrepackedLayoutB::ElementB;
+  using PPBlockShape_NK = typename PrepackedLayoutB::PPBlockShape_NK;
 
   auto device = B.device();
   auto stream = at::cuda::getCurrentCUDAStream(device.index());
@@ -20,6 +21,13 @@ torch::Tensor prepack_impl(torch::Tensor const B) {
   // torch B passed in is/should be (packed_K,N), the kernel expects (N,K,L) (to
   // match cutlass using (N,K,L) for B), so we transpose B to (N,packed_K,L)
   auto Bt_packed = B.t();
+
+  TORCH_CHECK(
+      (B.size(0) * eles_per_storage) % size<1>(PPBlockShape_NK{}) == 0,
+      "B.shape[0] (in terms of unpacked elements) must be a multiple of ",
+      size<1>(PPBlockShape_NK{}));
+  TORCH_CHECK(B.size(1) % size<0>(PPBlockShape_NK{}) == 0,
+              "B.shape[1] must be a multiple of ", size<0>(PPBlockShape_NK{}));
 
   using StrideB = cutlass::detail::TagToStrideB_t<cutlass::layout::ColumnMajor>;
   auto const l_Bt_packed = make_cute_layout<StrideB>(Bt_packed, "B");

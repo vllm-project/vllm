@@ -25,7 +25,6 @@
 #include "cutlass/detail/collective.hpp"
 // clang-format on
 
-#include "math_utils.h"
 #include "cutlass_extensions/cute_utils.cuh"
 
 /////////////////////////////////////////////////////////////////////////////////////////////////

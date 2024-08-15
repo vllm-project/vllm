@@ -1,14 +1,22 @@
-// Based off of:
-//   https://github.com/NVIDIA/cutlass/blob/cutlass-3.5.0/include/cutlass/numeric_conversion.h
-
 #pragma once
 
 #include "cutlass/numeric_conversion.h"
 #include "cutlass_extensions/vllm_custom_types.cuh"
 #include "cutlass_extensions/cute_utils.cuh"
 
+// this file extends:
+//   https://github.com/NVIDIA/cutlass/blob/cutlass-3.5.0/include/cutlass/numeric_conversion.h
+// with vllm specific type conversions, namely: vllm_uint4b8_t, vllm_uint8b128_t
+// as well as adds interleaved numeric array converters for specific types.
+// (interleaved numeric array converters can be more efficient for subbyte
+// types)
+
 namespace cutlass {
 
+// InterleavedNumericArrayConverter is like NumericArrayConverter but also
+// deinterleaves converted elements based on IlvBlkLayout, interleaving can
+// make subbyte converts more efficient by allowing for efficient extraction
+// of subbyte elements from a 32bit register.
 template <typename IlvBlkLayout, typename T, typename S, int N,
           FloatRoundStyle Round = FloatRoundStyle::round_to_nearest,
           class Enable = void>
@@ -48,7 +56,7 @@ struct InterleavedNumericArrayConverter<
   result_type operator()(source_type const& s) const { return convert(s); }
 };
 
-// TODO (Lucas): Implement
+// TODO (LucasWilkinson): Implement
 // for Array<cutlass::float8_e4m3fn, N> <= Array<vllm_uint4b8_t, N>
 
 // ....
@@ -71,10 +79,10 @@ struct ArrayConverterPacked32Bit {
   static constexpr auto src_elems_per_32bit_reg =
       32 / cutlass::sizeof_bits_v<S>;
 
-  // Maybe not Valid,. ScalarConverter will not actually work unless
-  //  NumericConverter<T, S, Round> is implemented
-  // but it won't be used since we assert N % 2 == 0, just here for compliance
-  // with VectorizedConverter
+  // Maybe not Valid. ScalarConverter will not actually work unless
+  // NumericConverter<T, S, Round> is implemented. However it won't be used
+  // anyways since we assert N % 2 == 0, just here for compliance with
+  // VectorizedConverter.
   using ScalarConverter = NumericConverter<T, S>;
 
   template <typename PackedSrc>
