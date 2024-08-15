@@ -249,35 +249,20 @@ class JambaMambaMixer(nn.Module):
         return hidden_states
 
 
-class JambaMLP(nn.Module):
+class JambaMLP(JambaMoE):
 
-    def __init__(
-        self,
-        config: JambaConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-    ) -> None:
-        super().__init__()
-        hidden_size = config.hidden_size
-        intermediate_size = config.intermediate_size
-        hidden_act = config.hidden_act
-        self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size, [intermediate_size] * 2,
-            bias=False,
-            quant_config=quant_config)
-        self.down_proj = RowParallelLinear(intermediate_size,
-                                           hidden_size,
-                                           bias=False,
-                                           quant_config=quant_config)
-        if hidden_act != "silu":
-            raise ValueError(f"Unsupported activation: {hidden_act}. "
-                             "Only silu is supported for now.")
-        self.act_fn = SiluAndMul()
+    def __init__(self,
+                 config: JambaConfig,
+                 params_dtype: Optional[torch.dtype] = None,
+                 tp_size: Optional[int] = None,
+                 quant_config: Optional[QuantizationConfig] = None):
+        super().__init__(config,
+                         num_experts=1,
+                         top_k=1,
+                         params_dtype=params_dtype,
+                         tp_size=tp_size,
+                         quant_config=quant_config)
 
-    def forward(self, x):
-        gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
-        x, _ = self.down_proj(x)
-        return x
 
 
 class JambaMoE(nn.Module):
@@ -325,7 +310,6 @@ class JambaMoE(nn.Module):
                                        dtype=hidden_states.dtype)
         hidden_states = self.experts(hidden_states, router_logits)
         return hidden_states.view(orig_shape)
-
 
 class JambaMambaDecoderLayer(nn.Module):
 
