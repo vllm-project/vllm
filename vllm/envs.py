@@ -334,7 +334,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_XLA_CACHE_PATH":
     lambda: os.path.expanduser(
         os.getenv(
-            "VLLM_ASSETS_CACHE",
+            "VLLM_XLA_CACHE_PATH",
             os.path.join(get_default_cache_root(), "vllm", "xla_cache"),
         )),
     "VLLM_FUSED_MOE_CHUNK_SIZE":
