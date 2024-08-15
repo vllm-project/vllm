@@ -1,7 +1,7 @@
 #ifndef DNNL_HELPER_HPP
 #define DNNL_HELPER_HPP
 
-#include "torch/types.h"
+#include <c10/util/BFloat16.h>
 
 #include "oneapi/dnnl/dnnl.hpp"
 
@@ -51,18 +51,18 @@ class DNNLPrimitiveHelper {
   // Note: Due to the limitation of oneDNN
   // (https://github.com/oneapi-src/oneDNN/issues/1636), the quantized bias is
   // not supported.
-  template <typename OT, typename BT>
-  static void gemm_s8s8_jit(const int8_t* a, const int8_t* b, OT* c,
-                            const BT* bias, dnnl_dim_t M, dnnl_dim_t N,
+  template <typename OutputT, typename BiasT>
+  static void gemm_s8s8_jit(const int8_t* a, const int8_t* b, OutputT* c,
+                            const BiasT* bias, dnnl_dim_t M, dnnl_dim_t N,
                             dnnl_dim_t K, const float* a_scales,
                             const float* b_scales, dnnl_dim_t MS,
                             dnnl_dim_t NS) {
-    auto&& OutputT = get_dnnl_type<OT>();
-    auto&& BiasT = get_dnnl_type<BT>();
+    auto&& OutputType = get_dnnl_type<OutputT>();
+    auto&& BiasType = get_dnnl_type<BiasT>();
 
     dnnl::memory::desc a_md({M, K}, dnnl::memory::data_type::s8, {K, 1});
     dnnl::memory::desc b_md({K, N}, dnnl::memory::data_type::s8, {1, K});
-    dnnl::memory::desc c_md({M, N}, OutputT, {N, 1});
+    dnnl::memory::desc c_md({M, N}, OutputType, {N, 1});
 
     dnnl::primitive_attr attr;
     if constexpr (!InputNoScale) {
@@ -85,7 +85,7 @@ class DNNLPrimitiveHelper {
 
     dnnl::matmul::primitive_desc matmul_pd;
     if (bias) {
-      dnnl::memory::desc bias_md({1, N}, BiasT, {N, 1});
+      dnnl::memory::desc bias_md({1, N}, BiasType, {N, 1});
       matmul_pd = dnnl::matmul::primitive_desc(default_engine(), a_md, b_md,
                                                bias_md, c_md, attr);
     } else {
@@ -107,7 +107,7 @@ class DNNLPrimitiveHelper {
     auto& stream = default_stream();
     if constexpr (InputNoScale) {
       if (bias) {
-        dnnl::memory::desc bias_md({N}, BiasT, {1});
+        dnnl::memory::desc bias_md({N}, BiasType, {1});
         dnnl::memory bias_m(bias_md, engine, (void*)bias);
         matmul.execute(
             stream, {
@@ -128,7 +128,7 @@ class DNNLPrimitiveHelper {
       }
     } else {
       if (bias) {
-        dnnl::memory::desc bias_md({N}, BiasT, {1});
+        dnnl::memory::desc bias_md({N}, BiasType, {1});
         dnnl::memory bias_m(bias_md, engine, (void*)bias);
         matmul.execute(
             stream, {
