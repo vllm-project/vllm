@@ -288,9 +288,9 @@ fused_add_rms_norm_kernel(
 
 }  // namespace vllm
 
-void rms_norm(torch::Tensor& out,     // [..., hidden_size]
-              torch::Tensor& input,   // [..., hidden_size]
-              torch::Tensor& weight,  // [hidden_size]
+void rms_norm(torch::Tensor& out,           // [..., hidden_size]
+              torch::Tensor const& input,   // [..., hidden_size]
+              torch::Tensor const& weight,  // [hidden_size]
               double epsilon) {
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
@@ -301,24 +301,25 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "rms_norm_kernel", [&] {
     vllm::rms_norm_kernel<scalar_t><<<grid, block, 0, stream>>>(
-        out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
-        weight.data_ptr<scalar_t>(), epsilon, num_tokens, hidden_size);
+        out.mutable_data_ptr<scalar_t>(), input.const_data_ptr<scalar_t>(),
+        weight.const_data_ptr<scalar_t>(), epsilon, num_tokens, hidden_size);
   });
 }
 
-#define LAUNCH_FUSED_ADD_RMS_NORM(width)                                       \
-  VLLM_DISPATCH_FLOATING_TYPES(                                                \
-      input.scalar_type(), "fused_add_rms_norm_kernel", [&] {                  \
-        vllm::fused_add_rms_norm_kernel<scalar_t, width>                       \
-            <<<grid, block, 0, stream>>>(input.data_ptr<scalar_t>(),           \
-                                         residual.data_ptr<scalar_t>(),        \
-                                         weight.data_ptr<scalar_t>(), epsilon, \
-                                         num_tokens, hidden_size);             \
+#define LAUNCH_FUSED_ADD_RMS_NORM(width)                                \
+  VLLM_DISPATCH_FLOATING_TYPES(                                         \
+      input.scalar_type(), "fused_add_rms_norm_kernel", [&] {           \
+        vllm::fused_add_rms_norm_kernel<scalar_t, width>                \
+            <<<grid, block, 0, stream>>>(                               \
+                input.mutable_data_ptr<scalar_t>(),                     \
+                residual.mutable_data_ptr<scalar_t>(),                  \
+                weight.const_data_ptr<scalar_t>(), epsilon, num_tokens, \
+                hidden_size);                                           \
       });
 
-void fused_add_rms_norm(torch::Tensor& input,     // [..., hidden_size]
-                        torch::Tensor& residual,  // [..., hidden_size]
-                        torch::Tensor& weight,    // [hidden_size]
+void fused_add_rms_norm(torch::Tensor& input,         // [..., hidden_size]
+                        torch::Tensor& residual,      // [..., hidden_size]
+                        torch::Tensor const& weight,  // [hidden_size]
                         double epsilon) {
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
@@ -339,9 +340,9 @@ void fused_add_rms_norm(torch::Tensor& input,     // [..., hidden_size]
     However, this requires each tensor's data to be aligned to 16
     bytes.
    */
-  auto inp_ptr = reinterpret_cast<std::uintptr_t>(input.data_ptr());
-  auto res_ptr = reinterpret_cast<std::uintptr_t>(residual.data_ptr());
-  auto wt_ptr = reinterpret_cast<std::uintptr_t>(weight.data_ptr());
+  auto inp_ptr = reinterpret_cast<std::uintptr_t>(input.const_data_ptr());
+  auto res_ptr = reinterpret_cast<std::uintptr_t>(residual.const_data_ptr());
+  auto wt_ptr = reinterpret_cast<std::uintptr_t>(weight.const_data_ptr());
   bool ptrs_are_aligned =
       inp_ptr % 16 == 0 && res_ptr % 16 == 0 && wt_ptr % 16 == 0;
   if (ptrs_are_aligned && hidden_size % 8 == 0) {

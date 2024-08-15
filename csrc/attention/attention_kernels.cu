@@ -711,16 +711,18 @@ void paged_attention_v1_launcher(
 
   // NOTE: alibi_slopes is optional.
   const float* alibi_slopes_ptr =
-      alibi_slopes
-          ? reinterpret_cast<const float*>(alibi_slopes.value().data_ptr())
-          : nullptr;
+      alibi_slopes ? reinterpret_cast<const float*>(
+                         alibi_slopes.value().const_data_ptr())
+                   : nullptr;
 
-  T* out_ptr = reinterpret_cast<T*>(out.data_ptr());
-  T* query_ptr = reinterpret_cast<T*>(query.data_ptr());
-  CACHE_T* key_cache_ptr = reinterpret_cast<CACHE_T*>(key_cache.data_ptr());
-  CACHE_T* value_cache_ptr = reinterpret_cast<CACHE_T*>(value_cache.data_ptr());
-  int* block_tables_ptr = block_tables.data_ptr<int>();
-  int* seq_lens_ptr = seq_lens.data_ptr<int>();
+  T* out_ptr = reinterpret_cast<T*>(out.mutable_data_ptr());
+  auto query_ptr = reinterpret_cast<T const*>(query.const_data_ptr());
+  auto key_cache_ptr =
+      reinterpret_cast<CACHE_T const*>(key_cache.const_data_ptr());
+  auto value_cache_ptr =
+      reinterpret_cast<CACHE_T const*>(value_cache.const_data_ptr());
+  auto block_tables_ptr = block_tables.const_data_ptr<int>();
+  auto seq_lens_ptr = seq_lens.const_data_ptr<int>();
 
   constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
   int padded_max_seq_len =
@@ -870,19 +872,21 @@ void paged_attention_v2_launcher(
 
   // NOTE: alibi_slopes is optional.
   const float* alibi_slopes_ptr =
-      alibi_slopes
-          ? reinterpret_cast<const float*>(alibi_slopes.value().data_ptr())
-          : nullptr;
+      alibi_slopes ? reinterpret_cast<const float*>(
+                         alibi_slopes.value().const_data_ptr())
+                   : nullptr;
 
-  T* out_ptr = reinterpret_cast<T*>(out.data_ptr());
-  float* exp_sums_ptr = reinterpret_cast<float*>(exp_sums.data_ptr());
-  float* max_logits_ptr = reinterpret_cast<float*>(max_logits.data_ptr());
-  T* tmp_out_ptr = reinterpret_cast<T*>(tmp_out.data_ptr());
-  T* query_ptr = reinterpret_cast<T*>(query.data_ptr());
-  CACHE_T* key_cache_ptr = reinterpret_cast<CACHE_T*>(key_cache.data_ptr());
-  CACHE_T* value_cache_ptr = reinterpret_cast<CACHE_T*>(value_cache.data_ptr());
-  int* block_tables_ptr = block_tables.data_ptr<int>();
-  int* seq_lens_ptr = seq_lens.data_ptr<int>();
+  auto out_ptr = reinterpret_cast<T*>(out.mutable_data_ptr());
+  auto exp_sums_ptr = reinterpret_cast<float*>(exp_sums.mutable_data_ptr());
+  auto max_logits_ptr = reinterpret_cast<float*>(max_logits.mutable_data_ptr());
+  auto tmp_out_ptr = reinterpret_cast<T*>(tmp_out.mutable_data_ptr());
+  auto query_ptr = reinterpret_cast<T const*>(query.const_data_ptr());
+  auto key_cache_ptr =
+      reinterpret_cast<CACHE_T const*>(key_cache.const_data_ptr());
+  auto value_cache_ptr =
+      reinterpret_cast<CACHE_T const*>(value_cache.const_data_ptr());
+  auto block_tables_ptr = block_tables.const_data_ptr<int>();
+  auto seq_lens_ptr = seq_lens.const_data_ptr<int>();
 
   constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
   int max_num_partitions = DIVIDE_ROUND_UP(max_seq_len, PARTITION_SIZE);

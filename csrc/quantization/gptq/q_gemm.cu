@@ -1768,7 +1768,7 @@ __global__ void make_sequential_8bit_kernel(const uint32_t* __restrict__ w,
   w_new2[w_new2_row * w2_stride + w2_column] = dst;
 }
 
-void shuffle_exllama_weight(uint32_t* q_weight, int* q_perm, int height,
+void shuffle_exllama_weight(uint32_t* q_weight, int const* q_perm, int height,
                             int width, int bit) {
   if (q_perm) {
     uint32_t* new_qweight = NULL;
@@ -1820,10 +1820,11 @@ void shuffle_exllama_weight(uint32_t* q_weight, int* q_perm, int height,
 }  // namespace gptq
 }  // namespace vllm
 
-torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
-                        torch::Tensor b_gptq_qzeros,
-                        torch::Tensor b_gptq_scales, torch::Tensor b_g_idx,
-                        bool use_exllama, int64_t bit) {
+torch::Tensor gptq_gemm(torch::Tensor const a, torch::Tensor const b_q_weight,
+                        torch::Tensor const b_gptq_qzeros,
+                        torch::Tensor const b_gptq_scales,
+                        torch::Tensor const b_g_idx, bool use_exllama,
+                        int64_t bit) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
   auto options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
   at::Tensor c = torch::empty({a.size(0), b_q_weight.size(1)}, options);
@@ -1831,12 +1832,12 @@ torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
       {b_q_weight.size(0) * 32 / bit, b_q_weight.size(1)}, options);
 
   vllm::gptq::gemm_half_q_half_cuda(
-      at::cuda::getCurrentCUDABlasHandle(), (const half*)a.data_ptr(),
-      (const uint32_t*)b_q_weight.data_ptr(),
-      (const uint32_t*)b_gptq_qzeros.data_ptr(),
-      (const half*)b_gptq_scales.data_ptr(),
-      b_g_idx.device().is_meta() ? NULL : (const int*)b_g_idx.data_ptr(),
-      (half*)c.data_ptr(), (half*)temp_dq.data_ptr(),
+      at::cuda::getCurrentCUDABlasHandle(), (const half*)a.const_data_ptr(),
+      (const uint32_t*)b_q_weight.const_data_ptr(),
+      (const uint32_t*)b_gptq_qzeros.const_data_ptr(),
+      (const half*)b_gptq_scales.const_data_ptr(),
+      b_g_idx.device().is_meta() ? NULL : (const int*)b_g_idx.const_data_ptr(),
+      (half*)c.mutable_data_ptr(), (half*)temp_dq.mutable_data_ptr(),
       c.size(0),              // m
       c.size(1),              // n
       a.size(1),              // k
@@ -1848,9 +1849,9 @@ torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
 void gptq_shuffle(torch::Tensor q_weight, torch::Tensor q_perm, int64_t bit) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(q_weight));
   vllm::gptq::shuffle_exllama_weight(
-      (uint32_t*)q_weight.data_ptr(),
+      (uint32_t*)q_weight.mutable_data_ptr(),
       q_perm.device().is_meta() || q_perm.numel() == 0
           ? NULL
-          : (int*)q_perm.data_ptr(),
+          : (int*)q_perm.const_data_ptr(),
       q_weight.size(0) * 32 / bit, q_weight.size(1), bit);
 }

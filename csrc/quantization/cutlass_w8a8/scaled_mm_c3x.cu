@@ -94,7 +94,7 @@ struct ScaledEpilogueBase {
   template <typename Descriptor, typename T>
   static auto args_from_tensor(torch::Tensor const& tensor) {
     using Arguments = typename Descriptor::Arguments;
-    auto* data_ptr = static_cast<T*>(tensor.data_ptr());
+    auto data_ptr = static_cast<T const*>(tensor.const_data_ptr());
     if constexpr (std::is_same_v<Descriptor, ColOrScalarLoad<T>> ||
                   std::is_same_v<Descriptor, RowOrScalarLoad<T>>) {
       return Arguments{data_ptr, tensor.numel() != 1};
@@ -110,7 +110,8 @@ struct ScaledEpilogueBase {
   template <typename Descriptor, typename T>
   static auto args_from_tensor(c10::optional<torch::Tensor> const& tensor) {
     using Arguments = typename Descriptor::Arguments;
-    auto* data_ptr = tensor ? static_cast<T*>(tensor->data_ptr()) : nullptr;
+    auto data_ptr =
+        tensor ? static_cast<T const*>(tensor->const_data_ptr()) : nullptr;
     static_assert(std::is_same_v<Descriptor, ColLoad<T, true>> ||
                   std::is_same_v<Descriptor, RowLoad<T, true>>);
     return Arguments{data_ptr};
@@ -435,12 +436,12 @@ void cutlass_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
   using GemmKernel = typename Gemm::GemmKernel;
   typename GemmKernel::ProblemShape prob_shape{m, n, k, 1};
 
-  auto a_ptr = static_cast<ElementAB*>(a.data_ptr());
-  auto b_ptr = static_cast<ElementAB*>(b.data_ptr());
+  auto a_ptr = static_cast<ElementAB const*>(a.const_data_ptr());
+  auto b_ptr = static_cast<ElementAB const*>(b.const_data_ptr());
   typename GemmKernel::MainloopArguments mainloop_args{a_ptr, a_stride, b_ptr,
                                                        b_stride};
 
-  auto c_ptr = static_cast<ElementD*>(out.data_ptr());
+  auto c_ptr = static_cast<ElementD*>(out.mutable_data_ptr());
   typename GemmKernel::EpilogueArguments epilogue_args{
       Gemm::Epilogue::prepare_args(
           std::forward<EpilogueArgs>(epilogue_params)...),
@@ -461,7 +462,8 @@ void cutlass_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
 
   auto stream = at::cuda::getCurrentCUDAStream(a.get_device());
 
-  cutlass::Status status = gemm_op.run(args, workspace.data_ptr(), stream);
+  cutlass::Status status =
+      gemm_op.run(args, workspace.mutable_data_ptr(), stream);
   CUTLASS_CHECK(status);
 }
 

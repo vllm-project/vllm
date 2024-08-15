@@ -20,10 +20,11 @@ namespace awq {
 template <int N>
 __global__ void __launch_bounds__(64)
     gemm_forward_4bit_cuda_m16nXk32(int G, int split_k_iters,
-                                    half* __restrict__ A, int* __restrict__ B,
-                                    half* __restrict__ scaling_factors,
-                                    int* __restrict__ zeros, int M, int IC,
-                                    int OC, half* __restrict__ C) {
+                                    half const* __restrict__ A,
+                                    int const* __restrict__ B,
+                                    half const* __restrict__ scaling_factors,
+                                    int const* __restrict__ zeros, int M,
+                                    int IC, int OC, half* __restrict__ C) {
   // Only support matrix n = 64 or 128
   assert(N == 64 || N == 128);
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 750
@@ -54,17 +55,17 @@ __global__ void __launch_bounds__(64)
        threadIdx.x * 8 / 32) < M;  // threadIdx.y is warp_id
   // bool wb_C_flag = (threadIdx.x / 4) < M;
 
-  half* A_ptr =
+  half const* A_ptr =
       A +
       (((int)blockIdx_y) / j_factors1 * 16 +
        (((int)threadIdx.y) * row_stride_warp) + ((int)threadIdx.x) / (32 / 8)) *
           IC +
       (((int)threadIdx.x) % (32 / 8)) * 8;
 
-  int* B_ptr = B + ((int)threadIdx.y) * (OC / 8) * (256 / N) +
-               (((int)threadIdx.x) / (N / 8)) * (OC / 8) +
-               (((int)blockIdx_y) % j_factors1) * (N / 8) +
-               (((int)threadIdx.x) % (N / 8)) * 1;
+  int const* B_ptr = B + ((int)threadIdx.y) * (OC / 8) * (256 / N) +
+                     (((int)threadIdx.x) / (N / 8)) * (OC / 8) +
+                     (((int)blockIdx_y) % j_factors1) * (N / 8) +
+                     (((int)threadIdx.x) % (N / 8)) * 1;
   // Why * 1 in the above line?
 
   half* A_shared_ptr = A_shared +
@@ -77,12 +78,12 @@ __global__ void __launch_bounds__(64)
                        (((int)threadIdx.x) / (N / 8)) * (N + 8) +
                        (((int)threadIdx.x) % (N / 8)) * 8;
 
-  int* zeros_ptr = zeros + (((int)blockIdx_y) % j_factors1) * (N / 8) +
-                   ((int)threadIdx.x) % (N / 8);
+  int const* zeros_ptr = zeros + (((int)blockIdx_y) % j_factors1) * (N / 8) +
+                         ((int)threadIdx.x) % (N / 8);
 
-  half* scaling_factors_ptr = scaling_factors +
-                              (((int)blockIdx_y) % j_factors1) * N +
-                              (((int)threadIdx.x) % (N / 8)) * 8;
+  half const* scaling_factors_ptr = scaling_factors +
+                                    (((int)blockIdx_y) % j_factors1) * N +
+                                    (((int)threadIdx.x) % (N / 8)) * 8;
 
   half* C_ptr =
       C +
@@ -116,7 +117,7 @@ __global__ void __launch_bounds__(64)
     }
     */
     // uint4 B_loaded_scale = make_uint4(0, 0, 0, 0);
-    int* B_ptr_local = B_ptr + k_0_0 * 32 * (OC / 8);
+    int const* B_ptr_local = B_ptr + k_0_0 * 32 * (OC / 8);
 
     for (int ax0_ax1_fused_0 = 0; ax0_ax1_fused_0 < N / 16; ++ax0_ax1_fused_0) {
       // B: 32 x 136 (128+8) float16
@@ -348,8 +349,10 @@ __global__ void __launch_bounds__(64)
 }
 
 __global__ void __launch_bounds__(64)
-    dequantize_weights(int* __restrict__ B, half* __restrict__ scaling_factors,
-                       int* __restrict__ zeros, half* __restrict__ C, int G) {
+    dequantize_weights(int const* __restrict__ B,
+                       half const* __restrict__ scaling_factors,
+                       int const* __restrict__ zeros, half* __restrict__ C,
+                       int G) {
   static constexpr uint32_t ZERO = 0x0;
   half B_shared[32 * (128 + 8)];
 
@@ -362,12 +365,12 @@ __global__ void __launch_bounds__(64)
   half* C_ptr2 = C + index1;
 
   int index2 = col + row * N;
-  int* B_ptr2 = B + index2;
+  int const* B_ptr2 = B + index2;
 
   int index3 = col + (int)(row / G) * N;
-  int* zeros_ptr2 = zeros + index3;
+  int const* zeros_ptr2 = zeros + index3;
   int index4 = 8 * col + (int)(row / G) * N * 8;
-  half* scaling_factors_ptr2 = scaling_factors + index4;
+  half const* scaling_factors_ptr2 = scaling_factors + index4;
 
   uint32_t zeros_loaded = *(uint32_t*)(zeros_ptr2);
   uint4 B_loaded_zero = dequantize_s4_to_fp16x2(zeros_loaded);
@@ -410,9 +413,9 @@ __global__ void __launch_bounds__(64)
 }  // namespace awq
 }  // namespace vllm
 
-torch::Tensor awq_dequantize(torch::Tensor _kernel,
-                             torch::Tensor _scaling_factors,
-                             torch::Tensor _zeros, int64_t split_k_iters,
+torch::Tensor awq_dequantize(torch::Tensor const _kernel,
+                             torch::Tensor const _scaling_factors,
+                             torch::Tensor const _zeros, int64_t split_k_iters,
                              int64_t thx, int64_t thy) {
   int in_c = _kernel.size(0);
   int qout_c = _kernel.size(1);
@@ -444,11 +447,12 @@ torch::Tensor awq_dequantize(torch::Tensor _kernel,
                      .device(_scaling_factors.device());
   at::Tensor _de_kernel = torch::empty({in_c, out_c}, options);
 
-  auto kernel = reinterpret_cast<int*>(_kernel.data_ptr<int>());
-  auto de_kernel = reinterpret_cast<half*>(_de_kernel.data_ptr<at::Half>());
-  auto scaling_factors =
-      reinterpret_cast<half*>(_scaling_factors.data_ptr<at::Half>());
-  auto zeros = reinterpret_cast<int*>(_zeros.data_ptr<int>());
+  auto kernel = _kernel.const_data_ptr<int>();
+  auto de_kernel =
+      reinterpret_cast<half*>(_de_kernel.mutable_data_ptr<at::Half>());
+  auto scaling_factors = reinterpret_cast<half const*>(
+      _scaling_factors.const_data_ptr<at::Half>());
+  auto zeros = _zeros.const_data_ptr<int>();
 
   dim3 num_blocks(x_blocks, y_blocks);
   dim3 threads_per_block(x_thread, y_thread);
@@ -481,12 +485,14 @@ torch::Tensor awq_gemm(torch::Tensor _in_feats, torch::Tensor _kernel,
   int num_out_feats = _out_feats.size(-2);
   int num_out_channels = _out_feats.size(-1);
 
-  auto in_feats = reinterpret_cast<half*>(_in_feats.data_ptr<at::Half>());
-  auto kernel = reinterpret_cast<int*>(_kernel.data_ptr<int>());
-  auto out_feats = reinterpret_cast<half*>(_out_feats.data_ptr<at::Half>());
-  auto scaling_factors =
-      reinterpret_cast<half*>(_scaling_factors.data_ptr<at::Half>());
-  auto zeros = reinterpret_cast<int*>(_zeros.data_ptr<int>());
+  auto in_feats =
+      reinterpret_cast<half const*>(_in_feats.const_data_ptr<at::Half>());
+  auto kernel = _kernel.const_data_ptr<int>();
+  auto out_feats =
+      reinterpret_cast<half*>(_out_feats.mutable_data_ptr<at::Half>());
+  auto scaling_factors = reinterpret_cast<half const*>(
+      _scaling_factors.const_data_ptr<at::Half>());
+  auto zeros = _zeros.const_data_ptr<int>();
   int group_size = num_in_channels / _scaling_factors.size(0);
 
   if (num_out_channels % 64 != 0)

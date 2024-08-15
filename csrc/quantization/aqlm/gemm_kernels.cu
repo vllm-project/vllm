@@ -416,9 +416,9 @@ void code1x16_matvec(
   int prob_m = C.size(0);
   int prob_k = B.size(0);
 
-  code1x16_matvec_cuda(A.data_ptr(), B.data_ptr(), C.data_ptr(),
-                       codebook.data_ptr(), prob_m, prob_k, codebook_a_sizes,
-                       codebook_stride(codebook));
+  code1x16_matvec_cuda(A.const_data_ptr(), B.const_data_ptr(),
+                       C.mutable_data_ptr(), codebook.const_data_ptr(), prob_m,
+                       prob_k, codebook_a_sizes, codebook_stride(codebook));
 }
 
 torch::Tensor code1x16_matmat(const torch::Tensor& input,
@@ -459,9 +459,9 @@ void code2x8_matvec(const torch::Tensor& A, const torch::Tensor& B,
   const at::cuda::OptionalCUDAGuard device_guard(device_of(A));
   int prob_m = C.size(0);
   int prob_k = B.size(0);
-  code2x8_matvec_cuda(A.data_ptr(), B.data_ptr(), C.data_ptr(),
-                      codebook.data_ptr(), prob_m, prob_k, codebook_a_sizes,
-                      2 * codebook_stride(codebook));
+  code2x8_matvec_cuda(A.const_data_ptr(), B.const_data_ptr(),
+                      C.mutable_data_ptr(), codebook.const_data_ptr(), prob_m,
+                      prob_k, codebook_a_sizes, 2 * codebook_stride(codebook));
 }
 
 torch::Tensor code2x8_matmat(const torch::Tensor& input,
@@ -565,10 +565,10 @@ torch::Tensor aqlm_dequant(const torch::Tensor& codes,
                                   .device(codebooks.device()));
 
   if (nbooks == 1 && entries == (1 << 16)) {
-    vllm::aqlm::code1x16_dequant_cuda(codes.data_ptr(), weights.data_ptr(),
-                                      codebooks.data_ptr(), out_features,
-                                      in_features, cumulative_sizes,
-                                      vllm::aqlm::codebook_stride(codebooks));
+    vllm::aqlm::code1x16_dequant_cuda(
+        codes.const_data_ptr(), weights.mutable_data_ptr(),
+        codebooks.const_data_ptr(), out_features, in_features, cumulative_sizes,
+        vllm::aqlm::codebook_stride(codebooks));
 
     // if you wanted to flip to scaling the weights, (though it's 30%-ish slower
     // and not consistent with gemv implementation.) weights *=
@@ -578,10 +578,10 @@ torch::Tensor aqlm_dequant(const torch::Tensor& codes,
   }
 
   if (nbooks == 2 && entries == (1 << 8)) {
-    vllm::aqlm::code2x8_dequant_cuda(codes.data_ptr(), weights.data_ptr(),
-                                     codebooks.data_ptr(), out_features,
-                                     in_features, cumulative_sizes,
-                                     vllm::aqlm::codebook_stride(codebooks));
+    vllm::aqlm::code2x8_dequant_cuda(
+        codes.const_data_ptr(), weights.mutable_data_ptr(),
+        codebooks.const_data_ptr(), out_features, in_features, cumulative_sizes,
+        vllm::aqlm::codebook_stride(codebooks));
 
     // if you wanted to flip to scaling the weights, (though it's 30%-ish slower
     // and not consistent with gemv implementation) weights *=

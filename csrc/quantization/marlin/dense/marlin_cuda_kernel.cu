@@ -868,10 +868,11 @@ thread_config_t determine_thread_config(int prob_m, int prob_n, int prob_k) {
   __CALL_IF(4, N_BLOCKS, K_BLOCKS, -1, NUM_THREADS) \
   __CALL_IF(4, N_BLOCKS, K_BLOCKS, 8, NUM_THREADS)
 
-void marlin_cuda(const void* A, const void* B, void* C, void* s, int prob_m,
-                 int prob_n, int prob_k, void* workspace, int groupsize = -1,
-                 int dev = 0, cudaStream_t stream = 0, int thread_k = -1,
-                 int thread_n = -1, int sms = -1, int max_par = 16) {
+void marlin_cuda(void const* A, void const* B, void* C, void const* s,
+                 int prob_m, int prob_n, int prob_k, void* workspace,
+                 int groupsize = -1, int dev = 0, cudaStream_t stream = 0,
+                 int thread_k = -1, int thread_n = -1, int sms = -1,
+                 int max_par = 16) {
   int tot_m = prob_m;
   int tot_m_blocks = ceildiv(tot_m, 16);
   int pad = 16 * tot_m_blocks - tot_m;
@@ -1058,9 +1059,10 @@ torch::Tensor marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                   " is below min_workspace_size = " + str(min_workspace_size));
 
   int dev = a.get_device();
-  marlin_dense::marlin_cuda(a.data_ptr(), b_q_weight.data_ptr(), c.data_ptr(),
-                            b_scales.data_ptr(), size_m, size_n, size_k,
-                            workspace.data_ptr(), groupsize, dev,
+  marlin_dense::marlin_cuda(a.const_data_ptr(), b_q_weight.const_data_ptr(),
+                            c.mutable_data_ptr(), b_scales.const_data_ptr(),
+                            size_m, size_n, size_k,
+                            workspace.mutable_data_ptr(), groupsize, dev,
                             at::cuda::getCurrentCUDAStream(dev), thread_k,
                             thread_n, sms, marlin_dense::max_par);
 

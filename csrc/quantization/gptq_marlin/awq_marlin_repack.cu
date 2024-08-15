@@ -241,8 +241,8 @@ torch::Tensor awq_marlin_repack(torch::Tensor& b_q_weight, int64_t size_k,
 
   // Get ptrs
   uint32_t const* b_q_weight_ptr =
-      reinterpret_cast<uint32_t const*>(b_q_weight.data_ptr());
-  uint32_t* out_ptr = reinterpret_cast<uint32_t*>(out.data_ptr());
+      reinterpret_cast<uint32_t const*>(b_q_weight.const_data_ptr());
+  uint32_t* out_ptr = reinterpret_cast<uint32_t*>(out.mutable_data_ptr());
 
   // Get dev info
   int dev = b_q_weight.get_device();

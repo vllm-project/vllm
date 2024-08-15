@@ -54,7 +54,7 @@ __global__ void advance_step_kernel(int num_seqs, int num_queries,
   slot_mapping_ptr[cur_query_id] = slot_num;
 }
 
-inline void verify_tensor(std::string const& name, torch::Tensor& t,
+inline void verify_tensor(std::string const& name, torch::Tensor const& t,
                           int64_t const size_0, int64_t const size_1,
                           c10::ScalarType const type) {
   bool size_0_cond = true;
@@ -80,12 +80,12 @@ inline void verify_tensor(std::string const& name, torch::Tensor& t,
 }
 
 void advance_step(int num_seqs, int num_queries, int block_size,
-                  torch::Tensor& input_tokens,       // type: long
-                  torch::Tensor& sampled_token_ids,  // type: long
-                  torch::Tensor& input_positions,    // type: long
-                  torch::Tensor& seq_lens,           // type: int
-                  torch::Tensor& slot_mapping,       // type: long
-                  torch::Tensor& block_tables) {     // type: int
+                  torch::Tensor& input_tokens,             // type: long
+                  torch::Tensor const& sampled_token_ids,  // type: long
+                  torch::Tensor& input_positions,          // type: long
+                  torch::Tensor& seq_lens,                 // type: int
+                  torch::Tensor& slot_mapping,             // type: long
+                  torch::Tensor const& block_tables) {     // type: int
 
   if (logging) {
     printf("advance_step:\n");
@@ -110,21 +110,23 @@ void advance_step(int num_seqs, int num_queries, int block_size,
 
   advance_step_kernel<max_threads><<<blocks, max_threads, 0, stream>>>(
       num_seqs, num_queries, block_size,
-      reinterpret_cast<long*>(input_tokens.data_ptr()),
-      reinterpret_cast<long const*>(sampled_token_ids.data_ptr()),
-      reinterpret_cast<long*>(input_positions.data_ptr()),
-      reinterpret_cast<int*>(seq_lens.data_ptr()),
-      reinterpret_cast<long*>(slot_mapping.data_ptr()),
-      reinterpret_cast<int const*>(block_tables.data_ptr()),
+      reinterpret_cast<long*>(input_tokens.mutable_data_ptr()),
+      reinterpret_cast<long const*>(sampled_token_ids.const_data_ptr()),
+      reinterpret_cast<long*>(input_positions.mutable_data_ptr()),
+      reinterpret_cast<int*>(seq_lens.mutable_data_ptr()),
+      reinterpret_cast<long*>(slot_mapping.mutable_data_ptr()),
+      reinterpret_cast<int const*>(block_tables.const_data_ptr()),
       block_tables.stride(0));
 }
 
 }  // namespace prepare_inputs
 
 void advance_step(int64_t num_seqs, int64_t num_queries, int64_t block_size,
-                  torch::Tensor& input_tokens, torch::Tensor& sampled_token_ids,
+                  torch::Tensor& input_tokens,
+                  torch::Tensor const& sampled_token_ids,
                   torch::Tensor& input_positions, torch::Tensor& seq_lens,
-                  torch::Tensor& slot_mapping, torch::Tensor& block_tables) {
+                  torch::Tensor& slot_mapping,
+                  torch::Tensor const& block_tables) {
   prepare_inputs::advance_step(num_seqs, num_queries, block_size, input_tokens,
                                sampled_token_ids, input_positions, seq_lens,
                                slot_mapping, block_tables);

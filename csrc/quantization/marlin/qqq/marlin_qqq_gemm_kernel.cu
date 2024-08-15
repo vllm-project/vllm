@@ -1019,9 +1019,9 @@ thread_config_t determine_thread_config(int prob_m, int prob_n, int prob_k) {
   __CALL_IF(4, N_BLOCKS, K_BLOCKS, -1, NUM_THREADS) \
   __CALL_IF(4, N_BLOCKS, K_BLOCKS, 8, NUM_THREADS)
 
-void marlin_qqq_cuda(const void* A, const void* B, void* C, void* D,
-                     void* s_tok, void* s_ch, void* s_group, int prob_m,
-                     int prob_n, int prob_k, void* workspace,
+void marlin_qqq_cuda(void const* A, void const* B, void* C, void* D,
+                     void const* s_tok, void const* s_ch, void const* s_group,
+                     int prob_m, int prob_n, int prob_k, void* workspace,
                      int groupsize = -1, int dev = 0, cudaStream_t stream = 0,
                      int thread_k = -1, int thread_n = -1, int sms = -1,
                      int max_par = 16) {
@@ -1234,9 +1234,10 @@ torch::Tensor marlin_qqq_gemm(torch::Tensor const& a,
 
   int dev = a.get_device();
   marlin_qqq_cuda(
-      a.data_ptr(), b_q_weight.data_ptr(), c.data_ptr(), d.data_ptr(),
-      s_tok.data_ptr(), s_ch.data_ptr(), s_group.data_ptr(), size_m, size_n,
-      size_k, workspace.data_ptr(), groupsize, dev,
+      a.const_data_ptr(), b_q_weight.const_data_ptr(), c.mutable_data_ptr(),
+      d.mutable_data_ptr(), s_tok.const_data_ptr(), s_ch.const_data_ptr(),
+      s_group.const_data_ptr(), size_m, size_n, size_k,
+      workspace.mutable_data_ptr(), groupsize, dev,
       at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms, max_par);
 
   return d;

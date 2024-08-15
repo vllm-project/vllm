@@ -110,7 +110,7 @@ struct ScaledEpilogueBase {
   template <typename Descriptor, typename T>
   static auto args_from_tensor(torch::Tensor const& tensor) {
     using Arguments = typename Descriptor::Arguments;
-    auto* data_ptr = static_cast<T*>(tensor.data_ptr());
+    auto data_ptr = static_cast<T const*>(tensor.const_data_ptr());
     if constexpr (std::is_same_v<Descriptor, ColOrScalarLoad<T>> ||
                   std::is_same_v<Descriptor, RowOrScalarLoad<T>>) {
       return Arguments{data_ptr, tensor.numel() != 1};
@@ -127,7 +127,8 @@ struct ScaledEpilogueBase {
   static auto args_from_tensor(c10::optional<torch::Tensor> const& tensor) {
     static_assert(std::is_same_v<Descriptor, RowOrZeroLoad<T>>);
     using Arguments = typename Descriptor::Arguments;
-    auto* data_ptr = tensor ? static_cast<T*>(tensor->data_ptr()) : nullptr;
+    auto data_ptr =
+        tensor ? static_cast<T const*>(tensor->const_data_ptr()) : nullptr;
     return Arguments{data_ptr};
   }
 };
@@ -444,9 +445,9 @@ inline void cutlass_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
   using StrideC = Stride<int64_t, Int<1>, Int<0>>;
   StrideC c_stride{ldc, Int<1>{}, Int<0>{}};
 
-  auto a_ptr = static_cast<ElementAB const*>(a.data_ptr());
-  auto b_ptr = static_cast<ElementAB const*>(b.data_ptr());
-  auto c_ptr = static_cast<ElementD*>(out.data_ptr());
+  auto a_ptr = static_cast<ElementAB const*>(a.const_data_ptr());
+  auto b_ptr = static_cast<ElementAB const*>(b.const_data_ptr());
+  auto c_ptr = static_cast<ElementD*>(out.mutable_data_ptr());
 
   typename Gemm::D::Arguments d_args{c_ptr, c_stride};
 
@@ -487,7 +488,7 @@ inline void cutlass_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
   auto stream = at::cuda::getCurrentCUDAStream(a.get_device());
 
   CUTLASS_CHECK(gemm_op.can_implement(args));
-  cutlass::Status status = gemm_op(args, workspace.data_ptr(), stream);
+  cutlass::Status status = gemm_op(args, workspace.mutable_data_ptr(), stream);
   CUTLASS_CHECK(status);
 }
 

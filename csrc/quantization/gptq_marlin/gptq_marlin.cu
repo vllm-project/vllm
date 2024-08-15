@@ -1950,13 +1950,13 @@ exec_config_t determine_thread_config(int prob_m, int prob_n, int prob_k,
     __CALL_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, true, 8, NUM_THREADS)
 
 template <typename scalar_t>
-void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
-               void* zp, void* g_idx, void* perm, void* a_tmp, int prob_m,
-               int prob_n, int prob_k, void* workspace,
-               vllm::ScalarType const& q_type, bool has_act_order,
-               bool is_k_full, bool has_zp, int num_groups, int group_size,
-               int dev, cudaStream_t stream, int thread_k, int thread_n,
-               int sms, int max_par, bool use_fp32_reduce) {
+void marlin_mm(const void* A, const void* B, void* C, void* C_tmp,
+               const void* s, const void* zp, const void* g_idx,
+               const void* perm, void* a_tmp, int prob_m, int prob_n,
+               int prob_k, void* workspace, vllm::ScalarType const& q_type,
+               bool has_act_order, bool is_k_full, bool has_zp, int num_groups,
+               int group_size, int dev, cudaStream_t stream, int thread_k,
+               int thread_n, int sms, int max_par, bool use_fp32_reduce) {
   if (has_zp) {
     TORCH_CHECK(
         q_type == vllm::kU4 || q_type == vllm::kU8,
@@ -2273,22 +2273,26 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
   int dev = a.get_device();
   if (a.scalar_type() == at::ScalarType::Half) {
     marlin::marlin_mm<half>(
-        a.data_ptr<at::Half>(), b_q_weight.data_ptr(), c.data_ptr<at::Half>(),
-        c_tmp.data_ptr<float>(), b_scales.data_ptr<at::Half>(),
-        b_zeros.data_ptr(), g_idx.data_ptr(), perm.data_ptr(),
-        a_tmp.data_ptr<at::Half>(), size_m, size_n, size_k,
-        workspace.data_ptr(), *b_q_type, has_act_order, is_k_full, has_zp,
-        num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
-        thread_k, thread_n, sms, marlin::max_par, use_fp32_reduce);
+        a.const_data_ptr<at::Half>(), b_q_weight.const_data_ptr(),
+        c.mutable_data_ptr<at::Half>(), c_tmp.mutable_data_ptr<float>(),
+        b_scales.const_data_ptr<at::Half>(), b_zeros.const_data_ptr(),
+        g_idx.const_data_ptr(), perm.const_data_ptr(),
+        a_tmp.mutable_data_ptr<at::Half>(), size_m, size_n, size_k,
+        workspace.mutable_data_ptr(), *b_q_type, has_act_order, is_k_full,
+        has_zp, num_groups, group_size, dev,
+        at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms,
+        marlin::max_par, use_fp32_reduce);
   } else if (a.scalar_type() == at::ScalarType::BFloat16) {
     marlin::marlin_mm<nv_bfloat16>(
-        a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(),
-        c.data_ptr<at::BFloat16>(), c_tmp.data_ptr<float>(),
-        b_scales.data_ptr<at::BFloat16>(), b_zeros.data_ptr(), g_idx.data_ptr(),
-        perm.data_ptr(), a_tmp.data_ptr<at::BFloat16>(), size_m, size_n, size_k,
-        workspace.data_ptr(), *b_q_type, has_act_order, is_k_full, has_zp,
-        num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
-        thread_k, thread_n, sms, marlin::max_par, use_fp32_reduce);
+        a.const_data_ptr<at::BFloat16>(), b_q_weight.const_data_ptr(),
+        c.mutable_data_ptr<at::BFloat16>(), c_tmp.mutable_data_ptr<float>(),
+        b_scales.const_data_ptr<at::BFloat16>(), b_zeros.const_data_ptr(),
+        g_idx.const_data_ptr(), perm.const_data_ptr(),
+        a_tmp.mutable_data_ptr<at::BFloat16>(), size_m, size_n, size_k,
+        workspace.mutable_data_ptr(), *b_q_type, has_act_order, is_k_full,
+        has_zp, num_groups, group_size, dev,
+        at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms,
+        marlin::max_par, use_fp32_reduce);
   } else {
     TORCH_CHECK(false, "gpt_marlin_gemm only supports bfloat16 and float16");
   }

@@ -258,12 +258,12 @@ class CustomAllreduce {
 
   // below are device pointers
   RankSignals sg_;
-  std::unordered_map<void*, RankData*> buffers_;
+  std::unordered_map<void const*, RankData*> buffers_;
   Signal* self_sg_;
 
   // stores the registered device pointers from all ranks
   RankData *d_rank_data_base_, *d_rank_data_end_;
-  std::vector<void*> graph_unreg_buffers_;
+  std::vector<void const*> graph_unreg_buffers_;
   // a map from IPC handles to opened IPC pointers
   std::map<IPC_KEY, char*> ipc_handles_;
 
@@ -342,7 +342,7 @@ class CustomAllreduce {
   }
 
   void register_buffer(const std::vector<std::string>& handles,
-                       const std::vector<int64_t>& offsets, void* self) {
+                       const std::vector<int64_t>& offsets, void const* self) {
     check_rank_data_capacity();
     RankData data;
     for (int i = 0; i < world_size_; i++) {
@@ -402,7 +402,7 @@ class CustomAllreduce {
    * will cause contention on NVLink bus.
    */
   template <typename T>
-  void allreduce(cudaStream_t stream, T* input, T* output, int size,
+  void allreduce(cudaStream_t stream, T const* input, T* output, int size,
                  int threads = 512, int block_limit = 36) {
     auto d = packed_t<T>::P::size;
     if (size % d != 0)

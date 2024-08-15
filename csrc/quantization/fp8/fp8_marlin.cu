@@ -1101,9 +1101,9 @@ exec_config_t determine_thread_config(int prob_m, int prob_n, int prob_k,
     __CALL_IF(NUM_BITS, 4, N_BLOCKS, K_BLOCKS, -1, NUM_THREADS)
 
 template <typename scalar_t>
-void marlin_mm_f16i4(const void* A, const void* B, void* C, void* s, int prob_m,
-                     int prob_n, int prob_k, void* workspace, int num_bits,
-                     int num_groups, int group_size, int dev,
+void marlin_mm_f16i4(const void* A, const void* B, void* C, const void* s,
+                     int prob_m, int prob_n, int prob_k, void* workspace,
+                     int num_bits, int num_groups, int group_size, int dev,
                      cudaStream_t stream, int thread_k, int thread_n, int sms,
                      int max_par) {
   TORCH_CHECK(num_bits == 8, "num_bits must be 8. Got = ", num_bits);
@@ -1283,17 +1283,18 @@ torch::Tensor fp8_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
   int dev = a.get_device();
   if (a.scalar_type() == at::ScalarType::Half) {
     fp8_marlin::marlin_mm_f16i4<half>(
-        a.data_ptr<at::Half>(), b_q_weight.data_ptr(), c.data_ptr<at::Half>(),
-        b_scales.data_ptr<at::Half>(), size_m, size_n, size_k,
-        workspace.data_ptr(), num_bits, num_groups, group_size, dev,
-        at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms,
-        marlin::max_par);
+        a.const_data_ptr<at::Half>(), b_q_weight.const_data_ptr(),
+        c.mutable_data_ptr<at::Half>(), b_scales.const_data_ptr<at::Half>(),
+        size_m, size_n, size_k, workspace.mutable_data_ptr(), num_bits,
+        num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
+        thread_k, thread_n, sms, marlin::max_par);
   } else if (a.scalar_type() == at::ScalarType::BFloat16) {
     fp8_marlin::marlin_mm_f16i4<nv_bfloat16>(
-        a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(),
-        c.data_ptr<at::BFloat16>(), b_scales.data_ptr<at::BFloat16>(), size_m,
-        size_n, size_k, workspace.data_ptr(), num_bits, num_groups, group_size,
-        dev, at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms,
+        a.const_data_ptr<at::BFloat16>(), b_q_weight.const_data_ptr(),
+        c.mutable_data_ptr<at::BFloat16>(),
+        b_scales.const_data_ptr<at::BFloat16>(), size_m, size_n, size_k,
+        workspace.mutable_data_ptr(), num_bits, num_groups, group_size, dev,
+        at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms,
         marlin::max_par);
   } else {
     TORCH_CHECK(false, "fp8_marlin_gemm only supports bfloat16 and float16");
