@@ -177,6 +177,9 @@ class SequenceData:
 
     @property
     def draft_token_ids(self) -> list[int]:
+        if self._draft_token_ids is None:
+            return []
+
         return self._draft_token_ids
     
     @draft_token_ids.setter
@@ -185,6 +188,9 @@ class SequenceData:
     
     @property
     def scorer_token_ids(self) -> list[int]:
+        if self._scorer_token_ids is None:
+            return []
+
         return self._scorer_token_ids
 
     @scorer_token_ids.setter
@@ -193,6 +199,9 @@ class SequenceData:
 
     @property
     def decoded_draft_token_ids(self) -> list[str]:
+        if self._decoded_draft_token_ids is None:
+            return ""
+
         return self._decoded_draft_token_ids
 
     @decoded_draft_token_ids.setter
@@ -201,6 +210,9 @@ class SequenceData:
     
     @property
     def decoded_scorer_token_ids(self) -> list[str]:
+        if self._decoded_scorer_token_ids is None:
+            return ""
+
         return self._decoded_scorer_token_ids
     
     @decoded_scorer_token_ids.setter
@@ -209,6 +221,9 @@ class SequenceData:
 
     @property
     def decoded_draft_sequence(self) -> str:
+        if self._decoded_draft_sequence is None:
+            return ""
+
         return self._decoded_draft_sequence
     
     @decoded_draft_sequence.setter
@@ -217,6 +232,9 @@ class SequenceData:
 
     @property
     def decoded_scorer_sequence(self) -> str:
+        if self._decoded_scorer_sequence is None:
+            return ""
+
         return self._decoded_scorer_sequence
     
     @decoded_scorer_sequence.setter
