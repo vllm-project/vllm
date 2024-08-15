@@ -134,17 +134,6 @@ class QuantMixtralMoE(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_total_experts = config.num_local_experts
         self.top_k = config.num_experts_per_tok
-        if self.tp_size > self.num_total_experts:
-            raise ValueError(
-                f"Tensor parallel size {self.tp_size} is greater than "
-                f"the number of experts {self.num_total_experts}."
-            )
-        # Split experts equally between ranks
-        self.expert_indicies = np.array_split(
-            range(self.num_total_experts), self.tp_size
-        )[self.rank].tolist()
-        if not self.expert_indicies:
-            raise ValueError(f"Rank {self.rank} has no experts assigned to it.")
 
         params_dtype = torch.float16
         self.gate = ReplicatedLinear(
@@ -279,19 +268,20 @@ class MixtralDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
         )
-        # self.block_sparse_moe = MixtralMoE(
-        #     num_experts=config.num_local_experts,
-        #     top_k=config.num_experts_per_tok,
-        #     hidden_size=config.hidden_size,
-        #     intermediate_size=config.intermediate_size,
+        self.block_sparse_moe = MixtralMoE(
+            num_experts=config.num_local_experts,
+            top_k=config.num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.intermediate_size,
+            quant_config=quant_config,
+            tp_size=get_tensor_model_parallel_world_size(),
+            prefix=f"{prefix}.block_sparse_moe",
+        )
+        # self.block_sparse_moe = QuantMixtralMoE(
+        #     config,
         #     quant_config=quant_config,
         #     prefix=f"{prefix}.block_sparse_moe",
         # )
-        self.block_sparse_moe = QuantMixtralMoE(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.block_sparse_moe",
-        )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
