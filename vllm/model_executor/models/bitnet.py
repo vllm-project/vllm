@@ -48,7 +48,7 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, kv_cache_scales_loader, partital_weight_loader)
+    default_weight_loader, kv_cache_scales_loader)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.utils import is_hip, print_warning_once
@@ -654,18 +654,6 @@ class BitnetForCausalLM(nn.Module):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
-                # This is a trick to load weight scale for BitNet Models
-                if name.endswith(".sw") and name in params_dict:
-                    param = params_dict[name]
-                    if param_name == ".qkv_proj":
-                        loaded_weight = loaded_weight.repeat(
-                            (param.data.shape[0] // 3, *param.data.shape[1:]))
-                        shard_id = {"q": 0, "k": 1, "v": 2}[shard_id]
-                    elif param_name == ".gate_up_proj":
-                        loaded_weight = loaded_weight.repeat(
-                            (param.data.shape[0] // 2, *param.data.shape[1:]))
-                    partital_weight_loader(param, loaded_weight, shard_id)
-                    break
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 # align scaling attr with param
@@ -677,13 +665,6 @@ class BitnetForCausalLM(nn.Module):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
-                # This is a trick to load weight scale for BitNet Models
-                if name.endswith(".sw") and name in params_dict:
-                    param = params_dict[name]
-                    weight_loader(param,
-                                  loaded_weight.repeat(param.data.shape))
-                    continue
-                # Remapping the name of FP8 kv-scale.
                 if name.endswith("kv_scale"):
                     remapped_kv_scale_name = name.replace(
                         ".kv_scale", ".attn.kv_scale")
