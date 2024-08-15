@@ -590,7 +590,7 @@ class LoRAEnabledMixtralForCausalLM(nn.Module, SupportsLoRA):
 
         self.config = config
         self.lora_config = lora_config
-
+        self.use_fused_moe = (config.torch_dtype != torch.float8_e4m3fn)
         self.model = LoRAMixtralModel(
             config, cache_config, quant_config, lora_config=lora_config, prefix="model"
         )
