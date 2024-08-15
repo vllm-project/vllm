@@ -6,13 +6,10 @@
 
 void init_cpu_threads_env(const std::string& cpu_ids);
 
-void int8_scaled_mm(torch::Tensor& c,               
-                       const torch::Tensor& a,         
-                       const torch::Tensor& b,         
-                       const torch::Tensor& a_scales,  
-                       const torch::Tensor& b_scales,  
-                       const c10::optional<torch::Tensor>& bias 
-);
+void int8_scaled_mm(torch::Tensor& c, const torch::Tensor& a,
+                    const torch::Tensor& b, const torch::Tensor& a_scales,
+                    const torch::Tensor& b_scales,
+                    const c10::optional<torch::Tensor>& bias);
 
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops

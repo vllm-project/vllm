@@ -149,9 +149,9 @@ void dynamic_output_scale_impl(const float* input, scalar_t* output,
     elems_fp32 = elems_fp32 * token_scale_vec;
 
     if constexpr (Bias) {
-        load_vec_t bias_vec(bias + j);
-        cvt_vec_t bias_vec_fp32(bias_vec);
-        elems_fp32 = elems_fp32 + bias_vec_fp32;
+      load_vec_t bias_vec(bias + j);
+      cvt_vec_t bias_vec_fp32(bias_vec);
+      elems_fp32 = elems_fp32 + bias_vec_fp32;
     }
 
     load_vec_t elems_out(elems_fp32);
@@ -186,11 +186,11 @@ void dynamic_output_scale_impl() {
 }  // namespace
 
 void int8_scaled_mm(torch::Tensor& c,               // [M, OC], row-major
-                       const torch::Tensor& a,         // [M, IC], row-major
-                       const torch::Tensor& b,         // [IC, OC], column-major
-                       const torch::Tensor& a_scales,  // [1] or [M]
-                       const torch::Tensor& b_scales,  // [1] or [OC]
-                       const c10::optional<torch::Tensor>& bias  // [OC]
+                    const torch::Tensor& a,         // [M, IC], row-major
+                    const torch::Tensor& b,         // [IC, OC], column-major
+                    const torch::Tensor& a_scales,  // [1] or [M]
+                    const torch::Tensor& b_scales,  // [1] or [OC]
+                    const c10::optional<torch::Tensor>& bias  // [OC]
 ) {
   CPU_KERNEL_GUARD_IN(cutlass_scaled_mm)
   // Checks for conformality
