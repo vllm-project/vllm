@@ -221,27 +221,50 @@ class FusedMoE(torch.nn.Module):
         else:
             param_data[expert_id] = loaded_weight
 
-    def _load_per_channel_group_weight_scale(self, expert_data: torch.Tensor,
-                                             shard_id: str,
-                                             loaded_weight: torch.tensor,
-                                             tp_rank: int):
-        # for per channel weight quantization
+    def _load_group_weight_scale(self, expert_data: torch.Tensor,
+                                 shard_id: str, loaded_weight: torch.tensor,
+                                 tp_rank: int):
+        loaded_weight = loaded_weight.t().contiguous()
         if shard_id == "w2":
-            shard_dim = 1
-            shard_size = expert_data.shape[1]
-            # move this to a group size function
-            loaded_weight = loaded_weight.narrow(shard_dim,
-                                                 tp_rank * shard_size,
-                                                 shard_size)
-            expert_data.copy_(loaded_weight)
-        elif shard_id in ("w1", "w3"):
             shard_dim = 0
-            shard_size = expert_data.shape[1]
+            shard_size = expert_data.shape[0]
             loaded_weight = loaded_weight.narrow(shard_dim,
                                                  shard_size * tp_rank,
                                                  shard_size)
-            idx = 0 if shard_id == "w1" else 1
-            expert_data[idx].copy_(loaded_weight)
+        elif shard_id in ("w1", "w3"):
+            shard_dim = 1
+            shard_size = expert_data.shape[1] // 2
+            loaded_weight = loaded_weight.narrow(shard_dim,
+                                                 shard_size * tp_rank,
+                                                 shard_size)
+            if shard_id == "w1":
+                expert_data = expert_data.narrow(shard_dim, 0, shard_size)
+            else:
+                expert_data = expert_data.narrow(shard_dim, shard_size,
+                                                 shard_size)
+
+        expert_data.copy_(loaded_weight)
+
+    def _load_per_channel_weight_scale(self, expert_data: torch.Tensor,
+                                       shard_id: str,
+                                       loaded_weight: torch.tensor,
+                                       tp_rank: int):
+        # for per channel weight quantization
+        loaded_weight = loaded_weight.t().contiguous()
+        if shard_id == "w2":
+            expert_data.copy_(loaded_weight)
+        elif shard_id in ("w1", "w3"):
+            shard_dim = 1
+            shard_size = expert_data.shape[1] // 2
+            loaded_weight = loaded_weight.narrow(shard_dim,
+                                                 shard_size * tp_rank,
+                                                 shard_size)
+            if shard_id == "w1":
+                expert_data = expert_data.narrow(shard_dim, 0, shard_size)
+            else:
+                expert_data = expert_data.narrow(shard_dim, shard_size,
+                                                 shard_size)
+            expert_data.copy_(loaded_weight)
 
     def _load_model_weights(self, shard_id: str, param: torch.nn.Parameter,
                             loaded_weight: torch.nn.Parameter,
@@ -251,8 +274,9 @@ class FusedMoE(torch.nn.Module):
         # If transposed, weight is saved as [input_dim, output_dim]
         # Otherwise, weight is saved as     [output_dim, input_dim]
         # Default is not transposed/input dim is dim 1
-        input_dim = getattr(param, "input_dim", 1)
-        output_dim = getattr(param, "output_dim", 0)
+        loaded_weight = loaded_weight.t().contiguous()
+        input_dim = getattr(param, "input_dim", 0)
+        output_dim = getattr(param, "output_dim", 1)
 
         # Index the loaded weight for tp sharding.
         # down_proj: "RowParallel" so tp sharding on input_dim
@@ -310,19 +334,22 @@ class FusedMoE(torch.nn.Module):
 
         if "weight_scale" in weight_name:
             quant_method = getattr(param, "quant_method", None)
-            if (quant_method == WeightScaleSupported.CHANNEL.value
-                    or quant_method == WeightScaleSupported.GROUP.value):
-                self._load_per_channel_group_weight_scale(
+            if quant_method == WeightScaleSupported.CHANNEL.value:
+                self._load_per_channel_weight_scale(
                     shard_id=shard_id,
                     loaded_weight=loaded_weight,
                     expert_data=expert_data,
                     tp_rank=tp_rank)
+            elif quant_method == WeightScaleSupported.GROUP.value:
+                self._load_group_weight_scale(shard_id=shard_id,
+                                              loaded_weight=loaded_weight,
+                                              expert_data=expert_data,
+                                              tp_rank=tp_rank)
             elif quant_method == WeightScaleSupported.TENSOR.value:
                 self._load_per_tensor_weight_scale(shard_id=shard_id,
                                                    param=param,
                                                    loaded_weight=loaded_weight,
                                                    expert_id=expert_id)
-
             else:
                 raise ValueError(
                     f"quant method must be one of {WEIGHT_SCALE_SUPPORTED}")
