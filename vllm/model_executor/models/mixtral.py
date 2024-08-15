@@ -469,51 +469,6 @@ class MixtralModel(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-
-class QuantMixtralModel(nn.Module):
-    def __init__(
-        self,
-        config: MixtralConfig,
-        use_fused_moe: bool,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-    ) -> None:
-        super().__init__()
-        self.padding_idx = config.pad_token_id
-        self.vocab_size = config.vocab_size
-
-        self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
-        )
-        self.layers = nn.ModuleList(
-            [
-                MixtralDecoderLayer(
-                    config, use_fused_moe, cache_config, quant_config=quant_config
-                )
-                for _ in range(config.num_hidden_layers)
-            ]
-        )
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-    ) -> torch.Tensor:
-        hidden_states = self.embed_tokens(input_ids)
-        residual = None
-        for i in range(len(self.layers)):
-            layer = self.layers[i]
-            hidden_states, residual = layer(
-                positions, hidden_states, kv_caches[i], attn_metadata, residual
-            )
-        hidden_states, _ = self.norm(hidden_states, residual)
-        return hidden_states
-
-
 class MixtralForCausalLM(nn.Module, SupportsLoRA):
     fall_back_to_pt_during_load = False
 
@@ -612,6 +567,80 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+        ]
+
+        # Params for weights, fp8 weight scales, fp8 activation scales
+        # (param_name, weight_name, expert_id, shard_id)
+        expert_params_mapping = FusedMoE.make_expert_params_mapping(
+            ckpt_gate_proj_name="w1",
+            ckpt_down_proj_name="w2",
+            ckpt_up_proj_name="w3",
+            num_experts=self.config.num_local_experts,
+        )
+
+        params_dict = dict(self.named_parameters())
+        for name, loaded_weight in weights:
+            if "rotary_emb.inv_freq" in name:
+                continue
+
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                # Skip layers on other devices.
+                if is_pp_missing_parameter(name, self):
+                    continue
+
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id, is_quantized=True)
+                break
+            else:
+                for mapping in expert_params_mapping:
+                    param_name, weight_name, expert_id, shard_id = mapping
+                    if weight_name not in name:
+                        continue
+                    name = name.replace(weight_name, param_name)
+                    # Skip layers on other devices.
+                    if is_pp_missing_parameter(name, self):
+                        continue
+                    param = params_dict[name]
+                    weight_loader = param.weight_loader
+                    weight_loader(
+                        param,
+                        loaded_weight,
+                        weight_name,
+                        shard_id=shard_id,
+                        expert_id=expert_id,
+                        is_quantized=True,
+                    )
+                    break
+                else:
+                    # Skip loading extra bias for GPTQ models.
+                    if name.endswith(".bias") and name not in params_dict:
+                        continue
+                    # Skip layers on other devices.
+                    if is_pp_missing_parameter(name, self):
+                        continue
+                    # Remapping the name of FP8 kv-scale.
+                    name = maybe_remap_kv_scale_name(name, params_dict)
+                    if name is None:
+                        continue
+
+                    param = params_dict[name]
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
+                    weight_loader(param, loaded_weight)
     # def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
     #     stacked_params_mapping = [
     #         # (param_name, shard_name, shard_id)
@@ -620,20 +649,10 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
     #         ("qkv_proj", "v_proj", "v"),
     #     ]
 
-    #     # Params for weights, fp8 weight scales, fp8 activation scales
-    #     # (param_name, weight_name, expert_id, shard_id)
-    #     expert_params_mapping = FusedMoE.make_expert_params_mapping(
-    #         ckpt_gate_proj_name="w1",
-    #         ckpt_down_proj_name="w2",
-    #         ckpt_up_proj_name="w3",
-    #         num_experts=self.config.num_local_experts,
-    #     )
-
     #     params_dict = dict(self.named_parameters())
     #     for name, loaded_weight in weights:
     #         if "rotary_emb.inv_freq" in name:
     #             continue
-
     #         for param_name, weight_name, shard_id in stacked_params_mapping:
     #             if weight_name not in name:
     #                 continue
@@ -641,272 +660,63 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
     #             # Skip loading extra bias for GPTQ models.
     #             if name.endswith(".bias") and name not in params_dict:
     #                 continue
-    #             # Skip layers on other devices.
-    #             if is_pp_missing_parameter(name, self):
-    #                 continue
-
     #             param = params_dict[name]
     #             weight_loader = param.weight_loader
-    #             weight_loader(param, loaded_weight, shard_id, is_quantized=True)
+    #             weight_loader(param, loaded_weight, shard_id)
     #             break
     #         else:
-    #             for mapping in expert_params_mapping:
-    #                 param_name, weight_name, expert_id, shard_id = mapping
-    #                 if weight_name not in name:
-    #                     continue
-    #                 name = name.replace(weight_name, param_name)
-    #                 # Skip layers on other devices.
-    #                 if is_pp_missing_parameter(name, self):
-    #                     continue
-    #                 param = params_dict[name]
-    #                 weight_loader = param.weight_loader
-    #                 weight_loader(
-    #                     param,
-    #                     loaded_weight,
-    #                     weight_name,
-    #                     shard_id=shard_id,
-    #                     expert_id=expert_id,
-    #                     is_quantized=True,
-    #                 )
-    #                 break
-    #             else:
-    #                 # Skip loading extra bias for GPTQ models.
-    #                 if name.endswith(".bias") and name not in params_dict:
-    #                     continue
-    #                 # Skip layers on other devices.
-    #                 if is_pp_missing_parameter(name, self):
-    #                     continue
-    #                 # Remapping the name of FP8 kv-scale.
-    #                 name = maybe_remap_kv_scale_name(name, params_dict)
-    #                 if name is None:
+    #             # Skip loading extra bias for GPTQ models.
+    #             if name.endswith(".bias") and name not in params_dict:
+    #                 continue
+
+    #             if self.use_fused_moe:
+    #                 if (
+    #                     "block_sparse_moe.experts." in name
+    #                     and ".w1." not in name
+    #                     and ".w2." not in name
+    #                     and ".w3." not in name
+    #                     and name not in params_dict
+    #                 ):
     #                     continue
 
-    #                 param = params_dict[name]
+    #                 if ".qzeros" in name:
+    #                     continue
+
+    #                 shard_id = None
+    #                 expert_id = 0
+
+    #                 has_any_numbered = (
+    #                     ".qweight" in name or ".scales" in name or ".g_idx" in name
+    #                 )
+    #                 if has_any_numbered and (".w1." in name):
+    #                     name = name.replace(".w1.", ".w13_")
+    #                     shard_id = 0
+    #                 if has_any_numbered and (".w2." in name):
+    #                     name = name.replace(".w2.", ".w2_")
+    #                     shard_id = 0
+    #                 if has_any_numbered and (".w3." in name):
+    #                     name = name.replace(".w3.", ".w13_")
+    #                     shard_id = 1
+
+    #                 exp_string = re.search(r"\.experts\.\d+.", name)
+    #                 if exp_string:
+    #                     exp_string = exp_string.group(0)
+    #                     expert_id = int(exp_string.split(".")[2])
+    #                     name = name.replace(exp_string, ".experts.")
+
+    #             else:
+    #                 if "block_sparse_moe.experts." in name and name not in params_dict:
+    #                     continue
+
+    #             param = params_dict[name]
+
+    #             if self.use_fused_moe and shard_id is not None:
+    #                 weight_loader = getattr(
+    #                     param, "weight_loader", default_weight_loader
+    #                 )
+    #                 weight_loader(param, loaded_weight, name, shard_id, expert_id, True)
+    #             else:
     #                 weight_loader = getattr(
     #                     param, "weight_loader", default_weight_loader
     #                 )
     #                 weight_loader(param, loaded_weight)
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
-
-        params_dict = dict(self.named_parameters())
-        for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-
-                if self.use_fused_moe:
-                    if (
-                        "block_sparse_moe.experts." in name
-                        and ".w1." not in name
-                        and ".w2." not in name
-                        and ".w3." not in name
-                        and name not in params_dict
-                    ):
-                        continue
-
-                    if ".qzeros" in name:
-                        continue
-
-                    shard_id = None
-                    expert_id = 0
-
-                    has_any_numbered = (
-                        ".qweight" in name or ".scales" in name or ".g_idx" in name
-                    )
-                    if has_any_numbered and (".w1." in name):
-                        name = name.replace(".w1.", ".w13_")
-                        shard_id = 0
-                    if has_any_numbered and (".w2." in name):
-                        name = name.replace(".w2.", ".w2_")
-                        shard_id = 0
-                    if has_any_numbered and (".w3." in name):
-                        name = name.replace(".w3.", ".w13_")
-                        shard_id = 1
-
-                    exp_string = re.search(r"\.experts\.\d+.", name)
-                    if exp_string:
-                        exp_string = exp_string.group(0)
-                        expert_id = int(exp_string.split(".")[2])
-                        name = name.replace(exp_string, ".experts.")
-
-                else:
-                    if "block_sparse_moe.experts." in name and name not in params_dict:
-                        continue
-
-                param = params_dict[name]
-
-                if self.use_fused_moe and shard_id is not None:
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight, name, shard_id, expert_id, True)
-                else:
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
-
-
-class QuantizedMixtralForCausalLM(nn.Module):
-    fall_back_to_pt_during_load = False
-
-    def __init__(
-        self,
-        config: MixtralConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-    ) -> None:
-        super().__init__()
-
-        # TODO check runs with dtype=float16
-        self.use_fused_moe = config.torch_dtype != torch.float8_e4m3fn
-
-        self.config = config
-        self.quant_config = quant_config
-        self.model = QuantMixtralModel(
-            config, self.use_fused_moe, cache_config, quant_config
-        )
-        self.lm_head = ParallelLMHead(
-            config.vocab_size, config.hidden_size, quant_config=quant_config
-        )
-        self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = Sampler()
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, kv_caches, attn_metadata)
-        return hidden_states
-
-    def compute_logits(
-        self, hidden_states: torch.Tensor, sampling_metadata: SamplingMetadata
-    ) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
-        return logits
-
-    # def make_empty_intermediate_tensors(
-    #     self, batch_size: int, dtype: torch.dtype, device: torch.device
-    # ) -> IntermediateTensors:
-    #     return IntermediateTensors(
-    #         {
-    #             "hidden_states": torch.zeros(
-    #                 (batch_size, self.config.hidden_size), dtype=dtype, device=device
-    #             ),
-    #             "residual": torch.zeros(
-    #                 (batch_size, self.config.hidden_size), dtype=dtype, device=device
-    #             ),
-    #         }
-    #     )
-
-    def sample(
-        self,
-        logits: Optional[torch.Tensor],
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
-
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
-
-        params_dict = dict(self.named_parameters())
-        for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-
-                if self.use_fused_moe:
-                    if (
-                        "block_sparse_moe.experts." in name
-                        and ".w1." not in name
-                        and ".w2." not in name
-                        and ".w3." not in name
-                        and name not in params_dict
-                    ):
-                        continue
-
-                    if ".qzeros" in name:
-                        continue
-
-                    shard_id = None
-                    expert_id = 0
-
-                    has_any_numbered = (
-                        ".qweight" in name or ".scales" in name or ".g_idx" in name
-                    )
-                    if has_any_numbered and (".w1." in name):
-                        name = name.replace(".w1.", ".w13_")
-                        shard_id = 0
-                    if has_any_numbered and (".w2." in name):
-                        name = name.replace(".w2.", ".w2_")
-                        shard_id = 0
-                    if has_any_numbered and (".w3." in name):
-                        name = name.replace(".w3.", ".w13_")
-                        shard_id = 1
-
-                    exp_string = re.search(r"\.experts\.\d+.", name)
-                    if exp_string:
-                        exp_string = exp_string.group(0)
-                        expert_id = int(exp_string.split(".")[2])
-                        name = name.replace(exp_string, ".experts.")
-
-                else:
-                    if "block_sparse_moe.experts." in name and name not in params_dict:
-                        continue
-
-                param = params_dict[name]
-
-                if self.use_fused_moe and shard_id is not None:
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight, name, shard_id, expert_id, True)
-                else:
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
