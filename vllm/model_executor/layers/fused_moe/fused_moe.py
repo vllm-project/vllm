@@ -444,7 +444,7 @@ def get_config_dtype_str(dtype: torch.dtype,
                          use_int8_w8a16: Optional[bool] = False,
                          use_fp8_w8a8: Optional[bool] = False):
     if use_fp8_w8a8:
-        return "fp8"
+        return "fp8_w8a8"
     elif use_int8_w8a16:
         return "int8_w8a16"
     elif dtype == torch.float:

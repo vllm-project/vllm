@@ -181,12 +181,7 @@ class BenchmarkWorker:
         use_int8_w8a16: bool,
     ) -> Tuple[Dict[str, int], float]:
         torch.cuda.manual_seed_all(self.seed)
-
-        dtype_str = None
-        if use_fp8_w8a8:
-            dtype_str = "float8"
-        elif use_int8_w8a16:
-            dtype_str = "int8"
+        dtype_str = get_config_dtype_str(dtype, use_int8_w8a16, use_int8_w8a16)
         # NOTE(woosuk): The current naming convention uses w2.shape[2], which
         # is the intermediate size after silu_and_mul.
         op_config = get_moe_configs(num_experts, shard_intermediate_size // 2,
