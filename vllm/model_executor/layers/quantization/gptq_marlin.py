@@ -539,8 +539,6 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
                             device=device),
                 requires_grad=False,
             )
-        # logger.error(f"W13 qweight size - {layer.w13_qweight.size()}")
-        # logger.error(f"Quant Config: {self.quant_config}")
         # Repack weights
         marlin_w13_qweight = ops.gptq_marlin_moe_repack(
             layer.w13_qweight,
@@ -567,7 +565,6 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             group_size=self.quant_config.group_size,
         )
         replace_tensor(layer, "w13_scales", marlin_w13_scales)
-        # logger.error(f"{layer.w2_scales.size()}, {layer.intermediate_size_per_partition}, {self.quant_config.group_size}")
         marlin_w2_scales = marlin_moe_permute_scales(
             s=layer.w2_scales,
             size_k=layer.w2_scales.shape[1] * self.quant_config.pack_factor,
