@@ -479,8 +479,7 @@ class LLM:
         "prompts",
         "prompt_token_ids",
         is_deprecated=lambda: LLM.DEPRECATE_LEGACY,
-        additional_message="Please use the 'inputs' parameter "
-        "instead.",
+        additional_message="Please use the 'inputs' parameter instead.",
     )
     def encode(
         self,
