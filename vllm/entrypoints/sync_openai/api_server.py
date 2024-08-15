@@ -25,8 +25,9 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse, ChatMessage, CompletionRequest,
-    CompletionResponse, CompletionResponseChoice, DeltaMessage, ErrorResponse,
-    ModelCard, ModelList, ModelPermission, UsageInfo)
+    CompletionResponse, CompletionResponseChoice,
+    CompletionResponseStreamChoice, CompletionStreamResponse, DeltaMessage,
+    ErrorResponse, ModelCard, ModelList, ModelPermission, UsageInfo)
 from vllm.entrypoints.openai.serving_chat import (ChatMessageParseResult,
                                                   ConversationMessage)
 from vllm.logger import init_logger
@@ -174,18 +175,18 @@ async def completion_generator(model, result_queue, choices, created_time,
             request_id, token, stats = await result_queue.get()
 
             choice_idx = choices[request_id]
-            res = CompletionResponse(id=request_id,
-                                     created=created_time,
-                                     model=model,
-                                     choices=[
-                                         CompletionResponseChoice(
-                                             index=choice_idx,
-                                             text=token,
-                                             logprobs=None,
-                                             finish_reason=None,
-                                             stop_reason=None)
-                                     ],
-                                     usage=None)
+            res = CompletionStreamResponse(id=request_id,
+                                           created=created_time,
+                                           model=model,
+                                           choices=[
+                                               CompletionResponseStreamChoice(
+                                                   index=choice_idx,
+                                                   text=token,
+                                                   logprobs=None,
+                                                   finish_reason=None,
+                                                   stop_reason=None)
+                                           ],
+                                           usage=None)
             if stats is not None:
                 res.usage = UsageInfo()
                 res.usage.completion_tokens = stats.get("tokens", 0)
