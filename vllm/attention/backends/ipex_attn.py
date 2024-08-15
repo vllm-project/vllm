@@ -288,15 +288,28 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                                             attn_metadata.seq_lens,
                                             sum(attn_metadata.seq_lens),
                                             query.dtype).to(query.device)
-                out = scaled_dot_product_attention(
-                    query,
-                    key,
-                    value,
-                    attn_mask=mask,
-                    dropout_p=0.0,
-                    is_causal=False,
-                    scale=self.scale).movedim(query.dim() - 2,
-                                                1).contiguous()
+                import os
+                should_split_qkv = os.getenv("IPEX_LLM_SPLIT_QKV", None)
+                if should_split_qkv is None:
+                    out = torch.nn.functional.scaled_dot_product_attention(
+                        query,
+                        key,
+                        value,
+                        attn_mask=mask,
+                        dropout_p=0.0,
+                        is_causal=False,
+                        scale=self.scale).movedim(query.dim() - 2, 1).contiguous()
+                else:
+                    out = []
+                    block_size = 2
+                    query_split = torch.split(query, block_size, dim=1)
+                    key_split = torch.split(key, block_size, dim=1)
+                    value_split = torch.split(value, block_size, dim=1)
+                    for q, k, v in zip(query_split, key_split, value_split):
+                        out_split = torch.nn.functional.scaled_dot_product_attention(
+                            q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=False, scale=self.scale)
+                        out.append(out_split)
+                    out = torch.cat(out, dim=1).movedim(query.dim() - 2, 1).contiguous()
                 output = out.view_as(query).to(query.dtype)
             else:
                 # prefix-enabled attention
