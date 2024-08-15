@@ -124,8 +124,6 @@ class RequestOutput:
 
     @classmethod
     def from_seq_group(cls, seq_group: SequenceGroup) -> "RequestOutput":
-        # seq_group.seqs[0].data.last_draft_token_ids
-        # [1, 2, 3, 4]
         if seq_group.sampling_params is None:
             raise ValueError(
                 "Sampling parameters are missing for a CompletionRequest.")
@@ -164,8 +162,6 @@ class RequestOutput:
                 seq.data.decoded_draft_sequence,
                 seq.data.decoded_scorer_sequence) for seq in top_n_seqs
         ]
-
-        # todo: replace last draft with just draft since in order to get history u can hust use streaming
 
         # Every sequence in the sequence group should have the same prompt.
         prompt = seq_group.prompt
