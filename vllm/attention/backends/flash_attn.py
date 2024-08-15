@@ -22,7 +22,12 @@ from vllm_flash_attn import flash_attn_with_kvcache as _flash_attn_with_kvcache
 
 
 @torch.library.custom_op("vllm::flash_attn_varlen_func",
-                         mutates_args="unknown")
+                         mutates_args=[
+                             "q", "k", "v", "cu_seqlens_q", "cu_seqlens_k",
+                             "max_seqlen_q", "max_seqlen_k", "softmax_scale",
+                             "causal", "window_size", "softcap",
+                             "alibi_slopes", "block_table"
+                         ])
 def flash_attn_varlen_func(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -87,7 +92,11 @@ def _(
 
 
 @torch.library.custom_op("vllm::flash_attn_with_kvcache",
-                         mutates_args="unknown")
+                         mutates_args=[
+                             "decode_query", "key_cache", "value_cache",
+                             "cache_seqlens", "block_table", "softmax_scale",
+                             "causal", "alibi_slopes", "softcap"
+                         ])
 def flash_attn_with_kvcache(
     decode_query: torch.Tensor,
     key_cache: torch.Tensor,
