@@ -124,9 +124,7 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
                              inplace=True,
                              use_int8_w8a16=True,
                              w1_scale=layer.w13_scale,
-                             w2_scale=layer.w2_scale,
-                             a1_scale=layer.w13_input_scale,
-                             a2_scale=layer.w2_input_scale)
+                             w2_scale=layer.w2_scale)
 
 
 
@@ -143,19 +141,19 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
             device = get_tp_group().device
             loaded_weight = loaded_weight.to(device)
             # w1, gate_proj case: Load into first shard of w13.
-            if shard_id == 0:
+            if shard_id == "w1":
                 scales = quantize_in_place_and_get_scales(
                     loaded_weight[shard, :])
                 layer.w13_scale.data[expert_id, 0:shard_size].copy_(scales[:,
                                                                            0])
             # w3, up_proj case: Load into second shard of w13.
-            elif shard_id == 2:
+            elif shard_id == "w3":
                 scales = quantize_in_place_and_get_scales(
                     loaded_weight[shard, :])
                 layer.w13_scale.data[expert_id, shard_size:2 *
                                      shard_size].copy_(scales[:, 0])
             # w2, down_proj case: Load into only shard of w2.
-            elif shard_id == 1:
+            elif shard_id == "w2":
                 scales = quantize_in_place_and_get_scales(loaded_weight[:,
                                                                         shard])
                 layer.w2_scale.data[expert_id, :].copy_(scales[:, 0])
