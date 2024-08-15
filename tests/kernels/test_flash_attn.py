@@ -107,7 +107,7 @@ def test_flash_attn_with_paged_kv(
                                  dtype=torch.int32)
 
     output = torch.ops.vllm.flash_attn_with_kvcache(
-        q=query.unsqueeze(1),
+        query.unsqueeze(1),
         k_cache=key_cache,
         v_cache=value_cache,
         softmax_scale=scale,
