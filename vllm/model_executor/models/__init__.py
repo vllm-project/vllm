@@ -5,7 +5,6 @@ from typing import Dict, List, Optional, Tuple, Type
 import torch.nn as nn
 
 from vllm.logger import init_logger
-from vllm.model_executor.models.interfaces import supports_multimodal
 from vllm.utils import is_hip
 
 logger = init_logger(__name__)
@@ -185,6 +184,9 @@ class ModelRegistry:
     @staticmethod
     def is_multimodal_model(model_arch: str) -> bool:
         model_cls = ModelRegistry._try_load_model_cls(model_arch)
+
+        # Avoid circular import
+        from vllm.model_executor.models.interfaces import supports_multimodal
 
         return supports_multimodal(model_cls)
 
