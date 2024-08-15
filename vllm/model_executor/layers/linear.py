@@ -990,8 +990,9 @@ class RowParallelLinear(LinearBase):
         # Materialize GGUF UninitializedParameter
         if is_gguf_weight and isinstance(param, UninitializedParameter):
             weight_shape = list(loaded_weight.shape)
-            weight_shape[input_dim] = weight_shape[input_dim] // tp_size
-            param.materialize(weight_shape, dtype=loaded_weight.dtype)
+            if input_dim:
+                weight_shape[input_dim] = weight_shape[input_dim] // tp_size
+            param.materialize(tuple(weight_shape), dtype=loaded_weight.dtype)
 
         param_data = param.data
         if input_dim is not None:
