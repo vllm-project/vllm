@@ -33,7 +33,7 @@ def test_clip_image_processor(image_assets, mm_registry, dtype, size_factor):
     )
     mm_config = MultiModalConfig(limit_per_prompt={"image": 1})
 
-    mm_registry.init_mm_limits_per_prompt(model_config, mm_config)
+    mm_registry.init_mm_limits_per_prompt(model_config)
 
     for asset in image_assets:
         image = rescale_image_size(asset.pil_image, size_factor)
@@ -76,7 +76,7 @@ def test_llava_next_image_processor(image_assets, mm_registry, dtype,
     )
     mm_config = MultiModalConfig(limit_per_prompt={"image": 1})
 
-    mm_registry.init_mm_limits_per_prompt(model_config, mm_config)
+    mm_registry.init_mm_limits_per_prompt(model_config)
 
     for asset in image_assets:
         image = rescale_image_size(asset.pil_image, size_factor)
@@ -118,7 +118,7 @@ def test_mm_limits(image_assets, mm_registry, num_images, limit, is_valid):
     )
     mm_config = MultiModalConfig(limit_per_prompt={"image": limit})
 
-    mm_registry.init_mm_limits_per_prompt(model_config, mm_config)
+    mm_registry.init_mm_limits_per_prompt(model_config)
 
     image = image_assets[0].pil_image
     if num_images == 0:
@@ -148,7 +148,7 @@ def test_image_mapper_multi(image_assets, mm_registry, num_images):
     )
     mm_config = MultiModalConfig(limit_per_prompt={"image": num_images})
 
-    mm_registry.init_mm_limits_per_prompt(model_config, mm_config)
+    mm_registry.init_mm_limits_per_prompt(model_config)
 
     image = image_assets[0].pil_image
     mm_inputs = {"image": [image] * num_images}

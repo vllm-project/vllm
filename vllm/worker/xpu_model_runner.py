@@ -171,7 +171,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
 
         input_registry = self.input_registry
         mm_registry = self.mm_registry
-        mm_registry.init_mm_limits_per_prompt(model_config, mm_config)
+        mm_registry.init_mm_limits_per_prompt(model_config)
 
         max_mm_tokens = mm_registry.get_max_multimodal_tokens(model_config)
         if max_mm_tokens > 0:
