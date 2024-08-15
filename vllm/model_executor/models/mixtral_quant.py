@@ -51,7 +51,8 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
-
+import logging
+logger = logging.getLogger(__name__)
 class MixtralMLP(nn.Module):
 
     def __init__(
@@ -371,7 +372,7 @@ class MixtralForCausalLM(nn.Module):
 
         # TODO check runs with dtype=float16
         self.use_fused_moe = (config.torch_dtype != torch.float8_e4m3fn)
-
+        logger.error(f"Using fused MoE: {self.use_fused_moe}")
         self.config = config
         self.quant_config = quant_config
         self.model = MixtralModel(config, self.use_fused_moe, cache_config,
