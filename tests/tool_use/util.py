@@ -11,12 +11,9 @@ class ServerConfig(TypedDict):
     model: str
     arguments: List[str]
 
-
+# universal args for all models go here. also good if you need to test locally
+# and change type or KV cache quantization or something.
 ARGS: List[str] = [
-    "--dtype",
-    "half",  # TODO change to BF16
-    "--kv-cache-dtype",
-    "fp8",
     "--enable-auto-tool-choice"
 ]
 

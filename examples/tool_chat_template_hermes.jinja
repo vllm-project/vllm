@@ -32,8 +32,8 @@
 
 
 {{- bos_token }}
+{{- "You are a function calling AI model. You are provided with function signatures within <tools></tools> XML tags. You may call one or more functions to assist with the user query. Don't make assumptions about what values to plug into functions. Here are the available tools: <tools> " }}
 {%- if tools is iterable and tools | length > 0 %}
-    {{- "You are a function calling AI model. You are provided with function signatures within <tools></tools> XML tags. You may call one or more functions to assist with the user query. Don't make assumptions about what values to plug into functions. Here are the available tools: <tools> " }}
     {%- for tool in tools %}
         {%- if tool.function is defined %}
             {%- set tool = tool.function %}
@@ -73,49 +73,58 @@
             {{- "\n" }}
         {%- endif %}
     {%- endfor %}
-    {{- " </tools>" }}
-    {{- 'Use the following pydantic model json schema for each tool call you will make: {"properties": {"arguments": {"title": "Arguments", "type": "object"}, "name": {"title": "Name", "type": "string"}}, "required": ["arguments", "name"], "title": "FunctionCall", "type": "object"}
-' }}
-    {{- "For each function call return a json object with function name and arguments within <tool_call></tool_call> XML tags as follows:
-" }}
-    {{- "<tool_call>
-" }}
-    {{- '{"name": <function-name>, "arguments": <args-dict>}
-' }}
-    {{- '</tool_call><|im_end|>' }}
 {%- endif %}
+{{- " </tools>" }}
+{{- 'Use the following pydantic model json schema for each tool call you will make: {"properties": {"name": {"title": "Name", "type": "string"}, "arguments": {"title": "Arguments", "type": "object"}}, "required": ["name", "arguments"], "title": "FunctionCall", "type": "object"}}
+' }}
+{{- "For each function call return a json object with function name and arguments within <tool_call></tool_call> XML tags as follows:
+" }}
+{{- "<tool_call>
+" }}
+{{- '{"name": <function-name>, "arguments": <args-dict>}
+' }}
+{{- '</tool_call><|im_end|>' }}
 {%- for message in messages %}
     {%- if message.role == "user" or message.role == "system" or (message.role == "assistant" and message.tool_calls is not defined) %}
         {{- '<|im_start|>' + message.role + '\n' + message.content + '<|im_end|>' + '\n' }}
-    {%- elif message.role == "assistant" %}
-        {{- '<|im_start|>' + message.role  }}
-        {%- for tool_call in message.tool_calls %}
-            {{- '\n<tool_call>\n' }}
-            {%- if tool_call.function is defined %}
-                {%- set tool_call = tool_call.function %}
-            {%- endif %}
-            {{- '{ ' }}
-            {%- if tool_call.arguments is defined %}
-                {{- '"arguments": ' }}
-                {{- tool_call.arguments|tojson }}
+    {%- elif message.role == "assistant" and message.tool_calls is defined %}
+        {{- '<|im_start|>' + message.role }}
+            {%- for tool_call in message.tool_calls %}
+                {{- '\n<tool_call>\n' }}
+                {%- if tool_call.function is defined %}
+                    {%- set tool_call = tool_call.function %}
+                {%- endif %}
+                {{- '{' }}
+                {{- '"name": "' }}
+                {{- tool_call.name }}
+                {{- '"}' }}
                 {{- ', ' }}
-            {%- endif %}
-            {{- '"name": "' }}
-            {{- tool_call.name }}
-            {{- '"}' }}
-            {{- '\n</tool_call> ' }}
-        {%- endfor %}
+                {%- if tool_call.arguments is defined %}
+                    {{- '"arguments": ' }}
+                    {{- tool_call.arguments|tojson }}
+                {%- endif %}
+                {{- '\n</tool_call>' }}
+            {%- endfor %}
         {{- '<|im_end|>\n' }}
     {%- elif message.role == "tool" %}
         {%- if not message.name is defined %}
             {{- raise_exception("Tool response dicts require a 'name' key indicating the name of the called function!") }}
         {%- endif %}
-        {{- '<|im_start|>' + message.role + '\n<tool_response>\n' }}
-        {{- '{"name": "' }}
-        {{- message.name }}
-        {{- '", "content": ' }}
-        {{- message.content|tojson + '}' }}
-        {{- '\n</tool_response> <|im_end|>\n' }}
+        {%- if loop.previtem and loop.previtem.role != "tool" %}
+            {{- '<|im_start|>tool\n' }}
+        {%- endif %}
+        {{- '<tool_response>\n' }}
+        {{- message.content }}
+        {%- if not loop.last %}
+            {{- '\n</tool_response>\n' }}
+        {%- else %}
+            {{- '\n</tool_response>' }}
+        {%- endif %}
+        {%- if not loop.last and loop.nextitem.role != "tool" %}
+            {{- '<|im_end|>' }}
+        {%- elif loop.last %}
+            {{- '<|im_end|>' }}
+        {%- endif %}
     {%- endif %}
 {%- endfor %}
 {%- if add_generation_prompt %}
