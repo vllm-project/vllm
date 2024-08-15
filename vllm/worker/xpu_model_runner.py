@@ -184,6 +184,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
                     "Setting it to the minimum value of 1.", expr)
                 max_num_seqs = 1
 
+        batch_size = 0
         for group_id in range(max_num_seqs):
             seq_len = (max_num_batched_tokens // max_num_seqs +
                        (group_id < max_num_batched_tokens % max_num_seqs))
