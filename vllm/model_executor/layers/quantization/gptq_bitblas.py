@@ -148,10 +148,8 @@ class GPTQBitBLASConfig(QuantizationConfig):
                         " faster inference")
         return None
 
-    def get_quant_method(
-            self,
-            layer: torch.nn.Module,
-            prefix: str) -> Optional["GPTQBitBLASLinearMethod"]:
+    def get_quant_method(self, layer: torch.nn.Module,
+                         prefix: str) -> Optional["GPTQBitBLASLinearMethod"]:
         if isinstance(layer, LinearBase):
             return GPTQBitBLASLinearMethod(self)
         return None

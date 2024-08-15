@@ -249,8 +249,8 @@ class ModelConfig:
         supported_quantization = [*QUANTIZATION_METHODS]
         rocm_supported_quantization = ["gptq", "squeezellm"]
         optimized_quantization_methods = [
-            "fp8", "marlin", "gptq_marlin_24", "gptq_marlin",
-            "gptq_bitblas", "bitblas", "bitnet_bitblas", "compressed_tensors"
+            "fp8", "marlin", "gptq_marlin_24", "gptq_marlin", "gptq_bitblas",
+            "bitblas", "bitnet_bitblas", "compressed_tensors"
         ]
         tpu_supported_quantization = ["tpu_int8"]
         if self.quantization is not None:

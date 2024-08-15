@@ -105,10 +105,8 @@ class BITNETBitBLASConfig(QuantizationConfig):
                 " faster inference")
         return None
 
-    def get_quant_method(
-            self,
-            layer: torch.nn.Module,
-            prefix: str) -> Optional["BITNETBitBLASLinearMethod"]:
+    def get_quant_method(self, layer: torch.nn.Module,
+                         prefix: str) -> Optional["BITNETBitBLASLinearMethod"]:
         if isinstance(layer, LinearBase):
             return BITNETBitBLASLinearMethod(self)
         return None
