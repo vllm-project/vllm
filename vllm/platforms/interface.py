@@ -1,5 +1,5 @@
 import enum
-from typing import Tuple
+from typing import Tuple, Optional
 
 import torch
 
@@ -24,8 +24,8 @@ class Platform:
         return self._enum == PlatformEnum.TPU
 
     @staticmethod
-    def get_device_capability(device_id: int = 0) -> Tuple[int, int]:
-        raise NotImplementedError
+    def get_device_capability(device_id: int = 0) -> Optional[Tuple[int, int]]:
+        return None
 
     @staticmethod
     def get_device_name(device_id: int = 0) -> str:
