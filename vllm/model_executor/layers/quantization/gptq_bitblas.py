@@ -150,7 +150,8 @@ class GPTQBitBLASConfig(QuantizationConfig):
 
     def get_quant_method(
             self,
-            layer: torch.nn.Module) -> Optional["GPTQBitBLASLinearMethod"]:
+            layer: torch.nn.Module,
+            prefix: str) -> Optional["GPTQBitBLASLinearMethod"]:
         if isinstance(layer, LinearBase):
             return GPTQBitBLASLinearMethod(self)
         return None
