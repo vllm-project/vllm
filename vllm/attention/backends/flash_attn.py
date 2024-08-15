@@ -196,6 +196,39 @@ class FlashAttentionMetadata(AttentionMetadata):
         )
         return self._cached_decode_metadata
 
+    def update_flash_attn_metadata(self, num_seqs,
+                                    num_queries):
+        # When using cudagraph, the num_seqs is padded to the next captured
+        # batch sized, but num_queries tracks the actual number of requests in
+        # the batch. For --enforce-eager mode, num_seqs == num_queries
+        if num_seqs != num_queries:
+            assert num_seqs > num_queries
+            assert self.use_cuda_graph
+
+        assert self.num_prefills == 0
+        assert self.num_prefill_tokens == 0
+        assert self.num_decode_tokens == num_seqs
+        assert self.slot_mapping.shape == (num_seqs, )
+
+        assert len(self.seq_lens) == num_seqs
+        assert self.seq_lens_tensor.shape == (num_seqs, )
+        assert self.max_query_len == 1
+        assert self.max_prefill_seq_len == 0
+        assert self.max_decode_seq_len == max(self.seq_lens)
+
+        assert self.query_start_loc.shape == (num_queries + 1, )
+        assert self.seq_start_loc.shape == (num_seqs + 1, )
+
+        assert self.context_lens_tensor.shape == (num_queries, )
+
+        assert self.block_tables.shape[0] == num_seqs
+
+        # Update query lengths. Note that we update only queries and not seqs,
+        # since tensors may be padded due to captured cuda graph batch size
+        for i in range(num_queries):
+            self.seq_lens[i] += 1
+        self.max_decode_seq_len = max(self.seq_lens)
+
 
 class FlashAttentionMetadataBuilder(
         AttentionMetadataBuilder[FlashAttentionMetadata]):
