@@ -595,7 +595,6 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
-                param = params_dict[name]
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
@@ -603,6 +602,7 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                 if is_pp_missing_parameter(name, self):
                     continue
 
+                param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id, is_quantized=True)
                 break
@@ -613,10 +613,9 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                     if weight_name not in name:
                         continue
                     # Skip layers on other devices.
+                    name = name.replace(weight_name, param_name)
                     if is_pp_missing_parameter(name, self):
                         continue
-                    name = name.replace(weight_name, param_name)
-                    logger.error(name)
                     param = params_dict[name]
                     weight_loader = param.weight_loader
                     weight_loader(
