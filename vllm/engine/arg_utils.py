@@ -781,8 +781,8 @@ class EngineArgs:
             served_model_name=self.served_model_name,
             multimodal_config=multimodal_config)
         cache_config = CacheConfig(
-            block_size=self.block_size if self.device != "neuron"
-                else self.max_num_seqs, # neuron needs block_size = max_num_seqs
+            block_size=self.block_size if self.device != "neuron" else
+            self.max_num_seqs,  # neuron needs block_size = max_num_seqs
             gpu_memory_utilization=self.gpu_memory_utilization,
             swap_space=self.swap_space,
             cache_dtype=self.kv_cache_dtype,

@@ -35,8 +35,7 @@ class NeuronExecutor(ExecutorBase):
             cache_config=self.cache_config,
             local_rank=0,
             rank=0,
-            distributed_init_method=distributed_init_method
-        )
+            distributed_init_method=distributed_init_method)
         self.driver_worker.init_device()
         self.driver_worker.load_model()
 
