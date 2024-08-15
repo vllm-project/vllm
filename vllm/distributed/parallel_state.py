@@ -199,18 +199,10 @@ def initialize_model_parallel(
     if _ENABLE_CUSTOM_ALL_REDUCE:
         from vllm.distributed.device_communicators.custom_all_reduce import (
             CustomAllreduce)
-
-        # max size defaults to 8 MiB, increase to 16 MiB on ROCm
-        # due to later crossover
-        if is_hip():
-            _TP_CA_COMMUNICATOR = CustomAllreduce(group=_TP_CPU_GROUP,
-                                                  device=_LOCAL_RANK,
-                                                  max_size=2 * 8192 * 1024)
-        else:
-            _TP_CA_COMMUNICATOR = CustomAllreduce(
-                group=_TP_CPU_GROUP,
-                device=_LOCAL_RANK,
-            )
+        _TP_CA_COMMUNICATOR = CustomAllreduce(
+            group=_TP_CPU_GROUP,
+            device=_LOCAL_RANK,
+        )
 
     # Build the pipeline model-parallel groups.
     global _PP_DEVICE_GROUP, _PP_CPU_GROUP
