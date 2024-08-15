@@ -120,53 +120,15 @@ class MixtralMoE(nn.Module):
         final_hidden_states = self.experts(hidden_states, router_logits)
         return final_hidden_states.view(orig_shape)
 
-
-class MixtralMLP(nn.Module):
-    def __init__(
-        self,
-        num_experts: int,
-        hidden_size: int,
-        intermediate_size: int,
-        quant_config: Optional[QuantizationConfig] = None,
-    ) -> None:
-        super().__init__()
-        self.num_experts = num_experts
-        self.ffn_dim = intermediate_size
-        self.hidden_dim = hidden_size
-
-        self.w1 = ReplicatedLinear(
-            self.hidden_dim, self.ffn_dim, bias=False, quant_config=quant_config
-        )
-        self.w2 = ReplicatedLinear(
-            self.ffn_dim, self.hidden_dim, bias=False, quant_config=quant_config
-        )
-        self.w3 = ReplicatedLinear(
-            self.hidden_dim, self.ffn_dim, bias=False, quant_config=quant_config
-        )
-
-        # TODO: Use vllm's SiluAndMul
-        self.act_fn = nn.SiLU()
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        w1_out, _ = self.w1(hidden_states)
-        w1_out = self.act_fn(w1_out)
-        w3_out, _ = self.w3(hidden_states)
-        current_hidden_states = w1_out * w3_out
-        current_hidden_states, _ = self.w2(current_hidden_states)
-        return current_hidden_states
-
-
 class QuantMixtralMoE(nn.Module):
     def __init__(
         self,
         config: MixtralConfig,
-        use_fused_moe: bool,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ):
         super().__init__()
         self.config = config
-        self.use_fused_moe = use_fused_moe
         self.quant_config = quant_config
         self.rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -184,35 +146,7 @@ class QuantMixtralMoE(nn.Module):
         if not self.expert_indicies:
             raise ValueError(f"Rank {self.rank} has no experts assigned to it.")
 
-        if self.use_fused_moe:
-            params_dtype = torch.float16
-            self.experts = FusedMoE(
-                num_experts=self.num_total_experts,
-                top_k=self.top_k,
-                hidden_size=config.hidden_size,
-                intermediate_size=config.intermediate_size,
-                params_dtype=params_dtype,
-                reduce_results=True,
-                renormalize=True,
-                quant_config=quant_config,
-                tp_size=self.tp_size,
-                prefix=f"{prefix}.experts",
-            )
-        else:
-            self.experts = nn.ModuleList(
-                [
-                    MixtralMLP(
-                        self.num_total_experts,
-                        config.hidden_size,
-                        config.intermediate_size,
-                        quant_config=quant_config,
-                    )
-                    if idx in self.expert_indicies
-                    else None
-                    for idx in range(self.num_total_experts)
-                ]
-            )
-
+        params_dtype = torch.float16
         self.gate = ReplicatedLinear(
             config.hidden_size,
             self.num_total_experts,
@@ -220,40 +154,27 @@ class QuantMixtralMoE(nn.Module):
             quant_config=None,
             prefix=f"{prefix}.gate",
         )
+        self.experts = FusedMoE(
+            num_experts=self.num_total_experts,
+            top_k=self.top_k,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.intermediate_size,
+            params_dtype=params_dtype,
+            reduce_results=True,
+            renormalize=True,
+            quant_config=quant_config,
+            tp_size=self.tp_size,
+            prefix=f"{prefix}.experts",
+        )
+
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        num_tokens, hidden_dim = hidden_states.shape
+        _, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
         router_logits, _ = self.gate(hidden_states)
 
-        if self.use_fused_moe:
-            ret = self.experts(hidden_states.half(), router_logits)
-            return ret.bfloat16()
-        else:
-            routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
-            routing_weights, selected_experts = torch.topk(
-                routing_weights, self.top_k, dim=-1
-            )
-            routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
-
-            final_hidden_states = None
-            for expert_idx in self.expert_indicies:
-                expert_layer = self.experts[expert_idx]
-                expert_mask = selected_experts == expert_idx
-                expert_weights = (routing_weights * expert_mask).sum(
-                    dim=-1, keepdim=True
-                )
-
-                current_hidden_states = expert_layer(hidden_states).mul_(expert_weights)
-                if final_hidden_states is None:
-                    final_hidden_states = current_hidden_states
-                else:
-                    final_hidden_states.add_(current_hidden_states)
-
-            return tensor_model_parallel_all_reduce(final_hidden_states).view(
-                num_tokens, hidden_dim
-            )
-
+        ret = self.experts(hidden_states.half(), router_logits)
+        return ret.bfloat16()
 
 class MixtralAttention(nn.Module):
     def __init__(
@@ -642,82 +563,3 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                         param, "weight_loader", default_weight_loader
                     )
                     weight_loader(param, loaded_weight)
-    # def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-    #     stacked_params_mapping = [
-    #         # (param_name, shard_name, shard_id)
-    #         ("qkv_proj", "q_proj", "q"),
-    #         ("qkv_proj", "k_proj", "k"),
-    #         ("qkv_proj", "v_proj", "v"),
-    #     ]
-
-    #     params_dict = dict(self.named_parameters())
-    #     for name, loaded_weight in weights:
-    #         if "rotary_emb.inv_freq" in name:
-    #             continue
-    #         for param_name, weight_name, shard_id in stacked_params_mapping:
-    #             if weight_name not in name:
-    #                 continue
-    #             name = name.replace(weight_name, param_name)
-    #             # Skip loading extra bias for GPTQ models.
-    #             if name.endswith(".bias") and name not in params_dict:
-    #                 continue
-    #             param = params_dict[name]
-    #             weight_loader = param.weight_loader
-    #             weight_loader(param, loaded_weight, shard_id)
-    #             break
-    #         else:
-    #             # Skip loading extra bias for GPTQ models.
-    #             if name.endswith(".bias") and name not in params_dict:
-    #                 continue
-
-    #             if self.use_fused_moe:
-    #                 if (
-    #                     "block_sparse_moe.experts." in name
-    #                     and ".w1." not in name
-    #                     and ".w2." not in name
-    #                     and ".w3." not in name
-    #                     and name not in params_dict
-    #                 ):
-    #                     continue
-
-    #                 if ".qzeros" in name:
-    #                     continue
-
-    #                 shard_id = None
-    #                 expert_id = 0
-
-    #                 has_any_numbered = (
-    #                     ".qweight" in name or ".scales" in name or ".g_idx" in name
-    #                 )
-    #                 if has_any_numbered and (".w1." in name):
-    #                     name = name.replace(".w1.", ".w13_")
-    #                     shard_id = 0
-    #                 if has_any_numbered and (".w2." in name):
-    #                     name = name.replace(".w2.", ".w2_")
-    #                     shard_id = 0
-    #                 if has_any_numbered and (".w3." in name):
-    #                     name = name.replace(".w3.", ".w13_")
-    #                     shard_id = 1
-
-    #                 exp_string = re.search(r"\.experts\.\d+.", name)
-    #                 if exp_string:
-    #                     exp_string = exp_string.group(0)
-    #                     expert_id = int(exp_string.split(".")[2])
-    #                     name = name.replace(exp_string, ".experts.")
-
-    #             else:
-    #                 if "block_sparse_moe.experts." in name and name not in params_dict:
-    #                     continue
-
-    #             param = params_dict[name]
-
-    #             if self.use_fused_moe and shard_id is not None:
-    #                 weight_loader = getattr(
-    #                     param, "weight_loader", default_weight_loader
-    #                 )
-    #                 weight_loader(param, loaded_weight, name, shard_id, expert_id, True)
-    #             else:
-    #                 weight_loader = getattr(
-    #                     param, "weight_loader", default_weight_loader
-    #                 )
-    #                 weight_loader(param, loaded_weight)
