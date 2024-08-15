@@ -81,12 +81,7 @@ def _(
     alibi_slopes: Optional[List[float]] = None,
     block_table: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    # NOTE: shape can be incorrect.
-    # just annotate the shape to pass Dynamo
-    return torch.empty(q.shape,
-                       dtype=q.dtype,
-                       layout=q.layout,
-                       device=q.device)
+    return torch.empty_like(q)
 
 
 @torch.library.custom_op("vllm::flash_attn_with_kvcache",
@@ -133,12 +128,7 @@ def _(
     alibi_slopes: Optional[List[int]] = None,
     softcap: float = 0.0,
 ) -> torch.Tensor:
-    # NOTE: shape can be incorrect.
-    # just annotate the shape to pass Dynamo
-    return torch.empty(decode_query.shape,
-                       dtype=decode_query.dtype,
-                       layout=decode_query.layout,
-                       device=decode_query.device)
+    return torch.empty_like(decode_query)
 
 
 class FlashAttentionBackend(AttentionBackend):
