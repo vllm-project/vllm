@@ -12,6 +12,7 @@ from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          apply_chat_template)
 from vllm.inputs import (PromptInputs, TextPrompt, TokensPrompt,
                          parse_and_batch_prompt)
+from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.guided_decoding import (

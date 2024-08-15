@@ -1,7 +1,6 @@
 """Sequence and its related classes."""
 import copy
 import enum
-import math
 from abc import ABC, abstractmethod
 from array import array
 from collections import defaultdict
@@ -9,9 +8,10 @@ from dataclasses import dataclass, field
 from typing import (TYPE_CHECKING, Dict, List, Mapping, Optional, Set, Tuple,
                     Union, cast)
 
+import numpy
 import torch
 
-from vllm.inputs import is_valid_encoder_decoder_llm_inputs
+from vllm.inputs.parse import is_valid_encoder_decoder_llm_inputs
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -93,6 +93,13 @@ class RequestMetrics:
         first_token_time: The time when the first token was generated.
         time_in_queue: The time the request spent in the queue.
         finished_time: The time when the request was finished.
+        scheduler_time: The time spent in the scheduler when this request was
+                        being considered by the scheduler.
+        model_forward_time: The time spent in the model forward pass when this
+                            request was in the batch.
+        model_execute_time: The time spent in the model execute function. This
+                            will include model forward, block/sync across
+                            workers, cpu-gpu sync time and sampling time.
     """
     arrival_time: float
     last_token_time: float
@@ -100,6 +107,9 @@ class RequestMetrics:
     first_token_time: Optional[float]
     time_in_queue: Optional[float]
     finished_time: Optional[float] = None
+    scheduler_time: Optional[float] = None
+    model_forward_time: Optional[float] = None
+    model_execute_time: Optional[float] = None
 
 
 class SequenceData:
@@ -330,7 +340,7 @@ class Sequence:
 
     @property
     def n_blocks(self) -> int:
-        return math.ceil(self.get_len() / self.block_size)
+        return (self.get_len() + self.block_size - 1) // self.block_size
 
     @property
     def prompt(self) -> Optional[str]:
@@ -480,6 +490,19 @@ class Sequence:
                 f"num_blocks={self.n_blocks}, ")
 
 
+@dataclass
+class SequenceGroupState:
+    """Mutable state tied to a specific sequence group"""
+
+    # for multi-step decoding
+    num_steps: int = 1
+    current_step: int = 0
+
+    @property
+    def remaining_steps(self) -> int:
+        return self.num_steps - self.current_step
+
+
 class SequenceGroup:
     """A group of sequences that are generated from the same prompt.
 
@@ -514,7 +537,9 @@ class SequenceGroup:
     ) -> None:
         self.request_id = request_id
         self.seqs = seqs
+        self.is_single_seq = len(seqs) == 1
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
+
         self.sampling_params = sampling_params
         self.metrics = RequestMetrics(arrival_time=arrival_time,
                                       last_token_time=arrival_time,
@@ -523,6 +548,7 @@ class SequenceGroup:
                                       time_in_queue=None)
         self.lora_request = lora_request
         self.prompt_logprobs: Optional[PromptLogprobs] = None
+        self.state = SequenceGroupState()
         self.embeddings = embeddings
         self.pooling_params = pooling_params
         self.prompt_adapter_request = prompt_adapter_request
@@ -576,6 +602,10 @@ class SequenceGroup:
     def prompt_adapter_num_virtual_tokens(self) -> int:
         return self.prompt_adapter_request.prompt_adapter_num_virtual_tokens\
                          if self.prompt_adapter_request else 0
+
+    def init_multi_step(self, num_scheduler_steps: int) -> None:
+        self.state.num_steps = num_scheduler_steps
+        self.state.current_step = 0
 
     def get_last_latency(self, now: float) -> Optional[float]:
         """Sets the last token time for Request level timings."""
@@ -635,6 +665,10 @@ class SequenceGroup:
     ) -> List[Sequence]:
         if status is None:
             return self.seqs
+
+        if self.is_single_seq:
+            return self.seqs if self.seqs[0].status == status else []
+
         return [seq for seq in self.seqs if seq.status == status]
 
     def is_encoder_decoder(self) -> bool:
@@ -644,9 +678,15 @@ class SequenceGroup:
         return self.encoder_seq
 
     def get_unfinished_seqs(self) -> List[Sequence]:
+        if self.is_single_seq:
+            return self.seqs if not self.seqs[0].is_finished() else []
+
         return [seq for seq in self.seqs if not seq.is_finished()]
 
     def get_finished_seqs(self) -> List[Sequence]:
+        if self.is_single_seq:
+            return self.seqs if self.seqs[0].is_finished() else []
+
         return [seq for seq in self.seqs if seq.is_finished()]
 
     def update_num_computed_tokens(self, num_new_computed_tokens: int):
@@ -668,12 +708,21 @@ class SequenceGroup:
         if status is None:
             return len(self.seqs)
 
+        if self.is_single_seq:
+            return 1 if self.seqs[0].status == status else 0
+
         return len(self.get_seqs(status))
 
     def num_unfinished_seqs(self) -> int:
+        if self.is_single_seq:
+            return 1 if not self.seqs[0].is_finished() else 0
+
         return len(self.get_unfinished_seqs())
 
     def num_finished_seqs(self) -> int:
+        if self.is_single_seq:
+            return 1 if self.seqs[0].is_finished() else 0
+
         return len(self.get_finished_seqs())
 
     def find(self, seq_id: int) -> Sequence:
@@ -686,12 +735,14 @@ class SequenceGroup:
             raise ValueError(f"Sequence {seq.seq_id} already exists.")
         self.seqs_dict[seq.seq_id] = seq
         self.seqs.append(seq)
+        self.is_single_seq = len(self.seqs) == 1
 
     def remove(self, seq_id: int) -> None:
         seq = self.seqs_dict.pop(seq_id, None)
         if seq is None:
             raise ValueError(f"Sequence {seq_id} not found.")
         self.seqs.remove(seq)
+        self.is_single_seq = len(self.seqs) == 1
 
     def is_finished(self) -> bool:
         return all(seq.is_finished() for seq in self.seqs)
@@ -724,6 +775,7 @@ class SequenceGroupMetadata:
         lora_request: LoRA request.
         computed_block_nums: The block numbers that are already computed,
             used in prefix caching.
+        state: Internal state tied to this sequence group.
         multi_modal_data: Multi modal data.
         encoder_seq_data: Optional sequence data for encoder prompt
                           (SequenceGroup.encoder_seq). Should be None 
@@ -749,6 +801,7 @@ class SequenceGroupMetadata:
         token_chunk_size: Optional[int] = None,
         lora_request: Optional[LoRARequest] = None,
         computed_block_nums: Optional[List[int]] = None,
+        state: Optional[SequenceGroupState] = None,
         multi_modal_data: Optional["MultiModalDataDict"] = None,
         encoder_seq_data: Optional[SequenceData] = None,
         cross_block_table: Optional[List[int]] = None,
@@ -764,6 +817,7 @@ class SequenceGroupMetadata:
         self.prompt_adapter_request = prompt_adapter_request
         self.computed_block_nums = computed_block_nums
         self.multi_modal_data = multi_modal_data
+        self.state = SequenceGroupState() if state is None else state
         self.encoder_seq_data = encoder_seq_data
         self.cross_block_table = cross_block_table
         self._token_chunk_size = token_chunk_size
@@ -775,9 +829,10 @@ class SequenceGroupMetadata:
         # TODO: We should maintain this states out of the sequence group.
         self.num_speculative_tokens = None
 
-        if self._token_chunk_size is None:
+        if seq_data is not None and self._token_chunk_size is None:
             if is_prompt:
-                self._token_chunk_size = list(seq_data.values())[0].get_len()
+                self._token_chunk_size = next(iter(
+                    seq_data.values())).get_len()
             else:
                 self._token_chunk_size = 1
 
@@ -800,6 +855,10 @@ class SequenceGroupMetadata:
         """Return the number of tokens to be processed (chunk size)."""
         assert self._token_chunk_size is not None
         return self._token_chunk_size
+
+    def finish_step(self) -> None:
+        assert self.state.current_step < self.state.num_steps
+        self.state.current_step += 1
 
 
 class SequenceOutput:
@@ -938,12 +997,20 @@ class SamplerOutput:
 
     # On-device tensor containing the sampled token ids.
     sampled_token_ids: Optional[torch.Tensor] = None
+    sampled_token_ids_numpy: Optional[numpy.ndarray] = None
 
     # Spec decode metrics populated by workers.
     spec_decode_worker_metrics: Optional["SpecDecodeWorkerMetrics"] = None
 
     # Optional last hidden states from the model.
     hidden_states: Optional[torch.Tensor] = None
+
+    # Time taken in the forward pass for this across all workers
+    model_forward_time: Optional[float] = None
+
+    # Time taken in the model execute function. This will include model forward,
+    # block/sync across workers, cpu-gpu sync time and sampling time.
+    model_execute_time: Optional[float] = None
 
     def __getitem__(self, idx: int):
         return self.outputs[idx]
@@ -1072,6 +1139,33 @@ class ExecuteModelRequest:
     num_steps: int = 1
     # Finished request ids since last step.
     finished_requests_ids: List[str] = field(default_factory=list)
+    # The last sampled token ids for multi step decoding.
+    last_sampled_token_ids: Optional[torch.Tensor] = None
+
+    @property
+    def is_first_multi_step(self) -> bool:
+        # TODO(will) make this be able to handle batches with variable number of
+        # steps
+        assert len(self.seq_group_metadata_list) > 0
+        first_seq_group = self.seq_group_metadata_list[0]
+        return first_seq_group.state.current_step == 0
+
+    @property
+    def is_last_step(self) -> bool:
+        # TODO(will) make this be able to handle batches with variable number of
+        # steps
+        assert len(self.seq_group_metadata_list) > 0
+        first_seq_group = self.seq_group_metadata_list[0]
+        num_steps = first_seq_group.state.num_steps
+        current_step = first_seq_group.state.current_step
+        return num_steps - current_step == 1
+
+    @property
+    def current_step(self) -> int:
+        # TODO(will) make this be able to handle batches with variable number of
+        # steps
+        assert len(self.seq_group_metadata_list) > 0
+        return self.seq_group_metadata_list[0].state.current_step
 
     def clone(
         self, seq_group_metadata_list: List[SequenceGroupMetadata]
@@ -1087,4 +1181,6 @@ class ExecuteModelRequest:
             running_queue_size=self.running_queue_size,
             previous_hidden_states=self.previous_hidden_states,
             num_steps=self.num_steps,
-            finished_requests_ids=self.finished_requests_ids)
+            finished_requests_ids=self.finished_requests_ids,
+            last_sampled_token_ids=self.last_sampled_token_ids.clone()
+            if self.last_sampled_token_ids is not None else None)

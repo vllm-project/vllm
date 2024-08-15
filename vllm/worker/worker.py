@@ -7,8 +7,8 @@ import torch
 import torch.distributed
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, MultiModalConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig,
+                         ModelConfig, MultiModalConfig, ObservabilityConfig,
+                         ParallelConfig, PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
@@ -19,8 +19,6 @@ from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest
-from vllm.utils import (is_embedding_model_config,
-                        is_encoder_decoder_model_config)
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
@@ -53,6 +51,7 @@ class Worker(LocalOrDistributedWorkerBase):
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         is_driver_worker: bool = False,
         model_runner_cls: Optional[Type[GPUModelRunnerBase]] = None,
+        observability_config: Optional[ObservabilityConfig] = None,
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -75,6 +74,7 @@ class Worker(LocalOrDistributedWorkerBase):
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
         self.multimodal_config = multimodal_config
+        self.observability_config = observability_config
 
         # Return hidden states from target model if the draft model is an
         # mlp_speculator
@@ -104,6 +104,7 @@ class Worker(LocalOrDistributedWorkerBase):
             is_driver_worker=is_driver_worker,
             prompt_adapter_config=prompt_adapter_config,
             multimodal_config=multimodal_config,
+            observability_config=observability_config,
             **speculative_args,
         )
         # Uninitialized cache engine. Will be initialized by
@@ -113,10 +114,10 @@ class Worker(LocalOrDistributedWorkerBase):
         self.gpu_cache: Optional[List[List[torch.Tensor]]] = None
 
     def _is_encoder_decoder_model(self):
-        return is_encoder_decoder_model_config(self.model_config)
+        return self.model_config.is_encoder_decoder_model
 
     def _is_embedding_model(self):
-        return is_embedding_model_config(self.model_config)
+        return self.model_config.is_embedding_model
 
     def init_device(self) -> None:
         if self.device_config.device.type == "cuda":
@@ -263,6 +264,7 @@ class Worker(LocalOrDistributedWorkerBase):
     def prepare_worker_input(
             self, execute_model_req: ExecuteModelRequest) -> WorkerInput:
         virtual_engine = execute_model_req.virtual_engine
+        num_steps = execute_model_req.num_steps
         num_seq_groups = len(execute_model_req.seq_group_metadata_list)
         # `blocks_to_swap_in` and `blocks_to_swap_out` are cpu tensors.
         # they contain parameters to launch cudamemcpyasync.
@@ -285,6 +287,7 @@ class Worker(LocalOrDistributedWorkerBase):
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
             virtual_engine=virtual_engine,
+            num_steps=num_steps,
         )
 
     @torch.inference_mode()
