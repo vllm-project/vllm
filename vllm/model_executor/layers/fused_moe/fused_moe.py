@@ -242,14 +242,14 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
     assert topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1
 
-    if not use_fp8_w8a8 and not use_int8_w8a16:
-        assert A_scale is None
-        assert B_scale is None
+    if use_fp8_w8a8:
+        A, A_scale = ops.scaled_fp8_quant(A, A_scale)
+        assert B_scale is not None
     elif use_int8_w8a16:
         assert B_scale is not None
     else:
-        A, A_scale = ops.scaled_fp8_quant(A, A_scale)
-        assert B_scale is not None
+        assert A_scale is None
+        assert B_scale is None
 
     grid = lambda META: (triton.cdiv(sorted_token_ids.shape[0], META[
         'BLOCK_SIZE_M']) * triton.cdiv(B.shape[1], META['BLOCK_SIZE_N']), )
