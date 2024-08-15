@@ -30,6 +30,9 @@ from unittest.mock import patch
 
 import torch
 import torch.distributed
+from ray.actor import ActorHandle
+from ray.experimental.channel.nccl_group_interface import (
+    NcclGroupInterface, TorchTensorAllocator)
 from torch.distributed import Backend, ProcessGroup
 
 import vllm.envs as envs
@@ -741,7 +744,33 @@ class GroupCoordinator:
             self.mq_broadcaster = None
 
 
+class AdagNcclGroup(NcclGroupInterface):
+
+    def __init__(self, world: GroupCoordinator, workers: List[ActorHandle]):
+        self.world = world
+        self.workers = workers
+
+    def get_rank(self, actor: ActorHandle) -> int:
+        return self.workers.index(actor)
+
+    def get_self_rank(self) -> Optional[int]:
+        return self.world.rank
+
+    def send(self, input_tensor: torch.Tensor, dst: int):
+        self.world.send(input_tensor, dst=dst)
+
+    def recv(
+        self,
+        shape: Tuple[int],
+        dtype: "torch.dtype",
+        peer_rank: int,
+        allocator: Optional[TorchTensorAllocator] = None,
+    ):
+        return self.world.recv(torch.Size(shape), dtype, src=peer_rank)
+
+
 _WORLD: Optional[GroupCoordinator] = None
+_ADAG_WORLD: Optional[AdagNcclGroup] = None
 
 
 def get_world_group() -> GroupCoordinator:
@@ -840,6 +869,8 @@ def init_distributed_environment(
     rank: int = -1,
     distributed_init_method: str = "env://",
     local_rank: int = -1,
+    workers=None,
+    nccl_group_id: Optional[str] = None,
     backend: str = "nccl",
 ):
     logger.debug(
@@ -867,9 +898,12 @@ def init_distributed_environment(
         else:
             local_rank = rank
     global _WORLD
+    global _ADAG_WORLD
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
         _WORLD = init_world_group(ranks, local_rank, backend)
+        _ADAG_WORLD = AdagNcclGroup(_WORLD, workers)
+        _ADAG_WORLD.register(nccl_group_id)
     else:
         assert _WORLD.world_size == torch.distributed.get_world_size(), (
             "world group already initialized with a different world size")
