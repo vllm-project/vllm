@@ -229,6 +229,10 @@ class ModelConfig:
                 for arch in architectures):
             return MultiModalConfig(limit_per_prompt=limit_mm_per_prompt or {})
         else:
+            if limit_mm_per_prompt:
+                raise ValueError(
+                    "limit_mm_per_prompt is only supported for multimodal "
+                    "models.")
             return None
 
     def _verify_tokenizer_mode(self) -> None:
@@ -477,6 +481,18 @@ class ModelConfig:
             t for t in self.get_layers_block_type(parallel_config)
             if t != "attention"
         ])
+
+    def get_multimodal_config(self) -> "MultiModalConfig":
+        """
+        Get the multimodal configuration of the model.
+
+        Raises:
+            ValueError: If the model is not multimodal.
+        """
+        if self.multimodal_config is None:
+            raise ValueError("The model is not multimodal.")
+
+        return self.multimodal_config
 
     @property
     def is_encoder_decoder_model(self) -> bool:
