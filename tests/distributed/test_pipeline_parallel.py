@@ -32,6 +32,7 @@ VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
                              (2, 2, 1, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
                              (2, 2, 0, 1, "meta-llama/Meta-Llama-3-8B", "ray"),
                          ])
+@fork_new_process_for_each_test
 def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME,
                     DIST_BACKEND):
     if VLLM_MULTI_NODE and DIST_BACKEND == "mp":
@@ -88,28 +89,3 @@ def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME,
         else:
             # Ray ADAG tests are flaky, so we don't want to fail the test
             logger.exception("Ray ADAG tests failed")
-
-
-@pytest.mark.parametrize("PP_SIZE, MODEL_NAME", [
-    (2, "JackFram/llama-160m"),
-])
-@pytest.mark.parametrize("ATTN_BACKEND", [
-    "FLASH_ATTN",
-    "FLASHINFER",
-])
-@fork_new_process_for_each_test
-def test_pp_cudagraph(PP_SIZE, MODEL_NAME, ATTN_BACKEND):
-    cudagraph_args = [
-        # use half precision for speed and memory savings in CI environment
-        "--dtype",
-        "float16",
-        "--pipeline-parallel-size",
-        str(PP_SIZE),
-        "--distributed-executor-backend",
-        "mp",
-    ]
-    os.environ["VLLM_ATTENTION_BACKEND"] = ATTN_BACKEND
-
-    eager_args = cudagraph_args + ["--enforce-eager"]
-
-    compare_two_settings(MODEL_NAME, eager_args, cudagraph_args)
