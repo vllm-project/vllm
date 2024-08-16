@@ -1,7 +1,7 @@
 psutil
-sentencepiece  # Required for LLaMA tokenizer.
+sentencepiece # Required for LLaMA tokenizer.
 numpy < 2.0.0
-requests
+requests 
 tqdm
 py-cpuinfo
 transformers >= 4.43.2  # Required for Chameleon and Llama 3.1 hotfox.
