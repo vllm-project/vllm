@@ -22,8 +22,8 @@ USER root
 ARG BASE_IMAGE
 ARG COMMON_WORKDIR
 # Used as ARCHes for all components
-ARG PYTORCH_ROCM_ARCH="gfx90a;gfx942"
-ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
+ARG ARG_PYTORCH_ROCM_ARCH="gfx90a;gfx942"
+ENV PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH}
 
 # Install some basic utilities
 RUN apt-get update && apt-get install python3 python3-pip -
