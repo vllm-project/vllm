@@ -86,14 +86,13 @@ def _bgmv_expand_kernel(
 
 
 @torch.inference_mode()
-def bgmv_expand(
+def _bgmv_expand(
     inputs: torch.Tensor,
     lora_b_weights: torch.Tensor,
     output_tensor: torch.Tensor,
     lora_indices_tensor: torch.Tensor,
     add_inputs: bool = True,
-    override_config: Optional[Dict[str, int]] = None,
-):
+) -> None:
     """
     Args:
         inputs (torch.Tensor): input tensor
@@ -108,6 +107,7 @@ def bgmv_expand(
         override_config (Optional[Dict[str, int]], optional): Defaults to None. 
             Triton grid config
     """
+    override_config: Optional[Dict[str, int]] = None
 
     assert inputs.dtype in [torch.float16, torch.bfloat16, torch.float32]
     assert lora_b_weights.dtype in [
@@ -167,3 +167,8 @@ def bgmv_expand(
         **config,
     )
     return
+
+
+bgmv_expand = torch.library.custom_op("lora::bgmv_expand",
+                                      _bgmv_expand,
+                                      mutates_args=["output_tensor"])

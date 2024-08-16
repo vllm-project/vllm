@@ -89,7 +89,7 @@ def _bgmv_expand_slice_kernel(
 
 
 @torch.inference_mode()
-def bgmv_expand_slice(
+def _bgmv_expand_slice(
     inputs: torch.Tensor,
     lora_b_weights: torch.Tensor,
     output_tensor: torch.Tensor,
@@ -97,8 +97,7 @@ def bgmv_expand_slice(
     slice_offset: int,
     slice_size: int,
     add_inputs: bool = True,
-    override_config: Optional[Dict[str, int]] = None,
-):
+) -> None:
     """
     Args:
         inputs (torch.Tensor): input tensor
@@ -114,6 +113,7 @@ def bgmv_expand_slice(
         override_config (Optional[Dict[str, int]], optional): Defaults to None.
             Triton grid config
     """
+    override_config: Optional[Dict[str, int]] = None
 
     assert inputs.dtype in [torch.float16, torch.bfloat16, torch.float32]
     assert lora_b_weights.dtype in [
@@ -180,3 +180,8 @@ def bgmv_expand_slice(
         **config,
     )
     return
+
+
+bgmv_expand_slice = torch.library.custom_op("lora::bgmv_expand_slice",
+                                            _bgmv_expand_slice,
+                                            mutates_args=["output_tensor"])

@@ -78,14 +78,13 @@ def _bgmv_shrink_kernel(
 
 
 @torch.inference_mode()
-def bgmv_shrink(
+def _bgmv_shrink(
     inputs: torch.Tensor,
     lora_a_weights: torch.Tensor,
     output_tensor: torch.Tensor,
     lora_indices_tensor: torch.Tensor,
     scaling: float = 1.0,
-    override_config: Optional[Dict[str, int]] = None,
-):
+) -> None:
     """
     Args:
         inputs (torch.Tensor): input tensor
@@ -107,6 +106,8 @@ def bgmv_shrink(
     ]
     assert inputs.size(1) == lora_a_weights.size(-1)
     assert inputs.is_contiguous()
+
+    override_config: Optional[Dict[str, int]] = None
 
     if lora_a_weights.ndim == 4:  # shape:(lora_num,1,rank, size)
         assert lora_a_weights.size(1) == 1
@@ -148,3 +149,8 @@ def bgmv_shrink(
         **config,
     )
     return
+
+
+bgmv_shrink = torch.library.custom_op("lora::bgmv_shrink",
+                                      _bgmv_shrink,
+                                      mutates_args=["output_tensor"])
