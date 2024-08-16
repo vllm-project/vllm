@@ -261,20 +261,6 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - bash ./run-tests.sh -c configs/models-small.txt -t 1
 
-  - label: Utils Test
-  mirror_hardwares: [amd]
-  source_file_dependencies:
-  - vllm/
-  - tests/test_utils.py
-  command: pytest -v -s test_utils.py # Utils
-
-  - label: Worker Test
-  mirror_hardwares: [amd]
-  source_file_dependencies:
-  - vllm/
-  - tests/worker
-  command: pytest -v -s worker # Worker
-
 #####  1 GPU test  #####
 #####  multi gpus test  #####
 
