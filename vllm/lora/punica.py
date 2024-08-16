@@ -521,13 +521,13 @@ class PunicaWrapper:
             ).squeeze(0)
         Args:
             y (torch.Tensor):  Output tensor. Will be changed in-place.
-            x (torch.Tensor): Input tensor.
-            wa_t_all (torch.Tensor): lora_a's weight.
-            wb_t_all (torch.Tensor): lora_b's weight.
+            x (torch.Tensor): Input tensor
+            wa_t_all (torch.Tensor): lora_a's weight
+            wb_t_all (torch.Tensor): lora_b's weight
             scale (float): Scaling factor.
             y_offset (Optional[int], optional): Offset to apply to the starting
                 column of y.
-            y_slice_size (Optional[int], optional): Size of the y column slice..
+            y_slice_size (Optional[int], optional): Size of the y column slice.
             buffer (Optional[torch.Tensor], optional): Defaults to None.
         """
         y_org = y
