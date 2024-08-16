@@ -27,7 +27,6 @@ TARGET_TEST_SUITE = os.environ.get("TARGET_TEST_SUITE", "L4")
     ])
 def test_multi_node_bad_topology(
     vllm_runner,
-    example_prompts,
     model: str,
     distributed_executor_backend: str,
     test_suite: str,
@@ -42,7 +41,6 @@ def test_multi_node_bad_topology(
     - the tensor parallel size exceeds the available GPUs in a current node.
     """
     dtype = "half"
-    max_tokens = 5
     assert test_suite == TARGET_TEST_SUITE
 
     # Simulate 2 node clusters, 1 GPU each.
@@ -71,11 +69,10 @@ def test_multi_node_bad_topology(
 
     # Now vLLM is created on a head node, but there's no GPU. It should raise
     # an exception.
-    with pytest.raises(RuntimeError):
-        with vllm_runner(
+    with pytest.raises(RuntimeError), vllm_runner(
             model,
             dtype=dtype,
             tensor_parallel_size=1,
             distributed_executor_backend=distributed_executor_backend
-        ) as _:
-            pass
+    ) as _:
+        pass
