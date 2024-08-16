@@ -121,6 +121,12 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
 
         # only load the bitsandbytes module when needed
         from bitsandbytes import matmul_4bit
+        original_shape = x.shape
+
+        if len(original_shape) == 3:
+            # default reshape
+            B, L, _ = original_shape
+            x = x.reshape(B * L, -1)
 
         original_type = x.dtype
         bf_x = x.to(torch.bfloat16)
@@ -153,5 +159,10 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
 
         if bias is not None:
             out += bias
+
+        if len(original_shape) == 3:
+            # default reshape
+            B, L, _ = original_shape
+            out = out.reshape(B, L, -1)
 
         return out

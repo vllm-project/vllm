@@ -810,6 +810,16 @@ class QKVParallelLinear(ColumnParallelLinear):
                     # Special case for Marlin.
                     shard_size, shard_offset = adjust_marlin_shard(
                         param, shard_size, shard_offset)
+                use_bitsandbytes = getattr(param, "use_bitsandbytes", False)
+                if use_bitsandbytes:
+                    total = (self.num_heads + 2 * self.num_kv_heads) * self.head_size
+                    orig_offset, orig_size = shard_offset, shard_size
+
+                    quantized_total = param.data.shape[0]
+                    quantized_offset = orig_offset * quantized_total // total
+                    quantized_size = orig_size * quantized_total // total
+
+                    shard_offset, shard_size =  quantized_offset, quantized_size
 
                 loaded_weight_shard = loaded_weight.narrow(
                     output_dim, shard_offset, shard_size)

@@ -1,6 +1,8 @@
 import os
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com' 
 
+# torch-2.1.0+cuda11.8-cp310-cp310-linux_aarch64.whl
+
 # import torch
 # from PIL import Image
 # from transformers import AutoTokenizer
@@ -63,6 +65,7 @@ prompt = [{"role": "user", "content": "你好"}]
 tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 llm = LLM(
     model=model_name,
+    dtype='float16',
     tensor_parallel_size=tp_size,
     max_model_len=max_model_len,
     trust_remote_code=True,

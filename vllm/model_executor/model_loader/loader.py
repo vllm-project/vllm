@@ -880,6 +880,9 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
     def _load_weights(self, model_config: ModelConfig,
                       model: nn.Module) -> None:
+        
+        self.target_modules += getattr(model, 'bitsandbytes_quant_target_modules', [])
+        
         if not hasattr(model, 'load_weights'):
             raise AttributeError(
                 "The required method 'load_weights' is not defined in class"

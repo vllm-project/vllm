@@ -313,6 +313,8 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA):
     embedding_modules = {}
     embedding_padding_modules = []
 
+    bitsandbytes_stacked_params_mapping = {}
+    
     def __init__(
         self,
         config: Qwen2Config,

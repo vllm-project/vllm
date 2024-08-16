@@ -37,6 +37,7 @@ class ChatGLMConfig(PretrainedConfig):
                  quantization_bit=0,
                  pre_seq_len=None,
                  prefix_projection=False,
+                 vision_config=None,
                  **kwargs):
         self.num_layers = num_layers
         self.vocab_size = padded_vocab_size
@@ -46,6 +47,7 @@ class ChatGLMConfig(PretrainedConfig):
         self.kv_channels = kv_channels
         self.num_attention_heads = num_attention_heads
         self.seq_length = seq_length
+        self.vision_config = vision_config
         # It is to be compatible with long lora.
         self.max_position_embeddings = seq_length
         self.hidden_dropout = hidden_dropout
