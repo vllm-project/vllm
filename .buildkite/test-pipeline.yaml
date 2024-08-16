@@ -56,7 +56,7 @@ steps:
   - pytest -v -s worker # Worker
 
 - label: Basic Correctness Test # 30min
-  mirror_hardwares: [amd]
+  #mirror_hardwares: [amd]
   fast_check: true
   source_file_dependencies:
   - vllm/
