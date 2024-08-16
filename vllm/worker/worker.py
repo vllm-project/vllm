@@ -264,6 +264,7 @@ class Worker(LocalOrDistributedWorkerBase):
     def prepare_worker_input(
             self, execute_model_req: ExecuteModelRequest) -> WorkerInput:
         virtual_engine = execute_model_req.virtual_engine
+        num_steps = execute_model_req.num_steps
         num_seq_groups = len(execute_model_req.seq_group_metadata_list)
         # `blocks_to_swap_in` and `blocks_to_swap_out` are cpu tensors.
         # they contain parameters to launch cudamemcpyasync.
@@ -286,6 +287,7 @@ class Worker(LocalOrDistributedWorkerBase):
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
             virtual_engine=virtual_engine,
+            num_steps=num_steps,
         )
 
     @torch.inference_mode()
