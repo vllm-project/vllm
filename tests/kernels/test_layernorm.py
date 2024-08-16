@@ -48,7 +48,7 @@ def test_rms_norm(
     # numerical errors than other operators because they involve reductions.
     # Therefore, we use a larger tolerance.
     if add_residual:
-        assert torch.allclose(out[0], ref_out[0], atol=1e-2, rtol=1e-2)
-        assert torch.allclose(out[1], ref_out[1], atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(out[0], ref_out[0], atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(out[1], ref_out[1], atol=1e-2, rtol=1e-2)
     else:
-        assert torch.allclose(out, ref_out, atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)

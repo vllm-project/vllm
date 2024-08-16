@@ -161,7 +161,7 @@ def assert_logprobs_dict_allclose(
                 single_step_actual_logprobs[token_id].logprob)
             expected = torch.tensor(
                 single_step_expected_logprobs[token_id].logprob)
-            assert torch.allclose(actual, expected)
+            torch.testing.assert_close(actual, expected)
 
 
 def create_sampler_output_list(

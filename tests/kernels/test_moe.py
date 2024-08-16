@@ -50,7 +50,7 @@ def test_fused_moe(
     score = torch.randn((m, e), device='cuda', dtype=dtype)
     triton_output = fused_moe(a, w1, w2, score, topk, renormalize=False)
     torch_output = torch_moe(a, w1, w2, score, topk)
-    assert torch.allclose(triton_output, torch_output, atol=1e-2, rtol=0)
+    torch.testing.assert_close(triton_output, torch_output, atol=1e-2, rtol=0)
 
 
 @pytest.mark.parametrize("dtype",
@@ -95,7 +95,7 @@ def test_mixtral_moe(dtype: torch.dtype):
         torch.bfloat16: 1e-2,
     }
 
-    assert torch.allclose(hf_states.flatten(0, 1),
-                          vllm_states,
-                          rtol=mixtral_moe_tol[dtype],
-                          atol=mixtral_moe_tol[dtype])
+    torch.testing.assert_close(hf_states.flatten(0, 1),
+                               vllm_states,
+                               rtol=mixtral_moe_tol[dtype],
+                               atol=mixtral_moe_tol[dtype])
