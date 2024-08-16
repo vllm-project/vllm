@@ -97,7 +97,7 @@ def _sgmv_expand_kernel(
 
 
 @torch.inference_mode()
-def sgmv_expand(
+def _sgmv_expand(
     inputs: torch.Tensor,
     lora_b_weights: torch.Tensor,
     output_tensor: torch.Tensor,
@@ -108,7 +108,7 @@ def sgmv_expand(
     max_seq_length: int,
     token_nums: int,
     add_inputs: bool = False,
-):
+) -> None:
     """
     Args:
         inputs (torch.Tensor): input tensor
@@ -194,3 +194,8 @@ def sgmv_expand(
         CAST_TYPE,
     )
     return
+
+
+sgmv_expand = torch.library.custom_op("lora::sgmv_expand",
+                                      _sgmv_expand,
+                                      mutates_args=["output_tensor"])
