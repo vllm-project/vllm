@@ -74,7 +74,10 @@ kill_gpu_processes() {
   ps aux | grep python | grep openai | awk '{print $2}' | xargs -r kill -9
   ps -e | grep pt_main_thread | awk '{print $1}' | xargs kill -9
 
-  sleep 5
+  # wait until GPU memory usage smaller than 1GB
+  while [ $(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -n 1) -ge 1000 ]; do
+    sleep 1
+  done
 
   # remove vllm config file
   rm -rf ~/.config/vllm
