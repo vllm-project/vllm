@@ -60,11 +60,13 @@ logger = init_logger('vllm.entrypoints.openai.api_server')
 _running_tasks: Set[asyncio.Task] = set()
 
 
-def model_is_embedding(model_name: str, trust_remote_code: bool) -> bool:
+def model_is_embedding(model_name: str, trust_remote_code: bool,
+                       quantization: str) -> bool:
     return ModelConfig(model=model_name,
                        tokenizer=model_name,
                        tokenizer_mode="auto",
                        trust_remote_code=trust_remote_code,
+                       quantization=quantization,
                        seed=0,
                        dtype="auto").embedding_mode
 
@@ -97,7 +99,8 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
 
     # If manually triggered or embedding model, use AsyncLLMEngine in process.
     # TODO: support embedding model via RPC.
-    if (model_is_embedding(args.model, args.trust_remote_code)
+    if (model_is_embedding(args.model, args.trust_remote_code,
+                           args.quantization)
             or args.disable_frontend_multiprocessing):
         async_engine_client = AsyncLLMEngine.from_engine_args(
             engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
