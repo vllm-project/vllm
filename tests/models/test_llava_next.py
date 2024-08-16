@@ -254,13 +254,21 @@ def test_models_multiple_image_inputs(hf_runner, vllm_runner, image_assets,
     img_0 = image_assets[0].pil_image
     img_1 = image_assets[1].pil_image
 
-    inputs = [([
-        f"{_PREFACE} USER: <image><image>\nDescribe the 2 images. ASSISTANT:",
-        f"{_PREFACE} USER: <image><image><image><image>\nDescribe the 4 images. ASSISTANT:"
-    ], [
-        [img_0, img_1],
-        [img_0, img_1, img_0, img_1],
-    ])]
+    inputs = [(
+        [
+            f"{_PREFACE} USER: <image><image>\nDescribe the 2 images. ASSISTANT:",
+            f"{_PREFACE} USER: <image><image><image><image>\nDescribe the 4 images. ASSISTANT:"
+        ],
+        [
+            [img_0, img_1],
+            # Images with different sizes and aspect-ratios
+            [
+                img_0,
+                rescale_image_size(img_0, 0.25),
+                img_0.resize((183, 488)),
+                img_0.resize((488, 183))
+            ],
+        ])]
 
     _run_test(
         hf_runner,
