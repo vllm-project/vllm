@@ -8,12 +8,10 @@ WARNING: This test runs in both single-node (4 GPUs) and multi-node
 import os
 
 import pytest
-import torch
 
 from vllm.logger import init_logger
 
-from ..utils import (compare_two_settings, fork_new_process_for_each_test,
-                     wait_for_gpu_memory_to_clear)
+from ..utils import compare_two_settings, fork_new_process_for_each_test
 
 logger = init_logger("test_pipeline_parallel")
 
@@ -40,12 +38,6 @@ def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME,
     if VLLM_MULTI_NODE and DIST_BACKEND == "mp":
         pytest.skip("Skipping multi-node pipeline parallel test for "
                     "multiprocessing distributed backend")
-
-    wait_for_gpu_memory_to_clear(
-        devices=list(range(torch.cuda.device_count())),
-        threshold_bytes=2 * 2**30,
-        timeout_s=60,
-    )
 
     pp_args = [
         # use half precision for speed and memory savings in CI environment
@@ -88,6 +80,10 @@ def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME,
             "VLLM_USE_RAY_SPMD_WORKER": "1",
             "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL": "1",
         }
+        # Temporary. Currently when zeromq + SPMD is used, it does not properly
+        # terminate because of aDAG issue.
+        pp_args.append("--disable-frontend-multiprocessing")
+        tp_args.append("--disable-frontend-multiprocessing")
 
     try:
         compare_two_settings(MODEL_NAME, pp_args, tp_args, pp_env)
