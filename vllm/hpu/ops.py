@@ -26,10 +26,8 @@ try:
     from habana_frameworks.torch.hpex.kernels import FusedSDPA
     HPUFusedSDPA = FusedSDPA
 except ImportError:
-    logger.warning(
-        "Could not import HPU FusedSDPA kernel. "
-        "vLLM will use native implementation."
-    )
+    logger.warning("Could not import HPU FusedSDPA kernel. "
+                   "vLLM will use native implementation.")
 
 PA_SPLIT_VALUE = (os.environ.get('PA_SPLIT_VALUE', '1') == '1')
 
