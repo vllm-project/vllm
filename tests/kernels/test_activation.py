@@ -47,7 +47,7 @@ def test_act_and_mul(
     ref_out = layer.forward_native(x)
     # The SiLU and GELU implementations are equivalent to the native PyTorch
     # implementations, so we can do exact comparison.
-    assert torch.allclose(out, ref_out, atol=0.0, rtol=0.0)
+    torch.testing.assert_close(out, ref_out, atol=0.0, rtol=0.0)
 
 
 @pytest.mark.parametrize("activation", [FastGELU, NewGELU])
@@ -73,7 +73,7 @@ def test_activation(
     layer = activation()
     out = layer(x)
     ref_out = layer.forward_native(x)
-    assert torch.allclose(out,
-                          ref_out,
-                          atol=get_default_atol(out),
-                          rtol=get_default_rtol(out))
+    torch.testing.assert_close(out,
+                               ref_out,
+                               atol=get_default_atol(out),
+                               rtol=get_default_rtol(out))
