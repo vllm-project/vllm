@@ -140,3 +140,22 @@ def test_multiple_sampling_params(llm: LLM):
     # sampling_params is None, default params should be applied
     outputs = llm.generate(PROMPTS, sampling_params=None)
     assert len(PROMPTS) == len(outputs)
+
+
+def test_chat():
+
+    llm = LLM(model="meta-llama/Meta-Llama-3-8B-Instruct")
+
+    prompt1 = "Explain the concept of entropy."
+    messages = [
+        {
+            "role": "system",
+            "content": "You are a helpful assistant"
+        },
+        {
+            "role": "user",
+            "content": prompt1
+        },
+    ]
+    outputs = llm.chat(messages)
+    assert len(outputs) == 1
