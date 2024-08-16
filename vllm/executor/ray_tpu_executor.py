@@ -2,16 +2,8 @@ import asyncio
 import os
 from collections import defaultdict
 from itertools import islice, repeat
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Awaitable,
-    Dict,
-    List,
-    Optional,
-    Tuple,
-    Union,
-)
+from typing import (TYPE_CHECKING, Any, Awaitable, Dict, List, Optional, Tuple,
+                    Union)
 
 import vllm.envs as envs
 from vllm.executor.executor_base import ExecutorAsyncBase
@@ -19,13 +11,8 @@ from vllm.executor.ray_utils import RayWorkerWrapper, ray
 from vllm.executor.tpu_executor import TPUExecutor
 from vllm.logger import init_logger
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
-from vllm.utils import (
-    get_distributed_init_method,
-    get_ip,
-    get_open_port,
-    get_vllm_instance_id,
-    make_async,
-)
+from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
+                        get_vllm_instance_id, make_async)
 
 if ray is not None:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
