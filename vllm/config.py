@@ -1,7 +1,8 @@
 import enum
 import json
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, ClassVar, List, Optional, Tuple, Type, Union
+from typing import (TYPE_CHECKING, ClassVar, List, Mapping, Optional, Tuple,
+                    Type, Union)
 
 import torch
 from transformers import PretrainedConfig
@@ -10,11 +11,12 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
+from vllm.platforms import current_platform
 from vllm.tracing import is_otel_installed
 from vllm.transformers_utils.config import get_config, get_hf_text_config
-from vllm.utils import (STR_NOT_IMPL_ENC_DEC_CUDAGRAPH,
+from vllm.utils import (STR_NOT_IMPL_ENC_DEC_CUDAGRAPH, GiB_bytes,
                         cuda_device_count_stateless, get_cpu_memory, is_cpu,
-                        is_hip, is_neuron, is_openvino, is_tpu, is_xpu,
+                        is_hip, is_neuron, is_openvino, is_xpu,
                         print_warning_once)
 
 if TYPE_CHECKING:
@@ -27,7 +29,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-_GB = 1 << 30
 _EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 
 _PP_SUPPORTED_MODELS = [
@@ -283,7 +284,7 @@ class ModelConfig:
                 raise ValueError(
                     f"{self.quantization} quantization is currently not "
                     f"supported in ROCm.")
-            if is_tpu(
+            if current_platform.is_tpu(
             ) and self.quantization not in tpu_supported_quantization:
                 raise ValueError(
                     f"{self.quantization} quantization is currently not "
@@ -492,7 +493,7 @@ class CacheConfig:
         self,
         block_size: int,
         gpu_memory_utilization: float,
-        swap_space: int,
+        swap_space: float,
         cache_dtype: str,
         num_gpu_blocks_override: Optional[int] = None,
         sliding_window: Optional[int] = None,
@@ -501,7 +502,7 @@ class CacheConfig:
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
-        self.swap_space_bytes = swap_space * _GB
+        self.swap_space_bytes = swap_space * GiB_bytes
         self.num_gpu_blocks_override = num_gpu_blocks_override
         self.cache_dtype = cache_dtype
         self.sliding_window = sliding_window
@@ -546,10 +547,6 @@ class CacheConfig:
             raise NotImplementedError(
                 "Prefix caching is not supported with sliding window. "
                 "Run with --disable-sliding-window to use prefix caching.")
-        if self.cache_dtype == "fp8":
-            raise NotImplementedError(
-                "Prefix caching is not supported for fp8 cache_dtype. "
-                "Run with --kv-cache-dtype auto to use prefix caching.")
 
     def verify_with_parallel_config(
         self,
@@ -561,9 +558,9 @@ class CacheConfig:
         num_gpus_per_node = parallel_config.tensor_parallel_size
         cpu_memory_usage = self.swap_space_bytes * num_gpus_per_node
 
-        msg = (f"{cpu_memory_usage / _GB:.2f} GiB out of "
-               f"the {total_cpu_memory / _GB:.2f} GiB total CPU memory is "
-               "allocated for the swap space.")
+        msg = (f"{cpu_memory_usage / GiB_bytes:.2f} GiB out of the "
+               f"{total_cpu_memory / GiB_bytes:.2f} GiB total CPU memory "
+               "is allocated for the swap space.")
         if cpu_memory_usage > 0.7 * total_cpu_memory:
             raise ValueError("Too large swap space. " + msg)
         elif cpu_memory_usage > 0.4 * total_cpu_memory:
@@ -850,7 +847,8 @@ class SchedulerConfig:
                  delay_factor: float = 0.0,
                  enable_chunked_prefill: bool = False,
                  embedding_mode: Optional[bool] = False,
-                 preemption_mode: Optional[str] = None) -> None:
+                 preemption_mode: Optional[str] = None,
+                 num_scheduler_steps: int = 1) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
         else:
@@ -879,6 +877,7 @@ class SchedulerConfig:
         self.chunked_prefill_enabled = enable_chunked_prefill
         self.embedding_mode = embedding_mode
         self.preemption_mode = preemption_mode
+        self.num_scheduler_steps = num_scheduler_steps
         self._verify_args()
 
     def _verify_args(self) -> None:
@@ -904,6 +903,16 @@ class SchedulerConfig:
                 f"({self.num_lookahead_slots}) must be greater than or "
                 "equal to 0.")
 
+        if self.num_scheduler_steps < 1:
+            raise ValueError(
+                "num_scheduler_steps "
+                f"({self.num_scheduler_steps}) must be greater than or "
+                "equal to 1.")
+
+    @property
+    def is_multi_step(self) -> bool:
+        return self.num_scheduler_steps > 1
+
 
 class DeviceConfig:
     device: Optional[torch.device]
@@ -915,7 +924,7 @@ class DeviceConfig:
                 self.device_type = "neuron"
             elif is_openvino():
                 self.device_type = "openvino"
-            elif is_tpu():
+            elif current_platform.is_tpu():
                 self.device_type = "tpu"
             elif is_cpu():
                 self.device_type = "cpu"
@@ -952,6 +961,7 @@ class SpeculativeConfig:
         target_parallel_config: ParallelConfig,
         target_dtype: str,
         speculative_model: Optional[str],
+        speculative_model_quantization: Optional[str],
         speculative_draft_tensor_parallel_size: Optional[int],
         num_speculative_tokens: Optional[int],
         speculative_max_model_len: Optional[int],
@@ -980,6 +990,9 @@ class SpeculativeConfig:
             target_dtype (str): The data type used for the target model.
             speculative_model (Optional[str]): The name of the speculative
                 model, if provided.
+            speculative_model_quantization (Optional[str]): Quantization method
+                that was used to quantize the speculative model weights. If
+                None, we assume the model weights are not quantized.
             speculative_draft_tensor_parallel_size (Optional[int]): The degree
                 of the tensor parallelism for the draft model.
             num_speculative_tokens (Optional[int]): The number of speculative
@@ -1047,11 +1060,11 @@ class SpeculativeConfig:
                 "Speculative decoding requires usage of the V2 "
                 "block manager. Enable it with --use-v2-block-manager.")
 
-        # TODO: The user should be able to specify revision/quantization/max
-        # model len for the draft model. It is not currently supported.
+        # TODO: The user should be able to specify revision/max model len
+        # for the draft model. It is not currently supported.
         draft_revision = None
         draft_code_revision = None
-        draft_quantization = None
+        draft_quantization = speculative_model_quantization
 
         if speculative_model == "[ngram]":
             if ngram_prompt_lookup_min is None:
@@ -1208,7 +1221,7 @@ class SpeculativeConfig:
         elif speculative_draft_tensor_parallel_size != 1:
             # TODO(wooyeon): allow tp values larger than 1
             raise ValueError(
-                f"{speculative_draft_tensor_parallel_size=} cannot be"
+                f"{speculative_draft_tensor_parallel_size=} cannot be "
                 f"other value than 1")
 
         draft_parallel_config = ParallelConfig(
@@ -1433,10 +1446,15 @@ class PromptAdapterConfig:
 
 @dataclass
 class MultiModalConfig:
-    """Configs the input data format and how models should run for
-    multimodal models."""
+    """Controls the behavior of multimodal models."""
+
+    limit_per_prompt: Mapping[str, int]
+    """
+    The maximum number of multi-modal input instances allowed per prompt
+    for each :class:`~vllm.multimodal.MultiModalPlugin`.
+    """
+
     # TODO: Add configs to init vision tower or not.
-    pass
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
@@ -1656,10 +1674,25 @@ class ObservabilityConfig:
     """Configuration for observability."""
     otlp_traces_endpoint: Optional[str] = None
 
+    # Collecting detailed timing information for each request can be expensive.
+
+    # If set, collects the model forward time for the request.
+    collect_model_forward_time: bool = False
+
+    # If set, collects the model execute time for the request.
+    collect_model_execute_time: bool = False
+
     def __post_init__(self):
         if not is_otel_installed() and self.otlp_traces_endpoint is not None:
             raise ValueError("OpenTelemetry packages must be installed before "
                              "configuring 'otlp_traces_endpoint'")
+
+        if ((self.collect_model_forward_time
+             or self.collect_model_execute_time)
+                and self.otlp_traces_endpoint is None):
+            raise ValueError(
+                "collect_model_forward_time or collect_model_execute_time "
+                "requires --otlp-traces-endpoint to be set.")
 
 
 @dataclass(frozen=True)

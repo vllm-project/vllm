@@ -27,11 +27,11 @@ except ImportError:
 import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, MultiModalConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig)
+                         ModelConfig, MultiModalConfig, ObservabilityConfig,
+                         ParallelConfig, PromptAdapterConfig, SchedulerConfig)
 from vllm.distributed import get_pp_group
 from vllm.distributed.parallel_state import graph_capture
-from vllm.inputs import INPUT_REGISTRY
+from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
@@ -40,10 +40,10 @@ from vllm.model_executor import SamplingMetadata, SamplingMetadataCache
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models.interfaces import (supports_lora,
-                                                   supports_vision)
+                                                   supports_multimodal)
 from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
-                             MultiModalInputs)
+                             MultiModalInputs, MultiModalRegistry)
 from vllm.prompt_adapter.layers import PromptAdapterMapping
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.prompt_adapter.worker_manager import (
@@ -347,6 +347,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             self.prompt_adapter_request = prompt_adapter_request
             self.multi_modal_inputs = multi_modal_inputs
             self.prefix_cache_hit = prefix_cache_hit
+
+            self.n_seqs = len(self.seq_ids)
 
             if not reinit:
                 self.__post_init__()
@@ -804,6 +806,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         multimodal_config: Optional[MultiModalConfig] = None,
         return_hidden_states: bool = False,
+        observability_config: Optional[ObservabilityConfig] = None,
+        input_registry: InputRegistry = INPUT_REGISTRY,
+        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -816,6 +821,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.prompt_adapter_config = prompt_adapter_config
         self.multimodal_config = multimodal_config
         self.return_hidden_states = return_hidden_states
+        self.observability_config = observability_config
 
         self.device = self.device_config.device
         self.pin_memory = is_pin_memory_available()
@@ -856,8 +862,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         ) if num_attn_heads else None
 
         # Multi-modal data support
-        self.multi_modal_input_mapper = MULTIMODAL_REGISTRY \
-            .create_input_mapper(self.model_config)
+        self.input_registry = input_registry
+        self.mm_registry = mm_registry
+        self.multi_modal_input_mapper = mm_registry \
+            .create_input_mapper(model_config)
 
         # Lazy initialization
         self.model: nn.Module  # Set after load_model
@@ -896,9 +904,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         if self.lora_config:
             assert supports_lora(self.model), "Model does not support LoRA"
-            assert not supports_vision(
+            assert not supports_multimodal(
                 self.model
-            ), "To be tested: vision language model with LoRA settings."
+            ), "To be tested: Multi-modal model with LoRA settings."
 
             self.lora_manager = LRUCacheWorkerLoRAManager(
                 self.scheduler_config.max_num_seqs,
@@ -1042,17 +1050,21 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         # Profile memory usage with max_num_sequences sequences and the total
         # number of tokens equal to max_num_batched_tokens.
         seqs: List[SequenceGroupMetadata] = []
-        # Additional GPU memory may be needed for vision encoding, which needs
-        # to be accounted for when calculating the GPU blocks for
+        # Additional GPU memory may be needed for multi-modal encoding, which
+        # needs to be accounted for when calculating the GPU blocks for
         # vLLM blocker manager.
         # To exercise the worst scenario for GPU memory consumption,
         # the number of seqs (batch_size) is chosen to maximize the number
         # of images processed.
         model_config = self.model_config
+        mm_config = self.multimodal_config
 
-        if supports_vision(self.model):
-            max_mm_tokens = MULTIMODAL_REGISTRY \
-                .get_max_multimodal_tokens(model_config)
+        input_registry = self.input_registry
+        mm_registry = self.mm_registry
+        mm_registry.init_mm_limits_per_prompt(model_config, mm_config)
+
+        max_mm_tokens = mm_registry.get_max_multimodal_tokens(model_config)
+        if max_mm_tokens > 0:
             max_num_seqs_orig = max_num_seqs
             max_num_seqs = min(max_num_seqs,
                                max_num_batched_tokens // max_mm_tokens)
@@ -1070,13 +1082,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                        (group_id < max_num_batched_tokens % max_num_seqs))
             batch_size += seq_len
 
-            seq_data, dummy_multi_modal_data = INPUT_REGISTRY \
-                .dummy_data_for_profiling(model_config, seq_len)
-
-            # Having more tokens is over-conservative but otherwise fine
-            assert len(seq_data.prompt_token_ids) >= seq_len, (
-                f"Expected at least {seq_len} dummy tokens for profiling, "
-                f"but got: {len(seq_data.prompt_token_ids)}")
+            seq_data, dummy_multi_modal_data = input_registry \
+                .dummy_data_for_profiling(model_config, seq_len, mm_registry)
 
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
@@ -1525,6 +1532,12 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             "finished_requests_ids": model_input.finished_requests_ids,
             "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
         } if self.has_seqlen_agnostic else {}
+        if (self.observability_config is not None
+                and self.observability_config.collect_model_forward_time):
+            model_forward_start = torch.cuda.Event(enable_timing=True)
+            model_forward_end = torch.cuda.Event(enable_timing=True)
+            model_forward_start.record()
+
         hidden_or_intermediate_states = model_executable(
             input_ids=model_input.input_tokens,
             positions=model_input.input_positions,
@@ -1534,6 +1547,10 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             **MultiModalInputs.as_kwargs(multi_modal_kwargs,
                                          device=self.device),
             **seqlen_agnostic_kwargs)
+
+        if (self.observability_config is not None
+                and self.observability_config.collect_model_forward_time):
+            model_forward_end.record()
 
         # Compute the logits in the last pipeline stage.
         if not get_pp_group().is_last_rank:
@@ -1550,6 +1567,17 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
         )
+        if (self.observability_config is not None
+                and self.observability_config.collect_model_forward_time
+                and output is not None):
+            model_forward_end.synchronize()
+            model_forward_time = model_forward_start.elapsed_time(
+                model_forward_end)
+            # If there are multiple workers, we are still tracking the latency
+            # from the start time of the driver worker to the end time of the
+            # driver worker. The model forward time will then end up covering
+            # the communication time as well.
+            output.model_forward_time = model_forward_time
 
         if self.return_hidden_states:
             # we only need to pass hidden states of most recent token
@@ -1707,8 +1735,9 @@ class CUDAGraphRunner:
                                                       **kwargs)
         if intermediate_tensors is not None:
             for key in intermediate_tensors.tensors:
-                self.input_buffers[key].copy_(intermediate_tensors[key],
-                                              non_blocking=True)
+                if key != "model_execute_time":
+                    self.input_buffers[key].copy_(intermediate_tensors[key],
+                                                  non_blocking=True)
         # Run the graph.
         self.graph.replay()
         # Return the output tensor.

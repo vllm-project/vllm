@@ -805,6 +805,9 @@ class Scheduler:
                 curr_loras.add(lora_int_id)
             waiting_queue.popleft()
             self._allocate_and_set_running(seq_group)
+            seq_group.init_multi_step(
+                num_scheduler_steps=self._get_num_lookahead_slots(
+                    is_prefill=True) + 1)
             seq_groups.append(
                 ScheduledSequenceGroup(seq_group=seq_group,
                                        token_chunk_size=num_new_tokens))
@@ -1032,6 +1035,7 @@ class Scheduler:
         # such as self.running, self.swapped, and self.waiting.
         scheduler_outputs = self._schedule()
         now = time.time()
+        scheduler_start_time = time.perf_counter()
 
         if not self.cache_config.enable_prefix_caching:
             common_computed_block_nums = []
@@ -1107,6 +1111,7 @@ class Scheduler:
                 computed_block_nums=common_computed_block_nums,
                 encoder_seq_data=encoder_seq_data,
                 cross_block_table=cross_block_table,
+                state=seq_group.state,
                 # `multi_modal_data` will only be present for the 1st comm
                 # between engine and worker.
                 # the subsequent comms can still use delta, but
@@ -1126,6 +1131,17 @@ class Scheduler:
                 scheduled_seq_group.seq_group)
 
         self._seq_group_metadata_cache.reset()
+
+        scheduler_time = time.perf_counter() - scheduler_start_time
+        # Add this to scheduler time to all the sequences that are currently
+        # running. This will help estimate if the scheduler is a significant
+        # component in the e2e latency.
+        for seq_group in self.running:
+            if seq_group is not None and seq_group.metrics is not None:
+                if seq_group.metrics.scheduler_time is not None:
+                    seq_group.metrics.scheduler_time += scheduler_time
+                else:
+                    seq_group.metrics.scheduler_time = scheduler_time
 
         return seq_group_metadata_list, scheduler_outputs
 
@@ -1172,6 +1188,7 @@ class Scheduler:
                 slots.
         """
         num_lookahead_slots = self._get_num_lookahead_slots(is_prefill=False)
+        seq_group.init_multi_step(num_scheduler_steps=num_lookahead_slots + 1)
 
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             cows = self.block_manager.append_slots(seq, num_lookahead_slots)
