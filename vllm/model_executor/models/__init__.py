@@ -81,8 +81,8 @@ _MULTIMODAL_MODELS = {
     ("llava_next", "LlavaNextForConditionalGeneration"),
     "PaliGemmaForConditionalGeneration": ("paligemma",
                                           "PaliGemmaForConditionalGeneration"),
-    "MiniCPMV": ("minicpmv", "MiniCPMV"),
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
+    "MiniCPMV": ("minicpmv", "MiniCPMV"),
 }
 _CONDITIONAL_GENERATION_MODELS = {
     "BartModel": ("bart", "BartForConditionalGeneration"),
@@ -186,8 +186,10 @@ class ModelRegistry:
     @staticmethod
     def is_multimodal_model(model_arch: str) -> bool:
 
-        #TODO: find a way to use `supports_multimodal` interface
-        # to determine if a model is multimodal
+        # TODO: find a way to avoid initializing CUDA prematurely to
+        # use `supports_multimodal` to determine if a model is multimodal
+        # model_cls = ModelRegistry._try_load_model_cls(model_arch)
+        # from vllm.model_executor.models.interfaces import supports_multimodal
         return model_arch in _MULTIMODAL_MODELS
 
 
