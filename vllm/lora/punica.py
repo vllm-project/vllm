@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 def compute_meta(
     token_lora_tensor: torch.Tensor
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, bool]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, int, bool]:
     """
     Get the information required for the sgmv kernel. With the  features:
     1. If consecutive requests in the batch use the same LoRA, this function
@@ -36,14 +36,14 @@ def compute_meta(
     2. At the beginning of each prefill stage inference, recalculations are
     needed based on the input, but only once.
     """
-
+    
     lora_indices_tensor, seq_length_tensor = torch.unique_consecutive(
         token_lora_tensor, return_counts=True)
     cum_result = torch.cumsum(seq_length_tensor, dim=0)
     b_seq_start_tensor = torch.zeros_like(seq_length_tensor)
     b_seq_start_tensor[1:].copy_(cum_result[:-1])
     max_length = seq_length_tensor.max().item()
-
+    token_nums = seq_length_tensor.sum().item()
     batch_size = lora_indices_tensor.size(0)
     no_lora = False
     # -1 means no lora should be applied. Use `no_lora` to determine whether
@@ -52,7 +52,7 @@ def compute_meta(
     if batch_size == 1 and lora_indices_tensor == -1:
         no_lora = True
     return (b_seq_start_tensor, seq_length_tensor, lora_indices_tensor,
-            batch_size, max_length, no_lora)
+            batch_size, max_length, token_nums, no_lora)
 
 
 # TODO see if this can be vectorized
@@ -277,13 +277,13 @@ class PunicaWrapper:
                 long_lora_offsets_tensor)
         else:
             self._long_lora_indices.zero_()
-        self.token_nums = base_indices.sum().item()
         self.indices_len[:] = indices_len
 
     def _update_prefill_metada(self, token_lora_tensor: torch.Tensor) -> None:
 
         (b_seq_start_tensor, seq_length_tensor, lora_indices_tensor,
-         batch_size, max_length, no_lora) = compute_meta(token_lora_tensor)
+         batch_size, max_length, token_nums,
+         no_lora) = compute_meta(token_lora_tensor)
 
         self._seq_start_locs[:b_seq_start_tensor.shape[0]].copy_(
             b_seq_start_tensor)
@@ -292,6 +292,7 @@ class PunicaWrapper:
             lora_indices_tensor)
         self.batch_size = batch_size
         self.max_length = max_length
+        self.token_nums = token_nums
         self.no_lora = no_lora
 
     @property
