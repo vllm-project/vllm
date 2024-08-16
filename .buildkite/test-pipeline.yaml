@@ -40,7 +40,6 @@ steps:
   - grep \"sig sig-object py\" build/html/dev/sampling_params.html
 
 - label: Async Engine, Inputs, Utils, Worker Test # 15min
-  mirror_hardwares: [amd]
   fast_check: true
   source_file_dependencies:
   - vllm/
@@ -262,6 +261,19 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - bash ./run-tests.sh -c configs/models-small.txt -t 1
 
+  - label: Utils Test
+  mirror_hardwares: [amd]
+  source_file_dependencies:
+  - tests/test_utils
+  commands:
+  - pytest -v -s test_utils.py # Utils
+
+  - label: Worker Test
+  mirror_hardwares: [amd]
+  source_file_dependencies:
+  - tests/worker
+  commands:
+  - pytest -v -s worker # Worker
 
 #####  1 GPU test  #####
 #####  multi gpus test  #####
