@@ -386,7 +386,8 @@ class OpenAIServingCompletion(OpenAIServing):
                     logprobs=logprobs,
                     finish_reason=output.finish_reason,
                     stop_reason=output.stop_reason,
-                    prompt_logprobs=final_res.prompt_logprobs)
+                    prompt_logprobs=final_res.prompt_logprobs,
+                )
                 choices.append(choice_data)
 
             num_prompt_tokens += len(prompt_token_ids)

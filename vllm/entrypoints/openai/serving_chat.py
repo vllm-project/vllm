@@ -516,7 +516,8 @@ class OpenAIServingChat(OpenAIServing):
             model=model_name,
             choices=choices,
             usage=usage,
-            prompt_logprobs=final_res.prompt_logprobs)
+            prompt_logprobs=final_res.prompt_logprobs,
+        )
 
         return response
 
