@@ -453,6 +453,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
         return forward_dag.experimental_compile(enable_asyncio=enable_asyncio)
 
     def __del__(self):
+        logger.info("Shutting down RayGPUExecutor from destructor.")
         self.shutdown()
 
 
@@ -526,4 +527,5 @@ class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
         return await asyncio.gather(*coros)
 
     def __del__(self):
+        logger.info("Shutting down RayGPUExecutor from destructor.")
         self.shutdown()

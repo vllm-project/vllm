@@ -486,7 +486,9 @@ class LLMEngine:
     def __del__(self):
         # Shutdown model executor when engine is garbage collected
         # Use getattr since __init__ can fail before the field is set
+        logger.info("Destructing LLMEngine.")
         if model_executor := getattr(self, "model_executor", None):
+            logger.info("Shutting down model executor.")
             model_executor.shutdown()
 
     MISSING_TOKENIZER_GROUP_MSG = ("Unable to get tokenizer because "

@@ -686,9 +686,11 @@ class AsyncLLMEngine:
         their resources).
         """
         if self._background_loop_unshielded is not None:
+            logger.info("Cancelling the background loop.")
             self._background_loop_unshielded.cancel()
             self._background_loop_unshielded = None
         self.background_loop = None
+        logger.info("Background loop has been shut down.")
 
     def _init_engine(self, *args,
                      **kwargs) -> Union[_AsyncLLMEngine, "ray.ObjectRef"]:
