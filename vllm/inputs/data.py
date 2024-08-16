@@ -179,6 +179,7 @@ def to_enc_dec_tuple_list(
 
 
 def build_encoder_prompt(
-        encoder_prompt: _T1) -> ExplicitEncoderDecoderPrompt[_T1, SingletonPromptInputs]:
+    encoder_prompt: _T1,
+) -> ExplicitEncoderDecoderPrompt[_T1, SingletonPromptInputs]:
     return build_explicit_enc_dec_prompt(encoder_prompt=encoder_prompt,
                                          decoder_prompt=None)
