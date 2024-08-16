@@ -46,6 +46,7 @@ FIX #xxxx (*link existing issues this PR will resolve*)
     <li>Custom operations that return <code>Tensors</code> require meta-functions. Meta-functions should be implemented and registered in python so that dynamic dims can be handled automatically. See above documents for a description of meta-functions.</li>
     <li>Use <a href="https://pytorch.org/docs/stable/library.html#torch.library.opcheck"><code>torch.libary.opcheck()</code></a> to test the function registration and meta-function for any registered ops.  See <code>tests/kernels</code> for examples.</li>
     <li>When changing the C++ signature of an existing op, the schema must be updated to reflect the changes.</li>
+    <li>If a new custom type is needed, see the following document: <a href="https://docs.google.com/document/d/18fBMPuOJ0fY5ZQ6YyrHUppw9FA332CpNtgB6SOIgyuA">Custom Class Support in PT2</a>.
 </ul>
 
 <h3>Notes for Large Changes</h3>
