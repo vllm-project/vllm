@@ -70,23 +70,13 @@ wait_for_server() {
 
 kill_gpu_processes() {
   # kill all processes on GPU.
-  pids=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader)
-  if [ -z "$pids" ]; then
-      echo "No GPU processes found."
-  else
-      for pid in $pids; do
-          kill -9 "$pid"
-          echo "Killed process with PID: $pid"
-      done
 
-      echo "All GPU processes have been killed."
-  fi
+  ps aux | grep python | grep openai | awk '{print $2}' | xargs -r kill -9
+  ps -e | grep pt_main_thread | awk '{print $1}' | xargs kill -9
 
-  # waiting for GPU processes to be fully killed
-  # loop while nvidia-smi returns any processes
-  while [ -n "$(nvidia-smi --query-compute-apps=pid --format=csv,noheader)" ]; do
+  # wait until GPU memory usage smaller than 1GB
+  while [ $(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -n 1) -ge 1000 ]; do
     sleep 1
-    echo "Waiting for GPU processes to be killed"
   done
 
   # remove vllm config file
