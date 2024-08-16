@@ -79,10 +79,10 @@ _MULTIMODAL_MODELS = {
     ("llava", "LlavaForConditionalGeneration"),
     "LlavaNextForConditionalGeneration":
     ("llava_next", "LlavaNextForConditionalGeneration"),
+    "MiniCPMV": ("minicpmv", "MiniCPMV"),
     "PaliGemmaForConditionalGeneration": ("paligemma",
                                           "PaliGemmaForConditionalGeneration"),
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
-    "MiniCPMV": ("minicpmv", "MiniCPMV"),
 }
 _CONDITIONAL_GENERATION_MODELS = {
     "BartModel": ("bart", "BartForConditionalGeneration"),
