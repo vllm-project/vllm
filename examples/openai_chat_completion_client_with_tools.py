@@ -103,23 +103,24 @@ tool_call_idx = -1
 for chunk in chunks:
 
     if chunk.choices[0].delta.tool_calls:
-        if chunk.choices[0].delta.tool_calls[0].index != tool_call_idx:
+        tool_call = chunk.choices[0].delta.tool_calls[0]
+
+        if tool_call.index != tool_call_idx:
             if tool_call_idx >= 0:
                 print(
                     f"streamed tool call arguments: {arguments[tool_call_idx]}"
                 )
             tool_call_idx = chunk.choices[0].delta.tool_calls[0].index
             arguments.append("")
-        if chunk.choices[0].delta.tool_calls[0].id:
-            print(f"streamed tool call id: "
-                  f"{chunk.choices[0].delta.tool_calls[0].id}")
-        if chunk.choices[0].delta.tool_calls[0].function:
-            if chunk.choices[0].delta.tool_calls[0].function.name:
-                print(f"streamed tool call name: "
-                      f"{chunk.choices[0].delta.tool_calls[0].function.name}")
-            if chunk.choices[0].delta.tool_calls[0].function.arguments:
-                arguments[tool_call_idx] += chunk.choices[0].delta.tool_calls[
-                    0].function.arguments
+        if tool_call.id:
+            print(f"streamed tool call id: {tool_call.id} ")
+
+        if tool_call.function:
+            if tool_call.function.name:
+                print(f"streamed tool call name: {tool_call.function.name}")
+
+            if tool_call.function.arguments:
+                arguments[tool_call_idx] += tool_call.function.arguments
 
 if len(arguments):
     print(f"streamed tool call arguments: {arguments[-1]}")
