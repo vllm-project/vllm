@@ -178,7 +178,7 @@ def convert_mapping(
 class PunicaWrapper:
     """
     PunicaWrapper is designed to manage and provide metadata for the punica 
-    kernel. The main function  is to maintain the state information for 
+    kernel. The main function is to maintain the state information for 
     Multi-LoRA, and to provide the interface for the punica kernel.
     """
 
@@ -216,6 +216,7 @@ class PunicaWrapper:
                                                    dtype=torch.long,
                                                    device=device)
         self.max_length: int = 0
+        self.token_nums: int = 0
         self.batch_size: int = -1
         self.is_prefill = False
         self.no_lora = False
@@ -276,7 +277,7 @@ class PunicaWrapper:
                 long_lora_offsets_tensor)
         else:
             self._long_lora_indices.zero_()
-
+        self.token_nums = base_indices.sum().item()
         self.indices_len[:] = indices_len
 
     def _update_prefill_metada(self, token_lora_tensor: torch.Tensor) -> None:
@@ -295,21 +296,23 @@ class PunicaWrapper:
 
     @property
     def prefill_metadata(
-            self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
+        self
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, int]:
         """
         This property provides a convenient way to access the necessary 
         metadata for prefill-related  kernel computations.
-            1. seq_start_locs: Tensor of sequence start positions
-            2. seq_lengths: Tensor of sequence lengths
+            1. seq_start_locs: Tensor of sequence start positions.
+            2. seq_lengths: Tensor of sequence lengths.
             3. lora_indices_per_batch: Tensor of lora indices, and an index of 
                 -1 means no lora should be applied.
-            4. batch_size: batch size after clustering identical lora indices
-            5. max_length: The maximum sequence length in the batch
+            4. batch_size: Batch size after clustering identical lora indices.
+            5. max_length: The maximum sequence length in the batch.
+            6. token_nums: The token numbers in the batch.
         """
         return (self._seq_start_locs[:self.batch_size],
                 self._seq_lengths[:self.batch_size],
                 self._lora_indices_per_batch[:self.batch_size],
-                self.batch_size, self.max_length)
+                self.batch_size, self.max_length, self.token_nums)
 
     @property
     def token_lora_indices(self) -> torch.Tensor:
@@ -324,7 +327,7 @@ class PunicaWrapper:
     def sampler_indices(self) -> torch.Tensor:
         """ 
         This property is used to access the lora indices specifically for 
-        LogitsProcessorWithLoRA
+        LogitsProcessorWithLoRA.
         """
         sampler_indices_len = self.indices_len[1]
         return self._sampler_indices[:sampler_indices_len]
@@ -332,7 +335,7 @@ class PunicaWrapper:
     @property
     def sampler_indices_padded(self) -> torch.Tensor:
         """
-        This property provides access to padded sampler indices
+        This property provides access to padded sampler indices.
         """
         indices_padded_len = self.indices_len[2]
         return self._sampler_indices_padded[:indices_padded_len]
@@ -341,7 +344,7 @@ class PunicaWrapper:
     def embeddings_indices(self) -> torch.Tensor:
         """
         This property provides access to the indices used for lora embeddings, 
-        specifically for VocabParallelEmbeddingWithLoRA
+        specifically for VocabParallelEmbeddingWithLoRA.
         """
         embeddings_indices_len = self.indices_len[3]
         return self._embeddings_indices[:, :embeddings_indices_len]
@@ -350,7 +353,7 @@ class PunicaWrapper:
     def long_lora_indices(self) -> torch.Tensor:
         """ 
         This property provides access to the indices used for long context 
-        lora, specifically for LinearScalingRotaryEmbeddingWithLora
+        lora, specifically for LinearScalingRotaryEmbeddingWithLora.
         """
         long_lora_len = self.indices_len[4]
         return self._long_lora_indices[:long_lora_len]
@@ -518,9 +521,9 @@ class PunicaWrapper:
             ).squeeze(0)
         Args:
             y (torch.Tensor):  Output tensor. Will be changed in-place.
-            x (torch.Tensor): Input tensor
-            wa_t_all (torch.Tensor): lora_a's weight
-            wb_t_all (torch.Tensor): lora_b's weight
+            x (torch.Tensor): Input tensor.
+            wa_t_all (torch.Tensor): lora_a's weight.
+            wb_t_all (torch.Tensor): lora_b's weight.
             scale (float): Scaling factor.
             y_offset (Optional[int], optional): Offset to apply to the starting
                 column of y.

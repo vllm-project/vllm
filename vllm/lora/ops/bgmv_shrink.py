@@ -95,7 +95,7 @@ def bgmv_shrink(
             corresponding to each batch. An index of -1 means no lora should be
             applied.
         batches (int): batch size
-        scaling (float):  Scaling factor.
+        scaling (float):  Scaling factor
         override_config (Optional[Dict[str, int]], optional): Defaults to None. 
             Triton grid config
     """
