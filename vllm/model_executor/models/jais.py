@@ -272,7 +272,9 @@ class JAISModel(nn.Module):
 
         for i in range(self.start_layer, self.end_layer):
             layer = self.h[i]
-            hidden_states = layer(hidden_states, kv_caches[i - self.start_layer], attn_metadata)
+            hidden_states = layer(hidden_states,
+                                  kv_caches[i - self.start_layer],
+                                  attn_metadata)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
