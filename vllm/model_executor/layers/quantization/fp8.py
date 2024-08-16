@@ -488,7 +488,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                              topk_weights=topk_weights,
                              topk_ids=topk_ids,
                              inplace=True,
-                             use_fp8=True,
+                             use_fp8_w8a8=True,
                              w1_scale=layer.w13_weight_scale,
                              w2_scale=layer.w2_weight_scale,
                              a1_scale=layer.w13_input_scale,
