@@ -12,9 +12,9 @@ __global__ void gptq_marlin_repack_kernel(
 
 }  // namespace marlin
 
-torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
-                                 int64_t size_k, int64_t size_n,
-                                 int64_t num_bits) {
+torch::Tensor gptq_marlin_repack(torch::Tensor const& b_q_weight,
+                                 torch::Tensor const& perm, int64_t size_k,
+                                 int64_t size_n, int64_t num_bits) {
   TORCH_CHECK_NOT_IMPLEMENTED(
       false, "marlin_repack_from_gptq(..) requires CUDA_ARCH >= 8.0");
   return torch::empty({1, 1});

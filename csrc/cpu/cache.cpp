@@ -88,7 +88,7 @@ void reshape_and_cache_cpu_impl(
 // in order to satisfy pytorch's C++ operator registration code.
 void copy_blocks(std::vector<torch::Tensor> const& key_caches,
                  std::vector<torch::Tensor> const& value_caches,
-                 const torch::Tensor& block_mapping) {
+                 torch::Tensor const& block_mapping) {
   unsigned num_layers = key_caches.size();
   TORCH_CHECK(num_layers == value_caches.size());
   if (num_layers == 0) {
@@ -134,7 +134,7 @@ void reshape_and_cache(torch::Tensor const& key, torch::Tensor const& value,
       });
 }
 
-void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
-                 const torch::Tensor& block_mapping) {
+void swap_blocks(torch::Tensor const& src, torch::Tensor& dst,
+                 torch::Tensor const& block_mapping) {
   TORCH_CHECK(false, "swap_blocks is unsupported on CPU.")
 }
