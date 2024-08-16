@@ -61,12 +61,16 @@ class RayGPUExecutor(DistributedGPUExecutor):
         self._init_workers_ray(placement_group)
 
     def shutdown(self) -> None:
+        logger.info("Shutting down RayGPUExecutor.")
         if hasattr(self, "forward_dag") and self.forward_dag is not None:
+            logger.info("tearing down forward_dag.")
             self.forward_dag.teardown()
             import ray
             for worker in self.workers:
                 ray.kill(worker)
             self.forward_dag = None
+        else:
+            logger.info("hasattr=%s", hasattr(self, "forward_dag"))
 
     def _configure_ray_workers_use_nsight(self,
                                           ray_remote_kwargs) -> Dict[str, Any]:
