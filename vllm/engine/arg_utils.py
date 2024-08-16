@@ -230,7 +230,8 @@ class EngineArgs:
             'section for more information.\n'
             '* "bitsandbytes" will load the weights using bitsandbytes '
             'quantization.\n'
-            '* "sharded_state" will load the weights from a sharded checkpoint.\n')
+            '* "sharded_state" will load the weights from a sharded '
+            'checkpoint.\n')
         parser.add_argument(
             '--dtype',
             type=str,
