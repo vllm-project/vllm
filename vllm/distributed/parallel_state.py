@@ -329,7 +329,7 @@ class GroupCoordinator:
     def gather(self,
                input_: torch.Tensor,
                dst: int = 0,
-               dim: int = -1) -> torch.Tensor:
+               dim: int = -1) -> Optional[torch.Tensor]:
         """
         NOTE: We assume that the input tensor is on the same device across
         all the ranks.
