@@ -265,15 +265,13 @@ steps:
   mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
-  commands:
-  - pytest -v -s test_utils.py # Utils
+  command: pytest -v -s test_utils.py # Utils
 
   - label: Worker Test
   mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
-  commands:
-  - pytest -v -s worker # Worker
+  command: pytest -v -s worker # Worker
 
 #####  1 GPU test  #####
 #####  multi gpus test  #####
