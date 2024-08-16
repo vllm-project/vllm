@@ -17,13 +17,7 @@ if not current_platform.is_tpu():
         logger.warning("Failed to import from vllm._C with %r", e)
 
 with contextlib.suppress(ImportError):
-    # ruff: noqa: F401
-    import vllm._moe_C
-
-
-def is_custom_op_supported(op_name: str) -> bool:
-    op, overloads = torch._C._jit_get_operation(op_name)
-    return op is not None
+    import vllm._moe_C  # noqa: F401
 
 
 def hint_on_error(fn):
@@ -280,14 +274,14 @@ def cutlass_scaled_mm_azp(a: torch.Tensor,
 # aqlm
 def aqlm_gemm(input: torch.Tensor, codes: torch.Tensor,
               codebooks: torch.Tensor, scales: torch.Tensor,
-              codebook_partition_sizes: torch.Tensor,
+              codebook_partition_sizes: List[int],
               bias: Optional[torch.Tensor]) -> torch.Tensor:
     return torch.ops._C.aqlm_gemm(input, codes, codebooks, scales,
                                   codebook_partition_sizes, bias)
 
 
 def aqlm_dequant(codes: torch.Tensor, codebooks: torch.Tensor,
-                 codebook_partition_sizes: torch.Tensor) -> torch.Tensor:
+                 codebook_partition_sizes: List[int]) -> torch.Tensor:
     return torch.ops._C.aqlm_dequant(codes, codebooks,
                                      codebook_partition_sizes)
 
@@ -434,17 +428,9 @@ def marlin_qqq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
 
 
 # gguf
-def ggml_dequantize(W: torch.Tensor, quant_type: int, m: int, n: int):
+def ggml_dequantize(W: torch.Tensor, quant_type: int, m: int,
+                    n: int) -> torch.Tensor:
     return torch.ops._C.ggml_dequantize(W, quant_type, m, n)
-
-
-def ggml_mul_mat_vec(
-    W: torch.Tensor,
-    X: torch.Tensor,
-    quant_type: int,
-    row: int,
-):
-    return torch.ops._C.ggml_mul_mat_vec(W, X, quant_type, row)
 
 
 def ggml_mul_mat_vec_a8(
@@ -452,7 +438,7 @@ def ggml_mul_mat_vec_a8(
     X: torch.Tensor,
     quant_type: int,
     row: int,
-):
+) -> torch.Tensor:
     return torch.ops._C.ggml_mul_mat_vec_a8(W, X, quant_type, row)
 
 
@@ -461,7 +447,7 @@ def ggml_mul_mat_a8(
     X: torch.Tensor,
     quant_type: int,
     row: int,
-):
+) -> torch.Tensor:
     return torch.ops._C.ggml_mul_mat_a8(W, X, quant_type, row)
 
 
