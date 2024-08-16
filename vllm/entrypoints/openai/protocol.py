@@ -243,6 +243,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if max_tokens is None:
             max_tokens = default_max_tokens
 
+        prompt_logprobs = self.prompt_logprobs
+        if prompt_logprobs is None and self.echo:
+            prompt_logprobs = self.top_logprobs
+
         # We now allow logprobs being true without top_logrobs.
         logits_processors = get_logits_processors(
             logit_bias=self.logit_bias,
@@ -266,8 +270,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             stop=self.stop,
             stop_token_ids=self.stop_token_ids,
             logprobs=self.top_logprobs if self.logprobs else None,
-            prompt_logprobs=self.prompt_logprobs if self.prompt_logprobs else
-            (self.top_logprobs if self.echo else None),
+            prompt_logprobs=prompt_logprobs,
             ignore_eos=self.ignore_eos,
             max_tokens=max_tokens,
             min_tokens=self.min_tokens,
@@ -281,14 +284,36 @@ class ChatCompletionRequest(OpenAIBaseModel):
             truncate_prompt_tokens=self.truncate_prompt_tokens,
         )
 
-    @model_validator(mode='before')
+    @model_validator(mode="before")
     @classmethod
-    def validate_stream_options(cls, values):
-        if (values.get('stream_options') is not None
-                and not values.get('stream')):
+    def validate_stream_options(cls, data):
+        if data.get("stream_options") and not data.get("stream"):
             raise ValueError(
-                "stream_options can only be set if stream is true")
-        return values
+                "Stream options can only be defined when `stream=True`.")
+
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_logprobs(cls, data):
+        if (prompt_logprobs := data.get("prompt_logprobs")) is not None:
+            if data.get("stream") and prompt_logprobs > 0:
+                raise ValueError(
+                    "`prompt_logprobs` are not available when `stream=True`.")
+
+            if prompt_logprobs < 0:
+                raise ValueError("`prompt_logprobs` must be a positive value.")
+
+        if (top_logprobs := data.get("top_logprobs")) is not None:
+            if top_logprobs < 0:
+                raise ValueError("`top_logprobs` must be a positive value.")
+
+            if not data.get("logprobs"):
+                raise ValueError(
+                    "when using `top_logprobs`, `logprobs` must be set to true."
+                )
+
+        return data
 
     @model_validator(mode="before")
     @classmethod
@@ -319,19 +344,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
             if "tools" not in data or data["tools"] is None:
                 raise ValueError(
                     "When using `tool_choice`, `tools` must be set.")
-        return data
-
-    @model_validator(mode="before")
-    @classmethod
-    def check_logprobs(cls, data):
-        if "top_logprobs" in data and data["top_logprobs"] is not None:
-            if "logprobs" not in data or data["logprobs"] is False:
-                raise ValueError(
-                    "when using `top_logprobs`, `logprobs` must be set to true."
-                )
-            elif data["top_logprobs"] < 0:
-                raise ValueError(
-                    "`top_logprobs` must be a value a positive value.")
         return data
 
 
@@ -430,6 +442,10 @@ class CompletionRequest(OpenAIBaseModel):
         if max_tokens is None:
             max_tokens = default_max_tokens
 
+        prompt_logprobs = self.prompt_logprobs
+        if prompt_logprobs is None and self.echo:
+            prompt_logprobs = self.logprobs
+
         echo_without_generation = self.echo and self.max_tokens == 0
 
         logits_processors = get_logits_processors(
@@ -459,8 +475,7 @@ class CompletionRequest(OpenAIBaseModel):
             min_tokens=self.min_tokens,
             use_beam_search=self.use_beam_search,
             early_stopping=self.early_stopping,
-            prompt_logprobs=self.prompt_logprobs
-            if self.prompt_logprobs else self.logprobs if self.echo else None,
+            prompt_logprobs=prompt_logprobs,
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
@@ -486,9 +501,17 @@ class CompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_logprobs(cls, data):
-        if "logprobs" in data and data[
-                "logprobs"] is not None and not data["logprobs"] >= 0:
-            raise ValueError("if passed, `logprobs` must be a positive value.")
+        if (prompt_logprobs := data.get("prompt_logprobs")) is not None:
+            if data.get("stream") and prompt_logprobs > 0:
+                raise ValueError(
+                    "`prompt_logprobs` are not available when `stream=True`.")
+
+            if prompt_logprobs < 0:
+                raise ValueError("`prompt_logprobs` must be a positive value.")
+
+        if (logprobs := data.get("logprobs")) is not None and logprobs < 0:
+            raise ValueError("`logprobs` must be a positive value.")
+
         return data
 
     @model_validator(mode="before")
@@ -496,7 +519,8 @@ class CompletionRequest(OpenAIBaseModel):
     def validate_stream_options(cls, data):
         if data.get("stream_options") and not data.get("stream"):
             raise ValueError(
-                "Stream options can only be defined when stream is true.")
+                "Stream options can only be defined when `stream=True`.")
+
         return data
 
 

@@ -87,15 +87,6 @@ class OpenAIServingCompletion(OpenAIServing):
         request_id = f"cmpl-{random_uuid()}"
         created_time = int(time.time())
 
-        if request.prompt_logprobs is not None:
-            if request.stream and request.prompt_logprobs > 0:
-                return self.create_error_response(
-                    "Prompt_logprobs are not available when stream is enabled")
-            elif request.prompt_logprobs < 0:
-                return self.create_error_response(
-                    f"Prompt_logprobs set to invalid negative "
-                    f"value: {request.prompt_logprobs}")
-
         # Schedule the request and get the result generator.
         generators: List[AsyncGenerator[RequestOutput, None]] = []
         try:
