@@ -216,6 +216,10 @@ def awq_gemm_kernel(a_ptr, b_ptr, c_ptr, zeros_ptr, scales_ptr, M, N, K,
 #   split_k_iters=0
 #   thx=0
 #   thy=0
+
+# qweights - [K     , M // 8], int32
+# scales   - [K // G, M     ], float16
+# zeros    - [K // G, M // 8], int32
 def awq_dequantize_triton(
         qweight: torch.Tensor,
         scales: torch.Tensor,
@@ -224,6 +228,14 @@ def awq_dequantize_triton(
         thx: int,  # Not used
         thy: int  # Not used
 ) -> torch.Tensor:
+    K = qweight.shape[0]
+    M = scales.shape[1]
+    awq_group_size = 128
+
+    assert K > 0 and M > 0
+    assert scales.shape[0] == K // awq_group_size and scales.shape[1] == M
+    assert zeros.shape[0] == K // awq_group_size and zeros.shape[1] == M // 8
+
     # Result tensor:
     # number of rows = same as input tensor
     # number of cols = 8 x input tensor num cols
@@ -258,17 +270,30 @@ def awq_dequantize_triton(
     return result
 
 
+# input   - [N, K]
+# qweight - [K, M // 8]
+# qzeros  - [K // G, M // 8]
+# scales  - [K // G, M]
+# split_k_iters - parallelism along K-dimension, int, power of 2.
 def awq_gemm_triton(input: torch.Tensor, qweight: torch.Tensor,
                     scales: torch.Tensor, qzeros: torch.Tensor,
                     split_k_iters: int) -> torch.Tensor:
     M, K = input.shape
     N = qweight.shape[1] * 8
+    awq_group_size = 128
+
+    assert N > 0 and K > 0 and M > 0
+    assert qweight.shape[0] == K and qweight.shape[1] == N // 8
+    assert qzeros.shape[0] == K // awq_group_size and qzeros.shape[1] == N // 8
+    assert scales.shape[0] == K // awq_group_size and scales.shape[1] == N
+    assert split_k_iters & (split_k_iters - 1) == 0 and split_k_iters != 0
+    assert split_k_iters <= 32
+
     grid = lambda META: (
         triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(
             N, META['BLOCK_SIZE_N']),
         split_k_iters,
     )
-    awq_group_size = 128
     block_size_m = 32
     block_size_n = 32
     block_size_k = 32
