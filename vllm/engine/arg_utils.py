@@ -319,7 +319,7 @@ class EngineArgs:
                             choices=[8, 16, 32],
                             help='Token block size for contiguous chunks of '
                             'tokens. This is ignored on neuron devices and '
-                            'set to max-num-seqs')
+                            'set to max-model-len')
 
         parser.add_argument('--enable-prefix-caching',
                             action='store_true',
@@ -782,7 +782,7 @@ class EngineArgs:
             multimodal_config=multimodal_config)
         cache_config = CacheConfig(
             block_size=self.block_size if self.device != "neuron" else
-            self.max_num_seqs,  # neuron needs block_size = max_num_seqs
+            self.max_model_len,  # neuron needs block_size = max_model_len
             gpu_memory_utilization=self.gpu_memory_utilization,
             swap_space=self.swap_space,
             cache_dtype=self.kv_cache_dtype,
