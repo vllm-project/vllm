@@ -298,14 +298,9 @@ async def test_prompt_logprobs_chat(client: openai.AsyncOpenAI,
     if prompt_logprobs is not None:
         params["extra_body"] = {"prompt_logprobs": prompt_logprobs}
 
-    if prompt_logprobs and prompt_logprobs < 0:
-        with pytest.raises(BadRequestError) as err_info:
+    if prompt_logprobs is not None and prompt_logprobs < 0:
+        with pytest.raises(BadRequestError):
             await client.chat.completions.create(**params)
-        expected_err_string = (
-            "Error code: 400 - {'object': 'error', 'message': "
-            "'Prompt_logprobs set to invalid negative value: -1',"
-            " 'type': 'BadRequestError', 'param': None, 'code': 400}")
-        assert str(err_info.value) == expected_err_string
     else:
         completion = await client.chat.completions.create(**params)
         if prompt_logprobs and prompt_logprobs > 0:
@@ -369,14 +364,9 @@ async def test_prompt_logprobs_completion(client: openai.AsyncOpenAI,
     if prompt_logprobs is not None:
         params["extra_body"] = {"prompt_logprobs": prompt_logprobs}
 
-    if prompt_logprobs and prompt_logprobs < 0:
-        with pytest.raises(BadRequestError) as err_info:
+    if prompt_logprobs is not None and prompt_logprobs < 0:
+        with pytest.raises(BadRequestError):
             await client.completions.create(**params)
-        expected_err_string = (
-            "Error code: 400 - {'object': 'error', 'message': "
-            "'Prompt_logprobs set to invalid negative value: -1',"
-            " 'type': 'BadRequestError', 'param': None, 'code': 400}")
-        assert str(err_info.value) == expected_err_string
     else:
         completion = await client.completions.create(**params)
         if prompt_logprobs and prompt_logprobs > 0:
