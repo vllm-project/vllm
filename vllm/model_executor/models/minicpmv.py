@@ -24,8 +24,8 @@
 import math
 import re
 from functools import partial
-from typing import (Any, Callable, Iterable, List, Optional, Tuple, TypedDict,
-                    Union)
+from typing import (Any, Callable, Iterable, List, Mapping, Optional, Tuple,
+                    TypedDict, Union)
 
 import numpy as np
 import torch
@@ -34,7 +34,7 @@ import torch.types
 from PIL import Image
 from torch import nn
 from torch.nn.init import trunc_normal_
-from transformers.configuration_utils import PretrainedConfig
+from transformers import PretrainedConfig
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
@@ -42,13 +42,12 @@ from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import SupportsVision
+from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.models.minicpm import MiniCPMModel
 from vllm.model_executor.models.qwen2 import Qwen2Model
@@ -404,26 +403,28 @@ def get_version_by_config(config: PretrainedConfig) -> Tuple[int, ...]:
 
 
 def get_max_minicpmv_image_tokens(ctx: InputContext):
-    hf_config = ctx.get_hf_config(PretrainedConfig)
+    hf_config = ctx.get_hf_config()
     return getattr(hf_config, "query_num", 64)
 
 
-def dummy_seq_data_for_minicpmv(seq_len: int):
+def dummy_seq_data_for_minicpmv(seq_len: int, num_images: int):
     token_ids = [0] * seq_len
     return SequenceData(token_ids)
 
 
-def dummy_image_for_minicpmv(hf_config: PretrainedConfig):
+def dummy_image_for_minicpmv(hf_config: PretrainedConfig, num_images: int):
     width = height = hf_config.image_size
     image = Image.new("RGB", (width, height), color=0)
-    return {"image": image}
+    return {"image": image if num_images == 1 else [image] * num_images}
 
 
-def dummy_data_for_minicpmv(ctx: InputContext, seq_len: int):
-    hf_config = ctx.get_hf_config(PretrainedConfig)
+def dummy_data_for_minicpmv(ctx: InputContext, seq_len: int,
+                            mm_counts: Mapping[str, int]):
+    hf_config = ctx.get_hf_config()
+    num_images = mm_counts["image"]
 
-    seq_data = dummy_seq_data_for_minicpmv(seq_len)
-    mm_data = dummy_image_for_minicpmv(hf_config)
+    seq_data = dummy_seq_data_for_minicpmv(seq_len, num_images)
+    mm_data = dummy_image_for_minicpmv(hf_config, num_images)
 
     return seq_data, mm_data
 
@@ -479,7 +480,7 @@ def input_processor_for_minicpmv(ctx: InputContext, llm_inputs: LLMInputs):
     return llm_inputs
 
 
-class MiniCPMVBaseModel(nn.Module, SupportsVision):
+class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
     """
     The abstract class of MiniCPMV can only be inherited, but cannot be
     instantiated.
@@ -630,8 +631,11 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
         )
         return output
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
