@@ -1820,10 +1820,10 @@ void shuffle_exllama_weight(uint32_t* q_weight, int const* q_perm, int height,
 }  // namespace gptq
 }  // namespace vllm
 
-torch::Tensor gptq_gemm(torch::Tensor const a, torch::Tensor const b_q_weight,
-                        torch::Tensor const b_gptq_qzeros,
-                        torch::Tensor const b_gptq_scales,
-                        torch::Tensor const b_g_idx, bool use_exllama,
+torch::Tensor gptq_gemm(torch::Tensor const& a, torch::Tensor const& b_q_weight,
+                        torch::Tensor const& b_gptq_qzeros,
+                        torch::Tensor const& b_gptq_scales,
+                        torch::Tensor const& b_g_idx, bool use_exllama,
                         int64_t bit) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
   auto options = torch::TensorOptions().dtype(a.dtype()).device(a.device());

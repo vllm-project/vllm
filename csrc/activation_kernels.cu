@@ -55,34 +55,34 @@ __device__ __forceinline__ T gelu_tanh_kernel(const T& x) {
 }  // namespace vllm
 
 // Launch activation and gating kernel.
-#define LAUNCH_ACTIVATION_GATE_KERNEL(KERNEL)                            \
-  int d = input.size(-1) / 2;                                            \
-  int64_t num_tokens = input.numel() / input.size(-1);                   \
-  dim3 grid(num_tokens);                                                 \
-  dim3 block(std::min(d, 1024));                                         \
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));      \
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();          \
-  VLLM_DISPATCH_FLOATING_TYPES(                                          \
-      input.scalar_type(), "act_and_mul_kernel", [&] {                   \
-        vllm::act_and_mul_kernel<scalar_t, KERNEL<scalar_t>>             \
-            <<<grid, block, 0, stream>>>(out.data_ptr<scalar_t>(),       \
-                                         input.data_ptr<scalar_t>(), d); \
+#define LAUNCH_ACTIVATION_GATE_KERNEL(KERNEL)                                  \
+  int d = input.size(-1) / 2;                                                  \
+  int64_t num_tokens = input.numel() / input.size(-1);                         \
+  dim3 grid(num_tokens);                                                       \
+  dim3 block(std::min(d, 1024));                                               \
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));            \
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();                \
+  VLLM_DISPATCH_FLOATING_TYPES(                                                \
+      input.scalar_type(), "act_and_mul_kernel", [&] {                         \
+        vllm::act_and_mul_kernel<scalar_t, KERNEL<scalar_t>>                   \
+            <<<grid, block, 0, stream>>>(out.mutable_data_ptr<scalar_t>(),     \
+                                         input.const_data_ptr<scalar_t>(), d); \
       });
 
-void silu_and_mul(torch::Tensor& out,    // [..., d]
-                  torch::Tensor& input)  // [..., 2 * d]
+void silu_and_mul(torch::Tensor& out,          // [..., d]
+                  torch::Tensor const& input)  // [..., 2 * d]
 {
   LAUNCH_ACTIVATION_GATE_KERNEL(vllm::silu_kernel);
 }
 
-void gelu_and_mul(torch::Tensor& out,    // [..., d]
-                  torch::Tensor& input)  // [..., 2 * d]
+void gelu_and_mul(torch::Tensor& out,          // [..., d]
+                  torch::Tensor const& input)  // [..., 2 * d]
 {
   LAUNCH_ACTIVATION_GATE_KERNEL(vllm::gelu_kernel);
 }
 
-void gelu_tanh_and_mul(torch::Tensor& out,    // [..., d]
-                       torch::Tensor& input)  // [..., 2 * d]
+void gelu_tanh_and_mul(torch::Tensor& out,          // [..., d]
+                       torch::Tensor const& input)  // [..., 2 * d]
 {
   LAUNCH_ACTIVATION_GATE_KERNEL(vllm::gelu_tanh_kernel);
 }
@@ -114,8 +114,8 @@ __global__ void activation_kernel(
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();                \
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "activation_kernel", [&] { \
     vllm::activation_kernel<scalar_t, KERNEL<scalar_t>>                        \
-        <<<grid, block, 0, stream>>>(out.data_ptr<scalar_t>(),                 \
-                                     input.data_ptr<scalar_t>(), d);           \
+        <<<grid, block, 0, stream>>>(out.mutable_data_ptr<scalar_t>(),         \
+                                     input.const_data_ptr<scalar_t>(), d);     \
   });
 
 namespace vllm {
@@ -143,20 +143,20 @@ __device__ __forceinline__ T gelu_quick_kernel(const T& x) {
 
 }  // namespace vllm
 
-void gelu_new(torch::Tensor& out,    // [..., d]
-              torch::Tensor& input)  // [..., d]
+void gelu_new(torch::Tensor& out,          // [..., d]
+              torch::Tensor const& input)  // [..., d]
 {
   LAUNCH_ACTIVATION_KERNEL(vllm::gelu_new_kernel);
 }
 
-void gelu_fast(torch::Tensor& out,    // [..., d]
-               torch::Tensor& input)  // [..., d]
+void gelu_fast(torch::Tensor& out,          // [..., d]
+               torch::Tensor const& input)  // [..., d]
 {
   LAUNCH_ACTIVATION_KERNEL(vllm::gelu_fast_kernel);
 }
 
-void gelu_quick(torch::Tensor& out,    // [..., d]
-                torch::Tensor& input)  // [..., d]
+void gelu_quick(torch::Tensor& out,          // [..., d]
+                torch::Tensor const& input)  // [..., d]
 {
   LAUNCH_ACTIVATION_KERNEL(vllm::gelu_quick_kernel);
 }

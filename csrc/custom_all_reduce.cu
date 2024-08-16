@@ -50,14 +50,14 @@ fptr_t init_custom_ar(torch::Tensor& meta, torch::Tensor& rank_data,
  * 5. A[None].expand(2, -1, -1, -1): Not OK
  * 6. A[:, 1:, 1:]: Not OK
  */
-bool _is_weak_contiguous(torch::Tensor& t) {
+bool _is_weak_contiguous(torch::Tensor const& t) {
   return t.is_contiguous() ||
          (t.storage().nbytes() - t.storage_offset() * t.element_size() ==
           t.numel() * t.element_size());
 }
 
-bool should_custom_ar(torch::Tensor& inp, int64_t max_size, int64_t world_size,
-                      bool full_nvlink) {
+bool should_custom_ar(torch::Tensor const& inp, int64_t max_size,
+                      int64_t world_size, bool full_nvlink) {
   auto inp_size = inp.numel() * inp.element_size();
   // custom allreduce requires input byte size to be multiples of 16
   if (inp_size % 16 != 0) return false;
@@ -99,7 +99,7 @@ void _all_reduce(fptr_t _fa, torch::Tensor const& inp, torch::Tensor& out,
   }
 }
 
-void all_reduce_reg(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out) {
+void all_reduce_reg(fptr_t _fa, torch::Tensor const& inp, torch::Tensor& out) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(inp));
   auto stream = c10::cuda::getCurrentCUDAStream().stream();
   TORCH_CHECK_EQ(inp.scalar_type(), out.scalar_type());

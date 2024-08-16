@@ -480,7 +480,7 @@ void topk_softmax(
     torch::Tensor& topk_weights,                // [num_tokens, topk]
     torch::Tensor& topk_indices,                // [num_tokens, topk]
     torch::Tensor& token_expert_indices,        // [num_tokens, topk]
-    torch::Tensor& gating_output)               // [num_tokens, num_experts]
+    torch::Tensor const& gating_output)               // [num_tokens, num_experts]
 {
     const int num_experts = gating_output.size(-1);
     const int num_tokens = gating_output.numel() / num_experts;
@@ -494,11 +494,11 @@ void topk_softmax(
     const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     torch::Tensor softmax_workspace = torch::empty({workspace_size}, gating_output.options());
     vllm::moe::topkGatingSoftmaxKernelLauncher(
-        gating_output.data_ptr<float>(),
-        topk_weights.data_ptr<float>(),
-        topk_indices.data_ptr<int>(),
-        token_expert_indices.data_ptr<int>(),
-        softmax_workspace.data_ptr<float>(),
+        gating_output.const_data_ptr<float>(),
+        topk_weights.mutable_data_ptr<float>(),
+        topk_indices.mutable_data_ptr<int>(),
+        token_expert_indices.mutable_data_ptr<int>(),
+        softmax_workspace.mutable_data_ptr<float>(),
         num_tokens,
         num_experts,
         topk,

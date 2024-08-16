@@ -74,13 +74,13 @@ __global__ void Marlin(
 
 }  // namespace marlin
 
-torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
-                               torch::Tensor& b_scales, torch::Tensor& b_zeros,
-                               torch::Tensor& g_idx, torch::Tensor& perm,
-                               torch::Tensor& workspace,
-                               vllm::ScalarTypeTorchPtr const& b_q_type,
-                               int64_t size_m, int64_t size_n, int64_t size_k,
-                               bool is_k_full, bool has_zp) {
+torch::Tensor gptq_marlin_gemm(
+    torch::Tensor const& a, torch::Tensor const& b_q_weight,
+    torch::Tensor const& b_scales, torch::Tensor const& b_zeros,
+    torch::Tensor const& g_idx, torch::Tensor const& perm,
+    torch::Tensor& workspace, vllm::ScalarTypeTorchPtr const const& b_q_type,
+    int64_t size_m, int64_t size_n, int64_t size_k, bool is_k_full,
+    bool has_zp) {
   TORCH_CHECK_NOT_IMPLEMENTED(false,
                               "marlin_gemm(..) requires CUDA_ARCH >= 8.0");
   return torch::empty({1, 1});
@@ -2126,14 +2126,13 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp,
 
 }  // namespace marlin
 
-torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
-                               torch::Tensor& b_scales, torch::Tensor& b_zeros,
-                               torch::Tensor& g_idx, torch::Tensor& perm,
-                               torch::Tensor& workspace,
-                               vllm::ScalarTypeTorchPtr const& b_q_type,
-                               int64_t size_m, int64_t size_n, int64_t size_k,
-                               bool is_k_full, bool has_zp,
-                               bool use_fp32_reduce) {
+torch::Tensor gptq_marlin_gemm(
+    torch::Tensor const& a, torch::Tensor const& b_q_weight,
+    torch::Tensor const& b_scales, torch::Tensor const& b_zeros,
+    torch::Tensor const& g_idx, torch::Tensor const& perm,
+    torch::Tensor& workspace, vllm::ScalarTypeTorchPtr const& b_q_type,
+    int64_t size_m, int64_t size_n, int64_t size_k, bool is_k_full, bool has_zp,
+    bool use_fp32_reduce) {
   if (has_zp) {
     TORCH_CHECK(*b_q_type == vllm::kU4 || *b_q_type == vllm::kU8,
                 "b_q_type must be u4 or u8 when has_zp = True. Got = ",

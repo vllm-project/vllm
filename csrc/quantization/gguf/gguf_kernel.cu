@@ -59,7 +59,7 @@ static void quantize_row_q8_1_cuda(const half* x, void* vy, const int kx,
   quantize_q8_1<<<num_blocks, block_size, 0, stream>>>(x, vy, kx, kx_padded);
 }
 
-torch::Tensor ggml_dequantize(torch::Tensor W,  // quant weight
+torch::Tensor ggml_dequantize(torch::Tensor const& W,  // quant weight
                               int8_t type, int64_t m, int64_t n) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(W));
   auto options =
@@ -67,13 +67,13 @@ torch::Tensor ggml_dequantize(torch::Tensor W,  // quant weight
   at::Tensor DW = torch::empty({m, n}, options);
   cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
   const to_fp16_cuda_t to_fp16_cuda = ggml_get_to_fp16_cuda(type);
-  to_fp16_cuda((void*)W.const_data_ptr(), (half*)DW.mutable_data_ptr(), m * n,
-               stream);
+  to_fp16_cuda((void const*)W.const_data_ptr(), (half*)DW.mutable_data_ptr(),
+               m * n, stream);
   return DW;
 }
 
-torch::Tensor ggml_mul_mat_vec_a8(torch::Tensor W,  // quant weight
-                                  torch::Tensor X,  // input
+torch::Tensor ggml_mul_mat_vec_a8(torch::Tensor const& W,  // quant weight
+                                  torch::Tensor const& X,  // input
                                   int8_t type, int64_t row) {
   int col = X.sizes()[1];
   const int padded = (col + 512 - 1) / 512 * 512;
@@ -181,8 +181,8 @@ torch::Tensor ggml_mul_mat_vec_a8(torch::Tensor W,  // quant weight
   return Y;
 }
 
-torch::Tensor ggml_mul_mat_a8(torch::Tensor W,  // quant weight
-                              torch::Tensor X,  // input
+torch::Tensor ggml_mul_mat_a8(torch::Tensor const& W,  // quant weight
+                              torch::Tensor const& X,  // input
                               int8_t type, int64_t row) {
   int col = X.sizes()[1];
   int padded = (col + 512 - 1) / 512 * 512;

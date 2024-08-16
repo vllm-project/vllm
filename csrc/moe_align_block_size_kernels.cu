@@ -20,12 +20,10 @@ __device__ __forceinline__ int32_t index(int32_t total_col, int32_t row,
 }  // namespace
 
 template <typename scalar_t>
-__global__ void moe_align_block_size_kernel(scalar_t* __restrict__ topk_ids,
-                                            int32_t* sorted_token_ids,
-                                            int32_t* expert_ids,
-                                            int32_t* total_tokens_post_pad,
-                                            int32_t num_experts,
-                                            int32_t block_size, size_t numel) {
+__global__ void moe_align_block_size_kernel(
+    scalar_t const* __restrict__ topk_ids, int32_t* sorted_token_ids,
+    int32_t* expert_ids, int32_t* total_tokens_post_pad, int32_t num_experts,
+    int32_t block_size, size_t numel) {
   const size_t tokens_per_thread = CEILDIV(numel, blockDim.x);
   const size_t start_idx = threadIdx.x * tokens_per_thread;
 
@@ -108,10 +106,10 @@ __global__ void moe_align_block_size_kernel(scalar_t* __restrict__ topk_ids,
 }
 }  // namespace vllm
 
-void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
-                          int64_t block_size, torch::Tensor sorted_token_ids,
-                          torch::Tensor experts_ids,
-                          torch::Tensor num_tokens_post_pad) {
+void moe_align_block_size(torch::Tensor const& topk_ids, int64_t num_experts,
+                          int64_t block_size, torch::Tensor& sorted_token_ids,
+                          torch::Tensor& experts_ids,
+                          torch::Tensor& num_tokens_post_pad) {
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_INTEGRAL_TYPES(
       topk_ids.scalar_type(), "moe_align_block_size_kernel", [&] {
@@ -126,9 +124,10 @@ void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
         AT_CUDA_CHECK(VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize(
             (void*)kernel, shared_mem));
         kernel<<<1, num_experts, shared_mem, stream>>>(
-            topk_ids.data_ptr<scalar_t>(), sorted_token_ids.data_ptr<int32_t>(),
-            experts_ids.data_ptr<int32_t>(),
-            num_tokens_post_pad.data_ptr<int32_t>(), num_experts, block_size,
-            topk_ids.numel());
+            topk_ids.const_data_ptr<scalar_t>(),
+            sorted_token_ids.mutable_data_ptr<int32_t>(),
+            experts_ids.mutable_data_ptr<int32_t>(),
+            num_tokens_post_pad.mutable_data_ptr<int32_t>(), num_experts,
+            block_size, topk_ids.numel());
       });
 }

@@ -268,9 +268,9 @@ __global__ void gptq_marlin_repack_kernel(
               b_q_weight_ptr, perm_ptr, out_ptr, size_k, size_n);             \
     }
 
-torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
-                                 int64_t size_k, int64_t size_n,
-                                 int64_t num_bits) {
+torch::Tensor gptq_marlin_repack(torch::Tensor const& b_q_weight,
+                                 torch::Tensor const& perm, int64_t size_k,
+                                 int64_t size_n, int64_t num_bits) {
   // Verify compatibility with marlin tile of 16x64
   TORCH_CHECK(size_k % marlin::tile_k_size == 0, "size_k = ", size_k,
               " is not divisible by tile_k_size = ", marlin::tile_k_size);

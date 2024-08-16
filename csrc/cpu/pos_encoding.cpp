@@ -167,9 +167,9 @@ void rotary_embedding_gptj_impl(
 }
 };  // namespace
 
-void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
+void rotary_embedding(torch::Tensor const& positions, torch::Tensor& query,
                       torch::Tensor& key, int64_t head_size,
-                      torch::Tensor& cos_sin_cache, bool is_neox) {
+                      torch::Tensor const& cos_sin_cache, bool is_neox) {
   int num_tokens = query.numel() / query.size(-1);
   int rot_dim = cos_sin_cache.size(1);
   int num_heads = query.size(-1) / head_size;
@@ -181,17 +181,19 @@ void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
       query.scalar_type(), "rotary_embedding_impl", [&] {
         CPU_KERNEL_GUARD_IN(rotary_embedding_impl)
         if (is_neox) {
-          rotary_embedding_impl(
-              positions.data_ptr<int64_t>(), query.data_ptr<scalar_t>(),
-              key.data_ptr<scalar_t>(), cos_sin_cache.data_ptr<scalar_t>(),
-              rot_dim, query_stride, key_stride, num_heads, num_kv_heads,
-              head_size, num_tokens);
+          rotary_embedding_impl(positions.const_data_ptr<int64_t>(),
+                                query.mutable_data_ptr<scalar_t>(),
+                                key.mutable_data_ptr<scalar_t>(),
+                                cos_sin_cache.const_data_ptr<scalar_t>(),
+                                rot_dim, query_stride, key_stride, num_heads,
+                                num_kv_heads, head_size, num_tokens);
         } else {
           rotary_embedding_gptj_impl(
-              positions.data_ptr<int64_t>(), query.data_ptr<scalar_t>(),
-              key.data_ptr<scalar_t>(), cos_sin_cache.data_ptr<scalar_t>(),
-              rot_dim, query_stride, key_stride, num_heads, num_kv_heads,
-              head_size, num_tokens);
+              positions.const_data_ptr<int64_t>(),
+              query.mutable_data_ptr<scalar_t>(),
+              key.mutable_data_ptr<scalar_t>(),
+              cos_sin_cache.const_data_ptr<scalar_t>(), rot_dim, query_stride,
+              key_stride, num_heads, num_kv_heads, head_size, num_tokens);
         }
 
         CPU_KERNEL_GUARD_OUT(rotary_embedding_impl)

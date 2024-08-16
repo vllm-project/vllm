@@ -241,8 +241,9 @@ void static_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "scaled_fp8_quant_kernel", [&] {
         vllm::scaled_fp8_quant_kernel<scalar_t><<<grid, block, 0, stream>>>(
-            out.data_ptr<c10::Float8_e4m3fn>(), input.data_ptr<scalar_t>(),
-            scale.data_ptr<float>(), num_elems);
+            out.mutable_data_ptr<c10::Float8_e4m3fn>(),
+            input.const_data_ptr<scalar_t>(), scale.const_data_ptr<float>(),
+            num_elems);
       });
 }
 
@@ -259,10 +260,12 @@ void dynamic_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "scaled_fp8_quant_kernel", [&] {
         vllm::segmented_max_reduction<scalar_t><<<grid, block, 0, stream>>>(
-            scale.data_ptr<float>(), input.data_ptr<scalar_t>(), num_elems);
+            scale.mutable_data_ptr<float>(), input.const_data_ptr<scalar_t>(),
+            num_elems);
         vllm::scaled_fp8_quant_kernel<scalar_t><<<grid, block, 0, stream>>>(
-            out.data_ptr<c10::Float8_e4m3fn>(), input.data_ptr<scalar_t>(),
-            scale.data_ptr<float>(), num_elems);
+            out.mutable_data_ptr<c10::Float8_e4m3fn>(),
+            input.const_data_ptr<scalar_t>(), scale.mutable_data_ptr<float>(),
+            num_elems);
       });
 }
 
@@ -284,9 +287,11 @@ void dynamic_per_token_scaled_fp8_quant(
       input.scalar_type(), "dynamic_per_token_scaled_fp8_quant_kernel", [&] {
         vllm::dynamic_per_token_scaled_fp8_quant_kernel<scalar_t>
             <<<grid, block, 0, stream>>>(
-                out.data_ptr<c10::Float8_e4m3fn>(), scales.data_ptr<float>(),
-                input.data_ptr<scalar_t>(),
-                scale_ub.has_value() ? scale_ub->data_ptr<float>() : nullptr,
+                out.mutable_data_ptr<c10::Float8_e4m3fn>(),
+                scales.mutable_data_ptr<float>(),
+                input.const_data_ptr<scalar_t>(),
+                scale_ub.has_value() ? scale_ub->const_data_ptr<float>()
+                                     : nullptr,
                 hidden_size);
       });
 }

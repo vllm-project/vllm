@@ -87,9 +87,10 @@ void static_scaled_int8_quant(torch::Tensor& out,          // [..., hidden_size]
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "static_scaled_int8_quant_kernel", [&] {
         vllm::static_scaled_int8_quant_kernel<scalar_t, float>
-            <<<grid, block, 0, stream>>>(input.data_ptr<scalar_t>(),
-                                         out.data_ptr<int8_t>(),
-                                         scale.data_ptr<float>(), hidden_size);
+            <<<grid, block, 0, stream>>>(input.const_data_ptr<scalar_t>(),
+                                         out.mutable_data_ptr<int8_t>(),
+                                         scale.const_data_ptr<float>(),
+                                         hidden_size);
       });
 }
 
@@ -108,8 +109,9 @@ void dynamic_scaled_int8_quant(
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "dynamic_scaled_int8_quant_kernel", [&] {
         vllm::dynamic_scaled_int8_quant_kernel<scalar_t, float>
-            <<<grid, block, 0, stream>>>(input.data_ptr<scalar_t>(),
-                                         out.data_ptr<int8_t>(),
-                                         scales.data_ptr<float>(), hidden_size);
+            <<<grid, block, 0, stream>>>(input.const_data_ptr<scalar_t>(),
+                                         out.mutable_data_ptr<int8_t>(),
+                                         scales.mutable_data_ptr<float>(),
+                                         hidden_size);
       });
 }

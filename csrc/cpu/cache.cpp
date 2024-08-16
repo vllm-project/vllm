@@ -19,12 +19,13 @@ void copy_blocks_cpu_impl(std::vector<torch::Tensor> const& key_caches,
           element_num_per_block * mapping_pairs[pair][0].item<int64_t>();
       int64_t target_offset =
           element_num_per_block * mapping_pairs[pair][1].item<int64_t>();
-      scalar_t* key_cache_ptr = key_caches[layer].data_ptr<scalar_t>();
+      scalar_t* key_cache_ptr = key_caches[layer].const_data_ptr<scalar_t>();
       scalar_t* source_ptr = key_cache_ptr + source_offset;
       scalar_t* target_ptr = key_cache_ptr + target_offset;
       std::memcpy(target_ptr, source_ptr, block_bytes);
 
-      scalar_t* value_cache_ptr = value_caches[layer].data_ptr<scalar_t>();
+      scalar_t* value_cache_ptr =
+          value_caches[layer].const_data_ptr<scalar_t>();
       source_ptr = value_cache_ptr + source_offset;
       target_ptr = value_cache_ptr + target_offset;
       std::memcpy(target_ptr, source_ptr, block_bytes);
@@ -104,10 +105,10 @@ void copy_blocks(std::vector<torch::Tensor> const& key_caches,
       });
 }
 
-void reshape_and_cache(torch::Tensor& key, torch::Tensor& value,
+void reshape_and_cache(torch::Tensor const& key, torch::Tensor const& value,
                        torch::Tensor& key_cache, torch::Tensor& value_cache,
-                       torch::Tensor& slot_mapping,
-                       const std::string& kv_cache_dtype, double k_scale,
+                       torch::Tensor const& slot_mapping,
+                       std::string const& kv_cache_dtype, double k_scale,
                        double v_scale) {
   TORCH_CHECK(k_scale == 1.0f && v_scale == 1.0f);
 
@@ -124,9 +125,10 @@ void reshape_and_cache(torch::Tensor& key, torch::Tensor& value,
       key.scalar_type(), "reshape_and_cache_cpu_impl", [&] {
         CPU_KERNEL_GUARD_IN(reshape_and_cache_cpu_impl)
         reshape_and_cache_cpu_impl<scalar_t>(
-            key.data_ptr<scalar_t>(), value.data_ptr<scalar_t>(),
-            key_cache.data_ptr<scalar_t>(), value_cache.data_ptr<scalar_t>(),
-            slot_mapping.data_ptr<int64_t>(), num_tokens, key_stride,
+            key.const_data_ptr<scalar_t>(), value.const_data_ptr<scalar_t>(),
+            key_cache.mutable_data_ptr<scalar_t>(),
+            value_cache.mutable_data_ptr<scalar_t>(),
+            slot_mapping.const_data_ptr<int64_t>(), num_tokens, key_stride,
             value_stride, num_heads, head_size, block_size, x);
         CPU_KERNEL_GUARD_OUT(reshape_and_cache_cpu_impl)
       });

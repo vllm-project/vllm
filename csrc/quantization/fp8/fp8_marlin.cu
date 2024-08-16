@@ -1209,10 +1209,11 @@ void marlin_mm_f16i4(const void* A, const void* B, void* C, const void* s,
 
 }  // namespace fp8_marlin
 
-torch::Tensor fp8_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
-                              torch::Tensor& b_scales, torch::Tensor& workspace,
-                              int64_t num_bits, int64_t size_m, int64_t size_n,
-                              int64_t size_k) {
+torch::Tensor fp8_marlin_gemm(torch::Tensor const& a,
+                              torch::Tensor const& b_q_weight,
+                              torch::Tensor const& b_scales,
+                              torch::Tensor& workspace, int64_t num_bits,
+                              int64_t size_m, int64_t size_n, int64_t size_k) {
   // Verify num_bits
   TORCH_CHECK(num_bits == 8, "num_bits must be 8. Got = ", num_bits);
   int pack_factor = 32 / num_bits;

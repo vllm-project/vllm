@@ -413,9 +413,9 @@ __global__ void __launch_bounds__(64)
 }  // namespace awq
 }  // namespace vllm
 
-torch::Tensor awq_dequantize(torch::Tensor const _kernel,
-                             torch::Tensor const _scaling_factors,
-                             torch::Tensor const _zeros, int64_t split_k_iters,
+torch::Tensor awq_dequantize(torch::Tensor const& _kernel,
+                             torch::Tensor const& _scaling_factors,
+                             torch::Tensor const& _zeros, int64_t split_k_iters,
                              int64_t thx, int64_t thy) {
   int in_c = _kernel.size(0);
   int qout_c = _kernel.size(1);
@@ -470,9 +470,10 @@ torch::Tensor awq_dequantize(torch::Tensor const _kernel,
 // zeros: IC // G, OC // 8 [int32] -> cast to IC // G, OC [uint4b]
 // assume that batch_size < 16 for now
 
-torch::Tensor awq_gemm(torch::Tensor _in_feats, torch::Tensor _kernel,
-                       torch::Tensor _scaling_factors, torch::Tensor _zeros,
-                       int64_t split_k_iters) {
+torch::Tensor awq_gemm(torch::Tensor const& _in_feats,
+                       torch::Tensor const& _kernel,
+                       torch::Tensor const& _scaling_factors,
+                       torch::Tensor const& _zeros, int64_t split_k_iters) {
   int num_in_feats = _in_feats.size(0);
   int num_in_channels = _in_feats.size(1);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(_in_feats));

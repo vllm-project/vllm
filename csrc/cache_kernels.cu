@@ -260,16 +260,16 @@ __global__ void reshape_and_cache_flash_kernel(
           slot_mapping.const_data_ptr<int64_t>(), key_stride, value_stride, \
           num_heads, head_size, block_size, x, k_scale, v_scale);
 
+// clang-format off
 void reshape_and_cache(
-    torch::Tensor& key,    // [num_tokens, num_heads, head_size]
-    torch::Tensor& value,  // [num_tokens, num_heads, head_size]
-    torch::Tensor&
-        key_cache,  // [num_blocks, num_heads, head_size/x, block_size, x]
-    torch::Tensor&
-        value_cache,  // [num_blocks, num_heads, head_size, block_size]
-    torch::Tensor& slot_mapping,  // [num_tokens]
-    const std::string& kv_cache_dtype, const double k_scale,
-    const double v_scale) {
+    torch::Tensor const& key,    // [num_tokens, num_heads, head_size]
+    torch::Tensor const& value,  // [num_tokens, num_heads, head_size]
+    torch::Tensor& key_cache,    // [num_blocks, num_heads, head_size/x, block_size, x]
+    torch::Tensor& value_cache,  // [num_blocks, num_heads, head_size, block_size]
+    torch::Tensor const& slot_mapping,  // [num_tokens]
+    std::string const& kv_cache_dtype, double const k_scale,
+    double const v_scale) {
+// clang-format on 
   int num_tokens = key.size(0);
   int num_heads = key.size(1);
   int head_size = key.size(2);
@@ -301,15 +301,16 @@ void reshape_and_cache(
           slot_mapping.const_data_ptr<int64_t>(), block_stride, key_stride, \
           value_stride, num_heads, head_size, block_size, k_scale, v_scale);
 
+// clang-format off
 void reshape_and_cache_flash(
-    torch::Tensor& key,        // [num_tokens, num_heads, head_size]
-    torch::Tensor& value,      // [num_tokens, num_heads, head_size]
-    torch::Tensor& key_cache,  // [num_blocks, block_size, num_heads, head_size]
-    torch::Tensor&
-        value_cache,  // [num_blocks, block_size, num_heads, head_size]
-    torch::Tensor& slot_mapping,  // [num_tokens]
-    const std::string& kv_cache_dtype, const double k_scale,
-    const double v_scale) {
+    torch::Tensor const& key,    // [num_tokens, num_heads, head_size]
+    torch::Tensor const& value,  // [num_tokens, num_heads, head_size]
+    torch::Tensor& key_cache,    // [num_blocks, block_size, num_heads, head_size]
+    torch::Tensor& value_cache,  // [num_blocks, block_size, num_heads, head_size]
+    torch::Tensor const& slot_mapping,  // [num_tokens]
+    std::string const& kv_cache_dtype, double const k_scale,
+    double const v_scale) {
+  // clang-format on
   int num_tokens = key.size(0);
   int num_heads = key.size(1);
   int head_size = key.size(2);
@@ -353,8 +354,8 @@ __global__ void convert_fp8_kernel(const Tin* __restrict__ src_cache,
       block_stride);
 
 // Only for testing.
-void convert_fp8(torch::Tensor& dst_cache, torch::Tensor& src_cache,
-                 const double scale, const std::string& kv_cache_dtype) {
+void convert_fp8(torch::Tensor& dst_cache, torch::Tensor const& src_cache,
+                 double const scale, std::string const& kv_cache_dtype) {
   torch::Device src_device = src_cache.device();
   torch::Device dst_device = dst_cache.device();
   TORCH_CHECK(src_device.is_cuda(), "src must be on a GPU")

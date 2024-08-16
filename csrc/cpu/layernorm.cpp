@@ -87,31 +87,32 @@ void fused_add_rms_norm_impl(scalar_t* __restrict__ input,
 }
 }  // namespace
 
-void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
-              double epsilon) {
+void rms_norm(torch::Tensor& out, torch::Tensor const& input,
+              torch::Tensor const& weight, double epsilon) {
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
 
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "rms_norm_impl", [&] {
     CPU_KERNEL_GUARD_IN(rms_norm_impl)
-    rms_norm_impl(out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
-                  weight.data_ptr<scalar_t>(), epsilon, num_tokens,
-                  hidden_size);
+    rms_norm_impl(
+        out.mutable_data_ptr<scalar_t>(), input.const_data_ptr<scalar_t>(),
+        weight.const_data_ptr<scalar_t>(), epsilon, num_tokens, hidden_size);
     CPU_KERNEL_GUARD_OUT(rms_norm_impl)
   });
 }
 
 void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
-                        torch::Tensor& weight, double epsilon) {
+                        torch::Tensor const& weight, double epsilon) {
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
 
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "fused_add_rms_norm_impl", [&] {
         CPU_KERNEL_GUARD_IN(fused_add_rms_norm_impl)
-        fused_add_rms_norm_impl(
-            input.data_ptr<scalar_t>(), residual.data_ptr<scalar_t>(),
-            weight.data_ptr<scalar_t>(), epsilon, num_tokens, hidden_size);
+        fused_add_rms_norm_impl(input.mutable_data_ptr<scalar_t>(),
+                                residual.mutable_data_ptr<scalar_t>(),
+                                weight.const_data_ptr<scalar_t>(), epsilon,
+                                num_tokens, hidden_size);
         CPU_KERNEL_GUARD_OUT(fused_add_rms_norm_impl)
       });
 }

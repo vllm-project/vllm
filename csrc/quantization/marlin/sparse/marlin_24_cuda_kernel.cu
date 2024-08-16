@@ -1024,13 +1024,11 @@ void marlin_cuda_2_4(const void* A, const void* B, const void* meta, void* C,
 
 }  // namespace marlin_24
 
-torch::Tensor gptq_marlin_24_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
-                                  torch::Tensor& b_meta,
-                                  torch::Tensor& b_scales,
-                                  torch::Tensor& workspace,
-                                  vllm::ScalarTypeTorchPtr const& b_q_type,
-                                  int64_t size_m, int64_t size_n,
-                                  int64_t size_k) {
+torch::Tensor gptq_marlin_24_gemm(
+    torch::Tensor const& a, torch::Tensor const& b_q_weight,
+    torch::Tensor const& b_meta, torch::Tensor const& b_scales,
+    torch::Tensor& workspace, vllm::ScalarTypeTorchPtr const& b_q_type,
+    int64_t size_m, int64_t size_n, int64_t size_k) {
   // Verify num_bits
   TORCH_CHECK(*b_q_type == vllm::kU4B8 || *b_q_type == vllm::kU8B128,
               "num_bits must be uint4b8 or uint8b128. Got = ", b_q_type->str());
