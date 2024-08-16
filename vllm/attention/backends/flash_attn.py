@@ -62,12 +62,6 @@ def flash_attn_varlen_func(
     )
 
 
-# Note: registration for these ops should be moved into vllm-flash-attn
-# once it is incorporated into the main repo/build process.
-flash_attn_varlen_func = torch.library.custom_op(
-    "vllm::flash_attn_varlen_func", flash_attn_varlen_func, mutates_args=[])
-
-
 @flash_attn_varlen_func.register_fake  # type: ignore
 def _(
     q: torch.Tensor,
@@ -96,7 +90,6 @@ def flash_attn_with_kvcache(
     block_table: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
     causal: bool = False,
-    softcap: float = 0.0,
     alibi_slopes: Optional[torch.Tensor] = None,
     softcap: float = 0.0,
 ) -> torch.Tensor:
@@ -108,7 +101,6 @@ def flash_attn_with_kvcache(
         block_table=block_table,
         softmax_scale=softmax_scale,
         causal=causal,
-        softcap=softcap,
         alibi_slopes=alibi_slopes,
         softcap=softcap,
     )
@@ -123,7 +115,6 @@ def _(
     block_table: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
     causal: bool = False,
-    softcap: float = 0.0,
     alibi_slopes: Optional[torch.Tensor] = None,
     softcap: float = 0.0,
 ) -> torch.Tensor:
@@ -687,7 +678,7 @@ class FlashAttentionImpl(AttentionImpl):
                     max_seqlen_k=prefill_meta.max_prefill_seq_len,
                     softmax_scale=self.scale,
                     causal=True,
-                    window_size=self.sliding_window,  # type: ignore
+                    window_size=self.sliding_window,
                     alibi_slopes=self.alibi_slopes,
                     softcap=self.logits_soft_cap,
                 )
