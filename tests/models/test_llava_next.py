@@ -6,10 +6,13 @@ from transformers import AutoConfig, AutoTokenizer
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
 
-from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets, PromptImageInput
+from ..conftest import (IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets,
+                        PromptImageInput)
 from .utils import check_logprobs_close
 
 pytestmark = pytest.mark.vlm
+
+_LIMIT_IMAGE_PER_PROMPT = 4
 
 _PREFACE = (
     "A chat between a curious human and an artificial intelligence assistant. "
@@ -23,7 +26,7 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     f"{_PREFACE} USER: <image>\nWhat is the season? ASSISTANT:",
 })
 
-models = ["llava-hf/llava-v1.6-vicuna-7b-hf"]
+models = ["llava-hf/llava-v1.6-mistral-7b-hf"]
 
 
 def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
@@ -139,11 +142,12 @@ def _run_test(
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model,
                      dtype=dtype,
-                     max_model_len=4096,
+                     max_model_len=32768,
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
                      enforce_eager=True,
-                     limit_mm_per_prompt={"image": 2}) as vllm_model:
+                     limit_mm_per_prompt={"image": _LIMIT_IMAGE_PER_PROMPT
+                                          }) as vllm_model:
         vllm_outputs_per_image = [
             vllm_model.generate_greedy_logprobs(prompts,
                                                 max_tokens,
@@ -247,9 +251,16 @@ def test_models_fixed_sizes(hf_runner, vllm_runner, image_assets, model, sizes,
 def test_models_multiple_image_inputs(hf_runner, vllm_runner, image_assets,
                                       model, dtype, max_tokens,
                                       num_logprobs) -> None:
+    img_0 = image_assets[0].pil_image
+    img_1 = image_assets[1].pil_image
+
     inputs = [([
-        f"{_PREFACE} USER: What's the content of the two images?\n<image><image> ASSISTANT:"
-    ], [[asset.pil_image.resize((183, 488)) for asset in image_assets]])]
+        f"{_PREFACE} USER: <image><image>\nDescribe the 2 images. ASSISTANT:",
+        f"{_PREFACE} USER: <image><image><image><image>\nDescribe the 4 images. ASSISTANT:"
+    ], [
+        [img_0, img_1],
+        [img_0, img_1, img_0, img_1],
+    ])]
 
     _run_test(
         hf_runner,
