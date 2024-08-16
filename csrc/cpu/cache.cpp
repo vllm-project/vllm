@@ -19,13 +19,13 @@ void copy_blocks_cpu_impl(std::vector<torch::Tensor> const& key_caches,
           element_num_per_block * mapping_pairs[pair][0].item<int64_t>();
       int64_t target_offset =
           element_num_per_block * mapping_pairs[pair][1].item<int64_t>();
-      scalar_t* key_cache_ptr = key_caches[layer].const_data_ptr<scalar_t>();
+      scalar_t* key_cache_ptr = key_caches[layer].mutable_data_ptr<scalar_t>();
       scalar_t* source_ptr = key_cache_ptr + source_offset;
       scalar_t* target_ptr = key_cache_ptr + target_offset;
       std::memcpy(target_ptr, source_ptr, block_bytes);
 
       scalar_t* value_cache_ptr =
-          value_caches[layer].const_data_ptr<scalar_t>();
+          value_caches[layer].mutable_data_ptr<scalar_t>();
       source_ptr = value_cache_ptr + source_offset;
       target_ptr = value_cache_ptr + target_offset;
       std::memcpy(target_ptr, source_ptr, block_bytes);

@@ -3,7 +3,8 @@
 namespace {
 template <typename scalar_t, vec_op::FP32Vec8 (*func)(const vec_op::FP32Vec8&),
           bool is_gated>
-void activation_kernel(int num_tokens, int d, scalar_t* __restrict__ input,
+void activation_kernel(int num_tokens, int d,
+                       scalar_t const* __restrict__ input,
                        scalar_t* __restrict__ output) {
   using scalar_vec_t = vec_op::vec_t<scalar_t>;
   constexpr int VEC_ELEM_NUM = scalar_vec_t::get_elem_num();
