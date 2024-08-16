@@ -270,10 +270,10 @@ def awq_dequantize_triton(
     return result
 
 
-# input   - [N, K]
-# qweight - [K, M // 8]
-# qzeros  - [K // G, M // 8]
-# scales  - [K // G, M]
+# input   - [M, K]
+# qweight - [K, N // 8]
+# qzeros  - [K // G, N // 8]
+# scales  - [K // G, N]
 # split_k_iters - parallelism along K-dimension, int, power of 2.
 def awq_gemm_triton(input: torch.Tensor, qweight: torch.Tensor,
                     scales: torch.Tensor, qzeros: torch.Tensor,
