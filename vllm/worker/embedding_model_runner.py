@@ -1,5 +1,5 @@
 import dataclasses
-from typing import Any, Dict, List, Optional, Tuple, Type, Set
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
 
@@ -7,20 +7,13 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ObservabilityConfig,
                          ParallelConfig, PromptAdapterConfig, SchedulerConfig)
 from vllm.logger import init_logger
-from vllm.lora.request import LoRARequest
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.multimodal import MultiModalInputs
-from vllm.multimodal import MultiModalInputs
 from vllm.pooling_params import PoolingParams
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (IntermediateTensors, PoolerOutput, SequenceData,
                            SequenceGroupMetadata)
-from vllm.utils import make_tensor_with_pad
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunnerBase
-from vllm.worker.model_runner import (GPUModelRunnerBase, ModelInputForGPU,
-                                      ModelInputForGPUBuilder)
-from vllm.worker.model_runner import (_BATCH_SIZES_TO_CAPTURE, _PAD_SLOT_ID,
-                                      GPUModelRunnerBase)
+from vllm.worker.model_runner import (ModelInputForGPU, ModelInputForGPUBuilder)
 
 logger = init_logger(__name__)
 
@@ -184,11 +177,10 @@ class EmbeddingModelRunner(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         prompt_lens: List[int],
-        is_decoder: bool = True,
     ) -> PoolingMetadata:
         """Prepare PoolingMetadata for the sequence group metadata list."""
         seq_groups: List[Tuple[List[int], PoolingParams]] = []
-        for i, seq_group_metadata in enumerate(seq_group_metadata_list):
+        for seq_group_metadata in seq_group_metadata_list:
             seq_ids = list(seq_group_metadata.seq_data.keys())
             pooling_params = seq_group_metadata.pooling_params
             seq_groups.append((seq_ids, pooling_params))
@@ -204,13 +196,3 @@ class EmbeddingModelRunner(
         )
 
         return pooling_metadata
-
-
-## TODO: move to utils, and modify enc_dec_model_runner.py
-def _is_single_block_table_empty(block_table: Optional[List[int]]):
-    """
-    Check if a single block table has not been constructed
-    """
-    if block_table is None:
-        return True
-    return False
