@@ -360,17 +360,34 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             execute_model_req)
         num_lookahead_slots = execute_model_req.num_lookahead_slots
 
+        # Speculative decoding is disabled in the following cases:
+        # 1. Prefill phase: Speculative decoding is not
+        #    used during the prefill phase.
+        # 2. Auto-disable enabled: The running queue size exceeds
+        #    the specified threshold.
+        # 3. No request: There are no requests in the batch.
+        # In any of these cases, the proposer and scorer workers
+        # are called normally.
+        no_spec = num_lookahead_slots == 0 or len(
+            execute_model_req.seq_group_metadata_list
+        ) == 0 or disable_all_speculation
+
         # Broadcast how many lookahead slots are scheduled for this step, and
         # whether all speculation is disabled, to all non-driver workers.
 
         # This is required as if the number of draft model runs changes
         # dynamically, the non-driver workers won't know unless we perform a
         # communication to inform them.
+
+        # no_spec is used to signal non-driver worker about prefill vs decode
+        # stage. This is needed to ensure that order of execution of proposer
+        # and scorer is same in both driver and non-driver workers (i.e.,
+        # scorer -> proposer for prefill and proposer -> scorer in decode). This
+        # order is needed to support models like EAGLE that take scorer states
+        # as inputs.
         broadcast_dict = dict(
             num_lookahead_slots=num_lookahead_slots,
-            no_spec=num_lookahead_slots == 0
-            or len(execute_model_req.seq_group_metadata_list) == 0
-            or disable_all_speculation,
+            no_spec=no_spec,
             disable_all_speculation=disable_all_speculation,
         )
         broadcast_tensor_dict(broadcast_dict, src=self._driver_rank)
@@ -381,17 +398,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self._maybe_disable_speculative_tokens(
             disable_all_speculation, execute_model_req.seq_group_metadata_list)
 
-        # Speculative decoding is disabled in the following cases:
-        # 1. Prefill phase: Speculative decoding is not
-        #    used during the prefill phase.
-        # 2. Auto-disable enabled: The running queue size exceeds
-        #    the specified threshold.
-        # 3. No request: There are no requests in the batch.
-        # In any of these cases, the proposer and scorer workers
-        # are called normally.
-        if num_lookahead_slots == 0 or len(
-                execute_model_req.seq_group_metadata_list
-        ) == 0 or disable_all_speculation:
+        if no_spec:
             return self._run_no_spec(execute_model_req,
                                      skip_proposer=disable_all_speculation)
         return self._run_speculative_decoding_step(execute_model_req,
@@ -482,21 +489,18 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         if hidden_states is not None:
             if self.previous_hidden_states is None:
                 self.previous_hidden_states = HiddenStates(
-                    execute_model_req.seq_group_metadata_list, hidden_states)
+                    hidden_states, execute_model_req.seq_group_metadata_list)
             else:
                 self.previous_hidden_states.update(
-                    execute_model_req.seq_group_metadata_list, hidden_states)
+                    hidden_states, execute_model_req.seq_group_metadata_list)
 
         if not skip_proposer:
-            # For prefill step in proposer, we run the model for N-1 tokens
-            # because Nth token will be processed in the first decode step. For
-            # N-1 tokens, the input should be 0:N-1 hidden states which should
-            # be concatanated with 1:N token (since output of scorer has to be
-            # the input for proposer). Therefore, we shift the hidden states to
-            # align n-1th hidden state with nth token.
-            if sampler_output.prefill_hidden_states is not None:
-                execute_model_req.previous_hidden_states = sampler_output\
-                    .prefill_hidden_states.roll(shifts=1, dims=0)
+            # We prepare the prefill hidden states here so that there no
+            # additional complexity in worker for spec_decode vs non_spec_decode
+            # flow and execute_model doesn't need additional modifications.
+            execute_model_req.previous_hidden_states = \
+                prepare_prefill_hidden_states(
+                    sampler_output.prefill_hidden_states)
 
             self.proposer_worker.execute_model(execute_model_req)
 
@@ -684,7 +688,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             hidden_states = hidden_states.gather(1, index).squeeze(1)  # b x d
             # Store hidden states from target model for subsequent decode step
             self.previous_hidden_states = HiddenStates(
-                seq_group_metadata_list, hidden_states,
+                hidden_states, seq_group_metadata_list,
                 second_last_token_hidden_states)
 
         return accepted_token_ids, logprobs
@@ -982,3 +986,15 @@ def split_num_cache_blocks_evenly(scorer_cache_block_size_bytes: int,
         (proposer_cache_block_size_bytes + scorer_cache_block_size_bytes))
 
     return new_num_gpu_blocks
+
+
+def prepare_prefill_hidden_states(
+        prefill_hidden_states: torch.Tensor) -> HiddenStates:
+    # For prefill step in proposer, we run the model for N-1 tokens
+    # because Nth token will be processed in the first decode step. For
+    # N-1 tokens, the input should be 0:N-1 hidden states which should
+    # be concatanated with 1:N token (since output of scorer has to be
+    # the input for proposer). Therefore, we shift the hidden states to
+    # align n-1th hidden state with nth token.
+    return HiddenStates(prefill_hidden_states.roll(
+        shifts=1, dims=0)) if prefill_hidden_states is not None else None

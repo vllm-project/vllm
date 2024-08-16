@@ -709,7 +709,7 @@ def test_expand_execute_model_request_sync_with_expand_hidden_states():
     execute_model_request = ExecuteModelRequest(
         seq_group_metadata_list,
         previous_hidden_states=HiddenStates(
-            seq_group_metadata_list, torch.arange(batch_size),
+            torch.arange(batch_size), seq_group_metadata_list,
             torch.arange(batch_size, 2 * batch_size)))
 
     expanded_execute_model_request, orig_seq_group_ids = MultiStepWorker.\

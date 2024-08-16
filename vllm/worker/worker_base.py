@@ -12,8 +12,8 @@ from vllm.distributed import broadcast_tensor_dict, get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
-from vllm.sequence import (ExecuteModelRequest, HiddenStates,
-                           IntermediateTensors, SamplerOutput)
+from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
+                           SamplerOutput)
 from vllm.utils import (enable_trace_function_call_for_thread,
                         update_environment_variables)
 from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
@@ -466,14 +466,13 @@ def extract_previous_hidden_states(
     execute_model calls."""
     output = {}
 
+    # When called from non-driver worker, data is dict but when called from
+    # driver worker, data is ExecuteModelRequest.
     if isinstance(data, dict):
         if "previous_hidden_states" in data:
             output["previous_hidden_states"] = data["previous_hidden_states"]
-    else:
-        if isinstance(data.previous_hidden_states, torch.Tensor):
-            output["previous_hidden_states"] = data.previous_hidden_states
-        elif isinstance(data.previous_hidden_states, HiddenStates):
-            output["previous_hidden_states"] = data.previous_hidden_states\
-                .hidden_states
+    elif data.previous_hidden_states is not None:
+        output["previous_hidden_states"] = data.previous_hidden_states\
+            .hidden_states
 
     return output

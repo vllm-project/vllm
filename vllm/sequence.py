@@ -1091,14 +1091,16 @@ def get_all_seq_ids_and_request_ids(
 class HiddenStates:
     """Hidden states corresponding to in-progress sequences.
     Used in speculative decoding to pass hidden states from
-    the target model to the proposer model in the subsequent step.
+    the target model to the proposer model.
 
     seq_ids are the sequence ids of each entry of the batch
     dimension of the hidden_states tensor"""
-    # The sequence group metadata list.
-    seq_group_metadata_list: InitVar[List[SequenceGroupMetadata]]
-    # Scorer hidden states of the last token accepted by the scorer.
+    # Scorer hidden states. For prefill step, it is used for hidden states of
+    # all tokens, whereas for decode step, it use used for last accepted tokens.
     hidden_states: torch.Tensor
+    # The sequence group metadata list. Only needed for decode step.
+    seq_group_metadata_list: InitVar[Optional[
+        List[SequenceGroupMetadata]]] = None
     # Scorer hidden states of the 2nd last token proposed by the proposer (
     # irrespective of whether it was accepted or not). Only used for cases when
     # last proposed token is accepted (i.e., in case of bonus tokens). For the
@@ -1106,15 +1108,19 @@ class HiddenStates:
     second_last_token_hidden_states: Optional[torch.Tensor] = None
 
     def __post_init__(self,
-                      seq_group_metadata_list: List[SequenceGroupMetadata]):
-        assert len(seq_group_metadata_list) == len(self.hidden_states)
-        self.seq_ids: List[int] = get_all_seq_ids(seq_group_metadata_list)
+                      seq_group_metadata_list: Optional[
+                          List[SequenceGroupMetadata]] = None):
+
+        if seq_group_metadata_list is not None:
+            assert len(seq_group_metadata_list) == len(self.hidden_states)
+            self.seq_ids: List[int] = get_all_seq_ids(seq_group_metadata_list)
 
     def update(self,
-               seq_group_metadata_list: List[SequenceGroupMetadata],
                hidden_states: torch.Tensor,
+               seq_group_metadata_list: List[SequenceGroupMetadata],
                second_last_token_hidden_states: Optional[torch.Tensor] = None):
-        """Update hidden states from target model invocation."""
+        """Update hidden states from target model invocation. Only used for
+        decode steps"""
         assert len(seq_group_metadata_list) == len(hidden_states)
         self.seq_ids.extend(get_all_seq_ids(seq_group_metadata_list))
         self.hidden_states = torch.cat([self.hidden_states, hidden_states])
@@ -1130,7 +1136,7 @@ class HiddenStates:
 
     def prune(self,
               seq_group_metadata_list: List[SequenceGroupMetadata]) -> None:
-        """Prune to provided list of sequence ids."""
+        """Prune to provided list of sequence ids. Only used for decode steps"""
         seq_ids = get_all_seq_ids(seq_group_metadata_list)
         if seq_ids != self.seq_ids:
             # Batch contents changed - prune removed sequences.
@@ -1143,6 +1149,8 @@ class HiddenStates:
 
     def expand_with_bonus_tokens(
             self, seq_with_bonus_token_in_last_step: set) -> None:
+        """Expand hidden states for sequences with bonus tokens. This is in
+        alignment with `MultiStepWorker._expand_execute_model_request`."""
         if self.second_last_token_hidden_states is None \
             or not seq_with_bonus_token_in_last_step:
             return
@@ -1177,7 +1185,7 @@ class ExecuteModelRequest:
     # The number of requests in the running queue.
     running_queue_size: int = 0
     # Optional hidden states from prior step.
-    previous_hidden_states: Union[HiddenStates, torch.Tensor, None] = None
+    previous_hidden_states: Optional[HiddenStates] = None
     # The number of forward steps to run.
     num_steps: int = 1
     # Finished request ids since last step.
