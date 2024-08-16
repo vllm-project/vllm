@@ -73,7 +73,7 @@ def run_test(
     All the image fixtures for the test is under tests/images.
     For huggingface runner, we provide the PIL images as input.
     For vllm runner, we provide MultiModalDataDict objects 
-    and corresponding vision language config as input.
+    and corresponding MultiModalConfig as input.
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """
@@ -81,7 +81,10 @@ def run_test(
 
     inputs_per_image = [(
         [prompt for _ in size_factors],
-        [rescale_image_size(image, factor) for factor in size_factors],
+        [
+            rescale_image_size(image, factor, transpose=idx)
+            for idx, factor in enumerate(size_factors)
+        ],
     ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
 
     # NOTE: take care of the order. run vLLM first, and then run HF.
