@@ -83,5 +83,5 @@ docker run \
         -e HF_HOME=${HF_MOUNT} \
         --name ${container_name} \
         ${image_name} \
-        /bin/bash -c ${commands}
+        /bin/bash -c "'${commands}'"
 
