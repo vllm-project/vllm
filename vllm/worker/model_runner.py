@@ -1554,6 +1554,21 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
         # Compute the logits in the last pipeline stage.
         if not get_pp_group().is_last_rank:
+            if (self.is_driver_worker
+                    and hidden_or_intermediate_states is not None
+                    and isinstance(hidden_or_intermediate_states,
+                                   IntermediateTensors)
+                    and self.observability_config is not None
+                    and self.observability_config.collect_model_forward_time):
+                model_forward_end.synchronize()
+                model_forward_time = model_forward_start.elapsed_time(
+                    model_forward_end)
+                orig_model_forward_time = 0.0
+                if intermediate_tensors is not None:
+                    orig_model_forward_time = intermediate_tensors.tensors.get(
+                        "model_forward_time", torch.tensor(0.0)).item()
+                hidden_or_intermediate_states.tensors["model_forward_time"] = (
+                    torch.tensor(model_forward_time + orig_model_forward_time))
             return hidden_or_intermediate_states
 
         logits = self.model.compute_logits(hidden_or_intermediate_states,
@@ -1573,11 +1588,16 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_forward_end.synchronize()
             model_forward_time = model_forward_start.elapsed_time(
                 model_forward_end)
+            orig_model_forward_time = 0.0
+            if intermediate_tensors is not None:
+                orig_model_forward_time = intermediate_tensors.tensors.get(
+                    "model_forward_time", torch.tensor(0.0)).item()
             # If there are multiple workers, we are still tracking the latency
             # from the start time of the driver worker to the end time of the
             # driver worker. The model forward time will then end up covering
             # the communication time as well.
-            output.model_forward_time = model_forward_time
+            output.model_forward_time = (orig_model_forward_time +
+                                         model_forward_time)
 
         if self.return_hidden_states:
             # we only need to pass hidden states of most recent token
@@ -1735,7 +1755,7 @@ class CUDAGraphRunner:
                                                       **kwargs)
         if intermediate_tensors is not None:
             for key in intermediate_tensors.tensors:
-                if key != "model_execute_time":
+                if key != "model_execute_time" and key != "model_forward_time":
                     self.input_buffers[key].copy_(intermediate_tensors[key],
                                                   non_blocking=True)
         # Run the graph.
