@@ -197,6 +197,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         virtual_engine: int = 0,
         finished_requests_ids: Optional[List[str]] = None
     ) -> ModelInputForNeuron:
+        multi_modal_kwargs = None
         # NOTE: We assume that all sequences in the group are all prompts or
         # all decodes.
         is_prompt = seq_group_metadata_list[0].is_prompt
