@@ -1,4 +1,5 @@
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
+from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
+                    TypedDict, Union)
 
 import torch
 import torch.nn as nn
@@ -20,8 +21,8 @@ from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
 
 from .blip import (BlipVisionModel, dummy_image_for_blip,
                    get_max_blip_image_tokens)
-from .interfaces import SupportsVision
-from .utils import merge_vision_embeddings
+from .interfaces import SupportsMultiModal
+from .utils import merge_multimodal_embeddings
 
 _KEYS_TO_MODIFY_MAPPING = {
     "language_model.lm_head": "lm_head",
@@ -413,17 +414,39 @@ def get_max_blip2_image_tokens(ctx: InputContext):
     raise NotImplementedError(msg)
 
 
-def dummy_data_for_blip2(ctx: InputContext, seq_len: int):
+def dummy_seq_data_for_blip2(
+    hf_config: Blip2Config,
+    seq_len: int,
+    num_images: int,
+    *,
+    image_token_id: int,
+    image_feature_size_override: Optional[int] = None,
+):
+    if image_feature_size_override is None:
+        image_feature_size = get_blip2_image_feature_size(hf_config)
+    else:
+        image_feature_size = image_feature_size_override
+
+    token_ids = [image_token_id] * image_feature_size * num_images
+    token_ids += [0] * (seq_len - image_feature_size * num_images)
+    return SequenceData(token_ids)
+
+
+def dummy_data_for_blip2(ctx: InputContext, seq_len: int,
+                         mm_counts: Mapping[str, int]):
     hf_config = ctx.get_hf_config(Blip2Config)
     vision_config = hf_config.vision_config
+    num_images = mm_counts["image"]
 
-    image_feature_size = get_blip2_image_feature_size(hf_config)
-    token_ids = [BLIP2_IMAGE_TOKEN_ID] * image_feature_size
-    token_ids += [0] * (seq_len - image_feature_size)
-    seq_data = SequenceData(token_ids)
+    seq_data = dummy_seq_data_for_blip2(
+        hf_config,
+        seq_len,
+        num_images,
+        image_token_id=BLIP2_IMAGE_TOKEN_ID,
+    )
 
     if isinstance(vision_config, Blip2VisionConfig):
-        mm_data = dummy_image_for_blip(vision_config)
+        mm_data = dummy_image_for_blip(vision_config, num_images)
 
         return seq_data, mm_data
 
@@ -457,7 +480,7 @@ def input_processor_for_blip2(ctx: InputContext, llm_inputs: LLMInputs):
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_blip2_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_blip2)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_blip2)
-class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
+class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def __init__(self,
                  config: Blip2Config,
@@ -621,9 +644,9 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsVision):
             vision_embeddings = self._process_image_input(image_input)
             inputs_embeds = self.language_model.get_input_embeddings(input_ids)
 
-            inputs_embeds = merge_vision_embeddings(input_ids, inputs_embeds,
-                                                    vision_embeddings,
-                                                    BLIP2_IMAGE_TOKEN_ID)
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, vision_embeddings,
+                BLIP2_IMAGE_TOKEN_ID)
 
             input_ids = None
         else:

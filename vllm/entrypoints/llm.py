@@ -6,6 +6,9 @@ from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
+from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
+                                         apply_chat_template,
+                                         parse_chat_messages)
 from vllm.inputs import PromptInputs, TextPrompt, TokensPrompt
 from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.logger import init_logger
@@ -87,7 +90,7 @@ class LLM:
         disable_custom_all_reduce: See ParallelConfig
         **kwargs: Arguments for :class:`~vllm.EngineArgs`. (See
             :ref:`engine_args`)
-    
+
     Note:
         This class is intended to be used for offline inference. For online
         serving, use the :class:`~vllm.AsyncLLMEngine` class instead.
@@ -138,8 +141,12 @@ class LLM:
 
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
-        removed_vision_keys = ("image_token_id", "image_feature_size",
-                               "image_input_shape", "image_input_type")
+        removed_vision_keys = (
+            "image_token_id",
+            "image_feature_size",
+            "image_input_shape",
+            "image_input_type",
+        )
         if any(k in kwargs for k in removed_vision_keys):
             raise TypeError(
                 "There is no need to pass vision-related arguments anymore.")
@@ -259,11 +266,12 @@ class LLM:
     ) -> List[RequestOutput]:
         ...
 
-    @deprecate_kwargs("prompts",
-                      "prompt_token_ids",
-                      is_deprecated=lambda: LLM.DEPRECATE_LEGACY,
-                      additional_message="Please use the 'inputs' parameter "
-                      "instead.")
+    @deprecate_kwargs(
+        "prompts",
+        "prompt_token_ids",
+        is_deprecated=lambda: LLM.DEPRECATE_LEGACY,
+        additional_message="Please use the 'inputs' parameter instead.",
+    )
     def generate(
         self,
         prompts: Union[Union[PromptInputs, Sequence[PromptInputs]],
@@ -286,17 +294,17 @@ class LLM:
         Args:
             inputs: A list of inputs to generate completions for.
             sampling_params: The sampling parameters for text generation. If
-                None, we use the default sampling parameters. 
-                When it is a single value, it is applied to every prompt. 
-                When it is a list, the list must have the same length as the 
+                None, we use the default sampling parameters.
+                When it is a single value, it is applied to every prompt.
+                When it is a list, the list must have the same length as the
                 prompts and it is paired one by one with the prompt.
             use_tqdm: Whether to use tqdm to display the progress bar.
             lora_request: LoRA request to use for generation, if any.
-            prompt_adapter_request: Prompt Adapter request to use for 
+            prompt_adapter_request: Prompt Adapter request to use for
                 generation, if any.
 
         Returns:
-            A list of `RequestOutput` objects containing the
+            A list of ``RequestOutput`` objects containing the
             generated completions in the same order as the input prompts.
 
         Note:
@@ -338,6 +346,62 @@ class LLM:
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return LLMEngine.validate_outputs(outputs, RequestOutput)
+
+    def chat(
+        self,
+        messages: List[ChatCompletionMessageParam],
+        sampling_params: Optional[Union[SamplingParams,
+                                        List[SamplingParams]]] = None,
+        use_tqdm: bool = True,
+        lora_request: Optional[LoRARequest] = None,
+        chat_template: Optional[str] = None,
+        add_generation_template: bool = True,
+    ) -> List[RequestOutput]:
+        """
+        Generates responses for chat messages.
+
+        Converts the messages to prompts using the tokenizer and calls
+        the :meth:`generate` method to generate the responses.
+
+        Args:
+            messages: A list of messages to generate responses for. Each
+                message is a list of dictionaries with 'role' and 'content'
+                keys.
+            sampling_params: The sampling parameters for text generation.
+                If None, we use the default sampling parameters. When it
+                is a single value, it is applied to every prompt. When it
+                is a list, the list must have the same length as the
+                prompts and it is paired one by one with the prompt.
+            use_tqdm: Whether to use tqdm to display the progress bar.
+            lora_request: LoRA request to use for generation, if any.
+            chat_template: The template to use for structuring the chat.
+              If not provided, the model's default chat template will be used.
+            add_generation_template: If True, adds a generation template 
+                to each message.
+
+        Returns:
+            A list of ``RequestOutput`` objects containing the generated
+            responses in the same order as the input messages.
+        """
+
+        tokenizer = self.get_tokenizer()
+        model_config = self.llm_engine.get_model_config()
+
+        conversations, _ = parse_chat_messages(messages, model_config,
+                                               tokenizer)
+
+        prompts = apply_chat_template(
+            tokenizer,
+            conversations,
+            chat_template=chat_template,
+            add_generation_template=add_generation_template)
+
+        return self.generate(
+            prompts,
+            sampling_params,
+            use_tqdm=use_tqdm,
+            lora_request=lora_request,
+        )
 
     @overload  # LEGACY: single (prompt + optional token ids)
     def encode(
@@ -413,11 +477,12 @@ class LLM:
     ) -> List[EmbeddingRequestOutput]:
         ...
 
-    @deprecate_kwargs("prompts",
-                      "prompt_token_ids",
-                      is_deprecated=lambda: LLM.DEPRECATE_LEGACY,
-                      additional_message="Please use the 'inputs' parameter "
-                      "instead.")
+    @deprecate_kwargs(
+        "prompts",
+        "prompt_token_ids",
+        is_deprecated=lambda: LLM.DEPRECATE_LEGACY,
+        additional_message="Please use the 'inputs' parameter instead.",
+    )
     def encode(
         self,
         prompts: Union[Union[PromptInputs, Sequence[PromptInputs]],
@@ -443,7 +508,7 @@ class LLM:
                 use the default pooling parameters.
             use_tqdm: Whether to use tqdm to display the progress bar.
             lora_request: LoRA request to use for generation, if any.
-            prompt_adapter_request: Prompt Adapter request to use for 
+            prompt_adapter_request: Prompt Adapter request to use for
                 generation, if any.
 
         Returns:
@@ -563,15 +628,15 @@ class LLM:
                 params[i] if isinstance(params, Sequence) else params,
                 lora_request=lora_request[i] if isinstance(
                     lora_request, Sequence) else lora_request,
-                prompt_adapter_request=prompt_adapter_request)
+                prompt_adapter_request=prompt_adapter_request,
+            )
 
     def _add_request(
-            self,
-            inputs: PromptInputs,
-            params: Union[SamplingParams, PoolingParams],
-            lora_request: Optional[Union[List[LoRARequest],
-                                         LoRARequest]] = None,
-            prompt_adapter_request: Optional[PromptAdapterRequest] = None
+        self,
+        inputs: PromptInputs,
+        params: Union[SamplingParams, PoolingParams],
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> None:
         request_id = str(next(self.request_counter))
         self.llm_engine.add_request(
@@ -579,7 +644,8 @@ class LLM:
             inputs,
             params,
             lora_request=lora_request,
-            prompt_adapter_request=prompt_adapter_request)
+            prompt_adapter_request=prompt_adapter_request,
+        )
 
     def _add_guided_processor(
             self,
@@ -628,8 +694,8 @@ class LLM:
                             in_spd = total_in_toks / pbar.format_dict["elapsed"]
                             total_out_toks += sum(
                                 len(stp.token_ids) for stp in output.outputs)
-                            out_spd = total_out_toks / pbar.format_dict[
-                                "elapsed"]
+                            out_spd = (total_out_toks /
+                                       pbar.format_dict["elapsed"])
                             pbar.postfix = (
                                 f"est. speed input: {in_spd:.2f} toks/s, "
                                 f"output: {out_spd:.2f} toks/s")
