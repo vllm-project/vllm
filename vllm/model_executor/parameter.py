@@ -208,9 +208,16 @@ class PerTensorScaleParameter(BasevLLMParameter):
         if isinstance(shard_id, int):
             return shard_id
 
+        # if not int, assuem shard_id for qkv
+        # map to int and return
         assert isinstance(shard_id, str)
         assert shard_id in self.qkv_idxs
         return self.qkv_idxs[shard_id]
+
+    # For row parallel layers, no sharding needed
+    # load weight into parameter as is
+    def load_row_parallel_weight(self, *args, **kwargs):
+        super().load_row_parallel_weight(*args, **kwargs)
 
     def load_merged_column_weight(self, *args, **kwargs):
         self._load_into_shard_id(*args, **kwargs)
