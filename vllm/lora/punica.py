@@ -36,7 +36,7 @@ def compute_meta(
     2. At the beginning of each prefill stage inference, recalculations are
     needed based on the input, but only once.
     """
-    
+
     lora_indices_tensor, seq_length_tensor = torch.unique_consecutive(
         token_lora_tensor, return_counts=True)
     cum_result = torch.cumsum(seq_length_tensor, dim=0)

@@ -112,9 +112,9 @@ def sgmv_expand_slice(
     lora_indices_tensor: torch.Tensor,
     batches: int,
     max_seq_length: int,
+    token_nums: int,
     slice_offset: int,
     slice_size: int,
-    token_nums: int,
     add_inputs: bool = False,
 ):
     """_summary_
@@ -135,10 +135,10 @@ def sgmv_expand_slice(
         batches (int): batch size
         max_seq_length (int): The max sequence lengths of the sequences
             in the batch
-        slice_offset (int): output_tensor's offset
-        slice_size (int): current output_tensor's size
         token_nums (int): The token numbers in the batch. Used to verify if the 
             token numbers in the inputs matches the one in the metadata.
+        slice_offset (int): output_tensor's offset
+        slice_size (int): current output_tensor's size
         add_inputs (bool, optional): Defaults to False, adds the final lora 
             results to the output.
     """

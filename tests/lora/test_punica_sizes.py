@@ -376,9 +376,9 @@ def test_punica_expand_nslices(
                 lora_indices_tensor,
                 batches,
                 max_seq_length,
+                token_nums,
                 slice_offset,
                 hidden_size,
-                token_nums,
                 add_inputs=True,
             )
         else:
