@@ -36,6 +36,8 @@ steps:
   commands:
   - pip install -r requirements-docs.txt
   - SPHINXOPTS=\"-W\" make html
+  # Check API reference (if it fails, you may have missing mock imports)
+  - grep \"sig sig-object py\" build/html/dev/sampling_params.html
 
 - label: Async Engine, Inputs, Utils, Worker Test # 15min
   fast_check: true
@@ -77,11 +79,13 @@ steps:
   - pytest -v -s core
 
 - label: Entrypoints Test # 20min
+  working_dir: "/vllm-workspace/tests"
   fast_check: true
   mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   commands:
+  - pip install -e ./plugins/vllm_add_dummy_model
   - pytest -v -s entrypoints/llm
   - pytest -v -s entrypoints/openai
 
@@ -143,6 +147,7 @@ steps:
     - pip install awscli tensorizer # for llava example and tensorizer test
     - python3 offline_inference.py
     - python3 cpu_offload.py
+    - python3 offline_inference_chat.py
     - python3 offline_inference_with_prefix.py
     - python3 llm_engine_example.py
     - python3 offline_inference_vision_language.py
@@ -154,7 +159,16 @@ steps:
   - vllm/
   - tests/models
   commands:
-    - pytest -v -s models -m \"not vlm\"
+    - pip install -e ./plugins/vllm_add_dummy_model
+    - pytest -v -s models/test_oot_registration.py # it needs a clean process
+    - pytest -v -s models -m \"not vlm\" --ignore=models/test_oot_registration.py
+
+- label: torch compile integration test
+  source_file_dependencies:
+  - vllm/
+  commands:
+    - pytest -v -s ./compile/test_full_graph.py
+
 
 - label: Vision Language Models Test # 42min
   mirror_hardwares: [amd]
@@ -289,6 +303,8 @@ steps:
   - pytest -v -s distributed/test_chunked_prefill_distributed.py
   - pytest -v -s distributed/test_multimodal_broadcast.py
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp2.py
+  - pip install -e ./plugins/vllm_add_dummy_model
+  - pytest -v -s distributed/test_distributed_oot.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s distributed/test_utils.py
 
@@ -298,8 +314,10 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/distributed/test_pipeline_parallel
+  - tests/distributed/test_pp_cudagraph.py
   commands:
   - pytest -v -s distributed/test_pipeline_parallel.py
+  - pytest -v -s distributed/test_pp_cudagraph.py
 
 - label: LoRA Long Context (Distributed) # 11min
   # This test runs llama 13B, so it is required to run on 4 GPUs.
@@ -313,6 +331,16 @@ steps:
     # before the fix, we need to use spawn to test it
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s -x lora/test_long_context.py
+
+- label: Weight Loading Multiple GPU Test
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 2
+  source_file_dependencies:
+  - vllm/
+  - tests/weight_loading
+  commands:
+    - bash weight_loading/run_model_weight_loading_test.sh
+
 
 ##### multi gpus test #####
 ##### A100 test #####
