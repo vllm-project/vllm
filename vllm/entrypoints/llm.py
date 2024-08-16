@@ -304,7 +304,7 @@ class LLM:
                 generation, if any.
 
         Returns:
-            A list of `RequestOutput` objects containing the
+            A list of ``RequestOutput`` objects containing the
             generated completions in the same order as the input prompts.
 
         Note:
@@ -359,8 +359,10 @@ class LLM:
     ) -> List[RequestOutput]:
         """
         Generates responses for chat messages.
+
         Converts the messages to prompts using the tokenizer and calls
-        the `generate` method to generate the responses.
+        the :meth:`generate` method to generate the responses.
+
         Args:
             messages: A list of messages to generate responses for. Each
                 message is a list of dictionaries with 'role' and 'content'
@@ -376,8 +378,9 @@ class LLM:
               If not provided, the model's default chat template will be used.
             add_generation_template: If True, adds a generation template 
                 to each message.
+
         Returns:
-            A list of `RequestOutput` objects containing the generated
+            A list of ``RequestOutput`` objects containing the generated
             responses in the same order as the input messages.
         """
 
