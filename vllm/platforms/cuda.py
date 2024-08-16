@@ -44,6 +44,13 @@ def get_physical_device_capability(device_id: int = 0) -> Tuple[int, int]:
     return pynvml.nvmlDeviceGetCudaComputeCapability(handle)
 
 
+@lru_cache(maxsize=8)
+@with_nvml_context
+def get_physical_device_name(device_id: int = 0) -> str:
+    handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
+    return pynvml.nvmlDeviceGetName(handle)
+
+
 def device_id_to_physical_device_id(device_id: int) -> int:
     if "CUDA_VISIBLE_DEVICES" in os.environ:
         device_ids = os.environ["CUDA_VISIBLE_DEVICES"].split(",")
@@ -60,6 +67,11 @@ class CudaPlatform(Platform):
     def get_device_capability(device_id: int = 0) -> Tuple[int, int]:
         physical_device_id = device_id_to_physical_device_id(device_id)
         return get_physical_device_capability(physical_device_id)
+
+    @staticmethod
+    def get_device_name(device_id: int = 0) -> str:
+        physical_device_id = device_id_to_physical_device_id(device_id)
+        return get_physical_device_name(physical_device_id)
 
     @staticmethod
     @with_nvml_context
