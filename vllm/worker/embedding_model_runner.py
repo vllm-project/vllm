@@ -13,7 +13,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sequence import (IntermediateTensors, PoolerOutput, SequenceData,
                            SequenceGroupMetadata)
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunnerBase
-from vllm.worker.model_runner import (ModelInputForGPU, ModelInputForGPUBuilder)
+from vllm.worker.model_runner import ModelInputForGPU, ModelInputForGPUBuilder
 
 logger = init_logger(__name__)
 
