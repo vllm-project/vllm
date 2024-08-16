@@ -30,7 +30,7 @@ from ...utils import VLLM_PATH
 chatml_jinja_path = VLLM_PATH / "examples/template_chatml.jinja"
 assert chatml_jinja_path.exists()
 
-MODEL_NAME = "facebook/opt-125m"
+MODEL_NAME = "google/paligemma-3b-pt-224"
 TEST_AUDIO_URLS = [
     "https://upload.wikimedia.org/wikipedia/en/b/bf/Dave_Niehaus_Winning_Call_1995_AL_Division_Series.ogg",
 ]
