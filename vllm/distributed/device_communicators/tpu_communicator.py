@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
@@ -24,9 +25,33 @@ class TpuCommunicator:
         # be simply calculated as follows.
         global_rank = dist.get_rank(group)
         global_world_size = dist.get_world_size(group)
-        num_nodes = len(ray.nodes())
+
+        # Calculate how many TPU nodes are in the current placement group.
+        pg_table = ray.util.placement_group_table()
+        current_pg = ray.util.get_current_placement_group()
+
+        print(f"current pg: {current_pg.id.hex()}")
+        nodes_in_pg = set()
+        for pg_key, pg in pg_table.items():
+            if pg_key == current_pg.id.hex():
+                for _, node in pg['bundles_to_node_id'].items():
+                    nodes_in_pg.add(node)
+        print(f"pg nodes: {nodes_in_pg}")
+        num_nodes = len(nodes_in_pg)
+
         local_world_size = global_world_size // num_nodes
         local_rank = global_rank % local_world_size
+
+        print(f"global_rank: {global_rank}")
+        print(f"global_world_size: {global_world_size}")
+        print(f"num_nodes: {num_nodes}")
+        print(f"local_world_size: {local_world_size}")
+        print(f"local_rank: {local_rank}")
+
+        # Ensure environment variables are set for multihost deployments.
+        os.environ['CLOUD_TPU_TASK_ID'] = str(global_rank)
+        os.environ['TPU_VISIBLE_CHIPS'] = str(local_rank)
+
         pjrt.initialize_multiprocess(local_rank, local_world_size)
         xr._init_world_size_ordinal()
 

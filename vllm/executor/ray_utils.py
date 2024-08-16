@@ -1,3 +1,4 @@
+import os
 from typing import List, Optional, Tuple, Union
 
 from vllm.config import ParallelConfig
@@ -62,6 +63,9 @@ try:
             if isinstance(output, IntermediateTensors):
                 return execute_model_req, output
             return output
+
+        def override_env_vars(self, vars):
+            os.environ.update(vars)
 
     ray_import_err = None
 
