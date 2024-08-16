@@ -11,7 +11,7 @@ from vllm.transformers_utils.image_processor import get_image_processor
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
 from vllm.utils import is_list_of
 
-from .base import MultiModalInputs, MultiModalPlugin
+from .base import MultiModalData, MultiModalInputs, MultiModalPlugin
 
 logger = init_logger(__name__)
 
@@ -110,8 +110,11 @@ class ImagePlugin(MultiModalPlugin):
             model_config.model,
             trust_remote_code=model_config.trust_remote_code)
 
-    def _default_input_mapper(self, ctx: InputContext,
-                              data: object) -> MultiModalInputs:
+    def _default_input_mapper(
+        self,
+        ctx: InputContext,
+        data: MultiModalData[object],
+    ) -> MultiModalInputs:
         model_config = ctx.model_config
 
         # PIL image
