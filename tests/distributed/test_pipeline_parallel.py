@@ -8,10 +8,12 @@ WARNING: This test runs in both single-node (4 GPUs) and multi-node
 import os
 
 import pytest
+import torch
 
 from vllm.logger import init_logger
 
-from ..utils import compare_two_settings, fork_new_process_for_each_test
+from ..utils import (compare_two_settings, fork_new_process_for_each_test,
+                     wait_for_gpu_memory_to_clear)
 
 logger = init_logger("test_pipeline_parallel")
 
@@ -38,6 +40,12 @@ def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME,
     if VLLM_MULTI_NODE and DIST_BACKEND == "mp":
         pytest.skip("Skipping multi-node pipeline parallel test for "
                     "multiprocessing distributed backend")
+
+    wait_for_gpu_memory_to_clear(
+        devices=list(range(torch.cuda.device_count())),
+        threshold_bytes=2 * 2**30,
+        timeout_s=60,
+    )
 
     pp_args = [
         # use half precision for speed and memory savings in CI environment
