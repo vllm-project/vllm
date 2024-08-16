@@ -533,21 +533,21 @@ def test_packed_loras(dist_init, dummy_model_gate_up):
     packed_lora = model_lora.get_lora("gate_up_proj")
     assert packed_lora and isinstance(packed_lora, PackedLoRALayerWeights)
 
-    assert torch.allclose(packed_lora.lora_a[0],
-                          model_lora.get_lora("gate_proj").lora_a)
-    assert torch.allclose(packed_lora.lora_b[0],
-                          model_lora.get_lora("gate_proj").lora_b)
-    assert torch.allclose(packed_lora.lora_a[1],
-                          model_lora.get_lora("up_proj").lora_a)
-    assert torch.allclose(packed_lora.lora_b[1],
-                          model_lora.get_lora("up_proj").lora_b)
+    torch.testing.assert_close(packed_lora.lora_a[0],
+                               model_lora.get_lora("gate_proj").lora_a)
+    torch.testing.assert_close(packed_lora.lora_b[0],
+                               model_lora.get_lora("gate_proj").lora_b)
+    torch.testing.assert_close(packed_lora.lora_a[1],
+                               model_lora.get_lora("up_proj").lora_a)
+    torch.testing.assert_close(packed_lora.lora_b[1],
+                               model_lora.get_lora("up_proj").lora_b)
 
     packed_lora1 = model_lora1.get_lora("gate_up_proj")
     assert packed_lora1 and isinstance(packed_lora1, PackedLoRALayerWeights)
 
     assert packed_lora1.lora_a[0] is None
     assert packed_lora1.lora_b[0] is None
-    assert torch.allclose(packed_lora1.lora_a[1],
-                          model_lora1.get_lora("up_proj").lora_a)
-    assert torch.allclose(packed_lora1.lora_b[1],
-                          model_lora1.get_lora("up_proj").lora_b)
+    torch.testing.assert_close(packed_lora1.lora_a[1],
+                               model_lora1.get_lora("up_proj").lora_a)
+    torch.testing.assert_close(packed_lora1.lora_b[1],
+                               model_lora1.get_lora("up_proj").lora_b)

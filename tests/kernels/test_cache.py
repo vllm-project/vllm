@@ -98,10 +98,10 @@ def test_copy_blocks(
 
     # Compare the results.
     for key_cache, cloned_key_cache in zip(key_caches, cloned_key_caches):
-        assert torch.allclose(key_cache, cloned_key_cache)
+        torch.testing.assert_close(key_cache, cloned_key_cache)
     for value_cache, cloned_value_cache in zip(value_caches,
                                                cloned_value_caches):
-        assert torch.allclose(value_cache, cloned_value_cache)
+        torch.testing.assert_close(value_cache, cloned_value_cache)
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -184,17 +184,17 @@ def test_reshape_and_cache(
         cloned_value_cache[block_idx, :, :, block_offset] = value[i]
 
     if kv_cache_dtype == "fp8":
-        assert torch.allclose(result_key_cache,
-                              cloned_key_cache,
-                              atol=0.001,
-                              rtol=0.1)
-        assert torch.allclose(result_value_cache,
-                              cloned_value_cache,
-                              atol=0.001,
-                              rtol=0.1)
+        torch.testing.assert_close(result_key_cache,
+                                   cloned_key_cache,
+                                   atol=0.001,
+                                   rtol=0.1)
+        torch.testing.assert_close(result_value_cache,
+                                   cloned_value_cache,
+                                   atol=0.001,
+                                   rtol=0.1)
     else:
-        assert torch.allclose(key_cache, cloned_key_cache)
-        assert torch.allclose(value_cache, cloned_value_cache)
+        torch.testing.assert_close(key_cache, cloned_key_cache)
+        torch.testing.assert_close(value_cache, cloned_value_cache)
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -290,17 +290,17 @@ def test_reshape_and_cache_flash(
         cloned_value_cache[block_idx, block_offset, :, :] = value[i]
 
     if kv_cache_dtype == "fp8":
-        assert torch.allclose(result_key_cache,
-                              cloned_key_cache,
-                              atol=0.001,
-                              rtol=0.1)
-        assert torch.allclose(result_value_cache,
-                              cloned_value_cache,
-                              atol=0.001,
-                              rtol=0.1)
+        torch.testing.assert_close(result_key_cache,
+                                   cloned_key_cache,
+                                   atol=0.001,
+                                   rtol=0.1)
+        torch.testing.assert_close(result_value_cache,
+                                   cloned_value_cache,
+                                   atol=0.001,
+                                   rtol=0.1)
     else:
-        assert torch.allclose(key_cache, cloned_key_cache)
-        assert torch.allclose(value_cache, cloned_value_cache)
+        torch.testing.assert_close(key_cache, cloned_key_cache)
+        torch.testing.assert_close(value_cache, cloned_value_cache)
 
 
 @pytest.mark.parametrize("direction", COPYING_DIRECTION)
@@ -372,10 +372,10 @@ def test_swap_blocks(
                     block_mapping_tensor)
 
     for src, dst in block_mapping:
-        assert torch.allclose(src_key_caches_clone[src].cpu(),
-                              dist_key_caches[0][dst].cpu())
-        assert torch.allclose(src_value_caches_clone[src].cpu(),
-                              dist_value_caches[0][dst].cpu())
+        torch.testing.assert_close(src_key_caches_clone[src].cpu(),
+                                   dist_key_caches[0][dst].cpu())
+        torch.testing.assert_close(src_value_caches_clone[src].cpu(),
+                                   dist_value_caches[0][dst].cpu())
 
 
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
@@ -411,4 +411,4 @@ def test_fp8_e4m3_conversion(
     converted_cache = torch.empty_like(cache)
     ops.convert_fp8(converted_cache, cache_fp8)
 
-    assert torch.allclose(cache, converted_cache, atol=0.001, rtol=0.1)
+    torch.testing.assert_close(cache, converted_cache, atol=0.001, rtol=0.1)

@@ -37,9 +37,9 @@ def test_dynamic_per_token_fp8_quant(num_tokens: int, hidden_size: int,
                                                scale_ub=scale_ub,
                                                use_per_token_if_dynamic=True)
 
-    assert torch.allclose(ref_scales, ops_scales)
-    assert torch.allclose(ref_out.to(dtype=torch.float32),
-                          ops_out.to(dtype=torch.float32))
+    torch.testing.assert_close(ref_scales, ops_scales)
+    torch.testing.assert_close(ref_out.to(dtype=torch.float32),
+                               ops_out.to(dtype=torch.float32))
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -57,9 +57,9 @@ def test_dynamic_per_tensor_fp8_quant(num_tokens: int, hidden_size: int,
     ref_out, ref_scale = ref_dynamic_per_tensor_fp8_quant(x)
     ops_out, ops_scale = ops.scaled_fp8_quant(x)
 
-    assert torch.allclose(ref_scale, ops_scale)
-    assert torch.allclose(ref_out.to(dtype=torch.float32),
-                          ops_out.to(dtype=torch.float32))
+    torch.testing.assert_close(ref_scale, ops_scale)
+    torch.testing.assert_close(ref_out.to(dtype=torch.float32),
+                               ops_out.to(dtype=torch.float32))
 
 
 # Regression test for a case with large activations where an int32 index cannot
@@ -84,4 +84,4 @@ def test_fp8_quant_large(seed: int) -> None:
     ref_out = ref_out.to(dtype=dtype)
     ops_out = ops_out.to(dtype=dtype)
 
-    assert torch.allclose(ref_out, ops_out)
+    torch.testing.assert_close(ref_out, ops_out)

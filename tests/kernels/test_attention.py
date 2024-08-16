@@ -276,7 +276,7 @@ def test_paged_attention(
     atol, rtol = 1e-3, 1e-5
     if kv_cache_dtype == "fp8":
         atol, rtol = 1e-2, 1e-5
-    assert torch.allclose(output, ref_output, atol=atol, rtol=rtol)
+    torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol)
 
 
 def ref_multi_query_kv_attention(
@@ -379,4 +379,4 @@ def test_multi_query_kv_attention(
     )
     atol = get_default_atol(output) if is_hip() else 1e-3
     rtol = get_default_rtol(output) if is_hip() else 1e-5
-    assert torch.allclose(output, ref_output, atol=atol, rtol=rtol)
+    torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol)

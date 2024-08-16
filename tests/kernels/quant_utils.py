@@ -69,4 +69,4 @@ def ref_dynamic_per_tensor_fp8_quant(x: torch.tensor) \
     ref_iscale = one / ref_scale
     ref_out = (as_float32_tensor(x) * ref_iscale).clamp(
         fp8_traits.min, fp8_traits.max).to(dtype=torch.float8_e4m3fn)
-    return ref_out, ref_scale
+    return ref_out, ref_scale.view((1, ))
