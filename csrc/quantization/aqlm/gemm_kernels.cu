@@ -496,14 +496,14 @@ torch::Tensor code2x8_matmat(const torch::Tensor& input,
 }
 
 // Accumulate the partition sizes.
-int4 accumulate_sizes(const torch::Tensor& codebook_partition_sizes) {
+int4 accumulate_sizes(const std::vector<int64_t>& codebook_partition_sizes) {
   int4 cumulative_sizes;
   auto cumulative_size = &cumulative_sizes.x;
-  int i = 0;
+  size_t i = 0;
   int last = 0;
-  assert(codebook_partition_sizes.size(0) <= 4);
-  for (; i < codebook_partition_sizes.size(0); ++i, ++cumulative_size) {
-    *cumulative_size = codebook_partition_sizes[i].item<int>() + last;
+  assert(codebook_partition_sizes.size() <= 4);
+  for (; i < codebook_partition_sizes.size(); ++i, ++cumulative_size) {
+    *cumulative_size = codebook_partition_sizes[i] + last;
     last = *cumulative_size;
   }
   // fill in the rest with unreachable.
@@ -519,12 +519,12 @@ int4 accumulate_sizes(const torch::Tensor& codebook_partition_sizes) {
 torch::Tensor aqlm_gemm(const torch::Tensor& input, const torch::Tensor& codes,
                         const torch::Tensor& codebooks,
                         const torch::Tensor& scales,
-                        const torch::Tensor& codebook_partition_sizes,
+                        const std::vector<int64_t>& codebook_partition_sizes,
                         const std::optional<torch::Tensor>& bias) {
   int4 cumulative_sizes =
       vllm::aqlm::accumulate_sizes(codebook_partition_sizes);
 
-  int const nbooks = codebooks.size(0) / codebook_partition_sizes.size(0);
+  int const nbooks = codebooks.size(0) / codebook_partition_sizes.size();
   int const entries = codebooks.size(1);
 
   if (nbooks == 1 && entries == (1 << 16)) {
@@ -541,13 +541,13 @@ torch::Tensor aqlm_gemm(const torch::Tensor& input, const torch::Tensor& codes,
   return {};
 }
 
-torch::Tensor aqlm_dequant(const torch::Tensor& codes,
-                           const torch::Tensor& codebooks,
-                           const torch::Tensor& codebook_partition_sizes) {
+torch::Tensor aqlm_dequant(
+    const torch::Tensor& codes, const torch::Tensor& codebooks,
+    const std::vector<int64_t>& codebook_partition_sizes) {
   int4 cumulative_sizes =
       vllm::aqlm::accumulate_sizes(codebook_partition_sizes);
 
-  int const nbooks = codebooks.size(0) / codebook_partition_sizes.size(0);
+  int const nbooks = codebooks.size(0) / codebook_partition_sizes.size();
   int const entries = codebooks.size(1);
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(codes));
@@ -557,7 +557,8 @@ torch::Tensor aqlm_dequant(const torch::Tensor& codes,
   auto in_features = codes.size(1) * 8;
   auto out_features = codes.size(0);
 
-  assert(out_features = codebook_partition_sizes.sum().item<int>());
+  assert(out_features == std::accumulate(codebook_partition_sizes.begin(),
+                                         codebook_partition_sizes.end(), 0));
 
   auto weights = torch::empty({out_features, in_features},
                               torch::TensorOptions()
