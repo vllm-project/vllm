@@ -70,18 +70,18 @@ HF_CACHE="$(realpath ~)/huggingface"
 mkdir -p ${HF_CACHE}
 HF_MOUNT="/root/.cache/huggingface"
 
+commands=${@//"--shard-id= "/}
+commands=${commands//"--num-shards= "/}
 docker run \
         --device /dev/kfd --device /dev/dri \
         --network host \
         --shm-size=16gb \
         --rm \
         -e HIP_VISIBLE_DEVICES=0 \
-        -e BUILDKITE_PARALLEL_JOB=0 \
-        -e BUILDKITE_PARALLEL_JOB_COUNT=1 \
         -e HF_TOKEN \
         -v ${HF_CACHE}:${HF_MOUNT} \
         -e HF_HOME=${HF_MOUNT} \
         --name ${container_name} \
         ${image_name} \
-        /bin/bash -c "${@}"
+        /bin/bash -c ${commands}
 
