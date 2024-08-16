@@ -72,6 +72,8 @@ HF_MOUNT="/root/.cache/huggingface"
 
 commands=${@//"--shard-id= "/}
 commands=${commands//"--num-shards= "/}
+commands=${commands//CUDA_VISIBLE_DEVICES/HIP_VISIBLE_DEVICES}
+
 docker run \
         --device /dev/kfd --device /dev/dri \
         --network host \
