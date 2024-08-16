@@ -18,7 +18,7 @@ from ..utils import fork_new_process_for_each_test
 
 @pytest.mark.skipif(cuda_device_count_stateless() < 2,
                     reason="Need at least 2 GPUs to run the test.")
-@pytest.mark.parametrize("model, distributed_executor_backend, enable_adag", [
+@pytest.mark.parametrize("model, distributed_executor_backend, enable_spmd", [
     ("facebook/opt-125m", "ray", False),
     ("facebook/opt-125m", "ray", True),
     ("meta-llama/Llama-2-7b-hf", "ray", False),
@@ -32,9 +32,9 @@ def test_models(
     example_prompts,
     model: str,
     distributed_executor_backend: str,
-    enable_adag: bool,
+    enable_spmd: bool,
 ) -> None:
-    if enable_adag:
+    if enable_spmd:
         assert distributed_executor_backend == "ray"
         # test ray adag
         os.environ['VLLM_USE_RAY_SPMD_WORKER'] = "1"

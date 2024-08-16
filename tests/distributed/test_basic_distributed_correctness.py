@@ -23,7 +23,7 @@ TARGET_TEST_SUITE = os.environ.get("TARGET_TEST_SUITE", "L4")
                     reason="Need at least 2 GPUs to run the test.")
 @pytest.mark.parametrize(
     "model, distributed_executor_backend, attention_backend, "
-    "test_suite, enable_adag", [
+    "test_suite, enable_spmd", [
         ("facebook/opt-125m", "ray", "", "L4", False),
         ("facebook/opt-125m", "ray", "", "L4", True),
         ("facebook/opt-125m", "mp", "", "L4", False),
@@ -43,13 +43,13 @@ def test_models(
     distributed_executor_backend: str,
     attention_backend: str,
     test_suite: str,
-    enable_adag: bool,
+    enable_spmd: bool,
 ) -> None:
 
     if test_suite != TARGET_TEST_SUITE:
         pytest.skip(f"Skip test for {test_suite}")
 
-    if enable_adag:
+    if enable_spmd:
         # test ray adag
         os.environ['VLLM_USE_RAY_SPMD_WORKER'] = "1"
         os.environ['VLLM_USE_RAY_COMPILED_DAG'] = "1"

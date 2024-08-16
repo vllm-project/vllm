@@ -53,6 +53,7 @@ def get_max_siglip_image_tokens(hf_config: SiglipVisionConfig) -> int:
 def dummy_seq_data_for_siglip(
     hf_config: SiglipVisionConfig,
     seq_len: int,
+    num_images: int,
     *,
     image_token_id: int,
     image_feature_size_override: Optional[int] = None,
@@ -62,13 +63,14 @@ def dummy_seq_data_for_siglip(
     else:
         image_feature_size = image_feature_size_override
 
-    token_ids = [image_token_id] * image_feature_size
-    token_ids += [0] * (seq_len - image_feature_size)
-    return SequenceData(array("I", token_ids))
+    token_ids = array("I", [image_token_id]) * image_feature_size
+    token_ids += array("I", [0]) * (seq_len - image_feature_size)
+    return SequenceData(token_ids)
 
 
 def dummy_image_for_siglip(
     hf_config: SiglipVisionConfig,
+    num_images: int,
     *,
     image_width_override: Optional[int] = None,
     image_height_override: Optional[int] = None,
@@ -80,7 +82,7 @@ def dummy_image_for_siglip(
         height = image_height_override
 
     image = Image.new("RGB", (width, height), color=0)
-    return {"image": image}
+    return {"image": image if num_images == 1 else [image] * num_images}
 
 
 def input_processor_for_siglip(

@@ -12,6 +12,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 _SAMPLING_EPS = 1e-5
+_MAX_TEMP = 1e-2
 
 
 class SamplingType(IntEnum):
@@ -150,6 +151,12 @@ class SamplingParams(msgspec.Struct,
 
     def __post_init__(self) -> None:
         self.best_of = self.best_of or self.n
+        if 0 < self.temperature < _MAX_TEMP:
+            logger.warning(
+                "temperature %s is less than %s, which may cause numerical "
+                "errors nan or inf in tensors. We have maxed it out to %s.",
+                self.temperature, _MAX_TEMP, _MAX_TEMP)
+            self.temperature = max(self.temperature, _MAX_TEMP)
         if self.seed == -1:
             self.seed = None
         else:

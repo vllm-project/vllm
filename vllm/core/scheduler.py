@@ -804,6 +804,9 @@ class Scheduler:
                 curr_loras.add(lora_int_id)
             waiting_queue.popleft()
             self._allocate_and_set_running(seq_group)
+            seq_group.init_multi_step(
+                num_scheduler_steps=self._get_num_lookahead_slots(
+                    is_prefill=True) + 1)
             seq_groups.append(
                 ScheduledSequenceGroup(seq_group=seq_group,
                                        token_chunk_size=num_new_tokens))
@@ -1093,7 +1096,7 @@ class Scheduler:
 
             # It assumes the scheduled_seq_groups is ordered by
             # prefill < decoding.
-            if is_first_prefill or not self.scheduler_config._send_delta_data:
+            if is_first_prefill or not self.scheduler_config.send_delta_data:
                 seq_group_metadata = SequenceGroupMetadata(
                     request_id=seq_group.request_id,
                     is_prompt=is_prompt,
@@ -1107,6 +1110,7 @@ class Scheduler:
                     computed_block_nums=common_computed_block_nums,
                     encoder_seq_data=encoder_seq_data,
                     cross_block_table=cross_block_table,
+                    state=seq_group.state,
                     # `multi_modal_data` will only be present for the 1st comm
                     # between engine and worker.
                     # the subsequent comms can still use delta, but
@@ -1195,6 +1199,7 @@ class Scheduler:
                 slots.
         """
         num_lookahead_slots = self._get_num_lookahead_slots(is_prefill=False)
+        seq_group.init_multi_step(num_scheduler_steps=num_lookahead_slots + 1)
 
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             cows = self.block_manager.append_slots(seq, num_lookahead_slots)
