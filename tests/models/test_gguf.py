@@ -37,16 +37,22 @@ MODELS = [
                     reason="gguf is not supported on this GPU type.")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
-@pytest.mark.parametrize("max_tokens", [32])
+@pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
+@pytest.mark.parametrize("tp_size", [1, 2])
 def test_models(
+    num_gpus_available,
     vllm_runner,
     example_prompts,
     model,
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
+    tp_size: int,
 ) -> None:
+    if num_gpus_available < tp_size:
+        pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
+
     original_model, gguf_model = model
 
     # Run unquantized model.
@@ -54,7 +60,7 @@ def test_models(
                      dtype=dtype,
                      max_model_len=MAX_MODEL_LEN,
                      enforce_eager=True,
-                     tensor_parallel_size=1) as original_model:
+                     tensor_parallel_size=tp_size) as original_model:
 
         original_outputs = original_model.generate_greedy_logprobs(
             example_prompts[:-1], max_tokens, num_logprobs)
@@ -64,7 +70,7 @@ def test_models(
                      dtype=dtype,
                      max_model_len=MAX_MODEL_LEN,
                      enforce_eager=True,
-                     tensor_parallel_size=1) as gguf_model:
+                     tensor_parallel_size=tp_size) as gguf_model:
         gguf_outputs = gguf_model.generate_greedy_logprobs(
             example_prompts[:-1], max_tokens, num_logprobs)
 
