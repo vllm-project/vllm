@@ -104,11 +104,7 @@ def _bgmv_expand(
         batches (int): batch size
         add_inputs (bool, optional):  Defaults to False. adds the final lora 
             results to the output.
-        override_config (Optional[Dict[str, int]], optional): Defaults to None. 
-            Triton grid config
     """
-    override_config: Optional[Dict[str, int]] = None
-
     assert inputs.dtype in [torch.float16, torch.bfloat16, torch.float32]
     assert lora_b_weights.dtype in [
         torch.float16,
@@ -138,10 +134,7 @@ def _bgmv_expand(
     ]:
         CAST_TYPE = True
     batches = lora_indices_tensor.size(0)
-    if override_config:
-        config = override_config
-    else:
-        config = get_lora_op_configs("expand", batches, N)
+    config = get_lora_op_configs("expand", batches, N)
     grid = lambda META: (
         META["SPLIT_N"],
         batches,
