@@ -178,8 +178,16 @@ def to_enc_dec_tuple_list(
             for enc_dec_prompt in enc_dec_prompts]
 
 
-def build_encoder_prompt(
-    encoder_prompt: _T1,
-) -> ExplicitEncoderDecoderPrompt[_T1, SingletonPromptInputs]:
-    return build_explicit_enc_dec_prompt(encoder_prompt=encoder_prompt,
-                                         decoder_prompt=None)
+def build_decoder_prompt(
+    prompt: _T2,
+) -> ExplicitEncoderDecoderPrompt[SingletonPromptInputs, _T2]:
+    return build_explicit_enc_dec_prompt(encoder_prompt="",
+                                         decoder_prompt=prompt)
+
+
+def build_decoder_prompts(
+    prompts: Iterable[_T1],
+) -> List[ExplicitEncoderDecoderPrompt[_T1, _T2]]:
+    return [
+        build_decoder_prompt(prompt) for prompt in prompts
+    ]

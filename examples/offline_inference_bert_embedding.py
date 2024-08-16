@@ -1,8 +1,7 @@
 from vllm import LLM
-from vllm.inputs import build_encoder_prompt
 
 # Sample prompts.
-prompts = [build_encoder_prompt("This is an example sentence.")]
+prompts = ["This is an example sentence."]
 
 # Create an LLM.
 model = LLM(model="bert-base-uncased", enforce_eager=True)
