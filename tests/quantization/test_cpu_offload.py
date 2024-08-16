@@ -7,6 +7,7 @@ from tests.quantization.utils import is_quant_method_supported
 
 from ..utils import compare_two_settings
 
+
 @pytest.mark.skipif(not is_quant_method_supported("fp8"),
                     reason="fp8 is not supported on this GPU type.")
 def test_cpu_offload_fp8():
