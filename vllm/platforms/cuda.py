@@ -53,7 +53,7 @@ def get_physical_device_name(device_id: int = 0) -> str:
 
 @with_nvml_context
 def warn_if_different_devices():
-    device_ids = pynvml.nvmlDeviceGetCount()
+    device_ids: int = pynvml.nvmlDeviceGetCount()
     if device_ids > 1:
         device_names = [get_physical_device_name(i) for i in range(device_ids)]
         if len(set(device_names)) > 1 and os.environ.get(
