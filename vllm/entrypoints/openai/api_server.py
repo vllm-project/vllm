@@ -66,7 +66,7 @@ def model_is_embedding(model_name: str, trust_remote_code: bool) -> bool:
                        tokenizer_mode="auto",
                        trust_remote_code=trust_remote_code,
                        seed=0,
-                       dtype="float16").embedding_mode
+                       dtype="auto").embedding_mode
 
 
 @asynccontextmanager
