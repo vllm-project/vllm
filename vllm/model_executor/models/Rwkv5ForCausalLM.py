@@ -28,7 +28,7 @@ from vllm.attention.backends.rwkv5linear_attn import LinearFlashAttentionMetadat
 from vllm.config import CacheConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+from vllm.model_executor.layers.linear import (ColumnParallelLinear, MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -57,15 +57,15 @@ class RWKVAttention(nn.Module):
             get_tensor_model_parallel_world_size())
         assert total_num_heads % tensor_model_parallel_world_size == 0
         self.num_heads = total_num_heads // tensor_model_parallel_world_size
-        self.head_dim =  self.hidden_size // self.num_heads
+        self.head_dim =  self.hidden_size // total_num_heads
         self.scale = self.head_dim**-0.5
 
-        self.receptance = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
-        self.key = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
+        self.receptance = ColumnParallelLinear(self.hidden_size, self.hidden_size, bias=False, quant_config=quant_config)
+        self.key = ColumnParallelLinear(self.hidden_size, self.hidden_size, bias=False, quant_config=quant_config)
 
-        self.value = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
-        self.output = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
-        self.gate = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
+        self.value = ColumnParallelLinear(self.hidden_size, self.hidden_size, bias=False, quant_config=quant_config)
+        self.gate = ColumnParallelLinear(self.hidden_size, self.hidden_size, bias=False, quant_config=quant_config)
+        self.output = RowParallelLinear(self.hidden_size, self.hidden_size, bias=False, quant_config=quant_config)
         self.time_mix_key = nn.Parameter(torch.zeros(1,1,self.hidden_size))
         self.time_mix_value = nn.Parameter(torch.zeros(1,1,self.hidden_size))
         self.time_mix_receptance = nn.Parameter(torch.zeros(1,1,self.hidden_size))
@@ -113,10 +113,11 @@ class RWKVAttention(nn.Module):
         xr = x + xx * (1-self.time_mix_receptance[0])
         xg = x + xx * (1-self.time_mix_gate[0])
 
-        k = self.key(xk)
-        v = self.value(xv)
-        r = self.receptance(xr)
-        g = torch.nn.functional.silu(self.gate(xg))
+        k,_ = self.key(xk)
+        v,_ = self.value(xv)
+        r,_ = self.receptance(xr)
+        g,_ = self.gate(xg)
+        g = torch.nn.functional.silu(g)
 
         k = k.view(-1,self.num_heads, self.head_dim,1)
         v = v.view(-1,self.num_heads, 1, self.head_dim)
@@ -167,7 +168,7 @@ class RWKVAttention(nn.Module):
                     kv_cache[blocknum[t],blockidx[t],:,:,2:] = s
         out = out.view(-1, self.hidden_size)
         out = self.ln_x(out/self.head_size_divisor)
-        hidden_states = self.output(out*g)
+        hidden_states, _ = self.output(out*g)
 
         
         return kv_cache, hidden_states
@@ -188,23 +189,23 @@ class RWKVMLP(nn.Module):
         self.time_mix_key = nn.Parameter(torch.zeros(1,1,hidden_size))
         self.time_mix_receptance = nn.Parameter(torch.zeros(1,1,hidden_size))
 
-        self.key = nn.Linear(
+        self.key = ColumnParallelLinear(
             hidden_size,
             intermediate_size,
             bias=True,
-            # quant_config=quant_config,
+            quant_config=quant_config
         )
-        self.value = nn.Linear(
+        self.value = RowParallelLinear(
             intermediate_size,
             hidden_size,
             bias=True,
-            # quant_config=quant_config,
+            quant_config=quant_config
         )
-        self.receptance = nn.Linear(
+        self.receptance = RowParallelLinear(
             hidden_size,
             hidden_size,
             bias=True,
-            # quant_config=quant_config,
+            quant_config=quant_config
         )
 
     def forward(self, x, kv_cache, attn_metadata:LinearFlashAttentionMetadata, position_ids:torch.Tensor):
@@ -232,12 +233,12 @@ class RWKVMLP(nn.Module):
         xk = x + xx * (1-self.time_mix_key[0])
         xr = x + xx * (1-self.time_mix_receptance[0])
 
-        k = self.key(xk)
+        k,_ = self.key(xk)
         k = torch.relu(k) ** 2
-        kv = self.value(k)
+        kv,_ = self.value(k)
+        rr,_ = self.receptance(xr)
 
-
-        return torch.sigmoid(self.receptance(xr)) * kv
+        return torch.sigmoid(rr) * kv
 
 
 class RWKVBlock(nn.Module):
@@ -319,12 +320,8 @@ class RWKV5Model(nn.Module):
         # print(attn_metadata)
         inputs_embeds = self.embeddings(input_ids)
 
-        print(position_ids)
 
         hidden_states = self.blocks[0].pre_ln(inputs_embeds)
-        print(attn_metadata.query_start_loc)
-        print(attn_metadata.seq_start_loc)
-        print(attn_metadata.slot_mapping)
 
         for i in range(len(self.blocks)):
             layer = self.blocks[i]
