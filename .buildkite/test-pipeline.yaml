@@ -101,10 +101,9 @@ steps:
   - pytest -v -s distributed/test_pynccl.py
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp4.py
 
-##### fast check tests  #####
-#####  1 GPU test  #####
-
 - label: Metrics, Tracing Test # 10min
+  num_gpus: 2 
+  fast_check: true
   source_file_dependencies:
   - vllm/
   - tests/metrics
@@ -117,6 +116,9 @@ steps:
       opentelemetry-exporter-otlp \
       opentelemetry-semantic-conventions-ai"
   - pytest -v -s tracing
+
+##### fast check tests  #####
+#####  1 GPU test  #####
 
 - label: Regression Test # 5min
   mirror_hardwares: [amd]
