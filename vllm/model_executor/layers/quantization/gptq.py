@@ -212,6 +212,7 @@ class GPTQLinearMethod(LinearMethodBase):
                 layer.g_idx.data = torch.argsort(layer.g_idx).to(torch.int)
             else:
                 layer.g_idx.data = torch.empty((0, ),
+                                               dtype=torch.int,
                                                device=layer.g_idx.device)
             layer.exllama_state = ExllamaState.READY
             ops.gptq_shuffle(layer.qweight, layer.g_idx,
