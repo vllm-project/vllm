@@ -264,14 +264,14 @@ steps:
   - label: Utils Test
   mirror_hardwares: [amd]
   source_file_dependencies:
-  - tests/test_utils
+  - vllm/
   commands:
   - pytest -v -s test_utils.py # Utils
 
   - label: Worker Test
   mirror_hardwares: [amd]
   source_file_dependencies:
-  - tests/worker
+  - vllm/
   commands:
   - pytest -v -s worker # Worker
 
