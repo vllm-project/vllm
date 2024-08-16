@@ -422,11 +422,12 @@ class FusedMoE(torch.nn.Module):
             loaded_weight = loaded_weight.t().contiguous()
             shard_dim = ~shard_dim
 
+        # Case weight_scales
         if "weight_scale" in weight_name:
             # load the weight scaling based on the quantization scheme
             # supported weight scales can be found in
             # FusedMoeWeightScaleSupported
-            # TODO @dsikka: once hardended, refactor to use vLLM Parameters
+            # TODO @dsikka: once hardened, refactor to use vLLM Parameters
             # specific to each case
             quant_method = getattr(param, "quant_method", None)
             if quant_method == FusedMoeWeightScaleSupported.CHANNEL.value:
@@ -453,6 +454,7 @@ class FusedMoE(torch.nn.Module):
                     f"quant method must be one of {WEIGHT_SCALE_SUPPORTED}")
             return
 
+        # Case input scales
         if "input_scale" in weight_name:
             # Note: Only supported for fp8
             self._load_input_scales(param=param,
@@ -460,6 +462,7 @@ class FusedMoE(torch.nn.Module):
                                     expert_id=expert_id)
             return
 
+        # Case model weights
         if "weight" in weight_name:
             self._load_model_weight_or_group_weight_scale(
                 shard_id=shard_id,
