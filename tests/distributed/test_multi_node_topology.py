@@ -34,6 +34,9 @@ def test_multi_node_bad_topology(
 ) -> None:
     """Verify ray + multi node's bad topology raises an exception.
 
+    This test simulates multi node ray cluster, so we don't have to start
+    real 2 multi nodes.
+
     There are 2 potential bad issues.
     - the engine's node doesn't have enough GPUs.
     - the tensor parallel size exceeds the available GPUs in a current node.
