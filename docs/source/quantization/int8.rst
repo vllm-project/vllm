@@ -1,6 +1,6 @@
 .. _int8:
 
-INT8 Weight and Activation Quantization (W8A8)
+INT8 W8A8
 ==================
 
 vLLM supports quantizing weights and activations to INT8 for memory savings and inference acceleration.

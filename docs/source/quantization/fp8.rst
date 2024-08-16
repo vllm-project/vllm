@@ -1,6 +1,6 @@
 .. _fp8:
 
-FP8 Weight and Activation Quantization (W8A8)
+FP8 W8A8
 ==================
 
 vLLM supports FP8 (8-bit floating point) weight and activation quantization using hardware acceleration on GPUs such as Nvidia H100 and AMD MI300x. 
@@ -145,18 +145,15 @@ Troubleshooting and Support
 If you encounter any issues or have feature requests, please open an issue on the ``vllm-project/llm-compressor`` GitHub repository.
 
 
-Deprecated Information
+Deprecated Flow
 ------------------
 
 .. note::
 
    The following information is preserved for reference and search purposes.
-   The quantization method described below is deprecated in favor of the `llmcompressor`` method described above.
+   The quantization method described below is deprecated in favor of the ``llmcompressor`` method described above.
 
-Offline Quantization
---------------------
-
-For offline quantization to FP8, please install the `AutoFP8 library <https://github.com/neuralmagic/autofp8>`_.
+For static per-tensor offline quantization to FP8, please install the `AutoFP8 library <https://github.com/neuralmagic/autofp8>`_.
 
 .. code-block:: bash
 
@@ -168,7 +165,7 @@ This package introduces the ``AutoFP8ForCausalLM`` and ``BaseQuantizeConfig`` ob
 Offline Quantization with Static Activation Scaling Factors
 -----------------------------------------------------------
 
-For the best inference performance, you can use AutoFP8 with calibration data to produce per-tensor static scales for both the weights and activations by enabling the ``activation_scheme="static"`` argument.
+You can use AutoFP8 with calibration data to produce per-tensor static scales for both the weights and activations by enabling the ``activation_scheme="static"`` argument.
 
 .. code-block:: python
 
