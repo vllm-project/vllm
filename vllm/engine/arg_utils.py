@@ -229,7 +229,8 @@ class EngineArgs:
             'CoreWeave. See the Tensorize vLLM Model script in the Examples '
             'section for more information.\n'
             '* "bitsandbytes" will load the weights using bitsandbytes '
-            'quantization.\n')
+            'quantization.\n'
+            '* "sharded_state" will load the weights from a sharded checkpoint.\n')
         parser.add_argument(
             '--dtype',
             type=str,
