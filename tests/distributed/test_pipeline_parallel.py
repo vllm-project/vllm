@@ -99,6 +99,8 @@ def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME,
 ])
 @fork_new_process_for_each_test
 def test_pp_cudagraph(PP_SIZE, MODEL_NAME, ATTN_BACKEND):
+    if VLLM_MULTI_NODE:
+        pytest.skip("Skipping for multi-node test")
     cudagraph_args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
