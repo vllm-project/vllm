@@ -1,4 +1,8 @@
-from typing import List, Optional, Tuple, Union
+from collections import defaultdict
+from typing import Dict, List, Optional, Tuple, Union
+
+from ray.util import placement_group_table
+from ray.util.placement_group import PlacementGroup
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
@@ -83,6 +87,49 @@ def assert_ray_available():
                          "`pip install ray`.") from ray_import_err
 
 
+def _verify_bundles(placement_group: PlacementGroup,
+                    parallel_config: ParallelConfig):
+    """Verify a given placement group has bundles located in the right place.
+
+    There are 2 rules.
+    - Warn if all tensor parallel workers cannot fit in a single node.
+    - Fail if driver node is not included in a placement group.
+    """
+    assert ray.is_initialized(), (
+        "Ray is not initialized although distributed-executor-backend is ray.")
+    pg_data = placement_group_table(placement_group)
+    # bundle_idx -> node_id
+    bundle_to_node_ids = pg_data["bundles_to_node_id"]
+    # bundle_idx -> bundle (e.g., {"GPU": 1})
+    bundles = pg_data["bundles"]
+    # node_id -> List of bundle (e.g., {"GPU": 1})
+    node_id_to_bundle: Dict[str, List[Dict[str, float]]] = defaultdict(list)
+
+    for bundle_idx, node_id in bundle_to_node_ids.items():
+        node_id_to_bundle[node_id].append(bundles[bundle_idx])
+    driver_node_id = ray.get_runtime_context().get_node_id()
+
+    if driver_node_id not in node_id_to_bundle:
+        raise RuntimeError(
+            f"driver node id {driver_node_id} is not included in a placement "
+            f"group {placement_group.id}. Node id -> bundles "
+            f"{node_id_to_bundle}. "
+            "You don't have enough GPUs available in a current node. Check "
+            "`ray status` to see if you have available GPUs in a node "
+            f"{driver_node_id} before starting an vLLM engine.")
+
+    for node_id, bundles in node_id_to_bundle.items():
+        if len(bundles) < parallel_config.tensor_parallel_size:
+            raise RuntimeError(
+                f"tensor_parallel_size={parallel_config.tensor_parallel_size} "
+                f"is smaller than the reserved number of GPUs ({len(bundles)} "
+                f"GPUs) in a node {node_id}. Tensor parallel workers can be "
+                "spread out to 2 nodes which can degrade the performance. "
+                "To resolve this issue, make sure you have more than "
+                f"{parallel_config.tensor_parallel_size} GPUs available at "
+                "each node.")
+
+
 def initialize_ray_cluster(
     parallel_config: ParallelConfig,
     ray_address: Optional[str] = None,
@@ -144,12 +191,15 @@ def initialize_ray_cluster(
         placement_group_specs = ([{
             device_str: 1
         }] * parallel_config.world_size)
+        # By default, Ray packs resources as much as possible.
         current_placement_group = ray.util.placement_group(
-            placement_group_specs)
+            placement_group_specs, strategy="PACK")
         # Wait until PG is ready - this will block until all
         # requested resources are available, and will timeout
         # if they cannot be provisioned.
         ray.get(current_placement_group.ready(), timeout=1800)
 
+    assert current_placement_group is not None
+    _verify_bundles(current_placement_group, parallel_config)
     # Set the placement group in the parallel config
     parallel_config.placement_group = current_placement_group
