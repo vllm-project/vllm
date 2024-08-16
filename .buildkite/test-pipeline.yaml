@@ -184,7 +184,7 @@ steps:
   - tests/samplers
   commands:
     - pytest -v -s samplers
-    - VLLM_DISABLE_FLASHINFER_SAMPLER=1 pytest -v -s samplers
+    - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers
 
 - label: LogitsProcessor Test # 5min
   mirror_hardwares: [amd]
@@ -279,7 +279,7 @@ steps:
   commands:
   - # the following commands are for the first node, with ip 192.168.10.10 (ray environment already set up)
     - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py
-    - VLLM_MULTI_NODE=1 VLLM_DISABLE_FLASHINFER_SAMPLER=1 pytest -v -s distributed/test_pipeline_parallel.py
+    - VLLM_MULTI_NODE=1 pytest -v -s distributed/test_pipeline_parallel.py
   - # the following commands are for the second node, with ip 192.168.10.11 (ray environment already set up)
     - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py
 
@@ -309,7 +309,7 @@ steps:
   - vllm/
   - tests/distributed/test_pipeline_parallel
   commands:
-  - VLLM_DISABLE_FLASHINFER_SAMPLER=1 pytest -v -s distributed/test_pipeline_parallel.py
+  - pytest -v -s distributed/test_pipeline_parallel.py
 
 - label: LoRA Long Context (Distributed) # 11min
   # This test runs llama 13B, so it is required to run on 4 GPUs.

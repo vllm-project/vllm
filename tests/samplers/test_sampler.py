@@ -643,7 +643,7 @@ def test_sampler_top_k_top_p(seed: int, device: str):
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_flashinfer_fallback(seed: int, device: str):
-    if envs.VLLM_DISABLE_FLASHINFER_SAMPLER:
+    if not envs.VLLM_USE_FLASHINFER_SAMPLER:
         pytest.skip("Flashinfer sampler is disabled")
 
     set_random_seed(seed)
