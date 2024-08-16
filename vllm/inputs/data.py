@@ -67,7 +67,7 @@ _T2_co = TypeVar("_T2_co",
 # TODO: Make fields ReadOnly once mypy supports it
 class ExplicitEncoderDecoderPrompt(TypedDict, Generic[_T1_co, _T2_co]):
     """Represents an encoder/decoder model input prompt,
-    comprising an explicit encoder prompt and a 
+    comprising an explicit encoder prompt and a
     decoder prompt.
 
     The encoder and decoder prompts, respectively,
@@ -179,6 +179,6 @@ def to_enc_dec_tuple_list(
 
 
 def build_encoder_prompt(
-        encoder_prompt: _T1) -> ExplicitEncoderDecoderPrompt[_T1, _T2]:
-    return ExplicitEncoderDecoderPrompt(encoder_prompt=encoder_prompt,
-                                        decoder_prompt=None)
+        encoder_prompt: _T1) -> ExplicitEncoderDecoderPrompt[_T1, SingletonPromptInputs]:
+    return build_explicit_enc_dec_prompt(encoder_prompt=encoder_prompt,
+                                         decoder_prompt=None)
