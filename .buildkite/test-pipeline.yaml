@@ -163,6 +163,13 @@ steps:
     - pytest -v -s models/test_oot_registration.py # it needs a clean process
     - pytest -v -s models -m \"not vlm\" --ignore=models/test_oot_registration.py
 
+- label: torch compile integration test
+  source_file_dependencies:
+  - vllm/
+  commands:
+    - pytest -v -s ./compile/test_full_graph.py
+
+
 - label: Vision Language Models Test # 42min
   mirror_hardwares: [amd]
   source_file_dependencies:
