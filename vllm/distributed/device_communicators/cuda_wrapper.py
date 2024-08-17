@@ -51,6 +51,9 @@ def find_loaded_library(lib_name) -> Optional[str]:
         return None
     start = line.index("/")
     path = line[start:].strip()
+    filename = path.split("/")[-1]
+    assert filename.startswith(lib_name) and filename.endswith(".so"), \
+        f"Unexpected filename: {filename} for library {lib_name}"
     return path
 
 
@@ -98,9 +101,9 @@ class CudaRTLibrary:
 
     def __init__(self, so_file: Optional[str] = None):
         if so_file is None:
-            so_file = find_loaded_library("libcudart.so")
+            so_file = find_loaded_library("libcudart")
             assert so_file is not None, \
-                "libcudart.so is not loaded in the current process"
+                "libcudart is not loaded in the current process"
         if so_file not in CudaRTLibrary.path_to_library_cache:
             lib = ctypes.CDLL(so_file)
             CudaRTLibrary.path_to_library_cache[so_file] = lib
