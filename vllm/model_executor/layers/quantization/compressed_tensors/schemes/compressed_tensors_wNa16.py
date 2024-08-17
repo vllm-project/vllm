@@ -6,9 +6,9 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    apply_gptq_marlin_linear, marlin_make_empty_g_idx, marlin_make_workspace,
-    marlin_permute_scales, replace_tensor, verify_marlin_supported,
-    verify_marlin_supports_shape, marlin_is_k_full, marlin_sort_g_idx)
+    apply_gptq_marlin_linear, marlin_is_k_full, marlin_make_empty_g_idx,
+    marlin_make_workspace, marlin_permute_scales, marlin_sort_g_idx,
+    replace_tensor, verify_marlin_supported, verify_marlin_supports_shape)
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            ChannelQuantScaleParameter,
                                            GroupQuantScaleParameter,
