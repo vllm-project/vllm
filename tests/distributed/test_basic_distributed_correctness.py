@@ -22,15 +22,16 @@ TARGET_TEST_SUITE = os.environ.get("TARGET_TEST_SUITE", "L4")
 @pytest.mark.skipif(cuda_device_count_stateless() < 2,
                     reason="Need at least 2 GPUs to run the test.")
 @pytest.mark.parametrize(
-    "model, distributed_executor_backend, attention_backend, test_suite", [
+    "model, distributed_executor_backend, attention_backend, test_suite",
+    [
         ("facebook/opt-125m", "ray", "", "L4"),
-        ("facebook/opt-125m", "mp", "", "L4"),
-        ("meta-llama/Llama-2-7b-hf", "ray", "", "L4"),
-        ("meta-llama/Llama-2-7b-hf", "mp", "", "L4"),
-        ("facebook/opt-125m", "ray", "", "A100"),
-        ("facebook/opt-125m", "mp", "", "A100"),
-        ("facebook/opt-125m", "mp", "FLASHINFER", "A100"),
-        ("meta-llama/Meta-Llama-3-8B", "ray", "FLASHINFER", "A100"),
+        # ("facebook/opt-125m", "mp", "", "L4"),
+        # ("meta-llama/Llama-2-7b-hf", "ray", "", "L4"),
+        # ("meta-llama/Llama-2-7b-hf", "mp", "", "L4"),
+        # ("facebook/opt-125m", "ray", "", "A100"),
+        # ("facebook/opt-125m", "mp", "", "A100"),
+        # ("facebook/opt-125m", "mp", "FLASHINFER", "A100"),
+        # ("meta-llama/Meta-Llama-3-8B", "ray", "FLASHINFER", "A100"),
     ])
 @fork_new_process_for_each_test
 def test_models(

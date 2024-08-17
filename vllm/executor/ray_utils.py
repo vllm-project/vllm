@@ -1,8 +1,10 @@
+import time
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple, Union
 
 from ray.util import placement_group_table
 from ray.util.placement_group import PlacementGroup
+from ray._private.state import available_resources_per_node
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
@@ -12,6 +14,7 @@ from vllm.utils import get_ip, is_hip, is_xpu
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
+PG_WAIT_TIMEOUT = 120
 
 try:
     import ray
@@ -120,7 +123,7 @@ def _verify_bundles(placement_group: PlacementGroup,
 
     for node_id, bundles in node_id_to_bundle.items():
         if len(bundles) < parallel_config.tensor_parallel_size:
-            raise RuntimeError(
+            logger.warning(
                 f"tensor_parallel_size={parallel_config.tensor_parallel_size} "
                 f"is smaller than the reserved number of GPUs ({len(bundles)} "
                 f"GPUs) in a node {node_id}. Tensor parallel workers can be "
@@ -128,6 +131,42 @@ def _verify_bundles(placement_group: PlacementGroup,
                 "To resolve this issue, make sure you have more than "
                 f"{parallel_config.tensor_parallel_size} GPUs available at "
                 "each node.")
+
+
+def _wait_until_pg_ready(current_placement_group: PlacementGroup):
+    """Wait until a placement group is ready.
+
+    It prints the informative log messages if the placement group is
+    not created within time.
+
+    """
+    # Wait until PG is ready - this will block until all
+    # requested resources are available, and will timeout
+    # if they cannot be provisioned.
+    placement_group_specs = current_placement_group.bundle_specs
+
+    s = time.time()
+    ref = current_placement_group.ready()
+    wait_interval = 10
+    while time.time() - s < PG_WAIT_TIMEOUT:
+        ready, _ = ray.wait([ref], timeout=wait_interval)
+        if len(ready) > 0:
+            break
+
+        # Expoential backoff.
+        wait_interval *= 2
+        logger.info(
+            "Waiting for creating a placement group of specs for "
+            f"{int(time.time() - s)} seconds {placement_group_specs=}. Check "
+            "`ray status` to see if you have enough resources.")
+
+    try:
+        ray.get(current_placement_group.ready(), timeout=0)
+    except ray.exceptions.GetTimeoutError:
+        raise ValueError(
+            "Cannot provide a placement group of "
+            f"{placement_group_specs=} within {PG_WAIT_TIMEOUT} seconds. See "
+            "`ray status` to make sure the cluster has enough resources.")
 
 
 def initialize_ray_cluster(
@@ -188,16 +227,30 @@ def initialize_ray_cluster(
                 f"The number of required {device_str}s exceeds the total "
                 f"number of available {device_str}s in the placement group.")
         # Create a new placement group
-        placement_group_specs = ([{
-            device_str: 1
-        }] * parallel_config.world_size)
+        placement_group_specs: List[Dict[str, float]] = ([{
+            device_str: 1.0
+        } for _ in range(parallel_config.world_size)])
+
+        # vLLM engine is also a worker to execute model with an accelerator,
+        # so it requires to have the device in a current node. Check if
+        # the current node has at least one device.
+        current_ip = get_ip()
+        current_node_id = ray.get_runtime_context().get_node_id()
+        current_node_resource = available_resources_per_node()[current_node_id]
+        if current_node_resource.get(device_str) < 1:
+            raise ValueError(
+                f"Current node has no {device_str} available. "
+                f"{current_node_resource=}. vLLM engine cannot start without "
+                f"{device_str}. Make sure you have at least 1 {device_str} "
+                f"available in a node {current_node_id=} {current_ip=}.")
+        # This way, at least bundle is required to be created in a current
+        # node.
+        placement_group_specs[0][f"node:{current_ip}"] = 0.001
+
         # By default, Ray packs resources as much as possible.
         current_placement_group = ray.util.placement_group(
             placement_group_specs, strategy="PACK")
-        # Wait until PG is ready - this will block until all
-        # requested resources are available, and will timeout
-        # if they cannot be provisioned.
-        ray.get(current_placement_group.ready(), timeout=1800)
+        _wait_until_pg_ready(current_placement_group)
 
     assert current_placement_group is not None
     _verify_bundles(current_placement_group, parallel_config)

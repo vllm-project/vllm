@@ -15,16 +15,14 @@ import ray
 from vllm.utils import cuda_device_count_stateless
 from ray.cluster_utils import Cluster
 
-
 TARGET_TEST_SUITE = os.environ.get("TARGET_TEST_SUITE", "L4")
 
 
 @pytest.mark.skipif(cuda_device_count_stateless() < 2,
                     reason="Need at least 2 GPUs to run the test.")
-@pytest.mark.parametrize(
-    "model, distributed_executor_backend, test_suite", [
-        ("facebook/opt-125m", "ray", "L4"),
-    ])
+@pytest.mark.parametrize("model, distributed_executor_backend, test_suite", [
+    ("facebook/opt-125m", "ray", "L4"),
+])
 def test_multi_node_bad_topology(
     vllm_runner,
     model: str,
@@ -51,11 +49,11 @@ def test_multi_node_bad_topology(
 
     # Creating tp == 2. Since TP workers are supposed to spread to 2 workers
     # it should log warning.
-    with vllm_runner(model,
-                     dtype=dtype,
-                     tensor_parallel_size=2,
-                     distributed_executor_backend=distributed_executor_backend
-                     ) as _:
+    with vllm_runner(
+            model,
+            dtype=dtype,
+            tensor_parallel_size=2,
+            distributed_executor_backend=distributed_executor_backend) as _:
         pass
 
     # Simulate there's no GPU in a current node.
@@ -73,6 +71,5 @@ def test_multi_node_bad_topology(
             model,
             dtype=dtype,
             tensor_parallel_size=1,
-            distributed_executor_backend=distributed_executor_backend
-    ) as _:
+            distributed_executor_backend=distributed_executor_backend) as _:
         pass
