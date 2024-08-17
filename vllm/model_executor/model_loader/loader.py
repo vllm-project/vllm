@@ -883,11 +883,11 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         if not hasattr(model, 'load_weights'):
             raise AttributeError(
                 "The required method 'load_weights' is not defined in class"
-                f" {type(self).__name__}.")
+                f" {type(model).__name__}.")
 
         if not hasattr(model, 'bitsandbytes_stacked_params_mapping'):
             raise AttributeError(
-                f"Model {type(self).__name__} does not support BitsAndBytes "
+                f"Model {type(model).__name__} does not support BitsAndBytes "
                 "quantization yet.")
 
         logger.info("Loading weights with BitsAndBytes quantization. "
