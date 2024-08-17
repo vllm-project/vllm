@@ -64,7 +64,13 @@ def warn_if_different_devices():
                 "avoid unexpected behavior.", "\n".join(device_names))
 
 
-warn_if_different_devices()
+try:
+    from sphinx.ext.autodoc.mock import _MockModule
+
+    if not isinstance(pynvml, _MockModule):
+        warn_if_different_devices()
+except ModuleNotFoundError:
+    warn_if_different_devices()
 
 
 def device_id_to_physical_device_id(device_id: int) -> int:
