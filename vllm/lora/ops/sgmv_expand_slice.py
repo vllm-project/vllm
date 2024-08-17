@@ -103,7 +103,7 @@ def _sgmv_expand_slice_kernel(
 
 
 @torch.inference_mode()
-def sgmv_expand_slice(
+def _sgmv_expand_slice(
     inputs: torch.Tensor,
     lora_b_weights: torch.Tensor,
     output_tensor: torch.Tensor,
@@ -115,7 +115,7 @@ def sgmv_expand_slice(
     slice_offset: int,
     slice_size: int,
     add_inputs: bool = False,
-):
+) -> None:
     """_summary_
 
     Args:
@@ -203,3 +203,8 @@ def sgmv_expand_slice(
         CAST_TYPE,
     )
     return
+
+
+sgmv_expand_slice = torch.library.custom_op("lora::sgmv_expand_slice",
+                                            _sgmv_expand_slice,
+                                            mutates_args=["output_tensor"])
