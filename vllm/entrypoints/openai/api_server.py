@@ -1,11 +1,11 @@
 import asyncio
 import importlib
 import inspect
+import multiprocessing
 import re
 from argparse import Namespace
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from multiprocessing import Process
 from typing import AsyncIterator, Set
 
 from fastapi import APIRouter, FastAPI, Request
@@ -60,13 +60,15 @@ logger = init_logger('vllm.entrypoints.openai.api_server')
 _running_tasks: Set[asyncio.Task] = set()
 
 
-def model_is_embedding(model_name: str, trust_remote_code: bool) -> bool:
+def model_is_embedding(model_name: str, trust_remote_code: bool,
+                       quantization: str) -> bool:
     return ModelConfig(model=model_name,
                        tokenizer=model_name,
                        tokenizer_mode="auto",
                        trust_remote_code=trust_remote_code,
+                       quantization=quantization,
                        seed=0,
-                       dtype="float16").embedding_mode
+                       dtype="auto").embedding_mode
 
 
 @asynccontextmanager
@@ -97,7 +99,8 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
 
     # If manually triggered or embedding model, use AsyncLLMEngine in process.
     # TODO: support embedding model via RPC.
-    if (model_is_embedding(args.model, args.trust_remote_code)
+    if (model_is_embedding(args.model, args.trust_remote_code,
+                           args.quantization)
             or args.disable_frontend_multiprocessing):
         async_engine_client = AsyncLLMEngine.from_engine_args(
             engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
@@ -112,12 +115,15 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
                     rpc_path)
 
         # Start RPCServer in separate process (holds the AsyncLLMEngine).
-        rpc_server_process = Process(target=run_rpc_server,
-                                     args=(engine_args,
-                                           UsageContext.OPENAI_API_SERVER,
-                                           rpc_path))
+        context = multiprocessing.get_context("spawn")
+        # the current process might have CUDA context,
+        # so we need to spawn a new process
+        rpc_server_process = context.Process(
+            target=run_rpc_server,
+            args=(engine_args, UsageContext.OPENAI_API_SERVER, rpc_path))
         rpc_server_process.start()
-
+        logger.info("Started engine process with PID %d",
+                    rpc_server_process.pid)
         # Build RPCClient, which conforms to AsyncEngineClient Protocol.
         async_engine_client = AsyncEngineRPCClient(rpc_path)
 
@@ -357,6 +363,7 @@ async def run_server(args, **uvicorn_kwargs) -> None:
 
         shutdown_task = await serve_http(
             app,
+            engine=async_engine_client,
             host=args.host,
             port=args.port,
             log_level=args.uvicorn_log_level,

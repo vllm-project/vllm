@@ -23,8 +23,8 @@ except ImportError:
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, MultiModalConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig)
+                         ModelConfig, MultiModalConfig, ObservabilityConfig,
+                         ParallelConfig, PromptAdapterConfig, SchedulerConfig)
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalInputs
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
@@ -69,6 +69,7 @@ class TP1DraftModelRunner(ModelRunner):
         multimodal_config: Optional[MultiModalConfig] = None,
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         return_hidden_states: bool = False,
+        observability_config: Optional[ObservabilityConfig] = None,
     ):
         if return_hidden_states:
             raise ValueError(
@@ -88,44 +89,13 @@ class TP1DraftModelRunner(ModelRunner):
             multimodal_config=multimodal_config,
             prompt_adapter_config=prompt_adapter_config,
             return_hidden_states=return_hidden_states,
+            observability_config=observability_config,
         )
 
         self.flashinfer_decode_workspace_buffer = None
         self.flashinfer_decode_wrapper = None
         self.flashinfer_prefill_workspace_buffer = None
         self.flashinfer_prefill_wrapper = None
-
-    def _update_flash_attn_metadata(self, attn_metadata, num_seqs,
-                                    num_queries):
-        assert isinstance(attn_metadata, FlashAttentionMetadata)
-
-        if num_seqs != num_queries:
-            assert num_seqs > num_queries
-            assert attn_metadata.use_cuda_graph
-
-        assert attn_metadata.num_prefills == 0
-        assert attn_metadata.num_prefill_tokens == 0
-        assert attn_metadata.num_decode_tokens == num_seqs
-        assert attn_metadata.slot_mapping.shape == (num_seqs, )
-
-        assert len(attn_metadata.seq_lens) == num_seqs
-        assert attn_metadata.seq_lens_tensor.shape == (num_seqs, )
-        assert attn_metadata.max_query_len == 1
-        assert attn_metadata.max_prefill_seq_len == 0
-        assert attn_metadata.max_decode_seq_len == max(attn_metadata.seq_lens)
-
-        assert attn_metadata.query_start_loc.shape == (num_queries + 1, )
-        assert attn_metadata.seq_start_loc.shape == (num_seqs + 1, )
-
-        assert attn_metadata.context_lens_tensor.shape == (num_queries, )
-
-        assert attn_metadata.block_tables.shape[0] == num_seqs
-
-        # Update query lengths. Note that we update only queries and not seqs,
-        # since tensors may be padded due to captured cuda graph batch size
-        for i in range(num_queries):
-            attn_metadata.seq_lens[i] += 1
-        attn_metadata.max_decode_seq_len = max(attn_metadata.seq_lens)
 
     def _update_sampling_metadata(self, sampling_metadata, num_seqs,
                                   num_queries):
@@ -164,7 +134,7 @@ class TP1DraftModelRunner(ModelRunner):
         # Update attn_metadata
         attn_metadata = model_input.attn_metadata
         assert isinstance(attn_metadata, FlashAttentionMetadata)
-        self._update_flash_attn_metadata(attn_metadata, num_seqs, num_queries)
+        attn_metadata.advance_step(num_seqs, num_queries)
 
         # Update GPU tensors
         ops.advance_step(num_seqs=num_seqs,

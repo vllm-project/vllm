@@ -28,7 +28,7 @@ import torch
 import torch.nn as nn
 
 from vllm.model_executor.custom_op import CustomOp
-from vllm.utils import is_tpu
+from vllm.platforms import current_platform
 
 
 def _rotate_neox(x: torch.Tensor) -> torch.Tensor:
@@ -78,7 +78,7 @@ class RotaryEmbedding(CustomOp):
         self.dtype = dtype
 
         cache = self._compute_cos_sin_cache()
-        self.use_native2 = is_tpu() and is_neox_style
+        self.use_native2 = current_platform.is_tpu() and is_neox_style
         if not self.use_native2:
             cache = cache.to(dtype)
             self.register_buffer("cos_sin_cache", cache, persistent=False)
@@ -774,7 +774,7 @@ def get_rope(
     is_neox_style: bool = True,
     rope_scaling: Optional[Dict[str, Any]] = None,
     dtype: Optional[torch.dtype] = None,
-    rotary_percent: float = 1.0,
+    partial_rotary_factor: float = 1.0,
 ) -> RotaryEmbedding:
     if dtype is None:
         dtype = torch.get_default_dtype()
@@ -787,8 +787,8 @@ def get_rope(
         rope_scaling_args = tuple(rope_scaling_tuple.items())
     else:
         rope_scaling_args = None
-    if rotary_percent < 1.0:
-        rotary_dim = int(rotary_dim * rotary_percent)
+    if partial_rotary_factor < 1.0:
+        rotary_dim = int(rotary_dim * partial_rotary_factor)
     key = (head_size, rotary_dim, max_position, base, is_neox_style,
            rope_scaling_args, dtype)
     if key in _ROPE_DICT:
