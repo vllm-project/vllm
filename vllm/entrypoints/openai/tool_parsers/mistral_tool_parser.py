@@ -44,10 +44,6 @@ class MistralToolParser(ToolParser):
         make sure your tool call arguments don't ever include quotes!
         """
 
-        logger.debug(
-            "Trying to extract mistral tool calls from the following:")
-        logger.debug(model_output)
-
         # case -- if a tool call token is not present, return a text response
         if MistralToolParser.bot_token not in model_output:
             return ExtractedToolCallInformation(tools_called=False,
@@ -203,7 +199,6 @@ class MistralToolParser(ToolParser):
             # if the current tool initial data incl. the id, type=function
             # and idx not sent, send that
             if not self.current_tool_initial_sent:
-                logger.debug("Sending InitialDeltaToolCall")
                 self.current_tool_initial_sent = True
                 delta = DeltaMessage(tool_calls=[
                     InitialDeltaToolCall(
@@ -216,8 +211,7 @@ class MistralToolParser(ToolParser):
             elif not self.current_tool_name_sent:
                 function_name = current_tool_call.get("name")
                 if function_name:
-                    logger.debug("Sending DeltaToolCall with function name %s",
-                                 function_name)
+
                     delta = DeltaMessage(tool_calls=[
                         DeltaToolCall(index=self.current_tool_id,
                                       function=DeltaFunctionCall(
@@ -236,8 +230,6 @@ class MistralToolParser(ToolParser):
                     self.current_tool_id].get("arguments")
                 cur_arguments = current_tool_call.get("arguments")
 
-                logger.debug("new text: %s", current_text)
-
                 new_text = delta_text.replace("\'", "\"")
 
                 if not cur_arguments and not prev_arguments:
@@ -250,7 +242,7 @@ class MistralToolParser(ToolParser):
                     delta = None
                 elif cur_arguments and not prev_arguments:
                     cur_arguments_json = json.dumps(cur_arguments)
-                    logger.debug("finding %s in |%s|", new_text,
+                    logger.debug("finding %s in %s", new_text,
                                  cur_arguments_json)
 
                     arguments_delta = cur_arguments_json[:cur_arguments_json.

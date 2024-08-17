@@ -178,7 +178,6 @@ class Hermes2ProToolParser(ToolParser):
             # case -- the current tool call is being closed.
             elif (cur_tool_start_count == cur_tool_end_count
                   and cur_tool_end_count > prev_tool_end_count):
-                logger.debug("Closing the current tool call!")
                 diff = self.prev_tool_call_arr[self.current_tool_id].get(
                     "arguments")
                 if diff:
@@ -199,7 +198,6 @@ class Hermes2ProToolParser(ToolParser):
                 delta = DeltaMessage(tool_calls=[], content=delta_text)
                 return delta
 
-            logger.debug("Tool call portion: %s", tool_call_portion or "")
             try:
 
                 current_tool_call = partial_json_parser.loads(
@@ -213,7 +211,6 @@ class Hermes2ProToolParser(ToolParser):
             # case - we haven't sent the initial delta with the tool call ID
             #   (it will be sent)
             if not self.current_tool_initial_sent:
-                logger.debug("Sending InitialDeltaToolCall")
                 self.current_tool_initial_sent = True
                 return DeltaMessage(tool_calls=[
                     InitialDeltaToolCall(
@@ -226,8 +223,6 @@ class Hermes2ProToolParser(ToolParser):
             elif not self.current_tool_name_sent:
                 function_name: Union[str, None] = current_tool_call.get("name")
                 if function_name:
-                    logger.debug("Sending DeltaToolCall with function name %s",
-                                 function_name)
                     self.current_tool_name_sent = True
                     return DeltaMessage(tool_calls=[
                         DeltaToolCall(index=self.current_tool_id,
@@ -249,8 +244,6 @@ class Hermes2ProToolParser(ToolParser):
 
             # now, the nitty-gritty of tool calls
             # now we have the portion to parse as tool call.
-            if text_portion is not None:
-                logger.debug("Also, will send text portion: %s", text_portion)
 
             logger.debug("Trying to parse current tool call with ID %s",
                          self.current_tool_id)
@@ -259,7 +252,6 @@ class Hermes2ProToolParser(ToolParser):
             #   a placeholder for the arguments
             if len(self.prev_tool_call_arr) <= self.current_tool_id:
                 self.prev_tool_call_arr.append({})
-                logger.debug("Pushed dummy value into tool call arr")
 
             # main logic for tool parsing here - compare prev. partially-parsed
             #   JSON to the current partially-parsed JSON
@@ -313,7 +305,7 @@ class Hermes2ProToolParser(ToolParser):
 
                 cur_args_json = json.dumps(cur_arguments)
                 prev_args_json = json.dumps(prev_arguments)
-                logger.debug("Searching for dif between\n%s", cur_args_json)
+                logger.debug("Searching for diff between\n%s", cur_args_json)
                 logger.debug("and\n%s", prev_args_json)
                 argument_diff = extract_intermediate_diff(
                     cur_args_json, prev_args_json)
