@@ -313,6 +313,8 @@ class ScalarType {
 //  have ScalarType inherit from torch::CustomClassHolder and have a constexpr
 //  constructor at the same time (torch::CustomClassHolder does not have a
 //  constexpr destructor)
+// See also:
+// https://docs.google.com/document/d/18fBMPuOJ0fY5ZQ6YyrHUppw9FA332CpNtgB6SOIgyuA
 class ScalarTypeTorch : public torch::CustomClassHolder, public ScalarType {
  public:
   ScalarTypeTorch(int64_t exponent, int64_t mantissa, int64_t bias,
@@ -380,6 +382,29 @@ class ScalarTypeTorch : public torch::CustomClassHolder, public ScalarType {
     check_exponent(exponent);
     return c10::make_intrusive<Self>(ScalarType::float_(
         exponent, mantissa, finite_values_only, NanRepr(nan_repr)));
+  }
+
+  // This needs to be implemented and throw a TypeError in order for
+  // PyTorch's opcheck to work on ops that use ScalarTypes.
+  int64_t len() const {
+    throw c10::TypeError("__len__ not implemented");
+    return 0;
+  }
+
+  // Serialize a ScalarType into a tuple of pairs.  Where each pair
+  // is a (fieldname, value).
+  // For simplicity, we are just going to convert to a ScalarTypeId.
+  std::tuple<std::tuple<std::string, int64_t>> obj_flatten() const {
+    return {{"ScalarType", id()}};
+  }
+
+  // Deserialize a scalar type that has been serialized by obj_flatten,
+  // ostensibly from a tuple of (member name, value) pairs, but in reality
+  // just a ScalarTypeId.
+  static SelfPtr obj_unflatten(
+      std::tuple<std::tuple<std::string, int64_t>> const& flat_type) {
+    return c10::make_intrusive<Self>(
+        from_id(std::get<1>(std::get<0>(flat_type))));
   }
 
   template <typename T>
@@ -457,6 +482,7 @@ class ScalarTypeTorch : public torch::CustomClassHolder, public ScalarType {
                         self.get()->min());
     });
 
+    bind_function(cls, "__len__", &ScalarTypeTorch::len);
     bind_function(cls, "__str__", &Base::str);
     bind_function(cls, "__eq__", [](SelfPtr const& self, SelfPtr const& other) {
       return *self == *other;
@@ -464,6 +490,10 @@ class ScalarTypeTorch : public torch::CustomClassHolder, public ScalarType {
     bind_function(cls, "__repr__", [](SelfPtr const& self) {
       return "ScalarType." + self.get()->str();
     });
+
+    bind_function(cls, "__obj_flatten__", &ScalarTypeTorch::obj_flatten);
+    bind_static_function(cls, "__obj_unflatten__",
+                         &ScalarTypeTorch::obj_unflatten);
 
     // Bind static functions (convenience constructors)
     bind_static_function(cls, "int_", &ScalarTypeTorch::int_);
