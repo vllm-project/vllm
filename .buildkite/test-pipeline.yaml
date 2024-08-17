@@ -314,11 +314,11 @@ steps:
   num_gpus: 4
   source_file_dependencies:
   - vllm/
-  - tests/distributed/test_pipeline_parallel
   - tests/distributed/test_pp_cudagraph.py
+  - tests/distributed/test_pipeline_parallel
   commands:
-  - pytest -v -s distributed/test_pipeline_parallel.py
   - pytest -v -s distributed/test_pp_cudagraph.py
+  - pytest -v -s distributed/test_pipeline_parallel.py
 
 - label: LoRA Long Context (Distributed) # 11min
   # This test runs llama 13B, so it is required to run on 4 GPUs.
