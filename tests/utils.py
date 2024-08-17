@@ -7,10 +7,11 @@ import time
 import warnings
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import openai
 import requests
+import torch
 from transformers import AutoTokenizer
 from typing_extensions import ParamSpec
 
@@ -52,6 +53,14 @@ else:
 
 VLLM_PATH = Path(__file__).parent.parent
 """Path to root of the vLLM repository."""
+
+# For now, disable "test_aot_dispatch_dynamic" since there are some
+# bugs related to this test in PyTorch 2.4.
+OPCHECK_TEST_UTILS: Tuple[str, ...] = (
+    "test_schema",
+    "test_autograd_registration",
+    "test_faketensor",
+)
 
 
 class RemoteOpenAIServer:
@@ -410,3 +419,21 @@ def fork_new_process_for_each_test(
                                     f" args {args} and kwargs {kwargs}")
 
     return wrapper
+
+
+def opcheck(op: Union[torch._ops.OpOverload, torch._ops.OpOverloadPacket,
+                      torch._library.custom_ops.CustomOpDef],
+            args: Tuple[Any, ...],
+            kwargs: Optional[Dict[str, Any]] = None,
+            *,
+            test_utils: Union[str, Sequence[str]] = OPCHECK_TEST_UTILS,
+            raise_exception: bool = True,
+            cond: bool = True) -> Dict[str, str]:
+    if not cond:
+        return {}
+    else:
+        return torch.library.opcheck(op,
+                                     args,
+                                     kwargs,
+                                     test_utils=test_utils,
+                                     raise_exception=raise_exception)
