@@ -2,9 +2,9 @@ import time
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple, Union
 
+from ray._private.state import available_resources_per_node
 from ray.util import placement_group_table
 from ray.util.placement_group import PlacementGroup
-from ray._private.state import available_resources_per_node
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
@@ -14,7 +14,7 @@ from vllm.utils import get_ip, is_hip, is_xpu
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
-PG_WAIT_TIMEOUT = 120
+PG_WAIT_TIMEOUT = 1800
 
 try:
     import ray
@@ -124,13 +124,14 @@ def _verify_bundles(placement_group: PlacementGroup,
     for node_id, bundles in node_id_to_bundle.items():
         if len(bundles) < parallel_config.tensor_parallel_size:
             logger.warning(
-                f"tensor_parallel_size={parallel_config.tensor_parallel_size} "
-                f"is smaller than the reserved number of GPUs ({len(bundles)} "
-                f"GPUs) in a node {node_id}. Tensor parallel workers can be "
+                "tensor_parallel_size=%d "
+                "is smaller than the reserved number of GPUs ({len(bundles)} "
+                "GPUs) in a node %s. Tensor parallel workers can be "
                 "spread out to 2 nodes which can degrade the performance. "
                 "To resolve this issue, make sure you have more than "
-                f"{parallel_config.tensor_parallel_size} GPUs available at "
-                "each node.")
+                "%d GPUs available at each node.",
+                parallel_config.tensor_parallel_size, node_id,
+                parallel_config.tensor_parallel_size)
 
 
 def _wait_until_pg_ready(current_placement_group: PlacementGroup):
@@ -157,8 +158,9 @@ def _wait_until_pg_ready(current_placement_group: PlacementGroup):
         wait_interval *= 2
         logger.info(
             "Waiting for creating a placement group of specs for "
-            f"{int(time.time() - s)} seconds {placement_group_specs=}. Check "
-            "`ray status` to see if you have enough resources.")
+            "%d seconds. specs=%s. Check "
+            "`ray status` to see if you have enough resources.",
+            int(time.time() - s), placement_group_specs)
 
     try:
         ray.get(current_placement_group.ready(), timeout=0)
@@ -166,7 +168,8 @@ def _wait_until_pg_ready(current_placement_group: PlacementGroup):
         raise ValueError(
             "Cannot provide a placement group of "
             f"{placement_group_specs=} within {PG_WAIT_TIMEOUT} seconds. See "
-            "`ray status` to make sure the cluster has enough resources.")
+            "`ray status` to make sure the cluster has enough resources."
+        ) from None
 
 
 def initialize_ray_cluster(

@@ -10,10 +10,10 @@ pytest distributed/test_multi_node.py
 import os
 
 import pytest
-
 import ray
-from vllm.utils import cuda_device_count_stateless
 from ray.cluster_utils import Cluster
+
+from vllm.utils import cuda_device_count_stateless
 
 TARGET_TEST_SUITE = os.environ.get("TARGET_TEST_SUITE", "L4")
 
