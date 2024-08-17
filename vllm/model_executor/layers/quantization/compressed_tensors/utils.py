@@ -58,6 +58,8 @@ class QuantizationArgs(BaseModel):
         observed with every sample. Defaults to False for static
         quantization. Note that enabling dynamic quantization 
         will change the default observer to a memoryless one
+    :param actorder: whether to apply group quantization in decreasing order of
+        activation. Defaults to False for arbitrary ordering
     """
 
     num_bits: int = 8
