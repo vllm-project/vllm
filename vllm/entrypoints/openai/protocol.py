@@ -409,13 +409,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 valid_tool = False
                 specified_function = data["tool_choice"]["function"]
                 if not specified_function:
-                    return ValueError(
+                    raise ValueError(
                         "Incorrectly formatted `tool_choice`. Should be like "
                         "`{\"type\": \"function\","
                         " \"function\": {\"name\": \"my_function\"}}`")
                 specified_function_name = specified_function["name"]
                 if not specified_function_name:
-                    return ValueError(
+                    raise ValueError(
                         "Incorrectly formatted `tool_choice`. Should be like "
                         "`{\"type\": \"function\", "
                         "\"function\": {\"name\": \"my_function\"}}`")
@@ -424,7 +424,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                         valid_tool = True
                         break
                 if not valid_tool:
-                    return ValueError(
+                    raise ValueError(
                         "The tool specified in `tool_choice` does not match any"
                         " of the specified `tools`")
         return data
