@@ -32,8 +32,8 @@ class MistralToolParser(ToolParser):
     # the bot_token is the token indicating tool call(s) follow. Tokens before
     # this token will be parsed as content; and
     # if not present, the entire response will be parsed as text content.
-    bot_token: str = "[TOOL_CALLS]"  # string literal
-    bot_token_id: int = 5  # token ID thereof from the models" tokenizer
+    bot_token: str = "[TOOL_CALLS]"
+    bot_token_id: int = 5 
     tool_call_regex = re.compile(r"\[{.*?}\]", re.DOTALL)
 
     @staticmethod
