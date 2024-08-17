@@ -31,9 +31,6 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                  num_bits: int,
                  group_size: Optional[int] = None,
                  actorder: bool = False):
-        self.num_bits = num_bits
-        self.pack_factor = 32 // self.num_bits
-        self.strategy = strategy
 
         self.pack_factor = 32 // num_bits
         self.strategy = strategy
@@ -188,7 +185,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
 
         # Permute scales from compressed-tensors format to marlin format.
         marlin_scales = marlin_permute_scales(
-            layer.weight_scale.squeeze().t().contiguous(),
+            layer.weight_scale,
             size_k=(layer.input_size
                     if self.actorder else layer.input_size_per_partition),
             size_n=layer.output_size_per_partition,
