@@ -13,7 +13,7 @@ common_pod_spec: &common_pod_spec
 
 common_container_settings: &common_container_settings
   command:
-    - bash .buildkite/nightly-benchmarks/run-nightly-suite.sh
+    - bash .buildkite/nightly-benchmarks/scripts/run-nightly-benchmarks.sh
   resources:
     limits:
       nvidia.com/gpu: 8
