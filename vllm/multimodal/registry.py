@@ -2,7 +2,7 @@ import functools
 from collections import UserDict
 from typing import Dict, Mapping, Optional, Sequence
 
-from vllm.config import ModelConfig, MultiModalConfig
+from vllm.config import ModelConfig
 from vllm.logger import init_logger
 
 from .audio import AudioPlugin
@@ -181,7 +181,6 @@ class MultiModalRegistry:
     def init_mm_limits_per_prompt(
         self,
         model_config: ModelConfig,
-        multimodal_config: Optional[MultiModalConfig],
     ) -> None:
         """
         Initialize the maximum number of multi-modal input instances for each
@@ -192,6 +191,7 @@ class MultiModalRegistry:
                 "`mm_limits` has already been set for model=%s, and will "
                 "be overwritten by the new values.", model_config.model)
 
+        multimodal_config = model_config.multimodal_config
         if multimodal_config is None:
             limits_per_plugin = self._disabled_limits_per_plugin
         else:

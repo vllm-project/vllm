@@ -11,7 +11,7 @@ import torch_xla.runtime as xr
 
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
-                         MultiModalConfig, ParallelConfig, SchedulerConfig)
+                         ParallelConfig, SchedulerConfig)
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -89,7 +89,6 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         device_config: DeviceConfig,
         cache_config: CacheConfig,
         load_config: LoadConfig,
-        multimodal_config: Optional[MultiModalConfig] = None,
         is_driver_worker: bool = False,
     ):
         self.model_config = model_config
@@ -98,7 +97,6 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         self.device_config = device_config
         self.cache_config = cache_config
         self.load_config = load_config
-        self.multimodal_config = multimodal_config
         self.is_driver_worker = is_driver_worker
 
         self.block_size = self.cache_config.block_size
@@ -142,7 +140,6 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 parallel_config=self.parallel_config,
                 cache_config=self.cache_config,
                 scheduler_config=self.scheduler_config,
-                multimodal_config=self.multimodal_config,
                 lora_config=None,
             )
         model = model.eval()

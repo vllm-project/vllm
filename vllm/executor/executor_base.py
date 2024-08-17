@@ -2,8 +2,8 @@ from abc import ABC, abstractmethod
 from typing import List, Optional, Set, Tuple
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, MultiModalConfig, ObservabilityConfig,
-                         ParallelConfig, PromptAdapterConfig, SchedulerConfig,
+                         ModelConfig, ObservabilityConfig, ParallelConfig,
+                         PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig)
 from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -29,7 +29,6 @@ class ExecutorBase(ABC):
         device_config: DeviceConfig,
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
-        multimodal_config: Optional[MultiModalConfig],
         speculative_config: Optional[SpeculativeConfig],
         prompt_adapter_config: Optional[PromptAdapterConfig],
         observability_config: Optional[ObservabilityConfig],
@@ -41,7 +40,6 @@ class ExecutorBase(ABC):
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
-        self.multimodal_config = multimodal_config
         self.speculative_config = speculative_config
         self.prompt_adapter_config = prompt_adapter_config
         self.observability_config = observability_config
