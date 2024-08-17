@@ -66,9 +66,10 @@ def extract_intermediate_diff(curr: str, old: str) -> str:
         diff = diff[::-1].replace(suffix[::-1], '', 1)[::-1]
 
     if len(prefix):
+        # replace the prefix only once in case it's mirrored
         diff = diff.replace(
             prefix, '',
-            1)  # replace the prefix only once in case it's mirrored
+            1)
 
     return diff
 
