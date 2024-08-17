@@ -56,7 +56,7 @@ steps:
   - pytest -v -s worker # Worker
 
 - label: Basic Correctness Test # 30min
-  mirror_hardwares: [amd]
+  #mirror_hardwares: [amd]
   fast_check: true
   source_file_dependencies:
   - vllm/
@@ -81,7 +81,7 @@ steps:
 - label: Entrypoints Test # 20min
   working_dir: "/vllm-workspace/tests"
   fast_check: true
-  mirror_hardwares: [amd]
+  #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   commands:
@@ -141,7 +141,7 @@ steps:
 
 - label: Examples Test # 12min
   working_dir: "/vllm-workspace/examples"
-  mirror_hardwares: [amd]
+  #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/entrypoints
   - examples/
@@ -173,14 +173,14 @@ steps:
 
 
 - label: Vision Language Models Test # 42min
-  mirror_hardwares: [amd]
+  #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   commands:
     - pytest -v -s models -m vlm
 
 - label: Prefix Caching Test # 7min
-  mirror_hardwares: [amd]
+  #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   - tests/prefix_caching
@@ -263,7 +263,6 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - bash ./run-tests.sh -c configs/models-small.txt -t 1
 
-
 #####  1 GPU test  #####
 #####  multi gpus test  #####
 
@@ -292,7 +291,7 @@ steps:
     - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py
 
 - label: Distributed Tests (2 GPUs) # 28min
-  mirror_hardwares: [amd]
+  #mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   source_file_dependencies:
