@@ -74,9 +74,6 @@ prompts = [
     enc_dec_prompt1, enc_dec_prompt2, enc_dec_prompt3
 ] + zipped_prompt_list
 
-# prompts = zip_enc_dec_prompts(['Only encoder prompt'], ["Decoder prompt"])
-prompts = zip_enc_dec_prompts(['Only encoder prompt'], [None])
-
 print(prompts)
 
 # Create a sampling params object.
