@@ -109,6 +109,8 @@ class ModelConfig:
             matches the model name exposed via the APIs. If multiple model 
             names provided, the first name will be used. If not specified, 
             the model name will be the same as `model`.
+        limit_mm_per_prompt: Maximum number of data instances per modality 
+            per prompt. Only applicable for multimodal models.
     """
 
     def __init__(
@@ -134,7 +136,7 @@ class ModelConfig:
         disable_sliding_window: bool = False,
         skip_tokenizer_init: bool = False,
         served_model_name: Optional[Union[str, List[str]]] = None,
-        multimodal_config: Optional["MultiModalConfig"] = None,
+        limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -211,13 +213,28 @@ class ModelConfig:
             sliding_window_len=self.get_hf_config_sliding_window())
         self.served_model_name = get_served_model_name(model,
                                                        served_model_name)
-        self.multimodal_config = multimodal_config
-
+        self.multimodal_config = self._init_multimodal_config(
+            limit_mm_per_prompt)
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
         self._verify_embedding_mode()
         self._verify_quantization()
         self._verify_cuda_graph()
+
+    def _init_multimodal_config(
+        self, limit_mm_per_prompt: Optional[Mapping[str, int]]
+    ) -> Optional["MultiModalConfig"]:
+        architectures = getattr(self.hf_config, "architectures", [])
+        if any(
+                ModelRegistry.is_multimodal_model(arch)
+                for arch in architectures):
+            return MultiModalConfig(limit_per_prompt=limit_mm_per_prompt or {})
+        else:
+            if limit_mm_per_prompt:
+                raise ValueError(
+                    "limit_mm_per_prompt is only supported for multimodal "
+                    "models.")
+            return None
 
     def _verify_tokenizer_mode(self) -> None:
         tokenizer_mode = self.tokenizer_mode.lower()
@@ -466,6 +483,18 @@ class ModelConfig:
             t for t in self.get_layers_block_type(parallel_config)
             if t != "attention"
         ])
+
+    def get_multimodal_config(self) -> "MultiModalConfig":
+        """
+        Get the multimodal configuration of the model.
+
+        Raises:
+            ValueError: If the model is not multimodal.
+        """
+        if self.multimodal_config is None:
+            raise ValueError("The model is not multimodal.")
+
+        return self.multimodal_config
 
     @property
     def is_encoder_decoder_model(self) -> bool:
@@ -1450,7 +1479,7 @@ class PromptAdapterConfig:
 class MultiModalConfig:
     """Controls the behavior of multimodal models."""
 
-    limit_per_prompt: Mapping[str, int]
+    limit_per_prompt: Mapping[str, int] = field(default_factory=dict)
     """
     The maximum number of multi-modal input instances allowed per prompt
     for each :class:`~vllm.multimodal.MultiModalPlugin`.
@@ -1710,7 +1739,6 @@ class EngineConfig:
     device_config: DeviceConfig
     load_config: LoadConfig
     lora_config: Optional[LoRAConfig]
-    multimodal_config: Optional[MultiModalConfig]
     speculative_config: Optional[SpeculativeConfig]
     decoding_config: Optional[DecodingConfig]
     observability_config: Optional[ObservabilityConfig]
