@@ -15,7 +15,7 @@ from vllm.platforms import current_platform
 from vllm.utils import cuda_device_count_stateless
 
 try:
-    assert ops.is_custom_op_supported("_C_custom_ar::meta_size")
+    ops.meta_size()
     custom_ar = True
 except Exception:
     # For AMD GPUs and CPUs
