@@ -28,6 +28,10 @@ class Platform:
         raise NotImplementedError
 
     @staticmethod
+    def get_device_name(device_id: int = 0) -> str:
+        raise NotImplementedError
+
+    @staticmethod
     def inference_mode():
         """A device-specific wrapper of `torch.inference_mode`.
 

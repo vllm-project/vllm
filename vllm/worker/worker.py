@@ -368,7 +368,7 @@ def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
     if torch_dtype == torch.bfloat16:
         compute_capability = current_platform.get_device_capability()
         if compute_capability[0] < 8:
-            gpu_name = torch.cuda.get_device_name()
+            gpu_name = current_platform.get_device_name()
             raise ValueError(
                 "Bfloat16 is only supported on GPUs with compute capability "
                 f"of at least 8.0. Your {gpu_name} GPU has compute capability "
