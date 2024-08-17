@@ -26,6 +26,9 @@ if TYPE_CHECKING:
 VLLM_TOKEN_ID_ARRAY_TYPE = "l"
 
 
+# We use dataclass for now because it is used for
+# openai server output, and msgspec is not serializable.
+# TODO(sang): Fix it.
 @dataclass
 class Logprob:
     """Infos for supporting OpenAI compatible logprobs and token ranks.

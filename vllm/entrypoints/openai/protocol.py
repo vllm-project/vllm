@@ -526,9 +526,6 @@ class CompletionLogProbs(OpenAIBaseModel):
 
 
 class CompletionResponseChoice(OpenAIBaseModel):
-    # For Logprob because it is msgspec.Struct
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
     index: int
     text: str
     logprobs: Optional[CompletionLogProbs] = None
@@ -630,9 +627,6 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
 
 
 class ChatCompletionResponse(OpenAIBaseModel):
-    # For Logprob because it is msgspec.Struct
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
     id: str = Field(default_factory=lambda: f"chatcmpl-{random_uuid()}")
     object: Literal["chat.completion"] = "chat.completion"
     created: int = Field(default_factory=lambda: int(time.time()))
