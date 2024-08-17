@@ -29,61 +29,6 @@ class MistralToolParser(ToolParser):
     Used when --enable-auto-tool-choice --tool-call-parser gmistral are all set
     """
 
-    # the bot_token is the token indicating tool call(s) follow. Tokens before
-    # this token will be parsed as content; and
-    # if not present, the entire response will be parsed as text content.
-    bot_token: str = "[TOOL_CALLS]"
-    bot_token_id: int = 5 
-    tool_call_regex = re.compile(r"\[{.*?}\]", re.DOTALL)
-
-    @staticmethod
-    def extract_tool_calls(model_output: str) -> ExtractedToolCallInformation:
-        """
-        Extract the tool calls from a complete model response. Requires
-        find-and-replacing single quotes with double quotes for JSON parsing,
-        make sure your tool call arguments don't ever include quotes!
-        """
-
-        # case -- if a tool call token is not present, return a text response
-        if MistralToolParser.bot_token not in model_output:
-            return ExtractedToolCallInformation(tools_called=False,
-                                                tool_calls=[],
-                                                content=model_output)
-        try:
-
-            # use a regex to find the tool call. remove the BOT token
-            #   and make sure to replace single quotes with double quotes
-            raw_tool_call = MistralToolParser.tool_call_regex.findall(
-                model_output.replace(MistralToolParser.bot_token, ""))[0]
-
-            # load the JSON, and then use it to build the Function and
-            # Tool Call
-            function_call_arr = json.loads(raw_tool_call)
-            tool_calls: List[ToolCall] = [
-                ToolCall(
-                    type="function",
-                    function=FunctionCall(
-                        name=raw_function_call["name"],
-                        # function call args are JSON but as a string
-                        arguments=json.dumps(raw_function_call["arguments"])))
-                for raw_function_call in function_call_arr
-            ]
-
-            # get any content before  the tool call
-            content = model_output.split(MistralToolParser.bot_token)[0]
-            return ExtractedToolCallInformation(
-                tools_called=True,
-                tool_calls=tool_calls,
-                content=content if len(content) > 0 else None)
-
-        except Exception as e:
-            logger.error("Error in extracting tool call from response: %s", e)
-            print("ERROR", e)
-            # return information to just treat the tool call as regular JSON
-            return ExtractedToolCallInformation(tools_called=False,
-                                                tool_calls=[],
-                                                content=model_output)
-
     def __init__(self,
                  tokenizer: Optional[Union[PreTrainedTokenizer,
                                            PreTrainedTokenizerFast,
@@ -99,6 +44,57 @@ class MistralToolParser(ToolParser):
         self.current_tool_initial_sent: bool = False
         self.streamed_args_for_tool: List[str] = [
         ]  # map what has been streamed for each tool so far to a list
+        self.bot_token = "[TOOL_CALLS]"
+        self.bot_token_id = self.model_tokenizer.vocab[self.bot_token]
+        self.tool_call_regex = re.compile(r"\[{.*?}\]", re.DOTALL)
+
+    def extract_tool_calls(self,
+                           model_output: str) -> ExtractedToolCallInformation:
+        """
+        Extract the tool calls from a complete model response. Requires
+        find-and-replacing single quotes with double quotes for JSON parsing,
+        make sure your tool call arguments don't ever include quotes!
+        """
+
+        # case -- if a tool call token is not present, return a text response
+        if self.bot_token not in model_output:
+            return ExtractedToolCallInformation(tools_called=False,
+                                                tool_calls=[],
+                                                content=model_output)
+        try:
+
+            # use a regex to find the tool call. remove the BOT token
+            #   and make sure to replace single quotes with double quotes
+            raw_tool_call = self.tool_call_regex.findall(
+                model_output.replace(self.bot_token, ""))[0]
+
+            # load the JSON, and then use it to build the Function and
+            # Tool Call
+            function_call_arr = json.loads(raw_tool_call)
+            tool_calls: List[ToolCall] = [
+                ToolCall(
+                    type="function",
+                    function=FunctionCall(
+                        name=raw_function_call["name"],
+                        # function call args are JSON but as a string
+                        arguments=json.dumps(raw_function_call["arguments"])))
+                for raw_function_call in function_call_arr
+            ]
+
+            # get any content before  the tool call
+            content = model_output.split(self.bot_token)[0]
+            return ExtractedToolCallInformation(
+                tools_called=True,
+                tool_calls=tool_calls,
+                content=content if len(content) > 0 else None)
+
+        except Exception as e:
+            logger.error("Error in extracting tool call from response: %s", e)
+            print("ERROR", e)
+            # return information to just treat the tool call as regular JSON
+            return ExtractedToolCallInformation(tools_called=False,
+                                                tool_calls=[],
+                                                content=model_output)
 
     def extract_tool_calls_streaming(
         self,

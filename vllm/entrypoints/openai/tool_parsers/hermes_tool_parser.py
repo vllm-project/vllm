@@ -22,21 +22,50 @@ logger = init_logger(__name__)
 
 
 class Hermes2ProToolParser(ToolParser):
-    tool_call_start_token: str = "<tool_call>"
-    tool_call_end_token: str = "</tool_call>"
 
-    # regex to match between <tool_call> and </tool_call> OR between <tool_call>
-    # and EOS (happens sometimes :))
-    tool_call_regex = re.compile(
-        r"<tool_call>(.*?)</tool_call>|<tool_call>(.*)", re.DOTALL)
-    scratch_pad_regex = re.compile(r"<scratch_pad>(.*?)</scratch_pad>",
-                                   re.DOTALL)
+    def __init__(self,
+                 tokenizer: Optional[Union[PreTrainedTokenizer,
+                                           PreTrainedTokenizerFast,
+                                           PreTrainedTokenizerFast,
+                                           AutoTokenizer]] = None):
+        super().__init__(tokenizer)
+        self.current_tool_name_sent: bool = False
+        self.prev_tool_call_arr: List[Dict] = []
+        self.current_tool_id: int = -1
+        self.current_tool_name_sent = False
+        self.current_tool_initial_sent: bool = False
+        self.streamed_args_for_tool: List[str] = [
+        ]  # map what has been streamed for each tool so far to a list
 
-    @staticmethod
-    def extract_tool_calls(model_output: str) -> ExtractedToolCallInformation:
+        self.tool_call_start_token: str = "<tool_call>"
+        self.tool_call_end_token: str = "</tool_call>"
+
+        self.tool_call_regex = re.compile(
+            r"<tool_call>(.*?)</tool_call>|<tool_call>(.*)", re.DOTALL)
+        self.scratch_pad_regex = re.compile(
+            r"<scratch_pad>(.*?)</scratch_pad>", re.DOTALL)
+
+        if not self.model_tokenizer:
+            raise ValueError(
+                "The model tokenizer must be passed to the ToolParser "
+                "constructor during construction.")
+        self.tool_call_start_token_id: int = self.model_tokenizer.vocab[
+            self.tool_call_start_token]
+        self.tool_call_end_token_id: int = self.model_tokenizer.vocab[
+            self.tool_call_end_token]
+        if not self.tool_call_start_token_id or not self.tool_call_end_token_id:
+            raise RuntimeError(
+                "Hermes 2 Pro Tool parser could not locate tool call start/end "
+                "tokens in the tokenizer!")
+
+
+    def extract_tool_calls(
+            self,
+            model_output: str
+    ) -> ExtractedToolCallInformation:
 
         # sanity check; avoid unnecessary processing
-        if Hermes2ProToolParser.tool_call_start_token not in model_output:
+        if self.tool_call_start_token not in model_output:
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
                                                 content=model_output)
@@ -49,7 +78,7 @@ class Hermes2ProToolParser(ToolParser):
                 # findall is an array of tuples where one is a function call and
                 # the other is None
                 function_call_tuples = (
-                    Hermes2ProToolParser.tool_call_regex.findall(model_output))
+                    self.tool_call_regex.findall(model_output))
 
                 # load the JSON, and then use it to build the Function and
                 # Tool Call
@@ -68,7 +97,7 @@ class Hermes2ProToolParser(ToolParser):
                 ]
 
                 content = model_output[:model_output.find(
-                    Hermes2ProToolParser.tool_call_start_token)]
+                    self.tool_call_start_token)]
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=tool_calls,
@@ -80,33 +109,6 @@ class Hermes2ProToolParser(ToolParser):
                 return ExtractedToolCallInformation(tools_called=False,
                                                     tool_calls=[],
                                                     content=model_output)
-
-    def __init__(self,
-                 tokenizer: Optional[Union[PreTrainedTokenizer,
-                                           PreTrainedTokenizerFast,
-                                           PreTrainedTokenizerFast,
-                                           AutoTokenizer]] = None):
-        super().__init__(tokenizer)
-        self.current_tool_name_sent: bool = False
-        self.prev_tool_call_arr: List[Dict] = []
-        self.current_tool_id: int = -1
-        self.current_tool_name_sent = False
-        self.current_tool_initial_sent: bool = False
-        self.streamed_args_for_tool: List[str] = [
-        ]  # map what has been streamed for each tool so far to a list
-
-        if not self.model_tokenizer:
-            raise ValueError(
-                "The model tokenizer must be passed to the ToolParser "
-                "constructor during construction.")
-        self.tool_call_start_token_id: int = self.model_tokenizer.vocab[
-            "<tool_call>"]
-        self.tool_call_end_token_id: int = self.model_tokenizer.vocab[
-            "</tool_call>"]
-        if not self.tool_call_start_token_id or not self.tool_call_end_token_id:
-            raise RuntimeError(
-                "Hermes 2 Pro Tool parser could not locate tool call start/end "
-                "tokens in the tokenizer!")
 
     def extract_tool_calls_streaming(
             self, previous_text: str, current_text: str, delta_text: str,

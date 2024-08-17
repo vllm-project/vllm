@@ -624,8 +624,8 @@ class OpenAIServingChat(OpenAIServing):
                     or request.tool_choice is None) and self.enable_auto_tools \
                     and self.tool_parser:
 
-                tool_call_info = self.tool_parser.extract_tool_calls(
-                    output.text)
+                tool_parser = self.tool_parser(tokenizer)
+                tool_call_info = tool_parser.extract_tool_calls(output.text)
                 tools_called = tool_call_info.tools_called
                 if tool_call_info.tools_called:
                     message = ChatMessage(role=role,
