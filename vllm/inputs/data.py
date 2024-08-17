@@ -186,8 +186,8 @@ def build_decoder_prompt(
 
 
 def build_decoder_prompts(
-    prompts: Iterable[_T1],
-) -> List[ExplicitEncoderDecoderPrompt[_T1, _T2]]:
+    prompts: Iterable[_T2],
+) -> List[ExplicitEncoderDecoderPrompt[SingletonPromptInputs, _T2]]:
     return [
         build_decoder_prompt(prompt) for prompt in prompts
     ]
