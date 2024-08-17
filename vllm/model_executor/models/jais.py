@@ -20,7 +20,7 @@
 """Inference-only Jais model compatible with HuggingFace weights."""
 
 import math
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -252,20 +252,16 @@ class JAISModel(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Union[IntermediateTensors, torch.Tensor]:
         if get_pp_group().is_first_rank:
-            if inputs_embeds is not None:
-                hidden_states = inputs_embeds
+            inputs_embeds = self.wte(input_ids)
+            if self.wpe is not None:
+                position_embeds = self.wpe(position_ids)
+                hidden_states = inputs_embeds + position_embeds
             else:
-                inputs_embeds = self.wte(input_ids)
-                if self.wpe is not None:
-                    position_embeds = self.wpe(position_ids)
-                    hidden_states = inputs_embeds + position_embeds
-                else:
-                    hidden_states = inputs_embeds
-                hidden_states *= torch.tensor(float(self.embeddings_scale),
-                                              dtype=hidden_states.dtype)
+                hidden_states = inputs_embeds
+            hidden_states *= torch.tensor(float(self.embeddings_scale),
+                                          dtype=hidden_states.dtype)
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
@@ -312,7 +308,7 @@ class JAISLMHeadModel(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> torch.Tensor:
+    ) -> Union[IntermediateTensors, torch.Tensor]:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
                                          attn_metadata, intermediate_tensors)
         return hidden_states
