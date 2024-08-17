@@ -86,7 +86,7 @@ if [[ $commands == *"--shard-id="* ]]; then
         -e HF_TOKEN \
         -v ${HF_CACHE}:${HF_MOUNT} \
         -e HF_HOME=${HF_MOUNT} \
-        --name ${container_name} \
+        --name ${container_name}_${GPU}  \
         ${image_name} \
         /bin/bash -c "${commands}"
   done
