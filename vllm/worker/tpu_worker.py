@@ -271,7 +271,10 @@ def _make_src_to_dst(
     mapping: List[Tuple[int, int]],
     src_device: Union[torch.device, str],
     dst_device: Union[torch.device, str],
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+    if not mapping:
+        return None
+
     src_indices = [i for i, _ in mapping]
     dst_indices = [i for _, i in mapping]
     src_indices = torch.tensor(src_indices,
