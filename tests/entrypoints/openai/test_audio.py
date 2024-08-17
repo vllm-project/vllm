@@ -86,8 +86,12 @@ def server_function(port):
 
     ModelRegistry.register_model("OPTForCausalLM", FakeAudioModel)
 
-    with patch("vllm.entrypoints.chat_utils._mm_token_str",
-               lambda *_, **__: "_"):
+    with patch(
+            "vllm.entrypoints.chat_utils._mm_token_str",
+            lambda *_, **__: "_"), patch(
+                "vllm.model_executor.models.ModelRegistry.is_multimodal_model"
+            ) as mock:
+        mock.return_value = True
         sys.argv = ["placeholder.py"] + \
             (f"--model {MODEL_NAME} --gpu-memory-utilization 0.10 "
             "--dtype bfloat16 --enforce-eager --api-key token-abc123 "

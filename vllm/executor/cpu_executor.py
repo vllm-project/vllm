@@ -141,7 +141,6 @@ class CPUExecutor(ExecutorBase):
             rank=rank,
             distributed_init_method=self.distributed_init_method,
             lora_config=self.lora_config,
-            multimodal_config=self.multimodal_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             prompt_adapter_config=self.prompt_adapter_config,
             is_driver_worker=rank == 0,

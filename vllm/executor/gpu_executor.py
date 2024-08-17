@@ -55,7 +55,6 @@ class GPUExecutor(ExecutorBase):
             rank=rank,
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
-            multimodal_config=self.multimodal_config,
             speculative_config=self.speculative_config,
             prompt_adapter_config=self.prompt_adapter_config,
             is_driver_worker=(not self.parallel_config)
