@@ -70,20 +70,37 @@ HF_CACHE="$(realpath ~)/huggingface"
 mkdir -p ${HF_CACHE}
 HF_MOUNT="/root/.cache/huggingface"
 
-commands=${@//"--shard-id= "/}
-commands=${commands//"--num-shards= "/}
-commands=${commands//CUDA_VISIBLE_DEVICES/HIP_VISIBLE_DEVICES}
-
-docker run \
+commands=$@
+PARALLEL_JOB_COUNT=4
+if [[ $commands == *"--shard-id="* ]]; then
+  for GPU in $(seq 0 $(($PARALLEL_JOB_COUNT-1))); do
+    #replace shard arguments
+    commands=${@//"--shard-id= "/"--shard-id=${GPU} "}
+    commands=${commands//"--num-shards= "/"--num-shards=${PARALLEL_JOB_COUNT} "}
+    docker run \
         --device /dev/kfd --device /dev/dri \
         --network host \
         --shm-size=16gb \
         --rm \
-        -e HIP_VISIBLE_DEVICES=0 \
+        -e HIP_VISIBLE_DEVICES=${GPU} \
         -e HF_TOKEN \
         -v ${HF_CACHE}:${HF_MOUNT} \
         -e HF_HOME=${HF_MOUNT} \
         --name ${container_name} \
         ${image_name} \
         /bin/bash -c "${commands}"
-
+  done
+else
+  docker run \
+          --device /dev/kfd --device /dev/dri \
+          --network host \
+          --shm-size=16gb \
+          --rm \
+          -e HIP_VISIBLE_DEVICES=0 \
+          -e HF_TOKEN \
+          -v ${HF_CACHE}:${HF_MOUNT} \
+          -e HF_HOME=${HF_MOUNT} \
+          --name ${container_name} \
+          ${image_name} \
+          /bin/bash -c "${commands}"
+fi
