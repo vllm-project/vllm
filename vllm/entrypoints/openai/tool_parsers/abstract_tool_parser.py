@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Union
 
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
@@ -18,10 +18,8 @@ class ToolParser:
     """
 
     def __init__(self,
-                 tokenizer: Optional[Union[PreTrainedTokenizer,
-                                           PreTrainedTokenizerFast,
-                                           PreTrainedTokenizerFast,
-                                           AutoTokenizer]] = None):
+                 tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast,
+                                  PreTrainedTokenizerFast, AutoTokenizer]):
         self.prev_tool_call_arr: List[Dict] = []
         # the index of the tool call that is currently being parsed
         self.current_tool_id: int = -1
@@ -31,8 +29,8 @@ class ToolParser:
 
         self.model_tokenizer = tokenizer
 
-    @staticmethod
-    def extract_tool_calls(model_output: str) -> ExtractedToolCallInformation:
+    def extract_tool_calls(self,
+                           model_output: str) -> ExtractedToolCallInformation:
         """
         Static method that should be implemented for extracting tool calls from
         a complete model-generated string.

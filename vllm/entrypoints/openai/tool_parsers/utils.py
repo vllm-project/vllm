@@ -67,9 +67,7 @@ def extract_intermediate_diff(curr: str, old: str) -> str:
 
     if len(prefix):
         # replace the prefix only once in case it's mirrored
-        diff = diff.replace(
-            prefix, '',
-            1)
+        diff = diff.replace(prefix, '', 1)
 
     return diff
 

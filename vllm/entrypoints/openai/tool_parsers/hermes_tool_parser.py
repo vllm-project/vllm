@@ -58,11 +58,8 @@ class Hermes2ProToolParser(ToolParser):
                 "Hermes 2 Pro Tool parser could not locate tool call start/end "
                 "tokens in the tokenizer!")
 
-
-    def extract_tool_calls(
-            self,
-            model_output: str
-    ) -> ExtractedToolCallInformation:
+    def extract_tool_calls(self,
+                           model_output: str) -> ExtractedToolCallInformation:
 
         # sanity check; avoid unnecessary processing
         if self.tool_call_start_token not in model_output:
@@ -96,8 +93,8 @@ class Hermes2ProToolParser(ToolParser):
                     for function_call in raw_function_calls
                 ]
 
-                content = model_output[:model_output.find(
-                    self.tool_call_start_token)]
+                content = model_output[:model_output.
+                                       find(self.tool_call_start_token)]
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=tool_calls,
