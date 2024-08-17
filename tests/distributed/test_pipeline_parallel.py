@@ -80,6 +80,10 @@ def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME,
             "VLLM_USE_RAY_SPMD_WORKER": "1",
             "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL": "1",
         }
+        # Temporary. Currently when zeromq + SPMD is used, it does not properly
+        # terminate because of aDAG issue.
+        pp_args.append("--disable-frontend-multiprocessing")
+        tp_args.append("--disable-frontend-multiprocessing")
 
     try:
         compare_two_settings(MODEL_NAME, pp_args, tp_args, pp_env)
