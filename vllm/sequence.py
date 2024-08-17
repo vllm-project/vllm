@@ -26,10 +26,8 @@ if TYPE_CHECKING:
 VLLM_TOKEN_ID_ARRAY_TYPE = "l"
 
 
-class Logprob(
-        msgspec.Struct,
-        omit_defaults=True,  # type: ignore[call-arg]
-        array_like=True):  # type: ignore[call-arg]
+@dataclass
+class Logprob:
     """Infos for supporting OpenAI compatible logprobs and token ranks.
 
     Attributes:
