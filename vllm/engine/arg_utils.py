@@ -909,7 +909,6 @@ class EngineArgs:
             preemption_mode=self.preemption_mode,
             num_scheduler_steps=self.num_scheduler_steps,
             send_delta_data=(envs.VLLM_USE_RAY_SPMD_WORKER
-                             and envs.VLLM_SPMD_SEND_DELTA_DATA
                              and parallel_config.use_ray),
         )
         lora_config = LoRAConfig(

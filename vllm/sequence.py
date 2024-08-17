@@ -23,6 +23,8 @@ if TYPE_CHECKING:
     from vllm.inputs import LLMInputs
     from vllm.multimodal.base import MultiModalDataDict
 
+VLLM_TOKEN_ID_ARRAY_TYPE = "l"
+
 
 class Logprob(
         msgspec.Struct,
@@ -148,7 +150,7 @@ class SequenceData(msgspec.Struct,
     # union of 2 list types.
     _prompt_token_ids: array
     _output_token_ids: array = msgspec.field(
-        default_factory=lambda: array("I", []))
+        default_factory=lambda: array(VLLM_TOKEN_ID_ARRAY_TYPE, []))
 
     ### The below fields should not be passed as an argument ###
     _cumulative_logprob: float = 0.0
@@ -164,6 +166,8 @@ class SequenceData(msgspec.Struct,
     _new_appended_tokens: List[int] = msgspec.field(default_factory=list)
 
     def __post_init__(self) -> None:
+        assert self._prompt_token_ids.typecode == "l"
+        assert self._output_token_ids.typecode == "l"
         self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(
             self._prompt_token_ids)
         self._update_cached_all_tokens()
@@ -201,7 +205,8 @@ class SequenceData(msgspec.Struct,
 
     @output_token_ids.setter
     def output_token_ids(self, new_output_token_ids: List[int]) -> None:
-        self._output_token_ids = array('I', new_output_token_ids)
+        self._output_token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
+                                       new_output_token_ids)
         self._update_cached_all_tokens()
 
     @property
@@ -383,7 +388,8 @@ class Sequence:
                              f"invalid input {inputs}; did you forget the "
                              "encoder input prompt fields?")
 
-        self.data = SequenceData(array("I", self.prompt_token_ids))
+        self.data = SequenceData(
+            array(VLLM_TOKEN_ID_ARRAY_TYPE, self.prompt_token_ids))
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
 

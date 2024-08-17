@@ -5,8 +5,9 @@ from typing import Iterator, List, Tuple
 import torch
 
 from vllm import SamplingParams
-from vllm.sequence import (ExecuteModelRequest, SamplerOutput, SequenceData,
-                           SequenceGroupMetadata, get_all_seq_ids)
+from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, ExecuteModelRequest,
+                           SamplerOutput, SequenceData, SequenceGroupMetadata,
+                           get_all_seq_ids)
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
 from vllm.spec_decode.util import (nvtx_range, sampler_output_to_torch,
@@ -301,7 +302,8 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             target_seq_id:
             SequenceData(
                 prompt_token_ids,
-                _output_token_ids=array("I", new_output_token_ids),
+                _output_token_ids=array(VLLM_TOKEN_ID_ARRAY_TYPE,
+                                        new_output_token_ids),
             ),
         }
         # This is a hack. Technically, spec decoding should compute
