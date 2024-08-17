@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from typing import List, Optional
+from typing import Dict, Optional, Union
 
 import torch
 import torch.jit
@@ -36,9 +36,12 @@ class SpecDecodeBaseSampler(nn.Module):
         self.num_emitted_tokens: Optional[torch.Tensor] = None
         self.num_draft_tokens: int = 0
 
-    def init_gpu_tensors(self, rank: int) -> None:
+    def init_gpu_tensors(self, device: Union[int, str]) -> None:
         assert self.num_accepted_tokens is None
-        device = f"cuda:{rank}"
+        if isinstance(device, int):
+            device = f"cuda:{device}"
+        elif not isinstance(device, str):
+            raise ValueError(f"Device must be int or str, get {type(device)}")
         self.num_accepted_tokens = torch.tensor(0,
                                                 dtype=torch.long,
                                                 device=device)
@@ -237,6 +240,6 @@ class SpecDecodeStochasticBaseSampler(SpecDecodeBaseSampler):
         bonus_token_ids: torch.Tensor,
         draft_probs: torch.Tensor,
         draft_token_ids: torch.Tensor,
-        generators: List[Optional[torch.Generator]],
+        seeded_seqs: Optional[Dict[int, torch.Generator]] = None,
     ) -> torch.Tensor:
         raise NotImplementedError

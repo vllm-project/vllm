@@ -1,6 +1,6 @@
 import functools
 import importlib
-from typing import Dict, List, Optional, Type
+from typing import Dict, List, Optional, Tuple, Type
 
 import torch.nn as nn
 
@@ -16,9 +16,10 @@ _GENERATION_MODELS = {
     "BaiChuanForCausalLM": ("baichuan", "BaiChuanForCausalLM"),  # baichuan-7b
     "BaichuanForCausalLM": ("baichuan", "BaichuanForCausalLM"),  # baichuan-13b
     "BloomForCausalLM": ("bloom", "BloomForCausalLM"),
-    "ChameleonForCausalLM":
-    ("chameleon", "ChameleonForConditionalGeneration"
-     ),  #TODO(ywang96): fix model name when huggingface fixes it
+    "Blip2ForConditionalGeneration":
+    ("blip2", "Blip2ForConditionalGeneration"),
+    "ChameleonForConditionalGeneration":
+    ("chameleon", "ChameleonForConditionalGeneration"),
     "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
     "ChatGLMForConditionalGeneration": ("chatglm", "ChatGLMForCausalLM"),
     "CohereForCausalLM": ("commandr", "CohereForCausalLM"),
@@ -36,6 +37,7 @@ _GENERATION_MODELS = {
     "GPTNeoXForCausalLM": ("gpt_neox", "GPTNeoXForCausalLM"),
     "InternLMForCausalLM": ("llama", "LlamaForCausalLM"),
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
+    "InternVLChatModel": ("internvl", "InternVLChatModel"),
     "JAISLMHeadModel": ("jais", "JAISLMHeadModel"),
     "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
     "LlavaForConditionalGeneration":
@@ -51,12 +53,14 @@ _GENERATION_MODELS = {
     "MptForCausalLM": ("mpt", "MPTForCausalLM"),
     "MPTForCausalLM": ("mpt", "MPTForCausalLM"),
     "MiniCPMForCausalLM": ("minicpm", "MiniCPMForCausalLM"),
+    "MiniCPMV": ("minicpmv", "MiniCPMV"),
+    "NemotronForCausalLM": ("nemotron", "NemotronForCausalLM"),
     "OlmoForCausalLM": ("olmo", "OlmoForCausalLM"),
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
     "OrionForCausalLM": ("orion", "OrionForCausalLM"),
     "PersimmonForCausalLM": ("persimmon", "PersimmonForCausalLM"),
-    "PaliGemmaForConditionalGeneration":
-    ("paligemma", "PaliGemmaForConditionalGeneration"),
+    "PaliGemmaForConditionalGeneration": ("paligemma",
+                                          "PaliGemmaForConditionalGeneration"),
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
     "Phi3ForCausalLM": ("llama", "LlamaForCausalLM"),
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
@@ -79,7 +83,16 @@ _EMBEDDING_MODELS = {
     "MistralModel": ("llama_embedding", "LlamaEmbeddingModel"),
 }
 
-_MODELS = {**_GENERATION_MODELS, **_EMBEDDING_MODELS}
+_CONDITIONAL_GENERATION_MODELS = {
+    "BartModel": ("bart", "BartForConditionalGeneration"),
+    "BartForConditionalGeneration": ("bart", "BartForConditionalGeneration"),
+}
+
+_MODELS = {
+    **_GENERATION_MODELS,
+    **_EMBEDDING_MODELS,
+    **_CONDITIONAL_GENERATION_MODELS
+}
 
 # Architecture -> type.
 # out of tree models
@@ -122,7 +135,7 @@ class ModelRegistry:
         return getattr(module, model_cls_name, None)
 
     @staticmethod
-    def load_model_cls(model_arch: str) -> Optional[Type[nn.Module]]:
+    def _try_load_model_cls(model_arch: str) -> Optional[Type[nn.Module]]:
         if model_arch in _OOT_MODELS:
             return _OOT_MODELS[model_arch]
         if model_arch not in _MODELS:
@@ -140,8 +153,20 @@ class ModelRegistry:
         return ModelRegistry._get_model(model_arch)
 
     @staticmethod
+    def resolve_model_cls(
+            architectures: List[str]) -> Tuple[Type[nn.Module], str]:
+        for arch in architectures:
+            model_cls = ModelRegistry._try_load_model_cls(arch)
+            if model_cls is not None:
+                return (model_cls, arch)
+
+        raise ValueError(
+            f"Model architectures {architectures} are not supported for now. "
+            f"Supported architectures: {ModelRegistry.get_supported_archs()}")
+
+    @staticmethod
     def get_supported_archs() -> List[str]:
-        return list(_MODELS.keys())
+        return list(_MODELS.keys()) + list(_OOT_MODELS.keys())
 
     @staticmethod
     def register_model(model_arch: str, model_cls: Type[nn.Module]):

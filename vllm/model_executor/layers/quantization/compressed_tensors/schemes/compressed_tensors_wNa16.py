@@ -1,20 +1,28 @@
 from typing import Callable, List, Optional
 
 import torch
-from torch.nn import Parameter
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     apply_gptq_marlin_linear, marlin_is_k_full, marlin_make_empty_g_idx,
-    marlin_make_workspace, marlin_permute_scales,
-    marlin_repeat_scales_on_all_ranks, marlin_sort_g_idx, replace_tensor,
-    verify_gptq_marlin_supported, verify_marlin_supports_shape)
+    marlin_make_workspace, marlin_permute_scales, marlin_sort_g_idx,
+    replace_tensor, verify_marlin_supported, verify_marlin_supports_shape,
+    replace_tensor)
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.parameter import (BasevLLMParameter,
+                                           ChannelQuantScaleParameter,
+                                           GroupQuantScaleParameter,
+                                           PackedvLLMParameter)
+from vllm.scalar_type import scalar_types
 
 __all__ = ["CompressedTensorsWNA16"]
-WNA16_SUPPORTED_BITS = [4, 8]
+WNA16_SUPPORTED_TYPES_MAP = {
+    4: scalar_types.uint4b8,
+    8: scalar_types.uint8b128,
+}
+WNA16_SUPPORTED_BITS = list(WNA16_SUPPORTED_TYPES_MAP.keys())
 
 
 class CompressedTensorsWNA16(CompressedTensorsScheme):
@@ -28,16 +36,21 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         self.pack_factor = 32 // self.num_bits
         self.strategy = strategy
 
-        self.group_size: int
-        if group_size is None:
-            if self.strategy != "channel":
-                raise ValueError(
-                    "Marlin kernels require group quantization or "
-                    "channelwise quantization, but found no group "
-                    "size and strategy is not channelwise.")
-            self.group_size = -1
-        else:
-            self.group_size = group_size
+        self.pack_factor = 32 // num_bits
+        self.strategy = strategy
+        self.group_size = -1 if group_size is None else group_size
+
+        if self.group_size == -1 and self.strategy != "channel":
+            raise ValueError("Marlin kernels require group quantization or "
+                             "channelwise quantization, but found no group "
+                             "size and strategy is not channelwise.")
+
+        if num_bits not in WNA16_SUPPORTED_TYPES_MAP:
+            raise ValueError(
+                f"Unsupported num_bits = {num_bits}. "
+                f"Supported num_bits = {WNA16_SUPPORTED_TYPES_MAP.keys()}")
+
+        self.quant_type = WNA16_SUPPORTED_TYPES_MAP[num_bits]
 
         if actorder and self.group_size == -1:
             # In this case, actorder == True is the same as actorder == False
@@ -46,11 +59,11 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         self.actorder = actorder
 
         # Verify supported on platform.
-        verify_gptq_marlin_supported(num_bits=self.num_bits,
-                                     group_size=self.group_size,
-                                     is_sym=True)
+        verify_marlin_supported(quant_type=self.quant_type,
+                                group_size=self.group_size)
 
-    def get_min_capability(self) -> int:
+    @classmethod
+    def get_min_capability(cls) -> int:
         # ampere and up
         return 80
 
@@ -59,11 +72,17 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                        input_size_per_partition: int,
                        params_dtype: torch.dtype, weight_loader: Callable,
                        **kwargs):
+
         output_size_per_partition = sum(output_partition_sizes)
         is_row_parallel = input_size != input_size_per_partition
 
         # If group_size is -1, we are in channelwise case.
-        group_size = input_size if self.group_size == -1 else self.group_size
+        channelwise = (self.group_size == -1)
+        group_size = self.group_size if self.group_size != -1 else input_size
+        row_parallel = (input_size != input_size_per_partition)
+        # In the case of channelwise quantization, we need to replicate the
+        # scales across all gpus.
+        partition_scales = (row_parallel and not channelwise)
 
         verify_marlin_supports_shape(
             output_size_per_partition=output_size_per_partition,
@@ -71,60 +90,51 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             input_size=input_size,
             group_size=group_size)
 
-        # WEIGHT
-        weight = Parameter(
+        scales_and_zp_size = input_size // group_size
+
+        if partition_scales:
+            assert input_size_per_partition % group_size == 0
+            scales_and_zp_size = input_size_per_partition // group_size
+
+        weight = PackedvLLMParameter(input_dim=1,
+                                     output_dim=0,
+                                     weight_loader=weight_loader,
+                                     packed_factor=self.pack_factor,
+                                     packed_dim=1,
+                                     data=torch.empty(
+                                         output_size_per_partition,
+                                         input_size_per_partition //
+                                         self.pack_factor,
+                                         dtype=torch.int32,
+                                     ))
+
+        weight_scale_args = {
+            "weight_loader":
+            weight_loader,
+            "data":
             torch.empty(
                 output_size_per_partition,
-                input_size_per_partition // self.pack_factor,
-                dtype=torch.int32,
-            ),
-            requires_grad=False,
-        )
-
-        set_weight_attrs(
-            weight, {
-                "input_dim": 1,
-                "output_dim": 0,
-                "packed_dim": 1,
-                "pack_factor": self.pack_factor,
-                "weight_loader": weight_loader
-            })
-        layer.register_parameter("weight_packed", weight)
-
-        # WEIGHT SCALE
-        if marlin_repeat_scales_on_all_ranks(self.actorder, self.group_size,
-                                             is_row_parallel):
-            # By setting scale_dim == None, weight_loader will
-            # repeat the scales on each GPU in TP>1 case.
-            scale_input_dim = None
-            scale_input_size = input_size // group_size
+                scales_and_zp_size,
+                dtype=params_dtype,
+            )
+        }
+        if not partition_scales:
+            weight_scale = ChannelQuantScaleParameter(output_dim=0,
+                                                      **weight_scale_args)
         else:
-            # By setting scale_dim == 0, weight_loader will
-            # shard the scales in TP>1 case.
-            scale_input_dim = 1
-            scale_input_size = input_size_per_partition // group_size
+            weight_scale = GroupQuantScaleParameter(output_dim=0,
+                                                    input_dim=1,
+                                                    **weight_scale_args)
 
-        weight_scale = Parameter(torch.empty(output_size_per_partition,
-                                             scale_input_size,
-                                             dtype=params_dtype),
-                                 requires_grad=False)
-        set_weight_attrs(
-            weight_scale, {
-                "weight_loader": weight_loader,
-                "input_dim": scale_input_dim,
-                "output_dim": 0
-            })
+        # A 2D array defining the original shape of the weights
+        # before packing
+        weight_shape = BasevLLMParameter(data=torch.empty(2,
+                                                          dtype=torch.int64),
+                                         weight_loader=weight_loader)
+
+        layer.register_parameter("weight_packed", weight)
         layer.register_parameter("weight_scale", weight_scale)
-
-        # Shape of the weights before packing (not used in inference)
-        weight_shape = Parameter(torch.empty(2, dtype=torch.int64),
-                                 requires_grad=False)
-
         layer.register_parameter("weight_shape", weight_shape)
-        set_weight_attrs(weight_shape, {
-            "weight_loader": weight_loader,
-            "ignore_warning": True,
-        })
 
         # G_IDX (for activation reordering)
         g_idx = Parameter(torch.empty(input_size_per_partition,
@@ -162,14 +172,19 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
 
         # No zero-point
         layer.weight_zp = marlin_make_empty_g_idx(device)
+        # Update for kernel
+        layer.weight_packed = torch.nn.Parameter(
+            layer.weight_packed.t().contiguous(), requires_grad=False)
+        layer.weight_scale = torch.nn.Parameter(
+            layer.weight_scale.squeeze().t().contiguous(), requires_grad=False)
 
         # Repack weights from compressed-tensors format to marlin format.
         marlin_qweight = ops.gptq_marlin_repack(
-            layer.weight_packed.t().contiguous(),
+            layer.weight_packed,
             perm=layer.g_idx_sort_indices,
             size_k=layer.input_size_per_partition,
             size_n=layer.output_size_per_partition,
-            num_bits=self.num_bits)
+            num_bits=self.quant_type.size_bits)
         replace_tensor(layer, "weight_packed", marlin_qweight)
 
         # Permute scales from compressed-tensors format to marlin format.
@@ -192,7 +207,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             g_idx=layer.weight_g_idx,
             g_idx_sort_indices=layer.g_idx_sort_indices,
             workspace=layer.workspace,
-            num_bits=self.num_bits,
+            wtype=self.quant_type,
             output_size_per_partition=layer.output_size_per_partition,
             input_size_per_partition=layer.input_size_per_partition,
             is_k_full=True,

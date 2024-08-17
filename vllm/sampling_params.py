@@ -8,12 +8,12 @@ import torch
 from pydantic import Field
 from typing_extensions import Annotated
 
-import vllm.envs as envs
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
 _SAMPLING_EPS = 1e-5
+_MAX_TEMP = 1e-2
 
 
 class SamplingType(IntEnum):
@@ -93,11 +93,12 @@ class SamplingParams:
         min_tokens: Minimum number of tokens to generate per output sequence
             before EOS or stop_token_ids can be generated
         logprobs: Number of log probabilities to return per output token.
-            Note that the implementation follows the OpenAI API: The return
-            result includes the log probabilities on the `logprobs` most likely
-            tokens, as well the chosen tokens. The API will always return the
-            log probability of the sampled token, so there  may be up to
-            `logprobs+1` elements in the response.
+            When set to None, no probability is returned. If set to a non-None
+            value, the result includes the log probabilities of the specified
+            number of most likely tokens, as well as the chosen tokens.
+            Note that the implementation follows the OpenAI API: The API will
+            always return the log probability of the sampled token, so there
+            may be up to `logprobs+1` elements in the response.
         prompt_logprobs: Number of log probabilities to return per prompt token.
         detokenize: Whether to detokenize the output. Defaults to True.
         skip_special_tokens: Whether to skip special tokens in the output.
@@ -145,6 +146,12 @@ class SamplingParams:
         self.presence_penalty = presence_penalty
         self.frequency_penalty = frequency_penalty
         self.repetition_penalty = repetition_penalty
+        if 0 < temperature < _MAX_TEMP:
+            logger.warning(
+                "temperature %s is less than %s, which may cause numerical "
+                "errors nan or inf in tensors. We have maxed it out to %s.",
+                temperature, _MAX_TEMP, _MAX_TEMP)
+            temperature = max(temperature, _MAX_TEMP)
         self.temperature = temperature
         self.top_p = top_p
         self.top_k = top_k
@@ -169,8 +176,8 @@ class SamplingParams:
         self.ignore_eos = ignore_eos
         self.max_tokens = max_tokens
         self.min_tokens = min_tokens
-        self.logprobs = logprobs
-        self.prompt_logprobs = prompt_logprobs
+        self.logprobs = 1 if logprobs is True else logprobs
+        self.prompt_logprobs = 1 if prompt_logprobs is True else prompt_logprobs
         # NOTE: This parameter is only exposed at the engine level for now.
         # It is not exposed in the OpenAI API server, as the OpenAI API does
         # not support returning only a list of token IDs.
@@ -189,18 +196,6 @@ class SamplingParams:
 
         self._verify_args()
         if self.use_beam_search:
-            # Lazy import to avoid circular imports.
-            from vllm.usage.usage_lib import set_runtime_usage_data
-            set_runtime_usage_data("use_beam_search", True)
-
-            if not envs.VLLM_NO_DEPRECATION_WARNING:
-                logger.warning(
-                    "[IMPORTANT] We plan to discontinue the support for beam "
-                    "search in the next major release. Please refer to "
-                    "https://github.com/vllm-project/vllm/issues/6226 for "
-                    "more information. Set VLLM_NO_DEPRECATION_WARNING=1 to "
-                    "suppress this warning.")
-
             self._verify_beam_search()
         else:
             self._verify_non_beam_search()
@@ -236,6 +231,9 @@ class SamplingParams:
         if self.top_k < -1 or self.top_k == 0:
             raise ValueError(f"top_k must be -1 (disable), or at least 1, "
                              f"got {self.top_k}.")
+        if not isinstance(self.top_k, int):
+            raise TypeError(
+                f"top_k must be an integer, got {type(self.top_k).__name__}")
         if not 0.0 <= self.min_p <= 1.0:
             raise ValueError("min_p must be in [0, 1], got "
                              f"{self.min_p}.")
