@@ -153,7 +153,7 @@ def _wait_until_pg_ready(current_placement_group: PlacementGroup):
         if len(ready) > 0:
             break
 
-        # Expoential backoff.
+        # Exponential backoff for warning print.
         wait_interval *= 2
         logger.info(
             "Waiting for creating a placement group of specs for "
