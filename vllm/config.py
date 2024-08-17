@@ -36,6 +36,7 @@ _PP_SUPPORTED_MODELS = [
     "AquilaForCausalLM",
     "DeepseekV2ForCausalLM",
     "InternLMForCausalLM",
+    "JAISLMHeadModel",
     "LlamaForCausalLM",
     "LLaMAForCausalLM",
     "MistralForCausalLM",
