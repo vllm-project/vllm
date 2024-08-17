@@ -49,6 +49,8 @@ def find_loaded_library(lib_name) -> Optional[str]:
     if not found:
         # the library is not loaded in the current process
         return None
+    # if lib_name is libcudart, we need to match a line with:
+    # address /path/to/libcudart-hash.so.11.0
     start = line.index("/")
     path = line[start:].strip()
     filename = path.split("/")[-1]
