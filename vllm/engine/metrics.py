@@ -39,6 +39,13 @@ class Metrics:
     _histogram_cls = prometheus_client.Histogram
 
     def __init__(self, labelnames: List[str], max_model_len: int):
+        
+        # Config Stats
+        self.gauge_cache_info = self._gauge_cls(
+            name="vllm:cache_config_info",
+            documentation="Info about the cache configuration for vLLM.",
+            labelnames=labelnames,
+            multiprocess_mode="sum")
 
         # System stats
         #   Scheduler State
@@ -176,8 +183,22 @@ class Metrics:
             multiprocess_mode="sum",
         )
 
-
 # end-metrics-definitions
+
+    def _create_info_cache_config(self) -> None:
+        # Config Information
+        self.info_cache_config = self._gauge_cls(
+            name='vllm:cache_config',
+            documentation='Information of the LLMEngine CacheConfig',
+            labelnames=
+            multiprocess_mode="sum"
+        )
+    
+
+    def _unregister_vllm_metrics(self) -> None:
+        for collector in list(prometheus_client.REGISTRY._collector_to_names):
+            if hasattr(collector, "_name") and "vllm" in collector._name:
+                prometheus_client.REGISTRY.unregister(collector)
 
 
 class _RayGaugeWrapper:

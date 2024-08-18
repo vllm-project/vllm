@@ -1,7 +1,7 @@
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Dict, List, Optional, Protocol
 
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
@@ -60,3 +60,9 @@ class StatLoggerBase(ABC):
         to be emitted at same time as log interval)."""
         if stats.spec_decode_metrics is not None:
             self.spec_decode_metrics = stats.spec_decode_metrics
+
+
+class SupportsMetricsInfo(Protocol):
+
+    def metrics_info(self) -> Dict[str, str]:
+        ...
