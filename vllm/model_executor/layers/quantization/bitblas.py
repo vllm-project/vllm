@@ -541,10 +541,10 @@ class BitBLASLinearMethod(LinearMethodBase):
         result = (x * s).round().clamp(Qn, Qp).type(torch.int8)
         return result, s
 
-    @torch.compile
+    @torch.compile(dynamic=True)
     def post_quant_process(self, input, si, sw):
         out = input / si
-        out = out / sw
+        out.div_(sw)
         out = out.half()
         return out
 
