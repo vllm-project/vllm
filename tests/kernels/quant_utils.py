@@ -11,10 +11,7 @@ FP8_DTYPE = torch.float8_e4m3fnuz if is_hip() else torch.float8_e4m3fn
 
 
 def as_float32_tensor(x: Union[float, torch.tensor]) -> torch.tensor:
-    return torch.as_tensor(
-        x,
-        dtype=torch.float32,
-        device='cuda' if torch.cuda.is_available() else 'cpu')
+    return torch.as_tensor(x, dtype=torch.float32, device='cuda')
 
 def ref_dynamic_per_token_quant(x: torch.tensor,
                                 quant_dtype: torch.dtype,

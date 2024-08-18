@@ -30,14 +30,6 @@ docker exec cpu-test bash -c "
       --ignore=tests/models/test_jamba.py \
       --ignore=tests/models/test_danube3_4b.py" # Mamba and Danube3-4B on CPU is not supported
 
-# Run Compressed-Tensor test
-docker exec cpu-test bash -c "
-  pytest -v \
-  tests/kernels/test_int8_quant.py::test_dynamic_scaled_int8_quant \
-  tests/kernels/test_int8_quant.py::test_static_scaled_int8_quant \
-  tests/kernels/test_cutlass.py::test_cutlass_int8_gemm \
-  tests/kernels/test_cutlass.py::test_cutlass_int8_gemm_output_dtype"
-
 # online inference
 docker exec cpu-test bash -c "
   export VLLM_CPU_KVCACHE_SPACE=10 

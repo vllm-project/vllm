@@ -9,21 +9,13 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
-from vllm.utils import is_cpu
 
-if not is_cpu():
-    CUDA_DEVICES = [
-        f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
-    ]
-    OUTPUT_DTYPES = [torch.bfloat16, torch.float16]
-    DEFAULT_DEVICE = "cuda"
-else:
-    CUDA_DEVICES = ["cpu"]
-    OUTPUT_DTYPES = [torch.bfloat16]
-    DEFAULT_DEVICE = "cpu"
+CUDA_DEVICES = [
+    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
+]
 
 capability = current_platform.get_device_capability()
-capability = capability[0] * 10 + capability[1] if capability is not None else 0
+capability = capability[0] * 10 + capability[1]
 
 
 def to_fp8(tensor: torch.Tensor):
@@ -92,7 +84,7 @@ def cutlass_int8_gemm_helper(m: int,
                              per_out_channel_weight_quant: bool,
                              use_bias: bool,
                              out_dtype: Type[torch.dtype] = torch.bfloat16,
-                             device: str = DEFAULT_DEVICE):
+                             device: str = "cuda"):
     # Test for a cutlass kernel with per-token activation quantization
     # and per-output channel weight quantization.
     a = to_int8(torch.randn((m, k), device=device) * 5)
@@ -143,7 +135,7 @@ def test_cutlass_int8_gemm(m: int, n: int, k: int, per_act_token: bool,
 
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
-@pytest.mark.parametrize("out_dtype", OUTPUT_DTYPES)
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("use_bias", [True, False])
 def test_cutlass_int8_gemm_output_dtype(per_act_token: bool, per_out_ch: bool,
                                         out_dtype: Type[torch.dtype],
@@ -159,7 +151,7 @@ def test_cutlass_int8_gemm_output_dtype(per_act_token: bool, per_out_ch: bool,
 
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
-@pytest.mark.parametrize("out_dtype", OUTPUT_DTYPES)
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("use_bias", [True, False])
 @pytest.mark.skipif(capability < 89,
                     reason="FP8 is not supported on this GPU type.")
@@ -235,7 +227,7 @@ def test_cutlass_int8_gemm_m_sweep(per_act_token: bool, per_out_ch: bool,
 @pytest.mark.parametrize("m", [32, 64, 128])
 @pytest.mark.parametrize("n", [16, 32, 64])
 @pytest.mark.parametrize("k", [64, 128, 256])
-@pytest.mark.parametrize("out_dtype", OUTPUT_DTYPES)
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.skip
 def test_cutlass_int8_azp_bias_fold(m: int, n: int, k: int,
                                     out_dtype: torch.dtype):
@@ -286,7 +278,7 @@ def test_cutlass_int8_azp_bias_fold(m: int, n: int, k: int,
 @pytest.mark.parametrize("m", [32, 64, 128])
 @pytest.mark.parametrize("n", [16, 32, 64])
 @pytest.mark.parametrize("k", [64, 128, 256])
-@pytest.mark.parametrize("out_dtype", OUTPUT_DTYPES)
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("use_bias", [True, False])
 @pytest.mark.parametrize("azp_per_token", [True, False])
 def test_cutlass_int8_azp(m: int, n: int, k: int, out_dtype: torch.dtype,
