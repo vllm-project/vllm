@@ -32,7 +32,7 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.rotary_embedding import GemmaRotaryEmbedding
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
@@ -130,8 +130,7 @@ class Gemma2Attention(nn.Module):
             bias=config.attention_bias,
             quant_config=quant_config,
         )
-        # TODO(woosuk): Use the `get_rope` interface.
-        self.rotary_emb = GemmaRotaryEmbedding(
+        self.rotary_emb = get_rope(
             self.head_dim,
             self.head_dim,
             max_position_embeddings,

@@ -93,11 +93,6 @@ class RotaryEmbedding(CustomOp):
 
     def _compute_inv_freq(self, base: Union[int, float]) -> torch.Tensor:
         """Compute the inverse frequency."""
-        # NOTE(woosuk): The HF implementation uses `torch.arange(...).float()`.
-        # However, we use `torch.arange(..., dtype=torch.float)` instead to
-        # avoid numerical issues with large base values (e.g., 10000000).
-        # This may cause a slight numerical difference between the HF
-        # implementation and ours.
         # NOTE(woosuk): To exactly match the HF implementation, we need to
         # use CPU to compute the cache and then move it to GPU. However, we
         # create the cache on GPU for faster initialization. This may cause
@@ -724,16 +719,6 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         return query, key
 
 
-class GemmaRotaryEmbedding(RotaryEmbedding):
-
-    def _compute_inv_freq(self, base: Union[int, float]) -> torch.Tensor:
-        # https://github.com/huggingface/transformers/blob/v4.41.2/src/transformers/models/gemma/modeling_gemma.py#L107
-        inv_freq = 1.0 / (base**(
-            torch.arange(0, self.rotary_dim, 2, dtype=torch.int64).float() /
-            self.rotary_dim))
-        return inv_freq
-
-
 class ExtendedRotaryEmbedding(RotaryEmbedding):
 
     def _compute_inv_freq(self, base: Union[int, float]) -> torch.Tensor:
@@ -776,6 +761,7 @@ def get_rope(
     rope_scaling: Optional[Dict[str, Any]] = None,
     dtype: Optional[torch.dtype] = None,
     partial_rotary_factor: float = 1.0,
+    rope_
 ) -> RotaryEmbedding:
     if dtype is None:
         dtype = torch.get_default_dtype()
