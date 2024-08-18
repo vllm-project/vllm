@@ -10,7 +10,7 @@ from typing_extensions import assert_never
 import vllm.envs as envs
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
-                         MultiModalConfig, ObservabilityConfig, ParallelConfig,
+                         ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig)
 from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
@@ -23,8 +23,9 @@ from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.ray_utils import initialize_ray_cluster
-from vllm.inputs import (INPUT_REGISTRY, EncoderDecoderLLMInputs, LLMInputs,
-                         PromptInputs, SingletonPromptInputs)
+from vllm.inputs import (INPUT_REGISTRY, EncoderDecoderLLMInputs,
+                         InputRegistry, LLMInputs, PromptInputs,
+                         SingletonPromptInputs)
 from vllm.inputs.parse import is_explicit_encoder_decoder_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -98,8 +99,6 @@ class LLMEngine:
         scheduler_config: The configuration related to the request scheduler.
         device_config: The configuration related to the device.
         lora_config (Optional): The configuration related to serving multi-LoRA.
-        multimodal_config (Optional): The configuration related to multimodal 
-            models.
         speculative_config (Optional): The configuration related to speculative
             decoding.
         executor_class: The model executor class for managing distributed
@@ -170,7 +169,6 @@ class LLMEngine:
         device_config: DeviceConfig,
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
-        multimodal_config: Optional[MultiModalConfig],
         speculative_config: Optional[SpeculativeConfig],
         decoding_config: Optional[DecodingConfig],
         observability_config: Optional[ObservabilityConfig],
@@ -179,6 +177,7 @@ class LLMEngine:
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
+        input_registry: InputRegistry = INPUT_REGISTRY,
     ) -> None:
         logger.info(
             "Initializing an LLM engine (v%s) with config: "
@@ -232,7 +231,6 @@ class LLMEngine:
         self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config
-        self.multimodal_config = multimodal_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
@@ -264,8 +262,9 @@ class LLMEngine:
         self.generation_config_fields = _load_generation_config_dict(
             model_config)
 
-        self.input_processor = INPUT_REGISTRY.create_input_processor(
-            self.model_config)
+        self.input_registry = input_registry
+        self.input_processor = input_registry.create_input_processor(
+            model_config)
 
         self.model_executor = executor_class(
             model_config=model_config,
@@ -274,7 +273,6 @@ class LLMEngine:
             scheduler_config=scheduler_config,
             device_config=device_config,
             lora_config=lora_config,
-            multimodal_config=multimodal_config,
             speculative_config=speculative_config,
             load_config=load_config,
             prompt_adapter_config=prompt_adapter_config,

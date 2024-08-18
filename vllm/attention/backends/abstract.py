@@ -75,6 +75,9 @@ class AttentionBackend(ABC):
     ) -> None:
         raise NotImplementedError
 
+    def advance_step(self, num_seqs: int, num_queries: int):
+        raise NotImplementedError
+
 
 @dataclass
 class AttentionMetadata:

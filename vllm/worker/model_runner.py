@@ -27,11 +27,11 @@ except ImportError:
 import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, MultiModalConfig, ObservabilityConfig,
-                         ParallelConfig, PromptAdapterConfig, SchedulerConfig)
+                         ModelConfig, ObservabilityConfig, ParallelConfig,
+                         PromptAdapterConfig, SchedulerConfig)
 from vllm.distributed import get_pp_group
 from vllm.distributed.parallel_state import graph_capture
-from vllm.inputs import INPUT_REGISTRY
+from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
@@ -43,7 +43,7 @@ from vllm.model_executor.models.interfaces import (supports_lora,
                                                    supports_multimodal)
 from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
-                             MultiModalInputs)
+                             MultiModalInputs, MultiModalRegistry)
 from vllm.prompt_adapter.layers import PromptAdapterMapping
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.prompt_adapter.worker_manager import (
@@ -804,9 +804,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
-        multimodal_config: Optional[MultiModalConfig] = None,
         return_hidden_states: bool = False,
         observability_config: Optional[ObservabilityConfig] = None,
+        input_registry: InputRegistry = INPUT_REGISTRY,
+        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -817,7 +818,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.load_config = load_config
         self.is_driver_worker = is_driver_worker
         self.prompt_adapter_config = prompt_adapter_config
-        self.multimodal_config = multimodal_config
         self.return_hidden_states = return_hidden_states
         self.observability_config = observability_config
 
@@ -860,8 +860,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         ) if num_attn_heads else None
 
         # Multi-modal data support
-        self.multi_modal_input_mapper = MULTIMODAL_REGISTRY \
-            .create_input_mapper(self.model_config)
+        self.input_registry = input_registry
+        self.mm_registry = mm_registry
+        self.multi_modal_input_mapper = mm_registry \
+            .create_input_mapper(model_config)
+        self.mm_registry.init_mm_limits_per_prompt(self.model_config)
 
         # Lazy initialization
         self.model: nn.Module  # Set after load_model
@@ -889,7 +892,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                                    device_config=self.device_config,
                                    load_config=self.load_config,
                                    lora_config=self.lora_config,
-                                   multimodal_config=self.multimodal_config,
                                    parallel_config=self.parallel_config,
                                    scheduler_config=self.scheduler_config,
                                    cache_config=self.cache_config)
@@ -902,7 +904,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             assert supports_lora(self.model), "Model does not support LoRA"
             assert not supports_multimodal(
                 self.model
-            ), "To be tested: multimodal language model with LoRA settings."
+            ), "To be tested: Multi-modal model with LoRA settings."
 
             self.lora_manager = LRUCacheWorkerLoRAManager(
                 self.scheduler_config.max_num_seqs,
@@ -1046,17 +1048,16 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         # Profile memory usage with max_num_sequences sequences and the total
         # number of tokens equal to max_num_batched_tokens.
         seqs: List[SequenceGroupMetadata] = []
-        # Additional GPU memory may be needed for vision encoding, which needs
-        # to be accounted for when calculating the GPU blocks for
+        # Additional GPU memory may be needed for multi-modal encoding, which
+        # needs to be accounted for when calculating the GPU blocks for
         # vLLM blocker manager.
         # To exercise the worst scenario for GPU memory consumption,
         # the number of seqs (batch_size) is chosen to maximize the number
         # of images processed.
-        model_config = self.model_config
 
-        if supports_multimodal(self.model):
-            max_mm_tokens = MULTIMODAL_REGISTRY \
-                .get_max_multimodal_tokens(model_config)
+        max_mm_tokens = self.mm_registry.get_max_multimodal_tokens(
+            self.model_config)
+        if max_mm_tokens > 0:
             max_num_seqs_orig = max_num_seqs
             max_num_seqs = min(max_num_seqs,
                                max_num_batched_tokens // max_mm_tokens)
@@ -1074,13 +1075,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                        (group_id < max_num_batched_tokens % max_num_seqs))
             batch_size += seq_len
 
-            seq_data, dummy_multi_modal_data = INPUT_REGISTRY \
-                .dummy_data_for_profiling(model_config, seq_len)
-
-            # Having more tokens is over-conservative but otherwise fine
-            assert len(seq_data.prompt_token_ids) >= seq_len, (
-                f"Expected at least {seq_len} dummy tokens for profiling, "
-                f"but got: {len(seq_data.prompt_token_ids)}")
+            seq_data, dummy_multi_modal_data = self.input_registry \
+                .dummy_data_for_profiling(self.model_config,
+                                          seq_len,
+                                          self.mm_registry)
 
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
@@ -1551,6 +1549,21 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
         # Compute the logits in the last pipeline stage.
         if not get_pp_group().is_last_rank:
+            if (self.is_driver_worker
+                    and hidden_or_intermediate_states is not None
+                    and isinstance(hidden_or_intermediate_states,
+                                   IntermediateTensors)
+                    and self.observability_config is not None
+                    and self.observability_config.collect_model_forward_time):
+                model_forward_end.synchronize()
+                model_forward_time = model_forward_start.elapsed_time(
+                    model_forward_end)
+                orig_model_forward_time = 0.0
+                if intermediate_tensors is not None:
+                    orig_model_forward_time = intermediate_tensors.tensors.get(
+                        "model_forward_time", torch.tensor(0.0)).item()
+                hidden_or_intermediate_states.tensors["model_forward_time"] = (
+                    torch.tensor(model_forward_time + orig_model_forward_time))
             return hidden_or_intermediate_states
 
         logits = self.model.compute_logits(hidden_or_intermediate_states,
@@ -1570,11 +1583,16 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_forward_end.synchronize()
             model_forward_time = model_forward_start.elapsed_time(
                 model_forward_end)
+            orig_model_forward_time = 0.0
+            if intermediate_tensors is not None:
+                orig_model_forward_time = intermediate_tensors.tensors.get(
+                    "model_forward_time", torch.tensor(0.0)).item()
             # If there are multiple workers, we are still tracking the latency
             # from the start time of the driver worker to the end time of the
             # driver worker. The model forward time will then end up covering
             # the communication time as well.
-            output.model_forward_time = model_forward_time
+            output.model_forward_time = (orig_model_forward_time +
+                                         model_forward_time)
 
         if self.return_hidden_states:
             # we only need to pass hidden states of most recent token
@@ -1732,7 +1750,7 @@ class CUDAGraphRunner:
                                                       **kwargs)
         if intermediate_tensors is not None:
             for key in intermediate_tensors.tensors:
-                if key != "model_execute_time":
+                if key != "model_execute_time" and key != "model_forward_time":
                     self.input_buffers[key].copy_(intermediate_tensors[key],
                                                   non_blocking=True)
         # Run the graph.
