@@ -5,6 +5,7 @@ from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Type,
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.sequence import (IntermediateTensors, SamplerOutput,
                            SequenceGroupMetadata)
 
@@ -138,6 +139,9 @@ class ModelRunnerBase(ABC, Generic[T]):
     ModelRunnerInputBase subclass.
     """
 
+    # Map of request_id -> generator used for seeded random sampling
+    generators: Dict[str, torch.Generator] = {}
+
     @abstractmethod
     def make_model_input_from_broadcasted_tensor_dict(
         self,
@@ -163,7 +167,7 @@ class ModelRunnerBase(ABC, Generic[T]):
         """
         raise NotImplementedError
 
-    @torch.inference_mode()
+    @current_platform.inference_mode()
     def execute_model(
         self,
         model_input: T,
@@ -175,3 +179,15 @@ class ModelRunnerBase(ABC, Generic[T]):
         Execute the model on the given input.
         """
         raise NotImplementedError
+
+    def get_generators(self, finished_request_ids: Optional[List[str]] = None):
+        """
+        Return dict of per-request generators used for random sampling.
+        """
+
+        # Clean up generators from completed requests
+        if finished_request_ids:
+            for request_id in finished_request_ids:
+                self.generators.pop(request_id, None)
+
+        return self.generators

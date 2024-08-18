@@ -61,9 +61,12 @@ envs = load_module_from_path('envs', os.path.join(ROOT_DIR, 'vllm', 'envs.py'))
 
 VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE
 
-# vLLM only supports Linux platform
-assert sys.platform.startswith(
-    "linux"), "vLLM only supports Linux platform (including WSL)."
+if not sys.platform.startswith("linux"):
+    logger.warning(
+        "vLLM only supports Linux platform (including WSL). "
+        "Building on %s, "
+        "so vLLM may not be able to run correctly", sys.platform)
+    VLLM_TARGET_DEVICE = "empty"
 
 MAIN_CUDA_VERSION = "12.1"
 
@@ -181,9 +184,6 @@ class cmake_build_ext(build_ext):
         # match.
         cmake_args += ['-DVLLM_PYTHON_EXECUTABLE={}'.format(sys.executable)]
 
-        if _install_punica():
-            cmake_args += ['-DVLLM_INSTALL_PUNICA_KERNELS=ON']
-
         #
         # Setup parallelism and build tool
         #
@@ -234,6 +234,10 @@ class cmake_build_ext(build_ext):
         subprocess.check_call(["cmake", *build_args], cwd=self.build_temp)
 
 
+def _no_device() -> bool:
+    return VLLM_TARGET_DEVICE == "empty"
+
+
 def _is_cuda() -> bool:
     has_cuda = torch.version.cuda is not None
     return (VLLM_TARGET_DEVICE == "cuda" and has_cuda
@@ -274,8 +278,8 @@ def _build_custom_ops() -> bool:
     return _is_cuda() or _is_hip() or _is_cpu()
 
 
-def _install_punica() -> bool:
-    return envs.VLLM_INSTALL_PUNICA_KERNELS
+def _build_core_ext() -> bool:
+    return not _is_neuron() and not _is_tpu() and not _is_openvino()
 
 
 def get_hipcc_rocm_version():
@@ -353,7 +357,9 @@ def find_version(filepath: str) -> str:
 def get_vllm_version() -> str:
     version = find_version(get_path("vllm", "version.py"))
 
-    if _is_cuda():
+    if _no_device():
+        version += "+empty"
+    elif _is_cuda():
         cuda_version = str(get_nvcc_cuda_version())
         if cuda_version != MAIN_CUDA_VERSION:
             cuda_version_str = cuda_version.replace(".", "")[:3]
@@ -407,7 +413,9 @@ def get_requirements() -> List[str]:
                 resolved_requirements.append(line)
         return resolved_requirements
 
-    if _is_cuda():
+    if _no_device():
+        requirements = _read_requirements("requirements-cuda.txt")
+    elif _is_cuda():
         requirements = _read_requirements("requirements-cuda.txt")
         cuda_major, cuda_minor = torch.version.cuda.split(".")
         modified_requirements = []
@@ -440,14 +448,14 @@ def get_requirements() -> List[str]:
 
 ext_modules = []
 
+if _build_core_ext():
+    ext_modules.append(CMakeExtension(name="vllm._core_C"))
+
 if _is_cuda() or _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._moe_C"))
 
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
-
-    if _install_punica():
-        ext_modules.append(CMakeExtension(name="vllm._punica_C"))
 
 package_data = {
     "vllm": ["py.typed", "model_executor/layers/fused_moe/configs/*.json"]
@@ -455,6 +463,9 @@ package_data = {
 if envs.VLLM_USE_PRECOMPILED:
     ext_modules = []
     package_data["vllm"].append("*.so")
+
+if _no_device():
+    ext_modules = []
 
 setup(
     name="vllm",
@@ -475,6 +486,7 @@ setup(
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
         "License :: OSI Approved :: Apache Software License",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
@@ -486,7 +498,7 @@ setup(
     extras_require={
         "tensorizer": ["tensorizer>=2.9.0"],
     },
-    cmdclass={"build_ext": cmake_build_ext} if _build_custom_ops() else {},
+    cmdclass={"build_ext": cmake_build_ext} if len(ext_modules) > 0 else {},
     package_data=package_data,
     entry_points={
         "console_scripts": [

@@ -10,7 +10,7 @@ from .allclose_default import get_default_atol, get_default_rtol
 
 IS_NEOX_STYLE = [True, False]
 DTYPES = [torch.half, torch.bfloat16, torch.float]
-HEAD_SIZES = [64, 80, 96, 112, 128, 192, 256]
+HEAD_SIZES = [64, 80, 96, 112, 120, 128, 192, 256]
 ROTARY_DIMS = [None, 32]  # None means rotary dim == head size
 NUM_HEADS = [7, 17]  # Arbitrary values for testing
 BATCH_SIZES = [1, 5]  # Arbitrary values for testing
@@ -67,14 +67,14 @@ def test_rotary_embedding(
     ref_query, ref_key = rope.forward_native(positions, query, key)
     out_query, out_key = rope.forward(positions, query, key)
     # Compare the results.
-    assert torch.allclose(out_query,
-                          ref_query,
-                          atol=get_default_atol(out_query),
-                          rtol=get_default_rtol(out_query))
-    assert torch.allclose(out_key,
-                          ref_key,
-                          atol=get_default_atol(out_key),
-                          rtol=get_default_rtol(out_key))
+    torch.testing.assert_close(out_query,
+                               ref_query,
+                               atol=get_default_atol(out_query),
+                               rtol=get_default_rtol(out_query))
+    torch.testing.assert_close(out_key,
+                               ref_key,
+                               atol=get_default_atol(out_key),
+                               rtol=get_default_rtol(out_key))
 
 
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
@@ -129,14 +129,14 @@ def test_batched_rotary_embedding(
                                                           dtype=torch.long,
                                                           device=device))
     # Compare the results.
-    assert torch.allclose(out_query,
-                          ref_query,
-                          atol=get_default_atol(out_query),
-                          rtol=get_default_rtol(out_query))
-    assert torch.allclose(out_key,
-                          ref_key,
-                          atol=get_default_atol(out_key),
-                          rtol=get_default_rtol(out_key))
+    torch.testing.assert_close(out_query,
+                               ref_query,
+                               atol=get_default_atol(out_query),
+                               rtol=get_default_rtol(out_query))
+    torch.testing.assert_close(out_key,
+                               ref_key,
+                               atol=get_default_atol(out_key),
+                               rtol=get_default_rtol(out_key))
 
 
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
@@ -200,14 +200,14 @@ def test_batched_rotary_embedding_multi_lora(
     out_query, out_key = rope.forward(positions, query, key,
                                       query_offsets.flatten())
     # Compare the results.
-    assert torch.allclose(out_query,
-                          ref_query,
-                          atol=get_default_atol(out_query),
-                          rtol=get_default_rtol(out_query))
-    assert torch.allclose(out_key,
-                          ref_key,
-                          atol=get_default_atol(out_key),
-                          rtol=get_default_rtol(out_key))
+    torch.testing.assert_close(out_query,
+                               ref_query,
+                               atol=get_default_atol(out_query),
+                               rtol=get_default_rtol(out_query))
+    torch.testing.assert_close(out_key,
+                               ref_key,
+                               atol=get_default_atol(out_key),
+                               rtol=get_default_rtol(out_key))
 
 
 @torch.inference_mode()

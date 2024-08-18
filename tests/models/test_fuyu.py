@@ -49,7 +49,7 @@ def run_test(
     All the image fixtures for the test is under tests/images.
     For huggingface runner, we provide the PIL images as input.
     For vllm runner, we provide MultiModalDataDict objects 
-    and corresponding vision language config as input.
+    and corresponding MultiModalConfig as input.
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """
@@ -77,8 +77,8 @@ def run_test(
             vllm_model.generate_greedy_logprobs(prompts,
                                                 max_tokens,
                                                 num_logprobs=num_logprobs,
-                                                images=vllm_images)
-            for prompts, vllm_images in inputs_per_image
+                                                images=images)
+            for prompts, images in inputs_per_image
         ]
 
     with hf_runner(model, dtype=dtype) as hf_model:
@@ -89,9 +89,9 @@ def run_test(
             hf_model.generate_greedy_logprobs_limit(prompts,
                                                     max_tokens,
                                                     num_logprobs=num_logprobs,
-                                                    images=hf_images,
+                                                    images=images,
                                                     eos_token_id=eos_token_id)
-            for prompts, hf_images in inputs_per_image
+            for prompts, images in inputs_per_image
         ]
 
     for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,

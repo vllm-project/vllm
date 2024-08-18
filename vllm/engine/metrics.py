@@ -355,6 +355,7 @@ class StatLoggerBase(ABC):
         self.num_generation_tokens: List[int] = []
         self.last_local_log = time.time()
         self.local_interval = local_interval
+        self.spec_decode_metrics: Optional["SpecDecodeWorkerMetrics"] = None
 
     @abstractmethod
     def info(self, type: str, obj: SupportsMetricsInfo) -> None:
@@ -363,6 +364,12 @@ class StatLoggerBase(ABC):
     @abstractmethod
     def log(self, stats: Stats) -> None:
         raise NotImplementedError
+
+    def maybe_update_spec_decode_metrics(self, stats: Stats):
+        """Save spec decode metrics (since they are unlikely
+        to be emitted at same time as log interval)."""
+        if stats.spec_decode_metrics is not None:
+            self.spec_decode_metrics = stats.spec_decode_metrics
 
 
 class LoggingStatLogger(StatLoggerBase):
@@ -378,6 +385,9 @@ class LoggingStatLogger(StatLoggerBase):
         # Save tracked stats for token counters.
         self.num_prompt_tokens.append(stats.num_prompt_tokens_iter)
         self.num_generation_tokens.append(stats.num_generation_tokens_iter)
+
+        # Update spec decode metrics
+        self.maybe_update_spec_decode_metrics(stats)
 
         # Log locally every local_interval seconds.
         if local_interval_elapsed(stats.now, self.last_local_log,
@@ -408,15 +418,16 @@ class LoggingStatLogger(StatLoggerBase):
                 stats.cpu_cache_usage_sys * 100,
             )
 
+            if self.spec_decode_metrics is not None:
+                logger.info(
+                    self._format_spec_decode_metrics_str(
+                        self.spec_decode_metrics))
+
             # Reset tracked stats for next interval.
             self.num_prompt_tokens = []
             self.num_generation_tokens = []
             self.last_local_log = stats.now
-
-            if stats.spec_decode_metrics is not None:
-                logger.info(
-                    self._format_spec_decode_metrics_str(
-                        stats.spec_decode_metrics))
+            self.spec_decode_metrics = None
 
     def _format_spec_decode_metrics_str(
             self, metrics: "SpecDecodeWorkerMetrics") -> str:
@@ -533,6 +544,9 @@ class PrometheusStatLogger(StatLoggerBase):
         self.num_prompt_tokens.append(stats.num_prompt_tokens_iter)
         self.num_generation_tokens.append(stats.num_generation_tokens_iter)
 
+        # Update spec decode metrics
+        self.maybe_update_spec_decode_metrics(stats)
+
         # Log locally every local_interval seconds.
         if local_interval_elapsed(stats.now, self.last_local_log,
                                   self.local_interval):
@@ -550,26 +564,27 @@ class PrometheusStatLogger(StatLoggerBase):
                 prompt_throughput=prompt_throughput,
                 generation_throughput=generation_throughput)
 
+            if self.spec_decode_metrics is not None:
+                self._log_gauge(
+                    self.metrics.gauge_spec_decode_draft_acceptance_rate,
+                    self.spec_decode_metrics.draft_acceptance_rate)
+                self._log_gauge(self.metrics.gauge_spec_decode_efficiency,
+                                self.spec_decode_metrics.system_efficiency)
+                self._log_counter(
+                    self.metrics.counter_spec_decode_num_accepted_tokens,
+                    self.spec_decode_metrics.accepted_tokens)
+                self._log_counter(
+                    self.metrics.counter_spec_decode_num_draft_tokens,
+                    self.spec_decode_metrics.draft_tokens)
+                self._log_counter(
+                    self.metrics.counter_spec_decode_num_emitted_tokens,
+                    self.spec_decode_metrics.emitted_tokens)
+
             # Reset tracked stats for next interval.
             self.num_prompt_tokens = []
             self.num_generation_tokens = []
             self.last_local_log = stats.now
-
-            if stats.spec_decode_metrics is not None:
-                self._log_gauge(
-                    self.metrics.gauge_spec_decode_draft_acceptance_rate,
-                    stats.spec_decode_metrics.draft_acceptance_rate)
-                self._log_gauge(self.metrics.gauge_spec_decode_efficiency,
-                                stats.spec_decode_metrics.system_efficiency)
-                self._log_counter(
-                    self.metrics.counter_spec_decode_num_accepted_tokens,
-                    stats.spec_decode_metrics.accepted_tokens)
-                self._log_counter(
-                    self.metrics.counter_spec_decode_num_draft_tokens,
-                    stats.spec_decode_metrics.draft_tokens)
-                self._log_counter(
-                    self.metrics.counter_spec_decode_num_emitted_tokens,
-                    stats.spec_decode_metrics.emitted_tokens)
+            self.spec_decode_metrics = None
 
 
 class RayPrometheusStatLogger(PrometheusStatLogger):

@@ -1,26 +1,15 @@
 import base64
 from io import BytesIO
-from typing import Optional, Union
-from urllib.parse import urlparse
+from typing import Tuple, Union
 
-import aiohttp
-import requests
+import librosa
+import numpy as np
+import soundfile
 from PIL import Image
 
-from vllm.envs import VLLM_IMAGE_FETCH_TIMEOUT
+from vllm.connections import global_http_connection
+from vllm.envs import VLLM_AUDIO_FETCH_TIMEOUT, VLLM_IMAGE_FETCH_TIMEOUT
 from vllm.multimodal.base import MultiModalDataDict
-from vllm.version import __version__ as VLLM_VERSION
-
-
-def _validate_remote_url(url: str, *, name: str):
-    parsed_url = urlparse(url)
-    if parsed_url.scheme not in ["http", "https"]:
-        raise ValueError(f"Invalid '{name}': A valid '{name}' "
-                         "must have scheme 'http' or 'https'.")
-
-
-def _get_request_headers():
-    return {"User-Agent": f"vLLM/{VLLM_VERSION}"}
 
 
 def _load_image_from_bytes(b: bytes):
@@ -42,13 +31,8 @@ def fetch_image(image_url: str, *, image_mode: str = "RGB") -> Image.Image:
     By default, the image is converted into RGB format.
     """
     if image_url.startswith('http'):
-        _validate_remote_url(image_url, name="image_url")
-
-        headers = _get_request_headers()
-
-        with requests.get(url=image_url, headers=headers) as response:
-            response.raise_for_status()
-            image_raw = response.content
+        image_raw = global_http_connection.get_bytes(
+            image_url, timeout=VLLM_IMAGE_FETCH_TIMEOUT)
         image = _load_image_from_bytes(image_raw)
 
     elif image_url.startswith('data:image'):
@@ -60,56 +44,82 @@ def fetch_image(image_url: str, *, image_mode: str = "RGB") -> Image.Image:
     return image.convert(image_mode)
 
 
-class ImageFetchAiohttp:
-    aiohttp_client: Optional[aiohttp.ClientSession] = None
+async def async_fetch_image(image_url: str,
+                            *,
+                            image_mode: str = "RGB") -> Image.Image:
+    """
+    Asynchronously load a PIL image from a HTTP or base64 data URL.
 
-    @classmethod
-    def get_aiohttp_client(cls) -> aiohttp.ClientSession:
-        if cls.aiohttp_client is None:
-            timeout = aiohttp.ClientTimeout(total=VLLM_IMAGE_FETCH_TIMEOUT)
-            connector = aiohttp.TCPConnector()
-            cls.aiohttp_client = aiohttp.ClientSession(timeout=timeout,
-                                                       connector=connector)
+    By default, the image is converted into RGB format.
+    """
+    if image_url.startswith('http'):
+        image_raw = await global_http_connection.async_get_bytes(
+            image_url, timeout=VLLM_IMAGE_FETCH_TIMEOUT)
+        image = _load_image_from_bytes(image_raw)
 
-        return cls.aiohttp_client
+    elif image_url.startswith('data:image'):
+        image = _load_image_from_data_url(image_url)
+    else:
+        raise ValueError("Invalid 'image_url': A valid 'image_url' must start "
+                         "with either 'data:image' or 'http'.")
 
-    @classmethod
-    async def fetch_image(
-        cls,
-        image_url: str,
-        *,
-        image_mode: str = "RGB",
-    ) -> Image.Image:
-        """
-        Asynchronously load a PIL image from a HTTP or base64 data URL.
+    return image.convert(image_mode)
 
-        By default, the image is converted into RGB format.
-        """
 
-        if image_url.startswith('http'):
-            _validate_remote_url(image_url, name="image_url")
+def fetch_audio(audio_url: str) -> Tuple[np.ndarray, Union[int, float]]:
+    """
+    Load audio from a URL.
+    """
+    if audio_url.startswith("http"):
+        audio_bytes = global_http_connection.get_bytes(
+            audio_url, timeout=VLLM_AUDIO_FETCH_TIMEOUT)
+    elif audio_url.startswith("data:audio"):
+        _, audio_base64 = audio_url.split(",", 1)
+        audio_bytes = base64.b64decode(audio_base64)
+    else:
+        raise ValueError("Invalid 'audio_url': A valid 'audio_url' must start "
+                         "with either 'data:audio' or 'http'.")
 
-            client = cls.get_aiohttp_client()
-            headers = _get_request_headers()
+    return librosa.load(BytesIO(audio_bytes), sr=None)
 
-            async with client.get(url=image_url, headers=headers) as response:
-                response.raise_for_status()
-                image_raw = await response.read()
-            image = _load_image_from_bytes(image_raw)
 
-        elif image_url.startswith('data:image'):
-            image = _load_image_from_data_url(image_url)
-        else:
-            raise ValueError(
-                "Invalid 'image_url': A valid 'image_url' must start "
-                "with either 'data:image' or 'http'.")
+async def async_fetch_audio(
+        audio_url: str) -> Tuple[np.ndarray, Union[int, float]]:
+    """
+    Asynchronously fetch audio from a URL.
+    """
+    if audio_url.startswith("http"):
+        audio_bytes = await global_http_connection.async_get_bytes(
+            audio_url, timeout=VLLM_AUDIO_FETCH_TIMEOUT)
+    elif audio_url.startswith("data:audio"):
+        _, audio_base64 = audio_url.split(",", 1)
+        audio_bytes = base64.b64decode(audio_base64)
+    else:
+        raise ValueError("Invalid 'audio_url': A valid 'audio_url' must start "
+                         "with either 'data:audio' or 'http'.")
 
-        return image.convert(image_mode)
+    return librosa.load(BytesIO(audio_bytes), sr=None)
+
+
+async def async_get_and_parse_audio(audio_url: str) -> MultiModalDataDict:
+    audio, sr = await async_fetch_audio(audio_url)
+    return {"audio": (audio, sr)}
 
 
 async def async_get_and_parse_image(image_url: str) -> MultiModalDataDict:
-    image = await ImageFetchAiohttp.fetch_image(image_url)
+    image = await async_fetch_image(image_url)
     return {"image": image}
+
+
+def encode_audio_base64(
+    audio: np.ndarray,
+    sampling_rate: int,
+) -> str:
+    """Encode audio as base64."""
+    buffered = BytesIO()
+    soundfile.write(buffered, audio, sampling_rate, format="WAV")
+
+    return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
 
 def encode_image_base64(
@@ -134,8 +144,13 @@ def load_image_from_base64(image: Union[bytes, str]) -> Image.Image:
     return _load_image_from_bytes(base64.b64decode(image))
 
 
-def rescale_image_size(image: Image.Image, size_factor: float) -> Image.Image:
+def rescale_image_size(image: Image.Image,
+                       size_factor: float,
+                       transpose: int = -1) -> Image.Image:
     """Rescale the dimensions of an image by a constant factor."""
     new_width = int(image.width * size_factor)
     new_height = int(image.height * size_factor)
-    return image.resize((new_width, new_height))
+    image = image.resize((new_width, new_height))
+    if transpose >= 0:
+        image = image.transpose(Image.Transpose(transpose))
+    return image
