@@ -5,7 +5,8 @@ from typing import Dict, List, Optional, Union
 import numpy as np
 import prometheus_client
 
-from vllm.engine.metrics_types import StatLoggerBase, Stats
+from vllm.engine.metrics_types import (StatLoggerBase, Stats,
+                                       SupportsMetricsInfo)
 from vllm.executor.ray_utils import ray
 from vllm.logger import init_logger
 
@@ -39,7 +40,9 @@ class Metrics:
     _histogram_cls = prometheus_client.Histogram
 
     def __init__(self, labelnames: List[str], max_model_len: int):
-        
+        # Unregister any existing vLLM collectors (for CI/CD)
+        self._unregister_vllm_metrics()
+
         # Config Stats
         self.gauge_cache_info = self._gauge_cls(
             name="vllm:cache_config_info",
@@ -183,17 +186,8 @@ class Metrics:
             multiprocess_mode="sum",
         )
 
-# end-metrics-definitions
 
-    def _create_info_cache_config(self) -> None:
-        # Config Information
-        self.info_cache_config = self._gauge_cls(
-            name='vllm:cache_config',
-            documentation='Information of the LLMEngine CacheConfig',
-            labelnames=
-            multiprocess_mode="sum"
-        )
-    
+# end-metrics-definitions
 
     def _unregister_vllm_metrics(self) -> None:
         for collector in list(prometheus_client.REGISTRY._collector_to_names):
@@ -281,6 +275,10 @@ class RayMetrics(Metrics):
         if ray_metrics is None:
             raise ImportError("RayMetrics requires Ray to be installed.")
         super().__init__(labelnames, max_model_len)
+
+    def _unregister_vllm_metrics(self) -> None:
+        # No-op on purpose
+        pass
 
 
 def build_1_2_5_buckets(max_value: int) -> List[int]:
@@ -381,10 +379,14 @@ class LoggingStatLogger(StatLoggerBase):
                 f"Number of draft tokens: {metrics.draft_tokens}, "
                 f"Number of emitted tokens: {metrics.emitted_tokens}.")
 
+    def info(self, type: str, obj: SupportsMetricsInfo) -> None:
+        raise NotImplementedError
+
 
 class PrometheusStatLogger(StatLoggerBase):
     """PrometheusStatLogger is used LLMEngine to log to Promethus."""
     _metrics_cls = Metrics
+    _gauge_cls = prometheus_client.Gauge
 
     def __init__(self, local_interval: float, labels: Dict[str, str],
                  max_model_len: int) -> None:
@@ -523,7 +525,23 @@ class PrometheusStatLogger(StatLoggerBase):
             self.last_local_log = stats.now
             self.spec_decode_metrics = None
 
+    def info(self, type: str, obj: SupportsMetricsInfo) -> None:
+        # Info type metrics are syntactic sugar for a gauge permanently set to 1
+        # Since prometheus multiprocessing mode does not support Info, emulate
+        # info here with a gauge.
+        if type == "cache_config":
+            metrics_info = obj.metrics_info()
+            info_gauge = self._gauge_cls(
+                name='vllm:cache_config',
+                documentation='Information of the LLMEngine CacheConfig',
+                labelnames=metrics_info.keys(),
+                multiprocess_mode="mostrecent")
+            info_gauge.labels(**metrics_info).set(1)
+
 
 class RayPrometheusStatLogger(PrometheusStatLogger):
     """RayPrometheusStatLogger uses Ray metrics instead."""
     _metrics_cls = RayMetrics
+
+    def info(self, type: str, obj: SupportsMetricsInfo) -> None:
+        return None
