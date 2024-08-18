@@ -57,8 +57,13 @@ def test_models(
     original_model, gguf_model = model
 
     tokenizer = AutoTokenizer.from_pretrained(original_model)
-    example_prompts = [tokenizer.apply_chat_template([{'role': 'user', 'content': prompt}], tokenize=False, add_generation_prompt=True)
-               for prompt in example_prompts]
+    messages = [[{
+        'role': 'user',
+        'content': prompt
+    }] for prompt in example_prompts]
+    example_prompts = tokenizer.apply_chat_template(messages,
+                                                    tokenize=False,
+                                                    add_generation_prompt=True)
 
     # Run unquantized model.
     with vllm_runner(model_name=original_model,
