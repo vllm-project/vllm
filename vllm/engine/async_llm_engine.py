@@ -15,7 +15,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_timeout import asyncio_timeout
 from vllm.engine.llm_engine import (DecoderPromptComponents, LLMEngine,
                                     PromptComponents)
-from vllm.engine.metrics import StatLoggerBase
+from vllm.engine.metrics_types import StatLoggerBase
 from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.ray_utils import initialize_ray_cluster, ray
 from vllm.inputs import (EncoderDecoderLLMInputs, LLMInputs, PromptInputs,
