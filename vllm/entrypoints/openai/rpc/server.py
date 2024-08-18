@@ -39,7 +39,7 @@ class AsyncEngineRPCServer:
         self.context.destroy()
         self.engine.shutdown_background_loop()
         # Clear the engine reference so that it can be GC'ed.
-        self.engine = None
+        del self.engine
 
     async def get_model_config(self, identity):
         """Send the ModelConfig"""
