@@ -24,7 +24,6 @@ from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 
 logger = init_logger(__name__)
 
-
 # Path used for inprocess proxy.
 INPROC_PROXY_PATH = f"inproc://{uuid4()}"
 
@@ -170,7 +169,6 @@ class AsyncEngineRPCClient:
             # LoRAConfig can be None.
             if expected_type == LoRAConfig and response is None:
                 pass
-            # Propogate Exception Engine.
             elif isinstance(response, Exception):
                 logger.warning(error_message)
                 raise response
@@ -195,7 +193,6 @@ class AsyncEngineRPCClient:
             response = cloudpickle.loads(await socket.recv())
 
         if not isinstance(response, str) or response != VLLM_RPC_SUCCESS_STR:
-            # Propogate Exception.
             if isinstance(response, Exception):
                 logger.warning(error_message)
                 raise response
@@ -221,8 +218,8 @@ class AsyncEngineRPCClient:
         await self._send_one_way_rpc_request(
             request=RPCUtilityRequest.IS_SERVER_READY,
             error_message="Unable to start RPC Server",
-            timeout=VLLM_RPC_HEALTH_TIMEOUT_MS)
-        
+            timeout=VLLM_RPC_SERVER_START_TIMEOUT_MS)
+
     async def _get_model_config_rpc(self) -> ModelConfig:
         """Get the ModelConfig object from the RPC Server"""
 
@@ -335,7 +332,7 @@ class AsyncEngineRPCClient:
                         # Use this to set the sync `is_running` and `errored`
                         # properties.
                         try:
-                            await self._check_health_rpc()
+                            await self.check_health()
                         except Exception:
                             self._errored = True
                         # NB: do before raising here so that the flag is set
@@ -355,7 +352,6 @@ class AsyncEngineRPCClient:
             request=RPCUtilityRequest.IS_SERVER_HEALTHY,
             error_message="Got Unhealthy response from RPC Server",
             timeout=VLLM_RPC_HEALTH_TIMEOUT_MS)
-
 
     async def encode(self, *args,
                      **kwargs) -> AsyncGenerator[EmbeddingRequestOutput, None]:

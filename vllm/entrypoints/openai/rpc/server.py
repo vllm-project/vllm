@@ -9,8 +9,7 @@ import zmq.asyncio
 from typing_extensions import Never
 
 from vllm import AsyncEngineArgs, AsyncLLMEngine
-from vllm.entrypoints.openai.rpc import (VLLM_RPC_HEALTHY_STR,
-                                         VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
+from vllm.entrypoints.openai.rpc import (VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCGenerateRequest, RPCUtilityRequest)
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
@@ -94,13 +93,13 @@ class AsyncEngineRPCServer:
         try:
             # Abort the request in the llm engine.
             await self.engine.abort(request.request_id)
-        except Exception as e:
-            logger.warning("Failed to abort request %s", request.request_id)
-        finally:
-            # Send confirmation to the client.
             await self.socket.send_multipart(
                 [rpc_id, client_id,
                  cloudpickle.dumps(VLLM_RPC_SUCCESS_STR)])
+
+        except Exception as e:
+            await self.socket.send_multipart(
+                [rpc_id, client_id, cloudpickle.dumps(e)])
 
     async def generate(self, rpc_id, client_id,
                        generate_request: RPCGenerateRequest):
