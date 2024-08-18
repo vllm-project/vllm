@@ -86,9 +86,10 @@ class RotaryEmbedding(CustomOp):
         self.dtype = dtype
 
         cache = self._compute_cos_sin_cache()
-        self.use_native2 = current_platform.is_tpu() and is_neox_style
         cache = cache.to(dtype)
         self.register_buffer("cos_sin_cache", cache, persistent=False)
+
+        self.use_native2 = current_platform.is_tpu() and is_neox_style
 
     def _compute_inv_freq(self, base: Union[int, float]) -> torch.Tensor:
         """Compute the inverse frequency."""
