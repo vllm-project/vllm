@@ -79,19 +79,15 @@ class AsyncEngineRPCServer:
         """Log stats and confirm success."""
         await self.engine.do_log_stats()
 
-        await self.socket.send_multipart([
-            rpc_id,
-            client_id,
-            cloudpickle.dumps(VLLM_RPC_SUCCESS_STR),
-        ])
+        await self.socket.send_multipart(
+            [rpc_id, client_id,
+             cloudpickle.dumps(VLLM_RPC_SUCCESS_STR)])
 
     async def is_server_ready(self, rpc_id, client_id):
         """Notify the client that we are ready."""
-        await self.socket.send_multipart([
-            rpc_id,
-            client_id,
-            cloudpickle.dumps(VLLM_RPC_SUCCESS_STR),
-        ])
+        await self.socket.send_multipart(
+            [rpc_id, client_id,
+             cloudpickle.dumps(VLLM_RPC_SUCCESS_STR)])
 
     async def abort(self, rpc_id, client_id, request: RPCAbortRequest):
         """Abort request and notify the client of success."""
@@ -102,11 +98,9 @@ class AsyncEngineRPCServer:
             logger.warning("Failed to abort request %s", request.request_id)
         finally:
             # Send confirmation to the client.
-            await self.socket.send_multipart([
-                rpc_id,
-                client_id,
-                cloudpickle.dumps(VLLM_RPC_SUCCESS_STR),
-            ])
+            await self.socket.send_multipart(
+                [rpc_id, client_id,
+                 cloudpickle.dumps(VLLM_RPC_SUCCESS_STR)])
 
     async def generate(self, rpc_id, client_id,
                        generate_request: RPCGenerateRequest):
