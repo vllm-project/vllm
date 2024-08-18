@@ -43,13 +43,6 @@ class Metrics:
         # Unregister any existing vLLM collectors (for CI/CD)
         self._unregister_vllm_metrics()
 
-        # Config Stats
-        self.gauge_cache_info = self._gauge_cls(
-            name="vllm:cache_config_info",
-            documentation="Info about the cache configuration for vLLM.",
-            labelnames=labelnames,
-            multiprocess_mode="sum")
-
         # System stats
         #   Scheduler State
         self.gauge_scheduler_running = self._gauge_cls(
@@ -532,8 +525,8 @@ class PrometheusStatLogger(StatLoggerBase):
         if type == "cache_config":
             metrics_info = obj.metrics_info()
             info_gauge = self._gauge_cls(
-                name='vllm:cache_config',
-                documentation='Information of the LLMEngine CacheConfig',
+                name="vllm:cache_config_info",
+                documentation="Information of the LLMEngine CacheConfig",
                 labelnames=metrics_info.keys(),
                 multiprocess_mode="mostrecent")
             info_gauge.labels(**metrics_info).set(1)
