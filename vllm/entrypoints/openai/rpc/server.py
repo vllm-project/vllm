@@ -172,7 +172,6 @@ class AsyncEngineRPCServer:
         running_tasks = set()
         while True:
             # Wait for a request.
-            # Identity of RPC Endpoint, Identity of Client, Message
             rpc_id, client_id, message = await self.socket.recv_multipart()
 
             # Process the request async.
