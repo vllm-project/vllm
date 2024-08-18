@@ -7,7 +7,7 @@ from typing import (TYPE_CHECKING, Dict, List, Mapping, Optional, Tuple, Type,
 
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
-                         MultiModalConfig, ObservabilityConfig, ParallelConfig,
+                         ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig, TokenizerPoolConfig)
 from vllm.executor.executor_base import ExecutorBase
@@ -765,9 +765,6 @@ class EngineArgs:
             "CPU offload space must be non-negative"
             f", but got {self.cpu_offload_gb}")
 
-        multimodal_config = MultiModalConfig(
-            limit_per_prompt=self.limit_mm_per_prompt or {})
-
         device_config = DeviceConfig(device=self.device)
         model_config = ModelConfig(
             model=self.model,
@@ -791,7 +788,8 @@ class EngineArgs:
             disable_sliding_window=self.disable_sliding_window,
             skip_tokenizer_init=self.skip_tokenizer_init,
             served_model_name=self.served_model_name,
-            multimodal_config=multimodal_config)
+            limit_mm_per_prompt=self.limit_mm_per_prompt,
+        )
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
@@ -948,11 +946,6 @@ class EngineArgs:
                 raise ValueError(
                     f"Invalid module {m} in collect_detailed_traces. "
                     f"Valid modules are {ALLOWED_DETAILED_TRACE_MODULES}")
-            if (m == "model"
-                    or m == "all") and self.pipeline_parallel_size > 1:
-                raise ValueError(
-                    "Collection of detailed traces for the 'model' module is "
-                    "not yet supported with pipeline parallelism.")
         observability_config = ObservabilityConfig(
             otlp_traces_endpoint=self.otlp_traces_endpoint,
             collect_model_forward_time="model" in detailed_trace_modules
@@ -975,7 +968,6 @@ class EngineArgs:
             scheduler_config=scheduler_config,
             device_config=device_config,
             lora_config=lora_config,
-            multimodal_config=multimodal_config,
             speculative_config=speculative_config,
             load_config=load_config,
             decoding_config=decoding_config,
