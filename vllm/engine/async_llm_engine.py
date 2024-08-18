@@ -652,7 +652,7 @@ class AsyncLLMEngine:
     async def get_tokenizer(
         self,
         lora_request: Optional[LoRARequest] = None,
-    ) -> "AnyTokenizer":
+    ) -> AnyTokenizer:
         if self.engine_use_ray:
             return await self.engine.get_tokenizer.remote(  # type: ignore
                 lora_request)
