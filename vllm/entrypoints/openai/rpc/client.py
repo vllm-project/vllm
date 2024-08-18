@@ -28,28 +28,68 @@ INPROC_PROXY_PATH = f"inproc://{uuid4()}"
 
 
 class AsyncEngineRPCClient:
+    """
+    RPCClient that connects to the RPCServer wrapping AsyncLLMEngine.
+    
+    On startup, the RPCClient:
+        - makes DEALER socket (to_rpc_server) that connects to the RPCServer 
+            via ipc, which uses unix sockets under the hood
+            (https://libzmq.readthedocs.io/en/zeromq4-1/zmq_ipc.html)
+        - makes ROUTER socket (from_api_server) that binds to a random 
+            inproc address, which uses memory under the hood
+            (https://libzmq.readthedocs.io/en/zeromq3-x/zmq_inproc.html)
+        - runs a proxy in a background asyncio task between 
+            from_api_server (ROUTER, inproc) and to_rpc_server (DEALER ipc, )
+
+    Each request handled by the asyncio api_server calls generate():
+        - make a DEALER socket that connects to from_api_server via inproc
+        - send a RCPGenerateRequest to the inproc socket
+        - background proxy forwards the request from inproc -> ipc
+        - RPCServer responds to the request one token at a time over ipc
+        - background proxy forwards the response from ipc -> inproc
+
+    The connection looks like this:
+        DEALER <- inproc -> [ ROUTER | DEALER ] <- ipc -> ROUTER
+    
+    Message routing is performed via identities that are managed by the 
+    ROUTER socket. ROUTER sockets track every connection it has and 
+    tells the caller about these. The way it tells the caller is to stick 
+    the connection identity in front of each message received. When we 
+    send the message via a ROUTER, we first send an identity frame.
+    See https://zguide.zeromq.org/docs/chapter3/#The-Extended-Reply-Envelope
+    for more details on connection identities.
+
+    This proxy design enables us to use a single unix socket, which 
+    improves performance by avoiding syscalls (~5%) and avoids resource limits
+    such as ulimit, which defaults to 1024 on ubuntu.
+
+    See: https://zguide.zeromq.org/docs/chapter3/ for more details on the
+    Request-Reply pattern of zeromq sockets.
+    """
 
     def __init__(self, rpc_path: str):
         self.context = zmq.asyncio.Context()
         self.context.set(zmq.constants.MAX_SOCKETS,
                          self.context.get(zmq.constants.SOCKET_LIMIT))
 
-        # In process proxy to RPC Server.
-        self.from_client = self.context.socket(zmq.constants.ROUTER)
-        self.from_client.bind(INPROC_PROXY_PATH)
+        # IPC connection to RPC Server (uses unix sockets).
+        self.to_rcp_server = self.context.socket(zmq.constants.DEALER)
+        self.to_rcp_server.connect(rpc_path)
 
-        # IPC connection to RPC Server.
-        self.to_server = self.context.socket(zmq.constants.DEALER)
-        self.to_server.connect(rpc_path)
+        # In process proxy to RPC Server (used memory-based messaging).
+        self.from_api_server = self.context.socket(zmq.constants.ROUTER)
+        self.from_api_server.bind(INPROC_PROXY_PATH)
 
-        # Background task for proxy.
+        # Asyncio background task for the proxy.
         self.proxy_task = asyncio.create_task(
-            self.run_proxy(self.from_client, self.to_server))
+            self.run_proxy(self.from_api_server, self.to_rcp_server))
 
-        # Maximum number of requests that can be active.
-        # Note: used to set uvicorn --limit-concurrency
-        self.limit_concurrency = self.context.get(
-            zmq.constants.SOCKET_LIMIT)
+        # Maximum number of requests that can be active. This value is
+        # used uvicorn to launch with --limit-concurrency to limit the
+        # maximum number of requests being processed at a time.
+        # Note: https://www.uvicorn.org/server-behavior/#resource-limits
+        # Note: this value is typically 65536
+        self.limit_concurrency = self.context.get(zmq.constants.SOCKET_LIMIT)
 
     async def run_proxy(self, socket_from, socket_to):
         """Background task that runs a proxy"""
@@ -92,10 +132,8 @@ class AsyncEngineRPCClient:
         self.context.destroy()
 
     @contextmanager
-    def socket(self):
-        # Ensure client sockets are always closed after use
-
-        # Connect to RPC socket for Request-Reply pattern,
+    def to_proxy_socket(self):
+        # Connect to the proxy.
         # Note that we use DEALER to enable asynchronous communication
         # to enable streaming.
         socket = self.context.socket(zmq.constants.DEALER)
@@ -119,7 +157,7 @@ class AsyncEngineRPCClient:
                                          error_message: str) -> Any:
         """Send an RPC request that is expecting data back."""
 
-        with self.socket() as socket:
+        with self.to_proxy_socket() as socket:
             # Ping RPCServer with a request.
             await socket.send_multipart([cloudpickle.dumps(request)])
 
@@ -140,7 +178,7 @@ class AsyncEngineRPCClient:
                                         error_message: str,
                                         timeout: Optional[int] = None):
         """Send one-way RPC request to trigger an action."""
-        with self.socket() as socket:
+        with self.to_proxy_socket() as socket:
             # Ping RPC Server with request.
             await socket.send_multipart([cloudpickle.dumps(request)])
 
@@ -263,9 +301,9 @@ class AsyncEngineRPCClient:
 
         finished = False
         try:
-            with self.socket() as socket:
+            with self.to_proxy_socket() as socket:
 
-                # Send RPCGenerateRequest to the RPCServer.
+                # Send RPCGenerateRequest.
                 await socket.send_multipart([
                     cloudpickle.dumps(
                         RPCGenerateRequest(
@@ -277,7 +315,7 @@ class AsyncEngineRPCClient:
                             prompt_adapter_request=prompt_adapter_request))
                 ])
 
-                # Stream back the results from the RPC Server.
+                # Stream back the results.
                 while not finished:
                     message = await socket.recv()
                     request_output = cloudpickle.loads(message)
@@ -303,7 +341,7 @@ class AsyncEngineRPCClient:
     async def check_health(self) -> None:
         """Raise if unhealthy"""
 
-        with self.socket() as socket:
+        with self.to_proxy_socket() as socket:
 
             # Ping RPCServer with CHECK_HEALTH request.
             await socket.send_multipart(

@@ -59,7 +59,8 @@ class AsyncEngineRPCServer:
                 raise ValueError("Unknown Config Request: %s", request)
 
             await self.socket.send_multipart(
-                [rpc_id, client_id, cloudpickle.dumps(config)])
+                [rpc_id, client_id,
+                 cloudpickle.dumps(config)])
 
         except Exception as e:
             ### Notify client of all failures
@@ -71,7 +72,8 @@ class AsyncEngineRPCServer:
         tracing_flag = await self.engine.is_tracing_enabled()
 
         await self.socket.send_multipart(
-            [rpc_id, client_id, cloudpickle.dumps(tracing_flag)])
+            [rpc_id, client_id,
+             cloudpickle.dumps(tracing_flag)])
 
     async def do_log_stats(self, rpc_id, client_id):
         """Log stats and confirm success."""

@@ -29,9 +29,10 @@ async def serve_http(app: FastAPI, engine: AsyncEngineClient,
     # Set concurrency limits in uvicorn if running in multiprocessing mode
     # since zmq has maximum socket limit of zmq.constants.SOCKET_LIMIT (65536).
     if engine.limit_concurrency is not None:
-        logger.info("Launching Uvicorn with --limit_concurrency %s. To avoid this "
-                    "limit at the expense of performance run with "
-                    "--disable-frontend-multiprocessing", engine.limit_concurrency)
+        logger.info(
+            "Launching Uvicorn with --limit_concurrency %s. To avoid this "
+            "limit at the expense of performance run with "
+            "--disable-frontend-multiprocessing", engine.limit_concurrency)
         uvicorn_kwargs["limit_concurrency"] = engine.limit_concurrency
 
     config = uvicorn.Config(app, **uvicorn_kwargs)

@@ -29,7 +29,7 @@ class AsyncEngineClient(Protocol):
     @property
     def errored(self) -> bool:
         ...
-    
+
     @property
     def limit_concurrency(self) -> Optional[int]:
         """Maximum number of concurrently running requests."""
