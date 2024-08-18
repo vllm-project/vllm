@@ -3,7 +3,7 @@ import json
 import re
 import shutil
 from tempfile import TemporaryDirectory
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import jsonschema
 import openai  # use the official client for correctness check
@@ -274,7 +274,8 @@ async def test_too_many_completion_logprobs(client: openai.AsyncOpenAI,
     [(MODEL_NAME, 1), (MODEL_NAME, 0), (MODEL_NAME, -1), (MODEL_NAME, None)],
 )
 async def test_prompt_logprobs_chat(client: openai.AsyncOpenAI,
-                                    model_name: str, prompt_logprobs: int):
+                                    model_name: str,
+                                    prompt_logprobs: Optional[int]):
     params: Dict = {
         "messages": [{
             "role": "system",
@@ -303,7 +304,7 @@ async def test_prompt_logprobs_chat(client: openai.AsyncOpenAI,
             await client.chat.completions.create(**params)
     else:
         completion = await client.chat.completions.create(**params)
-        if prompt_logprobs and prompt_logprobs > 0:
+        if prompt_logprobs is not None:
             assert completion.prompt_logprobs is not None
             assert len(completion.prompt_logprobs) > 0
         else:
@@ -356,7 +357,7 @@ async def test_more_than_one_prompt_logprobs_chat(client: openai.AsyncOpenAI,
                                                          (MODEL_NAME, None)])
 async def test_prompt_logprobs_completion(client: openai.AsyncOpenAI,
                                           model_name: str,
-                                          prompt_logprobs: int):
+                                          prompt_logprobs: Optional[int]):
     params: Dict = {
         "prompt": ["A robot may not injure another robot", "My name is"],
         "model": model_name,
@@ -369,7 +370,7 @@ async def test_prompt_logprobs_completion(client: openai.AsyncOpenAI,
             await client.completions.create(**params)
     else:
         completion = await client.completions.create(**params)
-        if prompt_logprobs and prompt_logprobs > 0:
+        if prompt_logprobs is not None:
             assert completion.choices[0].prompt_logprobs is not None
             assert len(completion.choices[0].prompt_logprobs) > 0
 
