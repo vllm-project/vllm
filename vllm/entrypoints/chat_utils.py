@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import (Any, Awaitable, Iterable, List, Literal, Optional, Tuple,
-                    Union, cast)
+                    Union)
 
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -15,8 +15,8 @@ from openai.types.chat import (
     ChatCompletionMessageParam as OpenAIChatCompletionMessageParam)
 # yapf: enable
 # pydantic needs the TypedDict from typing_extensions
-from pydantic import ConfigDict
-from typing_extensions import Required, TypedDict
+from pydantic import ConfigDict, TypeAdapter
+from typing_extensions import Required, TypeAlias, TypedDict
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
@@ -49,9 +49,11 @@ class CustomChatCompletionContentPartParam(TypedDict, total=False):
     """The type of the content part."""
 
 
-ChatCompletionContentPartParam = Union[OpenAIChatCompletionContentPartParam,
-                                       ChatCompletionContentPartAudioParam,
-                                       CustomChatCompletionContentPartParam]
+ChatCompletionContentPartParam: TypeAlias = Union[
+    OpenAIChatCompletionContentPartParam,
+    ChatCompletionContentPartAudioParam,
+    CustomChatCompletionContentPartParam,
+]
 
 
 class CustomChatCompletionMessageParam(TypedDict, total=False):
@@ -150,6 +152,11 @@ def _get_full_multimodal_text_prompt(placeholder_token_str: str,
     return f"{placeholder_token_str}\n{text_prompt}"
 
 
+_TextParser = TypeAdapter(ChatCompletionContentPartTextParam)
+_ImageParser = TypeAdapter(ChatCompletionContentPartImageParam)
+_AudioParser = TypeAdapter(ChatCompletionContentPartAudioParam)
+
+
 def _parse_chat_message_content_parts(
     role: str,
     parts: Iterable[ChatCompletionContentPartParam],
@@ -163,7 +170,7 @@ def _parse_chat_message_content_parts(
     for part in parts:
         part_type = part["type"]
         if part_type == "text":
-            text = cast(ChatCompletionContentPartTextParam, part)["text"]
+            text = _TextParser.validate_python(part)["text"]
             texts.append(text)
         elif part_type == "image_url":
             modality = "image"
@@ -171,8 +178,7 @@ def _parse_chat_message_content_parts(
                 raise NotImplementedError(
                     "Multiple multimodal inputs is currently not supported.")
 
-            image_url = cast(ChatCompletionContentPartImageParam,
-                             part)["image_url"]
+            image_url = _ImageParser.validate_python(part)["image_url"]
 
             if image_url.get("detail", "auto") != "auto":
                 logger.warning(
@@ -187,8 +193,7 @@ def _parse_chat_message_content_parts(
                 raise NotImplementedError(
                     "Multiple multimodal inputs is currently not supported.")
 
-            audio_url = cast(ChatCompletionContentPartAudioParam,
-                             part)["audio_url"]
+            audio_url = _AudioParser.validate_python(part)["audio_url"]
             audio_future = async_get_and_parse_audio(audio_url["url"])
             mm_futures.append(audio_future)
         else:
