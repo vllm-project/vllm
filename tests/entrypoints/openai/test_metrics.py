@@ -147,6 +147,18 @@ EXPECTED_METRICS = [
     "vllm:prompt_tokens_total",
     "vllm:generation_tokens_total",
     "vllm:request_success_total",
+    "vllm:cache_config_info"
+    # labels in cache_config_info
+    "block_size",
+    "cache_dtype",
+    "cpu_offload_gb",
+    "enable_prefix_caching"
+    "gpu_memory_utilization=",
+    "num_cpu_blocks",
+    "num_gpu_blocks=",
+    "num_gpu_blocks_override",
+    "sliding_window",
+    "swap_space_bytes",
 ]
 
 
