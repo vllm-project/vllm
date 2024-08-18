@@ -29,54 +29,75 @@ check_hf_token() {
     fi
 }
 
-main() {
-
-    check_gpus
-    check_hf_token
-
-    df -h
-
-    (which wget && which curl) || (apt-get update && apt-get install -y wget curl)
-    (which jq) || (apt-get update && apt-get -y install jq)
-
-    cd $VLLM_SOURCE_CODE_LOC/benchmarks
-    wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
-    
+get_current_llm_serving_engine() {
 
     # run lmdeploy
     if which lmdeploy >/dev/null; then
-        echo "lmdeploy is available, redirect to run-lmdeploy-nightly.sh"
-        bash ../.buildkite/nightly-benchmarks/scripts/run-lmdeploy-nightly.sh
-        exit 0
+        echo "Container: lmdeploy"
+        export CURRENT_LLM_SERVING_ENGINE=lmdeploy
+        return
     fi
 
     # run tgi
     if [ -e /tgi-entrypoint.sh ]; then
-        echo "tgi is available, redirect to run-tgi-nightly.sh"
-        bash ../.buildkite/nightly-benchmarks/scripts/run-tgi-nightly.sh
-        exit 0
+        echo "Container: tgi"
+        export CURRENT_LLM_SERVING_ENGINE=tgi
+        return
     fi
 
     # run trt
     if which trtllm-build >/dev/null; then
-        echo "trtllm is available, redirect to run-trt-nightly.sh"
-        bash ../.buildkite/nightly-benchmarks/scripts/run-trt-nightly.sh
-        exit 0
+        echo "Container: trt"
+        export CURRENT_LLM_SERVING_ENGINE=trt
+        return
     fi
 
-    # run sglang
+    # run sgl
     if [ -e /sgl-workspace ]; then
-        echo "SGLang is available, redirect to run-sgl-nightly.sh"
-        bash ../.buildkite/nightly-benchmarks/scripts/run-sgl-nightly.sh
-        exit 0
+        echo "Container: sgl"
+        export CURRENT_LLM_SERVING_ENGINE=sgl
+        return
     fi
 
     # run vllm
     if [ -e /vllm-workspace ]; then
-        echo "vllm is available, redirect to run-vllm-nightly.sh"
-        bash ../.buildkite/nightly-benchmarks/scripts/run-vllm-nightly.sh
-        exit 0
+        echo "Container: vllm"
+        export CURRENT_LLM_SERVING_ENGINE=vllm
+        return
     fi
+}
+
+ensure_installed () {
+    # Ensure that the given command is installed by apt-get
+    local cmd=$1
+    if ! which $cmd >/dev/null; then
+        apt-get update && apt-get install -y $cmd
+    fi
+}
+
+main() {
+
+    check_gpus
+    check_hf_token
+    get_current_llm_serving_engine
+
+    # check storage
+    df -h
+
+    ensure_installed wget
+    ensure_installed curl
+    ensure_installed jq
+
+    cd $VLLM_SOURCE_CODE_LOC/benchmarks
+    wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
+    declare -g RESULTS_FOLDER=results/
+    mkdir -p $RESULTS_FOLDER
+    BENCHMARK_ROOT=../.buildkite/nightly-benchmarks/
+
+    run_serving_tests $BENCHMARK_ROOT/tests/nightly-tests.json
+    python3 -m pip install tabulate pandas
+    python3 $BENCHMARK_ROOT/scripts/summary-nightly-results.py
+    upload_to_buildkite
 
 }
 
