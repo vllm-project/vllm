@@ -84,6 +84,8 @@ kill_processes_launched_by_current_bash() {
 kill_gpu_processes() {
 
   # Kill all python processes launched from current bash script
+  ps -e
+  lsof -t -i:8000 | xargs -r kill -9
   kill_processes_launched_by_current_bash python
   kill_processes_launched_by_current_bash python3
   kill_processes_launched_by_current_bash pt_main_thread
@@ -348,6 +350,7 @@ main() {
   # dependencies
   (which wget && which curl) || (apt-get update && apt-get install -y wget curl)
   (which jq) || (apt-get update && apt-get -y install jq)
+  (which lsof) || (apt-get update && apt-get install -y lsof)
 
   # get the current IP address, required by benchmark_serving.py
   export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
