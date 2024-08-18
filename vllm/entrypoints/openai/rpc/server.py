@@ -94,7 +94,7 @@ class AsyncEngineRPCServer:
         try:
             # Abort the request in the llm engine.
             await self.engine.abort(request.request_id)
-        except Exception:
+        except Exception as e:
             logger.warning("Failed to abort request %s", request.request_id)
         finally:
             # Send confirmation to the client.
@@ -127,7 +127,7 @@ class AsyncEngineRPCServer:
             await self.engine.check_health()
             await self.socket.send_multipart(
                 [rpc_id, client_id,
-                 cloudpickle.dumps(VLLM_RPC_HEALTHY_STR)])
+                 cloudpickle.dumps(VLLM_RPC_SUCCESS_STR)])
 
         except Exception as e:
             await self.socket.send_multipart(
@@ -158,7 +158,7 @@ class AsyncEngineRPCServer:
                 return self.do_log_stats(rpc_id, client_id)
             elif request == RPCUtilityRequest.IS_SERVER_READY:
                 return self.is_server_ready(rpc_id, client_id)
-            elif request == RPCUtilityRequest.CHECK_HEALTH:
+            elif request == RPCUtilityRequest.IS_SERVER_HEALTHY:
                 return self.check_health(rpc_id, client_id)
             elif request == RPCUtilityRequest.IS_TRACING_ENABLED:
                 return self.is_tracing_enabled(rpc_id, client_id)

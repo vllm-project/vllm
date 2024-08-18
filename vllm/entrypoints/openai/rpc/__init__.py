@@ -8,7 +8,8 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 
 VLLM_RPC_SUCCESS_STR = "SUCCESS"
-VLLM_RPC_HEALTHY_STR = "HEALTHY"
+VLLM_RPC_SERVER_START_TIMEOUT_MS = 1000
+VLLM_RPC_HEALTH_TIMEOUT_MS = 10000
 
 
 @dataclass
@@ -34,7 +35,7 @@ class RPCUtilityRequest(Enum):
     GET_SCHEDULER_CONFIG = 5
     GET_LORA_CONFIG = 6
     DO_LOG_STATS = 7
-    CHECK_HEALTH = 8
+    IS_SERVER_HEALTHY = 8
     IS_TRACING_ENABLED = 9
 
 

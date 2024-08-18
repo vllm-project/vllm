@@ -10,18 +10,20 @@ import zmq.asyncio
 from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.entrypoints.openai.rpc import (RPC_REQUEST_TYPE,
-                                         VLLM_RPC_HEALTHY_STR,
+                                         VLLM_RPC_HEALTH_TIMEOUT_MS,
+                                         VLLM_RPC_SERVER_START_TIMEOUT_MS,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCGenerateRequest, RPCUtilityRequest)
 from vllm.inputs import PromptInputs
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 
-# Time to wait before checking it the server process is alive.
-SERVER_START_TIMEOUT_MS = 1000
+logger = init_logger(__name__)
+
 
 # Path used for inprocess proxy.
 INPROC_PROXY_PATH = f"inproc://{uuid4()}"
@@ -91,6 +93,24 @@ class AsyncEngineRPCClient:
         # Note: this value is typically 65536
         self.limit_concurrency = self.context.get(zmq.constants.SOCKET_LIMIT)
 
+    @property
+    def is_running(self) -> bool:
+        return not self._errored
+
+    @property
+    def is_stopped(self) -> bool:
+        return self._errored
+
+    @property
+    def errored(self) -> bool:
+        return self._errored
+    
+    def close(self):
+        """Destroy the ZeroMQ Context."""
+        self.from_api_server.close()
+        self.to_rcp_server.close()
+        self.context.destroy()
+    
     async def run_proxy(self, socket_from, socket_to):
         """Background task that runs a proxy"""
         poller = zmq.asyncio.Poller()
@@ -107,10 +127,14 @@ class AsyncEngineRPCClient:
                 await socket_from.send_multipart(msg)
 
     async def setup(self):
-        """Setup the client before it starts sending server requests."""
+        """Setup the client before it starts sending server requests.
+        
+        This should be called immediately after __init__
+        (it would be part of __init__ if not for async)
+        """
 
         # Wait until server is ready.
-        await self.wait_for_server()
+        await self._wait_for_server_rpc()
         self._errored = False
 
         # Get the configs.
@@ -127,15 +151,10 @@ class AsyncEngineRPCClient:
             enable_lora=bool(await self._get_lora_config_rpc()),
         )
 
-    def close(self):
-        """Destroy the ZeroMQ Context."""
-        self.context.destroy()
-
     @contextmanager
     def to_proxy_socket(self):
         # Connect to the proxy.
-        # Note that we use DEALER to enable asynchronous communication
-        # to enable streaming.
+        # DEALER enables asynch communication for streaming.
         socket = self.context.socket(zmq.constants.DEALER)
         try:
             socket.connect(INPROC_PROXY_PATH)
@@ -162,16 +181,20 @@ class AsyncEngineRPCClient:
             await socket.send_multipart([cloudpickle.dumps(request)])
 
             # Await the data from the Server.
-            data = cloudpickle.loads(await socket.recv())
+            response = cloudpickle.loads(await socket.recv())
 
-        if not isinstance(data, expected_type):
+        if not isinstance(response, expected_type):
             # LoRAConfig can be None.
-            if expected_type == LoRAConfig and data is None:
+            if expected_type == LoRAConfig and response is None:
                 pass
+            # Propogate Exception Engine.
+            elif isinstance(response, Exception):
+                logger.warning(error_message)
+                raise response
             else:
                 raise ValueError(error_message)
 
-        return data
+        return response
 
     async def _send_one_way_rpc_request(self,
                                         request: RPC_REQUEST_TYPE,
@@ -189,6 +212,10 @@ class AsyncEngineRPCClient:
             response = cloudpickle.loads(await socket.recv())
 
         if not isinstance(response, str) or response != VLLM_RPC_SUCCESS_STR:
+            # Propogate Exception.
+            if isinstance(response, Exception):
+                logger.warning(error_message)
+                raise response
             raise ValueError(error_message)
 
         return response
@@ -205,14 +232,22 @@ class AsyncEngineRPCClient:
     async def is_tracing_enabled(self) -> bool:
         return self.tracing_flag
 
-    async def wait_for_server(self):
+    async def _wait_for_server_rpc(self):
         """Wait for the RPCServer to start up."""
 
         await self._send_one_way_rpc_request(
             request=RPCUtilityRequest.IS_SERVER_READY,
             error_message="Unable to start RPC Server.",
-            timeout=SERVER_START_TIMEOUT_MS)
+            timeout=VLLM_RPC_HEALTH_TIMEOUT_MS)
 
+    async def _check_health_rpc(self) -> None:
+        """Raise if unhealthy"""
+
+        await self._send_one_way_rpc_request(
+            request=RPCUtilityRequest.IS_SERVER_HEALTHY,
+            error_message="Did not get HEALTHY response from RPC Server",
+            timeout=VLLM_RPC_HEALTH_TIMEOUT_MS)
+        
     async def _get_model_config_rpc(self) -> ModelConfig:
         """Get the ModelConfig object from the RPC Server"""
 
@@ -276,18 +311,6 @@ class AsyncEngineRPCClient:
             request=RPCUtilityRequest.DO_LOG_STATS,
             error_message="RPCRequest DO_LOG_STATS failed.")
 
-    @property
-    def is_running(self) -> bool:
-        return not self._errored
-
-    @property
-    def is_stopped(self) -> bool:
-        return self._errored
-
-    @property
-    def errored(self) -> bool:
-        return self._errored
-
     async def generate(
         self,
         inputs: PromptInputs,
@@ -325,7 +348,7 @@ class AsyncEngineRPCClient:
                         # Use this to set the sync `is_running` and `errored`
                         # properties.
                         try:
-                            await self.check_health()
+                            await self._check_health_rpc()
                         except Exception:
                             self._errored = True
                         # NB: do before raising here so that the flag is set
@@ -338,26 +361,6 @@ class AsyncEngineRPCClient:
             if not finished:
                 await self.abort(request_id)
 
-    async def check_health(self) -> None:
-        """Raise if unhealthy"""
-
-        with self.to_proxy_socket() as socket:
-
-            # Ping RPCServer with CHECK_HEALTH request.
-            await socket.send_multipart(
-                [cloudpickle.dumps(RPCUtilityRequest.CHECK_HEALTH)])
-
-            # Await the reply from the server.
-            # TODO: do we need an internal timeout here?
-            # Or do we expect the external probe to timeout and let this chill?
-            health_message = cloudpickle.loads(await socket.recv())
-
-        if isinstance(health_message, Exception):
-            raise health_message
-
-        if health_message != VLLM_RPC_HEALTHY_STR:
-            raise ValueError("Expected healthy response from backend but got "
-                             "f{health_message}")
 
     async def encode(self, *args,
                      **kwargs) -> AsyncGenerator[EmbeddingRequestOutput, None]:
