@@ -62,7 +62,6 @@ class AsyncEngineRPCServer:
                  cloudpickle.dumps(config)])
 
         except Exception as e:
-            ### Notify client of all failures
             await self.socket.send_multipart(
                 [rpc_id, client_id, cloudpickle.dumps(e)])
 
