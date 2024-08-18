@@ -10,11 +10,12 @@ from vllm.attention.selector import (_Backend, get_env_variable_attn_backend,
                                      get_global_forced_attn_backend,
                                      global_force_attn_backend)
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, MultiModalConfig, ObservabilityConfig,
-                         ParallelConfig, PromptAdapterConfig, SchedulerConfig)
-from vllm.inputs import INPUT_REGISTRY
+                         ModelConfig, ObservabilityConfig, ParallelConfig,
+                         PromptAdapterConfig, SchedulerConfig)
+from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (IntermediateTensors, PoolerOutput, SamplerOutput,
                            SequenceGroupMetadata)
@@ -81,13 +82,14 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
-        multimodal_config: Optional[MultiModalConfig] = None,
         observability_config: Optional[ObservabilityConfig] = None,
+        input_registry: InputRegistry = INPUT_REGISTRY,
+        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ):
         '''
         EncoderDecoderModelRunner constructor.
 
-        `lora_config`, `multimodal_config`, and prompt_adapter_config are
+        `lora_config` and `prompt_adapter_config` are
         unused (since these features are not yet supported for encoder/decoder
         models) but these arguments are present here for compatibility with 
         the base-class constructor.
@@ -270,7 +272,11 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         # number of tokens equal to max_num_batched_tokens.
         seqs: List[SequenceGroupMetadata] = []
 
-        model_config = self.model_config
+        max_mm_tokens = self.mm_registry.get_max_multimodal_tokens(
+            self.model_config)
+        if max_mm_tokens > 0:
+            raise NotImplementedError(
+                "Multi-modal encoder-decoder models are not supported yet")
 
         batch_size = 0
         for group_id in range(max_num_seqs):
@@ -278,8 +284,10 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                        (group_id < max_num_batched_tokens % max_num_seqs))
             batch_size += seq_len
 
-            seq_data, _ = INPUT_REGISTRY \
-                .dummy_data_for_profiling(model_config, seq_len)
+            seq_data, _ = self.input_registry \
+                .dummy_data_for_profiling(self.model_config,
+                                          seq_len,
+                                          self.mm_registry)
 
             # Having more tokens is over-conservative but otherwise fine
             assert len(seq_data.prompt_token_ids) >= seq_len, (
