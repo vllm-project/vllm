@@ -913,8 +913,8 @@ class SequenceGroupMetadata(
     def __post_init__(self):
         if self.seq_data is not None and self.token_chunk_size is None:
             if self.is_prompt:
-                self.token_chunk_size = list(
-                    self.seq_data.values())[0].get_len()
+                self.token_chunk_size = next(iter(
+                    self.seq_data.values())).get_len()
             else:
                 self.token_chunk_size = 1
 

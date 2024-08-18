@@ -10,10 +10,11 @@ def encode_hook(obj: Any) -> Any:
     See https://jcristharif.com/msgspec/api.html#msgspec.msgpack.Encoder
     """
     if isinstance(obj, array):
-        assert obj.typecode == "l"
+        assert obj.typecode == VLLM_TOKEN_ID_ARRAY_TYPE, (
+            f"vLLM array type should use '{VLLM_TOKEN_ID_ARRAY_TYPE}' type. "
+            f"Given array has a type code of {obj.typecode}."
+        )
         return obj.tobytes()
-    else:
-        raise ValueError(f"Unsupported serialization type: {type(obj)}")
 
 
 def decode_hook(type: Type, obj: Any) -> Any:
@@ -25,5 +26,3 @@ def decode_hook(type: Type, obj: Any) -> Any:
         deserialized = array(VLLM_TOKEN_ID_ARRAY_TYPE)
         deserialized.frombytes(obj)
         return deserialized
-    else:
-        raise ValueError(f"Unsupported deserialization type: {type(obj)}")

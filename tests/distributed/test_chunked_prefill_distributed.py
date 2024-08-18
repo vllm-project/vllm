@@ -20,7 +20,6 @@ from ..utils import fork_new_process_for_each_test
                     reason="Need at least 2 GPUs to run the test.")
 @pytest.mark.parametrize("model, distributed_executor_backend", [
     ("facebook/opt-125m", "ray"),
-    ("facebook/opt-125m", "ray"),
     ("meta-llama/Llama-2-7b-hf", "ray"),
     ("facebook/opt-125m", "mp"),
     ("meta-llama/Llama-2-7b-hf", "mp"),

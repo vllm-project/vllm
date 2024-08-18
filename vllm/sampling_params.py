@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Union
 import msgspec
 import torch
 from typing_extensions import Annotated
+from functools import cached_property
 
 from vllm.logger import init_logger
 
@@ -33,7 +34,9 @@ to sample from."""
 
 
 class SamplingParams(msgspec.Struct,
-                     omit_defaults=True):  # type: ignore[call-arg]
+                     omit_defaults=True,  # type: ignore[call-arg]
+                     # required for @cached_property.
+                     dict=True):  # type: ignore[call-arg]
     """Sampling parameters for text generation.
 
     Overall, we follow the sampling parameters from the OpenAI text completion
@@ -309,7 +312,7 @@ class SamplingParams(msgspec.Struct,
                     eos_ids.update(self.stop_token_ids)
                     self.stop_token_ids = list(eos_ids)
 
-    @property
+    @cached_property
     def sampling_type(self) -> SamplingType:
         if self.use_beam_search:
             return SamplingType.BEAM
