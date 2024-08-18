@@ -1,9 +1,23 @@
+"""
+These types are defined in this file to avoid importing vllm.engine.metrics
+and therefore importing prometheus_client.
+
+This is required due to usage of Prometheus multiprocess mode to enable 
+metrics after splitting out the uvicorn process from the engine process.
+
+Prometheus multiprocess mode requires setting PROMETHEUS_MULTIPROC_DIR
+before prometheus_client is imported. Typically, this is done by setting
+the env variable before launch, but since we are a library, we need to
+do this in Python code and lazily import prometheus_client.
+"""
+
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Protocol
 
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
+
 
 
 @dataclass
