@@ -555,12 +555,9 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 output_token_ids = _execute_model(
                     model_input.token_ids[None, start_idx:end_idx],
                     model_input.position_ids[None, start_idx:end_idx],
-                    model_input.attn_metadata,
-                    model_input.input_lens[i:i + 1],
-                    model_input.t[i:i + 1],
-                    model_input.p[i:i + 1],
-                    model_input.num_samples,
-                    kv_caches)
+                    model_input.attn_metadata, model_input.input_lens[i:i + 1],
+                    model_input.t[i:i + 1], model_input.p[i:i + 1],
+                    model_input.num_samples, kv_caches)
                 # Retrieve the outputs to CPU.
                 next_token_ids += output_token_ids.cpu().tolist()
                 start_idx = end_idx
