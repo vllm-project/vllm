@@ -24,7 +24,9 @@ class LoRAParserAction(argparse.Action):
         values: Optional[Union[str, Sequence[str]]],
         option_string: Optional[str] = None,
     ):
-        if values is None or isinstance(values, str):
+        if values is None:
+            values = []
+        if isinstance(values, str):
             raise TypeError("Expected values to be a list")
 
         lora_list: List[LoRAModulePath] = []
@@ -43,7 +45,9 @@ class PromptAdapterParserAction(argparse.Action):
         values: Optional[Union[str, Sequence[str]]],
         option_string: Optional[str] = None,
     ):
-        if values is None or isinstance(values, str):
+        if values is None:
+            values = []
+        if isinstance(values, str):
             raise TypeError("Expected values to be a list")
 
         adapter_list: List[PromptAdapterPath] = []
