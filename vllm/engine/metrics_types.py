@@ -19,7 +19,6 @@ from typing import Dict, List, Optional, Protocol
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 
-
 @dataclass
 class Stats:
     """Created by LLMEngine for use by StatLogger."""
