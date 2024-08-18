@@ -163,19 +163,19 @@ class AsyncEngineRPCClient:
             await socket.send_multipart([cloudpickle.dumps(request)])
 
             # Await the data from the Server.
-            response = cloudpickle.loads(await socket.recv())
+            data = cloudpickle.loads(await socket.recv())
 
-        if not isinstance(response, expected_type):
+        if not isinstance(data, expected_type):
             # LoRAConfig can be None.
-            if expected_type == LoRAConfig and response is None:
+            if expected_type == LoRAConfig and data is None:
                 pass
-            elif isinstance(response, Exception):
+            elif isinstance(data, Exception):
                 logger.warning(error_message)
-                raise response
+                raise data
             else:
                 raise ValueError(error_message)
 
-        return response
+        return data
 
     async def _send_one_way_rpc_request(self,
                                         request: RPC_REQUEST_TYPE,
