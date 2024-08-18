@@ -50,10 +50,8 @@ class CustomChatCompletionContentPartParam(TypedDict, total=False):
 
 
 ChatCompletionContentPartParam: TypeAlias = Union[
-    OpenAIChatCompletionContentPartParam,
-    ChatCompletionContentPartAudioParam,
-    CustomChatCompletionContentPartParam,
-]
+    OpenAIChatCompletionContentPartParam, ChatCompletionContentPartAudioParam,
+    CustomChatCompletionContentPartParam, ]
 
 
 class CustomChatCompletionMessageParam(TypedDict, total=False):
