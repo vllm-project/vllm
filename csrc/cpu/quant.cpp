@@ -1,7 +1,5 @@
 #include "cpu_types.hpp"
 #include "dnnl_helper.hpp"
-#include <c10/util/Exception.h>
-#include <torch/types.h>
 
 namespace {
 template <typename scalar_t>
