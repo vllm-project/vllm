@@ -144,13 +144,13 @@ async def build_async_engine_client(
 
             yield async_engine_client
         finally:
-            # Ensure rpc server process was terminated.
+            # Ensure rpc server process was terminated
             rpc_server_process.terminate()
 
-            # Cleanup zeromq state.
+            # Close all open connections to the backend
             async_engine_client.close()
 
-            # Wait for server process to join.
+            # Wait for server process to join
             rpc_server_process.join()
 
 
