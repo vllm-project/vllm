@@ -321,7 +321,7 @@ class AsyncEngineRPCClient:
         try:
             with self.to_proxy_socket() as socket:
 
-                # Send RPCGenerateRequest.
+                # Send RPCGenerateRequest to the RPCServer.
                 await socket.send_multipart([
                     cloudpickle.dumps(
                         RPCGenerateRequest(
@@ -333,7 +333,7 @@ class AsyncEngineRPCClient:
                             prompt_adapter_request=prompt_adapter_request))
                 ])
 
-                # Stream back the results.
+                # Stream back the results from the RPC Server.
                 while not finished:
                     message = await socket.recv()
                     request_output = cloudpickle.loads(message)
