@@ -761,7 +761,6 @@ def get_rope(
     rope_scaling: Optional[Dict[str, Any]] = None,
     dtype: Optional[torch.dtype] = None,
     partial_rotary_factor: float = 1.0,
-    rope_
 ) -> RotaryEmbedding:
     if dtype is None:
         dtype = torch.get_default_dtype()
