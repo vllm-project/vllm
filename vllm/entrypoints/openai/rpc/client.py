@@ -112,7 +112,7 @@ class AsyncEngineRPCClient:
         """Setup the client before it starts sending server requests."""
 
         # Wait until server is ready.
-        await self.wait_for_server()
+        await self._wait_for_server_rpc()
         self._errored = False
 
         # Get the configs.
@@ -215,20 +215,12 @@ class AsyncEngineRPCClient:
     async def is_tracing_enabled(self) -> bool:
         return self.tracing_flag
 
-    async def wait_for_server(self):
+    async def _wait_for_server_rpc(self):
         """Wait for the RPCServer to start up."""
 
         await self._send_one_way_rpc_request(
             request=RPCUtilityRequest.IS_SERVER_READY,
             error_message="Unable to start RPC Server",
-            timeout=VLLM_RPC_HEALTH_TIMEOUT_MS)
-
-    async def check_health(self) -> None:
-        """Raise if unhealthy"""
-
-        await self._send_one_way_rpc_request(
-            request=RPCUtilityRequest.IS_SERVER_HEALTHY,
-            error_message="Got Unhealthy response from RPC Server",
             timeout=VLLM_RPC_HEALTH_TIMEOUT_MS)
         
     async def _get_model_config_rpc(self) -> ModelConfig:
@@ -343,7 +335,7 @@ class AsyncEngineRPCClient:
                         # Use this to set the sync `is_running` and `errored`
                         # properties.
                         try:
-                            await self.check_health()
+                            await self._check_health_rpc()
                         except Exception:
                             self._errored = True
                         # NB: do before raising here so that the flag is set
@@ -355,6 +347,14 @@ class AsyncEngineRPCClient:
         finally:
             if not finished:
                 await self.abort(request_id)
+
+    async def check_health(self) -> None:
+        """Raise if unhealthy"""
+
+        await self._send_one_way_rpc_request(
+            request=RPCUtilityRequest.IS_SERVER_HEALTHY,
+            error_message="Got Unhealthy response from RPC Server",
+            timeout=VLLM_RPC_HEALTH_TIMEOUT_MS)
 
 
     async def encode(self, *args,
