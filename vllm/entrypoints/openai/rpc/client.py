@@ -23,7 +23,7 @@ from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 # Time to wait before checking it the server process is alive.
 SERVER_START_TIMEOUT_MS = 1000
 
-# Inprocess path
+# Path used for inprocess proxy.
 INPROC_PROXY_PATH = f"inproc://{uuid4()}"
 
 
