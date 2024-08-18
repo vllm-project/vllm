@@ -762,13 +762,11 @@ class Llama3RotaryEmbedding(RotaryEmbedding):
         high_freq_wavelen = self.orig_max_position / self.high_freq_factor
 
         wave_len = 2 * math.pi / inv_freqs
-        if self.low_freq_factor == self.high_freq_factor:
-            new_freqs = torch.where(wave_len < high_freq_wavelen, inv_freqs,
-                                    inv_freqs / self.scaling_factor)
-            return new_freqs
-
-        smooth = (self.orig_max_position / wave_len - self.low_freq_factor) / (
-            self.high_freq_factor - self.low_freq_factor)
+        if self.low_freq_factor != self.high_freq_factor:
+            smooth = (self.orig_max_position / wave_len - self.low_freq_factor
+                      ) / (self.high_freq_factor - self.low_freq_factor)
+        else:
+            smooth = 0
         new_freqs = torch.where(
             wave_len < high_freq_wavelen,
             inv_freqs,
