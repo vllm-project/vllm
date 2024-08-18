@@ -11,6 +11,7 @@ from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.entrypoints.openai.rpc import (RPC_REQUEST_TYPE,
                                          VLLM_RPC_HEALTH_TIMEOUT_MS,
+                                         VLLM_RPC_PROXY_POLL_TIMEOUT_MS,
                                          VLLM_RPC_SERVER_START_TIMEOUT_MS,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCGenerateRequest, RPCUtilityRequest)
@@ -98,7 +99,7 @@ class AsyncEngineRPCClient:
         poller.register(socket_from, zmq.constants.POLLIN)
         poller.register(socket_to, zmq.constants.POLLIN)
         while True:
-            events = await poller.poll()
+            events = await poller.poll(timeout=VLLM_RPC_PROXY_POLL_TIMEOUT_MS)
             events = dict(events)
             if socket_from in events:
                 msg = await socket_from.recv_multipart()
@@ -107,11 +108,14 @@ class AsyncEngineRPCClient:
                 msg = await socket_to.recv_multipart()
                 await socket_from.send_multipart(msg)
 
-    async def setup(self):
+    async def setup(self) -> bool:
         """Setup the client before it starts sending server requests."""
 
         # Wait until server is ready.
-        await self._wait_for_server_rpc()
+        did_timeout = await self._wait_for_server_rpc()
+        if did_timeout:
+            return False
+
         self._errored = False
 
         # Get the configs.
@@ -128,9 +132,13 @@ class AsyncEngineRPCClient:
             enable_lora=bool(await self._get_lora_config_rpc()),
         )
 
+        return True
+
     def close(self):
         """Destroy the ZeroMQ Context."""
-        self.context.destroy()
+        # Close all sockets associated with this context and
+        # then terminate the context.
+        self.context.destroy(linger=0)
 
     @contextmanager
     def to_proxy_socket(self):
@@ -180,15 +188,18 @@ class AsyncEngineRPCClient:
     async def _send_one_way_rpc_request(self,
                                         request: RPC_REQUEST_TYPE,
                                         error_message: str,
-                                        timeout: Optional[int] = None):
-        """Send one-way RPC request to trigger an action."""
+                                        timeout: Optional[int] = None) -> bool:
+        """
+        Send one-way RPC request to trigger an action. 
+        Returns True if timeout.
+        """
         with self.to_proxy_socket() as socket:
             # Ping RPC Server with request.
             await socket.send_multipart([cloudpickle.dumps(request)])
 
             # Await acknowledgement from RPCServer.
             if timeout is not None and await socket.poll(timeout=timeout) == 0:
-                raise TimeoutError(f"server didn't reply within {timeout} ms")
+                return True
 
             response = cloudpickle.loads(await socket.recv())
 
@@ -198,7 +209,7 @@ class AsyncEngineRPCClient:
                 raise response
             raise ValueError(error_message)
 
-        return response
+        return False
 
     async def get_tokenizer(self, lora_request: LoRARequest):
         return await self.tokenizer.get_lora_tokenizer_async(lora_request)
@@ -212,13 +223,15 @@ class AsyncEngineRPCClient:
     async def is_tracing_enabled(self) -> bool:
         return self.tracing_flag
 
-    async def _wait_for_server_rpc(self):
+    async def _wait_for_server_rpc(self) -> bool:
         """Wait for the RPCServer to start up."""
 
-        await self._send_one_way_rpc_request(
+        timeout = await self._send_one_way_rpc_request(
             request=RPCUtilityRequest.IS_SERVER_READY,
             error_message="Unable to start RPC Server",
             timeout=VLLM_RPC_SERVER_START_TIMEOUT_MS)
+
+        return timeout
 
     async def _get_model_config_rpc(self) -> ModelConfig:
         """Get the ModelConfig object from the RPC Server"""

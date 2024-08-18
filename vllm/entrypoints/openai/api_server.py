@@ -6,7 +6,7 @@ import re
 from argparse import Namespace
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import AsyncIterator, Set
+from typing import AsyncIterator, Optional, Set
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -88,7 +88,8 @@ async def lifespan(app: FastAPI):
 
 
 @asynccontextmanager
-async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
+async def build_async_engine_client(
+        args) -> AsyncIterator[Optional[AsyncEngineClient]]:
     # Context manager to handle async_engine_client lifecycle
     # Ensures everything is shutdown and cleaned up on error/exit
     global engine_args
@@ -129,24 +130,27 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
 
         try:
             while True:
-                try:
-                    await async_engine_client.setup()
+                # Wait for RPCServer with AsyncLLMEngine to startup.
+                if await async_engine_client.setup():
                     break
-                except TimeoutError as e:
-                    if not rpc_server_process.is_alive():
-                        raise RuntimeError(
-                            "The server process died before "
-                            "responding to the readiness probe") from e
+
+                # If the RPCServer process with the Engine died, raise Error.
+                if not rpc_server_process.is_alive():
+                    logger.error(
+                        "LLMEngine RPCServer process died during "
+                        "initialization. See stack trace for root cause.")
+                    yield None
+                    return
 
             yield async_engine_client
         finally:
-            # Ensure rpc server process was terminated
+            # Ensure rpc server process was terminated.
             rpc_server_process.terminate()
 
-            # Close all open connections to the backend
+            # Cleanup zeromq state.
             async_engine_client.close()
 
-            # Wait for server process to join
+            # Wait for server process to join.
             rpc_server_process.join()
 
 
@@ -359,6 +363,9 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     logger.info("args: %s", args)
 
     async with build_async_engine_client(args) as async_engine_client:
+        if async_engine_client is None:
+            return
+
         app = await init_app(async_engine_client, args)
 
         shutdown_task = await serve_http(

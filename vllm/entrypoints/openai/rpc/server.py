@@ -27,10 +27,8 @@ class AsyncEngineRPCServer:
 
         # Initialize context.
         self.context = zmq.asyncio.Context()
-        self.context.set(zmq.constants.MAX_SOCKETS,
-                         self.context.get(zmq.constants.SOCKET_LIMIT))
 
-        # Init socket for readiness state.
+        # Init socket.
         self.socket = self.context.socket(zmq.constants.ROUTER)
         self.socket.bind(rpc_path)
 
