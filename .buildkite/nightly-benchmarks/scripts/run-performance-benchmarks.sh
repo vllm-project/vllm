@@ -37,9 +37,9 @@ check_hf_token() {
 ensure_sharegpt_downloaded() {
   local FILE=ShareGPT_V3_unfiltered_cleaned_split.json
   if [ ! -f "$FILE" ]; then
-      wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/$FILE
+    wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/$FILE
   else
-      echo "$FILE already exists."
+    echo "$FILE already exists."
   fi
 }
 
@@ -68,11 +68,17 @@ wait_for_server() {
     done' && return 0 || return 1
 }
 
-kill_processes_launched_by_current_bash () {
+kill_processes_launched_by_current_bash() {
   # Kill all python processes launched from current bash script
   current_shell_pid=$$
   processes=$(ps -eo pid,ppid,command | awk -v ppid="$current_shell_pid" -v proc="$1" '$2 == ppid && $3 ~ proc {print $1}')
-  echo "$processes" | xargs kill -9
+  if [ -n "$processes" ]; then
+    echo "Killing the following processes matching '$1':"
+    echo "$processes"
+    echo "$processes" | xargs kill -9
+  else
+    echo "No processes found matching '$1'."
+  fi
 }
 
 kill_gpu_processes() {
@@ -107,7 +113,7 @@ upload_to_buildkite() {
   fi
 
   # Use the determined command to annotate and upload artifacts
-  $BUILDKITE_AGENT_COMMAND annotate --style "info" --context "$BUILDKITE_LABEL-benchmark-results" < $RESULTS_FOLDER/benchmark_results.md
+  $BUILDKITE_AGENT_COMMAND annotate --style "info" --context "$BUILDKITE_LABEL-benchmark-results" <$RESULTS_FOLDER/benchmark_results.md
   $BUILDKITE_AGENT_COMMAND artifact upload "$RESULTS_FOLDER/*"
 }
 
@@ -159,7 +165,7 @@ run_latency_tests() {
         latency_command: $latency,
         gpu_type: $gpu
       }')
-    echo "$jq_output" > "$RESULTS_FOLDER/$test_name.commands"
+    echo "$jq_output" >"$RESULTS_FOLDER/$test_name.commands"
 
     # run the benchmark
     eval "$latency_command"
@@ -168,7 +174,6 @@ run_latency_tests() {
 
   done
 }
-
 
 run_throughput_tests() {
   # run throughput tests using `benchmark_throughput.py`
@@ -217,7 +222,7 @@ run_throughput_tests() {
         throughput_command: $command,
         gpu_type: $gpu
       }')
-    echo "$jq_output" > "$RESULTS_FOLDER/$test_name.commands"
+    echo "$jq_output" >"$RESULTS_FOLDER/$test_name.commands"
 
     # run the benchmark
     eval "$throughput_command"
@@ -248,7 +253,6 @@ run_serving_tests() {
       echo "Skip test case $test_name."
       continue
     fi
-
 
     # get client and server arguments
     server_params=$(echo "$params" | jq -r '.server_parameters')
@@ -327,7 +331,7 @@ run_serving_tests() {
           client_command: $client,
           gpu_type: $gpu
         }')
-      echo "$jq_output" > "$RESULTS_FOLDER/${new_test_name}.commands"
+      echo "$jq_output" >"$RESULTS_FOLDER/${new_test_name}.commands"
 
     done
 
@@ -361,7 +365,6 @@ main() {
   run_serving_tests $QUICK_BENCHMARK_ROOT/tests/serving-tests.json
   run_latency_tests $QUICK_BENCHMARK_ROOT/tests/latency-tests.json
   run_throughput_tests $QUICK_BENCHMARK_ROOT/tests/throughput-tests.json
-
 
   # postprocess benchmarking results
   pip install tabulate pandas
