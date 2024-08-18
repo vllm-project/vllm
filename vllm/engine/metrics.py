@@ -195,7 +195,9 @@ class _RayGaugeWrapper:
     def __init__(self,
                  name: str,
                  documentation: str = "",
-                 labelnames: Optional[List[str]] = None):
+                 labelnames: Optional[List[str]] = None,
+                 multiprocess_mode: str=""):
+        del multiprocess_mode
         labelnames_tuple = tuple(labelnames) if labelnames else None
         self._gauge = ray_metrics.Gauge(name=name,
                                         description=documentation,
