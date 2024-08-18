@@ -31,7 +31,8 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
 
     def __init__(self,
                  disable_bonus_tokens: bool = True,
-                 strict_mode: bool = False):
+                 strict_mode: bool = False,
+                 use_flashinfer: bool = True):
         """Create a rejection sampler.
 
         Args:
@@ -44,6 +45,10 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         """
         super().__init__(disable_bonus_tokens=disable_bonus_tokens,
                          strict_mode=strict_mode)
+        self.use_flashinfer = use_flashinfer
+        if self.use_flashinfer:
+            assert not disable_bonus_tokens, \
+                "flashinfer will enable bonus token by default"
 
     def forward(
         self,
@@ -104,22 +109,19 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
 
         # If use Flashinfer chain_speculative_sampling kernel
         # for rejection sampling
-        if chain_speculative_sampling is not None:
+        if chain_speculative_sampling is not None and self.use_flashinfer:
             batch_size, k, _ = draft_probs.shape
             uniform_samples = self._create_uniform_samples(
                 seeded_seqs, batch_size, k, draft_probs.device)
-            output_token_ids = chain_speculative_sampling(
+            output_token_ids, accepted_token_num, emitted_token_num \
+                = chain_speculative_sampling(
                 draft_probs, draft_token_ids, uniform_samples,
                 target_with_bonus_probs)
 
-            # Since we do not call _create_output any more,
-            # we need to update metrics here.
-            # The num_accepted_tokens is not updated because
-            # flashinfer kernel does not return this value.
-            # The metric is meaningless when using flashinfer
-            # rejection sampling.
-            self.num_accepted_tokens += batch_size * k
-            self.num_emitted_tokens += (output_token_ids != -1).sum()
+            # num_emitted_tokens returned by flashinfer
+            # does not include the bonus token
+            self.num_accepted_tokens += accepted_token_num.sum()
+            self.num_emitted_tokens += emitted_token_num.sum() + batch_size
             self.num_draft_tokens += batch_size * k
         else:
             accepted, recovered_token_ids = (
