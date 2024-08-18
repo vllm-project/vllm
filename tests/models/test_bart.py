@@ -4,6 +4,8 @@ Run `pytest tests/models/test_bart.py`.
 """
 from typing import List, Optional, Tuple
 
+from transformers import TransfoXLForSequenceClassification
+
 from vllm.utils import is_cpu
 
 if not is_cpu():
@@ -35,7 +37,7 @@ if not is_cpu():
 
     @pytest.mark.parametrize("model", MODELS)
     @pytest.mark.parametrize("dtype", ["float", "bfloat16"])
-    @pytest.mark.parametrize("max_tokens", [64])
+    @pytest.mark.parametrize("max_tokens", [2048])
     @pytest.mark.parametrize("num_logprobs", [5])
     @pytest.mark.parametrize("decoder_prompt_type", list(DecoderPromptType))
     def test_models(
@@ -150,9 +152,11 @@ if not is_cpu():
         # decoder-only unit tests expect), so when testing an encoder/decoder
         # model we must explicitly specify enforce_eager=True in the VllmRunner
         # constructor.
-        with vllm_runner(model, dtype=dtype, enforce_eager=True) as vllm_model:
+        #print('test_case_prompts ' + str(test_case_prompts))
+        with vllm_runner(model, dtype=dtype, enforce_eager=False) as vllm_model:
             vllm_outputs = vllm_model.generate_encoder_decoder_greedy_logprobs(
                 test_case_prompts, max_tokens, num_logprobs)
+        print('vllm_outputs ' + str(vllm_outputs))
 
         hf_skip_tokens = (1 if decoder_prompt_type == DecoderPromptType.NONE
                           else 0)

@@ -1,6 +1,6 @@
 import dataclasses
 from typing import Any, Dict, List, Optional, Tuple, Type, cast
-
+import itertools
 import torch
 import torch.distributed
 
@@ -21,7 +21,7 @@ from vllm.sequence import (IntermediateTensors, PoolerOutput, SamplerOutput,
 from vllm.utils import STR_NOT_IMPL_ENC_DEC_BACKEND, make_tensor_with_pad
 from vllm.worker.model_runner import (_PAD_SLOT_ID, GPUModelRunnerBase,
                                       ModelInputForGPUBuilder,
-                                      ModelInputForGPUWithSamplingMetadata)
+                                      ModelInputForGPUWithSamplingMetadata, _get_graph_batch_size)
 from vllm.worker.model_runner_base import (
     _add_attn_metadata_broadcastable_dict,
     _add_sampling_metadata_broadcastable_dict)
@@ -174,7 +174,22 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             raise ValueError("num_steps > 1 is not supported in "
                              "EncoderDecoderModelRunner")
 
-        model_executable = self.model
+        if (model_input.attn_metadata.prefill_metadata is None and
+            model_input.attn_metadata.decode_metadata.use_cuda_graph):
+            print('Executing as cuda graph')
+            assert model_input.input_tokens is not None
+            graph_batch_size = model_input.input_tokens.shape[0]
+            model_executable = self.graph_runners[model_input.virtual_engine][
+                graph_batch_size]
+            print('encoder_seq_lens_tensor.shape ' + str(
+                model_input.attn_metadata.encoder_seq_lens_tensor.shape))
+
+        else:
+            print('Executing without cuda graph')
+            model_executable = self.model
+
+        
+        #model_executable = self.model
 
         seqlen_agnostic_kwargs = {
             "finished_requests_ids": model_input.finished_requests_ids,
@@ -210,6 +225,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             tensor_dict,
             attn_backend=self.attn_backend,
         )
+
 
     def prepare_model_input(
         self,
@@ -428,10 +444,23 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                     cross_block_table is None) else cross_block_table)
 
             # Convert cross-attention block tables to encoder input tensor
+            if model_input.attn_metadata.decode_metadata.use_cuda_graph:
+                #max_len = self.max_seq_len_to_capture
+                max_len = self.get_max_block_per_batch()
+                batch_size = len(encoder_seq_lens)
+                graph_batch_size = _get_graph_batch_size(batch_size)
+                assert graph_batch_size >= batch_size
+                cuda_graph_pad_size = graph_batch_size - batch_size
+                print('cuda_graph_pad_size-1' + str(cuda_graph_pad_size))
+                cross_block_tables.extend([[] for _ in range(cuda_graph_pad_size)])
+                encoder_seq_lens.extend(itertools.repeat(1, cuda_graph_pad_size))
+
+            else:
+                max_len = max(len(block_table) for block_table in cross_block_tables)
+
             cross_block_tables = make_tensor_with_pad(
                 cross_block_tables,
-                max_len=max(
-                    len(block_table) for block_table in cross_block_tables),
+                max_len=max_len,
                 pad=0,
                 dtype=torch.int32,
                 device=self.device,

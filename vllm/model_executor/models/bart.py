@@ -353,6 +353,8 @@ class BartCrossAttention(nn.Module):
 
         # (afeldman-nm 2024/07/22) TODO:
         # Need a more efficient solution for q/k/v
+        #print('decoder_hidden_states.shape() ' + str(decoder_hidden_states.shape))
+        #print('encoder_hidden_states.shape() ' + str(encoder_hidden_states.shape))
         qkv_dec, _ = self.qkv_proj(decoder_hidden_states)
         q, _, _ = qkv_dec.split([self.q_size, self.kv_size, self.kv_size],
                                 dim=-1)
@@ -363,15 +365,18 @@ class BartCrossAttention(nn.Module):
             qkv_enc, _ = self.qkv_proj(encoder_hidden_states)
             _, k, v = qkv_enc.split([self.q_size, self.kv_size, self.kv_size],
                                     dim=-1)
-
+        #print('In 10')
+        #print('Cross Block Table shape ' + str(attn_metadata.cross_block_tables.shape))
+        #print('Cross Block Table content ' + str(attn_metadata.cross_block_tables))
         attn_output = self.attn(q,
                                 k,
                                 v,
                                 kv_cache,
                                 attn_metadata,
                                 attn_type=AttentionType.ENCODER_DECODER)
-
+        #print('In 11')
         output, _ = self.out_proj(attn_output)
+        #print('In 12')
         return output
 
 
@@ -528,18 +533,25 @@ class BartDecoderLayer(nn.Module):
             Decoder layer output torch.Tensor
         """
         residual = decoder_hidden_states
+        #print('In 4')
+        #print('Decoder Block Table shape ' + str(attn_metadata.block_tables.shape))
+        #print('Decoder Block Table content ' + str(attn_metadata.block_tables))
+
 
         # Self Attention
         hidden_states = self.self_attn(hidden_states=decoder_hidden_states,
                                        kv_cache=kv_cache,
                                        attn_metadata=attn_metadata)
+        #print('In 5')
 
         hidden_states = residual + hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
-
+        #print('In 6')
+        
         # Cross-Attention Block
 
         residual = hidden_states
+        #print('In 7')
 
         hidden_states = self.encoder_attn(
             decoder_hidden_states=hidden_states,
@@ -547,6 +559,7 @@ class BartDecoderLayer(nn.Module):
             attn_metadata=attn_metadata,
             encoder_hidden_states=encoder_hidden_states,
         )
+        #print('In 8')
 
         hidden_states = residual + hidden_states
         hidden_states = self.encoder_attn_layer_norm(hidden_states)
@@ -560,6 +573,8 @@ class BartDecoderLayer(nn.Module):
 
         hidden_states = residual + hidden_states
         hidden_states = self.final_layer_norm(hidden_states)
+
+        #print('In 9')
 
         return hidden_states
 
@@ -712,7 +727,7 @@ class BartDecoder(nn.Module):
         Returns:
             Decoder output torch.Tensor
         """
-
+        #print('In 1')
         inputs_embeds = self.embed_tokens(decoder_input_ids)
 
         # embed positions
@@ -725,6 +740,7 @@ class BartDecoder(nn.Module):
         hidden_states = inputs_embeds + embed_pos
         hidden_states = self.layernorm_embedding(hidden_states)
 
+        #print('In 2')
         # decoder layers
 
         for idx, decoder_layer in enumerate(self.layers):
@@ -734,7 +750,7 @@ class BartDecoder(nn.Module):
                 attn_metadata=attn_metadata,
                 encoder_hidden_states=encoder_hidden_states,
             )
-
+        #print('In 3')
         return hidden_states
 
 
@@ -846,11 +862,13 @@ class BartForConditionalGeneration(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        encoder_input_ids: torch.Tensor,
-        encoder_positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        *,
+        encoder_input_ids: torch.Tensor,
+        encoder_positions: torch.Tensor,
+        **kwargs,
     ) -> torch.Tensor:
         r"""
         Args:

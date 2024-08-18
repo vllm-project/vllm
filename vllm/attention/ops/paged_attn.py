@@ -116,6 +116,12 @@ class PagedAttention:
         num_seqs, num_heads, head_size = query.shape
         max_num_partitions = ((max_seq_len + _PARTITION_SIZE - 1) //
                               _PARTITION_SIZE)
+        #print('max_seq_len ' + str(max_seq_len))
+        #print('max_num_partitions ' + str(max_num_partitions))
+        #print('num_seqs ' + str(num_seqs))
+        #print('num_heads ' + str(num_heads))
+        #print('seq_lens ' + str(seq_lens))
+        #print('block_tables ' + str(block_tables))
         # NOTE(woosuk): We use a simple heuristic to decide whether to use
         # PagedAttention V1 or V2. If the number of partitions is 1, we use
         # V1 to avoid the overhead of reduction. Also, if the number of

@@ -180,11 +180,11 @@ class ModelConfig:
                             "decoder models.")
                 self.enforce_eager = True
 
-            if not self.enforce_eager:
+            #if not self.enforce_eager:
                 # Eager mode explicitly disabled by user for an encoder/
                 # decoder model; however CUDAGRAPH + encoder/decoder is
                 # not currently supported
-                raise ValueError(STR_NOT_IMPL_ENC_DEC_CUDAGRAPH)
+            #    raise ValueError(STR_NOT_IMPL_ENC_DEC_CUDAGRAPH)
         elif self.enforce_eager is None:
             # *Only for decoder-only models*, enforce_eager
             # defaults to False if unset. This is intuitive
