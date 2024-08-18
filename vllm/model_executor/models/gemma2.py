@@ -132,11 +132,10 @@ class Gemma2Attention(nn.Module):
         )
         self.rotary_emb = get_rope(
             self.head_dim,
-            self.head_dim,
-            max_position_embeddings,
+            rotary_dim=self.head_dim,
+            max_position=max_position_embeddings,
             base=self.rope_theta,
             is_neox_style=True,
-            dtype=torch.get_default_dtype(),
         )
 
         # FIXME(woosuk): While Gemma 2 uses sliding window attention for every
