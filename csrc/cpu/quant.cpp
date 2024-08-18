@@ -1,5 +1,7 @@
 #include "cpu_types.hpp"
 #include "dnnl_helper.hpp"
+#include <c10/util/Exception.h>
+#include <torch/types.h>
 
 namespace {
 template <typename scalar_t>
@@ -194,6 +196,8 @@ void int8_scaled_mm(torch::Tensor& c,               // [M, OC], row-major
 ) {
   CPU_KERNEL_GUARD_IN(cutlass_scaled_mm)
   // Checks for conformality
+  TORCH_CHECK(a.dtype() == torch::kInt8 && b.dtype() == torch::kInt8,
+              "int8_scaled_mm only supports INT8 inputs.")
   TORCH_CHECK(a.dim() == 2 && b.dim() == 2 && c.dim() == 2);
   TORCH_CHECK(c.size(0) == a.size(0) && a.size(1) == b.size(0) &&
               b.size(1) == c.size(1));
