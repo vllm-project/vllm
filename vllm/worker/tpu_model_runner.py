@@ -11,7 +11,7 @@ import torch_xla.runtime as xr
 
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
-                         MultiModalConfig, ParallelConfig, SchedulerConfig)
+                         ParallelConfig, SchedulerConfig)
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -89,7 +89,6 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         device_config: DeviceConfig,
         cache_config: CacheConfig,
         load_config: LoadConfig,
-        multimodal_config: Optional[MultiModalConfig] = None,
         is_driver_worker: bool = False,
     ):
         self.model_config = model_config
@@ -98,7 +97,6 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         self.device_config = device_config
         self.cache_config = cache_config
         self.load_config = load_config
-        self.multimodal_config = multimodal_config
         self.is_driver_worker = is_driver_worker
 
         self.block_size = self.cache_config.block_size
@@ -142,12 +140,15 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 parallel_config=self.parallel_config,
                 cache_config=self.cache_config,
                 scheduler_config=self.scheduler_config,
-                multimodal_config=self.multimodal_config,
                 lora_config=None,
             )
         model = model.eval()
         xm.wait_device_ops()
-        self.model = CompiledModelWrapper(model)
+        model = ModelWrapper(model)
+        self.model = torch.compile(model,
+                                   backend="openxla",
+                                   fullgraph=True,
+                                   dynamic=False)
 
     def _dummy_run(
         self,
@@ -209,9 +210,31 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             )
         t = torch.ones((batch_size, ), dtype=torch.float32, device=self.device)
         p = torch.ones((batch_size, ), dtype=torch.float32, device=self.device)
-
-        # Dummy run.
         num_samples = _MAX_NUM_SAMPLES if is_prompt else 1
+
+        # NOTE(woosuk): There are two stages of compilation: torch.compile and
+        # XLA compilation. Using `mark_dynamic` can reduce the torch.compile
+        # overhead by reusing the FX graph for different shapes.
+        # However, the XLA graph will still require static shapes and needs to
+        # be re-compiled for every different shapes. This overhead is inevitable
+        # in the first run, but can be skipped afterwards as we cache the XLA
+        # graphs in the disk (VLLM_XLA_CACHE_PATH).
+        if is_prompt:
+            # Prefll
+            torch._dynamo.mark_dynamic(token_ids, 1)
+            torch._dynamo.mark_dynamic(position_ids, 1)
+            torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 1)
+        else:
+            # Decode
+            torch._dynamo.mark_dynamic(token_ids, 0)
+            torch._dynamo.mark_dynamic(position_ids, 0)
+            torch._dynamo.mark_dynamic(input_lens, 0)
+            torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
+            torch._dynamo.mark_dynamic(attn_metadata.context_lens, 0)
+            torch._dynamo.mark_dynamic(attn_metadata.block_tables, 0)
+            torch._dynamo.mark_dynamic(t, 0)
+            torch._dynamo.mark_dynamic(p, 0)
+        # Dummy run.
         self.model(token_ids, position_ids, attn_metadata, input_lens, t, p,
                    num_samples, kv_caches)
 
@@ -683,52 +706,6 @@ class ModelWrapper(nn.Module):
         next_token_ids = torch.where(t != 0, sampled_token_ids,
                                      argmax_token_ids)
         return next_token_ids
-
-
-class CompiledModelWrapper:
-
-    def __init__(self, model: nn.Module):
-        model = ModelWrapper(model)
-        self.model = torch.compile(model,
-                                   backend="openxla",
-                                   fullgraph=True,
-                                   dynamic=False)
-
-    def __call__(
-        self,
-        token_ids: torch.Tensor,
-        position_ids: torch.Tensor,
-        attn_metadata: AttentionMetadata,
-        input_lens: torch.Tensor,
-        t: torch.Tensor,
-        p: torch.Tensor,
-        num_samples: int,
-        kv_caches: List[Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]],
-    ) -> torch.Tensor:
-        # NOTE(woosuk): There are two stages of compilation: torch.compile and
-        # XLA compilation. Using `mark_dynamic` can reduce the torch.compile
-        # overhead by reusing the FX graph for different shapes.
-        # However, the XLA graph will still require static shapes and needs to
-        # be re-compiled for every different shapes. This overhead is inevitable
-        # in the first run, but can be skipped afterwards as we cache the XLA
-        # graphs in the disk (VLLM_XLA_CACHE_PATH).
-        if attn_metadata.num_prefills > 0:
-            # Prefll
-            torch._dynamo.mark_dynamic(token_ids, 1)
-            torch._dynamo.mark_dynamic(position_ids, 1)
-            torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 1)
-        else:
-            # Decode
-            torch._dynamo.mark_dynamic(token_ids, 0)
-            torch._dynamo.mark_dynamic(position_ids, 0)
-            torch._dynamo.mark_dynamic(input_lens, 0)
-            torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
-            torch._dynamo.mark_dynamic(attn_metadata.context_lens, 0)
-            torch._dynamo.mark_dynamic(attn_metadata.block_tables, 0)
-            torch._dynamo.mark_dynamic(t, 0)
-            torch._dynamo.mark_dynamic(p, 0)
-        return self.model(token_ids, position_ids, attn_metadata, input_lens,
-                          t, p, num_samples, kv_caches)
 
 
 def _get_padded_prefill_len(x: int) -> int:
