@@ -449,7 +449,7 @@ def get_config_dtype_str(dtype: torch.dtype,
         # use fp16/bfloat16 configs
         return "float32"
     return None
-    
+
 def fused_marlin_moe(hidden_states: torch.Tensor,
                      w1: torch.Tensor,
                      w2: torch.Tensor,
@@ -546,6 +546,20 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
 
     return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
                      dim=1)
+
+
+def get_config_dtype_str(dtype: torch.dtype,
+                         use_int8_w8a16: Optional[bool] = False,
+                         use_fp8_w8a8: Optional[bool] = False):
+    if use_fp8_w8a8:
+        return "fp8_w8a8"
+    elif use_int8_w8a16:
+        return "int8_w8a16"
+    elif dtype == torch.float:
+        # avoiding cases where kernel fails when float32 MoE
+        # use fp16/bfloat16 configs
+        return "float32"
+    return None
 
 
 def fused_experts(hidden_states: torch.Tensor,
