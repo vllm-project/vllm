@@ -93,24 +93,6 @@ class AsyncEngineRPCClient:
         # Note: this value is typically 65536
         self.limit_concurrency = self.context.get(zmq.constants.SOCKET_LIMIT)
 
-    @property
-    def is_running(self) -> bool:
-        return not self._errored
-
-    @property
-    def is_stopped(self) -> bool:
-        return self._errored
-
-    @property
-    def errored(self) -> bool:
-        return self._errored
-    
-    def close(self):
-        """Destroy the ZeroMQ Context."""
-        self.from_api_server.close()
-        self.to_rcp_server.close()
-        self.context.destroy()
-    
     async def run_proxy(self, socket_from, socket_to):
         """Background task that runs a proxy"""
         poller = zmq.asyncio.Poller()
@@ -127,14 +109,10 @@ class AsyncEngineRPCClient:
                 await socket_from.send_multipart(msg)
 
     async def setup(self):
-        """Setup the client before it starts sending server requests.
-        
-        This should be called immediately after __init__
-        (it would be part of __init__ if not for async)
-        """
+        """Setup the client before it starts sending server requests."""
 
         # Wait until server is ready.
-        await self._wait_for_server_rpc()
+        await self.wait_for_server()
         self._errored = False
 
         # Get the configs.
@@ -151,10 +129,15 @@ class AsyncEngineRPCClient:
             enable_lora=bool(await self._get_lora_config_rpc()),
         )
 
+    def close(self):
+        """Destroy the ZeroMQ Context."""
+        self.context.destroy()
+
     @contextmanager
     def to_proxy_socket(self):
         # Connect to the proxy.
-        # DEALER enables asynch communication for streaming.
+        # Note that we use DEALER to enable asynchronous communication
+        # to enable streaming.
         socket = self.context.socket(zmq.constants.DEALER)
         try:
             socket.connect(INPROC_PROXY_PATH)
@@ -232,20 +215,20 @@ class AsyncEngineRPCClient:
     async def is_tracing_enabled(self) -> bool:
         return self.tracing_flag
 
-    async def _wait_for_server_rpc(self):
+    async def wait_for_server(self):
         """Wait for the RPCServer to start up."""
 
         await self._send_one_way_rpc_request(
             request=RPCUtilityRequest.IS_SERVER_READY,
-            error_message="Unable to start RPC Server.",
+            error_message="Unable to start RPC Server",
             timeout=VLLM_RPC_HEALTH_TIMEOUT_MS)
 
-    async def _check_health_rpc(self) -> None:
+    async def check_health(self) -> None:
         """Raise if unhealthy"""
 
         await self._send_one_way_rpc_request(
             request=RPCUtilityRequest.IS_SERVER_HEALTHY,
-            error_message="Did not get HEALTHY response from RPC Server",
+            error_message="Got Unhealthy response from RPC Server",
             timeout=VLLM_RPC_HEALTH_TIMEOUT_MS)
         
     async def _get_model_config_rpc(self) -> ModelConfig:
@@ -311,6 +294,18 @@ class AsyncEngineRPCClient:
             request=RPCUtilityRequest.DO_LOG_STATS,
             error_message="RPCRequest DO_LOG_STATS failed.")
 
+    @property
+    def is_running(self) -> bool:
+        return not self._errored
+
+    @property
+    def is_stopped(self) -> bool:
+        return self._errored
+
+    @property
+    def errored(self) -> bool:
+        return self._errored
+
     async def generate(
         self,
         inputs: PromptInputs,
@@ -348,7 +343,7 @@ class AsyncEngineRPCClient:
                         # Use this to set the sync `is_running` and `errored`
                         # properties.
                         try:
-                            await self._check_health_rpc()
+                            await self.check_health()
                         except Exception:
                             self._errored = True
                         # NB: do before raising here so that the flag is set
