@@ -3,6 +3,7 @@ import signal
 from typing import Any, Coroutine
 
 import cloudpickle
+import uvloop
 import zmq
 import zmq.asyncio
 from typing_extensions import Never
@@ -36,6 +37,9 @@ class AsyncEngineRPCServer:
         """Cleanup all resources."""
         self.socket.close()
         self.context.destroy()
+        self.engine.shutdown_background_loop()
+        # Clear the engine reference so that it can be GC'ed.
+        self.engine = None
 
     async def get_model_config(self, identity):
         """Send the ModelConfig"""
@@ -216,4 +220,4 @@ async def run_server(server: AsyncEngineRPCServer):
 def run_rpc_server(async_engine_args: AsyncEngineArgs,
                    usage_context: UsageContext, rpc_path: str):
     server = AsyncEngineRPCServer(async_engine_args, usage_context, rpc_path)
-    asyncio.run(run_server(server))
+    uvloop.run(run_server(server))
