@@ -76,7 +76,8 @@ async def lifespan(app: FastAPI):
 
     async def _force_log():
         while True:
-            await asyncio.sleep(10)
+            print("here")
+            await asyncio.sleep(1)
             await async_engine_client.do_log_stats()
 
     if not engine_args.disable_log_stats:
@@ -115,6 +116,9 @@ async def build_async_engine_client(
         logger.info("Multiprocessing frontend to use %s for RPC Path.",
                     rpc_path)
 
+        # Build RPCClient, which conforms to AsyncEngineClient Protocol.
+        async_engine_client = AsyncEngineRPCClient(rpc_path)
+
         # Start RPCServer in separate process (holds the AsyncLLMEngine).
         context = multiprocessing.get_context("spawn")
         # the current process might have CUDA context,
@@ -125,9 +129,7 @@ async def build_async_engine_client(
         rpc_server_process.start()
         logger.info("Started engine process with PID %d",
                     rpc_server_process.pid)
-        # Build RPCClient, which conforms to AsyncEngineClient Protocol.
-        async_engine_client = AsyncEngineRPCClient(rpc_path)
-
+        
         try:
             while True:
                 try:

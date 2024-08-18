@@ -289,10 +289,12 @@ async def async_request_openai_completions(
                 else:
                     output.error = response.reason or ""
                     output.success = False
+                    print(output)
         except Exception:
             output.success = False
             exc_info = sys.exc_info()
             output.error = "".join(traceback.format_exception(*exc_info))
+            print(output.error)
 
     if pbar:
         pbar.update(1)
