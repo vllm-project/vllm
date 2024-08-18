@@ -82,7 +82,8 @@ def test_oot_registration_for_api_server():
             except OpenAIError as e:
                 if "Connection error" in str(e):
                     time.sleep(3)
-                    if time.time() - now > RemoteOpenAIServer.MAX_START_WAIT_S:
+                    if time.time(
+                    ) - now > RemoteOpenAIServer.DEFAULT_MAX_START_WAIT_S:
                         msg = "Server did not start in time"
                         raise RuntimeError(msg) from e
                 else:

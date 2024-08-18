@@ -51,6 +51,7 @@ VLLM_PATH = Path(__file__).parent.parent
 
 class RemoteOpenAIServer:
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
+    DEFAULT_MAX_START_WAIT_S = 120  # needed as a class variable for a test
 
     def __init__(self,
                  model: str,
@@ -58,7 +59,7 @@ class RemoteOpenAIServer:
                  *,
                  env_dict: Optional[Dict[str, str]] = None,
                  auto_port: bool = True,
-                 max_start_wait_s: Optional[int] = 120) -> None:
+                 max_start_wait_s: Optional[int] = None) -> None:
         if auto_port:
             if "-p" in cli_args or "--port" in cli_args:
                 raise ValueError("You have manually specified the port"
@@ -74,7 +75,8 @@ class RemoteOpenAIServer:
         self.port = int(args.port)
 
         if max_start_wait_s:
-            self.max_start_wait_s = max_start_wait_s
+            self.max_start_wait_s = max_start_wait_s or \
+                                    RemoteOpenAIServer.DEFAULT_MAX_START_WAIT_S
 
         env = os.environ.copy()
         # the current process might initialize cuda,
