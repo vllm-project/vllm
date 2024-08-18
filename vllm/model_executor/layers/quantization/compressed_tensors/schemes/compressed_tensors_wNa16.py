@@ -140,6 +140,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
         layer.input_size = input_size
+        layer.group_size = group_size
         layer.is_k_full = marlin_is_k_full(self.actorder, is_row_parallel)
 
     # Checkpoints are serialized in compressed-tensors format, which is
@@ -183,7 +184,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             size_k=(layer.input_size
                     if self.actorder else layer.input_size_per_partition),
             size_n=layer.output_size_per_partition,
-            group_size=self.group_size)
+            group_size=layer.group_size)
         replace_tensor(layer, "weight_scale", marlin_scales)
 
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,
