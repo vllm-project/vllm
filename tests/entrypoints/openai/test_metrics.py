@@ -147,7 +147,7 @@ EXPECTED_METRICS = [
     "vllm:prompt_tokens_total",
     "vllm:generation_tokens_total",
     "vllm:request_success_total",
-    "vllm:cache_config_info"
+    "vllm:cache_config_info",
     # labels in cache_config_info
     "block_size",
     "cache_dtype",
