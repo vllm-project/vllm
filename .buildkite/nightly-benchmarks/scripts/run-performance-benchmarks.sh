@@ -68,11 +68,19 @@ wait_for_server() {
     done' && return 0 || return 1
 }
 
-kill_gpu_processes() {
-  # kill all processes on GPU.
+kill_processes_launched_by_current_bash () {
+  # Kill all python processes launched from current bash script
+  current_shell_pid=$$
+  processes=$(ps -eo pid,ppid,command | awk -v ppid="$current_shell_pid" -v proc="$1" '$2 == ppid && $3 ~ proc {print $1}')
+  echo "$processes" | xargs kill -9
+}
 
-  ps aux | grep python | grep openai | awk '{print $2}' | xargs -r kill -9
-  ps -e | grep pt_main_thread | awk '{print $1}' | xargs kill -9
+kill_gpu_processes() {
+
+  # Kill all python processes launched from current bash script
+  kill_processes_launched_by_current_bash python
+  kill_processes_launched_by_current_bash python3
+  kill_processes_launched_by_current_bash pt_main_thread
 
   # wait until GPU memory usage smaller than 1GB
   while [ $(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -n 1) -ge 1000 ]; do
@@ -82,11 +90,6 @@ kill_gpu_processes() {
   # remove vllm config file
   rm -rf ~/.config/vllm
 
-  # Print the GPU memory usage
-  # so that we know if all GPU processes are killed.
-  gpu_memory_usage=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i 0)
-  # The memory usage should be 0 MB.
-  echo "GPU 0 Memory Usage: $gpu_memory_usage MB"
 }
 
 upload_to_buildkite() {
