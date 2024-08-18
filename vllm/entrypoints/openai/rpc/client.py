@@ -108,13 +108,11 @@ class AsyncEngineRPCClient:
                 msg = await socket_to.recv_multipart()
                 await socket_from.send_multipart(msg)
 
-    async def setup(self) -> bool:
+    async def setup(self):
         """Setup the client before it starts sending server requests."""
 
         # Wait until server is ready.
-        did_timeout = await self._wait_for_server_rpc()
-        if did_timeout:
-            return False
+        await self._wait_for_server_rpc()
 
         self._errored = False
 
@@ -131,8 +129,6 @@ class AsyncEngineRPCClient:
             parallel_config=(await self._get_parallel_config_rpc()),
             enable_lora=bool(await self._get_lora_config_rpc()),
         )
-
-        return True
 
     def close(self):
         """Destroy the ZeroMQ Context."""
@@ -188,7 +184,7 @@ class AsyncEngineRPCClient:
     async def _send_one_way_rpc_request(self,
                                         request: RPC_REQUEST_TYPE,
                                         error_message: str,
-                                        timeout: Optional[int] = None) -> bool:
+                                        timeout: Optional[int] = None):
         """
         Send one-way RPC request to trigger an action. 
         Returns True if timeout.
@@ -199,7 +195,7 @@ class AsyncEngineRPCClient:
 
             # Await acknowledgement from RPCServer.
             if timeout is not None and await socket.poll(timeout=timeout) == 0:
-                return True
+                raise TimeoutError(f"Server didn't reply within {timeout} ms")
 
             response = cloudpickle.loads(await socket.recv())
 
@@ -208,8 +204,6 @@ class AsyncEngineRPCClient:
                 logger.warning(error_message)
                 raise response
             raise ValueError(error_message)
-
-        return False
 
     async def get_tokenizer(self, lora_request: LoRARequest):
         return await self.tokenizer.get_lora_tokenizer_async(lora_request)
@@ -223,15 +217,13 @@ class AsyncEngineRPCClient:
     async def is_tracing_enabled(self) -> bool:
         return self.tracing_flag
 
-    async def _wait_for_server_rpc(self) -> bool:
+    async def _wait_for_server_rpc(self):
         """Wait for the RPCServer to start up."""
 
-        timeout = await self._send_one_way_rpc_request(
+        await self._send_one_way_rpc_request(
             request=RPCUtilityRequest.IS_SERVER_READY,
             error_message="Unable to start RPC Server",
             timeout=VLLM_RPC_SERVER_START_TIMEOUT_MS)
-
-        return timeout
 
     async def _get_model_config_rpc(self) -> ModelConfig:
         """Get the ModelConfig object from the RPC Server"""

@@ -130,17 +130,14 @@ async def build_async_engine_client(
 
         try:
             while True:
-                # Wait for RPCServer with AsyncLLMEngine to startup.
-                if await async_engine_client.setup():
+                try:
+                    await async_engine_client.setup()
                     break
-
-                # If the RPCServer process with the Engine died, raise Error.
-                if not rpc_server_process.is_alive():
-                    logger.error(
-                        "LLMEngine RPCServer process died during "
-                        "initialization. See stack trace for root cause.")
-                    yield None
-                    return
+                except TimeoutError as e:
+                    if not rpc_server_process.is_alive():
+                        raise RuntimeError(
+                            "The server process died before "
+                            "responding to the readiness probe") from e
 
             yield async_engine_client
         finally:
