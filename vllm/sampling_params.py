@@ -313,7 +313,7 @@ class SamplingParams(
                     eos_ids.update(self.stop_token_ids)
                     self.stop_token_ids = list(eos_ids)
 
-    @property
+    @cached_property
     def sampling_type(self) -> SamplingType:
         if self.use_beam_search:
             return SamplingType.BEAM

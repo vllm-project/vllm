@@ -42,13 +42,12 @@ def test_models(
     distributed_executor_backend: str,
     attention_backend: str,
     test_suite: str,
-    enable_spmd: bool,
 ) -> None:
 
     if test_suite != TARGET_TEST_SUITE:
         pytest.skip(f"Skip test for {test_suite}")
 
-    if enable_spmd:
+    if model == "meta-llama/Llama-2-7b-hf" and distributed_executor_backend == "ray" and attention_backend == "" and test_suite == "L4":  # noqa:
         # test ray adag
         os.environ['VLLM_USE_RAY_SPMD_WORKER'] = "1"
         os.environ['VLLM_USE_RAY_COMPILED_DAG'] = "1"
