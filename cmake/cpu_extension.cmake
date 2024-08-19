@@ -87,9 +87,9 @@ message(STATUS "CPU extension compile flags: ${CXX_COMPILE_FLAGS}")
 list(APPEND LIBS dnnl numa)
 
 #
-# _C extension
+# _cpu_C extension
 #
-set(VLLM_EXT_SRC
+set(VLLM_CPU_EXT_SRC
     "csrc/cpu/activation.cpp"
     "csrc/cpu/attention.cpp"
     "csrc/cpu/cache.cpp"
@@ -109,15 +109,15 @@ endif()
 #
 
 define_gpu_extension_target(
-    _C
+    _cpu_C
     DESTINATION vllm
     LANGUAGE CXX
-    SOURCES ${VLLM_EXT_SRC}
+    SOURCES ${VLLM_CPU_EXT_SRC}
     LIBRARIES ${LIBS}
     COMPILE_FLAGS ${CXX_COMPILE_FLAGS}
     USE_SABI 3
     WITH_SOABI
 )
 
-message(STATUS "Enabling C extension.")
-add_dependencies(default _C)
+message(STATUS "Enabling CPU extension.")
+add_dependencies(default _cpu_C)
