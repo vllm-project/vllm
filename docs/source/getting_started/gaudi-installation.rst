@@ -30,7 +30,7 @@ To verify that the Intel Gaudi software was correctly installed, run:
    $ pip list | grep neural # verify that neural_compressor is installed
 
 Refer to `Intel Gaudi Software Stack
-Verification <https://docs.habana.ai/en/latest/Installation_Guide/SW_Verification.html#platform-upgrade>`__
+Verification <https://docs.habana.ai/en/latest/Installation_Guide/Platform_Upgrade_and_Unboxing.html#system-verifications-and-final-tests>`__
 for more details.
 
 Run Docker Image
@@ -51,15 +51,6 @@ Use the following commands to run a Docker image:
 Build and Install vLLM
 ---------------------------
 
-To build and install vLLM from source, run:
-
-.. code:: console
-
-   $ git clone https://github.com/vllm-project/vllm.git
-   $ cd vllm
-   $ python setup.py develop
-
-
 Currently, the latest features and performance optimizations are developed in Gaudi's `vLLM-fork <https://github.com/HabanaAI/vllm-fork>`__ and we periodically upstream them to vLLM main repo. To install latest `HabanaAI/vLLM-fork <https://github.com/HabanaAI/vllm-fork>`__, run the following:
 
 .. code:: console
@@ -67,16 +58,16 @@ Currently, the latest features and performance optimizations are developed in Ga
    $ git clone https://github.com/HabanaAI/vllm-fork.git
    $ cd vllm-fork
    $ git checkout habana_main
-   $ python setup.py develop
+   $ pip install -e .
 
 
 Supported Features
 ==================
 
 -  `Offline batched
-   inference <https://docs.vllm.ai/en/latest/getting_started/quickstart.html#offline-batched-inference>`__
+   inference <https://github.com/HabanaAI/vllm-fork/blob/habana_main/docs/source/getting_started/quickstart.rst#offline-batched-inference>`__
 -  Online inference via `OpenAI-Compatible
-   Server <https://docs.vllm.ai/en/latest/getting_started/quickstart.html#openai-compatible-server>`__
+   Server <https://github.com/HabanaAI/vllm-fork/blob/habana_main/docs/source/getting_started/quickstart.rst#openai-compatible-server>`__
 -  HPU autodetection - no need to manually select device within vLLM
 -  Paged KV cache with algorithms enabled for Intel Gaudi accelerators
 -  Custom Intel Gaudi implementations of Paged Attention, KV cache ops,

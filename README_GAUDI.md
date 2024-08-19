@@ -62,16 +62,16 @@ following:
 $ git clone https://github.com/HabanaAI/vllm-fork.git
 $ cd vllm-fork
 $ git checkout habana_main
-$ python setup.py develop
+$ pip install -e .
 ```
 
 Supported Features
 ==================
 
 -   [Offline batched
-    inference](https://docs.vllm.ai/en/latest/getting_started/quickstart.html#offline-batched-inference)
+    inference](https://github.com/HabanaAI/vllm-fork/blob/habana_main/docs/source/getting_started/quickstart.rst#offline-batched-inference)
 -   Online inference via [OpenAI-Compatible
-    Server](https://docs.vllm.ai/en/latest/getting_started/quickstart.html#openai-compatible-server)
+    Server](https://github.com/HabanaAI/vllm-fork/blob/habana_main/docs/source/getting_started/quickstart.rst#openai-compatible-server)
 -   HPU autodetection - no need to manually select device within vLLM
 -   Paged KV cache with algorithms enabled for Intel Gaudi accelerators
 -   Custom Intel Gaudi implementations of Paged Attention, KV cache ops,
