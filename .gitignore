@@ -193,3 +193,6 @@ benchmarks/*.json
 
 # install config
 install_config.sh
+
+# adding key
+ssh_add.sh
