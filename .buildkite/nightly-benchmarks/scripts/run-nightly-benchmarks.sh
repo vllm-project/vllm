@@ -239,6 +239,23 @@ run_serving_tests() {
   kill_gpu_processes
 }
 
+
+prepare_dataset() {
+
+  # download sharegpt dataset
+  cd $VLLM_SOURCE_CODE_LOC/benchmarks
+  wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
+
+  # duplicate sonnet by 4x, to allow benchmarking with input length 2048
+  cd $VLLM_SOURCE_CODE_LOC/benchmarks
+  echo "" > sonnet_4x.txt
+  for _ in {1..4}
+  do
+    cat sonnet.txt >> sonnet_4x.txt
+  done
+  
+}
+
 main() {
 
   check_gpus
@@ -252,12 +269,12 @@ main() {
   ensure_installed curl
   ensure_installed jq
 
-  # download benchmark dataset, and prepare
+  prepare_dataset
+
   cd $VLLM_SOURCE_CODE_LOC/benchmarks
-  wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
   declare -g RESULTS_FOLDER=results/
   mkdir -p $RESULTS_FOLDER
-  BENCHMARK_ROOT=../.buildkite/nightly-benchmarks/
+  BENCHMARK_ROOT=$VLLM_SOURCE_CODE_LOC/.buildkite/nightly-benchmarks/
 
   # run the test
   run_serving_tests $BENCHMARK_ROOT/tests/nightly-tests.json
