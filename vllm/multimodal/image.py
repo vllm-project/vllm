@@ -1,5 +1,5 @@
 from functools import lru_cache
-from typing import List, Optional, Tuple, TypeVar
+from typing import List, Optional, Tuple, TypeVar, Union
 
 import torch
 from PIL import Image
@@ -44,10 +44,13 @@ def repeat_and_pad_image_tokens(
     prompt_token_ids: List[int],
     *,
     image_token_id: int,
-    repeat_count: int = 1,
+    repeat_count: Union[int, List[int]] = 1,
     pad_token_left: Optional[int] = None,
     pad_token_right: Optional[int] = None,
 ) -> Tuple[Optional[str], List[int]]:
+    if not isinstance(repeat_count, list):
+        repeat_count = [repeat_count] * len(prompt_token_ids)
+
     if prompt is None:
         new_prompt = None
     else:
@@ -59,7 +62,7 @@ def repeat_and_pad_image_tokens(
         replacement_str = "".join(
             repeat_and_pad_token(
                 image_token_str,
-                repeat_count=repeat_count,
+                repeat_count=repeat_count[0],
                 pad_token_left=pad_token_str_left,
                 pad_token_right=pad_token_str_right,
             ))
@@ -76,15 +79,17 @@ def repeat_and_pad_image_tokens(
         new_prompt = prompt.replace(image_token_str, replacement_str)
 
     new_token_ids: List[int] = []
+    idx = 0
     for i, token in enumerate(prompt_token_ids):
         if token == image_token_id:
             replacement_ids = repeat_and_pad_token(
                 image_token_id,
-                repeat_count=repeat_count,
+                repeat_count=repeat_count[idx],
                 pad_token_left=pad_token_left,
                 pad_token_right=pad_token_right,
             )
             new_token_ids.extend(replacement_ids)
+            idx += 1
         else:
             new_token_ids.append(token)
 
