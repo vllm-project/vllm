@@ -295,6 +295,11 @@ class ModelConfig:
                     "%s quantization is not fully "
                     "optimized yet. The speed can be slower than "
                     "non-quantized models.", self.quantization)
+            if (self.quantization == "awq" and is_hip()
+                    and not envs.VLLM_USE_TRITON_AWQ):
+                logger.warning(
+                    "Using AWQ quantization with ROCm, but VLLM_USE_TRITON_AWQ"
+                    " is not set to 1, this will crash.")
 
     def _verify_cuda_graph(self) -> None:
         if self.max_seq_len_to_capture is None:
@@ -1324,8 +1329,8 @@ class SpeculativeConfig:
                              "typical_acceptance_sampler.")
 
         if (self.draft_token_acceptance_method != 'rejection_sampler'
-                and self.draft_token_acceptance_method !=
-                'typical_acceptance_sampler'):
+                and self.draft_token_acceptance_method
+                != 'typical_acceptance_sampler'):
             raise ValueError(
                 "Expected draft_token_acceptance_method to be either "
                 "rejection_sampler or typical_acceptance_sampler. Instead it "
