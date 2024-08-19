@@ -7,6 +7,7 @@ from ._core_ext import NanRepr, ScalarType
 #  - no-flags: means it follows IEEE 754 conventions
 #  - f: means finite values only (no infinities)
 #  - n: means nans are supported (non-standard encoding)
+#  - uz: means NAN is represented using `-0.0`
 # for integer types the scheme is:
 #  `[u]int<size_bits>[b<bias>]`
 #  - if bias is not present it means its zero
@@ -19,6 +20,8 @@ class scalar_types:
     uint8 = ScalarType.uint(8, None)
     float8_e4m3fn = ScalarType.float_(4, 3, True,
                                       NanRepr.EXTD_RANGE_MAX_MIN.value)
+    float8_e4m3fnuz = ScalarType.float_(4, 3, True,
+                                        NanRepr.EXTD_RANGE_NEG_ZERO.value)
     float8_e5m2 = ScalarType.float_IEEE754(5, 2)
     float16_e8m7 = ScalarType.float_IEEE754(8, 7)
     float16_e5m10 = ScalarType.float_IEEE754(5, 10)

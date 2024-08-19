@@ -15,6 +15,7 @@ class NanRepr(Enum):
     NONE = 0  # nans are not supported
     IEEE_754 = 1  # nans are: Exp all 1s, mantissa not all 0s
     EXTD_RANGE_MAX_MIN = 2  # nans are: Exp all 1s, mantissa all 1s
+    EXTD_RANGE_NEG_ZERO = 3  # nans ars: sign = 1, all else 0s
 
 
 if TYPE_CHECKING or not core_C_available:
@@ -61,6 +62,13 @@ if TYPE_CHECKING or not core_C_available:
         (value = stored_value - bias, default 0) for example if we store the
         type as an unsigned integer with a bias of 128 then the value 0 will be
         stored as 128 and -1 will be stored as 127 and 1 will be stored as 129.
+        """
+
+        exponent_bias: int
+        """
+        the bias used when encoding the exponent (since for floating point
+        numbers the exponent is encoded as an unsigned integers so a bias is
+        used to allow for negative exponents)
         """
 
         signed: bool
@@ -146,14 +154,29 @@ if TYPE_CHECKING or not core_C_available:
         #
 
         @classmethod
+        def _standard_exponent_bias(cls, exponent: int,
+                                    nan_repr: NanRepr) -> int:
+            """
+            See: https://onnx.ai/onnx/technical/float8.html
+            the common convention for `uz` types if for the bias to be one 
+            larger than what the IEEE 754 convention would suggest, so we 
+            consider this "standard" for our purposes
+            This should match `standard_exponent_bias` in `core/scalar_type.hpp`
+            """
+            exponent_bias = (1 << (exponent - 1)) - 1
+            if nan_repr == NanRepr.EXTD_RANGE_NEG_ZERO:
+                exponent_bias += 1
+            return exponent_bias
+
+        @classmethod
         def int_(cls, size_bits: int, bias: Optional[int]) -> 'ScalarType':
             "Create a signed integer scalar type (size_bits includes sign-bit)."
-            return cls(size_bits - 1, size_bits, bias if bias else 0, True)
+            return cls(size_bits - 1, size_bits, bias if bias else 0, 0, True)
 
         @classmethod
         def uint(cls, size_bits: int, bias: Optional[int]) -> 'ScalarType':
             """Create a unsigned integer scalar type."""
-            return cls(size_bits, size_bits, bias if bias else 0, False)
+            return cls(size_bits, size_bits, bias if bias else 0, 0, False)
 
         @classmethod
         def float_IEEE754(cls, exponent: int, mantissa: int) -> 'ScalarType':
@@ -161,7 +184,9 @@ if TYPE_CHECKING or not core_C_available:
             Create a standard floating point type
             (i.e. follows IEEE 754 conventions).
             """
-            return cls(exponent, mantissa, 0, True)
+            return cls(exponent, mantissa, 0,
+                       cls._standard_exponent_bias(exponent, NanRepr.IEEE_754),
+                       True)
 
         @classmethod
         def float_(cls, exponent: int, mantissa: int, finite_values_only: bool,
@@ -170,8 +195,10 @@ if TYPE_CHECKING or not core_C_available:
             Create a non-standard floating point type
             (i.e. does not follow IEEE 754 conventions).
             """
-            return cls(exponent, mantissa, 0, True, finite_values_only,
-                       nan_repr)
+            return cls(
+                exponent, mantissa, 0,
+                cls._standard_exponent_bias(exponent, NanRepr(nan_repr)), True,
+                finite_values_only, nan_repr)
 
 elif core_C_available:
     try:

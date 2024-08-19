@@ -21,36 +21,53 @@ namespace vllm {
 class ScalarType {
  public:
   enum NanRepr : uint8_t {
-    NAN_NONE = 0,                // nans are not supported
-    NAN_IEEE_754 = 1,            // nans are: exp all 1s, mantissa not all 0s
-    NAN_EXTD_RANGE_MAX_MIN = 2,  // nans are: exp all 1s, mantissa all 1s
+    NAN_NONE = 0,                 // nans are not supported
+    NAN_IEEE_754 = 1,             // nans are: exp all 1s, mantissa not all 0s
+    NAN_EXTD_RANGE_MAX_MIN = 2,   // nans are: exp all 1s, mantissa all 1s
+    NAN_EXTD_RANGE_NEG_ZERO = 3,  // nans are: sign = 1, all else 0s
 
     NAN_REPR_ID_MAX
   };
 
+  static constexpr uint16_t standard_exponent_bias(uint8_t exponent_bits,
+                                                   NanRepr nan_repr) {
+    assert(exponent_bits < 16);
+    uint16_t exponent_bias = (1 << (exponent_bits - 1)) - 1;
+    // See: https://onnx.ai/onnx/technical/float8.html
+    //  the common convention for `uz` types if for the bias to be one larger
+    //  than what the IEEE 754 convention would suggest, so we consider this
+    //  "standard" for our purposes
+    if (nan_repr == NAN_EXTD_RANGE_NEG_ZERO) exponent_bias += 1;
+    return exponent_bias;
+  }
+
   constexpr ScalarType(uint8_t exponent, uint8_t mantissa, bool signed_,
-                       int32_t bias, bool finite_values_only = false,
+                       int16_t bias, uint16_t exponent_bias,
+                       bool finite_values_only = false,
                        NanRepr nan_repr = NAN_IEEE_754)
       : exponent(exponent),
         mantissa(mantissa),
         signed_(signed_),
         bias(bias),
+        exponent_bias(exponent_bias),
         finite_values_only(finite_values_only),
         nan_repr(nan_repr){};
 
-  static constexpr ScalarType int_(uint8_t size_bits, int32_t bias = 0) {
-    return ScalarType(0, size_bits - 1, true, bias);
+  static constexpr ScalarType int_(uint8_t size_bits, int16_t bias = 0) {
+    return ScalarType(0, size_bits - 1, true, bias, 0);
   }
 
-  static constexpr ScalarType uint(uint8_t size_bits, int32_t bias = 0) {
-    return ScalarType(0, size_bits, false, bias);
+  static constexpr ScalarType uint(uint8_t size_bits, int16_t bias = 0) {
+    return ScalarType(0, size_bits, false, bias, 0);
   }
 
   // IEEE 754 compliant floating point type
   static constexpr ScalarType float_IEEE754(uint8_t exponent,
                                             uint8_t mantissa) {
     TORCH_CHECK(mantissa > 0 && exponent > 0);
-    return ScalarType(exponent, mantissa, true, 0, false, NAN_IEEE_754);
+    return ScalarType(exponent, mantissa, true, 0,
+                      standard_exponent_bias(exponent, NAN_IEEE_754), false,
+                      NAN_IEEE_754);
   }
 
   // IEEE 754 non-compliant floating point type
@@ -62,8 +79,9 @@ class ScalarType {
     TORCH_CHECK(nan_repr != NAN_IEEE_754,
                 "use `float_IEEE754` constructor for floating point types that "
                 "follow IEEE 754 conventions");
-    return ScalarType(exponent, mantissa, true, 0, finite_values_only,
-                      nan_repr);
+    return ScalarType(exponent, mantissa, true, 0,
+                      standard_exponent_bias(exponent, nan_repr),
+                      finite_values_only, nan_repr);
   }
 
   uint8_t const exponent;  // size of the exponent field (0 for integer types)
@@ -71,8 +89,9 @@ class ScalarType {
                            // excluding the sign bit for integer types)
   bool const signed_;  // flag if the type supports negative numbers (i.e. has a
                        // sign bit)
-  int32_t const bias;  // stored values equal value + bias,
+  int16_t const bias;  // stored values equal value + bias,
                        // used for quantized type
+  uint16_t const exponent_bias;
 
   // Extra Floating point info
   bool const finite_values_only;  // i.e. no +/-inf if true
@@ -104,7 +123,7 @@ class ScalarType {
   constexpr auto reduce_members(Fn f, Init init) const {
     // Should be in constructor order for `from_id`
     return reduce_members_helper(f, init, exponent, mantissa, signed_, bias,
-                                 finite_values_only, nan_repr);
+                                 exponent_bias, finite_values_only, nan_repr);
   };
 
   template <typename Fn, typename Init>
@@ -189,22 +208,19 @@ class ScalarType {
     }
 
     uint64_t max_exponent = (uint64_t(1) << exponent) - 2;
-    if (nan_repr == NAN_EXTD_RANGE_MAX_MIN || nan_repr == NAN_NONE) {
+    // if all values where the epxonent is all 1s is NOT reserved exclusively
+    // for NANs
+    bool is_extended_range = nan_repr == NAN_EXTD_RANGE_MAX_MIN ||
+                             nan_repr == NAN_EXTD_RANGE_NEG_ZERO ||
+                             nan_repr == NAN_NONE;
+    if (is_extended_range) {
       TORCH_CHECK(exponent < 11,
                   "Cannot represent max/min as a double for type ", str());
       max_exponent += 1;
     }
 
     // adjust the exponent to match that of a double
-    //  for now we assume the exponent bias is the standard 2^(e-1) -1, (where e
-    //  is the exponent bits), there is some precedent for non-standard biases,
-    //  example `float8_e4m3b11fnuz` here: https://github.com/jax-ml/ml_dtypes
-    //  but to avoid premature over complication we are just assuming the
-    //  standard exponent bias until there is a need to support non-standard
-    //  biases
-    uint64_t exponent_bias = (uint64_t(1) << (exponent - 1)) - 1;
     uint64_t exponent_bias_double = (uint64_t(1) << 10) - 1;  // double e = 11
-
     uint64_t max_exponent_double =
         max_exponent - exponent_bias + exponent_bias_double;
 
@@ -273,8 +289,10 @@ class ScalarType {
      *  `float<size_bits>_e<exponent_bits>m<mantissa_bits>[flags]`
      *  flags:
      *  - no-flags: means it follows IEEE 754 conventions
+     *  - b#: indicates a non-standard exponent bias of #
      *  - f: means finite values only (no infinities)
      *  - n: means nans are supported (non-standard encoding)
+     *  - uz: means NAN is represented using `-0.0`
      * for integer types the scheme is:
      *  `[u]int<size_bits>[b<bias>]`
      *  - if bias is not present it means its zero
@@ -283,12 +301,16 @@ class ScalarType {
       auto ret = "float" + std::to_string(size_bits()) + "_e" +
                  std::to_string(exponent) + "m" + std::to_string(mantissa);
       if (!is_ieee_754()) {
-        if (finite_values_only) {
-          ret += "f";
-        }
-        if (nan_repr != NAN_NONE) {
-          ret += "n";
-        }
+        TORCH_CHECK(
+            !has_bias(),
+            "Non-standard biases are not supported for floating point "
+            "types since we don't have naming conventions for them yet");
+        if (exponent >= 16 ||
+            exponent_bias != standard_exponent_bias(exponent, nan_repr))
+          ret += "b" + std::to_string(exponent_bias);
+        if (finite_values_only) ret += "f";
+        if (nan_repr != NAN_NONE) ret += "n";
+        if (nan_repr == NAN_EXTD_RANGE_MAX_MIN) ret += "uz";
       }
       return ret;
     } else {
@@ -318,8 +340,13 @@ class ScalarType {
 class ScalarTypeTorch : public torch::CustomClassHolder, public ScalarType {
  public:
   ScalarTypeTorch(int64_t exponent, int64_t mantissa, int64_t bias,
-                  bool _signed)
-      : ScalarType(exponent, mantissa, bias, _signed){};
+                  int64_t exponent_bias, bool _signed)
+      : ScalarType(exponent, mantissa, bias, exponent_bias, _signed) {
+    check_mantissa(mantissa);
+    check_exponent(exponent);
+    check_bias(bias);
+    check_exponent_bias(exponent_bias);
+  };
 
   ScalarTypeTorch(ScalarType type) : ScalarType(type){};
 
@@ -334,13 +361,6 @@ class ScalarTypeTorch : public torch::CustomClassHolder, public ScalarType {
         "size_bits bit width is too large to be represented");
   }
 
-  static void check_bias(int64_t bias) {
-    using Bias = decltype(std::declval<Self>().bias);
-    TORCH_CHECK(bias <= std::numeric_limits<Bias>::max() &&
-                    bias >= std::numeric_limits<Bias>::min(),
-                "bias too large or small to be represented");
-  }
-
   static void check_exponent(int64_t exponent) {
     TORCH_CHECK(
         exponent <=
@@ -353,6 +373,20 @@ class ScalarTypeTorch : public torch::CustomClassHolder, public ScalarType {
         mantissa <=
             std::numeric_limits<decltype(std::declval<Self>().mantissa)>::max(),
         "mantissa bit width is too large to be represented");
+  }
+
+  static void check_bias(int64_t bias) {
+    using Bias = decltype(std::declval<Self>().bias);
+    TORCH_CHECK(bias <= std::numeric_limits<Bias>::max() &&
+                    bias >= std::numeric_limits<Bias>::min(),
+                "bias too large or small to be represented");
+  }
+
+  static void check_exponent_bias(int64_t exponent_bias) {
+    using ExponentBias = decltype(std::declval<Self>().exponent_bias);
+    TORCH_CHECK(exponent_bias <= std::numeric_limits<ExponentBias>::max() &&
+                    exponent_bias >= std::numeric_limits<ExponentBias>::min(),
+                "exponent_bias too large or small to be represented");
   }
 
   static SelfPtr int_(int64_t size_bits, c10::optional<int64_t> bias) {
@@ -454,13 +488,15 @@ class ScalarTypeTorch : public torch::CustomClassHolder, public ScalarType {
   }
 
   static void bind_class(torch::Library& lib) {
-    auto cls = lib.class_<ScalarTypeTorch>("ScalarType")
-                   .def(torch::init<int64_t, int64_t, int64_t, bool>());
+    auto cls =
+        lib.class_<ScalarTypeTorch>("ScalarType")
+            .def(torch::init<int64_t, int64_t, int64_t, int64_t, bool>());
 
     // Bind Properties
     bind_readonly_property(cls, "mantissa", &Base::mantissa);
     bind_readonly_property(cls, "exponent", &Base::exponent);
     bind_readonly_property(cls, "bias", &Base::bias);
+    bind_readonly_property(cls, "exponent_bias", &Base::exponent_bias);
     bind_readonly_property(cls, "signed", &Base::is_signed);
     bind_readonly_property(cls, "size_bits", &Base::size_bits);
 
@@ -519,6 +555,8 @@ static inline constexpr auto kFE3M2f =
     ScalarType::float_(3, 2, true, ScalarType::NAN_NONE);
 static inline constexpr auto kFE4M3fn =
     ScalarType::float_(4, 3, true, ScalarType::NAN_EXTD_RANGE_MAX_MIN);
+static inline constexpr auto kFE4M3fnuz =
+    ScalarType::float_(4, 3, true, ScalarType::NAN_EXTD_RANGE_NEG_ZERO);
 static inline constexpr auto kFE5M2 = ScalarType::float_IEEE754(5, 2);
 static inline constexpr auto kFE8M7 = ScalarType::float_IEEE754(8, 7);
 static inline constexpr auto kFE5M10 = ScalarType::float_IEEE754(5, 10);
@@ -534,6 +572,7 @@ static inline constexpr auto kUint8b128 = kU8B128;
 
 static inline constexpr auto kFloat6_e3m2f = kFE3M2f;
 static inline constexpr auto kFloat8_e4m3fn = kFE4M3fn;
+static inline constexpr auto kFloat8_e4m3fnuz = kFE4M3fnuz;
 static inline constexpr auto kFloat8_e5m2 = kFE5M2;
 static inline constexpr auto kFloat16_e8m7 = kFE8M7;
 static inline constexpr auto kFloat16_e5m10 = kFE5M10;
