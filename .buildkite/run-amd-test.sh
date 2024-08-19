@@ -1,5 +1,6 @@
 # This script runs test inside the corresponding ROCm docker container.
-set -ex
+#set -ex
+set -o pipefail
 
 # Print ROCm version
 echo "--- Confirming Clean Initial State"
@@ -95,7 +96,7 @@ if [[ $commands == *"--shard-id="* ]]; then
         --name ${container_name}_${GPU}  \
         ${image_name} \
         /bin/bash -c "${commands}" \
-        | label "Shard $GPU" &
+        | label ">>Shard $GPU" &
     PIDS+=($!)
   done
   #wait for all processes to finish and collect exit codes
@@ -105,6 +106,7 @@ if [[ $commands == *"--shard-id="* ]]; then
   done
   for st in ${STATUS[@]}; do
     if [[ ${st} -ne 0 ]]; then
+      echo "One of the processes failed with $st"
       exit ${st}
     fi
   done
