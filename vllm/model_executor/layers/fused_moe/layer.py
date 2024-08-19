@@ -218,7 +218,7 @@ class FusedMoE(torch.nn.Module):
             idx = 0 if shard_id == "w1" else 1
             param_data[expert_id][idx] = loaded_weight
         # If we are in the row parallel case (down_proj)
-        else:
+        elif shard_id == "w2":
             param_data[expert_id] = loaded_weight
 
     def _load_model_weight_or_group_weight_scale(self, shard_dim: int,
@@ -269,6 +269,7 @@ class FusedMoE(torch.nn.Module):
             expert_data = expert_data.narrow(shard_dim, 0, shard_size)
         # w3, up_proj: Load into second logical weight of w13.
         else:
+            assert shard_id == "w3"
             expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
         expert_data.copy_(loaded_weight)
 
@@ -284,16 +285,11 @@ class FusedMoE(torch.nn.Module):
         # w2, down_proj: Load into only logical weight of w2.
         expert_data.copy_(loaded_weight)
 
-    def _load_input_scales(self, param: torch.nn.Parameter,
+    def _load_single_value(self, param: torch.nn.Parameter,
                            loaded_weight: torch.Tensor, expert_id: int):
         param_data = param.data
 
         # Input scales can be loaded directly and should be equal.
-        if param_data[expert_id] != 1 and (param_data[expert_id] -
-                                           loaded_weight).abs() > 1e-5:
-            raise ValueError("input_scales of w1 and w3 of a layer "
-                             f"must be equal. But got {param_data[expert_id]} "
-                             f"vs. {loaded_weight}")
         param_data[expert_id] = loaded_weight
 
     def weight_loader(self, param: torch.nn.Parameter,
@@ -308,7 +304,8 @@ class FusedMoE(torch.nn.Module):
             e.value for e in FusedMoeWeightScaleSupported
         ]
         # Fetch the dim to shard the parameter/loaded weight
-        # based on the shard id
+        # based on the shard id. This will be whatever
+        # dimension intermediate_size is used.
         SHARD_ID_TO_SHARDED_DIM = {"w1": 0, "w2": 1, "w3": 0}
 
         expert_data = param.data[expert_id]
@@ -355,10 +352,23 @@ class FusedMoE(torch.nn.Module):
                     f"quant method must be one of {WEIGHT_SCALE_SUPPORTED}")
             return
 
-        # Case input scales
+        if "weight_shape" in weight_name:
+            self._load_single_value(param=param,
+                                    loaded_weight=loaded_weight,
+                                    expert_id=expert_id)
+            return
+
+        # Case input scale
         if "input_scale" in weight_name:
-            # Note: Only supported for fp8
-            self._load_input_scales(param=param,
+            # Note: input_scale loading is only supported for fp8
+            if param.data[expert_id] != 1 and (param.data[expert_id] -
+                                               loaded_weight).abs() > 1e-5:
+                raise ValueError(
+                    "input_scales of w1 and w3 of a layer "
+                    f"must be equal. But got {param.data[expert_id]} "
+                    f"vs. {loaded_weight}")
+
+            self._load_single_value(param=param,
                                     loaded_weight=loaded_weight,
                                     expert_id=expert_id)
             return
