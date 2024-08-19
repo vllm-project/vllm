@@ -1,5 +1,5 @@
 """
-This example shows how to use vLLM for running offline inference
+This example shows how to use vLLM for running offline inference 
 with the correct prompt format on vision language models.
 
 For most models, the prompt format should follow corresponding examples
@@ -12,8 +12,7 @@ from vllm.assets.image import ImageAsset
 from vllm.utils import FlexibleArgumentParser
 
 # Input image and question
-cherry_blossom_image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
-stop_sign_image = ImageAsset("stop_sign").pil_image.convert("RGB")
+image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
 question = "What is the content of this image?"
 
 
@@ -182,41 +181,34 @@ def main(args):
 
     # We set temperature to 0.2 so that outputs can be different
     # even when all prompts are identical when running batch inference.
-    sampling_params = SamplingParams(max_tokens=2048,
+    sampling_params = SamplingParams(temperature=0.2,
+                                     max_tokens=64,
                                      stop_token_ids=stop_token_ids)
 
-    inputs = [
-        {
-            "prompt": f"[INST] What is the content of this image? [/INST]",
-        },
-        {
-            "prompt":
-            f"[INST] <image>\nWhat is the content of this image? [/INST]",
+    assert args.num_prompts > 0
+    if args.num_prompts == 1:
+        # Single inference
+        inputs = {
+            "prompt": prompt,
             "multi_modal_data": {
-                "image": cherry_blossom_image
-            }
-        },
-        {
-            "prompt":
-            f"[INST] <image>\nWhat is the content of this image? [/INST]",
+                "image": image
+            },
+        }
+
+    else:
+        # Batch inference
+        inputs = [{
+            "prompt": prompt,
             "multi_modal_data": {
-                "image": stop_sign_image
-            }
-        },
-        {
-            "prompt":
-            f"[INST] <image> \n <image> \nWhat are the contents of the two images? [/INST]",
-            "multi_modal_data": {
-                "image": [cherry_blossom_image, stop_sign_image]
-            }
-        },
-    ]
+                "image": image
+            },
+        } for _ in range(args.num_prompts)]
 
     outputs = llm.generate(inputs, sampling_params=sampling_params)
 
-    for i, o in zip(inputs, outputs):
+    for o in outputs:
         generated_text = o.outputs[0].text
-        print(i["prompt"], generated_text)
+        print(generated_text)
 
 
 if __name__ == "__main__":
