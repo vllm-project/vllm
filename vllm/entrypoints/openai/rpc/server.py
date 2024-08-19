@@ -58,11 +58,6 @@ class AsyncEngineRPCServer:
 
             await self.socket.send_multipart(
                 [identity, cloudpickle.dumps(config)])
-            
-            # identity, message = cloudpickle.loads(await self.socket.recv_multipart())
-            # print(message)
-            # if message != "awk":
-            #     raise ValueError
 
         except Exception as e:
             await self.socket.send_multipart(
@@ -75,11 +70,6 @@ class AsyncEngineRPCServer:
         await self.socket.send_multipart(
             [identity, cloudpickle.dumps(tracing_flag)])
 
-        # identity, message = cloudpickle.loads(await self.socket.recv_multipart())
-        # print(message)
-        # if message != "awk":
-        #     raise ValueError
-
     async def do_log_stats(self, identity):
         """Log stats and confirm success."""
         await self.engine.do_log_stats()
@@ -87,20 +77,10 @@ class AsyncEngineRPCServer:
         await self.socket.send_multipart(
             [identity, cloudpickle.dumps(VLLM_RPC_SUCCESS_STR)])
 
-        # identity, message = cloudpickle.loads(await self.socket.recv_multipart())
-        # print(message)
-        # if message != "awk":
-        #     raise ValueError
-
     async def is_server_ready(self, identity):
         """Notify the client that we are ready."""
         await self.socket.send_multipart(
             [identity, cloudpickle.dumps(VLLM_RPC_SUCCESS_STR)])
-
-        # identity, message = cloudpickle.loads(await self.socket.recv_multipart())
-        # print(message)
-        # if message != "awk":
-        #     raise ValueError
 
     async def abort(self, identity, request: RPCAbortRequest):
         """Abort request and notify the client of success."""
@@ -109,11 +89,6 @@ class AsyncEngineRPCServer:
             await self.engine.abort(request.request_id)
             await self.socket.send_multipart(
                 [identity, cloudpickle.dumps(VLLM_RPC_SUCCESS_STR)])
-            
-            # identity, message = cloudpickle.loads(await self.socket.recv_multipart())
-            # print(message)
-            # if message != "awk":
-            #     raise ValueError
 
         except Exception as e:
             await self.socket.send_multipart(
@@ -132,13 +107,6 @@ class AsyncEngineRPCServer:
             async for request_output in results_generator:
                 await self.socket.send_multipart(
                     [identity, cloudpickle.dumps(request_output)])
-                    # flags=zmq.constants.NOBLOCK)
-                
-                
-                # identity, message = cloudpickle.loads(await self.socket.recv_multipart())
-                # print(message)
-                # if message != "awk":
-                #     raise ValueError
 
         except Exception as e:
             await self.socket.send_multipart(
@@ -149,10 +117,6 @@ class AsyncEngineRPCServer:
             await self.engine.check_health()
             await self.socket.send_multipart(
                 [identity, cloudpickle.dumps(VLLM_RPC_SUCCESS_STR)])
-            # identity, message = cloudpickle.loads(await self.socket.recv_multipart())
-            # print(message)
-            # if message != "awk":
-            #     raise ValueError
 
         except Exception as e:
             await self.socket.send_multipart(
