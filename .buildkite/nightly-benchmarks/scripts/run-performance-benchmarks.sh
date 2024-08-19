@@ -86,7 +86,10 @@ kill_gpu_processes() {
   ps -aux
   lsof -t -i:8000 | xargs -r kill -9
   pkill -f pt_main_thread
-  ps aux | grep python | grep openai | awk '{print $2}' | xargs -r kill -9
+  # this line doesn't work now
+  # ps aux | grep python | grep openai | awk '{print $2}' | xargs -r kill -9
+  pkill -f python3
+  pkill -f /usr/bin/python3
 
 
   # wait until GPU memory usage smaller than 1GB
