@@ -1192,7 +1192,7 @@ class HiddenStates(msgspec.Struct, array_like=True,
     # last proposed token is accepted (i.e., in case of bonus tokens). For the
     # case of no bonus tokens, these are ignored.
     second_last_token_hidden_states: Optional[torch.Tensor] = None
-    
+
     _seq_ids: List[int] = msgspec.field(default_factory=list)
 
     def __post_init__(self):
@@ -1227,8 +1227,8 @@ class HiddenStates(msgspec.Struct, array_like=True,
               seq_group_metadata_list: List[SequenceGroupMetadata]) -> None:
         """Prune to provided list of sequence ids. Only used for decode steps.
         """
-        # Currently this prunes all seq_ids not present in 
-        # seq_group_metadata_list which might cause problems where a sequence 
+        # Currently this prunes all seq_ids not present in
+        # seq_group_metadata_list which might cause problems where a sequence
         # may be "paused" then "resumed" later. This should only prune sequences
         # which are confirmed to be aborted.
         seq_ids = get_all_seq_ids(seq_group_metadata_list)
