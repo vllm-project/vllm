@@ -14,6 +14,8 @@ import ray
 from vllm.utils import cuda_device_count_stateless
 
 
+@pytest.mark.skipif(cuda_device_count_stateless() < 2,
+                    reason="Need at least 2 GPUs to run the test.")
 @pytest.mark.parametrize("model, distributed_executor_backend", [
     ("facebook/opt-125m", "ray"),
 ])
