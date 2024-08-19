@@ -142,8 +142,9 @@ def _verify_bundles(placement_group: PlacementGroup,
                 "is smaller than the reserved number of GPUs ({len(bundles)} "
                 "GPUs) in a node %s. Tensor parallel workers can be "
                 "spread out to 2 nodes which can degrade the performance. "
-                "To resolve this issue, make sure you have more than "
-                "%d GPUs available at each node.",
+                "unless you have fast interconnect across nodes, like "
+                "Infiniband. To resolve this issue, make sure you have more "
+                "than %d GPUs available at each node.",
                 parallel_config.tensor_parallel_size, node_id,
                 parallel_config.tensor_parallel_size)
 
