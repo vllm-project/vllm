@@ -11,7 +11,7 @@ from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.entrypoints.openai.rpc import (RPC_REQUEST_TYPE,
                                          VLLM_RPC_HEALTH_TIMEOUT_MS,
-                                         VLLM_RPC_PROXY_POLL_TIMEOUT_MS,
+                                         VLLM_RPC_DO_LOG_STATS_TIMEOUT_MS,
                                          VLLM_RPC_SERVER_START_TIMEOUT_MS,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCGenerateRequest, RPCUtilityRequest)
@@ -32,7 +32,7 @@ INPROC_PROXY_PATH = f"inproc://{uuid4()}"
 ABORT_DRAIN_TIMEOUT_MS = 1000
 
 # Cutoff for value of MAX_SOCKETS.
-SOCKET_LIMIT_CUTOFF = 0
+SOCKET_LIMIT_CUTOFF = 10000
 
 class AsyncEngineRPCClient:
     """
@@ -99,6 +99,7 @@ class AsyncEngineRPCClient:
 
         # In process proxy to RPC Server (used memory-based messaging).
         self.from_api_server = self.context.socket(zmq.constants.ROUTER)
+        # note: debug ---> makes sure there is a valid reciever
         self.from_api_server.setsockopt(zmq.constants.ROUTER_MANDATORY, 1)
         self.from_api_server.bind(INPROC_PROXY_PATH)
 
@@ -121,7 +122,7 @@ class AsyncEngineRPCClient:
         poller.register(socket_from, zmq.constants.POLLIN)
         poller.register(socket_to, zmq.constants.POLLIN)
         while True:
-            events = await poller.poll(timeout=VLLM_RPC_PROXY_POLL_TIMEOUT_MS)
+            events = await poller.poll()
             events = dict(events)
             if socket_from in events:
                 msg = await socket_from.recv_multipart()
@@ -205,6 +206,7 @@ class AsyncEngineRPCClient:
                                         request: RPC_REQUEST_TYPE,
                                         error_message: str,
                                         timeout: Optional[int] = None,
+                                        ignore_timeout: bool = False,
                                         socket: Optional[zmq.asyncio.Socket] = None):
         """Send one-way RPC request to trigger an action."""
         
@@ -214,7 +216,12 @@ class AsyncEngineRPCClient:
             await socket.send_multipart([cloudpickle.dumps(request)])
 
             if timeout is not None and await socket.poll(timeout=timeout) == 0:
-                raise TimeoutError(f"Server didn't reply within {timeout} ms")
+                if not ignore_timeout:
+                    raise TimeoutError(f"Server didn't reply within {timeout} ms")
+                else:
+                    logger.warning(
+                        "Ignoring timed out RPCRequest %s", request)
+                    return VLLM_RPC_SUCCESS_STR
 
             return cloudpickle.loads(await socket.recv())
 
@@ -228,7 +235,6 @@ class AsyncEngineRPCClient:
             response = await do_rpc_call(socket, request, timeout)
 
         if not isinstance(response, str) or response != VLLM_RPC_SUCCESS_STR:
-            print("here here here")
             if isinstance(response, Exception):
                 logger.warning(error_message)
                 raise response
@@ -315,6 +321,8 @@ class AsyncEngineRPCClient:
 
         await self._send_one_way_rpc_request(
             request=RPCUtilityRequest.DO_LOG_STATS,
+            timeout=VLLM_RPC_DO_LOG_STATS_TIMEOUT_MS,
+            ignore_timeout=True,
             error_message="RPCRequest DO_LOG_STATS failed.")
 
     @property
