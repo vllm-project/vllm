@@ -28,7 +28,6 @@ import torch
 import torch.nn as nn
 
 from vllm.model_executor.custom_op import CustomOp
-from vllm.platforms import current_platform
 
 
 def _rotate_neox(x: torch.Tensor) -> torch.Tensor:
@@ -88,8 +87,6 @@ class RotaryEmbedding(CustomOp):
         cache = self._compute_cos_sin_cache()
         cache = cache.to(dtype)
         self.register_buffer("cos_sin_cache", cache, persistent=False)
-
-        self.use_native2 = current_platform.is_tpu() and is_neox_style
 
     def _compute_inv_freq(self, base: Union[int, float]) -> torch.Tensor:
         """Compute the inverse frequency."""
@@ -229,9 +226,10 @@ class RotaryEmbedding(CustomOp):
         key: torch.Tensor,
         offsets: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # forward_native() is too complex to be optimized by torch.compile.
-        # Fall back to the custom C++ kernel.
-        return self.forward_cuda(positions, query, key, offsets)
+        if self.is_neox_style:
+            return self.forward_native2(positions, query, key, offsets)
+        else:
+            return self.forward_native(positions, query, key, offsets)
 
     def forward_xpu(
         self,
@@ -263,9 +261,10 @@ class RotaryEmbedding(CustomOp):
         key: torch.Tensor,
         offsets: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        forward_fn = (self.forward_native2
-                      if self.use_native2 else self.forward_native)
-        return forward_fn(positions, query, key, offsets)
+        if self.is_neox_style:
+            return self.forward_native2(positions, query, key, offsets)
+        else:
+            return self.forward_native(positions, query, key, offsets)
 
     def extra_repr(self) -> str:
         s = f"head_size={self.head_size}, rotary_dim={self.rotary_dim}"
