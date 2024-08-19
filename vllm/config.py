@@ -869,7 +869,6 @@ class SchedulerConfig:
                  num_lookahead_slots: int = 0,
                  delay_factor: float = 0.0,
                  enable_chunked_prefill: bool = False,
-                 embedding_mode: Optional[bool] = False,
                  model_mode: ModelMode = ModelMode.DECODER,
                  preemption_mode: Optional[str] = None,
                  num_scheduler_steps: int = 1,
