@@ -127,8 +127,6 @@ class AsyncEngineRPCClient:
             events = dict(events)
             if socket_from in events:
                 identity, msg = await socket_from.recv_multipart()
-                # awk
-                await socket_from.send_multipart([identity, cloudpickle.dumps("awk")])
                 await socket_to.send_multipart([identity, msg])
             if socket_to in events:
                 identity, msg = await socket_to.recv_multipart()
@@ -168,8 +166,6 @@ class AsyncEngineRPCClient:
         # Note that we use DEALER to enable asynchronous communication
         # to enable streaming.
         socket = self.context.socket(zmq.constants.DEALER)
-        if request_id:
-            socket.identity = request_id.encode("ascii")
         # socket.set_hwm(0)
         try:
             socket.connect(INPROC_PROXY_PATH)
@@ -185,9 +181,6 @@ class AsyncEngineRPCClient:
         with self.to_proxy_socket() as socket:
             # Ping RPCServer with a request.
             await socket.send_multipart([cloudpickle.dumps(request)])
-            message = cloudpickle.loads(await socket.recv())
-            if message != "awk":
-                raise ValueError
 
             # Await the data from the Server.
             data = cloudpickle.loads(await socket.recv())
@@ -215,9 +208,6 @@ class AsyncEngineRPCClient:
                               request: RPC_REQUEST_TYPE, timeout=None):
 
             await socket.send_multipart([cloudpickle.dumps(request)])
-            message = cloudpickle.loads(await socket.recv())
-            if message != "awk":
-                raise ValueError
 
             if timeout is not None and await socket.poll(timeout=timeout) == 0:
                 raise TimeoutError(f"Server didn't reply within {timeout} ms")
@@ -359,10 +349,6 @@ class AsyncEngineRPCClient:
                             trace_headers=trace_headers,
                             prompt_adapter_request=prompt_adapter_request))
                 ])
-
-                message = cloudpickle.loads(await socket.recv())
-                if message != "awk":
-                    raise ValueError
 
                 # Stream back the results from the RPC Server.
                 while not finished:
