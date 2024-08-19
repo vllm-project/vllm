@@ -110,7 +110,6 @@ autodoc_mock_imports = [
     'triton',
     "tqdm",
     "tensorizer",
-    "msgspec",
     "pynvml",
     "outlines",
     "librosa",
