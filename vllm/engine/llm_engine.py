@@ -104,7 +104,7 @@ class LLMEngine:
             decoding.
         executor_class: The model executor class for managing distributed
             execution.
-        prompt_adapter_config (Optional): The configuration related to serving
+        prompt_adapter_config (Optional): The configuration related to serving 
             prompt adapters.
         log_stats: Whether to log statistics.
         usage_context: Specified entry point, used for usage info collection.
@@ -279,7 +279,6 @@ class LLMEngine:
             observability_config=self.observability_config,
         )
 
-        # if not self.model_config.embedding_mode:
         self._initialize_kv_caches()
 
         # If usage stat is enabled, collect relevant info.
@@ -570,7 +569,6 @@ class LLMEngine:
 
         dec_start_token_id = getattr(self.model_config.hf_config,
                                      'decoder_start_token_id', None)
-
         if dec_start_token_id is None:
             if not self.is_encoder_model():
                 logger.warning(
@@ -793,7 +791,7 @@ class LLMEngine:
         "default" decoder prompt be <BOS>.
 
         However, it is possible that in the future
-        other models may have different or more
+        other models may have different or more 
         complex logic for the default decoder prompt.
         This motivates having a special helper method
         for default decoder prompts.
@@ -856,7 +854,7 @@ class LLMEngine:
         have any possible singleton type; thus this
         method relies on helper functions to obtain
         token ids for the sub-prompts.
-
+        
         Arguments:
 
         * inputs: an input prompt

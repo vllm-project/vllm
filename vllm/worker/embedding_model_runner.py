@@ -68,13 +68,6 @@ class EmbeddingModelRunner(EncoderDecoderModelRunnerBase[EmbeddingModelInput]):
                          prompt_adapter_config=prompt_adapter_config,
                          observability_config=observability_config)
 
-    def make_model_input_from_broadcasted_tensor_dict(
-            self, tensor_dict: Dict[str, Any]) -> EmbeddingModelInput:
-        return EmbeddingModelInput.from_broadcasted_tensor_dict(
-            tensor_dict,
-            attn_backend=self.attn_backend,
-        )
-
     @torch.inference_mode()
     def execute_model(
         self,
@@ -143,6 +136,13 @@ class EmbeddingModelRunner(EncoderDecoderModelRunnerBase[EmbeddingModelInput]):
             self.model.pooler(hidden_states=hidden_states,
                               pooling_metadata=model_input.pooling_metadata)
         ]
+
+    def make_model_input_from_broadcasted_tensor_dict(
+            self, tensor_dict: Dict[str, Any]) -> EmbeddingModelInput:
+        return EmbeddingModelInput.from_broadcasted_tensor_dict(
+            tensor_dict,
+            attn_backend=self.attn_backend,
+        )
 
     def prepare_model_input(
         self,
