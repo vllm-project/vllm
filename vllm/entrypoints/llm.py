@@ -1,5 +1,6 @@
 from contextlib import contextmanager
-from typing import ClassVar, Iterator, List, Optional, Sequence, Union, cast, overload
+from typing import (ClassVar, Iterator, List, Optional, Sequence, Union, cast,
+                    overload)
 
 from tqdm.auto import tqdm
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -193,11 +194,12 @@ class LLM:
                 tokenizer)
 
     def _run_stream_engine(self) -> Iterator[RequestOutput]:
-        """Executes a streaming engine that yields outputs from unfinished LLM requests.
+        """Executes a streaming engine that yields outputs from 
+        unfinished LLM requests.
 
         Yields:
-            - Iterator[RequestOutput]: An iterator that produces outputs from the LLM
-            engine as they become available.
+            - Iterator[RequestOutput]: An iterator that produces 
+            outputs from the LLM engine as they become available.
         """
         while self.llm_engine.has_unfinished_requests():
             step_outputs = self.llm_engine.step()
