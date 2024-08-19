@@ -19,119 +19,6 @@ from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import PoolerOutput
 
 
-class BertEmbeddingModel(nn.Module):
-    """A model that uses Bert to provide embedding functionalities.
-
-   This class encapsulates the BertModel and provides an interface for
-   embedding operations and customized pooling functions.
-
-   Attributes:
-       model: An instance of BertModel used for forward operations.
-       _pooler: An instance of Pooler used for pooling operations.
-   """
-
-    stacked_params_mapping = {
-        "query": {
-            "param_name": "qkv_proj",
-            "shard_id": "q",
-        },
-        "key": {
-            "param_name": "qkv_proj",
-            "shard_id": "k",
-        },
-        "value": {
-            "param_name": "qkv_proj",
-            "shard_id": "v",
-        },
-    }
-
-    params_mapping = {
-        "beta": "bias",
-        "gamma": "weight",
-        "LayerNorm": "layernorm",
-    }
-
-    def __init__(
-        self,
-        **kwargs,
-    ) -> None:
-        super().__init__()
-        self.base_model_prefix = "bert"
-        self.model = BertModel(config=kwargs["config"],
-                               cache_config=kwargs.get("cache_config", None),
-                               quant_config=kwargs.get("quant_config", None))
-        self._pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
-        # self._pooler = BertPooler(config=kwargs["config"])
-
-    def forward(
-        self,
-        input_ids: Optional[torch.Tensor],
-        positions: torch.Tensor,
-        encoder_input_ids: Optional[torch.Tensor],
-        encoder_positions: Optional[torch.Tensor],
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        return self.model(input_ids=encoder_input_ids,
-                          position_ids=encoder_positions,
-                          kv_caches=kv_caches,
-                          inputs_embeds=inputs_embeds,
-                          attn_metadata=attn_metadata)
-
-    def pooler(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> Optional[PoolerOutput]:
-        return self._pooler(hidden_states, pooling_metadata)
-
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-
-        params_dict = dict(self.model.named_parameters())
-
-        for name, loaded_weight in weights:
-            name = self._rename_key(name)
-            name, shard_id = self._rename_stacked_param(name)
-
-            # Skip the specific downstream task weight.
-            if name.startswith('cls.'):
-                continue
-            # use Pooler instead.
-            if name.startswith('pooler.'):
-                continue
-            # Skip loading extra bias for GPTQ models.
-            if name.endswith(".bias") and name not in params_dict:
-                continue
-
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            if shard_id:
-                weight_loader(param, loaded_weight, shard_id)
-            else:
-                weight_loader(param, loaded_weight)
-
-    def _rename_key(self, key: str):
-        prefix = f"{self.base_model_prefix}."
-        key = key[len(prefix):] if key.startswith(prefix) else key
-
-        for src, dst in self.params_mapping.items():
-            key = key.replace(src, dst)
-
-        return key
-
-    def _rename_stacked_param(
-        self,
-        name: str,
-    ) -> Tuple[str, Optional[str]]:
-        for key, mapping in self.stacked_params_mapping.items():
-            if key in name:
-                name = name.replace(key, mapping["param_name"])
-                return name, mapping["shard_id"]
-        return name, None
-
-
 class BertModel(nn.Module):
 
     def __init__(
@@ -428,3 +315,116 @@ class BertPooler(nn.Module):
         pooled_output = self.dense(first_token_tensor)
         pooled_output = self.activation(pooled_output)
         return pooled_output
+
+
+class BertEmbeddingModel(nn.Module):
+    """A model that uses Bert to provide embedding functionalities.
+
+   This class encapsulates the BertModel and provides an interface for
+   embedding operations and customized pooling functions.
+
+   Attributes:
+       model: An instance of BertModel used for forward operations.
+       _pooler: An instance of Pooler used for pooling operations.
+   """
+
+    stacked_params_mapping = {
+        "query": {
+            "param_name": "qkv_proj",
+            "shard_id": "q",
+        },
+        "key": {
+            "param_name": "qkv_proj",
+            "shard_id": "k",
+        },
+        "value": {
+            "param_name": "qkv_proj",
+            "shard_id": "v",
+        },
+    }
+
+    params_mapping = {
+        "beta": "bias",
+        "gamma": "weight",
+        "LayerNorm": "layernorm",
+    }
+
+    def __init__(
+        self,
+        **kwargs,
+    ) -> None:
+        super().__init__()
+        self.base_model_prefix = "bert"
+        self.model = BertModel(config=kwargs["config"],
+                               cache_config=kwargs.get("cache_config", None),
+                               quant_config=kwargs.get("quant_config", None))
+        self._pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
+        # self._pooler = BertPooler(config=kwargs["config"])
+
+    def forward(
+        self,
+        input_ids: Optional[torch.Tensor],
+        positions: torch.Tensor,
+        encoder_input_ids: Optional[torch.Tensor],
+        encoder_positions: Optional[torch.Tensor],
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        return self.model(input_ids=encoder_input_ids,
+                          position_ids=encoder_positions,
+                          kv_caches=kv_caches,
+                          inputs_embeds=inputs_embeds,
+                          attn_metadata=attn_metadata)
+
+    def pooler(
+        self,
+        hidden_states: torch.Tensor,
+        pooling_metadata: PoolingMetadata,
+    ) -> Optional[PoolerOutput]:
+        return self._pooler(hidden_states, pooling_metadata)
+
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+
+        params_dict = dict(self.model.named_parameters())
+
+        for name, loaded_weight in weights:
+            name = self._rename_key(name)
+            name, shard_id = self._rename_stacked_param(name)
+
+            # Skip the specific downstream task weight.
+            if name.startswith('cls.'):
+                continue
+            # use Pooler instead.
+            if name.startswith('pooler.'):
+                continue
+            # Skip loading extra bias for GPTQ models.
+            if name.endswith(".bias") and name not in params_dict:
+                continue
+
+            param = params_dict[name]
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
+            if shard_id:
+                weight_loader(param, loaded_weight, shard_id)
+            else:
+                weight_loader(param, loaded_weight)
+
+    def _rename_key(self, key: str):
+        prefix = f"{self.base_model_prefix}."
+        key = key[len(prefix):] if key.startswith(prefix) else key
+
+        for src, dst in self.params_mapping.items():
+            key = key.replace(src, dst)
+
+        return key
+
+    def _rename_stacked_param(
+        self,
+        name: str,
+    ) -> Tuple[str, Optional[str]]:
+        for key, mapping in self.stacked_params_mapping.items():
+            if key in name:
+                name = name.replace(key, mapping["param_name"])
+                return name, mapping["shard_id"]
+        return name, None
