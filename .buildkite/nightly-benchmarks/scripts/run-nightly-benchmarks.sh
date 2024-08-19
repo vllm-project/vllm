@@ -161,6 +161,8 @@ run_serving_tests() {
         "$server_params" "$common_params"
     fi
 
+    wait_for_server
+
     if [ $? -eq 0 ]; then
       echo ""
       echo "$CURRENT_LLM_SERVING_ENGINE server is up and running."
