@@ -441,6 +441,9 @@ class BlockSpaceManagerV2(BlockSpaceManager):
     def get_num_free_cpu_blocks(self) -> int:
         return self.block_allocator.get_num_free_blocks(Device.CPU)
 
+    def get_prefix_cache_hit_rate(self, device: Device) -> float:
+        return self.block_allocator.get_prefix_cache_hit_rate(device)
+
     def _can_swap(self,
                   seq_group: SequenceGroup,
                   device: Device,

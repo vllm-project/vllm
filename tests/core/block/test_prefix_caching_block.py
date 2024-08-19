@@ -682,6 +682,32 @@ class TestPrefixCachingBlockAllocator:
 
         assert new_block[0].block_id == last_block_id
 
+    # Test case for cache mertics
+    @staticmethod
+    def test_metric():
+        block_size = 16
+        allocator = PrefixCachingBlockAllocator(num_blocks=4,
+                                                block_size=block_size)
+        # Test when no query (0/0)
+        assert allocator.get_prefix_cache_hit_rate() == 0.0
+
+        token_ids = list(range(block_size))
+        allocator.allocate_immutable_block(prev_block=None,
+                                           token_ids=token_ids)
+        # Test 0/1 hit rate
+        assert allocator.get_prefix_cache_hit_rate() == 0.0
+
+        allocator.allocate_immutable_block(prev_block=None,
+                                           token_ids=token_ids)
+        # Test 1/2 hit rate
+        assert allocator.get_prefix_cache_hit_rate() == 0.5
+
+        # Test more than one block
+        for _ in range(2, 1005):
+            allocator.allocate_immutable_block(prev_block=None,
+                                               token_ids=token_ids)
+        assert allocator.get_prefix_cache_hit_rate() > 0.99
+
     @staticmethod
     def create_immutable_chain(
         block_size: int,

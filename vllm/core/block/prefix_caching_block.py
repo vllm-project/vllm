@@ -1,9 +1,8 @@
 """Token blocks."""
-
 from os.path import commonprefix
 from typing import Dict, FrozenSet, Iterable, List, Optional, Tuple
 
-from vllm.core.block.common import (CopyOnWriteTracker,
+from vllm.core.block.common import (CacheMetricData, CopyOnWriteTracker,
                                     get_all_blocks_recursively)
 from vllm.core.block.interfaces import Block, BlockAllocator, BlockId, Device
 from vllm.core.block.naive_block import (BlockPool, NaiveBlock,
@@ -107,6 +106,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         self._cow_tracker = CopyOnWriteTracker(
             refcounter=self._refcounter.as_readonly())
 
+        self.metric_data = CacheMetricData()
+
     # Implements Block.Factory.
     def _create_block(
         self,
@@ -155,9 +156,11 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         cached_block_id = self._cached_blocks.get(block.content_hash, None)
         if cached_block_id is not None:
+            self.metric_data.query(hit=True)
             block.block_id = cached_block_id
             self._incr_refcount_cached_block(block)
             return block
+        self.metric_data.query(hit=False)
         self._block_pool.free_block(block)
 
         # No cached block => Allocate a new block
@@ -403,6 +406,9 @@ class PrefixCachingBlockAllocator(BlockAllocator):
     @property
     def all_block_ids(self) -> FrozenSet[int]:
         return self._hashless_allocator.all_block_ids
+
+    def get_prefix_cache_hit_rate(self) -> float:
+        return self.metric_data.get_hit_rate()
 
     def is_block_cached(self, block: Block) -> bool:
         assert block.content_hash is not None
