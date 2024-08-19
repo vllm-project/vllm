@@ -2,11 +2,10 @@ import time
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple, Union
 
+import msgspec
 from ray._private.state import available_resources_per_node
 from ray.util import placement_group_table
 from ray.util.placement_group import PlacementGroup
-
-import msgspec
 
 from vllm.config import ParallelConfig
 from vllm.executor.msgspec_utils import decode_hook, encode_hook
@@ -162,10 +161,10 @@ def _wait_until_pg_ready(current_placement_group: PlacementGroup):
     placement_group_specs = current_placement_group.bundle_specs
 
     s = time.time()
-    ref = current_placement_group.ready()
+    pg_ready_ref = current_placement_group.ready()
     wait_interval = 10
     while time.time() - s < PG_WAIT_TIMEOUT:
-        ready, _ = ray.wait([ref], timeout=wait_interval)
+        ready, _ = ray.wait([pg_ready_ref], timeout=wait_interval)
         if len(ready) > 0:
             break
 
@@ -178,7 +177,7 @@ def _wait_until_pg_ready(current_placement_group: PlacementGroup):
             int(time.time() - s), placement_group_specs)
 
     try:
-        ray.get(current_placement_group.ready(), timeout=0)
+        ray.get(pg_ready_ref, timeout=0)
     except ray.exceptions.GetTimeoutError:
         raise ValueError(
             "Cannot provide a placement group of "

@@ -7,7 +7,6 @@ cd $VLLM_PATH/tests
 pytest distributed/test_multi_node.py
 ```
 """
-import os
 
 import pytest
 import ray
@@ -15,19 +14,16 @@ from ray.cluster_utils import Cluster
 
 from vllm.utils import cuda_device_count_stateless
 
-TARGET_TEST_SUITE = os.environ.get("TARGET_TEST_SUITE", "L4")
-
 
 @pytest.mark.skipif(cuda_device_count_stateless() < 2,
                     reason="Need at least 2 GPUs to run the test.")
 @pytest.mark.parametrize("model, distributed_executor_backend, test_suite", [
-    ("facebook/opt-125m", "ray", "L4"),
+    ("facebook/opt-125m", "ray"),
 ])
 def test_multi_node_bad_topology(
     vllm_runner,
     model: str,
     distributed_executor_backend: str,
-    test_suite: str,
 ) -> None:
     """Verify ray + multi node's bad topology raises an exception.
 
@@ -39,7 +35,6 @@ def test_multi_node_bad_topology(
     - the tensor parallel size exceeds the available GPUs in a current node.
     """
     dtype = "half"
-    assert test_suite == TARGET_TEST_SUITE
 
     # Simulate 2 node clusters, 1 GPU each.
     cluster = Cluster()
