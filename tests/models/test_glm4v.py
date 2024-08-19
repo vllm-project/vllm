@@ -3,53 +3,54 @@ os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 
 # torch-2.1.0+cuda11.8-cp310-cp310-linux_aarch64.whl
 
-# import torch
-# from PIL import Image
-# from transformers import AutoTokenizer
-# from vllm import LLM, SamplingParams
-# from vllm.inputs import TokensPrompt
+import torch
+from PIL import Image
+from transformers import AutoTokenizer
+from vllm import LLM, SamplingParams
+from vllm.inputs import TokensPrompt
 
-# max_model_len, tp_size = 8192, 1
-# model_name = "THUDM/glm-4v-9b"
+max_model_len, tp_size = 8192, 1
+model_name = "THUDM/glm-4v-9b"
 
-# llm = LLM(
-#     model=model_name,
-#     tensor_parallel_size=tp_size,
-#     max_model_len=max_model_len,
-#     trust_remote_code=True,
-#     dtype=torch.bfloat16,
-#     enforce_eager=True,
-#     load_format='bitsandbytes',
-#     quantization='bitsandbytes'
-# )
-# stop_token_ids = [151329, 151336, 151338]
-# sampling_params = SamplingParams(temperature=0, max_tokens=1024, stop_token_ids=stop_token_ids)
+llm = LLM(
+    model=model_name,
+    tensor_parallel_size=tp_size,
+    max_model_len=max_model_len,
+    trust_remote_code=True,
+    dtype=torch.bfloat16,
+    enforce_eager=True,
+    load_format='bitsandbytes',
+    quantization='bitsandbytes'
+)
+stop_token_ids = [151329, 151336, 151338]
+sampling_params = SamplingParams(temperature=0, max_tokens=1024, stop_token_ids=stop_token_ids)
 
-# tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 
-# query = 'Describe this picture.'
-# image = Image.open("docs/source/assets/logos/vllm-logo-text-light.png").convert('RGB')
-# inputs = tokenizer.apply_chat_template(
-#     [{"role": "user", "image": image, "content": query}],
-#     add_generation_prompt=True,
-#     tokenize=True,
-#     return_tensors="pt",
-#     return_dict=True
-# )
+query = 'Describe this picture.'
 
-# image_tensor = inputs['images']
+image = Image.open(os.path.join(os.path.dirname(__file__), "../../docs/source/assets/logos/vllm-logo-text-light.png")).convert('RGB')
+inputs = tokenizer.apply_chat_template(
+    [{"role": "user", "image": image, "content": query}],
+    add_generation_prompt=True,
+    tokenize=True,
+    return_tensors="pt",
+    return_dict=True
+)
 
-# input_ids = inputs['input_ids'][0].tolist()
+image_tensor = inputs['images']
 
-# outputs = llm.generate(
-#     TokensPrompt(**{
-#         "prompt_token_ids": input_ids,
-#         "multi_modal_data":  {"image": image_tensor},
-#     }),
-#     sampling_params=sampling_params
-# )
+input_ids = inputs['input_ids'][0].tolist()
 
-# print(outputs[0].outputs[0].text)
+outputs = llm.generate(
+    TokensPrompt(**{
+        "prompt_token_ids": input_ids,
+        "multi_modal_data":  {"image": image_tensor},
+    }),
+    sampling_params=sampling_params
+)
+
+print(outputs[0].outputs[0].text)
 
 
 # from transformers import AutoTokenizer

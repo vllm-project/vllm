@@ -1,0 +1,29 @@
+Looking in indexes: http://mirrors.aliyun.com/pypi/simple
+Collecting bitsandbytes
+  Downloading http://mirrors.aliyun.com/pypi/packages/f8/1a/3cbdd70ce276085602ffe7e4f52753a41c43464053eec9e76b3dd065e4c9/bitsandbytes-0.43.3-py3-none-manylinux_2_24_x86_64.whl (137.5 MB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 137.5/137.5 MB 33.3 MB/s eta 0:00:00
+Requirement already satisfied: numpy in /root/miniconda3/lib/python3.10/site-packages (from bitsandbytes) (1.26.3)
+Requirement already satisfied: torch in /root/miniconda3/lib/python3.10/site-packages (from bitsandbytes) (2.4.0)
+Requirement already satisfied: nvidia-cufft-cu12==11.0.2.54 in /root/miniconda3/lib/python3.10/site-packages (from torch->bitsandbytes) (11.0.2.54)
+Requirement already satisfied: typing-extensions>=4.8.0 in /root/miniconda3/lib/python3.10/site-packages (from torch->bitsandbytes) (4.12.2)
+Requirement already satisfied: nvidia-cusparse-cu12==12.1.0.106 in /root/miniconda3/lib/python3.10/site-packages (from torch->bitsandbytes) (12.1.0.106)
+Requirement already satisfied: networkx in /root/miniconda3/lib/python3.10/site-packages (from torch->bitsandbytes) (3.2.1)
+Requirement already satisfied: nvidia-cuda-cupti-cu12==12.1.105 in /root/miniconda3/lib/python3.10/site-packages (from torch->bitsandbytes) (12.1.105)
+Requirement already satisfied: nvidia-curand-cu12==10.3.2.106 in /root/miniconda3/lib/python3.10/site-packages (from torch->bitsandbytes) (10.3.2.106)
+Requirement already satisfied: nvidia-cublas-cu12==12.1.3.1 in /root/miniconda3/lib/python3.10/site-packages (from torch->bitsandbytes) (12.1.3.1)
+Requirement already satisfied: nvidia-nccl-cu12==2.20.5 in /root/miniconda3/lib/python3.10/site-packages (from torch->bitsandbytes) (2.20.5)
+Requirement already satisfied: nvidia-cudnn-cu12==9.1.0.70 in /root/miniconda3/lib/python3.10/site-packages (from torch->bitsandbytes) (9.1.0.70)
+Requirement already satisfied: jinja2 in /root/miniconda3/lib/python3.10/site-packages (from torch->bitsandbytes) (3.1.2)
+Requirement already satisfied: filelock in /root/miniconda3/lib/python3.10/site-packages (from torch->bitsandbytes) (3.13.1)
+Requirement already satisfied: fsspec in /root/miniconda3/lib/python3.10/site-packages (from torch->bitsandbytes) (2023.12.2)
+Requirement already satisfied: triton==3.0.0 in /root/miniconda3/lib/python3.10/site-packages (from torch->bitsandbytes) (3.0.0)
+Requirement already satisfied: nvidia-nvtx-cu12==12.1.105 in /root/miniconda3/lib/python3.10/site-packages (from torch->bitsandbytes) (12.1.105)
+Requirement already satisfied: nvidia-cusolver-cu12==11.4.5.107 in /root/miniconda3/lib/python3.10/site-packages (from torch->bitsandbytes) (11.4.5.107)
+Requirement already satisfied: nvidia-cuda-runtime-cu12==12.1.105 in /root/miniconda3/lib/python3.10/site-packages (from torch->bitsandbytes) (12.1.105)
+Requirement already satisfied: sympy in /root/miniconda3/lib/python3.10/site-packages (from torch->bitsandbytes) (1.12)
+Requirement already satisfied: nvidia-cuda-nvrtc-cu12==12.1.105 in /root/miniconda3/lib/python3.10/site-packages (from torch->bitsandbytes) (12.1.105)
+Requirement already satisfied: nvidia-nvjitlink-cu12 in /root/miniconda3/lib/python3.10/site-packages (from nvidia-cusolver-cu12==11.4.5.107->torch->bitsandbytes) (12.6.20)
+Requirement already satisfied: MarkupSafe>=2.0 in /root/miniconda3/lib/python3.10/site-packages (from jinja2->torch->bitsandbytes) (2.1.3)
+Requirement already satisfied: mpmath>=0.19 in /root/miniconda3/lib/python3.10/site-packages (from sympy->torch->bitsandbytes) (1.3.0)
+Installing collected packages: bitsandbytes
+Successfully installed bitsandbytes-0.43.3
