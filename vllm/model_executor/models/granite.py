@@ -294,8 +294,7 @@ class GraniteModel(nn.Module):
             self.norm = PPMissingLayer()
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        inputs_embeds = self.embed_tokens(input_ids)
-        return inputs_embeds
+        return self.embed_tokens(input_ids)
 
     def forward(
         self,
@@ -317,7 +316,7 @@ class GraniteModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        hidden_states = hidden_states * self.config.embedding_multiplier
+        hidden_states *= self.config.embedding_multiplier
 
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
@@ -426,10 +425,10 @@ class GraniteForCausalLM(nn.Module, SupportsLoRA):
         return model_output
 
     def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+                       sampling_metadata: SamplingMetadata) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
-        logits = logits / self.config.logits_scaling
+        logits /= self.config.logits_scaling
         return logits
 
     def sample(
