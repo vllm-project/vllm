@@ -34,6 +34,7 @@ ABORT_DRAIN_TIMEOUT_MS = 1000
 # Cutoff for value of MAX_SOCKETS.
 SOCKET_LIMIT_CUTOFF = 0
 
+
 class AsyncEngineRPCClient:
     """
     RPCClient that connects to the RPCServer wrapping AsyncLLMEngine.
@@ -80,8 +81,6 @@ class AsyncEngineRPCClient:
         # Maximum number of sockets that can be opened (typically 65536).
         # ZMQ_SOCKET_LIMIT (http://api.zeromq.org/4-2:zmq-ctx-get)
         socket_limit = self.context.get(zmq.constants.SOCKET_LIMIT)
-        # debug
-        socket_limit = 5000
         if socket_limit < SOCKET_LIMIT_CUTOFF:
             raise ValueError(
                 f"Found zmq.constants.SOCKET_LIMIT={socket_limit}, which caps "
@@ -96,13 +95,12 @@ class AsyncEngineRPCClient:
 
         # IPC connection to RPC Server (uses unix sockets).
         self.to_rcp_server = self.context.socket(zmq.constants.DEALER)
+        self.to_rcp_server.set_hwm(0)
         self.to_rcp_server.bind(rpc_path)
 
-        # In process proxy to RPC Server (used memory-based messaging).
+        # In process proxy to RPC Server (uses memory-based messaging).
         self.from_api_server = self.context.socket(zmq.constants.ROUTER)
-        # note: debug ---> makes sure there is a valid reciever
-        self.from_api_server.set_hwm(0)
-        self.from_api_server.setsockopt(zmq.constants.ROUTER_MANDATORY, 1)
+        # self.from_api_server.set_hwm(0)
         self.from_api_server.bind(INPROC_PROXY_PATH)
 
         # Asyncio background task for the proxy.
@@ -113,10 +111,11 @@ class AsyncEngineRPCClient:
         # the number of requests that can run in vLLM w. frontend
         # mulitprocessing. This value is used uvicorn to launch 
         # with --limit-concurrency to return 503 when server is overloaded.
-        #
+        
         # We need 2 sockets per request - 1 for generate() and 1 for abort()
         # We need 2 sockets for do_log_stats() and check_health()
-        self.limit_concurrency = socket_limit // 3
+        self.limit_concurrency = socket_limit // 2
+        
 
     async def run_proxy(self, socket_from, socket_to):
         """Background task that runs a proxy"""
@@ -127,18 +126,14 @@ class AsyncEngineRPCClient:
             events = await poller.poll()
             events = dict(events)
             if socket_from in events:
-                msg = await socket_from.recv_multipart()
-                await socket_to.send_multipart(msg)
+                identity, msg = await socket_from.recv_multipart()
+                # awk
+                await socket_from.send_multipart([identity, cloudpickle.dumps("awk")])
+                await socket_to.send_multipart([identity, msg])
             if socket_to in events:
-                msg = await socket_to.recv_multipart()
-                try:
-                    await socket_from.send_multipart(msg)
-                except:
-                    identity, data = msg
-                    data = cloudpickle.loads(data)
-                    # print(identity)
-                    # print(data)
-                    print("ERROR IN PROXY")
+                identity, msg = await socket_to.recv_multipart()
+                await socket_from.send_multipart([identity, msg])
+
 
     async def setup(self):
         """Setup the client before it starts sending server requests."""
@@ -168,17 +163,19 @@ class AsyncEngineRPCClient:
         self.context.destroy(linger=0)
 
     @contextmanager
-    def to_proxy_socket(self):
+    def to_proxy_socket(self, request_id=None):
         # Connect to the RPCServer via the proxy.
         # Note that we use DEALER to enable asynchronous communication
         # to enable streaming.
         socket = self.context.socket(zmq.constants.DEALER)
+        if request_id:
+            socket.identity = request_id.encode("ascii")
+        # socket.set_hwm(0)
         try:
             socket.connect(INPROC_PROXY_PATH)
             yield socket
         finally:
             socket.close()
-    
 
     async def _send_get_data_rpc_request(self, request: RPCUtilityRequest,
                                          expected_type: Any,
@@ -188,6 +185,9 @@ class AsyncEngineRPCClient:
         with self.to_proxy_socket() as socket:
             # Ping RPCServer with a request.
             await socket.send_multipart([cloudpickle.dumps(request)])
+            message = cloudpickle.loads(await socket.recv())
+            if message != "awk":
+                raise ValueError
 
             # Await the data from the Server.
             data = cloudpickle.loads(await socket.recv())
@@ -215,6 +215,9 @@ class AsyncEngineRPCClient:
                               request: RPC_REQUEST_TYPE, timeout=None):
 
             await socket.send_multipart([cloudpickle.dumps(request)])
+            message = cloudpickle.loads(await socket.recv())
+            if message != "awk":
+                raise ValueError
 
             if timeout is not None and await socket.poll(timeout=timeout) == 0:
                 raise TimeoutError(f"Server didn't reply within {timeout} ms")
@@ -343,7 +346,7 @@ class AsyncEngineRPCClient:
         """Send an RPCGenerateRequest to the RPCServer and stream responses."""
 
         finished = False
-        with self.to_proxy_socket() as socket:
+        with self.to_proxy_socket(request_id) as socket:
             try:
                 # Send RPCGenerateRequest to the RPCServer.
                 await socket.send_multipart([
@@ -357,8 +360,13 @@ class AsyncEngineRPCClient:
                             prompt_adapter_request=prompt_adapter_request))
                 ])
 
+                message = cloudpickle.loads(await socket.recv())
+                if message != "awk":
+                    raise ValueError
+
                 # Stream back the results from the RPC Server.
                 while not finished:
+
                     message = await socket.recv()
                     request_output = cloudpickle.loads(message)
 
@@ -370,6 +378,8 @@ class AsyncEngineRPCClient:
                             await self.check_health(socket=socket)
                         except Exception:
                             self._errored = True
+                            import traceback
+                            logger.error(traceback.format_exc())
                         # NB: do before raising here so that the flag is set
                         # by the time the caller receives this exception
                         raise request_output
