@@ -93,8 +93,7 @@ async def lifespan(app: FastAPI):
 
 
 @asynccontextmanager
-async def build_async_engine_client(
-        args) -> AsyncIterator[Optional[AsyncEngineClient]]:
+async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
     # Context manager to handle async_engine_client lifecycle
     # Ensures everything is shutdown and cleaned up on error/exit
     global engine_args
