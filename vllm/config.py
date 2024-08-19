@@ -299,7 +299,8 @@ class ModelConfig:
                     and not envs.VLLM_USE_TRITON_AWQ):
                 logger.warning(
                     "Using AWQ quantization with ROCm, but VLLM_USE_TRITON_AWQ"
-                    " is not set to 1, this will crash.")
+                    " is not set, enabling VLLM_USE_TRITON_AWQ.")
+                envs.VLLM_USE_TRITON_AWQ = True
 
     def _verify_cuda_graph(self) -> None:
         if self.max_seq_len_to_capture is None:
