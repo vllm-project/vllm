@@ -409,10 +409,10 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         return self._base_model_runner.vocab_size
 
 
-def _pythonize_sampler_output(
-        model_input: StatefulModelInput, output: SamplerOutput,
-        pinned_sampled_token_buffer: torch.Tensor,
-        sampled_token_ids: torch.Tensor) -> None:
+def _pythonize_sampler_output(model_input: StatefulModelInput,
+                              output: SamplerOutput,
+                              pinned_sampled_token_buffer: torch.Tensor,
+                              sampled_token_ids: torch.Tensor) -> None:
     """ This function is only called when the output tensors are ready. 
     See ModelOutput
     """
