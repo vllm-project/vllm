@@ -1,14 +1,19 @@
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type
 
 try:
     from flashinfer import BatchDecodeWithPagedKVCacheWrapper
+    from flashinfer.decode import CUDAGraphBatchDecodeWithPagedKVCacheWrapper
     from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper
 
     import vllm.attention.backends.flash_attn  # noqa
+    FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
 except ImportError:
     BatchDecodeWithPagedKVCacheWrapper = None
+    CUDAGraphBatchDecodeWithPagedKVCacheWrapper = None
     BatchPrefillWithPagedKVCacheWrapper = None
+    FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
 
 import torch
 
@@ -16,7 +21,7 @@ from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata,
                                               AttentionMetadataBuilder,
-                                              AttentionType)
+                                              AttentionState, AttentionType)
 from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
@@ -47,6 +52,10 @@ class FlashInferBackend(AttentionBackend):
         return FlashInferMetadataBuilder
 
     @staticmethod
+    def get_state_cls() -> Type["FlashInferState"]:
+        return FlashInferState
+
+    @staticmethod
     def get_kv_cache_shape(
         num_blocks: int,
         block_size: int,
@@ -73,6 +82,160 @@ class FlashInferBackend(AttentionBackend):
     @staticmethod
     def get_supported_head_sizes() -> List[int]:
         return [64, 128, 256]
+
+
+class FlashInferState(AttentionState):
+
+    def __init__(self, runner):
+        self.runner = runner
+        self._is_graph_capturing = False
+        self._workspace_buffer = None
+        self._decode_wrapper = None
+        self._prefill_wrapper = None
+
+    def _get_workspace_buffer(self):
+        if self._workspace_buffer is None:
+            self._workspace_buffer = torch.empty(
+                FLASHINFER_WORKSPACE_BUFFER_SIZE,
+                dtype=torch.uint8,
+                device=self.runner.device)
+        return self._workspace_buffer
+
+    def _get_prefill_wrapper(self):
+        if self._prefill_wrapper is None:
+            self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
+                self._get_workspace_buffer(), "NHD")
+        return self._prefill_wrapper
+
+    def _get_decode_wrapper(self):
+        if self._decode_wrapper is None:
+            num_qo_heads = (self.runner.model_config.get_num_attention_heads(
+                self.runner.parallel_config))
+            num_kv_heads = self.runner.model_config.get_num_kv_heads(
+                self.runner.parallel_config)
+            use_tensor_cores = num_qo_heads // num_kv_heads >= 4
+            self._decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
+                self._get_workspace_buffer(),
+                "NHD",
+                use_tensor_cores=use_tensor_cores)
+        return self._decode_wrapper
+
+    @contextmanager
+    def graph_capture(self, max_batch_size: int):
+        self._is_graph_capturing = True
+        self._graph_decode_wrapper = None
+        self._graph_slot_mapping = torch.full((max_batch_size, ),
+                                              PAD_SLOT_ID,
+                                              dtype=torch.long,
+                                              device=self.runner.device)
+        self._graph_seq_lens = torch.ones(max_batch_size,
+                                          dtype=torch.int32,
+                                          device=self.runner.device)
+        self._graph_block_tables = torch.from_numpy(
+            self.runner.graph_block_tables).to(device=self.runner.device)
+        self._graph_decode_workspace_buffer = self._get_workspace_buffer()
+        self._graph_indices_buffer = torch.empty(
+            max_batch_size * self.runner.cache_config.num_gpu_blocks,
+            dtype=torch.int32,
+            device=self.runner.device)
+        self._graph_indptr_buffer = torch.empty(max_batch_size + 1,
+                                                dtype=torch.int32,
+                                                device=self.runner.device)
+        self._graph_last_page_len_buffer = torch.empty(
+            max_batch_size, dtype=torch.int32, device=self.runner.device)
+        yield
+        self._is_graph_capturing = False
+        del self._graph_slot_mapping
+        del self._graph_seq_lens
+        del self._graph_block_tables
+        del self._graph_decode_workspace_buffer
+        del self._graph_indices_buffer
+        del self._graph_indptr_buffer
+        del self._graph_last_page_len_buffer
+        del self._graph_decode_wrapper
+
+    def graph_clone(self, batch_size: int):
+        assert self._is_graph_capturing
+        state = self.__class__(self.runner)
+        state._workspace_buffer = self._graph_decode_workspace_buffer
+        state._decode_wrapper = self._graph_decode_wrapper
+        state._prefill_wrapper = self._get_prefill_wrapper()
+        return state
+
+    def graph_capture_get_metadata_for_batch(self, batch_size: int):
+        assert self._is_graph_capturing
+        _indptr_buffer = self._graph_indptr_buffer[:batch_size + 1]
+        _last_page_len_buffer = self._graph_last_page_len_buffer[:batch_size]
+
+        num_qo_heads = (self.runner.model_config.get_num_attention_heads(
+            self.runner.parallel_config))
+        num_kv_heads = self.runner.model_config.get_num_kv_heads(
+            self.runner.parallel_config)
+        use_tensor_cores = num_qo_heads // num_kv_heads >= 4
+        self._graph_decode_wrapper = \
+            CUDAGraphBatchDecodeWithPagedKVCacheWrapper(
+            self._graph_decode_workspace_buffer, _indptr_buffer,
+            self._graph_indices_buffer, _last_page_len_buffer, "NHD",
+            use_tensor_cores)
+        kv_cache_dtype = get_kv_cache_torch_dtype(
+            self.runner.kv_cache_dtype, self.runner.model_config.dtype)
+
+        paged_kv_indptr_tensor_host = torch.arange(0,
+                                                   batch_size + 1,
+                                                   dtype=torch.int32)
+        paged_kv_indices_tensor_host = torch.arange(0,
+                                                    batch_size,
+                                                    dtype=torch.int32)
+        paged_kv_last_page_len_tensor_host = torch.full((batch_size, ),
+                                                        self.runner.block_size,
+                                                        dtype=torch.int32)
+        query_start_loc_host = torch.arange(0,
+                                            batch_size + 1,
+                                            dtype=torch.int32)
+
+        attn_metadata = self.runner.attn_backend.make_metadata(
+            num_prefills=0,
+            slot_mapping=self._graph_slot_mapping[:batch_size],
+            num_prefill_tokens=0,
+            num_decode_tokens=batch_size,
+            max_prefill_seq_len=0,
+            block_tables=self._graph_block_tables,
+            paged_kv_indptr=paged_kv_indptr_tensor_host,
+            paged_kv_indices=paged_kv_indices_tensor_host,
+            paged_kv_last_page_len=paged_kv_last_page_len_tensor_host,
+            num_qo_heads=num_qo_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=self.runner.model_config.get_head_size(),
+            page_size=self.runner.block_size,
+            seq_start_loc=None,
+            query_start_loc=query_start_loc_host,
+            device=self.runner.device,
+            data_type=kv_cache_dtype,
+            use_cuda_graph=True,
+            decode_wrapper=self._graph_decode_wrapper,
+            prefill_wrapper=None)
+        attn_metadata.begin_forward()
+        return attn_metadata
+
+    def get_graph_input_buffers(self, attn_metadata):
+        return {
+            "slot_mapping": attn_metadata.slot_mapping,
+        }
+
+    def prepare_graph_input_buffers(self, input_buffers, attn_metadata):
+        return
+
+    def begin_forward(self, model_input):
+        assert not self._is_graph_capturing
+        state = self
+        if model_input.attn_metadata.use_cuda_graph:
+            batch_size = model_input.input_tokens.shape[0]
+            state = (self.runner.graph_runners[model_input.virtual_engine]
+                     [batch_size].attn_state)
+        model_input.attn_metadata.prefill_wrapper = state._get_prefill_wrapper(
+        )
+        model_input.attn_metadata.decode_wrapper = state._get_decode_wrapper()
+        model_input.attn_metadata.begin_forward()
 
 
 @dataclass

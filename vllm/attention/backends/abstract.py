@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from dataclasses import dataclass, fields
 from enum import Enum, auto
 from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Set,
@@ -7,7 +8,9 @@ from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Set,
 import torch
 
 if TYPE_CHECKING:
-    from vllm.worker.model_runner_base import ModelRunnerInputBuilderBase
+    from vllm.worker.model_runner_base import (ModelRunnerBase,
+                                               ModelRunnerInputBase,
+                                               ModelRunnerInputBuilderBase)
 
 
 class AttentionType(Enum):
@@ -32,6 +35,11 @@ class AttentionBackend(ABC):
     @staticmethod
     @abstractmethod
     def get_metadata_cls() -> Type["AttentionMetadata"]:
+        raise NotImplementedError
+
+    @staticmethod
+    @abstractmethod
+    def get_state_cls() -> Type["AttentionState"]:
         raise NotImplementedError
 
     @classmethod
@@ -124,6 +132,39 @@ class AttentionMetadata:
 
 
 T = TypeVar("T", bound=AttentionMetadata)
+
+
+class AttentionState(ABC, Generic[T]):
+
+    @abstractmethod
+    def __init__(self, runner: "ModelRunnerBase"):
+        ...
+
+    @abstractmethod
+    @contextmanager
+    def graph_capture(self, max_batch_size: int):
+        yield
+
+    @abstractmethod
+    def graph_clone(self, batch_size: int) -> "AttentionState[T]":
+        ...
+
+    @abstractmethod
+    def graph_capture_get_metadata_for_batch(self, batch_size: int) -> T:
+        ...
+
+    @abstractmethod
+    def get_graph_input_buffers(self, attn_metadata: T) -> Dict[str, Any]:
+        ...
+
+    @abstractmethod
+    def prepare_graph_input_buffers(self, input_buffers: Dict[str, Any],
+                                    attn_metadata: T) -> None:
+        ...
+
+    @abstractmethod
+    def begin_forward(self, model_input: "ModelRunnerInputBase") -> None:
+        ...
 
 
 class AttentionMetadataBuilder(ABC, Generic[T]):
