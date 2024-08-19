@@ -359,6 +359,8 @@ def run_equality_correctness_test(
         print(f'{i=}     {spec_token_ids=}')
         assert baseline_token_ids == spec_token_ids
 
+    print(f'{acceptance_rate=}')
+
     if ensure_all_accepted:
         assert acceptance_rate == 1.0
 

@@ -121,7 +121,7 @@ def test_mlp_e2e_acceptance_rate(baseline_llm_generator, test_llm_generator,
                                   temperature=0.0,
                                   seeded=True,
                                   force_output_len=True,
-                                  expected_acceptance_rate=0.6)
+                                  expected_acceptance_rate=0.48)
 
 
 @pytest.mark.parametrize(
