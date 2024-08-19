@@ -34,6 +34,9 @@ def test_block_allocator(
     assert (first_block == second_block)
     assert (second_block.ref_count == 2)
 
+    # Check metric: 1 hit of 2 queries
+    assert block_allocator.get_prefix_cache_hit_rate() == 0.5
+
     # Free the first_block and confirm that the ref_count is correctly
     # decremented on the second block
     block_allocator.free(first_block)
@@ -47,6 +50,10 @@ def test_block_allocator(
     first_block = block_allocator.allocate(block_hash, 0)
     assert (first_block == second_block)
     assert (first_block.block_hash == block_hash)
+
+    # Allocate one more time to get 3/4 hit rate for easy checking
+    block_allocator.allocate(block_hash, 0)
+    assert block_allocator.get_prefix_cache_hit_rate() == 0.75
 
 
 @pytest.mark.parametrize("num_blocks", [16])

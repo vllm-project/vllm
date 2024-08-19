@@ -1,4 +1,5 @@
 from collections import deque
+from dataclasses import dataclass
 from typing import Deque, Dict, Iterable, List, Optional, Protocol, Tuple
 
 from vllm.core.block.interfaces import Block, BlockAllocator
@@ -280,6 +281,58 @@ class BlockList:
 
     def ids(self) -> List[int]:
         return self._block_ids
+
+
+@dataclass
+class CacheMetricData:
+    """A utility dataclass to maintain cache metric.
+    To avoid overflow, we maintain the hit rate in block granularity, so that
+    we can maintain a single hit rate for n_completed_block x block_size,
+    and calculate the real time hit rate by the following:
+    BS = The number of queries per block.
+    nB = The number of completed blocks.
+    HR = hit rate of (nB x BS) queries.
+    Q = current number of queries (< BS).
+    H = current number of hits (< BS).
+    hit rate = ((HR x nB) + (H / Q) x (Q / BS)) / (nB + Q / BS)
+    """
+    num_completed_blocks: int = 0
+    completed_block_cache_hit_rate: float = 0.0
+    num_incompleted_block_queries: int = 0
+    num_incompleted_block_hit: int = 0
+    block_size: int = 1000
+
+    def query(self, hit: bool):
+        self.num_incompleted_block_queries += 1
+        self.num_incompleted_block_hit += 1 if hit else 0
+
+        # When a block is completed, update the cache hit rate
+        # and reset the incomplete numbers.
+        if self.num_incompleted_block_queries == self.block_size:
+            hit_rate = (self.num_incompleted_block_hit /
+                        self.num_incompleted_block_queries)
+            self.completed_block_cache_hit_rate = (
+                self.completed_block_cache_hit_rate * self.num_completed_blocks
+                + hit_rate) / (self.num_completed_blocks + 1)
+            self.num_incompleted_block_queries = 0
+            self.num_incompleted_block_hit = 0
+            self.num_completed_blocks += 1
+
+    def get_hit_rate(self):
+        incomplete_ratio = self.num_incompleted_block_queries / self.block_size
+        total_blocks = self.num_completed_blocks + incomplete_ratio
+        if total_blocks == 0:
+            return 0.0
+
+        completed_block_hit, incompleted_block_hit = 0.0, 0.0
+        if self.num_completed_blocks > 0:
+            completed_block_hit = (self.completed_block_cache_hit_rate *
+                                   self.num_completed_blocks)
+        if self.num_incompleted_block_queries > 0:
+            incompleted_hit_rate = (self.num_incompleted_block_hit /
+                                    self.num_incompleted_block_queries)
+            incompleted_block_hit = (incompleted_hit_rate * incomplete_ratio)
+        return (completed_block_hit + incompleted_block_hit) / total_blocks
 
 
 def get_all_blocks_recursively(last_block: Block) -> List[Block]:
