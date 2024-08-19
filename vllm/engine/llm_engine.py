@@ -22,6 +22,7 @@ from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.engine.output_processor.util import create_output_by_sequence_group
+from vllm.entrypoints.openai.logits_processors import get_logits_processors
 from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.inputs import (INPUT_REGISTRY, EncoderDecoderLLMInputs,
@@ -30,6 +31,8 @@ from vllm.inputs import (INPUT_REGISTRY, EncoderDecoderLLMInputs,
 from vllm.inputs.parse import is_explicit_encoder_decoder_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.guided_decoding import (
+    get_local_guided_decoding_logits_processor)
 from vllm.multimodal import MultiModalDataDict
 from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
                           RequestOutputFactory)
@@ -1055,6 +1058,35 @@ class LLMEngine:
                     and sampling_params.prompt_logprobs > max_logprobs):
             raise ValueError(f"Cannot request more than "
                              f"{max_logprobs} logprobs.")
+
+        # Construct logits processors and add them to the sampling params
+        if (lp_params := sampling_params.logits_processor_params) is not None:
+            logits_processors = []
+
+            tokenizer = self.get_tokenizer(lora_request=lora_request)
+
+            # Guided decoding processor
+            if (gdr := lp_params.guided_decoding_request) is not None:
+                decoding_backend = gdr.guided_decoding_backend or \
+                    self.decoding_config.guided_decoding_backend
+                processor = get_local_guided_decoding_logits_processor(
+                    guided_decoding_backend=decoding_backend,
+                    guided_options=gdr,
+                    tokenizer=tokenizer)
+                if processor:
+                    logits_processors.append(processor)
+
+            # Logit bias + allowed token IDs processors
+            processors = get_logits_processors(
+                logit_bias=lp_params.logit_bias,
+                allowed_token_ids=lp_params.allowed_token_ids,
+                tokenizer=tokenizer)
+            logits_processors.extend(processors)
+
+            if len(logits_processors) > 0:
+                if sampling_params.logits_processors is None:
+                    sampling_params.logits_processors = []
+                sampling_params.logits_processors.extend(logits_processors)
 
         # Defensive copy of SamplingParams, which are used by the sampler,
         # this doesn't deep-copy LogitsProcessor objects

@@ -25,11 +25,11 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
 from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.model_executor.guided_decoding import (
-    get_guided_decoding_logits_processor)
+from vllm.model_executor.guided_decoding.guided_fields import (
+    GuidedDecodingRequest)
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import LogitsProcessor, SamplingParams
+from vllm.sampling_params import SamplingParams
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer_group import AnyTokenizer
 
@@ -151,15 +151,6 @@ class OpenAIServing:
                                        status_code=status_code).model_dump()
         })
         return json_str
-
-    async def _guided_decode_logits_processor(
-            self, request: Union[ChatCompletionRequest, CompletionRequest],
-            tokenizer: AnyTokenizer) -> Optional[LogitsProcessor]:
-        decoding_config = await self.async_engine_client.get_decoding_config()
-        guided_decoding_backend = request.guided_decoding_backend \
-            or decoding_config.guided_decoding_backend
-        return await get_guided_decoding_logits_processor(
-            guided_decoding_backend, request, tokenizer)
 
     async def _check_model(
         self,
@@ -403,3 +394,23 @@ class OpenAIServing:
         if logprob.decoded_token is not None:
             return logprob.decoded_token
         return tokenizer.decode(token_id)
+
+    @staticmethod
+    async def _create_guided_decoding_request(
+        api_request: Union[CompletionRequest, ChatCompletionRequest]
+    ) -> GuidedDecodingRequest:
+        """Extract all of the guided decoding parameters from a frontend api 
+        request"""
+        guided_json_object = None
+        if (api_request.response_format is not None
+                and api_request.response_format.type == "json_object"):
+            guided_json_object = True
+
+        return GuidedDecodingRequest(
+            guided_json=api_request.guided_json,
+            guided_choice=api_request.guided_choice,
+            guided_decoding_backend=api_request.guided_decoding_backend,
+            guided_grammar=api_request.guided_grammar,
+            guided_regex=api_request.guided_regex,
+            guided_whitespace_pattern=api_request.guided_whitespace_pattern,
+            guided_json_object=guided_json_object)

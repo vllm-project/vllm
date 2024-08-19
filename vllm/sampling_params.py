@@ -1,5 +1,6 @@
 """Sampling parameters for text generation."""
 import copy
+from dataclasses import dataclass
 from enum import IntEnum
 from functools import cached_property
 from typing import Any, Callable, Dict, List, Optional, Union
@@ -9,6 +10,10 @@ from pydantic import Field
 from typing_extensions import Annotated
 
 from vllm.logger import init_logger
+
+# TODO: sad circular dependency
+# from vllm.model_executor.guided_decoding.guided_fields import (
+#     GuidedDecodingRequest)
 
 logger = init_logger(__name__)
 
@@ -31,6 +36,15 @@ of previously generated tokens, the logits tensor
 for the next token and, optionally, prompt tokens as a
 first argument, and returns a modified tensor of logits
 to sample from."""
+
+
+@dataclass
+class LogitsProcessorParams:
+    """Parameters required to construct one or more logits processors"""
+    logit_bias: Optional[Union[Dict[int, float], Dict[str, float]]]
+    allowed_token_ids: Optional[List[int]]
+    guided_decoding_request: Optional[  # type: ignore
+        'GuidedDecodingRequest']  # noqa
 
 
 class SamplingParams:
@@ -110,6 +124,8 @@ class SamplingParams:
         truncate_prompt_tokens: If set to an integer k, will use only the last k
             tokens from the prompt (i.e., left truncation). Defaults to None
             (i.e., no truncation).
+        logits_processor_params: If set, one or more logits processors will be
+            constructed and applied to this request
     """
 
     def __init__(
@@ -140,6 +156,7 @@ class SamplingParams:
         spaces_between_special_tokens: bool = True,
         logits_processors: Optional[List[LogitsProcessor]] = None,
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+        logits_processor_params: Optional[LogitsProcessorParams] = None,
     ) -> None:
         self.n = n
         self.best_of = best_of if best_of is not None else n
@@ -185,6 +202,7 @@ class SamplingParams:
         self.skip_special_tokens = skip_special_tokens
         self.spaces_between_special_tokens = spaces_between_special_tokens
         self.logits_processors = logits_processors
+        self.logits_processor_params = logits_processor_params
         self.include_stop_str_in_output = include_stop_str_in_output
         self.truncate_prompt_tokens = truncate_prompt_tokens
         # Number of characters to hold back for stop string evaluation
@@ -370,4 +388,5 @@ class SamplingParams:
             f"skip_special_tokens={self.skip_special_tokens}, "
             "spaces_between_special_tokens="
             f"{self.spaces_between_special_tokens}, "
-            f"truncate_prompt_tokens={self.truncate_prompt_tokens})")
+            f"truncate_prompt_tokens={self.truncate_prompt_tokens}, "
+            f"logits_processor_params={self.logits_processor_params})")
