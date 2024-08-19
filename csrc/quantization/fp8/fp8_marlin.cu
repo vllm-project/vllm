@@ -66,10 +66,11 @@ __global__ void Marlin(
 
 }  // namespace fp8_marlin
 
-torch::Tensor fp8_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
-                              torch::Tensor& b_scales, torch::Tensor& workspace,
-                              int64_t num_bits, int64_t size_m, int64_t size_n,
-                              int64_t size_k) {
+torch::Tensor fp8_marlin_gemm(torch::Tensor const& a,
+                              torch::Tensor const& b_q_weight,
+                              torch::Tensor const& b_scales,
+                              torch::Tensor& workspace, int64_t num_bits,
+                              int64_t size_m, int64_t size_n, int64_t size_k) {
   TORCH_CHECK_NOT_IMPLEMENTED(false,
                               "marlin_gemm(..) requires CUDA_ARCH >= 8.0");
   return torch::empty({1, 1});
