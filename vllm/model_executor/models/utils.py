@@ -1,3 +1,4 @@
+from functools import lru_cache
 from typing import Dict, Iterable, List, Optional, Protocol, Tuple
 
 import torch
@@ -9,7 +10,7 @@ from vllm.config import (CacheConfig, LoRAConfig, MultiModalConfig,
                          SchedulerConfig)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.loader import build_model
-from vllm.model_executor.models import ModelRegistry
+from vllm.model_executor.models import ModelMode, ModelRegistry
 from vllm.multimodal import BatchedTensors
 from vllm.utils import is_pin_memory_available
 
@@ -227,3 +228,27 @@ def is_pp_missing_parameter(name: str, model: torch.nn.Module) -> bool:
         if name.startswith(missing_layer_name):
             return True
     return False
+
+
+@lru_cache(maxsize=None)
+def is_encoder_decoder_model_config(model_config) -> bool:
+    """Check model is encoder-decoder model or not."""
+
+    return model_config is not None and \
+        model_config.model_mode == ModelMode.ENCODER_DECODER
+
+
+@lru_cache(maxsize=None)
+def is_embedding_model_config(model_config) -> bool:
+    """Check model is embedding model or not"""
+
+    return model_config is not None and \
+        model_config.model_mode == ModelMode.EMBEDDING
+
+
+@lru_cache(maxsize=None)
+def is_simple_model_config(model_config) -> bool:
+    """Check model is simple model or not"""
+
+    return model_config is not None and \
+                model_config.model_mode == ModelMode.SIMPLE

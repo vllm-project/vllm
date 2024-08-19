@@ -6,8 +6,8 @@ import sys
 import tempfile
 from collections import UserList
 from enum import Enum
-from typing import (Any, Callable, Dict, List, Optional, Tuple, TypedDict,
-                    TypeVar, Union)
+from typing import (Any, Callable, Dict, List, Optional, Sequence, Tuple,
+                    TypedDict, TypeVar, Union)
 
 import pytest
 import torch
@@ -25,8 +25,9 @@ from vllm.config import TokenizerPoolConfig
 from vllm.connections import global_http_connection
 from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
-from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
-                         to_enc_dec_tuple_list, zip_enc_dec_prompts)
+from vllm.inputs import (ExplicitEncoderDecoderPrompt, PromptInputs,
+                         TextPrompt, to_enc_dec_tuple_list,
+                         zip_enc_dec_prompts)
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sequence import SampleLogprobs
@@ -201,6 +202,7 @@ class HfRunner:
         is_embedding_model: bool = False,
         is_vision_model: bool = False,
         is_encoder_decoder_model: bool = False,
+        is_simple_model: bool = False,
         postprocess_inputs: Callable[[BatchEncoding],
                                      BatchEncoding] = identity,
     ) -> None:
@@ -221,6 +223,9 @@ class HfRunner:
                 auto_cls = AutoModelForVision2Seq
             elif is_encoder_decoder_model:
                 auto_cls = AutoModelForSeq2SeqLM
+            elif is_simple_model:
+                from transformers import AutoModelForSequenceClassification
+                auto_cls = AutoModelForSequenceClassification
             else:
                 auto_cls = AutoModelForCausalLM
 
@@ -513,6 +518,17 @@ class HfRunner:
     def encode(self, prompts: List[str]) -> List[List[torch.Tensor]]:
         return self.model.encode(prompts)
 
+    def process(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+    ) -> torch.Tensor:
+        with torch.no_grad():
+            req_outputs = self.model(input_ids,
+                                     attention_mask,
+                                     return_dict=True)
+        return req_outputs
+
     def __enter__(self):
         return self
 
@@ -710,6 +726,14 @@ class VllmRunner:
             embedding = req_output.outputs.embedding
             outputs.append(embedding)
         return outputs
+
+    def process(
+        self,
+        prompts: Union[Union[PromptInputs, Sequence[PromptInputs]],
+                       Optional[Union[str, List[str]]]] = None,
+    ) -> torch.Tensor:
+        req_outputs = self.model.process(prompts)
+        return req_outputs
 
     def __enter__(self):
         return self

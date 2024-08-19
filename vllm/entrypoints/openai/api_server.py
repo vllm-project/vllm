@@ -43,6 +43,7 @@ from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_tokenization import (
     OpenAIServingTokenization)
 from vllm.logger import init_logger
+from vllm.model_executor.models import ModelMode
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, get_open_zmq_ipc_path
 from vllm.version import __version__ as VLLM_VERSION
@@ -70,7 +71,7 @@ def model_is_embedding(model_name: str, trust_remote_code: bool,
                        trust_remote_code=trust_remote_code,
                        quantization=quantization,
                        seed=0,
-                       dtype="auto").embedding_mode
+                       dtype="auto").model_mode == ModelMode.EMBEDDING
 
 
 @asynccontextmanager

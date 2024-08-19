@@ -1,3 +1,4 @@
+import enum
 import functools
 import importlib
 from typing import Dict, List, Optional, Tuple, Type
@@ -89,12 +90,86 @@ _CONDITIONAL_GENERATION_MODELS = {
     "BartForConditionalGeneration": ("bart", "BartForConditionalGeneration"),
 }
 
+_SIMPLE_MODELS = {
+    "XLMRobertaForSequenceClassification":
+    ("xlmroberta", "XLMRobertaForSequenceClassification"),
+}
+
 _MODELS = {
     **_GENERATION_MODELS,
     **_EMBEDDING_MODELS,
     **_MULTIMODAL_MODELS,
     **_CONDITIONAL_GENERATION_MODELS,
+    **_SIMPLE_MODELS
 }
+
+_EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
+_SIMPLE_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
+
+
+class ModelMode(enum.Enum):
+    """
+    1. DECODER: decoder model, like GPT2*
+    2. ENCODER: encoder model, like BERT*
+    3. EMBEDDING: embedding model, like MistralModel
+    4. ENCODER_DECODER: encoder-decoder model, like BART*
+    5. SIMPLE: simple model, like XLMRoberta*
+    """
+    DECODER = enum.auto()
+    ENCODER = enum.auto()
+    ENCODER_DECODER = enum.auto()
+    EMBEDDING = enum.auto()
+    SIMPLE = enum.auto()
+
+    @staticmethod
+    def get_model_runner_cls(model_mode: "ModelMode"):
+
+        if model_mode == ModelMode.EMBEDDING:
+            from vllm.worker.embedding_model_runner import EmbeddingModelRunner
+            return EmbeddingModelRunner
+
+        if model_mode == ModelMode.SIMPLE:
+            from vllm.worker.simple_model_runner import SimpleModelRunner
+            return SimpleModelRunner
+
+        if model_mode == ModelMode.ENCODER_DECODER:
+            from vllm.worker.enc_dec_model_runner import (
+                EncoderDecoderModelRunner)
+            return EncoderDecoderModelRunner
+
+        from vllm.worker.model_runner import ModelRunner
+        return ModelRunner
+
+    @staticmethod
+    def get_block_space_manager_impl(use_v2_block_manager: bool,
+                                     model_mode: "ModelMode"):
+
+        if use_v2_block_manager:
+            from vllm.core.block_manager_v2 import BlockSpaceManagerV2
+            return BlockSpaceManagerV2
+
+        if model_mode == ModelMode.EMBEDDING:
+            from vllm.core.embedding_model_block_manager import (
+                EmbeddingModelBlockSpaceManager)
+            return EmbeddingModelBlockSpaceManager
+
+        if model_mode == ModelMode.SIMPLE:
+            from vllm.core.simple_model_block_manager import (
+                SimpleModelBlockSpaceManager)
+            return SimpleModelBlockSpaceManager
+
+        from vllm.core.block_manager_v1 import BlockSpaceManagerV1
+        return BlockSpaceManagerV1
+
+    @staticmethod
+    def get_model_max_num_batched_tokens(
+            model_mode: "ModelMode") -> Optional[int]:
+        if model_mode == ModelMode.EMBEDDING:
+            return _EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS
+        if model_mode == ModelMode.SIMPLE:
+            return _SIMPLE_MODEL_MAX_NUM_BATCHED_TOKENS
+        return None
+
 
 # Architecture -> type.
 # out of tree models
@@ -181,8 +256,27 @@ class ModelRegistry:
         _OOT_MODELS[model_arch] = model_cls
 
     @staticmethod
-    def is_embedding_model(model_arch: str) -> bool:
-        return model_arch in _EMBEDDING_MODELS
+    def get_model_mode(architectures: List[str]) -> ModelMode:
+
+        if any(arch in _EMBEDDING_MODELS for arch in architectures):
+            return ModelMode.EMBEDDING
+
+        if any(arch in _CONDITIONAL_GENERATION_MODELS
+               for arch in architectures):
+            return ModelMode.ENCODER_DECODER
+
+        if any(arch in _SIMPLE_MODELS for arch in architectures):
+            return ModelMode.SIMPLE
+
+        return ModelMode.DECODER
+
+    @staticmethod
+    def need_initialize_kv_caches(model_mode: ModelMode) -> bool:
+        if model_mode == ModelMode.EMBEDDING:
+            return False
+        if model_mode == ModelMode.SIMPLE:
+            return False
+        return True
 
     @staticmethod
     def is_multimodal_model(model_arch: str) -> bool:
@@ -191,7 +285,7 @@ class ModelRegistry:
         # use `supports_multimodal` to determine if a model is multimodal
         # model_cls = ModelRegistry._try_load_model_cls(model_arch)
         # from vllm.model_executor.models.interfaces import supports_multimodal
-        return model_arch in _MULTIMODAL_MODELS
+        return model_arch in _MULTIMODAL_MODELS or model_arch in _SIMPLE_MODELS
 
 
 __all__ = [

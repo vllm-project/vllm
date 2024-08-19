@@ -10,7 +10,7 @@ from typing_extensions import assert_never
 import vllm.envs as envs
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
-                         ObservabilityConfig, ParallelConfig,
+                         ModelMode, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig)
 from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
@@ -29,16 +29,19 @@ from vllm.inputs import (INPUT_REGISTRY, EncoderDecoderLLMInputs,
 from vllm.inputs.parse import is_explicit_encoder_decoder_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.models import ModelRegistry
+from vllm.model_executor.models.utils import (is_embedding_model_config,
+                                              is_encoder_decoder_model_config,
+                                              is_simple_model_config)
 from vllm.multimodal import MultiModalDataDict
 from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
-                          RequestOutputFactory)
+                          RequestOutputFactory, SimpleRequestOutput)
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
-                           PoolerOutput, SamplerOutput, Sequence,
-                           SequenceGroup, SequenceGroupMetadata,
-                           SequenceStatus)
+from vllm.sequence import (ExecuteModelRequest, PoolerOutput, SamplerOutput,
+                           Sequence, SequenceGroup, SequenceGroupMetadata,
+                           SequenceStatus, SimpleOutput)
 from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
 from vllm.transformers_utils.config import try_get_generation_config
@@ -67,7 +70,7 @@ def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
     return config.to_diff_dict()
 
 
-_O = TypeVar("_O", RequestOutput, EmbeddingRequestOutput)
+_O = TypeVar("_O", RequestOutput, EmbeddingRequestOutput, SimpleRequestOutput)
 
 PromptComponents = Tuple[Optional[str], List[int],
                          Optional[MultiModalDataDict]]
@@ -278,7 +281,8 @@ class LLMEngine:
             observability_config=self.observability_config,
         )
 
-        if not self.model_config.embedding_mode:
+        if ModelRegistry.need_initialize_kv_caches(
+                self.model_config.model_mode):
             self._initialize_kv_caches()
 
         # If usage stat is enabled, collect relevant info.
@@ -1160,9 +1164,7 @@ class LLMEngine:
     def _process_sequence_group_outputs(
         self,
         seq_group: SequenceGroup,
-        outputs: List[EmbeddingSequenceGroupOutput],
     ) -> None:
-        seq_group.embeddings = outputs[0].embeddings
 
         for seq in seq_group.get_seqs():
             seq.status = SequenceStatus.FINISHED_STOPPED
@@ -1171,11 +1173,13 @@ class LLMEngine:
 
     def _process_model_outputs(
         self,
-        output: GenericSequence[Union[SamplerOutput, PoolerOutput]],
+        output: GenericSequence[Union[SamplerOutput, PoolerOutput,
+                                      SimpleOutput]],
         scheduled_seq_groups: List[ScheduledSequenceGroup],
         ignored_seq_groups: List[SequenceGroup],
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
+    ) -> List[Union[RequestOutput, EmbeddingRequestOutput,
+                    SimpleRequestOutput]]:
         """Apply the model output to the sequences in the scheduled seq groups.
 
         Returns RequestOutputs that can be returned to the client.
@@ -1211,8 +1215,13 @@ class LLMEngine:
                         else:
                             seq_group.metrics.model_execute_time = (
                                 o.model_execute_time)
-            if self.model_config.embedding_mode:
-                self._process_sequence_group_outputs(seq_group, outputs)
+            if self.model_config.model_mode is ModelMode.EMBEDDING:
+                seq_group.embeddings = outputs[0].embeddings
+                self._process_sequence_group_outputs(seq_group)
+                continue
+            if self.model_config.model_mode is ModelMode.SIMPLE:
+                seq_group.result = outputs[0].result
+                self._process_sequence_group_outputs(seq_group)
                 continue
 
             self.output_processor.process_prompt_logprob(seq_group, outputs)
@@ -1224,8 +1233,8 @@ class LLMEngine:
             scheduler.free_finished_seq_groups()
 
         # Create the outputs.
-        request_outputs: List[Union[RequestOutput,
-                                    EmbeddingRequestOutput]] = []
+        request_outputs: List[Union[RequestOutput, EmbeddingRequestOutput,
+                                    SimpleRequestOutput]] = []
         for scheduled_seq_group in scheduled_seq_groups:
             seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
@@ -1236,7 +1245,10 @@ class LLMEngine:
             request_outputs.append(request_output)
         return request_outputs
 
-    def step(self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
+    def step(
+        self
+    ) -> List[Union[RequestOutput, EmbeddingRequestOutput,
+                    SimpleRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
 
         .. figure:: https://i.imgur.com/sv2HssD.png
@@ -1617,7 +1629,10 @@ class LLMEngine:
                     metrics.model_execute_time)
 
     def is_encoder_decoder_model(self):
-        return self.model_config.is_encoder_decoder_model
+        return is_encoder_decoder_model_config(self.model_config)
 
     def is_embedding_model(self):
-        return self.model_config.is_embedding_model
+        return is_embedding_model_config(self.model_config)
+
+    def is_simple_model(self):
+        return is_simple_model_config(self.model_config)

@@ -6,8 +6,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
 
-from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
-from vllm.core.interfaces import AllocStatus, BlockSpaceManager
+from vllm.config import CacheConfig, LoRAConfig, ModelMode, SchedulerConfig
+from vllm.core.interfaces import AllocStatus
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -307,14 +307,9 @@ class Scheduler:
         # LoRAs. This should be improved in the future.
         self.lora_config = lora_config
 
-        version = "v1"
-        if self.scheduler_config.use_v2_block_manager:
-            version = "v2"
-        if self.scheduler_config.embedding_mode:
-            version = "embedding"
-
-        BlockSpaceManagerImpl = BlockSpaceManager.get_block_space_manager_class(
-            version)
+        BlockSpaceManagerImpl = ModelMode.get_block_space_manager_impl(
+            self.scheduler_config.use_v2_block_manager,
+            self.scheduler_config.model_mode)
 
         num_gpu_blocks = cache_config.num_gpu_blocks
         if num_gpu_blocks:

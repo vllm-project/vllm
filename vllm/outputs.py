@@ -4,6 +4,8 @@ from typing import List, Optional
 from typing import Sequence as GenericSequence
 from typing import Union
 
+import torch
+
 from vllm.lora.request import LoRARequest
 from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
                            SequenceGroup, SequenceStatus)
@@ -64,6 +66,21 @@ class EmbeddingOutput:
     def __repr__(self) -> str:
         return (f"EmbeddingOutput("
                 f"embedding={len(self.embedding)})")
+
+
+@dataclass
+class SimpleOutput:
+    """The output data of one completion output of a request.
+
+    Args:
+        result: The result of Simple model, like XLMRoberta*
+    """
+
+    result: torch.Tensor
+
+    def __repr__(self) -> str:
+        return (f"SimpleOutput("
+                f"result_shape={self.result.shape})")
 
 
 class RequestOutput:
@@ -227,11 +244,59 @@ class EmbeddingRequestOutput:
                 f"finished={self.finished})")
 
 
+class SimpleRequestOutput:
+    """
+    The output data of an simple model request to the LLM.
+
+    Args:
+        request_id (str): A unique identifier for the simple model request.
+        outputs (SimpleOutput): Results for the given input.
+        prompt_token_ids (List[int]): A list of token IDs used in the prompt.
+        finished (bool): A flag indicating whether the result is completed.
+    """
+
+    def __init__(self, request_id: str, outputs: "SimpleOutput",
+                 prompt_token_ids: List[int], finished: bool):
+        self.request_id = request_id
+        self.prompt_token_ids = prompt_token_ids
+        self.finished = finished
+        self.outputs = outputs
+
+    @classmethod
+    def from_seq_group(cls,
+                       seq_group: 'SequenceGroup') -> "SimpleRequestOutput":
+        if seq_group.result is None:
+            raise ValueError(
+                "result is missing in seq_group for SimpleRequest.")
+        output = SimpleOutput(seq_group.result)
+        prompt_token_ids = seq_group.prompt_token_ids
+        finished = seq_group.is_finished()
+
+        return cls(seq_group.request_id, output, prompt_token_ids, finished)
+
+    def __repr__(self):
+        """
+        Returns a string representation of an SimpleRequestOutput instance.
+
+        The representation includes the request_id and the number of outputs,
+        providing a quick overview of the embedding request's results.
+
+        Returns:
+            str: A string representation of the SimpleRequestOutput instance.
+        """
+        return (f"SimpleRequestOutput(request_id='{self.request_id}', "
+                f"outputs={repr(self.outputs)}, "
+                f"prompt_token_ids={self.prompt_token_ids}, "
+                f"finished={self.finished})")
+
+
 class RequestOutputFactory:
 
     @staticmethod
     def create(seq_group):
         # Determine the type based on a condition, for example:
+        if hasattr(seq_group, 'result') and seq_group.result is not None:
+            return SimpleRequestOutput.from_seq_group(seq_group)
         if hasattr(seq_group,
                    'embeddings') and seq_group.embeddings is not None:
             return EmbeddingRequestOutput.from_seq_group(seq_group)

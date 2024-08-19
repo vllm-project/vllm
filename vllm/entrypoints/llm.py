@@ -4,6 +4,7 @@ from typing import ClassVar, List, Optional, Sequence, Union, cast, overload
 from tqdm.auto import tqdm
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
+from vllm.config import ModelMode
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
@@ -16,7 +17,8 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor.guided_decoding import (
     GuidedDecodingRequest, get_local_guided_decoding_logits_processor)
 from vllm.model_executor.guided_decoding.guided_fields import LLMGuidedOptions
-from vllm.outputs import EmbeddingRequestOutput, RequestOutput
+from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
+                          SimpleRequestOutput)
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
@@ -312,7 +314,9 @@ class LLM:
             considered legacy and may be deprecated in the future. You should
             instead pass them via the ``inputs`` parameter.
         """
-        if self.llm_engine.model_config.embedding_mode:
+        if self.llm_engine.model_config.model_mode not in [
+                ModelMode.DECODER, ModelMode.ENCODER_DECODER
+        ]:
             raise ValueError(
                 "LLM.generate() is only supported for (conditional) generation "
                 "models (XForCausalLM, XForConditionalGeneration).")
@@ -520,7 +524,8 @@ class LLM:
             considered legacy and may be deprecated in the future. You should
             instead pass them via the ``inputs`` parameter.
         """
-        if not self.llm_engine.model_config.embedding_mode:
+
+        if self.llm_engine.model_config.model_mode is not ModelMode.EMBEDDING:
             raise ValueError(
                 "LLM.encode() is only supported for embedding models (XModel)."
             )
@@ -546,6 +551,43 @@ class LLM:
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return LLMEngine.validate_outputs(outputs, EmbeddingRequestOutput)
+
+    def process(
+        self,
+        inputs: Union[PromptInputs, Sequence[PromptInputs]],
+        use_tqdm: bool = True,
+        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
+    ) -> List[SimpleRequestOutput]:
+        """Processing the simple model, like XLMRoberta*
+
+        Args:
+            inputs: The inputs to the LLM. You may pass a sequence of inputs for
+                batch inference. See :class:`~vllm.inputs.PromptInputs`
+                for more details about the format of each input.
+            use_tqdm: Whether to use tqdm to display the progress bar.
+            lora_request: LoRA request to use for generation, if any.
+
+        Returns:
+            A list of `SimpleRequestOutput` objects containing the
+            generated simple result in the same order as the input data.
+
+        Note:
+            Only ``inputs`` reserved for simple model.
+        """
+        if self.llm_engine.model_config.model_mode is not ModelMode.SIMPLE:
+            raise ValueError(
+                "LLM.process() is only supported for simple models.")
+
+        pooling_params = PoolingParams()
+
+        self._validate_and_add_requests(
+            inputs=inputs,
+            params=pooling_params,
+            lora_request=lora_request,
+            prompt_adapter_request=None,
+        )
+        outputs = self._run_engine(use_tqdm=use_tqdm)
+        return LLMEngine.validate_outputs(outputs, SimpleRequestOutput)
 
     # LEGACY
     def _convert_v1_inputs(
@@ -712,3 +754,6 @@ class LLM:
 
     def _is_embedding_model(self):
         return self.llm_engine.is_embedding_model()
+
+    def _is_simple_model(self):
+        return self.llm_engine.is_simple_model()

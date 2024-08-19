@@ -15,7 +15,6 @@ from transformers import PretrainedConfig
 import vllm.envs as envs
 from vllm.config import ModelConfig, ParallelConfig
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.llm_engine import LLMEngine
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -459,6 +458,8 @@ def tensorize_vllm_model(engine_args: EngineArgs,
         ) as stream:
             stream.write(encryption_params.key)
 
+    # Avoid circular import, move 'import LLMEngine' here
+    from vllm.engine.llm_engine import LLMEngine
     engine = LLMEngine.from_engine_args(engine_args)
     if tensorizer_config._is_sharded:
         # if the engine is a distributed engine (for tensor parallel) then each

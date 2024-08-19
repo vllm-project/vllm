@@ -595,6 +595,7 @@ class SequenceGroup:
         sampling_params: Optional[SamplingParams] = None,
         lora_request: Optional[LoRARequest] = None,
         embeddings: Optional[List[float]] = None,
+        result: Optional[torch.Tensor] = None,
         pooling_params: Optional[PoolingParams] = None,
         encoder_seq: Optional[Sequence] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
@@ -615,6 +616,7 @@ class SequenceGroup:
         self.prompt_logprobs: Optional[PromptLogprobs] = None
         self.state = SequenceGroupState()
         self.embeddings = embeddings
+        self.result = result
         self.pooling_params = pooling_params
         self.prompt_adapter_request = prompt_adapter_request
         self.encoder_seq = encoder_seq
@@ -1031,6 +1033,25 @@ class EmbeddingSequenceGroupOutput(
         return self.embeddings == other.embeddings
 
 
+class SimpleSequenceGroupOutput(SequenceGroupOutput):
+    """The model output associated with an tensor."""
+
+    def __init__(
+        self,
+        data: torch.Tensor,
+    ) -> None:
+        self.result = data
+
+    def __repr__(self) -> str:
+        return (f"SimpleSequenceGroupOutput("
+                f"result_shape={len(self.result)})")
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, SimpleSequenceGroupOutput):
+            raise NotImplementedError()
+        return self.result == other.result
+
+
 class IntermediateTensors(
         msgspec.Struct,
         omit_defaults=True,  # type: ignore[call-arg]
@@ -1132,6 +1153,24 @@ class PoolerOutput(
     outputs: List[EmbeddingSequenceGroupOutput]
 
     spec_decode_worker_metrics: Optional[SpecDecodeWorkerMetrics] = None
+
+    def __getitem__(self, idx: int):
+        return self.outputs[idx]
+
+    def __setitem__(self, idx: int, value):
+        self.outputs[idx] = value
+
+    def __len__(self):
+        return len(self.outputs)
+
+    def __eq__(self, other: object):
+        return isinstance(other,
+                          self.__class__) and self.outputs == other.outputs
+
+
+@dataclass
+class SimpleOutput:
+    outputs: List[SimpleSequenceGroupOutput]
 
     def __getitem__(self, idx: int):
         return self.outputs[idx]

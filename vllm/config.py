@@ -10,7 +10,7 @@ from transformers import PretrainedConfig
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
-from vllm.model_executor.models import ModelRegistry
+from vllm.model_executor.models import ModelMode, ModelRegistry
 from vllm.platforms import current_platform
 from vllm.tracing import is_otel_installed
 from vllm.transformers_utils.config import get_config, get_hf_text_config
@@ -167,6 +167,8 @@ class ModelConfig:
                                     code_revision, rope_scaling, rope_theta)
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
+        architectures = getattr(self.hf_config, "architectures", [])
+        self.model_mode = ModelRegistry.get_model_mode(architectures)
 
         # Choose a default enforce_eager value if the user did not specify
         # a value (enforce_eager is None)
@@ -217,7 +219,6 @@ class ModelConfig:
             limit_mm_per_prompt)
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
-        self._verify_embedding_mode()
         self._verify_quantization()
         self._verify_cuda_graph()
 
@@ -243,11 +244,6 @@ class ModelConfig:
                 f"Unknown tokenizer mode: {self.tokenizer_mode}. Must be "
                 "either 'auto' or 'slow'.")
         self.tokenizer_mode = tokenizer_mode
-
-    def _verify_embedding_mode(self) -> None:
-        architectures = getattr(self.hf_config, "architectures", [])
-        self.embedding_mode = any(
-            ModelRegistry.is_embedding_model(arch) for arch in architectures)
 
     def _parse_quant_hf_config(self):
         quant_cfg = getattr(self.hf_config, "quantization_config", None)
@@ -495,16 +491,6 @@ class ModelConfig:
             raise ValueError("The model is not multimodal.")
 
         return self.multimodal_config
-
-    @property
-    def is_encoder_decoder_model(self) -> bool:
-        """Extract the HF encoder/decoder model flag."""
-        return getattr(self.hf_config, "is_encoder_decoder", False)
-
-    @property
-    def is_embedding_model(self) -> bool:
-        """Extract the embedding model flag."""
-        return self.embedding_mode
 
 
 class CacheConfig:
@@ -860,7 +846,8 @@ class SchedulerConfig:
             prompt latency) before scheduling next prompt.
         enable_chunked_prefill: If True, prefill requests can be chunked based
             on the remaining max_num_batched_tokens.
-        embedding_mode: Whether the running model is for embedding.
+        model_mode: one of [DECODER, ENCODER, ENCODER_DECODER, EMBEDDING,
+            SIMPLE]
         preemption_mode: Whether to perform preemption by swapping or 
             recomputation. If not specified, we determine the mode as follows:
             We use recomputation by default since it incurs lower overhead than
@@ -883,6 +870,7 @@ class SchedulerConfig:
                  delay_factor: float = 0.0,
                  enable_chunked_prefill: bool = False,
                  embedding_mode: Optional[bool] = False,
+                 model_mode: ModelMode = ModelMode.DECODER,
                  preemption_mode: Optional[str] = None,
                  num_scheduler_steps: int = 1,
                  send_delta_data: bool = False) -> None:
@@ -893,14 +881,19 @@ class SchedulerConfig:
                 # It is the values that have the best balance between ITL
                 # and TTFT on A100. Note it is not optimized for throughput.
                 self.max_num_batched_tokens = 512
-            elif embedding_mode:
-                # For embedding, choose specific value for higher throughput
-                self.max_num_batched_tokens = max(
-                    max_model_len, _EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS)
             else:
                 # If max_model_len is too short, use 2048 as the default value
                 # for higher throughput.
-                self.max_num_batched_tokens = max(max_model_len, 2048)
+                max_num_batched_tokens = max(max_model_len, 2048)
+                max_num_batched_tokens_for_mode = \
+                    ModelMode.get_model_max_num_batched_tokens(model_mode)
+                if max_num_batched_tokens_for_mode is not None:
+                    max_num_batched_tokens = max(
+                        max_num_batched_tokens,
+                        max_num_batched_tokens_for_mode)
+
+                self.max_num_batched_tokens = max_num_batched_tokens
+
         if enable_chunked_prefill:
             logger.info(
                 "Chunked prefill is enabled with max_num_batched_tokens=%d.",
@@ -912,7 +905,7 @@ class SchedulerConfig:
         self.num_lookahead_slots = num_lookahead_slots
         self.delay_factor = delay_factor
         self.chunked_prefill_enabled = enable_chunked_prefill
-        self.embedding_mode = embedding_mode
+        self.model_mode = model_mode
         self.preemption_mode = preemption_mode
         self.num_scheduler_steps = num_scheduler_steps
         self.send_delta_data = send_delta_data
