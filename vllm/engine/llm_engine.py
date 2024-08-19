@@ -10,22 +10,22 @@ from typing_extensions import assert_never
 import vllm.envs as envs
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
-                         MultiModalConfig, ObservabilityConfig, ParallelConfig,
+                         ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig)
 from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
                                  SchedulerOutputs)
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.metrics import (LoggingStatLogger, PrometheusStatLogger,
-                                 StatLoggerBase, Stats)
+from vllm.engine.metrics_types import StatLoggerBase, Stats
 from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.ray_utils import initialize_ray_cluster
-from vllm.inputs import (INPUT_REGISTRY, EncoderDecoderLLMInputs, LLMInputs,
-                         PromptInputs, SingletonPromptInputs)
+from vllm.inputs import (INPUT_REGISTRY, EncoderDecoderLLMInputs,
+                         InputRegistry, LLMInputs, PromptInputs,
+                         SingletonPromptInputs)
 from vllm.inputs.parse import is_explicit_encoder_decoder_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -99,8 +99,6 @@ class LLMEngine:
         scheduler_config: The configuration related to the request scheduler.
         device_config: The configuration related to the device.
         lora_config (Optional): The configuration related to serving multi-LoRA.
-        multimodal_config (Optional): The configuration related to multimodal 
-            models.
         speculative_config (Optional): The configuration related to speculative
             decoding.
         executor_class: The model executor class for managing distributed
@@ -171,7 +169,6 @@ class LLMEngine:
         device_config: DeviceConfig,
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
-        multimodal_config: Optional[MultiModalConfig],
         speculative_config: Optional[SpeculativeConfig],
         decoding_config: Optional[DecodingConfig],
         observability_config: Optional[ObservabilityConfig],
@@ -180,6 +177,7 @@ class LLMEngine:
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
+        input_registry: InputRegistry = INPUT_REGISTRY,
     ) -> None:
         logger.info(
             "Initializing an LLM engine (v%s) with config: "
@@ -227,10 +225,12 @@ class LLMEngine:
         )
         # TODO(woosuk): Print more configs in debug mode.
 
+        from vllm.plugins import load_general_plugins
+        load_general_plugins()
+
         self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config
-        self.multimodal_config = multimodal_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
@@ -245,16 +245,26 @@ class LLMEngine:
         if not self.model_config.skip_tokenizer_init:
             self.tokenizer = self._init_tokenizer()
             self.detokenizer = Detokenizer(self.tokenizer)
+            tokenizer_group = self.get_tokenizer_group()
         else:
             self.tokenizer = None
             self.detokenizer = None
+            tokenizer_group = None
+
+        # Ensure that the function doesn't contain a reference to self,
+        # to avoid engine GC issues
+        def get_tokenizer_for_seq(sequence: Sequence) -> AnyTokenizer:
+            assert tokenizer_group, ("tokenizer_group cannot be None, "
+                                     "make sure skip_tokenizer_init is False")
+            return tokenizer_group.get_lora_tokenizer(sequence.lora_request)
 
         self.seq_counter = Counter()
         self.generation_config_fields = _load_generation_config_dict(
             model_config)
 
-        self.input_processor = INPUT_REGISTRY.create_input_processor(
-            self.model_config)
+        self.input_registry = input_registry
+        self.input_processor = input_registry.create_input_processor(
+            model_config)
 
         self.model_executor = executor_class(
             model_config=model_config,
@@ -263,7 +273,6 @@ class LLMEngine:
             scheduler_config=scheduler_config,
             device_config=device_config,
             lora_config=lora_config,
-            multimodal_config=multimodal_config,
             speculative_config=speculative_config,
             load_config=load_config,
             prompt_adapter_config=prompt_adapter_config,
@@ -329,6 +338,13 @@ class LLMEngine:
             if stat_loggers is not None:
                 self.stat_loggers = stat_loggers
             else:
+                # Lazy import for prometheus multiprocessing.
+                # We need to set PROMETHEUS_MULTIPROC_DIR environment variable
+                # before prometheus_client is imported.
+                # See https://prometheus.github.io/client_python/multiprocess/
+                from vllm.engine.metrics import (LoggingStatLogger,
+                                                 PrometheusStatLogger)
+
                 self.stat_loggers = {
                     "logging":
                     LoggingStatLogger(
@@ -356,10 +372,10 @@ class LLMEngine:
                 self.detokenizer,
                 self.scheduler,
                 self.seq_counter,
-                self.get_tokenizer_for_seq,
+                get_tokenizer_for_seq,
                 stop_checker=StopChecker(
                     self.scheduler_config.max_model_len,
-                    self.get_tokenizer_for_seq,
+                    get_tokenizer_for_seq,
                 ),
             ))
 
@@ -490,10 +506,6 @@ class LLMEngine:
         lora_request: Optional[LoRARequest] = None,
     ) -> AnyTokenizer:
         return self.get_tokenizer_group().get_lora_tokenizer(lora_request)
-
-    def get_tokenizer_for_seq(self, sequence: Sequence) -> AnyTokenizer:
-        return self.get_tokenizer_group().get_lora_tokenizer(
-            sequence.lora_request)
 
     def _init_tokenizer(self) -> BaseTokenizerGroup:
         return init_tokenizer_from_configs(

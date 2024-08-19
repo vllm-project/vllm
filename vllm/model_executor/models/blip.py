@@ -31,13 +31,13 @@ def get_blip_num_patches(*, image_size: int, patch_size: int) -> int:
 
 
 def get_blip_image_feature_size(
-    hf_config: Union[BlipVisionConfig, Blip2VisionConfig], ) -> int:
+        hf_config: Union[BlipVisionConfig, Blip2VisionConfig]) -> int:
     return get_blip_num_patches(image_size=hf_config.image_size,
                                 patch_size=hf_config.patch_size)
 
 
 def get_max_blip_image_tokens(
-    hf_config: Union[BlipVisionConfig, Blip2VisionConfig], ) -> int:
+        hf_config: Union[BlipVisionConfig, Blip2VisionConfig]) -> int:
     return get_blip_image_feature_size(hf_config)
 
 
@@ -60,6 +60,7 @@ def dummy_seq_data_for_blip(
 
 def dummy_image_for_blip(
     hf_config: Union[BlipVisionConfig, Blip2VisionConfig],
+    num_images: int,
     *,
     image_width_override: Optional[int] = None,
     image_height_override: Optional[int] = None,
@@ -71,7 +72,7 @@ def dummy_image_for_blip(
         height = image_height_override
 
     image = Image.new("RGB", (width, height), color=0)
-    return {"image": image}
+    return {"image": image if num_images == 1 else [image] * num_images}
 
 
 def input_processor_for_blip(

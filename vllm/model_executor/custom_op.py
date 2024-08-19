@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
 
-from vllm.utils import is_cpu, is_hip, is_tpu, is_xpu
+from vllm.platforms import current_platform
+from vllm.utils import is_cpu, is_hip, is_xpu
 
 # Set this flag to avoid the re-compilation due to `self`.
 # NOTE(woosuk): This only works for PyTorch 2.4+.
@@ -90,7 +91,7 @@ class CustomOp(nn.Module):
             return self.forward_hip
         elif is_cpu():
             return self.forward_cpu
-        elif is_tpu():
+        elif current_platform.is_tpu():
             return self.forward_tpu
         elif is_xpu():
             return self.forward_xpu
