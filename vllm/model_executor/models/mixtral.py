@@ -22,10 +22,7 @@
 # limitations under the License.
 """Inference-only Mixtral model."""
 from typing import Iterable, List, Optional, Tuple
-import re
 import torch
-import numpy as np
-import torch.nn.functional as F
 from torch import nn
 from transformers import MixtralConfig
 
@@ -33,9 +30,7 @@ from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (
     get_pp_group,
-    get_tensor_model_parallel_world_size,
-    get_tensor_model_parallel_rank,
-    tensor_model_parallel_all_reduce,
+    get_tensor_model_parallel_world_size
 )
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm

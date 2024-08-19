@@ -1,11 +1,8 @@
-import enum
 from abc import abstractmethod
-from enum import Enum
 from typing import List, Optional, Tuple
 
 import torch
 
-from vllm import _custom_ops as ops
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
