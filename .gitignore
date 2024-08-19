@@ -190,3 +190,6 @@ hip_compat.h
 
 # Benchmark dataset
 benchmarks/*.json
+
+# install config
+install_config.sh
