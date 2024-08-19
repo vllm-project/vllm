@@ -83,10 +83,11 @@ kill_processes_launched_by_current_bash() {
 
 kill_gpu_processes() {
 
-  # Kill all python processes launched from current bash script
   ps -aux
   lsof -t -i:8000 | xargs -r kill -9
-  pkill-f pt_main_thread
+  pkill -f pt_main_thread
+  ps aux | grep python | grep openai | awk '{print $2}' | xargs -r kill -9
+
 
   # wait until GPU memory usage smaller than 1GB
   while [ $(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -n 1) -ge 1000 ]; do
