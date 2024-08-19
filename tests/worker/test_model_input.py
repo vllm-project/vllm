@@ -7,6 +7,7 @@ from vllm.attention import AttentionMetadata, AttentionMetadataBuilder
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.pooling_metadata import PoolingMetadata
+from vllm.vllm.attention.backends.utils import CommonAttentionState
 from vllm.worker.embedding_model_runner import (
     ModelInputForGPUWithPoolingMetadata)
 from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
@@ -28,7 +29,11 @@ class MockAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls() -> Type["AttentionMetadataBuilder"]:
-        raise AttentionMetadataBuilder
+        return AttentionMetadataBuilder
+
+    @staticmethod
+    def get_state_cls() -> Type["CommonAttentionState"]:
+        return CommonAttentionState
 
     @staticmethod
     def get_kv_cache_shape(
