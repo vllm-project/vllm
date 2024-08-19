@@ -173,6 +173,8 @@ endif()
 #
 
 set(VLLM_EXT_SRC
+  "csrc/mamba/mamba_ssm/selective_scan_fwd.cu"
+  "csrc/mamba/causal_conv1d/causal_conv1d.cu"
   "csrc/cache_kernels.cu"
   "csrc/attention/attention_kernels.cu"
   "csrc/pos_encoding_kernels.cu"

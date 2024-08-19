@@ -176,6 +176,16 @@ void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
                           torch::Tensor experts_ids,
                           torch::Tensor num_tokens_post_pad);
 
+std::vector<torch::Tensor>
+selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
+                  const torch::Tensor &A, const torch::Tensor &B, const torch::Tensor &C,
+                  const c10::optional<torch::Tensor> &D_,
+                  const c10::optional<torch::Tensor> &z_,
+                  const c10::optional<torch::Tensor> &delta_bias_,
+                  bool delta_softplus,
+                  const c10::optional<torch::Tensor> &index_,
+                  const c10::optional<torch::Tensor> &x);
+
 #ifndef USE_ROCM
 using fptr_t = int64_t;
 fptr_t init_custom_ar(torch::Tensor& meta, torch::Tensor& rank_data,
