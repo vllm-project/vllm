@@ -199,19 +199,53 @@ run_serving_tests() {
 
       new_test_name=$test_name"_qps_"$qps
 
-      client_command="python3 benchmark_serving.py \
-        --backend $CURRENT_LLM_SERVING_ENGINE \
-        --tokenizer /tokenizer_cache \
-        --model $model \
-        --dataset-name $dataset_name \
-        --dataset-path $dataset_path \
-        --num-prompts $num_prompts \
-        --port $port \
-        --save-result \
-        --result-dir $RESULTS_FOLDER \
-        --result-filename ${new_test_name}.json \
-        --request-rate $qps \
-        $client_args"
+      if [[ "$dataset_name" = "sharegpt" ]]; then
+
+        client_command="python3 benchmark_serving.py \
+          --backend $CURRENT_LLM_SERVING_ENGINE \
+          --tokenizer /tokenizer_cache \
+          --model $model \
+          --dataset-name $dataset_name \
+          --dataset-path $dataset_path \
+          --num-prompts $num_prompts \
+          --port $port \
+          --save-result \
+          --result-dir $RESULTS_FOLDER \
+          --result-filename ${new_test_name}.json \
+          --request-rate $qps \
+          $client_args"
+
+      elif [[ "$dataset_name" = "sonnet" ]]; then
+
+        sonnet_input_len=$(echo "$common_params" | jq -r '.sonnet_input_len')
+        sonnet_output_len=$(echo "$common_params" | jq -r '.sonnet_output_len')
+        sonnet_prefix_len=$(echo "$common_params" | jq -r '.sonnet_prefix_len')
+
+        client_command="python3 benchmark_serving.py \
+          --backend $CURRENT_LLM_SERVING_ENGINE \
+          --tokenizer /tokenizer_cache \
+          --model $model \
+          --dataset-name $dataset_name \
+          --dataset-path $dataset_path \
+          --num-prompts $num_prompts \
+          --sonnet-input-len $sonnet_input_len \
+          --sonnet-output-len $sonnet_output_len \
+          --sonnet-prefix-len $sonnet_prefix_len \
+          --port $port \
+          --save-result \
+          --result-dir $RESULTS_FOLDER \
+          --result-filename ${new_test_name}.json \
+          --request-rate $qps \
+          $client_args"
+
+      else
+  
+        echo "The dataset name must be either 'sharegpt' or 'sonnet'. Got $dataset_name."
+        exit 1
+
+      fi
+
+        
 
       echo "Running test case $test_name with qps $qps"
       echo "Client command: $client_command"
