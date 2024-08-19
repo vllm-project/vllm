@@ -313,8 +313,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
             self.forward_dag = self._compiled_ray_dag(enable_asyncio=False)
 
         serialized_data = self.input_encoder.encode(execute_model_req)
-        outputs = ray.get(self.forward_dag.execute(serialized_data),
-                          timeout=30)
+        outputs = ray.get(self.forward_dag.execute(serialized_data))
         output = self.output_decoder.decode(outputs[0])
         return output
 

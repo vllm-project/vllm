@@ -1,6 +1,7 @@
 """Sampling parameters for text generation."""
 import copy
 from enum import IntEnum
+from functools import cached_property
 from typing import Any, Callable, Dict, List, Optional, Set, Union
 
 import msgspec
@@ -32,8 +33,11 @@ first argument, and returns a modified tensor of logits
 to sample from."""
 
 
-class SamplingParams(msgspec.Struct,
-                     omit_defaults=True):  # type: ignore[call-arg]
+class SamplingParams(
+        msgspec.Struct,
+        omit_defaults=True,  # type: ignore[call-arg]
+        # required for @cached_property.
+        dict=True):  # type: ignore[call-arg]
     """Sampling parameters for text generation.
 
     Overall, we follow the sampling parameters from the OpenAI text completion

@@ -23,11 +23,14 @@ if TYPE_CHECKING:
     from vllm.inputs import LLMInputs
     from vllm.multimodal.base import MultiModalDataDict
 
+VLLM_TOKEN_ID_ARRAY_TYPE = "l"
 
-class Logprob(
-        msgspec.Struct,
-        omit_defaults=True,  # type: ignore[call-arg]
-        array_like=True):  # type: ignore[call-arg]
+
+# We use dataclass for now because it is used for
+# openai server output, and msgspec is not serializable.
+# TODO(sang): Fix it.
+@dataclass
+class Logprob:
     """Infos for supporting OpenAI compatible logprobs and token ranks.
 
     Attributes:
@@ -148,7 +151,7 @@ class SequenceData(msgspec.Struct,
     # union of 2 list types.
     _prompt_token_ids: array
     _output_token_ids: array = msgspec.field(
-        default_factory=lambda: array("I", []))
+        default_factory=lambda: array(VLLM_TOKEN_ID_ARRAY_TYPE, []))
 
     ### The below fields should not be passed as an argument ###
     _cumulative_logprob: float = 0.0
@@ -164,6 +167,8 @@ class SequenceData(msgspec.Struct,
     _new_appended_tokens: List[int] = msgspec.field(default_factory=list)
 
     def __post_init__(self) -> None:
+        assert self._prompt_token_ids.typecode == VLLM_TOKEN_ID_ARRAY_TYPE
+        assert self._output_token_ids.typecode == VLLM_TOKEN_ID_ARRAY_TYPE
         self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(
             self._prompt_token_ids)
         self._update_cached_all_tokens()
@@ -201,7 +206,8 @@ class SequenceData(msgspec.Struct,
 
     @output_token_ids.setter
     def output_token_ids(self, new_output_token_ids: List[int]) -> None:
-        self._output_token_ids = array('I', new_output_token_ids)
+        self._output_token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
+                                       new_output_token_ids)
         self._update_cached_all_tokens()
 
     @property
@@ -383,7 +389,8 @@ class Sequence:
                              f"invalid input {inputs}; did you forget the "
                              "encoder input prompt fields?")
 
-        self.data = SequenceData(array("I", self.prompt_token_ids))
+        self.data = SequenceData(
+            array(VLLM_TOKEN_ID_ARRAY_TYPE, self.prompt_token_ids))
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
 
@@ -906,8 +913,8 @@ class SequenceGroupMetadata(
     def __post_init__(self):
         if self.seq_data is not None and self.token_chunk_size is None:
             if self.is_prompt:
-                self.token_chunk_size = list(
-                    self.seq_data.values())[0].get_len()
+                self.token_chunk_size = next(iter(
+                    self.seq_data.values())).get_len()
             else:
                 self.token_chunk_size = 1
 

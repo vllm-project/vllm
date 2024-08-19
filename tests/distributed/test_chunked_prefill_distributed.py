@@ -18,12 +18,12 @@ from ..utils import fork_new_process_for_each_test
 
 @pytest.mark.skipif(cuda_device_count_stateless() < 2,
                     reason="Need at least 2 GPUs to run the test.")
-@pytest.mark.parametrize("model, distributed_executor_backend, enable_spmd", [
-    ("facebook/opt-125m", "ray", False),
-    ("facebook/opt-125m", "ray", True),
-    ("meta-llama/Llama-2-7b-hf", "ray", False),
-    ("facebook/opt-125m", "mp", False),
-    ("meta-llama/Llama-2-7b-hf", "mp", False),
+@pytest.mark.parametrize("model, distributed_executor_backend", [
+    ("facebook/opt-125m", "ray"),
+    ("facebook/opt-125m", "ray"),
+    ("meta-llama/Llama-2-7b-hf", "ray"),
+    ("facebook/opt-125m", "mp"),
+    ("meta-llama/Llama-2-7b-hf", "mp"),
 ])
 @fork_new_process_for_each_test
 def test_models(
@@ -34,7 +34,7 @@ def test_models(
     distributed_executor_backend: str,
     enable_spmd: bool,
 ) -> None:
-    if enable_spmd:
+    if model == "meta-llama/Llama-2-7b-hf" and distributed_executor_backend == "ray":  # noqa
         assert distributed_executor_backend == "ray"
         # test ray adag
         os.environ['VLLM_USE_RAY_SPMD_WORKER'] = "1"

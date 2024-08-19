@@ -63,12 +63,12 @@ void advance_step(int64_t num_seqs, int64_t num_queries, int64_t block_size,
 torch::Tensor aqlm_gemm(const torch::Tensor& input, const torch::Tensor& codes,
                         const torch::Tensor& codebooks,
                         const torch::Tensor& scales,
-                        const torch::Tensor& codebook_partition_sizes,
+                        const std::vector<int64_t>& codebook_partition_sizes,
                         const std::optional<torch::Tensor>& bias);
 
-torch::Tensor aqlm_dequant(const torch::Tensor& codes,
-                           const torch::Tensor& codebooks,
-                           const torch::Tensor& codebook_partition_sizes);
+torch::Tensor aqlm_dequant(
+    const torch::Tensor& codes, const torch::Tensor& codebooks,
+    const std::vector<int64_t>& codebook_partition_sizes);
 
 torch::Tensor awq_gemm(torch::Tensor _in_feats, torch::Tensor _kernel,
                        torch::Tensor _scaling_factors, torch::Tensor _zeros,
@@ -107,13 +107,13 @@ torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
 torch::Tensor awq_marlin_repack(torch::Tensor& b_q_weight, int64_t size_k,
                                 int64_t size_n, int64_t num_bits);
 
-torch::Tensor ggml_dequantize(torch::Tensor W, int8_t type, int64_t m,
+torch::Tensor ggml_dequantize(torch::Tensor W, int64_t type, int64_t m,
                               int64_t n);
 
-torch::Tensor ggml_mul_mat_vec_a8(torch::Tensor W, torch::Tensor X, int8_t type,
-                                  int64_t row);
+torch::Tensor ggml_mul_mat_vec_a8(torch::Tensor W, torch::Tensor X,
+                                  int64_t type, int64_t row);
 
-torch::Tensor ggml_mul_mat_a8(torch::Tensor W, torch::Tensor X, int8_t type,
+torch::Tensor ggml_mul_mat_a8(torch::Tensor W, torch::Tensor X, int64_t type,
                               int64_t row);
 
 torch::Tensor fp8_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
