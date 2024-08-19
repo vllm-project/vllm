@@ -22,8 +22,8 @@ from vllm.worker.model_runner_base import (
     BroadcastableModelInput, _init_attn_metadata_from_tensor_dict,
     _init_frozen_model_input_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
-
-from ..model_executor.model_loader.tensorizer import TensorizerConfig
+from vllm.model_executor import SamplingMetadata
+from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -51,6 +51,10 @@ class ModelOutput:
     sampler_output_ready_event: torch.cuda.Event
     sampled_token_ids: Optional[torch.Tensor] = None
     pythonized: bool = False
+
+    # metadata required to run the pythonization
+    sampling_metadata: SamplingMetadata = None
+    num_empty_prefill_step_outputs: int = None
 
     def pythonize(self, input_metadata: "StatefulModelInput",
                   copy_stream: torch.cuda.Stream,
@@ -85,7 +89,10 @@ class ModelOutput:
         if blocking:
             self.sampler_output_ready_event.synchronize()
         with torch.cuda.stream(copy_stream):
-            _pythonize_sampler_output(input_metadata, self.sampler_output,
+            assert input_metadata.frozen_model_input is not None
+            _pythonize_sampler_output(self.sampling_metadata,
+                                      self.num_empty_prefill_step_outputs,
+                                      self.sampler_output,
                                       pinned_sampled_token_buffer,
                                       self.sampled_token_ids)
         return True
@@ -111,6 +118,46 @@ class StatefulModelInput(BroadcastableModelInput):
         default_factory=lambda: [torch.cuda.Event(blocking=True)] * 2)
     num_seqs: int = -1
     num_queries: int = -1
+
+    # Multi-Step + Chunked-Prefill related args.
+    # When the initially scheduled sequences have both prefill and decode
+    # sequences, the first iteration of the multi-step processes with all
+    # the sequences. However, further iterations only process the decode sequences.
+    # For example:
+    # Let [S1, S2, S3, S4, S5, S6] be the scheduled set of sequences.
+    # let {S1, S2, S3} be prefills. Assume S2 doesn't need sampling, but S1 and S3 does.
+    # let {S4, S5, S6} be decodes. All decode sequences need sampling.
+    # Step 1: execute_model processes all sequences and the corresponding pythonize
+    #  sampler output will produce results {R1, R3, R4, R5, R6} (Rx is the result for the xth sequence)
+    # Step 2-n: execute_model only processes sequences {S4, S5, S6} and the corresponding
+    # pythonize sampler output will produce results {[], [], R4, R5, R6}
+    # 
+    # These members dont need to be broadcasted as the sampling and pythonization
+    # is exclusive to the last_rank GPU
+
+    # Use sampling_metadata_decodes for decode-exclusive iterations.
+    sampling_metadata_decodes: Optional[SamplingMetadata] = None
+    # When pythonizing sampler outputs for the decode-exclusive steps,
+    # populate the sampler output with `num_empty_prefill_step_outputs` 
+    # empty outputs.
+    num_empty_prefill_step_outputs: int = 0
+
+    def forget_prefills(self):
+        ## Update state to forget prefills
+        num_prefills = self.frozen_model_input.attn_metadata.num_prefills
+        if num_prefills == 0:
+            return self
+        self.num_seqs -= num_prefills
+        self.num_queries -= num_prefills
+
+
+        if get_pp_group().is_last_rank:
+            # Sampling metadata is only required for the final pp group
+            self.num_empty_prefill_step_outputs = \
+                  len([None for x in self.frozen_model_input.sampling_metadata.seq_groups[:num_prefills]])
+
+        self.frozen_model_input = ModelInputForGPUWithSamplingMetadata.without_prefills(self.frozen_model_input,
+                                                                                        self.sampling_metadata_decodes)
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         assert self.frozen_model_input is not None
@@ -169,7 +216,9 @@ class StatefulModelInput(BroadcastableModelInput):
             ModelOutput(sampler_output=sampler_output,
                         sampler_output_ready_event=None,
                         sampled_token_ids=sampled_token_ids,
-                        pythonized=False))
+                        pythonized=False,
+                        sampling_metadata=self.frozen_model_input.sampling_metadata,
+                        num_empty_prefill_step_outputs=self.num_empty_prefill_step_outputs))
 
 
 # MutableModelInputForGPUWithMultiStepMetadata is not subclass of
@@ -208,10 +257,26 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         frozen_model_input = self._base_model_runner.prepare_model_input(
             seq_group_metadata_list, virtual_engine, finished_requests_ids)
 
+        sampling_metadata_decodes = None 
+        if get_pp_group().is_last_rank: # Sampling metadata is only required for the final pp group
+            generators = self.get_generators(finished_requests_ids)
+            num_prompts = len([None for sg in seq_group_metadata_list if sg.is_prompt])
+            if num_prompts != 0:
+                sampling_metadata_decodes = SamplingMetadata.prepare(
+                    seq_group_metadata_list[num_prompts:],
+                    frozen_model_input.seq_lens[num_prompts:],
+                    frozen_model_input.query_lens[num_prompts:],
+                    self.device,
+                    self.pin_memory,
+                    generators,
+                    self.sampling_metadata_cache)
+                sampling_metadata_decodes.skip_sampler_cpu_output = (True)
+
         model_input = StatefulModelInput(
             frozen_model_input=frozen_model_input,
             num_seqs=len(frozen_model_input.seq_lens),
             num_queries=len(frozen_model_input.query_lens),
+            sampling_metadata_decodes = sampling_metadata_decodes
         )
         return model_input
 
@@ -228,13 +293,12 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         metadata
         """
         assert num_steps == 1, "MultiStepModelRunner only supports num_steps=1"
-        frozen_model_input = model_input.frozen_model_input
-        assert frozen_model_input is not None
+        assert model_input.frozen_model_input is not None
 
         # path for warm up runs
         if not model_input.is_multi_step:
             return self._base_model_runner.execute_model(
-                frozen_model_input, kv_caches, intermediate_tensors, num_steps)
+                model_input.frozen_model_input, kv_caches, intermediate_tensors, num_steps)
 
         # make sure we skip the sampler on the lask rank and only pythonize
         # if CPU is ahead.
@@ -248,8 +312,8 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
 
             self._base_model_runner.model.sampler.include_gpu_probs_tensor = (
                 True)
-            if frozen_model_input.sampling_metadata:
-                frozen_model_input.sampling_metadata.skip_sampler_cpu_output = (
+            if model_input.frozen_model_input.sampling_metadata:
+                model_input.frozen_model_input.sampling_metadata.skip_sampler_cpu_output = (
                     True)
 
         # some pre-execute model logic for multi-step:
@@ -268,11 +332,14 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
             # might clobber enqueued forwards. (prevents CPU from running too
             # far ahead if needed)
             model_input.wait_previous_step()
+
+            # Forget prefills, if any
+            model_input.forget_prefills()
             model_input = self._advance_step(
                 model_input, model_input.cached_outputs[-1].sampler_output)
 
         # Execute the model
-        output = self._base_model_runner.execute_model(frozen_model_input,
+        output = self._base_model_runner.execute_model(model_input.frozen_model_input,
                                                        kv_caches,
                                                        intermediate_tensors,
                                                        num_steps=1)
@@ -294,7 +361,10 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
                     0].sampled_token_ids.cpu()
             model_input.cached_outputs.append(
                 ModelOutput(output[0], output_ready_event,
-                            output[0].sampled_token_ids, False))
+                            output[0].sampled_token_ids,
+                            pythonized=False,
+                            sampling_metadata=model_input.frozen_model_input.sampling_metadata,
+                            num_empty_prefill_step_outputs=model_input.num_empty_prefill_step_outputs))
             # make sure we dont try to serialize any GPU tensors
             output[0].sampled_token_ids = None
             output[0].sampled_token_probs = None
@@ -326,25 +396,6 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         # should be [SamplerOutput]
         return output
 
-    def _update_sampling_metadata(self, sampling_metadata, num_seqs,
-                                  num_queries):
-
-        assert sampling_metadata.num_prompts == 0
-        assert len(sampling_metadata.seq_groups) == num_queries
-        assert sampling_metadata.selected_token_indices.shape == (
-            num_queries, )
-        # assert sampling_metadata.categorized_sample_indices == TODO: Add if needed # noqa: E501
-
-        # Verify that all sequences are decodes
-        for i in range(num_queries):
-            seq_group = sampling_metadata.seq_groups[i]
-
-            assert seq_group.is_prompt is False  # No prompt
-            assert seq_group.prompt_logprob_indices == []  # No prompt
-            assert seq_group.sample_indices == [i]  # Simple
-            assert seq_group.seq_len is None  # Decode
-            assert seq_group.query_len is None  # Decode
-
     def _advance_step(self, model_input: StatefulModelInput,
                       out: SamplerOutput) -> StatefulModelInput:
         frozen_model_input = model_input.frozen_model_input
@@ -367,7 +418,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
             num_queries=num_queries,
             block_size=self.block_size,
             input_tokens=frozen_model_input.input_tokens,
-            sampled_token_ids=model_input.cached_outputs[-1].sampled_token_ids,
+            sampled_token_ids=model_input.cached_outputs[-1].sampled_token_ids[-num_seqs:],
             input_positions=frozen_model_input.input_positions,
             seq_lens=attn_metadata.seq_lens_tensor,
             slot_mapping=attn_metadata.slot_mapping,
@@ -409,22 +460,23 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         return self._base_model_runner.vocab_size
 
 
-def _pythonize_sampler_output(model_input: StatefulModelInput,
-                              output: SamplerOutput,
-                              pinned_sampled_token_buffer: torch.Tensor,
-                              sampled_token_ids: torch.Tensor) -> None:
+def _pythonize_sampler_output(
+        sampling_metadata: SamplingMetadata,
+        num_empty_prefill_step_outputs: int,
+        output: SamplerOutput,
+        pinned_sampled_token_buffer: torch.Tensor,
+        sampled_token_ids: torch.Tensor) -> SamplerOutput:
     """ This function is only called when the output tensors are ready. 
     See ModelOutput
     """
-
-    assert model_input.frozen_model_input is not None
-
-    frozen_model_input = model_input.frozen_model_input
-    assert frozen_model_input.sampling_metadata is not None
+    assert sampling_metadata is not None
     # samples generation should have been skipped
     assert not output.outputs
 
-    pinned_buffer = pinned_sampled_token_buffer[:model_input.num_queries]
+    # dont use num-queries as some of the sequence's may not need sampling.
+    # Like, chunked prefill seqs.
+    n_sampled_token_ids = sampled_token_ids.shape[0]
+    pinned_buffer = pinned_sampled_token_buffer[:n_sampled_token_ids]
 
     # CPU GPU sync
     pinned_buffer = pinned_buffer.copy_(sampled_token_ids, non_blocking=False)
@@ -432,17 +484,25 @@ def _pythonize_sampler_output(model_input: StatefulModelInput,
     # this will not block as the tensors are already on CPU
     samples_list = pinned_buffer.tolist()
 
-    sampling_metadata = frozen_model_input.sampling_metadata
+    for _ in range(num_empty_prefill_step_outputs):
+        output.outputs.append(CompletionSequenceGroupOutput([], None))
 
-    for (seq_group, sample_result) in zip(sampling_metadata.seq_groups,
-                                          samples_list):
-        seq_ids = seq_group.seq_ids
-        next_token_ids = sample_result
-        parent_ids = [0]
-        seq_outputs: List[SequenceOutput] = []
+    samples_it = iter(samples_list)
+    for sg_idx, seq_group in enumerate(sampling_metadata.seq_groups):
+
         if seq_group.sampling_params.logits_processors:
             assert len(seq_group.sampling_params.logits_processors) == 0, (
                 "Logits Processors are not supported in multi-step decoding")
+         
+        skip_sequence = not seq_group.do_sample
+        if skip_sequence:
+            output.outputs.append(CompletionSequenceGroupOutput([], None))
+            continue
+
+        seq_ids = seq_group.seq_ids
+        next_token_ids = next(samples_it)
+        parent_ids = [0]
+        seq_outputs: List[SequenceOutput] = []
         for parent_id, next_token_id in zip(parent_ids, next_token_ids):
             # TODO(will): support logprobs
             # Hard coded logprob

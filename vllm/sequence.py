@@ -1296,28 +1296,31 @@ class ExecuteModelRequest(
 
     @property
     def is_first_multi_step(self) -> bool:
-        # TODO(will) make this be able to handle batches with variable number of
-        # steps
+        # All sequences should start their lifetimes at step 0
         assert len(self.seq_group_metadata_list) > 0
-        first_seq_group = self.seq_group_metadata_list[0]
-        assert first_seq_group.state is not None
-        return first_seq_group.state.current_step == 0
+        state = self.seq_group_metadata_list[0].state
+        assert state is not None
+        return state.current_step == 0
 
     @property
     def is_last_step(self) -> bool:
-        # TODO(will) make this be able to handle batches with variable number of
-        # steps
+        # Assumptions:
+        # 1. All the prefills appear before any of the decodes
+        #  in self.seq_group_metadata_list.
+        # 2. All the decode sequences have the same num_steps and that,
+        #    the num_steps of the decode sequences >= num_steps of the
+        #    prefill sequences.
+
         assert len(self.seq_group_metadata_list) > 0
-        first_seq_group = self.seq_group_metadata_list[0]
-        assert first_seq_group.state is not None
-        return first_seq_group.state.remaining_steps == 1
+        state = self.seq_group_metadata_list[-1].state
+        assert state is not None
+        return state.remaining_steps == 1
 
     @property
     def current_step(self) -> int:
-        # TODO(will) make this be able to handle batches with variable number of
-        # steps
+        # Assumptions : refer to the comment in `is_last_step`
         assert len(self.seq_group_metadata_list) > 0
-        state = self.seq_group_metadata_list[0].state
+        state = self.seq_group_metadata_list[-1].state
         assert state is not None
         return state.current_step
 

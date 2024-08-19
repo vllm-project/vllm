@@ -75,12 +75,12 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             "Beam search not supported in multi-step decoding.")
         seq = seqs[0]
 
-        # Since there's only one sequence per sequence group, we can take the
-        # first sample.
-        samples = [output.samples[0] for output in outputs]
+        # TODO (Varun) : Pass in an output_token_id of -1 instead of returning
+        # 0 samples.
+        samples = [output.samples[0] for output in outputs if output.samples]
 
         # -1 means the output token is not valid (eg. due to spec decode
-        # rejecting tokens).
+        # rejecting tokens)
         valid_samples = [
             sample for sample in samples if sample.output_token != -1
         ]

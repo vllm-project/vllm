@@ -892,9 +892,6 @@ class EngineArgs:
             if speculative_config is not None:
                 raise ValueError("Speculative decoding is not supported with "
                                  "multi-step (--num-scheduler-steps > 1)")
-            if self.enable_chunked_prefill:
-                raise ValueError("Chunked prefill is not supported with "
-                                 "multi-step (--num-scheduler-steps > 1)")
 
         # make sure num_lookahead_slots is set the higher value depending on
         # if we are using speculative decoding or multi-step

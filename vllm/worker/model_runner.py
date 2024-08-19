@@ -51,6 +51,7 @@ from vllm.worker.model_runner_base import (
     _add_sampling_metadata_broadcastable_dict,
     _init_attn_metadata_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
+from vllm.attention.backends.flash_attn import FlashAttentionMetadata
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -118,7 +119,6 @@ class ModelInputForGPU(ModelRunnerInputBase):
                 attn_backend, tensor_dict)
         return cls(**tensor_dict)
 
-
 @dataclass(frozen=True)
 class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
     """
@@ -128,6 +128,42 @@ class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
     # Used for speculative decoding. We do not broadcast it because it is only
     # used by the driver worker.
     is_prompt: Optional[bool] = None
+
+    @staticmethod
+    def without_prefills(m: "ModelInputForGPUWithSamplingMetadata",
+                        sampling_metadata_decodes: SamplingMetadata) \
+                            -> "ModelInputForGPUWithSamplingMetadata":
+
+        num_prefills = m.attn_metadata.num_prefills
+        num_prefill_tokens = m.attn_metadata.num_prefill_tokens
+        if num_prefills == 0:
+            assert m.sampling_metadata == sampling_metadata_decodes
+            return dataclasses.replace(m)
+
+        # Prefill related data in the following datastructures are not handled.
+        assert all([m.lora_mapping is None,
+                    len(m.lora_requests) == 0,
+                    m.prompt_adapter_mapping is None,
+                    len(m.prompt_adapter_requests) == 0,
+                    len(m.multi_modal_kwargs) == 0])
+        assert isinstance(m.attn_metadata, FlashAttentionMetadata)
+
+        return ModelInputForGPUWithSamplingMetadata(
+            input_tokens = m.input_tokens[num_prefill_tokens:],
+            input_positions = m.input_positions[num_prefill_tokens:],
+            seq_lens = m.seq_lens[num_prefills:],
+            query_lens = m.query_lens[num_prefills:],
+            lora_mapping= None,
+            lora_requests= [],
+            attn_metadata = FlashAttentionMetadata.without_prefills(m.attn_metadata),
+            prompt_adapter_mapping=None,
+            prompt_adapter_requests=[],
+            multi_modal_kwargs={},
+            request_ids_to_seq_ids= m.request_ids_to_seq_ids,
+            finished_requests_ids= m.finished_requests_ids,
+            virtual_engine= m.virtual_engine,
+            sampling_metadata = sampling_metadata_decodes,
+            is_prompt=False)
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
