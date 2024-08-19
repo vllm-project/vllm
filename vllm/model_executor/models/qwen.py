@@ -11,7 +11,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -29,9 +29,12 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.utils import print_warning_once
+# Multimodal imports
+from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.model_executor.models.interfaces import SupportsMultiModal
+from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from .utils import is_pp_missing_parameter, make_layers
-
 
 class QWenMLP(nn.Module):
 
@@ -236,17 +239,38 @@ class QWenModel(nn.Module):
         hidden_states, _ = self.ln_f(hidden_states, residual)
         return hidden_states
 
+### Stubs that need to be implemented...
+def get_max_qwen_image_tokens(ctx: InputContext):
+    # TODO: calculate this
+    print("STUB: using hardcoded max image tokens for qwen")
+    return 2048
 
-class QWenLMHeadModel(nn.Module):
+def input_processor_for_qwen(ctx: InputContext, llm_inputs: LLMInputs):
+    multi_modal_data = llm_inputs.get("multi_modal_data")
+    if multi_modal_data is None or "image" not in multi_modal_data:
+        return llm_inputs
+    print("STUB - skipping multimodal image data for qwen")
+    prompt = llm_inputs.get("prompt")
+    prompt_token_ids = llm_inputs["prompt_token_ids"]
+    return LLMInputs(prompt=prompt,
+                     prompt_token_ids=prompt_token_ids,
+                     multi_modal_data=None)
+
+@MULTIMODAL_REGISTRY.register_image_input_mapper()
+@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_qwen_image_tokens)
+@INPUT_REGISTRY.register_input_processor(input_processor_for_qwen)
+class QWenLMHeadModel(nn.Module, SupportsMultiModal):
 
     def __init__(
         self,
         config: PretrainedConfig,
+        multimodal_config: MultiModalConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.config = config
+        self.multimodal_config = multimodal_config
         self.quant_config = quant_config
         self.transformer = QWenModel(config, cache_config, quant_config)
         self.lm_head = ParallelLMHead(config.vocab_size,
@@ -264,6 +288,7 @@ class QWenLMHeadModel(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        pixel_values: torch.Tensor = None,
     ) -> torch.Tensor:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
                                          attn_metadata, intermediate_tensors)
