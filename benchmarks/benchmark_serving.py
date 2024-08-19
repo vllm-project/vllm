@@ -476,8 +476,7 @@ def main(args: argparse.Namespace):
                               output_len in input_requests]
         else:
             assert (
-                tokenizer.chat_template or tokenizer.default_chat_template \
-                    or tokenizer.get_chat_template
+                tokenizer.apply_chat_template
             ), "Tokenizer/model must have chat template for sonnet dataset."
             input_requests = sample_sonnet_requests(
                 dataset_path=args.dataset_path,
