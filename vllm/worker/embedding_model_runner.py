@@ -1,5 +1,5 @@
 import dataclasses
-from typing import Any, Dict, List, Optional, Tuple, cast, Type
+from typing import Any, Dict, List, Optional, Tuple, Type, cast
 
 import torch
 
@@ -13,8 +13,8 @@ from vllm.multimodal import MultiModalInputs
 from vllm.pooling_params import PoolingParams
 from vllm.sequence import (IntermediateTensors, PoolerOutput, SequenceData,
                            SequenceGroupMetadata)
-from vllm.worker.enc_dec_model_runner import (EncoderDecoderModelRunnerBase,
-                                              EncoderDecoderModelInput)
+from vllm.worker.enc_dec_model_runner import (EncoderDecoderModelInput,
+                                              EncoderDecoderModelRunnerBase)
 from vllm.worker.model_runner import ModelInputForGPUBuilder
 
 logger = init_logger(__name__)
