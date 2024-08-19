@@ -71,13 +71,8 @@ HF_CACHE="$(realpath ~)/huggingface"
 mkdir -p ${HF_CACHE}
 HF_MOUNT="/root/.cache/huggingface"
 
-label() {
-    while read -r l; do
-        echo "$1: $l"
-    done
-}
 commands=$@
-PARALLEL_JOB_COUNT=4
+PARALLEL_JOB_COUNT=8
 #check if the command contains shard flag
 if [[ $commands == *"--shard-id="* ]]; then
   for GPU in $(seq 0 $(($PARALLEL_JOB_COUNT-1))); do
@@ -96,7 +91,8 @@ if [[ $commands == *"--shard-id="* ]]; then
         --name ${container_name}_${GPU}  \
         ${image_name} \
         /bin/bash -c "${commands}" \
-        | label ">>Shard $GPU" &
+        #add prefix to the output and run in background
+        |& while read -r line; do echo ">>Shard $GPU: $line"; done &
     PIDS+=($!)
   done
   #wait for all processes to finish and collect exit codes
