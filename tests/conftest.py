@@ -4,8 +4,7 @@ import os
 import sys
 from collections import UserList
 from enum import Enum
-from typing import (Any, Callable, Dict, List, Optional, Tuple, TypedDict,
-                    TypeVar, Union)
+from typing import Any, Dict, List, Optional, Tuple, TypedDict, TypeVar, Union
 
 import pytest
 import torch
@@ -28,8 +27,9 @@ from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sequence import SampleLogprobs
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, cuda_device_count_stateless,
-                        identity, is_cpu)
+                        is_cpu)
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+
 
 logger = init_logger(__name__)
 
@@ -199,8 +199,6 @@ class HfRunner:
         is_embedding_model: bool = False,
         is_vision_model: bool = False,
         is_encoder_decoder_model: bool = False,
-        postprocess_inputs: Callable[[BatchEncoding],
-                                     BatchEncoding] = identity,
     ) -> None:
         torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
 
@@ -246,13 +244,11 @@ class HfRunner:
                 torch_dtype=torch_dtype,
                 trust_remote_code=True,
             )
-        except Exception as exc:
+        except Exception:
             logger.warning(
-                "Unable to auto-load HuggingFace processor for model (%s). "
-                "Using tokenizer instead. Reason: %s", model_name, exc)
+                "Unable to auto-load processor from HuggingFace for "
+                "model %s. Using tokenizer instead.", model_name)
             self.processor = self.tokenizer
-
-        self.postprocess_inputs = postprocess_inputs
 
     def generate(
         self,
@@ -273,7 +269,6 @@ class HfRunner:
                 processor_kwargs["images"] = images[i]
 
             inputs = self.processor(**processor_kwargs)
-            inputs = self.postprocess_inputs(inputs)
 
             output_ids = self.model.generate(
                 **self.wrap_device(inputs),
@@ -343,7 +338,6 @@ class HfRunner:
                 processor_kwargs["images"] = images[i]
 
             inputs = self.processor(**processor_kwargs)
-            inputs = self.postprocess_inputs(inputs)
 
             output = self.model.generate(
                 **self.wrap_device(inputs),
@@ -428,7 +422,6 @@ class HfRunner:
                 processor_kwargs["images"] = images[i]
 
             inputs = self.processor(**processor_kwargs)
-            inputs = self.postprocess_inputs(inputs)
 
             output = self.model.generate(
                 **self.wrap_device(inputs),
@@ -543,6 +536,8 @@ class VllmRunner:
         **kwargs,
     ) -> None:
         path_to_tensors = f"s3://vllm-model-cache/vllm/{model_name}/v1/model.tensors"
+        configg=TensorizerConfig(tensorizer_uri=path_to_tensors, num_readers=128, s3_endpoint="https://vllm-model-cache.s3.us-west-2.amazonaws.com")
+        print("Accessing: ", model_name)
         self.model = LLM(
             model=model_name,
             tokenizer=tokenizer_name,
@@ -555,8 +550,8 @@ class VllmRunner:
             max_model_len=max_model_len,
             block_size=block_size,
             enable_chunked_prefill=enable_chunked_prefill,
-            load_format="tensorizer", 
-            model_loader_extra_config=TensorizerConfig(tensorizer_uri=path_to_tensors, num_readers=4, s3_endpoint="https://vllm-model-cache.s3.us-west-2.amazonaws.com")
+            load_format="tensorizer",
+            model_loader_extra_config=configg,
             **kwargs,
         )
 
@@ -564,8 +559,7 @@ class VllmRunner:
         self,
         prompts: List[str],
         sampling_params: SamplingParams,
-        images: Optional[Union[List[Image.Image],
-                               List[List[Image.Image]]]] = None,
+        images: Optional[List[Image.Image]] = None,
     ) -> List[Tuple[List[List[int]], List[str]]]:
         if images is not None:
             assert len(prompts) == len(images)
@@ -600,7 +594,7 @@ class VllmRunner:
         for req_output in req_outputs:
             for sample in req_output.outputs:
                 output_str = sample.text
-                output_ids = list(sample.token_ids)
+                output_ids = sample.token_ids
                 output_logprobs = sample.logprobs
             outputs.append((output_ids, output_str, output_logprobs))
         return outputs
@@ -609,8 +603,7 @@ class VllmRunner:
         self,
         prompts: List[str],
         sampling_params: SamplingParams,
-        images: Optional[Union[List[Image.Image],
-                               List[List[Image.Image]]]] = None,
+        images: Optional[List[Image.Image]] = None,
     ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
         assert sampling_params.logprobs is not None
 

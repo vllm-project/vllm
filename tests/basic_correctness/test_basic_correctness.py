@@ -10,7 +10,6 @@ import pytest
 from vllm import LLM
 from vllm.utils import is_hip
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-
 from ..models.utils import check_outputs_equal
 
 MODELS = [
@@ -23,13 +22,14 @@ def test_vllm_gc_ed():
     """Verify vllm instance is GC'ed when it is deleted"""
     model = "facebook/opt-125m"
     path_to_tensors = f"s3://vllm-model-cache/vllm/{model}/v1/model.tensors"
-    llm = LLM(model, load_format="tensorizer", model_loader_extra_config=TensorizerConfig(tensorizer_uri=path_to_tensors, num_readers=4, s3_endpoint="https://vllm-model-cache.s3.us-west-2.amazonaws.com"))
+    print("path: ", path_to_tensors)
+    llm = LLM(model, load_format="tensorizer", model_loader_extra_config=TensorizerConfig(tensorizer_uri=path_to_tensors, num_readers=32, s3_endpoint="https://vllm-model-cache.s3.us-west-2.amazonaws.com"))
+    #llm = LLM("facebook/opt-125m")
     weak_llm = weakref.ref(llm)
     del llm
     # If there's any circular reference to vllm, this fails
     # because llm instance is not GC'ed.
     assert weak_llm() is None
-
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("backend", ["FLASH_ATTN", "XFORMERS", "FLASHINFER"])
@@ -61,6 +61,7 @@ def test_models(
                      gpu_memory_utilization=0.7) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
 
+    print(vllm_outputs)
     check_outputs_equal(
         outputs_0_lst=hf_outputs,
         outputs_1_lst=vllm_outputs,
