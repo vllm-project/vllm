@@ -29,6 +29,7 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 
 # Install pip
 RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} && python3 -m pip --version
+RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 
 WORKDIR /workspace
 
@@ -46,16 +47,17 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 FROM base AS wheel-build
 ARG PYTHON_VERSION=3.10
 ARG USE_SCCACHE
-ARG MAX_JOBS=2
-ENV MAX_JOBS=${MAX_JOBS}
+ARG max_jobs=2
+ENV MAX_JOBS=${max_jobs}
 ARG NVCC_THREADS=8
 ENV NVCC_THREADS=${NVCC_THREADS}
-ARG BUILDKITE_COMMIT
-ENV BUILDKITE_COMMIT=${BUILDKITE_COMMIT}
+ARG buildkite_commit
+ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
+ENV BUILDKITE_COMMIT=${buildkite_commit}
 ENV CCACHE_DIR=/root/.cache/ccache
 
 # Install build dependencies
-COPY setup_files/* /workspace/
+COPY setup_files/* .
 COPY csrc csrc
 COPY setup.py setup.py
 COPY cmake cmake
@@ -65,6 +67,9 @@ COPY vllm vllm
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install -r requirements-build.txt
 
+# install compiler cache to speed up compilation leveraging local or remote caching
+RUN apt-get update -y && apt-get install -y ccache
+
 # If USE_SCCACHE is set to 1, install sccache and build wheel with it
 RUN --mount=type=cache,target=/root/.cache/pip \
     if [ "$USE_SCCACHE" = "1" ]; then \
@@ -73,9 +78,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         && tar -xzf sccache.tar.gz \
         && sudo mv sccache-v0.8.1-x86_64-unknown-linux-musl/sccache /usr/bin/sccache \
         && rm -rf sccache.tar.gz sccache-v0.8.1-x86_64-unknown-linux-musl \
-        && export SCCACHE_BUCKET=vllm-build-sccache \
+        && export SCCACHE_BUCKET=${SCCACHE_BUCKET_NAME} \
         && export SCCACHE_REGION=us-west-2 \
-	&& export SCCACHE_IDLE_TIMEOUT=0 \
         && export CMAKE_BUILD_TYPE=Release \
         && sccache --show-stats \
         && python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 \
@@ -141,11 +145,11 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
     && python3 --version
 
-# Install pip
-RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} && python3 -m pip --version
-
 RUN apt-get update -y \
     && apt-get install -y git vim curl libibverbs-dev
+    
+# Install pip
+RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} && python3 -m pip --version
 
 RUN ldconfig /usr/local/cuda-$(echo ${CUDA_VERSION} | cut -d. -f1,2)/compat/
 
