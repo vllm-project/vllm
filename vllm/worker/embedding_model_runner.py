@@ -12,27 +12,23 @@ from vllm.multimodal import MultiModalInputs
 from vllm.pooling_params import PoolingParams
 from vllm.sequence import (IntermediateTensors, PoolerOutput, SequenceData,
                            SequenceGroupMetadata)
-from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunnerBase
-from vllm.worker.model_runner import ModelInputForGPU, ModelInputForGPUBuilder
+from vllm.worker.enc_dec_model_runner import (EncoderDecoderModelRunnerBase,
+                                              EncoderDecoderModelInputBase)
+from vllm.worker.model_runner import ModelInputForGPUBuilder
 
 logger = init_logger(__name__)
 
 
 @dataclasses.dataclass(frozen=True)
-class ModelInputForGPUWithPoolingMetadata(ModelInputForGPU):
+class EmbeddingModelInput(EncoderDecoderModelInputBase):
     """
     Used by the EmbeddingModelRunner.
     """
     pooling_metadata: Optional["PoolingMetadata"] = None
 
-    encoder_input_tokens: Optional[torch.Tensor] = None
-    encoder_input_positions: Optional[torch.Tensor] = None
 
-
-class EmbeddingModelRunner(
-        EncoderDecoderModelRunnerBase[ModelInputForGPUWithPoolingMetadata]):
-    _model_input_cls: Type[ModelInputForGPUWithPoolingMetadata] = (
-        ModelInputForGPUWithPoolingMetadata)
+class EmbeddingModelRunner(EncoderDecoderModelRunnerBase[EmbeddingModelInput]):
+    _model_input_cls: Type[EmbeddingModelInput] = EmbeddingModelInput
     _builder_cls: Type[ModelInputForGPUBuilder] = ModelInputForGPUBuilder
 
     def __init__(
@@ -66,7 +62,7 @@ class EmbeddingModelRunner(
     @torch.inference_mode()
     def execute_model(
         self,
-        model_input: ModelInputForGPUWithPoolingMetadata,
+        model_input: EmbeddingModelInput,
         kv_caches: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
@@ -132,21 +128,12 @@ class EmbeddingModelRunner(
                               pooling_metadata=model_input.pooling_metadata)
         ]
 
-    def make_model_input_from_broadcasted_tensor_dict(
-            self,
-            tensor_dict: Dict[str,
-                              Any]) -> ModelInputForGPUWithPoolingMetadata:
-        return ModelInputForGPUWithPoolingMetadata.from_broadcasted_tensor_dict(
-            tensor_dict,
-            attn_backend=self.attn_backend,
-        )
-
     def prepare_model_input(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         virtual_engine: int = 0,
         finished_requests_ids: Optional[List[str]] = None
-    ) -> ModelInputForGPUWithPoolingMetadata:
+    ) -> EmbeddingModelInput:
         assert seq_group_metadata_list is not None
         model_input = self._prepare_model_input_tensors(
             seq_group_metadata_list, finished_requests_ids)
