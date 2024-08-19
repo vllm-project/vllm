@@ -11,7 +11,7 @@ steps:
       - "docker push {{ docker_image_amd }}"
     plugins:
       - docker-login#v3.0.0:
-          username: rocmshared
+          username: rocm
     key: "amd-build"
     env:
       DOCKER_BUILDKIT: "1"
