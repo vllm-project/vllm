@@ -70,8 +70,14 @@ HF_CACHE="$(realpath ~)/huggingface"
 mkdir -p ${HF_CACHE}
 HF_MOUNT="/root/.cache/huggingface"
 
+label() {
+    while read -r l; do
+        echo "$1: $l"
+    done
+}
 commands=$@
 PARALLEL_JOB_COUNT=4
+#check if the command contains shard flag
 if [[ $commands == *"--shard-id="* ]]; then
   for GPU in $(seq 0 $(($PARALLEL_JOB_COUNT-1))); do
     #replace shard arguments
@@ -88,7 +94,19 @@ if [[ $commands == *"--shard-id="* ]]; then
         -e HF_HOME=${HF_MOUNT} \
         --name ${container_name}_${GPU}  \
         ${image_name} \
-        /bin/bash -c "${commands}"
+        /bin/bash -c "${commands}" \
+        | label "Shard $GPU" &
+    PIDS+=($!)
+  done
+  #wait for all processes to finish and collect exit codes
+  for pid in ${PIDS[@]}; do
+    wait ${pid}
+    STATUS+=($?)
+  done
+  for st in ${STATUS[@]}; do
+    if [[ ${st} -ne 0 ]]; then
+      exit ${st}
+    fi
   done
 else
   docker run \
