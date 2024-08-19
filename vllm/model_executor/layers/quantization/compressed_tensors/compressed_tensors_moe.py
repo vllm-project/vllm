@@ -268,7 +268,6 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
 
         from vllm.model_executor.layers.fused_moe.fused_moe import (
             fused_marlin_moe)
-
         return fused_marlin_moe(x,
                                 layer.w13_weight_packed,
                                 layer.w2_weight_packed,
