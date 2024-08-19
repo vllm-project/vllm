@@ -30,6 +30,7 @@ class AsyncEngineRPCServer:
 
         # Init socket.
         self.socket = self.context.socket(zmq.constants.ROUTER)
+        # self.socket.setsockopt(zmq.constants.ROUTER_MANDATORY, 1)
         self.socket.bind(rpc_path)
 
     def cleanup(self):

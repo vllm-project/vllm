@@ -14,14 +14,15 @@ models = client.models.list()
 model = models.data[0].id
 
 # Completion API
-stream = False
+stream = True
 completion = client.completions.create(
     model=model,
     prompt="A robot may not injure a human being",
     echo=False,
-    n=2,
+    n=1,
     stream=stream,
-    logprobs=3)
+    logprobs=0,
+    max_tokens=2000)
 
 print("Completion results:")
 if stream:

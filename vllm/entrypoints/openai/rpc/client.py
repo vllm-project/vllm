@@ -28,8 +28,11 @@ logger = init_logger(__name__)
 # Path used for inprocess proxy.
 INPROC_PROXY_PATH = f"inproc://{uuid4()}"
 
+# Timeout for draining
+ABORT_DRAIN_TIMEOUT_MS = 1000
+
 # Cutoff for value of MAX_SOCKETS.
-SOCKET_LIMIT_CUTOFF = 2000
+SOCKET_LIMIT_CUTOFF = 0
 
 class AsyncEngineRPCClient:
     """
@@ -77,7 +80,7 @@ class AsyncEngineRPCClient:
         # Maximum number of sockets that can be opened (typically 65536).
         # ZMQ_SOCKET_LIMIT (http://api.zeromq.org/4-2:zmq-ctx-get)
         socket_limit = self.context.get(zmq.constants.SOCKET_LIMIT)
-        socket_limit = 2000
+        socket_limit = 5000
         if socket_limit < SOCKET_LIMIT_CUTOFF:
             raise ValueError(
                 f"Found zmq.constants.SOCKET_LIMIT={socket_limit}, which caps "
@@ -96,6 +99,7 @@ class AsyncEngineRPCClient:
 
         # In process proxy to RPC Server (used memory-based messaging).
         self.from_api_server = self.context.socket(zmq.constants.ROUTER)
+        self.from_api_server.setsockopt(zmq.constants.ROUTER_MANDATORY, 1)
         self.from_api_server.bind(INPROC_PROXY_PATH)
 
         # Asyncio background task for the proxy.
@@ -124,14 +128,20 @@ class AsyncEngineRPCClient:
                 await socket_to.send_multipart(msg)
             if socket_to in events:
                 msg = await socket_to.recv_multipart()
-                await socket_from.send_multipart(msg)
+                try:
+                    await socket_from.send_multipart(msg)
+                except:
+                    identity, data = msg
+                    data = cloudpickle.loads(data)
+                    # print(identity)
+                    # print(data)
+                    print("ERROR IN PROXY")
 
     async def setup(self):
         """Setup the client before it starts sending server requests."""
 
         # Wait until server is ready.
         await self._wait_for_server_rpc()
-
         self._errored = False
 
         # Get the configs.
@@ -156,7 +166,7 @@ class AsyncEngineRPCClient:
 
     @contextmanager
     def to_proxy_socket(self):
-        # Connect to the proxy.
+        # Connect to the RPCServer via the proxy.
         # Note that we use DEALER to enable asynchronous communication
         # to enable streaming.
         socket = self.context.socket(zmq.constants.DEALER)
@@ -164,17 +174,8 @@ class AsyncEngineRPCClient:
             socket.connect(INPROC_PROXY_PATH)
             yield socket
         finally:
-            # linger == 0 means discard unsent messages
-            # when the socket is closed. This is necessary
-            # because otherwise self.context.destroy() will
-            # wait for 30 seconds until unsent messages are
-            # received, which is impossible if the server
-            # crashed. In the absence of a server crash we
-            # always expect a response before closing the
-            # socket anyway.
-            # Reference: http://api.zeromq.org/4-2:zmq-setsockopt#toc24
-            if socket is not None:
-                socket.close(linger=0)
+            socket.close()
+    
 
     async def _send_get_data_rpc_request(self, request: RPCUtilityRequest,
                                          expected_type: Any,
@@ -198,15 +199,7 @@ class AsyncEngineRPCClient:
             else:
                 raise ValueError(error_message)
 
-        return data
-
-    async def _send_one_way_rpc_request(self,
-                                        socket: zmq.asyncio.Socket,
-                                        request: RPC_REQUEST_TYPE,
-                                        error_message: str,
-                                        timeout: Optional[int] = None):
-        # Ping RPC Server with request.
-        await socket.send_multipart([cloudpickle.dumps(request)])                       
+        return data                 
 
     async def _send_one_way_rpc_request(self,
                                         request: RPC_REQUEST_TYPE,
@@ -215,8 +208,9 @@ class AsyncEngineRPCClient:
                                         socket: Optional[zmq.asyncio.Socket] = None):
         """Send one-way RPC request to trigger an action."""
         
-        async def do_rpc(socket: zmq.asyncio.Socket,
-                         request: RPC_REQUEST_TYPE, timeout=None):
+        async def do_rpc_call(socket: zmq.asyncio.Socket,
+                              request: RPC_REQUEST_TYPE, timeout=None):
+
             await socket.send_multipart([cloudpickle.dumps(request)])
 
             if timeout is not None and await socket.poll(timeout=timeout) == 0:
@@ -224,17 +218,22 @@ class AsyncEngineRPCClient:
 
             return cloudpickle.loads(await socket.recv())
 
+        # Make a new socket connection.
         if socket is None:
             with self.to_proxy_socket() as socket:
-                response = await do_rpc(socket, request, timeout)
+                response = await do_rpc_call(socket, request, timeout)
+
+        # Use existing socket connection.
         else:
-            response = await do_rpc(socket, request, timeout)
+            response = await do_rpc_call(socket, request, timeout)
 
         if not isinstance(response, str) or response != VLLM_RPC_SUCCESS_STR:
+            print("here here here")
             if isinstance(response, Exception):
                 logger.warning(error_message)
                 raise response
             raise ValueError(error_message)
+        
 
     async def get_tokenizer(self, lora_request: LoRARequest):
         return await self.tokenizer.get_lora_tokenizer_async(lora_request)
@@ -342,9 +341,8 @@ class AsyncEngineRPCClient:
         """Send an RPCGenerateRequest to the RPCServer and stream responses."""
 
         finished = False
-        try:
-            with self.to_proxy_socket() as socket:
-
+        with self.to_proxy_socket() as socket:
+            try:
                 # Send RPCGenerateRequest to the RPCServer.
                 await socket.send_multipart([
                     cloudpickle.dumps(
@@ -376,9 +374,28 @@ class AsyncEngineRPCClient:
 
                     finished = request_output.finished
                     yield request_output
-        finally:
-            if not finished:
-                await self.abort(request_id)
+
+            finally:
+                # Request was canceled by the client + we broke out of the loop.
+                if not finished:
+                    # Call abort over the RPC.
+                    await self.abort(request_id)
+
+                    # Drain the socket. 
+                    # This helps to avoid hitting the HWM in the proxy when the 
+                    # under heavy load, since there will be 1-3 messages from
+                    # the RPCServer after abort is called. IF the socket is closed
+                    # the ROUTER in the proxy will queue and eventually drop messages.
+                    # The draining here ensures that the RPCServer is done sending
+                    # messages to this connection before closing the socket.
+                    while await socket.poll(timeout=ABORT_DRAIN_TIMEOUT_MS) != 0:
+                        message = await socket.recv()
+                        request_output = cloudpickle.loads(message)
+
+                        # If aborted, CancelledError is injected.
+                        if request_output == asyncio.exceptions.CancelledError:
+                            break
+
 
     async def check_health(self, 
                            socket: Optional[zmq.asyncio.Socket] = None) -> None:
