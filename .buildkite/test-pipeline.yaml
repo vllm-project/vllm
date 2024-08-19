@@ -192,7 +192,9 @@ steps:
   - vllm/model_executor/layers
   - vllm/sampling_metadata.py
   - tests/samplers
-  command: pytest -v -s samplers
+  commands:
+    - pytest -v -s samplers
+    - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers
 
 - label: LogitsProcessor Test # 5min
   mirror_hardwares: [amd]
