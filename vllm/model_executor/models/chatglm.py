@@ -785,12 +785,12 @@ def input_processor_for_glm4v(ctx: InputContext, llm_inputs: LLMInputs):
     llm_inputs["position_ids"] = new_position_ids
     return llm_inputs
 
-# @MULTIMODAL_REGISTRY.register_image_input_mapper()
-# @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_glm4v_image_tokens)
-# @INPUT_REGISTRY.register_dummy_data(dummy_data_for_glm4v)
-# @INPUT_REGISTRY.register_input_processor(input_processor_for_glm4v)
-# class ChatGLMForCausalLM(nn.Module, SupportsLoRA, SupportsVision):
-class ChatGLMForCausalLM(nn.Module, SupportsLoRA):
+@MULTIMODAL_REGISTRY.register_image_input_mapper()
+@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_glm4v_image_tokens)
+@INPUT_REGISTRY.register_dummy_data(dummy_data_for_glm4v)
+@INPUT_REGISTRY.register_input_processor(input_processor_for_glm4v)
+class ChatGLMForCausalLM(nn.Module, SupportsLoRA, SupportsVision):
+# class ChatGLMForCausalLM(nn.Module, SupportsLoRA):
     packed_modules_mapping = {
         "query_key_value": ["query_key_value"],
         "dense_h_to_4h": ["dense_h_to_4h"]
@@ -807,10 +807,7 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA):
 
     bitsandbytes_stacked_params_mapping = {}
 
-    bitsandbytes_quant_target_modules = ['dense.weight', 
-                                         'dense_h_to_4h.weight',
-                                         'query_key_value.weight',
-                                         'dense_4h_to_h.weight']
+
 
     def __init__(
         self,
@@ -832,6 +829,16 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA):
         self.lm_head = self.transformer.output_layer
         self.logits_processor = LogitsProcessor(config.padded_vocab_size)
         self.sampler = Sampler()
+
+        self.bitsandbytes_quant_target_modules = list(
+                set(
+                    ['.'.join(k.replace('qweight', 'weight').split('.')[-2:]) 
+                            for k in dict(self.named_parameters(remove_duplicate=False)).keys() 
+                                    if 'qweight' in k]
+                    )
+                )
+        for i in self.bitsandbytes_quant_target_modules:
+            print(f"Quantization param: *{i}*")
 
     def forward(
         self,
