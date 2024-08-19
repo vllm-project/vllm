@@ -405,9 +405,6 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     logger.info("args: %s", args)
 
     async with build_async_engine_client(args) as async_engine_client:
-        if async_engine_client is None:
-            return
-
         app = await init_app(async_engine_client, args)
 
         shutdown_task = await serve_http(
