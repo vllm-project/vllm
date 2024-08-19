@@ -311,6 +311,15 @@ steps:
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s distributed/test_utils.py
 
+- label: Multi-step Tests (4 GPUs) # 10min
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 4
+  source_file_dependencies:
+  - vllm/
+  - tests/multi_step/test_correctness.py
+  commands:
+  - pytest -v -s multi_step/test_correctness.py
+
 - label: Pipeline Parallelism Test # 23min
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
