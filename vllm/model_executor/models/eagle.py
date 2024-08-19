@@ -28,7 +28,10 @@ class EAGLE(nn.Module):
        frequently used tokens to give some additional speed-up by reducing 
        sampling overhead. This is disabled unless the checkpoint file has 
        explicit token_map tensor and config has an optional attribute 
-       truncated_vocab_size < vocab_size."""
+       truncated_vocab_size < vocab_size. To use this technique, one has to find
+       the top-k most frequent tokens in target dataset and add that as a tensor
+       in the draft checkpoint (using key token_map). Also, the draft config
+       needs to have truncated_vocab_size (=k) as an attribute."""
 
     def __init__(self, config: EAGLEConfig, *args, **kwargs) -> None:
         super().__init__()
