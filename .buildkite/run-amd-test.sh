@@ -92,7 +92,7 @@ if [[ $commands == *"--shard-id="* ]]; then
         ${image_name} \
         /bin/bash -c "${commands}" \
         #add prefix to the output and run in background
-        |& while read -r line; do echo ">>Shard $GPU: $line"; done &
+        | while read -r line; do echo ">>Shard $GPU: $line"; done &
     PIDS+=($!)
   done
   #wait for all processes to finish and collect exit codes
