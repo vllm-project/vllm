@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Dict, List, Mapping, Optional, Tuple, Type,
                     Union)
 
+import torch
+
 import vllm.envs as envs
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
@@ -113,7 +115,7 @@ class EngineArgs:
     fully_sharded_loras: bool = False
     lora_extra_vocab_size: int = 256
     long_lora_scaling_factors: Optional[Tuple[float]] = None
-    lora_dtype: str = 'auto'
+    lora_dtype: Optional[Union[str, torch.dtype]] = 'auto'
     max_cpu_loras: Optional[int] = None
     device: str = 'auto'
     num_scheduler_steps: int = 1
