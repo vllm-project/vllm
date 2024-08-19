@@ -92,14 +92,13 @@ def main(args: argparse.Namespace):
         run_to_completion(profile_dir=None)
 
     if args.profile:
-        profile_dir = args.profile_result_dir
-        if not profile_dir:
-            profile_dir = Path(
-                "."
-            ) / "vllm_benchmark_result" / f"latency_result_{time.time()}"
-        print(f"Profiling (results will be saved to '{profile_dir}')...")
-        run_to_completion(profile_dir=profile_dir)
-        return
+        import torch_xla.debug.profiler as xp
+        server = xp.start_server(9012)
+        # Update to your own gs bucket address if you want to profile
+        profile_logdir = "gs://tpu-pytorch/tmp/woosuk/"
+        xp.trace_detached('localhost:9012',
+                          profile_logdir,
+                          duration_ms=20 * 1000)
 
     # Benchmark.
     latencies = []
@@ -150,11 +149,11 @@ if __name__ == '__main__':
     parser.add_argument('--use-beam-search', action='store_true')
     parser.add_argument('--num-iters-warmup',
                         type=int,
-                        default=10,
+                        default=5,
                         help='Number of iterations to run for warmup.')
     parser.add_argument('--num-iters',
                         type=int,
-                        default=30,
+                        default=2,
                         help='Number of iterations to run.')
     parser.add_argument('--trust-remote-code',
                         action='store_true',
