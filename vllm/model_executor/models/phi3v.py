@@ -15,7 +15,8 @@
 # limitations under the License.
 import re
 from functools import lru_cache
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
+from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
+                    TypedDict, Union)
 
 import numpy as np
 import torch
@@ -28,8 +29,7 @@ from vllm.config import CacheConfig, ModelConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -42,8 +42,8 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
                    input_processor_for_clip)
-from .interfaces import SupportsVision
-from .utils import merge_vision_embeddings
+from .interfaces import SupportsMultiModal
+from .utils import merge_multimodal_embeddings
 
 logger = init_logger(__name__)
 
@@ -347,18 +347,22 @@ def get_max_phi3v_image_tokens(ctx: InputContext):
     )
 
 
-def dummy_data_for_phi3v(ctx: InputContext, seq_len: int):
+def dummy_data_for_phi3v(ctx: InputContext, seq_len: int,
+                         mm_counts: Mapping[str, int]):
+    num_images = mm_counts["image"]
 
     image_feature_size = get_max_phi3v_image_tokens(ctx)
 
     seq_data = dummy_seq_data_for_clip(
         CLIP_VIT_LARGE_PATCH14_336_CONFIG,
         seq_len,
+        num_images,
         image_token_id=_IMAGE_TOKEN_ID,
         image_feature_size_override=image_feature_size,
     )
     mm_data = dummy_image_for_clip(
         CLIP_VIT_LARGE_PATCH14_336_CONFIG,
+        num_images,
         image_width_override=MAX_IMAGE_FEATURE_SIZE_WIDTH,
         image_height_override=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
     )
@@ -453,7 +457,7 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_phi3v_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_phi3v)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_phi3v)
-class Phi3VForCausalLM(nn.Module, SupportsVision):
+class Phi3VForCausalLM(nn.Module, SupportsMultiModal):
 
     def __init__(self,
                  config: PretrainedConfig,
@@ -568,9 +572,9 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
         if image_input is not None:
             vision_embeddings = self._process_image_input(image_input)
             inputs_embeds = self.model.get_input_embeddings(input_ids)
-            inputs_embeds = merge_vision_embeddings(input_ids, inputs_embeds,
-                                                    vision_embeddings,
-                                                    self.image_token_id)
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, vision_embeddings,
+                self.image_token_id)
             input_ids = None
         else:
             inputs_embeds = None
@@ -584,8 +588,11 @@ class Phi3VForCausalLM(nn.Module, SupportsVision):
 
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits

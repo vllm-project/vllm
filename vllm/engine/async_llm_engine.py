@@ -15,7 +15,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_timeout import asyncio_timeout
 from vllm.engine.llm_engine import (DecoderPromptComponents, LLMEngine,
                                     PromptComponents)
-from vllm.engine.metrics import StatLoggerBase
+from vllm.engine.metrics_types import StatLoggerBase
 from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.ray_utils import initialize_ray_cluster, ray
 from vllm.inputs import (EncoderDecoderLLMInputs, LLMInputs, PromptInputs,
@@ -29,6 +29,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils import print_warning_once
 
 logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
@@ -509,6 +510,20 @@ class AsyncLLMEngine:
         self.engine_use_ray = engine_use_ray
         self.log_requests = log_requests
         self.engine = self._init_engine(*args, **kwargs)
+
+        if self.engine_use_ray:
+            print_warning_once(
+                "DEPRECATED. `--engine-use-ray` is deprecated and will "
+                "be removed in a future update. "
+                "See https://github.com/vllm-project/vllm/issues/7045.")
+
+            if envs.VLLM_ALLOW_ENGINE_USE_RAY:
+                print_warning_once(
+                    "VLLM_ALLOW_ENGINE_USE_RAY is set, force engine use Ray")
+            else:
+                raise ValueError("`--engine-use-ray` is deprecated. "
+                                 "Set `VLLM_ALLOW_ENGINE_USE_RAY=1` to "
+                                 "force use it")
 
         self.background_loop: Optional[asyncio.Future] = None
         # We need to keep a reference to unshielded

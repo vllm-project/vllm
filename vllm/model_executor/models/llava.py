@@ -1,5 +1,6 @@
 import itertools
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
+from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
+                    TypedDict, Union)
 
 import torch
 import torch.nn as nn
@@ -9,8 +10,7 @@ from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -19,12 +19,12 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 from .clip import (CLIPVisionModel, dummy_image_for_clip,
                    dummy_seq_data_for_clip, get_max_clip_image_tokens,
                    input_processor_for_clip)
-from .interfaces import SupportsVision
+from .interfaces import SupportsMultiModal
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_max_siglip_image_tokens,
                      input_processor_for_siglip)
 from .utils import (filter_weights, init_vllm_registered_model,
-                    merge_vision_embeddings)
+                    merge_multimodal_embeddings)
 
 
 class LlavaImagePixelInputs(TypedDict):
@@ -88,9 +88,11 @@ def get_max_llava_image_tokens(ctx: InputContext):
         raise ValueError(f"Unexpected select feature strategy: {strategy}")
 
 
-def dummy_data_for_llava(ctx: InputContext, seq_len: int):
+def dummy_data_for_llava(ctx: InputContext, seq_len: int,
+                         mm_counts: Mapping[str, int]):
     hf_config = ctx.get_hf_config(LlavaConfig)
     vision_config = hf_config.vision_config
+    num_images = mm_counts["image"]
 
     image_feature_size = get_max_llava_image_tokens(ctx)
 
@@ -98,21 +100,23 @@ def dummy_data_for_llava(ctx: InputContext, seq_len: int):
         seq_data = dummy_seq_data_for_clip(
             vision_config,
             seq_len,
+            num_images,
             image_token_id=hf_config.image_token_index,
             image_feature_size_override=image_feature_size,
         )
 
-        mm_data = dummy_image_for_clip(vision_config)
+        mm_data = dummy_image_for_clip(vision_config, num_images)
         return seq_data, mm_data
     elif isinstance(vision_config, SiglipVisionConfig):
         seq_data = dummy_seq_data_for_siglip(
             vision_config,
             seq_len,
+            num_images,
             image_token_id=hf_config.image_token_index,
             image_feature_size_override=image_feature_size,
         )
 
-        mm_data = dummy_image_for_siglip(vision_config)
+        mm_data = dummy_image_for_siglip(vision_config, num_images)
         return seq_data, mm_data
 
     msg = f"Unsupported vision config: {type(vision_config)}"
@@ -181,7 +185,7 @@ def _init_vision_tower(hf_config: LlavaConfig):
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_llava_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_llava)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_llava)
-class LlavaForConditionalGeneration(nn.Module, SupportsVision):
+class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def __init__(self,
                  config: LlavaConfig,
@@ -338,7 +342,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsVision):
             inputs_embeds = self.language_model.model.get_input_embeddings(
                 input_ids)
 
-            inputs_embeds = merge_vision_embeddings(
+            inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, vision_embeddings,
                 self.config.image_token_index)
 
@@ -355,8 +359,11 @@ class LlavaForConditionalGeneration(nn.Module, SupportsVision):
 
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
