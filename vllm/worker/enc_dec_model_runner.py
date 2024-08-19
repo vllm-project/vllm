@@ -22,7 +22,6 @@ from vllm.sequence import (IntermediateTensors, PoolerOutput, SamplerOutput,
 from vllm.utils import STR_NOT_IMPL_ENC_DEC_BACKEND, make_tensor_with_pad
 from vllm.worker.model_runner import (_PAD_SLOT_ID, GPUModelRunnerBase,
                                       ModelInputForGPUBuilder,
-                                      ModelInputForGPU,
                                       ModelInputForGPUWithSamplingMetadata,
                                       TModelInputForGPU)
 from vllm.worker.model_runner_base import (
@@ -33,11 +32,11 @@ from vllm.worker.utils import assert_enc_dec_mr_supported_scenario
 logger = init_logger(__name__)
 
 TEncoderDecoderModelInput = TypeVar('TEncoderDecoderModelInput',
-                                    bound="EncoderDecoderModelInputBase")
+                                    bound="EncoderDecoderModelInput")
 
 
 @dataclasses.dataclass(frozen=True)
-class EncoderDecoderModelInputBase(ModelInputForGPU):
+class EncoderDecoderModelInput(ModelInputForGPUWithSamplingMetadata):
     """
     Used by the EncoderDecoderModelRunner.
     """
@@ -55,6 +54,8 @@ class EncoderDecoderModelInputBase(ModelInputForGPU):
             "finished_requests_ids": self.finished_requests_ids,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
+        _add_sampling_metadata_broadcastable_dict(tensor_dict,
+                                                  self.sampling_metadata)
         return tensor_dict
 
     @classmethod
@@ -62,9 +63,9 @@ class EncoderDecoderModelInputBase(ModelInputForGPU):
         cls,
         tensor_dict: Dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None,
-    ) -> "EncoderDecoderModelInputBase":
+    ) -> "EncoderDecoderModelInput":
         return cast(
-            EncoderDecoderModelInputBase,
+            EncoderDecoderModelInput,
             super().from_broadcasted_tensor_dict(tensor_dict, attn_backend))
 
 
@@ -382,36 +383,6 @@ class EncoderDecoderModelRunnerBase(GPUModelRunnerBase[TModelInputForGPU]):
 
         return (attn_metadata, encoder_input_tokens_tensor,
                 encoder_input_positions_tensor)
-
-
-class EncoderDecoderModelInput(EncoderDecoderModelInputBase,
-                               ModelInputForGPUWithSamplingMetadata):
-
-    def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
-        tensor_dict = {
-            "input_tokens": self.input_tokens,
-            "input_positions": self.input_positions,
-            "encoder_input_tokens": self.encoder_input_tokens,
-            "encoder_input_positions": self.encoder_input_positions,
-            "virtual_engine": self.virtual_engine,
-            "request_ids_to_seq_ids": self.request_ids_to_seq_ids,
-            "finished_requests_ids": self.finished_requests_ids,
-        }
-        _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
-        _add_sampling_metadata_broadcastable_dict(tensor_dict,
-                                                  self.sampling_metadata)
-        return tensor_dict
-
-    @classmethod
-    def from_broadcasted_tensor_dict(
-        cls,
-        tensor_dict: Dict[str, Any],
-        attn_backend: Optional["AttentionBackend"] = None,
-    ) -> "EncoderDecoderModelInput":
-        return cast(
-            EncoderDecoderModelInput,
-            super(EncoderDecoderModelInputBase,
-                  cls).from_broadcasted_tensor_dict(tensor_dict, attn_backend))
 
 
 class EncoderDecoderModelRunner(

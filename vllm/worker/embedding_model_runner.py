@@ -14,14 +14,14 @@ from vllm.pooling_params import PoolingParams
 from vllm.sequence import (IntermediateTensors, PoolerOutput, SequenceData,
                            SequenceGroupMetadata)
 from vllm.worker.enc_dec_model_runner import (EncoderDecoderModelRunnerBase,
-                                              EncoderDecoderModelInputBase)
+                                              EncoderDecoderModelInput)
 from vllm.worker.model_runner import ModelInputForGPUBuilder
 
 logger = init_logger(__name__)
 
 
 @dataclasses.dataclass(frozen=True)
-class EmbeddingModelInput(EncoderDecoderModelInputBase):
+class EmbeddingModelInput(EncoderDecoderModelInput):
     """
     Used by the EmbeddingModelRunner.
     """
