@@ -257,17 +257,24 @@ def test_models_multiple_image_inputs(hf_runner, vllm_runner, image_assets,
     inputs = [(
         [
             f"{_PREFACE} USER: <image><image>\nDescribe the 2 images. ASSISTANT:",  # noqa: E501
-            f"{_PREFACE} USER: <image><image><image><image>\nDescribe the 4 images. ASSISTANT:"  # noqa: E501
+            f"{_PREFACE} USER: <image><image>\nDescribe the 2 images. ASSISTANT:",  # noqa: E501
+            f"{_PREFACE} USER: <image><image><image><image>\nDescribe the 4 images. ASSISTANT:",  # noqa: E501
+            f"{_PREFACE} USER: <image>\nWhat is the season? ASSISTANT:"
         ],
         [
             [stop_sign, cherry_blossom],
             # Images with different sizes and aspect-ratios
+            [
+                rescale_image_size(stop_sign, 0.1),
+                stop_sign,
+            ],
             [
                 stop_sign,
                 rescale_image_size(stop_sign, 0.25),
                 cherry_blossom.resize((183, 488)),
                 cherry_blossom.resize((488, 183))
             ],
+            cherry_blossom,
         ])]
 
     _run_test(

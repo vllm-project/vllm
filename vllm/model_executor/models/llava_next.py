@@ -433,7 +433,10 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
                     self.config.image_grid_pinpoints,
                     self.config.vision_config.image_size,
                 )
-                other_patch_embeds = other_patch_embeds \
+                num_patches = num_patch_height * num_patch_width
+
+                # image patches might be padded for batch.
+                other_patch_embeds = other_patch_embeds[:num_patches] \
                     .view(num_patch_height, num_patch_width, height, width, -1)
 
                 if "unpad" in strategy:
