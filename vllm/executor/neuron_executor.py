@@ -11,6 +11,8 @@ logger = init_logger(__name__)
 
 class NeuronExecutor(ExecutorBase):
 
+    uses_ray: bool = False
+
     def _init_executor(self) -> None:
         assert (self.lora_config is
                 None), "LoRA is not supported for Neuron backend."
@@ -70,6 +72,22 @@ class NeuronExecutor(ExecutorBase):
     def list_loras(self) -> Set[int]:
         return self.driver_worker.list_loras()
 
+    def add_prompt_adapter(self, prompt_adapter_request) -> bool:
+        raise NotImplementedError(
+            "Soft prompt is currently not supported by the Neuron backend.")
+
+    def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
+        raise NotImplementedError(
+            "Soft prompt is currently not supported by the Neuron backend.")
+
+    def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
+        raise NotImplementedError(
+            "Soft prompt is currently not supported by the Neuron backend.")
+
+    def list_prompt_adapters(self) -> Set[int]:
+        raise NotImplementedError(
+            "Soft prompt is currently not supported by the Neuron backend.")
+
     def check_health(self) -> None:
         # NeuronExecutor will always be healthy as long as
         # it's running.
@@ -82,9 +100,8 @@ class NeuronExecutorAsync(NeuronExecutor, ExecutorAsyncBase):
         self,
         execute_model_req: ExecuteModelRequest,
     ) -> List[SamplerOutput]:
-        output = await make_async(
-            self.driver_worker.execute_model
-        )(seq_group_metadata_list=execute_model_req.seq_group_metadata_list, )
+        output = await make_async(self.driver_worker.execute_model
+                                  )(execute_model_req=execute_model_req, )
         return output
 
     async def check_health_async(self) -> None:

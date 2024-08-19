@@ -9,12 +9,13 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.distributed.device_communicators.custom_all_reduce_utils import (
     gpu_p2p_access_check)
-from vllm.distributed.parallel_state import is_in_the_same_node
+from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import init_logger
-from vllm.utils import cuda_device_count_stateless, is_full_nvlink
+from vllm.platforms import current_platform
+from vllm.utils import cuda_device_count_stateless
 
 try:
-    assert ops.is_custom_op_supported("_C_custom_ar::meta_size")
+    ops.meta_size()
     custom_ar = True
 except Exception:
     # For AMD GPUs and CPUs
@@ -64,7 +65,7 @@ class CustomAllreduce:
         assert dist.get_backend(group) != dist.Backend.NCCL, (
             "CustomAllreduce should be attached to a non-NCCL group.")
 
-        if not is_in_the_same_node(group):
+        if not all(in_the_same_node_as(group, source_rank=0)):
             # No need to initialize custom allreduce for multi-node case.
             logger.warning(
                 "Custom allreduce is disabled because this process group"
@@ -113,7 +114,10 @@ class CustomAllreduce:
         # test nvlink first, this will filter out most of the cases
         # where custom allreduce is not supported
         # this checks hardware and driver support for NVLink
-        full_nvlink = is_full_nvlink(physical_device_ids)
+        assert current_platform.is_cuda()
+        from vllm.platforms.cuda import CudaPlatform
+        cuda_platform: CudaPlatform = current_platform
+        full_nvlink = cuda_platform.is_full_nvlink(physical_device_ids)
         if world_size > 2 and not full_nvlink:
             logger.warning(
                 "Custom allreduce is disabled because it's not supported on"

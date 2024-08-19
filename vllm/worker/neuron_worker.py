@@ -80,7 +80,7 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         return False
 
     @property
-    def kv_cache(self) -> Optional[List[torch.Tensor]]:
+    def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
         return None
 
     @torch.inference_mode()
@@ -88,6 +88,9 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             self, execute_model_req: ExecuteModelRequest) -> WorkerInput:
         return WorkerInput(num_seq_groups=len(
             execute_model_req.seq_group_metadata_list), )
+
+    def execute_worker(self, worker_input: WorkerInput) -> None:
+        pass
 
     def get_cache_block_size_bytes(self) -> int:
         """Determine the size in bytes of a cache block.

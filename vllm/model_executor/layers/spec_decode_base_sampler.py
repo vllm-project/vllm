@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from typing import Optional
+from typing import Dict, Optional, Union
 
 import torch
 import torch.jit
@@ -36,9 +36,12 @@ class SpecDecodeBaseSampler(nn.Module):
         self.num_emitted_tokens: Optional[torch.Tensor] = None
         self.num_draft_tokens: int = 0
 
-    def init_gpu_tensors(self, rank: int) -> None:
+    def init_gpu_tensors(self, device: Union[int, str]) -> None:
         assert self.num_accepted_tokens is None
-        device = f"cuda:{rank}"
+        if isinstance(device, int):
+            device = f"cuda:{device}"
+        elif not isinstance(device, str):
+            raise ValueError(f"Device must be int or str, get {type(device)}")
         self.num_accepted_tokens = torch.tensor(0,
                                                 dtype=torch.long,
                                                 device=device)
@@ -53,16 +56,6 @@ class SpecDecodeBaseSampler(nn.Module):
     @property
     def token_id_dtype(self):
         return torch.int64
-
-    @abstractmethod
-    def forward(
-        self,
-        target_probs: torch.Tensor,
-        bonus_token_ids: torch.Tensor,
-        draft_probs: torch.Tensor,
-        draft_token_ids: torch.Tensor,
-    ) -> torch.Tensor:
-        raise NotImplementedError
 
     def _create_output(
             self,
@@ -217,3 +210,36 @@ class SpecDecodeBaseSampler(nn.Module):
         assert torch.all(bonus_token_ids >= 0)
         assert torch.all(draft_token_ids < vocab_size)
         assert torch.all(draft_token_ids >= 0)
+
+
+class SpecDecodeDeterministicBaseSampler(SpecDecodeBaseSampler):
+    """Base class for samplers used for Speculative Decoding verification
+       step which are deterministic.
+    """
+
+    @abstractmethod
+    def forward(
+        self,
+        target_probs: torch.Tensor,
+        bonus_token_ids: torch.Tensor,
+        draft_probs: torch.Tensor,
+        draft_token_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        raise NotImplementedError
+
+
+class SpecDecodeStochasticBaseSampler(SpecDecodeBaseSampler):
+    """Base class for samplers used for Speculative Decoding verification
+       step which are stochastic
+    """
+
+    @abstractmethod
+    def forward(
+        self,
+        target_probs: torch.Tensor,
+        bonus_token_ids: torch.Tensor,
+        draft_probs: torch.Tensor,
+        draft_token_ids: torch.Tensor,
+        seeded_seqs: Optional[Dict[int, torch.Generator]] = None,
+    ) -> torch.Tensor:
+        raise NotImplementedError

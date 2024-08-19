@@ -14,6 +14,8 @@ logger = init_logger(__name__)
 
 class TPUExecutor(ExecutorBase):
 
+    uses_ray: bool = False
+
     def _init_executor(self) -> None:
         assert not self.scheduler_config.chunked_prefill_enabled, (
             "Chunked prefill is not yet supported for TPU backend")
@@ -50,7 +52,6 @@ class TPUExecutor(ExecutorBase):
             local_rank=local_rank,
             rank=rank,
             distributed_init_method=distributed_init_method,
-            vision_language_config=self.vision_language_config,
             is_driver_worker=rank == 0,
         )
 
@@ -81,8 +82,7 @@ class TPUExecutor(ExecutorBase):
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available KV blocks by invoking the
-        underlying worker.
-        """
+        underlying worker."""
         return self.driver_worker.determine_num_available_blocks()
 
     def execute_model(
@@ -93,16 +93,36 @@ class TPUExecutor(ExecutorBase):
         return output
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
-        raise NotImplementedError("LoRA is not implemented for TPU backend.")
+        raise NotImplementedError(
+            "LoRA is currently not supported by the TPU backend.")
 
     def remove_lora(self, lora_id: int) -> bool:
-        raise NotImplementedError("LoRA is not implemented for TPU backend.")
+        raise NotImplementedError(
+            "LoRA is currently not supported by the TPU backend.")
 
     def pin_lora(self, lora_id: int) -> bool:
-        raise NotImplementedError("LoRA is not implemented for TPU backend.")
+        raise NotImplementedError(
+            "LoRA is currently not supported by the TPU backend.")
 
     def list_loras(self) -> Set[int]:
-        raise NotImplementedError("LoRA is not implemented for TPU backend.")
+        raise NotImplementedError(
+            "LoRA is currently not supported by the TPU backend.")
+
+    def add_prompt_adapter(self, prompt_adapter_request) -> bool:
+        raise NotImplementedError(
+            "Soft prompt is currently not supported by the TPU backend.")
+
+    def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
+        raise NotImplementedError(
+            "Soft prompt is currently not supported by the TPU backend.")
+
+    def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
+        raise NotImplementedError(
+            "Soft prompt is currently not supported by the TPU backend.")
+
+    def list_prompt_adapters(self) -> Set[int]:
+        raise NotImplementedError(
+            "Soft prompt is currently not supported by the TPU backend.")
 
     def check_health(self) -> None:
         # TPUExecutor will always be healthy as long as it's running.

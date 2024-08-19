@@ -373,8 +373,9 @@ def test_cow(block_size: int, sequence_len: int, append_len: int,
                                    block_size) - (sequence_len // block_size)
 
     original_block_table.allocate(token_ids=token_ids, device=Device.GPU)
-    original_block_ids = original_block_table.physical_block_ids
+    original_block_ids = original_block_table.physical_block_ids[:]
 
+    print("original_block_ids = {}".format(original_block_ids))
     forked_block_table = original_block_table.fork()
 
     # Expect no additional allocation (copy on _write_).
@@ -457,7 +458,7 @@ def test_cow_lookahead_simple(block_size: int, sequence_len: int,
 
     # Allocate lookahead slots.
     original_block_table.ensure_num_empty_slots(lookahead_slots)
-    original_block_ids = original_block_table.physical_block_ids
+    original_block_ids = original_block_table.physical_block_ids[:]
 
     forked_block_table = original_block_table.fork()
 

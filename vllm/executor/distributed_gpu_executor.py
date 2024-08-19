@@ -64,16 +64,18 @@ class DistributedGPUExecutor(GPUExecutor):
                           num_cpu_blocks=num_cpu_blocks)
 
     def execute_model(
-        self, execute_model_req: ExecuteModelRequest
-    ) -> Optional[List[SamplerOutput]]:
+            self,
+            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
         if self.parallel_worker_tasks is None:
             self.parallel_worker_tasks = self._run_workers(
                 "start_worker_execution_loop",
-                async_run_remote_workers_only=True,
+                async_run_tensor_parallel_workers_only=True,
                 **self.extra_execute_model_run_workers_kwargs)
 
         # Only the driver worker returns the sampling results.
-        return self._driver_execute_model(execute_model_req)
+        driver_outputs = self._driver_execute_model(execute_model_req)
+        assert driver_outputs is not None
+        return driver_outputs
 
     def stop_remote_worker_execution_loop(self) -> None:
         if self.parallel_worker_tasks is None:
@@ -138,17 +140,17 @@ class DistributedGPUExecutor(GPUExecutor):
         self,
         method: str,
         *args,
-        async_run_remote_workers_only: bool = False,
+        async_run_tensor_parallel_workers_only: bool = False,
         max_concurrent_workers: Optional[int] = None,
         **kwargs,
     ) -> Any:
         """Runs the given method on all workers.
 
         Args:
-            async_run_remote_workers_only: If True the method will be run only
-                in the remote workers, not the driver worker. It will also be
-                run asynchronously and return a list of futures rather than
-                blocking on the results.
+            async_run_tensor_parallel_workers_only: If True the method will be
+                run only in the remote TP workers, not the driver worker.
+                It will also be run asynchronously and return a list of futures
+                rather than blocking on the results.
         """
         raise NotImplementedError
 

@@ -1,7 +1,7 @@
 #include "cache.h"
 #include "cuda_utils.h"
 #include "ops.h"
-#include "registration.h"
+#include "core/registration.h"
 
 #include <torch/library.h>
 
@@ -27,8 +27,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    Tensor value_cache, int num_kv_heads, float scale,"
       "    Tensor block_tables, Tensor seq_lens, int block_size,"
       "    int max_seq_len, Tensor? alibi_slopes,"
-      "    str kv_cache_dtype, float kv_scale, int tp_rank,"
-      "    int blocksparse_local_blocks,"
+      "    str kv_cache_dtype, float k_scale, float v_scale,"
+      "    int tp_rank, int blocksparse_local_blocks,"
       "    int blocksparse_vert_stride, int blocksparse_block_size,"
       "    int blocksparse_head_sliding_step) -> ()");
   ops.impl("paged_attention_v1", torch::kCUDA, &paged_attention_v1);
@@ -41,8 +41,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    Tensor value_cache, int num_kv_heads, float scale,"
       "    Tensor block_tables, Tensor seq_lens, int block_size,"
       "    int max_seq_len, Tensor? alibi_slopes,"
-      "    str kv_cache_dtype, float kv_scale, int tp_rank,"
-      "    int blocksparse_local_blocks,"
+      "    str kv_cache_dtype, float k_scale, float v_scale,"
+      "    int tp_rank, int blocksparse_local_blocks,"
       "    int blocksparse_vert_stride, int blocksparse_block_size,"
       "    int blocksparse_head_sliding_step) -> ()");
   ops.impl("paged_attention_v2", torch::kCUDA, &paged_attention_v2);
@@ -71,6 +71,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Quick GELU implementation.
   ops.def("gelu_quick(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_quick", torch::kCUDA, &gelu_quick);
+
+  // prepare_inputs advance_step
+  ops.def("advance_step", &advance_step);
+  ops.impl("advance_step", torch::kCUDA, &advance_step);
 
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
@@ -137,13 +141,46 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("gptq_marlin_repack", &gptq_marlin_repack);
   ops.impl("gptq_marlin_repack", torch::kCUDA, &gptq_marlin_repack);
 
+  // awq_marlin repack from AWQ.
+  ops.def("awq_marlin_repack", &awq_marlin_repack);
+  ops.impl("awq_marlin_repack", torch::kCUDA, &awq_marlin_repack);
+
+  // Dequantization for GGML.
+  ops.def("ggml_dequantize", &ggml_dequantize);
+  ops.impl("ggml_dequantize", torch::kCUDA, &ggml_dequantize);
+
+  // mmvq kernel for GGML.
+  ops.def("ggml_mul_mat_vec_a8", &ggml_mul_mat_vec_a8);
+  ops.impl("ggml_mul_mat_vec_a8", torch::kCUDA, &ggml_mul_mat_vec_a8);
+
+  // mmq kernel for GGML.
+  ops.def("ggml_mul_mat_a8", &ggml_mul_mat_a8);
+  ops.impl("ggml_mul_mat_a8", torch::kCUDA, &ggml_mul_mat_a8);
+
+  // fp8_marlin Optimized Quantized GEMM for FP8 weight-only.
+  ops.def("fp8_marlin_gemm", &fp8_marlin_gemm);
+  ops.impl("fp8_marlin_gemm", torch::kCUDA, &fp8_marlin_gemm);
+
+  // marlin_qqq_gemm for QQQ.
+  ops.def("marlin_qqq_gemm", &marlin_qqq_gemm);
+  ops.impl("marlin_qqq_gemm", torch::kCUDA, &marlin_qqq_gemm);
+
   // CUTLASS w8a8 GEMM, supporting symmetric per-tensor or per-row/column
-  // quantization.
+  // quantization, as well as bias
   ops.def(
       "cutlass_scaled_mm(Tensor! out, Tensor a,"
       "                  Tensor b, Tensor a_scales,"
       "                  Tensor b_scales, Tensor? bias) -> ()");
   ops.impl("cutlass_scaled_mm", torch::kCUDA, &cutlass_scaled_mm);
+
+  // CUTLASS w8a8 GEMM, supporting asymmetric per-tensor or per-row/column
+  // quantization.
+  ops.def(
+      "cutlass_scaled_mm_azp(Tensor! out, Tensor a,"
+      "                  Tensor b, Tensor a_scales,"
+      "                  Tensor b_scales, Tensor azp_adj,"
+      "                  Tensor? azp, Tensor? bias) -> ()");
+  ops.impl("cutlass_scaled_mm_azp", torch::kCUDA, &cutlass_scaled_mm_azp);
 
   // Check if cutlass scaled_mm is supported for CUDA devices of the given
   // capability
@@ -171,11 +208,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "static_scaled_fp8_quant(Tensor! out, Tensor input, Tensor scale) -> ()");
   ops.impl("static_scaled_fp8_quant", torch::kCUDA, &static_scaled_fp8_quant);
 
-  // Compute FP8 quantized tensor and scaling factor.
+  // Compute dynamic-per-tensor FP8 quantized tensor and scaling factor.
   ops.def(
       "dynamic_scaled_fp8_quant(Tensor! out, Tensor input, Tensor! scale) -> "
       "()");
   ops.impl("dynamic_scaled_fp8_quant", torch::kCUDA, &dynamic_scaled_fp8_quant);
+
+  // Compute dynamic-per-token FP8 quantized tensor and scaling factor.
+  ops.def(
+      "dynamic_per_token_scaled_fp8_quant(Tensor! out, Tensor input, Tensor! "
+      "scale, Tensor? scale_ub) -> "
+      "()");
+  ops.impl("dynamic_per_token_scaled_fp8_quant", torch::kCUDA,
+           &dynamic_per_token_scaled_fp8_quant);
 
   // Aligning the number of tokens to be processed by each expert such
   // that it is divisible by the block size.
@@ -219,7 +264,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "                  Tensor! key_cache, Tensor! value_cache,"
       "                  Tensor slot_mapping,"
       "                  str kv_cache_dtype,"
-      "                  float kv_scale) -> ()");
+      "                  float k_scale, float v_scale) -> ()");
   cache_ops.impl("reshape_and_cache", torch::kCUDA, &reshape_and_cache);
 
   // Reshape the key and value tensors and cache them.
@@ -228,7 +273,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "                        Tensor! key_cache,"
       "                        Tensor! value_cache,"
       "                        Tensor slot_mapping,"
-      "                        str kv_cache_dtype) -> ()");
+      "                        str kv_cache_dtype,"
+      "                        float k_scale, float v_scale) -> ()");
   cache_ops.impl("reshape_and_cache_flash", torch::kCUDA,
                  &reshape_and_cache_flash);
 

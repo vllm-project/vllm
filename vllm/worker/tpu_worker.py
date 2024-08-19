@@ -3,25 +3,25 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 import torch_xla.core.xla_model as xm
-import torch_xla.experimental.dynamo_set_buffer_donor  # noqa: F401
 import torch_xla.runtime as xr
 
 import vllm.envs as envs
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, VisionLanguageConfig)
+                         ParallelConfig, SchedulerConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.sequence import ExecuteModelRequest
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
 from vllm.worker.tpu_model_runner import TPUModelRunner
-from vllm.worker.worker_base import LoraNotSupportedWorkerBase
+from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
+                                     LoraNotSupportedWorkerBase, WorkerInput)
 
 logger = init_logger(__name__)
 
 
-class TPUWorker(LoraNotSupportedWorkerBase):
+class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
     def __init__(
         self,
@@ -31,7 +31,6 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         device_config: DeviceConfig,
         cache_config: CacheConfig,
         load_config: LoadConfig,
-        vision_language_config: Optional[VisionLanguageConfig],
         local_rank: int,
         rank: int,
         distributed_init_method: str,
@@ -39,11 +38,11 @@ class TPUWorker(LoraNotSupportedWorkerBase):
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
+        self.parallel_config.rank = rank
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.cache_config = cache_config
         self.load_config = load_config
-        self.vision_language_config = vision_language_config
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
@@ -56,24 +55,24 @@ class TPUWorker(LoraNotSupportedWorkerBase):
             self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 self.cache_config.cache_dtype]
 
-        self.model_runner = TPUModelRunner(model_config,
-                                           parallel_config,
-                                           scheduler_config,
-                                           device_config,
-                                           cache_config,
-                                           load_config,
-                                           vision_language_config,
-                                           is_driver_worker=is_driver_worker)
+        self.model_runner: TPUModelRunner = TPUModelRunner(
+            model_config,
+            parallel_config,
+            scheduler_config,
+            device_config,
+            cache_config,
+            load_config,
+            is_driver_worker=is_driver_worker)
 
     def init_device(self) -> None:
         os.environ["PJRT_DEVICE"] = "TPU"
-        self.device = xm.xla_device()
-        self.device_config.device = self.device
         torch.set_grad_enabled(False)
         torch.set_default_dtype(self.model_config.dtype)
 
-        # NOTE(woosuk): This is just a hack to initialize the TP group.
-        # This cannot perform the actual communication ops.
+        # NOTE(woosuk): This is just to initialize the TP group and broadcast
+        # the input objects on CPU. The all-reduce and all-gather ops on TPU
+        # are invoked by `xm.all_reduce` and `xm.all_gather` which use their
+        # own context.
         init_distributed_environment(
             world_size=self.parallel_config.world_size,
             rank=self.rank,
@@ -85,6 +84,11 @@ class TPUWorker(LoraNotSupportedWorkerBase):
             self.parallel_config.tensor_parallel_size,
             self.parallel_config.pipeline_parallel_size)
 
+        # Device initialization should happen after initializing the distributed
+        # runtime.
+        self.device = xm.xla_device()
+        self.device_config.device = self.device
+
         # Set random seed.
         set_random_seed(self.model_config.seed)
         xm.set_rng_state(self.model_config.seed, self.device)
@@ -95,10 +99,12 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         # 30-40 graphs for decode. 128 is an arbitrary safe number.
         torch._dynamo.config.cache_size_limit = 128
         # Use persistent cache to avoid XLA recompilation.
-        # NOTE(woosuk): This does not completely eliminate the recompilation
-        # overhead because dynamo does not cache the compiled results.
-        xr.initialize_cache(os.path.expanduser(envs.VLLM_XLA_CACHE_PATH),
-                            readonly=False)
+        # NOTE(woosuk): Set per-rank cache path since different ranks
+        # can have slightly different XLA graphs.
+        world_size = self.parallel_config.world_size
+        per_rank_path = os.path.join(envs.VLLM_XLA_CACHE_PATH,
+                                     f"tp{world_size}_rank{self.rank}")
+        xr.initialize_cache(per_rank_path, readonly=False)
 
     def load_model(self):
         self.model_runner.load_model()
@@ -134,8 +140,8 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         num_tpu_blocks = (num_tpu_blocks // 8) * 8  # Round down to 8.
 
         # Calculate the CPU KV cache size based on the config.
-        num_cpu_blocks = (self.cache_config.swap_space_bytes //
-                          block_size_bytes)
+        num_cpu_blocks = int(self.cache_config.swap_space_bytes //
+                             block_size_bytes)
         num_cpu_blocks = (num_cpu_blocks // 8) * 8  # Round down to 8.
         return num_tpu_blocks, num_cpu_blocks
 
@@ -196,76 +202,79 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         dtype_size = get_dtype_size(self.cache_dtype)
         return dtype_size * total
 
-    def execute_model(
-        self,
-        execute_model_req: Optional[ExecuteModelRequest] = None,
-    ) -> List[SamplerOutput]:
-        if not self.is_driver_worker:
-            self._execute_model_non_driver()
-            return []
-        assert execute_model_req is not None
-        # Issue cache operations.
-        self.cache_swap(
-            execute_model_req.blocks_to_swap_in,
-            execute_model_req.blocks_to_swap_out,
-            execute_model_req.blocks_to_copy,
-        )
-        # Run the model.
-        seq_group_metadata_list = execute_model_req.seq_group_metadata_list
-        assert len(seq_group_metadata_list) > 0
-        output = self.model_runner.execute_model(seq_group_metadata_list,
-                                                 self.tpu_cache)
-        return output
+    @property
+    def do_metadata_broadcast(self) -> bool:
+        return self.parallel_config.tensor_parallel_size > 1
 
-    def cache_swap(
+    @property
+    def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
+        # NOTE(woosuk): This assumes virtual_engine == 0, i.e., no pipeline
+        # parallelism.
+        return [self.tpu_cache]
+
+    def prepare_worker_input(
         self,
-        blocks_to_swap_in: List[Tuple[int, int]],
-        blocks_to_swap_out: List[Tuple[int, int]],
-        blocks_to_copy: List[Tuple[int, int]],
-    ) -> None:
+        execute_model_req: ExecuteModelRequest,
+    ) -> WorkerInput:
+        virtual_engine = execute_model_req.virtual_engine
+        num_seq_groups = len(execute_model_req.seq_group_metadata_list)
+        blocks_to_swap_in = _make_src_to_dst(
+            execute_model_req.blocks_to_swap_in, "cpu", self.device)
+        blocks_to_swap_out = _make_src_to_dst(
+            execute_model_req.blocks_to_swap_out, self.device, "cpu")
+        blocks_to_copy = _make_src_to_dst(execute_model_req.blocks_to_copy,
+                                          self.device, self.device)
+        return WorkerInput(
+            num_seq_groups=num_seq_groups,
+            blocks_to_swap_in=blocks_to_swap_in,
+            blocks_to_swap_out=blocks_to_swap_out,
+            blocks_to_copy=blocks_to_copy,
+            virtual_engine=virtual_engine,
+        )
+
+    def execute_worker(self, worker_input: WorkerInput) -> None:
+        virtual_engine = worker_input.virtual_engine
+        assert virtual_engine == 0
         attn_backend = self.model_runner.attn_backend
         num_layers = self.model_config.get_num_layers(self.parallel_config)
 
-        if blocks_to_swap_in:
-            # Swap from CPU to TPU.
-            src_indices, dst_indices = _make_src_to_dst(
-                blocks_to_swap_in, "cpu", self.device)
-            for i in range(num_layers):
-                tpu_k_cache, tpu_v_cache = self.tpu_cache[i]
-                cpu_k_cache, cpu_v_cache = self.cpu_cache[i]
-                k = cpu_k_cache[:, src_indices].to(self.device)
-                v = cpu_v_cache[:, src_indices].to(self.device)
-                _insert_kv(k, v, dst_indices, tpu_k_cache, tpu_v_cache)
+        # Issue cache operations.
+        if worker_input.blocks_to_swap_in is not None:
+            src_indices, dst_indices = worker_input.blocks_to_swap_in
+            if src_indices.numel() > 0:
+                # Swap from CPU to TPU.
+                for i in range(num_layers):
+                    tpu_k_cache, tpu_v_cache = self.tpu_cache[i]
+                    cpu_k_cache, cpu_v_cache = self.cpu_cache[i]
+                    k = cpu_k_cache[:, src_indices].to(self.device)
+                    v = cpu_v_cache[:, src_indices].to(self.device)
+                    _insert_kv(k, v, dst_indices, tpu_k_cache, tpu_v_cache)
 
-        if blocks_to_swap_out:
-            # Swap from TPU to CPU.
-            src_indices, dst_indices = _make_src_to_dst(
-                blocks_to_swap_out, self.device, "cpu")
-            for i in range(num_layers):
-                tpu_k_cache, tpu_v_cache = self.tpu_cache[i]
-                cpu_k_cache, cpu_v_cache = self.cpu_cache[i]
-                cpu_k_cache[:, dst_indices] = tpu_k_cache[:, src_indices].cpu()
-                cpu_v_cache[:, dst_indices] = tpu_v_cache[:, src_indices].cpu()
+        if worker_input.blocks_to_swap_out is not None:
+            src_indices, dst_indices = worker_input.blocks_to_swap_out
+            if src_indices.numel() > 0:
+                # Swap from TPU to CPU.
+                for i in range(num_layers):
+                    tpu_k_cache, tpu_v_cache = self.tpu_cache[i]
+                    cpu_k_cache, cpu_v_cache = self.cpu_cache[i]
+                    cpu_k_cache[:, dst_indices] = tpu_k_cache[:, src_indices]
+                    cpu_v_cache[:, dst_indices] = tpu_v_cache[:, src_indices]
 
-        if blocks_to_copy:
-            src_to_dst = _make_src_to_dst(blocks_to_copy, self.device,
-                                          self.device)
-            attn_backend.copy_blocks(self.tpu_cache, src_to_dst)
-
-    def start_worker_execution_loop(self) -> None:
-        while self._execute_model_non_driver():
-            pass
-
-    def _execute_model_non_driver(self) -> bool:
-        self.model_runner.execute_model(None, self.tpu_cache)
-        return True
+        if worker_input.blocks_to_copy is not None:
+            src_indices, dst_indices = worker_input.blocks_to_copy
+            if src_indices.numel() > 0:
+                attn_backend.copy_blocks(self.tpu_cache,
+                                         (src_indices, dst_indices))
 
 
 def _make_src_to_dst(
     mapping: List[Tuple[int, int]],
     src_device: Union[torch.device, str],
     dst_device: Union[torch.device, str],
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+    if not mapping:
+        return None
+
     src_indices = [i for i, _ in mapping]
     dst_indices = [i for _, i in mapping]
     src_indices = torch.tensor(src_indices,

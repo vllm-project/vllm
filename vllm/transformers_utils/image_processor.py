@@ -1,27 +1,23 @@
-from typing import Optional
-
-from transformers import AutoImageProcessor
-from transformers.image_processing_utils import BaseImageProcessor
-
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
+from typing import cast
 
 
 def get_image_processor(
     processor_name: str,
     *args,
     trust_remote_code: bool = False,
-    revision: Optional[str] = None,
     **kwargs,
-) -> BaseImageProcessor:
+):
     """Gets an image processor for the given model name via HuggingFace."""
+    # don't put this import at the top level
+    # it will call torch.cuda.device_count()
+    from transformers import AutoImageProcessor
+    from transformers.image_processing_utils import BaseImageProcessor
+
     try:
-        processor: BaseImageProcessor = AutoImageProcessor.from_pretrained(
+        processor = AutoImageProcessor.from_pretrained(
             processor_name,
             *args,
             trust_remote_code=trust_remote_code,
-            revision=revision,
             **kwargs)
     except ValueError as e:
         # If the error pertains to the processor class not existing or not
@@ -38,4 +34,4 @@ def get_image_processor(
         else:
             raise e
 
-    return processor
+    return cast(BaseImageProcessor, processor)
