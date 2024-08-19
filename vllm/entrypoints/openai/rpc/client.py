@@ -80,6 +80,7 @@ class AsyncEngineRPCClient:
         # Maximum number of sockets that can be opened (typically 65536).
         # ZMQ_SOCKET_LIMIT (http://api.zeromq.org/4-2:zmq-ctx-get)
         socket_limit = self.context.get(zmq.constants.SOCKET_LIMIT)
+        # debug
         socket_limit = 5000
         if socket_limit < SOCKET_LIMIT_CUTOFF:
             raise ValueError(
