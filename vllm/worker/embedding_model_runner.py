@@ -1,8 +1,9 @@
 import dataclasses
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import Any, Dict, List, Optional, Tuple, cast, Type
 
 import torch
 
+from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
@@ -25,6 +26,16 @@ class EmbeddingModelInput(EncoderDecoderModelInputBase):
     Used by the EmbeddingModelRunner.
     """
     pooling_metadata: Optional["PoolingMetadata"] = None
+
+    @classmethod
+    def from_broadcasted_tensor_dict(
+        cls,
+        tensor_dict: Dict[str, Any],
+        attn_backend: Optional["AttentionBackend"] = None,
+    ) -> "EmbeddingModelInput":
+        return cast(
+            EmbeddingModelInput,
+            super().from_broadcasted_tensor_dict(tensor_dict, attn_backend))
 
 
 class EmbeddingModelRunner(EncoderDecoderModelRunnerBase[EmbeddingModelInput]):
@@ -56,6 +67,13 @@ class EmbeddingModelRunner(EncoderDecoderModelRunnerBase[EmbeddingModelInput]):
                          is_driver_worker=is_driver_worker,
                          prompt_adapter_config=prompt_adapter_config,
                          observability_config=observability_config)
+
+    def make_model_input_from_broadcasted_tensor_dict(
+            self, tensor_dict: Dict[str, Any]) -> EmbeddingModelInput:
+        return EmbeddingModelInput.from_broadcasted_tensor_dict(
+            tensor_dict,
+            attn_backend=self.attn_backend,
+        )
 
     @torch.inference_mode()
     def execute_model(

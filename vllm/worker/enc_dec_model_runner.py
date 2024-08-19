@@ -164,13 +164,6 @@ class EncoderDecoderModelRunnerBase(GPUModelRunnerBase[TModelInputForGPU]):
     def _empty_long_tensor(self) -> torch.Tensor:
         return self._list_to_long_tensor([])
 
-    def make_model_input_from_broadcasted_tensor_dict(
-            self, tensor_dict: Dict[str, Any]) -> TEncoderDecoderModelInput:
-        return TEncoderDecoderModelInput.from_broadcasted_tensor_dict(
-            tensor_dict,
-            attn_backend=self.attn_backend,
-        )
-
     @torch.inference_mode()
     def profile_run(self) -> None:
         # Enable top-k sampling to reflect the accurate memory usage.
@@ -428,10 +421,17 @@ class EncoderDecoderModelRunner(
         EncoderDecoderModelInput)
     _builder_cls: Type[ModelInputForGPUBuilder] = (ModelInputForGPUBuilder)
 
+    def make_model_input_from_broadcasted_tensor_dict(
+            self, tensor_dict: Dict[str, Any]) -> EncoderDecoderModelInput:
+        return EncoderDecoderModelInput.from_broadcasted_tensor_dict(
+            tensor_dict,
+            attn_backend=self.attn_backend,
+        )
+
     @torch.inference_mode()
     def execute_model(
         self,
-        model_input: TEncoderDecoderModelInput,
+        model_input: EncoderDecoderModelInput,
         kv_caches: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
@@ -475,7 +475,7 @@ class EncoderDecoderModelRunner(
         seq_group_metadata_list: List[SequenceGroupMetadata],
         virtual_engine: int = 0,
         finished_requests_ids: Optional[List[str]] = None
-    ) -> TModelInputForGPU:
+    ) -> EncoderDecoderModelInput:
         """Prepare the model input based on a given sequence group, including
         metadata for the sampling step.
 

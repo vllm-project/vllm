@@ -10,10 +10,11 @@ prompts = build_decoder_prompts([
 ])
 
 # Create an LLM.
-model = LLM(model="intfloat/e5-mistral-7b-instruct",
-            enforce_eager=True,
-            # NOTE: sliding_window is not supported by encoder_decoder_model
-            disable_sliding_window=True)
+model = LLM(
+    model="intfloat/e5-mistral-7b-instruct",
+    enforce_eager=True,
+    # NOTE: sliding_window is not supported by encoder_decoder_model
+    disable_sliding_window=True)
 # Generate embedding. The output is a list of EmbeddingRequestOutputs.
 outputs = model.encode(prompts)
 # Print the outputs.
