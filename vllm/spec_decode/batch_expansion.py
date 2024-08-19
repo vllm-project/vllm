@@ -1,11 +1,13 @@
+from array import array
 from itertools import chain, count
 from typing import Iterator, List, Tuple
 
 import torch
 
 from vllm import SamplingParams
-from vllm.sequence import (ExecuteModelRequest, SamplerOutput, SequenceData,
-                           SequenceGroupMetadata, get_all_seq_ids)
+from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, ExecuteModelRequest,
+                           SamplerOutput, SequenceData, SequenceGroupMetadata,
+                           get_all_seq_ids)
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
 from vllm.spec_decode.util import (nvtx_range, sampler_output_to_torch,
@@ -293,14 +295,15 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
                 input sequence.
         """
         seq_data = seq_group_metadata.seq_data[seq_id]
-        prompt_token_ids = seq_data.get_prompt_token_ids()
+        prompt_token_ids = seq_data.prompt_token_ids_array
         new_output_token_ids = [*seq_data.get_output_token_ids(), *token_ids]
 
         new_seq_data_dict = {
             target_seq_id:
             SequenceData(
-                prompt_token_ids=prompt_token_ids,
-                output_token_ids=new_output_token_ids,
+                prompt_token_ids,
+                _output_token_ids=array(VLLM_TOKEN_ID_ARRAY_TYPE,
+                                        new_output_token_ids),
             ),
         }
         # This is a hack. Technically, spec decoding should compute

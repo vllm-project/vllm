@@ -12,7 +12,8 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
-                           SequenceGroupMetadata, SequenceStatus)
+                           SequenceGroupMetadata, SequenceGroupMetadataDelta,
+                           SequenceStatus)
 from vllm.utils import PyObjectCache
 
 logger = init_logger(__name__)
@@ -363,8 +364,6 @@ class Scheduler:
         self.num_cumulative_preemption: int = 0
 
         # Used to cache python objects
-        self._seq_group_metadata_cache: PyObjectCache = PyObjectCache(
-            seq_group_metadata_builder)
         self._scheduler_running_outputs_cache: PyObjectCache = PyObjectCache(
             scheduler_running_outputs_builder)
         self._scheduled_seq_group_cache: PyObjectCache = PyObjectCache(
@@ -1048,15 +1047,10 @@ class Scheduler:
             token_chunk_size = scheduled_seq_group.token_chunk_size
             seq_group.maybe_set_first_scheduled_time(now)
 
-            seq_group_metadata = self._seq_group_metadata_cache.get_object()
-            seq_group_metadata.seq_data.clear()
-            seq_group_metadata.block_tables.clear()
-
             # seq_id -> SequenceData
-            seq_data: Dict[int, SequenceData] = seq_group_metadata.seq_data
+            seq_data: Dict[int, SequenceData] = {}
             # seq_id -> physical block numbers
-            block_tables: Dict[int,
-                               List[int]] = seq_group_metadata.block_tables
+            block_tables: Dict[int, List[int]] = {}
 
             if seq_group.is_encoder_decoder():
                 # Encoder associated with SequenceGroup
@@ -1081,45 +1075,65 @@ class Scheduler:
                         seq_group.get_seqs(status=SequenceStatus.RUNNING)))
 
             do_sample = True
-            if seq_group.is_prefill():
+            is_prompt = seq_group.is_prefill()
+            # We should send the metadata to workers when the first prefill
+            # is sent. Subsequent requests could be chunked prefill or decode.
+            is_first_prefill = False
+            if is_prompt:
                 seqs = seq_group.get_seqs()
                 # Prefill has only 1 sequence.
                 assert len(seqs) == 1
+                num_computed_tokens = seqs[0].data.get_num_computed_tokens()
+                is_first_prefill = num_computed_tokens == 0
                 # In the next iteration, all prompt tokens are not computed.
                 # It means the prefill is chunked, and we don't need sampling.
                 # NOTE: We use get_len instead of get_prompt_len because when
                 # a sequence is preempted, prefill includes previous generated
                 # output tokens.
-                if (token_chunk_size + seqs[0].data.get_num_computed_tokens() <
+                if (token_chunk_size + num_computed_tokens <
                         seqs[0].data.get_len()):
                     do_sample = False
 
             # It assumes the scheduled_seq_groups is ordered by
             # prefill < decoding.
-            is_prompt = seq_group.is_prefill()
-
-            seq_group_metadata.__init__(
-                request_id=seq_group.request_id,
-                is_prompt=is_prompt,
-                seq_data=seq_data,
-                sampling_params=seq_group.sampling_params,
-                block_tables=block_tables,
-                do_sample=do_sample,
-                pooling_params=seq_group.pooling_params,
-                token_chunk_size=token_chunk_size,
-                lora_request=seq_group.lora_request,
-                computed_block_nums=common_computed_block_nums,
-                encoder_seq_data=encoder_seq_data,
-                cross_block_table=cross_block_table,
-                state=seq_group.state,
-                # `multi_modal_data` will only be present for the 1st comm
-                # between engine and worker.
-                # the subsequent comms can still use delta, but
-                # `multi_modal_data` will be None.
-                multi_modal_data=seq_group.multi_modal_data
-                if scheduler_outputs.num_prefill_groups > 0 else None,
-                prompt_adapter_request=seq_group.prompt_adapter_request,
-            )
+            if is_first_prefill or not self.scheduler_config.send_delta_data:
+                seq_group_metadata = SequenceGroupMetadata(
+                    request_id=seq_group.request_id,
+                    is_prompt=is_prompt,
+                    seq_data=seq_data,
+                    sampling_params=seq_group.sampling_params,
+                    block_tables=block_tables,
+                    do_sample=do_sample,
+                    pooling_params=seq_group.pooling_params,
+                    token_chunk_size=token_chunk_size,
+                    lora_request=seq_group.lora_request,
+                    computed_block_nums=common_computed_block_nums,
+                    encoder_seq_data=encoder_seq_data,
+                    cross_block_table=cross_block_table,
+                    state=seq_group.state,
+                    # `multi_modal_data` will only be present for the 1st comm
+                    # between engine and worker.
+                    # the subsequent comms can still use delta, but
+                    # `multi_modal_data` will be None.
+                    multi_modal_data=seq_group.multi_modal_data
+                    if scheduler_outputs.num_prefill_groups > 0 else None,
+                    prompt_adapter_request=seq_group.prompt_adapter_request,
+                )
+            else:
+                # When SPMD mode is enabled, we only send delta data except for
+                # the first request to reduce serialization cost.
+                seq_data_delta = {}
+                for id, data in seq_data.items():
+                    seq_data_delta[id] = data.get_delta_and_reset()
+                seq_group_metadata = SequenceGroupMetadataDelta(
+                    seq_data_delta,
+                    seq_group.request_id,
+                    block_tables,
+                    is_prompt,
+                    do_sample=do_sample,
+                    token_chunk_size=token_chunk_size,
+                    computed_block_nums=common_computed_block_nums,
+                )
             seq_group_metadata_list.append(seq_group_metadata)
 
         # Now that the batch has been created, we can assume all blocks in the
@@ -1129,8 +1143,6 @@ class Scheduler:
         for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
             self.block_manager.mark_blocks_as_computed(
                 scheduled_seq_group.seq_group)
-
-        self._seq_group_metadata_cache.reset()
 
         scheduler_time = time.perf_counter() - scheduler_start_time
         # Add this to scheduler time to all the sequences that are currently

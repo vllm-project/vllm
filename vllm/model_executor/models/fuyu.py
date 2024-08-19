@@ -16,6 +16,7 @@
 # limitations under the License.
 """ PyTorch Fuyu model."""
 import math
+from array import array
 from typing import Iterable, List, Literal, Mapping, Optional, Tuple, TypedDict
 
 import torch
@@ -37,7 +38,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.base import MultiModalInputs
 from vllm.multimodal.image import (cached_get_image_processor,
                                    cached_get_tokenizer)
-from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
+from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
+                           SamplerOutput, SequenceData)
 
 from .interfaces import SupportsMultiModal
 from .utils import merge_multimodal_embeddings
@@ -97,9 +99,12 @@ def dummy_seq_data_for_fuyu(ctx: InputContext, seq_len: int, num_images: int):
     ncol, nrow = get_max_fuyu_image_feature_size()
     image_feature_size = get_max_fuyu_image_tokens(ctx)
 
-    image_token_ids = ([_IMAGE_TOKEN_ID] * ncol + [_NEWLINE_TOKEN_ID]) * nrow
-    token_ids = image_token_ids * num_images
-    token_ids += [0] * (seq_len - image_feature_size * num_images)
+    image_token_ids = (
+        array(VLLM_TOKEN_ID_ARRAY_TYPE, [_IMAGE_TOKEN_ID]) * ncol +
+        array(VLLM_TOKEN_ID_ARRAY_TYPE, [_NEWLINE_TOKEN_ID])) * nrow
+    token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE, image_token_ids) * num_images
+    token_ids += array(VLLM_TOKEN_ID_ARRAY_TYPE,
+                       [0]) * (seq_len - image_feature_size * num_images)
     return SequenceData(token_ids)
 
 
