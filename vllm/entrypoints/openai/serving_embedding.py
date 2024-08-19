@@ -73,7 +73,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                          request_logger=request_logger)
 
         self._check_embedding_mode(model_config.model_mode)
-        self._enabled = model_config.embedding_mode == ModelMode.EMBEDDING
+        self._enabled = model_config.model_mode == ModelMode.EMBEDDING
 
     async def create_embedding(
         self,
