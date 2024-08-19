@@ -208,7 +208,7 @@ class PerTensorScaleParameter(BasevLLMParameter):
         if isinstance(shard_id, int):
             return shard_id
 
-        # if not int, assuem shard_id for qkv
+        # if not int, assume shard_id for qkv
         # map to int and return
         assert isinstance(shard_id, str)
         assert shard_id in self.qkv_idxs

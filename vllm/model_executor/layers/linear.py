@@ -1025,6 +1025,7 @@ class RowParallelLinear(LinearBase):
         # Special case for loading scales off disk, which often do not
         # have a shape (such as in the case of AutoFP8).
         if len(loaded_weight.shape) == 0:
+            assert loaded_weight.numel() == 1
             loaded_weight = loaded_weight.reshape(1)
 
         param.load_row_parallel_weight(loaded_weight=loaded_weight)
