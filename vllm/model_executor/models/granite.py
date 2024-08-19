@@ -278,6 +278,7 @@ class GraniteModel(nn.Module):
                 self.vocab_size,
                 config.hidden_size,
                 org_num_embeddings=config.vocab_size,
+                quant_config=quant_config,
             )
         else:
             self.embed_tokens = PPMissingLayer()
@@ -424,8 +425,9 @@ class GraniteForCausalLM(nn.Module, SupportsLoRA):
                                   attn_metadata, intermediate_tensors)
         return model_output
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> Optional[torch.Tensor]:
+    def compute_logits(
+            self, hidden_states: torch.Tensor,
+            sampling_metadata: SamplingMetadata) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         logits /= self.config.logits_scaling
