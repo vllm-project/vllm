@@ -8,14 +8,13 @@ from typing import Set, Tuple, Type, TypeVar, Union
 import vllm.envs as envs
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
-                         MultiModalConfig, ObservabilityConfig, ParallelConfig,
+                         ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig)
 from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
                                  SchedulerOutputs)
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.metrics import (LoggingStatLogger, PrometheusStatLogger,
-                                 StatLoggerBase, Stats)
+from vllm.engine.metrics_types import StatLoggerBase, Stats
 from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
 from vllm.engine.output_processor.stop_checker import StopChecker
@@ -91,8 +90,6 @@ class LLMEngine:
         scheduler_config: The configuration related to the request scheduler.
         device_config: The configuration related to the device.
         lora_config (Optional): The configuration related to serving multi-LoRA.
-        multimodal_config (Optional): The configuration related to multimodal 
-            models.
         speculative_config (Optional): The configuration related to speculative
             decoding.
         executor_class: The model executor class for managing distributed
@@ -163,7 +160,6 @@ class LLMEngine:
         device_config: DeviceConfig,
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
-        multimodal_config: Optional[MultiModalConfig],
         speculative_config: Optional[SpeculativeConfig],
         decoding_config: Optional[DecodingConfig],
         observability_config: Optional[ObservabilityConfig],
@@ -219,14 +215,12 @@ class LLMEngine:
             cache_config.enable_prefix_caching,
         )
         # TODO(woosuk): Print more configs in debug mode.
-
         from vllm.plugins import load_general_plugins
         load_general_plugins()
 
         self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config
-        self.multimodal_config = multimodal_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
@@ -272,7 +266,6 @@ class LLMEngine:
             scheduler_config=scheduler_config,
             device_config=device_config,
             lora_config=lora_config,
-            multimodal_config=multimodal_config,
             speculative_config=speculative_config,
             load_config=load_config,
             prompt_adapter_config=prompt_adapter_config,
@@ -338,6 +331,13 @@ class LLMEngine:
             if stat_loggers is not None:
                 self.stat_loggers = stat_loggers
             else:
+                # Lazy import for prometheus multiprocessing.
+                # We need to set PROMETHEUS_MULTIPROC_DIR environment variable
+                # before prometheus_client is imported.
+                # See https://prometheus.github.io/client_python/multiprocess/
+                from vllm.engine.metrics import (LoggingStatLogger,
+                                                 PrometheusStatLogger)
+
                 self.stat_loggers = {
                     "logging":
                     LoggingStatLogger(
