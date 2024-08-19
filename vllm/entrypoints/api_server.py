@@ -85,6 +85,46 @@ async def generate(request: Request) -> Response:
     return JSONResponse(ret)
 
 
+@app.post("/speculative_decode_generate")
+async def speculative_decode_generate(request: Request) -> Response:
+    request_dict = await request.json()
+    prompt = request_dict.pop("prompt")
+    sampling_params = SamplingParams(**request_dict)
+    request_id = random_uuid()
+    assert engine is not None
+    results_generator = engine.generate(prompt, sampling_params, request_id)
+    results_generator = iterate_with_cancellation(
+        results_generator, is_cancelled=request.is_disconnected)
+    return StreamingResponse(
+        _stream_speculative_decode_response(
+            results_generator=results_generator))
+
+
+async def _stream_speculative_decode_response(
+        results_generator: AsyncGenerator) -> AsyncGenerator[bytes, None]:
+    async for request_output in results_generator:
+        prompt = request_output.prompt
+
+        # Speculative decode does not support beam search and
+        # can not generate more then 1 sequence from the same
+        # prompt and this is way there is only one completion
+        output = request_output.outputs[0]
+
+        response = {
+            "text": prompt + output.text,
+            "speculative_draft_token_indices": output.draft_token_ids,
+            "speculative_scorer_token_indices": output.scorer_token_ids,
+            "decoded_speculative_draft_token_indices":
+            output.decoded_draft_token_ids,
+            "decoded_speculative_scorer_token_indices":
+            output.decoded_scorer_token_ids,
+            "decoded_draft_sequence": output.decoded_draft_sequence,
+            "decoded_scorer_sequence": output.decoded_scorer_sequence
+        }
+
+        yield (json.dumps(response) + "\0").encode("utf-8")
+
+
 def build_app(args: Namespace) -> FastAPI:
     global app
 

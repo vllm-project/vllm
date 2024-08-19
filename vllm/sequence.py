@@ -126,15 +126,25 @@ class SequenceData:
         cumulative_logprob: The cumulative log probability of the output.
     """
 
-    def __init__(
-        self,
-        prompt_token_ids: List[int],
-        output_token_ids: Optional[List[int]] = None,
-    ) -> None:
+    def __init__(self,
+                 prompt_token_ids: List[int],
+                 output_token_ids: Optional[List[int]] = None,
+                 draft_token_ids: Optional[List[int]] = None,
+                 scorer_token_ids: Optional[List[int]] = None,
+                 decoded_draft_token_ids: Optional[List[str]] = None,
+                 decoded_scorer_token_ids: Optional[List[str]] = None,
+                 decoded_draft_sequence: Optional[str] = None,
+                 decoded_scorer_sequence: Optional[str] = None) -> None:
         self._prompt_token_ids = array('l', prompt_token_ids)
         self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(prompt_token_ids)
         self._output_token_ids = array(
             'l', output_token_ids if output_token_ids is not None else [])
+        self._draft_token_ids = draft_token_ids
+        self._scorer_token_ids = scorer_token_ids
+        self._decoded_draft_token_ids = decoded_draft_token_ids
+        self._decoded_scorer_token_ids = decoded_scorer_token_ids
+        self._decoded_draft_sequence = decoded_draft_sequence
+        self._decoded_scorer_sequence = decoded_scorer_sequence
 
         self.cumulative_logprob = 0.0
         # The number of tokens that are computed (that run against the model).
@@ -173,6 +183,75 @@ class SequenceData:
     @property
     def output_token_ids_array(self) -> array:
         return self._output_token_ids
+
+    @property
+    def draft_token_ids(self) -> List[int]:
+        if self._draft_token_ids is None:
+            return []
+
+        return self._draft_token_ids
+
+    @draft_token_ids.setter
+    def draft_token_ids(self, new_draft_token_ids: List[int]) -> None:
+        self._draft_token_ids = new_draft_token_ids
+
+    @property
+    def scorer_token_ids(self) -> List[int]:
+        if self._scorer_token_ids is None:
+            return []
+
+        return self._scorer_token_ids
+
+    @scorer_token_ids.setter
+    def scorer_token_ids(self, new_scorer_token_ids: List[int]) -> None:
+        self._scorer_token_ids = new_scorer_token_ids
+
+    @property
+    def decoded_draft_token_ids(self) -> List[str]:
+        if self._decoded_draft_token_ids is None:
+            return []
+
+        return self._decoded_draft_token_ids
+
+    @decoded_draft_token_ids.setter
+    def decoded_draft_token_ids(
+            self, new_decoded_draft_token_ids: List[str]) -> None:
+        self._decoded_draft_token_ids = new_decoded_draft_token_ids
+
+    @property
+    def decoded_scorer_token_ids(self) -> List[str]:
+        if self._decoded_scorer_token_ids is None:
+            return []
+
+        return self._decoded_scorer_token_ids
+
+    @decoded_scorer_token_ids.setter
+    def decoded_scorer_token_ids(
+            self, new_decoded_scorer_token_ids: List[str]) -> None:
+        self._decoded_scorer_token_ids = new_decoded_scorer_token_ids
+
+    @property
+    def decoded_draft_sequence(self) -> str:
+        if self._decoded_draft_sequence is None:
+            return ""
+
+        return self._decoded_draft_sequence
+
+    @decoded_draft_sequence.setter
+    def decoded_draft_sequence(self, new_decoded_draft_sequence: str) -> None:
+        self._decoded_draft_sequence = new_decoded_draft_sequence
+
+    @property
+    def decoded_scorer_sequence(self) -> str:
+        if self._decoded_scorer_sequence is None:
+            return ""
+
+        return self._decoded_scorer_sequence
+
+    @decoded_scorer_sequence.setter
+    def decoded_scorer_sequence(self,
+                                new_decoded_scorer_sequence: str) -> None:
+        self._decoded_scorer_sequence = new_decoded_scorer_sequence
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self._output_token_ids.append(token_id)
@@ -1037,6 +1116,22 @@ class SamplerOutput:
             f"sampled_token_probs={sampled_token_probs_repr}, "
             f"sampled_token_ids={sampled_token_ids_repr}, "
             f"spec_decode_worker_metrics={self.spec_decode_worker_metrics})")
+
+
+@dataclass
+class SpeculativeProposerSamplerOutput:
+    # Each instance of this class represents step of proposer decode and
+    # stores token that corresponds to particular step for every element
+    # in batch
+    token_indices: torch.Tensor
+
+
+@dataclass
+class SpeculativeScorerSamplerOutput:
+    # Each instance of this class represents step of scorer decode and
+    # stores token that corresponds to particular step for every element
+    # in batch
+    token_indices: torch.Tensor
 
 
 @dataclass

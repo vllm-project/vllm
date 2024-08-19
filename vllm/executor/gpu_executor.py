@@ -4,7 +4,9 @@ from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sequence import ExecuteModelRequest, PoolerOutput, SamplerOutput
+from vllm.sequence import (ExecuteModelRequest, PoolerOutput, SamplerOutput,
+                           SpeculativeProposerSamplerOutput,
+                           SpeculativeScorerSamplerOutput)
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         make_async)
 from vllm.worker.worker_base import WorkerWrapperBase
@@ -155,7 +157,9 @@ class GPUExecutorAsync(GPUExecutor, ExecutorAsyncBase):
     async def execute_model_async(
         self,
         execute_model_req: ExecuteModelRequest,
-    ) -> List[Union[SamplerOutput, PoolerOutput]]:
+    ) -> List[Union[SamplerOutput, PoolerOutput,
+                    SpeculativeProposerSamplerOutput,
+                    SpeculativeScorerSamplerOutput]]:
         output = await make_async(self.driver_worker.execute_model
                                   )(execute_model_req=execute_model_req, )
         return output
