@@ -1,33 +1,42 @@
-from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
-import enum 
+import enum
 from enum import Enum
+from typing import List, Optional
+
 import torch
+
 from vllm import _custom_ops as ops
-from vllm.model_executor.utils import set_weight_attrs
-from typing import Optional, List
+from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     WNA16_SUPPORTED_BITS)
-from vllm.model_executor.layers.quantization.compressed_tensors.utils import(
-    CompressionFormat
-)
+from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
+    CompressionFormat)
+from vllm.model_executor.utils import set_weight_attrs
+
 
 class GPTQMarlinState(Enum):
     REPACK = enum.auto()
     READY = enum.auto()
 
+
 __all__ = ["CompressedTensorsMoEMethod"]
 
+
 class CompressedTensorsMoEMethod(FusedMoEMethodBase):
-    def __init__(self, quant_config: "CompressedTensorsConfig"): # type: ignore
+
+    def __init__(
+            self,
+            quant_config: "CompressedTensorsConfig"  # type: ignore # noqa E501
+    ):
         self.quant_config = quant_config
-        # TODO: @dsikka: refactor this to use schemes as other kernels 
+        # TODO: @dsikka: refactor this to use schemes as other kernels
         # are supported + check if the layer is being ignored.
         config = self.quant_config.target_scheme_map["Linear"].get("weights")
         self.num_bits = config.num_bits
         self.packed_factor = 32 // config.num_bits
         self.strategy = config.strategy.value
         self.group_size = config.group_size
-        assert config.symmetric, "Only symmetric quantization is supported for MoE"
+        assert config.symmetric, (
+            "Only symmetric quantization is supported for MoE")
 
         if not (self.quant_config.quant_format
                 == CompressionFormat.pack_quantized.value
@@ -159,8 +168,8 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
               num_expert_group: Optional[int] = None,
               topk_group: Optional[int] = None) -> torch.Tensor:
 
-        from vllm.model_executor.layers.fused_moe.fused_moe import fused_marlin_moe
-        # hook-up fused moe kernel
+        from vllm.model_executor.layers.fused_moe.fused_moe import (
+            fused_marlin_moe)
         if layer.marlin_state == GPTQMarlinState.REPACK:
             layer.marlin_state = GPTQMarlinState.READY
 
@@ -262,7 +271,6 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             )
             replace_tensor("w2_weight_scale", marlin_w2_scales)
 
-        
         return fused_marlin_moe(x,
                                 layer.w13_weight_packed,
                                 layer.w2_weight_packed,
