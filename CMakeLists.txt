@@ -88,14 +88,14 @@ message(STATUS "Enabling core extension.")
 # Define _core_C extension
 #  built for (almost) every target platform, (excludes TPU and Neuron)
 
-set(VLLM_EXT_SRC
+set(VLLM_CORE_EXT_SRC
   "csrc/core/torch_bindings.cpp")
 
 define_gpu_extension_target(
   _core_C
   DESTINATION vllm
   LANGUAGE CXX
-  SOURCES ${VLLM_EXT_SRC}
+  SOURCES ${VLLM_CORE_EXT_SRC}
   COMPILE_FLAGS ${CXX_COMPILE_FLAGS}
   USE_SABI 3
   WITH_SOABI)
@@ -105,6 +105,7 @@ add_dependencies(default _core_C)
 #
 # Forward the non-CUDA device extensions to external CMake scripts.
 #
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
 if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda" AND
     NOT VLLM_TARGET_DEVICE STREQUAL "rocm")
     if (VLLM_TARGET_DEVICE STREQUAL "cpu")
@@ -324,12 +325,10 @@ define_gpu_extension_target(
   WITH_SOABI)
 
 
-
 if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   message(STATUS "Enabling C extension.")
   add_dependencies(default _C)
 
   message(STATUS "Enabling moe extension.")
   add_dependencies(default _moe_C)
-
 endif()
