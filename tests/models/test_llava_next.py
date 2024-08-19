@@ -6,8 +6,8 @@ from transformers import AutoConfig, AutoTokenizer
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
 
-from ..conftest import (IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets,
-                        PromptImageInput)
+from ..conftest import (IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner,
+                        _ImageAssets)
 from .utils import check_logprobs_close
 
 pytestmark = pytest.mark.vlm
@@ -251,22 +251,22 @@ def test_models_fixed_sizes(hf_runner, vllm_runner, image_assets, model, sizes,
 def test_models_multiple_image_inputs(hf_runner, vllm_runner, image_assets,
                                       model, dtype, max_tokens,
                                       num_logprobs) -> None:
-    img_0 = image_assets[0].pil_image
-    img_1 = image_assets[1].pil_image
+    stop_sign = image_assets[0].pil_image
+    cherry_blossom = image_assets[1].pil_image
 
     inputs = [(
         [
-            f"{_PREFACE} USER: <image><image>\nDescribe the 2 images. ASSISTANT:",
-            f"{_PREFACE} USER: <image><image><image><image>\nDescribe the 4 images. ASSISTANT:"
+            f"{_PREFACE} USER: <image><image>\nDescribe the 2 images. ASSISTANT:",  # noqa: E501
+            f"{_PREFACE} USER: <image><image><image><image>\nDescribe the 4 images. ASSISTANT:"  # noqa: E501
         ],
         [
-            [img_0, img_1],
+            [stop_sign, cherry_blossom],
             # Images with different sizes and aspect-ratios
             [
-                img_0,
-                rescale_image_size(img_0, 0.25),
-                img_0.resize((183, 488)),
-                img_0.resize((488, 183))
+                stop_sign,
+                rescale_image_size(stop_sign, 0.25),
+                cherry_blossom.resize((183, 488)),
+                cherry_blossom.resize((488, 183))
             ],
         ])]
 
