@@ -3,6 +3,7 @@ from io import StringIO
 from typing import Awaitable, Callable, List
 
 import aiohttp
+from prometheus_client import start_http_server
 
 from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -58,6 +59,8 @@ def parse_args():
                         help='Max number of prompt characters or prompt '
                         'ID numbers being printed in log.'
                         '\n\nDefault: Unlimited')
+
+    parser.add_argument("--port", type=int, default=8000, help="port number")
 
     return parser.parse_args()
 
@@ -186,5 +189,9 @@ if __name__ == "__main__":
 
     logger.info("vLLM API server version %s", VLLM_VERSION)
     logger.info("args: %s", args)
+
+    # Start the Prometheus metrics server. LLMEngine uses the Prometheus client
+    # to publish metrics at the /metrics endpoint.
+    start_http_server(args.port)
 
     asyncio.run(main(args))
