@@ -31,8 +31,8 @@ from unittest.mock import patch
 import torch
 import torch.distributed
 from ray.actor import ActorHandle
-from ray.experimental.channel.nccl_group_interface import (
-    NcclGroupInterface, TorchTensorAllocator)
+from ray.experimental.channel.actor_group import (
+    ActorGroup, TorchTensorAllocator)
 from torch.distributed import Backend, ProcessGroup
 
 import vllm.envs as envs
@@ -744,7 +744,7 @@ class GroupCoordinator:
             self.mq_broadcaster = None
 
 
-class AdagNcclGroup(NcclGroupInterface):
+class AdagNcclGroup(ActorGroup):
 
     def __init__(self, world: GroupCoordinator, workers: List[ActorHandle]):
         self.world = world
