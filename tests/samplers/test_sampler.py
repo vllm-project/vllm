@@ -1,5 +1,6 @@
 import itertools
 import random
+from array import array
 from typing import Dict, List, Optional, Tuple
 from unittest.mock import Mock, patch
 
@@ -11,7 +12,8 @@ import vllm.envs as envs
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_random_seed
-from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
+from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, SamplingParams,
+                           SequenceData, SequenceGroupMetadata)
 from vllm.utils import Counter, is_pin_memory_available
 
 
@@ -57,7 +59,9 @@ def _do_sample(
             SequenceGroupMetadata(
                 request_id=f"test_{i}",
                 is_prompt=True,
-                seq_data={0: SequenceData([1, 2, 3])},
+                seq_data={
+                    0: SequenceData(array(VLLM_TOKEN_ID_ARRAY_TYPE, [1, 2, 3]))
+                },
                 sampling_params=sampling_params,
                 block_tables={0: [1]},
             ))
@@ -202,7 +206,8 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
 
     def create_sequence_data(num_input=3, num_generated=0):
         seq_data = SequenceData(
-            random.choices(range(0, VOCAB_SIZE), k=num_input))
+            array(VLLM_TOKEN_ID_ARRAY_TYPE,
+                  random.choices(range(0, VOCAB_SIZE), k=num_input)))
         if num_generated > 0:
             seq_data.output_token_ids = random.choices(range(0, VOCAB_SIZE),
                                                        k=num_generated)
@@ -505,7 +510,9 @@ def test_sampler_mixed(seed: int, device: str):
             SequenceGroupMetadata(
                 request_id=f"test_{i}",
                 is_prompt=True,
-                seq_data={0: SequenceData([1, 2, 3])},
+                seq_data={
+                    0: SequenceData(array(VLLM_TOKEN_ID_ARRAY_TYPE, [1, 2, 3]))
+                },
                 sampling_params=sampling_params,
                 block_tables={0: [1]},
             ))
@@ -601,7 +608,9 @@ def test_sampler_top_k_top_p(seed: int, device: str):
             SequenceGroupMetadata(
                 request_id=f"test_{i}",
                 is_prompt=True,
-                seq_data={0: SequenceData([1, 2, 3])},
+                seq_data={
+                    0: SequenceData(array(VLLM_TOKEN_ID_ARRAY_TYPE, [1, 2, 3]))
+                },
                 sampling_params=SamplingParams(
                     temperature=1,
                     top_k=top_k,
@@ -636,7 +645,7 @@ def test_sampler_top_k_top_p(seed: int, device: str):
 
     hf_probs = warpers(torch.zeros_like(fake_logits), fake_logits.clone())
     hf_probs = torch.softmax(hf_probs, dim=-1, dtype=torch.float)
-    assert torch.allclose(hf_probs, sample_probs, atol=1e-5)
+    torch.testing.assert_close(hf_probs, sample_probs, rtol=0.0, atol=1e-5)
     assert torch.equal(hf_probs.eq(0), sample_probs.eq(0))
 
 
@@ -685,7 +694,11 @@ def test_sampler_repetition_penalty_mixed(device: str):
                 SequenceGroupMetadata(
                     request_id=f"test_{i}",
                     is_prompt=True,
-                    seq_data={0: SequenceData([1, 2, 3])},
+                    seq_data={
+                        0:
+                        SequenceData(array(VLLM_TOKEN_ID_ARRAY_TYPE,
+                                           [1, 2, 3]))
+                    },
                     sampling_params=sampling_params[i],
                     block_tables={0: [1]},
                 ))
