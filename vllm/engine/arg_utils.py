@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Dict, List, Mapping, Optional, Tuple, Type,
                     Union)
 
+import vllm.envs as envs
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
                          ObservabilityConfig, ParallelConfig,
@@ -905,6 +906,8 @@ class EngineArgs:
             embedding_mode=model_config.embedding_mode,
             preemption_mode=self.preemption_mode,
             num_scheduler_steps=self.num_scheduler_steps,
+            send_delta_data=(envs.VLLM_USE_RAY_SPMD_WORKER
+                             and parallel_config.use_ray),
         )
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,

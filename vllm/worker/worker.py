@@ -1,7 +1,7 @@
 """A GPU worker class."""
 import gc
 import os
-from typing import List, Optional, Set, Tuple, Type
+from typing import Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
 import torch.distributed
@@ -18,7 +18,9 @@ from vllm.model_executor import set_random_seed
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sequence import ExecuteModelRequest
+from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
+                           SamplerOutput, SequenceGroupMetadata,
+                           SequenceGroupMetadataDelta)
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
@@ -109,6 +111,7 @@ class Worker(LocalOrDistributedWorkerBase):
         self.cache_engine: List[CacheEngine]
         # Initialize gpu_cache as embedding models don't initialize kv_caches
         self.gpu_cache: Optional[List[List[torch.Tensor]]] = None
+        self._seq_group_metadata_cache: Dict[str, SequenceGroupMetadata] = {}
 
     def _is_encoder_decoder_model(self):
         return self.model_config.is_encoder_decoder_model
@@ -302,6 +305,63 @@ class Worker(LocalOrDistributedWorkerBase):
         if (worker_input.blocks_to_copy is not None
                 and worker_input.blocks_to_copy.numel() > 0):
             self.cache_engine[virtual_engine].copy(worker_input.blocks_to_copy)
+
+    def _get_cached_seq_group_metadata(
+            self,
+            seq_group_metadata_list: List[Union[SequenceGroupMetadata,
+                                                SequenceGroupMetadataDelta]],
+            finished_request_ids: List[str]) -> List[SequenceGroupMetadata]:
+        """Return a list of cached Sequence Group Metadata after updating its
+        state.
+
+        It is used because scheduler only sends delta to workers to reduce
+        the data payload size. The function also cleans up cache based on
+        a given `finished_request_ids`.
+        """
+        new_seq_group_metadata_list = []
+        for metadata_or_delta in seq_group_metadata_list:
+            request_id = metadata_or_delta.request_id
+            if request_id not in self._seq_group_metadata_cache:
+                # The first prefill.
+                assert isinstance(metadata_or_delta, SequenceGroupMetadata)
+                self._seq_group_metadata_cache[request_id] = metadata_or_delta
+            else:
+                # The first prefill is already cached.
+                if isinstance(metadata_or_delta, SequenceGroupMetadataDelta):
+                    self._seq_group_metadata_cache[request_id].apply_delta(
+                        metadata_or_delta)
+                else:
+                    # If metadata snapshot is sent again, it is
+                    # preempted. Reset the cache because we need to start
+                    # from scratch.
+                    assert isinstance(metadata_or_delta, SequenceGroupMetadata)
+                    self._seq_group_metadata_cache[
+                        request_id] = metadata_or_delta
+
+            new_seq_group_metadata_list.append(
+                self._seq_group_metadata_cache[request_id])
+
+        # Clean up finished ids
+        for finished_id in finished_request_ids:
+            del self._seq_group_metadata_cache[finished_id]
+
+        return new_seq_group_metadata_list
+
+    def _execute_model_spmd(
+        self,
+        execute_model_req: ExecuteModelRequest,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+    ) -> Optional[List[SamplerOutput]]:
+        if execute_model_req is not None:
+            new_seq_group_metadata_list = self._get_cached_seq_group_metadata(
+                execute_model_req.seq_group_metadata_list,
+                execute_model_req.finished_requests_ids)
+
+            execute_model_req.seq_group_metadata_list = (
+                new_seq_group_metadata_list)
+        output = super()._execute_model_spmd(execute_model_req,
+                                             intermediate_tensors)
+        return output
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)

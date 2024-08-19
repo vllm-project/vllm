@@ -6,7 +6,8 @@ from typing import Dict, List, Optional, Tuple
 import torch
 
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.sequence import SequenceData, SequenceGroupMetadata
+from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, SequenceData,
+                           SequenceGroupMetadata)
 from vllm.triton_utils.sample import get_num_triton_sampler_splits
 from vllm.utils import (PyObjectCache, async_tensor_h2d,
                         is_pin_memory_available, make_tensor_with_pad,
@@ -505,9 +506,11 @@ class SamplingTensors:
                         and sampling_params.prompt_logprobs is not None):
                     prefill_len = len(seq_group.prompt_logprob_indices)
                     prompt_tokens.extend(
-                        array('l') for _ in range(prefill_len))
+                        array(VLLM_TOKEN_ID_ARRAY_TYPE)
+                        for _ in range(prefill_len))
                     output_tokens.extend(
-                        array('l') for _ in range(prefill_len))
+                        array(VLLM_TOKEN_ID_ARRAY_TYPE)
+                        for _ in range(prefill_len))
                 if seq_group.do_sample:
                     for seq_id in seq_ids:
                         seq_data = seq_group.seq_data[seq_id]
