@@ -29,9 +29,8 @@ class AsyncEngineRPCServer:
         self.context = zmq.asyncio.Context()
 
         # Init socket.
-        self.socket = self.context.socket(zmq.constants.ROUTER)
-        # self.socket.setsockopt(zmq.constants.ROUTER_MANDATORY, 1)
-        self.socket.bind(rpc_path)
+        self.socket = self.context.socket(zmq.constants.DEALER)
+        self.socket.connect(rpc_path)
 
     def cleanup(self):
         """Cleanup all resources."""
@@ -41,7 +40,7 @@ class AsyncEngineRPCServer:
         # Clear the engine reference so that it can be GC'ed.
         self.engine = None
 
-    async def get_config(self, rpc_id, client_id, request):
+    async def get_config(self, identity, request):
         try:
             if request == RPCUtilityRequest.GET_MODEL_CONFIG:
                 config = await self.engine.get_model_config()
@@ -57,50 +56,44 @@ class AsyncEngineRPCServer:
                 raise ValueError("Unknown Config Request: %s", request)
 
             await self.socket.send_multipart(
-                [rpc_id, client_id,
-                 cloudpickle.dumps(config)])
+                [identity, cloudpickle.dumps(config)])
 
         except Exception as e:
             await self.socket.send_multipart(
-                [rpc_id, client_id, cloudpickle.dumps(e)])
+                [identity, cloudpickle.dumps(e)])
 
-    async def is_tracing_enabled(self, rpc_id, client_id):
+    async def is_tracing_enabled(self, identity):
         """Send the is_tracing_enabled flag"""
         tracing_flag = await self.engine.is_tracing_enabled()
 
         await self.socket.send_multipart(
-            [rpc_id, client_id,
-             cloudpickle.dumps(tracing_flag)])
+            [identity, cloudpickle.dumps(tracing_flag)])
 
-    async def do_log_stats(self, rpc_id, client_id):
+    async def do_log_stats(self, identity):
         """Log stats and confirm success."""
         await self.engine.do_log_stats()
 
         await self.socket.send_multipart(
-            [rpc_id, client_id,
-             cloudpickle.dumps(VLLM_RPC_SUCCESS_STR)])
+            [identity, cloudpickle.dumps(VLLM_RPC_SUCCESS_STR)])
 
-    async def is_server_ready(self, rpc_id, client_id):
+    async def is_server_ready(self, identity):
         """Notify the client that we are ready."""
         await self.socket.send_multipart(
-            [rpc_id, client_id,
-             cloudpickle.dumps(VLLM_RPC_SUCCESS_STR)])
+            [identity, cloudpickle.dumps(VLLM_RPC_SUCCESS_STR)])
 
-    async def abort(self, rpc_id, client_id, request: RPCAbortRequest):
+    async def abort(self, identity, request: RPCAbortRequest):
         """Abort request and notify the client of success."""
         try:
             # Abort the request in the llm engine.
             await self.engine.abort(request.request_id)
             await self.socket.send_multipart(
-                [rpc_id, client_id,
-                 cloudpickle.dumps(VLLM_RPC_SUCCESS_STR)])
+                [identity, cloudpickle.dumps(VLLM_RPC_SUCCESS_STR)])
 
         except Exception as e:
             await self.socket.send_multipart(
-                [rpc_id, client_id, cloudpickle.dumps(e)])
+                [identity, cloudpickle.dumps(e)])
 
-    async def generate(self, rpc_id, client_id,
-                       generate_request: RPCGenerateRequest):
+    async def generate(self, identity, generate_request: RPCGenerateRequest):
         try:
             results_generator = self.engine.generate(
                 generate_request.inputs,
@@ -112,53 +105,50 @@ class AsyncEngineRPCServer:
 
             async for request_output in results_generator:
                 await self.socket.send_multipart(
-                    [rpc_id, client_id,
-                     cloudpickle.dumps(request_output)])
+                    [identity, cloudpickle.dumps(request_output)])
 
         except Exception as e:
             await self.socket.send_multipart(
-                [rpc_id, client_id, cloudpickle.dumps(e)])
+                [identity, cloudpickle.dumps(e)])
 
-    async def check_health(self, rpc_id, client_id):
+    async def check_health(self, identity):
         try:
             await self.engine.check_health()
             await self.socket.send_multipart(
-                [rpc_id, client_id,
-                 cloudpickle.dumps(VLLM_RPC_SUCCESS_STR)])
+                [identity, cloudpickle.dumps(VLLM_RPC_SUCCESS_STR)])
 
         except Exception as e:
             await self.socket.send_multipart(
-                [rpc_id, client_id, cloudpickle.dumps(e)])
+                [identity, cloudpickle.dumps(e)])
 
-    def _make_handler_coro(self, rpc_id, client_id,
-                           message) -> Coroutine[Any, Any, Never]:
+    def _make_handler_coro(self, identity, message) -> Coroutine[Any, Any, Never]:
         """Route the zmq message to the handler coroutine."""
 
         request = cloudpickle.loads(message)
 
         if isinstance(request, RPCGenerateRequest):
-            return self.generate(rpc_id, client_id, request)
+            return self.generate(identity, request)
 
         elif isinstance(request, RPCAbortRequest):
-            return self.abort(rpc_id, client_id, request)
+            return self.abort(identity, request)
 
         elif isinstance(request, RPCUtilityRequest):
             if request in [
-                    RPCUtilityRequest.GET_MODEL_CONFIG,
-                    RPCUtilityRequest.GET_PARALLEL_CONFIG,
-                    RPCUtilityRequest.GET_DECODING_CONFIG,
-                    RPCUtilityRequest.GET_SCHEDULER_CONFIG,
-                    RPCUtilityRequest.GET_LORA_CONFIG
+                RPCUtilityRequest.GET_MODEL_CONFIG,
+                RPCUtilityRequest.GET_PARALLEL_CONFIG,
+                RPCUtilityRequest.GET_DECODING_CONFIG,
+                RPCUtilityRequest.GET_SCHEDULER_CONFIG,
+                RPCUtilityRequest.GET_LORA_CONFIG
             ]:
-                return self.get_config(rpc_id, client_id, request)
+                return self.get_config(identity, request)
             elif request == RPCUtilityRequest.DO_LOG_STATS:
-                return self.do_log_stats(rpc_id, client_id)
+                return self.do_log_stats(identity)
             elif request == RPCUtilityRequest.IS_SERVER_READY:
-                return self.is_server_ready(rpc_id, client_id)
+                return self.is_server_ready(identity)
             elif request == RPCUtilityRequest.IS_SERVER_HEALTHY:
-                return self.check_health(rpc_id, client_id)
+                return self.check_health(identity)
             elif request == RPCUtilityRequest.IS_TRACING_ENABLED:
-                return self.is_tracing_enabled(rpc_id, client_id)
+                return self.is_tracing_enabled(identity)
             else:
                 raise ValueError(f"Unknown RPCUtilityRequest type: {request}")
 
@@ -171,11 +161,11 @@ class AsyncEngineRPCServer:
         running_tasks = set()
         while True:
             # Wait for a request.
-            rpc_id, client_id, message = await self.socket.recv_multipart()
+            identity, message = await self.socket.recv_multipart()
 
             # Process the request async.
             task = asyncio.create_task(
-                self._make_handler_coro(rpc_id, client_id, message))
+                self._make_handler_coro(identity, message))
 
             # We need to keep around a strong reference to the task,
             # to avoid the task disappearing mid-execution as running tasks
