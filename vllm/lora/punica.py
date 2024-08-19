@@ -10,8 +10,9 @@ from typing import TYPE_CHECKING, Callable, List, Optional, Tuple, Union
 import torch
 
 from vllm.triton_utils import HAS_TRITON
+from vllm.utils import is_xpu
 
-if HAS_TRITON:
+if HAS_TRITON and not is_xpu():
     from vllm.lora.ops.bgmv_expand import bgmv_expand
     from vllm.lora.ops.bgmv_expand_slice import bgmv_expand_slice
     from vllm.lora.ops.bgmv_shrink import bgmv_shrink
