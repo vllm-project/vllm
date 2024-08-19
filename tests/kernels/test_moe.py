@@ -10,8 +10,8 @@ from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import fused_moe, single_marlin_moe
-from vllm.model_executor.layers.fused_moe.fused_moe_marlin import fused_moe_marlin
+from vllm.model_executor.layers.fused_moe import fused_moe
+from vllm.model_executor.layers.fused_moe.fused_moe_marlin import fused_moe_marlin, single_marlin_moe
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     marlin_quantize, )
 from vllm.model_executor.models.mixtral import MixtralMoE
