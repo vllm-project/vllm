@@ -14,6 +14,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsConfig)
 from vllm.model_executor.layers.quantization.deepspeedfp import (
     DeepSpeedFPConfig)
+from vllm.model_executor.layers.quantization.experts_int8 import (
+    ExpertsInt8Config)
 from vllm.model_executor.layers.quantization.fbgemm_fp8 import FBGEMMFp8Config
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.gguf import GGUFConfig
@@ -51,6 +53,7 @@ QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "compressed-tensors": CompressedTensorsConfig,
     "bitsandbytes": BitsAndBytesConfig,
     "qqq": QQQConfig,
+    "experts_int8": ExpertsInt8Config,
 }
 
 

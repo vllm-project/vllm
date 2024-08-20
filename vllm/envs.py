@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     VLLM_LOGGING_CONFIG_PATH: Optional[str] = None
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
+    VLLM_USE_FLASHINFER_SAMPLER: bool = False
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
@@ -256,6 +257,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ATTENTION_BACKEND":
     lambda: os.getenv("VLLM_ATTENTION_BACKEND", None),
 
+    # If set, vllm will use flashinfer sampler
+    "VLLM_USE_FLASHINFER_SAMPLER":
+    lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_SAMPLER", "0"))),
+
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION":
     lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
@@ -334,7 +339,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_XLA_CACHE_PATH":
     lambda: os.path.expanduser(
         os.getenv(
-            "VLLM_ASSETS_CACHE",
+            "VLLM_XLA_CACHE_PATH",
             os.path.join(get_default_cache_root(), "vllm", "xla_cache"),
         )),
     "VLLM_FUSED_MOE_CHUNK_SIZE":

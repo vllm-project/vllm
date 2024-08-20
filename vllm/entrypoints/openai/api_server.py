@@ -2,7 +2,9 @@ import asyncio
 import importlib
 import inspect
 import multiprocessing
+import os
 import re
+import tempfile
 from argparse import Namespace
 from contextlib import asynccontextmanager
 from http import HTTPStatus
@@ -12,7 +14,6 @@ from fastapi import APIRouter, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from prometheus_client import make_asgi_app
 from starlette.routing import Mount
 
 import vllm.envs as envs
@@ -54,19 +55,22 @@ openai_serving_chat: OpenAIServingChat
 openai_serving_completion: OpenAIServingCompletion
 openai_serving_embedding: OpenAIServingEmbedding
 openai_serving_tokenization: OpenAIServingTokenization
+prometheus_multiproc_dir: tempfile.TemporaryDirectory
 
 logger = init_logger('vllm.entrypoints.openai.api_server')
 
 _running_tasks: Set[asyncio.Task] = set()
 
 
-def model_is_embedding(model_name: str, trust_remote_code: bool) -> bool:
+def model_is_embedding(model_name: str, trust_remote_code: bool,
+                       quantization: str) -> bool:
     return ModelConfig(model=model_name,
                        tokenizer=model_name,
                        tokenizer_mode="auto",
                        trust_remote_code=trust_remote_code,
+                       quantization=quantization,
                        seed=0,
-                       dtype="float16").embedding_mode
+                       dtype="auto").embedding_mode
 
 
 @asynccontextmanager
@@ -97,7 +101,8 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
 
     # If manually triggered or embedding model, use AsyncLLMEngine in process.
     # TODO: support embedding model via RPC.
-    if (model_is_embedding(args.model, args.trust_remote_code)
+    if (model_is_embedding(args.model, args.trust_remote_code,
+                           args.quantization)
             or args.disable_frontend_multiprocessing):
         async_engine_client = AsyncLLMEngine.from_engine_args(
             engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
@@ -106,6 +111,21 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
 
     # Otherwise, use the multiprocessing AsyncLLMEngine.
     else:
+        if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
+            # Make TemporaryDirectory for prometheus multiprocessing
+            # Note: global TemporaryDirectory will be automatically
+            #   cleaned up upon exit.
+            global prometheus_multiproc_dir
+            prometheus_multiproc_dir = tempfile.TemporaryDirectory()
+            os.environ[
+                "PROMETHEUS_MULTIPROC_DIR"] = prometheus_multiproc_dir.name
+        else:
+            logger.warning(
+                "Found PROMETHEUS_MULTIPROC_DIR was set by user. "
+                "This directory must be wiped between vLLM runs or "
+                "you will find inaccurate metrics. Unset the variable "
+                "and vLLM will properly handle cleanup.")
+
         # Select random path for IPC.
         rpc_path = get_open_zmq_ipc_path()
         logger.info("Multiprocessing frontend to use %s for RPC Path.",
@@ -146,13 +166,38 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
             # Wait for server process to join
             rpc_server_process.join()
 
+            # Lazy import for prometheus multiprocessing.
+            # We need to set PROMETHEUS_MULTIPROC_DIR environment variable
+            # before prometheus_client is imported.
+            # See https://prometheus.github.io/client_python/multiprocess/
+            from prometheus_client import multiprocess
+            multiprocess.mark_process_dead(rpc_server_process.pid)
+
 
 router = APIRouter()
 
 
 def mount_metrics(app: FastAPI):
-    # Add prometheus asgi middleware to route /metrics requests
-    metrics_route = Mount("/metrics", make_asgi_app())
+    # Lazy import for prometheus multiprocessing.
+    # We need to set PROMETHEUS_MULTIPROC_DIR environment variable
+    # before prometheus_client is imported.
+    # See https://prometheus.github.io/client_python/multiprocess/
+    from prometheus_client import (CollectorRegistry, make_asgi_app,
+                                   multiprocess)
+
+    prometheus_multiproc_dir_path = os.getenv("PROMETHEUS_MULTIPROC_DIR", None)
+    if prometheus_multiproc_dir_path is not None:
+        logger.info("vLLM to use %s as PROMETHEUS_MULTIPROC_DIR",
+                    prometheus_multiproc_dir_path)
+        registry = CollectorRegistry()
+        multiprocess.MultiProcessCollector(registry)
+
+        # Add prometheus asgi middleware to route /metrics requests
+        metrics_route = Mount("/metrics", make_asgi_app(registry=registry))
+    else:
+        # Add prometheus asgi middleware to route /metrics requests
+        metrics_route = Mount("/metrics", make_asgi_app())
+
     # Workaround for 307 Redirect for /metrics
     metrics_route.path_regex = re.compile('^/metrics(?P<path>.*)$')
     app.routes.append(metrics_route)
