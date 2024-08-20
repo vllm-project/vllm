@@ -1,23 +1,54 @@
-import torch
-
 from .interface import Platform, PlatformEnum, UnspecifiedPlatform
 
 current_platform: Platform
 
-try:
-    import libtpu
-except ImportError:
-    libtpu = None
+# NOTE: we don't use `torch.version.cuda` / `torch.version.hip` because
+# they only indicate the build configuration, not the runtime environment.
+# For example, people can install a cuda build of pytorch but run on tpu.
 
-if libtpu is not None:
+is_tpu = False
+try:
+    import torch_xla.core.xla_model as xm
+    xm.xla_device(devkind="TPU")
+    is_tpu = True
+except Exception:
+    pass
+
+is_cuda = False
+
+try:
+    import pynvml
+    pynvml.nvmlInit()
+    try:
+        if pynvml.nvmlDeviceGetCount() > 0:
+            is_cuda = True
+    finally:
+        pynvml.nvmlShutdown()
+except Exception:
+    pass
+
+is_rocm = False
+
+try:
+    import amdsmi
+    amdsmi.amdsmi_init()
+    try:
+        if len(amdsmi.amdsmi_get_processor_handles()) > 0:
+            is_rocm = True
+    finally:
+        amdsmi.amdsmi_shut_down()
+except Exception:
+    pass
+
+if is_tpu:
     # people might install pytorch built with cuda but run on tpu
     # so we need to check tpu first
     from .tpu import TpuPlatform
     current_platform = TpuPlatform()
-elif torch.version.cuda is not None:
+elif is_cuda:
     from .cuda import CudaPlatform
     current_platform = CudaPlatform()
-elif torch.version.hip is not None:
+elif is_rocm:
     from .rocm import RocmPlatform
     current_platform = RocmPlatform()
 else:
