@@ -821,6 +821,8 @@ class BartForConditionalGeneration(nn.Module):
                  lora_config: Optional[LoRAConfig] = None):
 
         super().__init__()
+        # currently all existing BART models have `tie_word_embeddings` enabled
+        assert config.tie_word_embeddings
         self.config = config
         self.model = BartModel(config,
                                cache_config,
