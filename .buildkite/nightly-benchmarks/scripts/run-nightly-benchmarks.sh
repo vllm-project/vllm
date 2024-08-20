@@ -273,7 +273,7 @@ run_serving_tests() {
         --arg server "$server_command" \
         --arg client "$client_command" \
         --arg gpu "$gpu_type" \
-        --arg engine "tgi" \
+        --arg engine "$CURRENT_LLM_SERVING_ENGINE" \
         '{
           server_command: $server,
           client_command: $client,
@@ -311,6 +311,13 @@ main() {
   check_gpus
   check_hf_token
   get_current_llm_serving_engine
+
+  if [[ $CURRENT_LLM_SERVING_ENGINE = "tensorrt-llm" ]]; then
+    # update transformers version for tensorrt-llm
+    # Issue: https://github.com/NVIDIA/TensorRT-LLM/issues/2105
+    pip install -U transformers
+  fi
+  
 
   # check storage
   df -h
