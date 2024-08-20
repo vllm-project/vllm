@@ -590,9 +590,17 @@ def caplog_vllm(temporary_enable_log_propagate, caplog):
     yield caplog
 
 
+def is_hpu():
+    from importlib import util
+    return util.find_spec('habana_frameworks') is not None
+
+
 @pytest.fixture(scope="session")
 def num_gpus_available():
     """Get number of GPUs without initializing the CUDA context
     in current process."""
+
+    if is_hpu():
+        return torch.hpu.device_count()
 
     return cuda_device_count_stateless()

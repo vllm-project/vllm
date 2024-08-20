@@ -154,29 +154,36 @@ class HabanaExecutor(ExecutorBase):
         return output
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
-        raise NotImplementedError("LoRA is not implemented for HPU backend.")
+        assert lora_request.lora_int_id > 0, "lora_id must be greater than 0."
+        return self.driver_worker.add_lora(lora_request)
 
     def remove_lora(self, lora_id: int) -> bool:
-        raise NotImplementedError("LoRA is not implemented for HPU backend.")
-
-    def list_loras(self) -> Set[int]:
-        raise NotImplementedError("LoRA is not implemented for HPU backend.")
+        assert lora_id > 0, "lora_id must be greater than 0."
+        return self.driver_worker.remove_lora(lora_id)
 
     def pin_lora(self, lora_id: int) -> bool:
-        raise NotImplementedError("LoRA is not implemented for HPU backend.")
+        assert lora_id > 0, "lora_id must be greater than 0."
+        return self.driver_worker.pin_lora(lora_id)
+
+    def list_loras(self) -> Set[int]:
+        return self.driver_worker.list_loras()
 
     def add_prompt_adapter(
             self, prompt_adapter_request: PromptAdapterRequest) -> bool:
-        raise NotImplementedError("LoRA is not implemented for HPU backend.")
+        raise NotImplementedError(
+            "Prompt Adapter is not implemented for HPU backend.")
 
     def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
-        raise NotImplementedError("LoRA is not implemented for HPU backend.")
+        raise NotImplementedError(
+            "Prompt Adapter is not implemented for HPU backend.")
 
     def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
-        raise NotImplementedError("LoRA is not implemented for HPU backend.")
+        raise NotImplementedError(
+            "Prompt Adapter is not implemented for HPU backend.")
 
     def list_prompt_adapters(self) -> Set[int]:
-        raise NotImplementedError("LoRA is not implemented for HPU backend.")
+        raise NotImplementedError(
+            "Prompt Adapter is not implemented for HPU backend.")
 
     def check_health(self) -> None:
         # GPUExecutor will always be healthy as long as

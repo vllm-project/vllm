@@ -3,6 +3,7 @@ from typing import Dict, List, Optional
 import torch
 
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
+from vllm.utils import get_device
 
 
 class DummyLoRAManager:
@@ -28,16 +29,16 @@ class DummyLoRAManager:
             lora_alpha=1,
             lora_a=torch.rand([weight.shape[1], rank],
                               dtype=weight.dtype,
-                              device="cuda"),
+                              device=get_device()),
             lora_b=torch.rand([rank, weight.shape[0]],
                               dtype=weight.dtype,
-                              device="cuda"),
+                              device=get_device()),
         )
         if generate_embeddings_tensor:
             lora.embeddings_tensor = torch.rand(5,
                                                 generate_embeddings_tensor,
                                                 dtype=weight.dtype,
-                                                device="cuda")
+                                                device=get_device())
         self.set_module_lora(module_name, lora)
 
         return lora
@@ -53,8 +54,8 @@ class DummyLoRAManager:
             module_name,
             rank=rank,
             lora_alpha=1,
-            lora_a=torch.rand([input_dim, rank], device="cuda"),
-            lora_b=torch.rand([rank, output_dim], device="cuda"),
+            lora_a=torch.rand([input_dim, rank], device=get_device()),
+            lora_b=torch.rand([rank, output_dim], device=get_device()),
             embeddings_tensor=embeddings_tensor,
         )
         self.set_module_lora(module_name, lora)

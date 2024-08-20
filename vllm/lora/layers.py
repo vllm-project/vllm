@@ -27,6 +27,10 @@ from vllm.model_executor.layers.rotary_embedding import (
     LinearScalingRotaryEmbedding, RotaryEmbedding)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
+from vllm.utils import is_hpu
+
+if is_hpu():
+    from vllm.hpu.ops import dispatch_bgmv_embedding, dispatch_bgmv_linear
 
 if TYPE_CHECKING:
     pass
@@ -89,7 +93,11 @@ def _apply_lora(
     x = x.view(-1, x.shape[-1])
     output = output.view(-1, output.shape[-1])
     indices = indices.view(-1)
-    add_lora(output, x, lora_a_stacked, lora_b_stacked, indices, 0, 1.0)
+    if is_hpu():
+        dispatch_bgmv_linear(output, x, lora_a_stacked, lora_b_stacked,
+                             indices, 0, 1.0)
+    else:
+        add_lora(output, x, lora_a_stacked, lora_b_stacked, indices, 0, 1.0)
     return output.view_as(org_output)
 
 
@@ -127,9 +135,15 @@ def _apply_lora_packed_nslice(
     indices = indices.view(-1)
     offset_left = 0
     for slice_idx in range(len(output_slices)):
-        add_lora_slice(output, x, lora_a_stacked[slice_idx],
-                       lora_b_stacked[slice_idx], indices, 0, 1.0, offset_left,
-                       output_slices[slice_idx])
+        if is_hpu():
+            dispatch_bgmv_linear(
+                output[:, offset_left:offset_left + output_slices[slice_idx]],
+                x, lora_a_stacked[slice_idx], lora_b_stacked[slice_idx],
+                indices, 0, 1.0)
+        else:
+            add_lora_slice(output, x, lora_a_stacked[slice_idx],
+                           lora_b_stacked[slice_idx], indices, 0, 1.0,
+                           offset_left, output_slices[slice_idx])
         offset_left += output_slices[slice_idx]
     return output.view_as(org_output)
 
@@ -330,8 +344,13 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             full_lora_a_embeddings = full_lora_a_embeddings.view(
                 full_lora_a_embeddings.shape[0] *
                 full_lora_a_embeddings.shape[1], -1)
-        bgmv(full_output, full_lora_a_embeddings, self.lora_b_stacked,
-             self.indices[:self.indices_len[0]], 0, 1.0)
+        if is_hpu():
+            dispatch_bgmv_embedding(full_output, full_lora_a_embeddings,
+                                    self.lora_b_stacked,
+                                    self.indices[:self.indices_len[0]], 0, 1.0)
+        else:
+            bgmv(full_output, full_lora_a_embeddings, self.lora_b_stacked,
+                 self.indices[:self.indices_len[0]], 0, 1.0)
         return full_output.view_as(full_output_org)
 
     @classmethod

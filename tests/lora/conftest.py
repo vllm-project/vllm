@@ -48,13 +48,19 @@ LONG_LORA_INFOS: List[ContextIDInfo] = [{
 }]
 
 
+def is_hpu():
+    from importlib import util
+    return util.find_spec('habana_frameworks') is not None
+
+
 def cleanup():
     destroy_model_parallel()
     destroy_distributed_environment()
     with contextlib.suppress(AssertionError):
         torch.distributed.destroy_process_group()
     gc.collect()
-    torch.cuda.empty_cache()
+    if not is_hpu():
+        torch.cuda.empty_cache()
     ray.shutdown()
 
 

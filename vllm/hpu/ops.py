@@ -191,3 +191,78 @@ def prompt_attention(
                                        valid_seq_lengths, 'right')
     attn_weights = attn_weights.transpose(1, 2)
     return attn_weights
+
+
+def dispatch_bgmv_linear(
+    y: torch.Tensor,
+    x: torch.Tensor,
+    wa_t_all: torch.Tensor,
+    wb_t_all: torch.Tensor,
+    indices: torch.LongTensor,
+    layer_idx: int,
+    scale: float,
+):
+    """
+    `wa_t_all` and `wb_t_all` contains all LoRA A and LoRA B weight matrices
+    stacked into single tensors, assuming same rank. HPU handles no-LoRA
+    requests using zero valued A and B tensors. These zero valued tensors are
+    appended at the end of `wa_t_all` and `wb_t_all` during initialization. For
+    custom BGMV, the corresponding `wa` and `wb` for each batch is created
+    based on the lora_index of each sample.
+
+    For example:
+        `wa_t_all` is tensor of shape (num_loras, num_layers, lora_rank,
+        hidden_dim), where `wa_t_all[-1]` is zero valued tensor which handles
+        no-LoRA case. The `wa` tensor for a batch of size batch_Size will have
+        a shape of (batch_size, num_layers, hidden_dim, lora_rank)
+
+    This method avoids for-loop as well as graph breaks.
+    """
+    assert layer_idx == 0, f'layer_idx should be 0, but got {layer_idx}'
+    max_loras = wa_t_all.size(0)
+    # Wrap-around for negative indices
+    indices = indices % max_loras
+    wa = torch.index_select(wa_t_all, 0, indices)[:, 0, :, :].transpose(-1, -2)
+    wb = torch.index_select(wb_t_all, 0, indices)[:, 0, :, :].transpose(-1, -2)
+
+    x = x.unsqueeze(1)
+    out = x @ wa
+    out = out @ wb
+    out = out.squeeze(1)
+    y += out * scale
+
+
+def dispatch_bgmv_embedding(
+    y: torch.Tensor,
+    x: torch.Tensor,
+    wa_t_all: torch.Tensor,
+    indices: torch.LongTensor,
+    layer_idx: int,
+    scale: float,
+):
+    """
+    `wa_t_all` contains all LoRA A weight matrices stacked into a single tensor
+    assuming same rank. HPU handles no-LoRA requests using zero valued A
+    tensor. This zero valued tensor is appended at the end of `wa_t_all` during
+    initialization. For custom BGMV, the corresponding wa for each batch is
+    created based on the lora_index of the sample.
+
+    For example:
+        `wa_t_all` is tensor of shape (num_loras, num_layers, lora_rank,
+        hidden_dim), where `wa_t_all[-1]` is zero valued tensor which handles
+        no-LoRA case. The wa tensor for a batch of size batch_Size will have a
+        shape of (batch_size, num_layers, lora_rank, hidden_dim)
+
+
+    This method avoids for-loop as well as graph breaks.
+    """
+    assert layer_idx == 0, f'layer_idx should be 0, but got {layer_idx}'
+    max_loras = wa_t_all.size(0)
+    # Wrap-around for negative indices
+    indices = indices % max_loras
+    wa = torch.index_select(wa_t_all, 0, indices)[:, 0, :, :].transpose(-1, -2)
+
+    x = x.unsqueeze(1)
+    out = x @ wa
+    out = out.squeeze(1)
+    y += out * scale

@@ -435,6 +435,23 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                    f"took {m_getmodel.get_summary_string()}")
             logger.info(msg)
 
+            if self.lora_config:
+                assert hasattr(self.model, "supported_lora_modules"
+                               ) and self.model.supported_lora_modules, (
+                                   "Model does not support LoRA")
+                assert hasattr(self.model, "embedding_modules"
+                               ), "Model does not have embedding_modules"
+                assert hasattr(
+                    self.model, "embedding_padding_modules"
+                ), "Model does not have embedding_padding_modules"
+                self.lora_manager = LRUCacheWorkerLoRAManager(
+                    self.scheduler_config.max_num_seqs,
+                    self.scheduler_config.max_num_batched_tokens,
+                    self.vocab_size, self.lora_config, self.device,
+                    self.model.embedding_modules,
+                    self.model.embedding_padding_modules)
+                self.model = self.lora_manager.create_lora_manager(self.model)
+
             if self.model_config.quantization == 'inc':
                 logger.info("Preparing model with INC..")
                 with HabanaMemoryProfiler() as m_inc:
@@ -467,35 +484,26 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         msg = f"Loading model weights took in total {m.get_summary_string()}"
         logger.info(msg)
 
-        if self.lora_config:
-            assert hasattr(self.model, "supported_lora_modules"
-                           ) and self.model.supported_lora_modules, (
-                               "Model does not support LoRA")
-            assert hasattr(
-                self.model,
-                "embedding_modules"), "Model does not have embedding_modules"
-            assert hasattr(self.model, "embedding_padding_modules"
-                           ), "Model does not have embedding_padding_modules"
-            self.lora_manager = LRUCacheWorkerLoRAManager(
-                self.scheduler_config.max_num_seqs,
-                self.scheduler_config.max_num_batched_tokens, self.vocab_size,
-                self.lora_config, self.device, self.model.embedding_modules,
-                self.model.embedding_padding_modules)
-            self.model = self.lora_manager.create_lora_manager(self.model)
-
     def _use_graphs(self, batch_size, seq_len, is_prompt):
         if self.enforce_eager:
             return False
         return (batch_size, seq_len, is_prompt) in self.graphed_buckets
 
+    def _is_valid_bucket(self, bucket):
+        return bucket[0] * bucket[1] <= self.max_num_batched_tokens
+
     def _setup_buckets(self) -> None:
+        max_bucket_cfg = 64
+        if self.lora_config and \
+            max_bucket_cfg > self.max_num_batched_tokens // self.block_size:
+            max_bucket_cfg = self.max_num_batched_tokens // self.block_size
         self.prompt_bs_bucket_cfg = read_bucket_settings('prompt',
                                                          'bs',
                                                          min=1,
                                                          step=32,
                                                          max=min(
                                                              self.max_num_seqs,
-                                                             64))
+                                                             max_bucket_cfg))
         self.decode_bs_bucket_cfg = read_bucket_settings('decode',
                                                          'bs',
                                                          min=1,
@@ -520,6 +528,12 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.prompt_buckets = warmup_buckets(self.prompt_bs_bucket_cfg,
                                              self.prompt_seq_bucket_cfg)
 
+        if self.lora_config:
+            self.prompt_buckets[:] = [
+                bucket for bucket in self.prompt_buckets
+                if self._is_valid_bucket(bucket)
+            ]
+
         msg = (f"Generated {len(self.prompt_buckets)} "
                f"prompt buckets: {list(sorted(self.prompt_buckets))}")
         logger.info(msg)
@@ -530,6 +544,11 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         logger.info(msg)
         self.decode_buckets = warmup_buckets(self.decode_bs_bucket_cfg,
                                              self.decode_seq_bucket_cfg)
+        if self.lora_config:
+            self.decode_buckets[:] = [
+                bucket for bucket in self.decode_buckets
+                if self._is_valid_bucket(bucket)
+            ]
         msg = (f"Generated {len(self.decode_buckets)} decode buckets: "
                f"{list(sorted(self.decode_buckets))}")
         logger.info(msg)
@@ -606,16 +625,6 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
             input_positions.append(list(range(context_len, seq_len)))
-            lora_id = seq_group_metadata.lora_int_id
-
-            if lora_id > 0:
-                lora_requests.add(seq_group_metadata.lora_request)
-
-            lora_index_mapping += [lora_id] * (seq_len - context_len)
-            lora_prompt_mapping.append(
-                [lora_id] *
-                (seq_len - context_len
-                 if seq_group_metadata.sampling_params.prompt_logprobs else 1))
 
             if seq_group_metadata.multi_modal_data:
                 multi_modal_input_list.append(
@@ -674,6 +683,20 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         max_prompt_len = max(
             find_bucket(max(seq_lens), self.prompt_seq_bucket_cfg),
             self.block_size)
+
+        for seq_group_metadata, context_len in zip(seq_group_metadata_list,
+                                                   context_lens):
+            lora_id = seq_group_metadata.lora_int_id
+
+            if lora_id > 0:
+                lora_requests.add(seq_group_metadata.lora_request)
+
+            lora_index_mapping += [lora_id] * (max_prompt_len - context_len)
+            lora_prompt_mapping.extend(
+                [lora_id] *
+                (max_prompt_len - context_len
+                 if seq_group_metadata.sampling_params.prompt_logprobs else 1))
+
         input_tokens = make_tensor_with_pad(input_tokens,
                                             max_len=max_prompt_len,
                                             pad=0,
@@ -1027,7 +1050,11 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         ])
         return attention_metadata
 
-    def create_dummy_seq_group_metadata(self, group_id, seq_len, is_prompt):
+    def create_dummy_seq_group_metadata(self,
+                                        group_id,
+                                        seq_len,
+                                        is_prompt,
+                                        lora_request=None):
         sampling_params = SamplingParams(temperature=0)
         num_blocks = math.ceil(seq_len / self.block_size)
         if is_prompt:
@@ -1042,34 +1069,78 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         output_token_ids = [1] * output_len
         seq_data = SequenceData(prompt_token_ids)
         seq_data.output_token_ids = output_token_ids
-        return SequenceGroupMetadata(
-            request_id=str(group_id),
-            is_prompt=(output_len == 0),
-            seq_data={group_id: seq_data},
-            sampling_params=sampling_params,
-            block_tables=block_tables,
-        )
+        return SequenceGroupMetadata(request_id=str(group_id),
+                                     is_prompt=(output_len == 0),
+                                     seq_data={group_id: seq_data},
+                                     sampling_params=sampling_params,
+                                     block_tables=block_tables,
+                                     lora_request=lora_request)
 
     def profile_run(self) -> None:
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
         max_batch_size = self.prompt_bs_bucket_cfg[-1]
         max_seq_len = self.prompt_seq_bucket_cfg[-1]
+        if self.lora_config:
+            max_seq_len = self.max_num_batched_tokens // max_batch_size
 
-        self.warmup_scenario(max_batch_size, max_seq_len, True, kv_caches)
+        self.warmup_scenario(max_batch_size,
+                             max_seq_len,
+                             True,
+                             kv_caches,
+                             is_profile_run=True)
 
-    def warmup_scenario(self, batch_size, seq_len, is_prompt,
-                        kv_caches) -> None:
+    def warmup_scenario(self,
+                        batch_size,
+                        seq_len,
+                        is_prompt,
+                        kv_caches,
+                        is_profile_run=False) -> None:
         use_graphs = self._use_graphs(batch_size, seq_len, is_prompt)
         scenario_name = ("warmup_"
                          f"{'prompt' if is_prompt else 'decode'}_"
                          f"bs{batch_size}_"
                          f"seq{seq_len}_"
                          f"graphs{'T' if use_graphs else 'F'}")
+        max_num_seqs = self.scheduler_config.max_num_seqs
+        # This represents the maximum number of different requests
+        # that will have unique loras, an therefore the max amount of memory
+        # consumption create dummy lora request copies from the lora request
+        # passed in, which contains a lora from the lora warmup path.
+        dummy_lora_requests: List[LoRARequest] = []
+        dummy_lora_requests_per_seq: List[LoRARequest] = []
+        if self.lora_config and is_profile_run:
+            assert self.lora_manager is not None
+            with self.lora_manager.dummy_lora_cache():
+                for idx in range(self.lora_config.max_loras):
+                    lora_id = idx + 1
+                    dummy_lora_request = LoRARequest(
+                        lora_name=f"warmup_{lora_id}",
+                        lora_int_id=lora_id,
+                        lora_local_path="/not/a/real/path",
+                    )
+                    self.lora_manager.add_dummy_lora(dummy_lora_request,
+                                                     rank=LORA_WARMUP_RANK)
+                    dummy_lora_requests.append(dummy_lora_request)
+                dummy_lora_requests_per_seq = [
+                    dummy_lora_requests[idx % len(dummy_lora_requests)]
+                    for idx in range(max_num_seqs)
+                ]
         self.profiler.start('internal', scenario_name)
         times = 3 if use_graphs else 1
+        if self.lora_config and not is_profile_run:
+            lora_mapping = LoRAMapping(
+                [0] * batch_size * seq_len,
+                [0] * batch_size * seq_len,
+            )
+            self.set_active_loras(set(), lora_mapping)
         seqs = [
-            self.create_dummy_seq_group_metadata(i, seq_len, is_prompt)
+            self.create_dummy_seq_group_metadata(
+                i,
+                seq_len,
+                is_prompt,
+                lora_request=dummy_lora_requests_per_seq[i]
+                if dummy_lora_requests_per_seq else None)
             for i in range(batch_size)
         ]
         torch.hpu.synchronize()
@@ -1079,6 +1150,37 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             torch.hpu.synchronize()
         self.profiler.end()
         gc.collect()
+
+    def remove_all_loras(self):
+        if not self.lora_manager:
+            raise RuntimeError("LoRA is not enabled.")
+        self.lora_manager.remove_all_adapters()
+
+    def set_active_loras(self, lora_requests: Set[LoRARequest],
+                         lora_mapping: LoRAMapping) -> None:
+        if not self.lora_manager:
+            raise RuntimeError("LoRA is not enabled.")
+        self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
+
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        if not self.lora_manager:
+            raise RuntimeError("LoRA is not enabled.")
+        return self.lora_manager.add_adapter(lora_request)
+
+    def remove_lora(self, lora_id: int) -> bool:
+        if not self.lora_manager:
+            raise RuntimeError("LoRA is not enabled.")
+        return self.lora_manager.remove_adapter(lora_id)
+
+    def pin_lora(self, lora_id: int) -> bool:
+        if not self.lora_manager:
+            raise RuntimeError("LoRA is not enabled.")
+        return self.lora_manager.pin_adapter(lora_id)
+
+    def list_loras(self) -> Set[int]:
+        if not self.lora_manager:
+            raise RuntimeError("LoRA is not enabled.")
+        return self.lora_manager.list_adapters()
 
     def log_warmup(self, phase, i, max_i, batch_size, seq_len):
         free_mem = format_bytes(
@@ -1403,9 +1505,11 @@ class HabanaModelRunner(
             raise ValueError(
                 "num_steps > 1 is not supported in HabanaModelRunner")
 
-        # NOTE(kzawora): Need to restore this after adding LoRA
-        # if self.lora_config:
-        #    self.set_active_loras(lora_requests, lora_mapping)
+        if self.lora_config:
+            assert model_input.lora_requests is not None
+            assert model_input.lora_mapping is not None
+            self.set_active_loras(model_input.lora_requests,
+                                  model_input.lora_mapping)
         input_tokens = model_input.input_tokens
         input_positions = model_input.input_positions
         attn_metadata = model_input.attn_metadata
@@ -1451,6 +1555,19 @@ class HabanaModelRunner(
                 **execute_model_kwargs,
                 selected_token_indices=sampling_metadata.selected_token_indices
             )
+
+        if self.lora_config:
+            from vllm.lora.layers import VocabParallelEmbeddingWithLoRA
+            property = vars(self.model.model)
+            model = list(property['_modules'].values())[0]
+            property = vars(model)
+            modules = list(property['_modules'].values())
+            for module in modules:
+                if isinstance(module, VocabParallelEmbeddingWithLoRA):
+                    for i in range(0, 4):
+                        module.indices_len[
+                            i] = sampling_metadata.selected_token_indices.numel(
+                            )
 
         # Compute the logits.
         with self.profiler.record_event(

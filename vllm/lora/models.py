@@ -24,7 +24,7 @@ from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              parse_fine_tuned_lora_name, replace_submodule)
 from vllm.model_executor.models.interfaces import SupportsLoRA
-from vllm.utils import is_pin_memory_available
+from vllm.utils import get_device, is_hpu, is_pin_memory_available
 
 logger = init_logger(__name__)
 
@@ -93,7 +93,7 @@ def convert_mapping(
     long_lora_offsets: Optional[torch.Tensor] = None
     if long_lora_context:
         long_lora_offsets = torch.zeros(len(index_mapping_indices),
-                                        device="cuda",
+                                        device=get_device(),
                                         dtype=torch.long)
     prompt_mapping: List[int] = [
         lora_index_to_id.index(x) if x > 0 else -1
@@ -118,9 +118,9 @@ def convert_mapping(
     if long_lora_context:
         assert long_lora_offsets is not None
         indices_list.append(long_lora_offsets)
-    indices = torch.tensor(indices_list, dtype=torch.long, device="cuda")
+    indices = torch.tensor(indices_list, dtype=torch.long, device=get_device())
     prompt_mapping_tensor = torch.tensor(prompt_mapping,
-                                         device="cuda",
+                                         device=get_device(),
                                          dtype=torch.long)
     embeddings_indices = torch.stack([
         indices[2] * extra_vocab_size,
@@ -131,10 +131,10 @@ def convert_mapping(
     sampler_indices = prompt_mapping_tensor
     sampler_indices_padded = sampler_indices.clone()
     sampler_indices_padded[sampler_indices_padded == -1] = max_loras - 1
-    sampler_indices_padded = (
-        torch.arange(
-            0, len(sampler_indices_padded), device="cuda", dtype=torch.long) +
-        (sampler_indices_padded * len(sampler_indices_padded)))
+    sampler_indices_padded = (torch.arange(
+        0, len(sampler_indices_padded), device=get_device(), dtype=torch.long)
+                              + (sampler_indices_padded *
+                                 len(sampler_indices_padded)))
     long_lora_indices = None
     long_lora_indices_len: Optional[int] = None
     if long_lora_context:
@@ -424,20 +424,20 @@ class LoRAModelManager(AdapterModelManager):
         self.long_lora_context: Optional[LongContextLoRAContext] = None
         self.base_indices = torch.empty(self.max_num_batched_tokens,
                                         dtype=torch.long,
-                                        device="cuda")
+                                        device=get_device())
         self.sampler_indices = torch.empty(self.max_num_batched_tokens,
                                            dtype=torch.long,
-                                           device="cuda")
+                                           device=get_device())
         self.sampler_indices_padded = torch.empty(self.max_num_batched_tokens,
                                                   dtype=torch.long,
-                                                  device="cuda")
+                                                  device=get_device())
         self.embeddings_indices = torch.empty(2,
                                               self.max_num_batched_tokens,
                                               dtype=torch.long,
-                                              device="cuda")
+                                              device=get_device())
         self.long_lora_indices = torch.empty(self.max_num_batched_tokens,
                                              dtype=torch.long,
-                                             device="cuda")
+                                             device=get_device())
         # Scaling factor -> offset to the sin_cos_cache to it.
         # Used for long context lora.
         self.scaling_factor_to_offset: Dict[float, int] = {}
@@ -465,11 +465,25 @@ class LoRAModelManager(AdapterModelManager):
 
     @property
     def capacity(self) -> int:
-        return self.lora_config.max_cpu_loras
+        if is_hpu():
+            # HPU handles no LoRA requests using zero valued A and B tensors.
+            # These zero valued tensors are appended at the end of A and B,
+            # making total number of loras to be lora_config.max_cpu_loras + 1.
+            # This demands the total number of max_cpu_loras to be
+            # lora_config.max_cpu_loras + 1
+            return self.lora_config.max_cpu_loras + 1
+        else:
+            return self.lora_config.max_cpu_loras
 
     @property
     def lora_slots(self) -> int:
-        return self.lora_config.max_loras
+        if is_hpu():
+            # HPU handles no LoRA requests using zero valued A and B tensors.
+            # These zero valued tensors are appended at the end of A and B,
+            # making total number of loras to be lora_config.max_cpu_loras + 1.
+            return self.lora_config.max_loras + 1
+        else:
+            return self.lora_config.max_loras
 
     @property
     def adapter_slots(self) -> int:
