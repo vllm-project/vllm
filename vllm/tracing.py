@@ -9,7 +9,7 @@ TRACE_HEADERS = ["traceparent", "tracestate"]
 logger = init_logger(__name__)
 
 _is_otel_imported = False
-otel_import_err = None
+otel_import_error_traceback: Optional[str] = None
 try:
     from opentelemetry.context.context import Context
     from opentelemetry.sdk.environment_variables import (
@@ -21,8 +21,13 @@ try:
     from opentelemetry.trace.propagation.tracecontext import (
         TraceContextTextMapPropagator)
     _is_otel_imported = True
-except ImportError as e:
-    otel_import_err = e
+except ImportError:
+    # Capture and format traceback to provide detailed context for the import
+    # error. Only the string representation of the error is retained to avoid
+    # memory leaks.
+    # See https://github.com/vllm-project/vllm/pull/7266#discussion_r1707395458
+    import traceback
+    otel_import_error_traceback = traceback.format_exc()
 
     class Context:  # type: ignore
         pass
@@ -46,8 +51,8 @@ def init_tracer(instrumenting_module_name: str,
     if not is_otel_available():
         raise ValueError(
             "OpenTelemetry is not available. Unable to initialize "
-            "a tracer. Ensure OpenTelemetry packages are installed."
-        ) from otel_import_err
+            "a tracer. Ensure OpenTelemetry packages are installed. "
+            f"Original error:\n{otel_import_error_traceback}")
     trace_provider = TracerProvider()
 
     span_exporter = get_span_exporter(otlp_traces_endpoint)

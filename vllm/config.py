@@ -12,7 +12,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import current_platform
-from vllm.tracing import is_otel_available, otel_import_err
+from vllm.tracing import is_otel_available, otel_import_error_traceback
 from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import (STR_NOT_IMPL_ENC_DEC_CUDAGRAPH, GiB_bytes,
                         cuda_device_count_stateless, get_cpu_memory, is_cpu,
@@ -1725,7 +1725,7 @@ class ObservabilityConfig:
             raise ValueError(
                 "OpenTelemetry is not available. Unable to configure "
                 "'otlp_traces_endpoint'. Ensure OpenTelemetry packages are "
-                "installed.") from otel_import_err
+                f"installed. Original error:\n{otel_import_error_traceback}")
 
         if ((self.collect_model_forward_time
              or self.collect_model_execute_time)
