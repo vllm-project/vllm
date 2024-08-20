@@ -108,7 +108,9 @@ class AsyncStream:
         try:
             while not self._finished:
                 result = await self._queue.get()
-                if isinstance(result, Exception):
+                if isinstance(result, BaseException) or \
+                    (isinstance(result, type) and \
+                     issubclass(result, BaseException)):
                     if result == STOP_ITERATION:
                         return
                     raise result
