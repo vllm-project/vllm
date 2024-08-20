@@ -91,15 +91,8 @@ class RayGPUExecutor(DistributedGPUExecutor):
         return ray_remote_kwargs
 
     def _get_worker_wrapper_args(self) -> Dict[str, Any]:
-        if self.speculative_config is not None:
-            worker_module_name = "vllm.spec_decode.spec_decode_worker"
-            worker_class_name = "create_spec_worker"
-        elif self.scheduler_config.is_multi_step:
-            worker_module_name = "vllm.worker.multi_step_worker"
-            worker_class_name = "MultiStepWorker"
-        else:
-            worker_module_name = "vllm.worker.worker"
-            worker_class_name = "Worker"
+        (worker_module_name,
+         worker_class_name) = self._get_worker_module_and_class()
 
         return dict(
             worker_module_name=worker_module_name,
