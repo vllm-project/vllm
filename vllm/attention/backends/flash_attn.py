@@ -9,7 +9,8 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata,
                                               AttentionMetadataBuilder,
                                               AttentionType)
-from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
+from vllm.attention.backends.utils import (PAD_SLOT_ID, CommonAttentionState,
+                                           compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
@@ -141,6 +142,10 @@ class FlashAttentionBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> Type["FlashAttentionMetadataBuilder"]:
         return FlashAttentionMetadataBuilder
+
+    @staticmethod
+    def get_state_cls() -> Type["CommonAttentionState"]:
+        return CommonAttentionState
 
     @staticmethod
     def get_kv_cache_shape(
