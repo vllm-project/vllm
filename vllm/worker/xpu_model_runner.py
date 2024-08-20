@@ -48,6 +48,7 @@ class ModelInputForXPU(ModelRunnerInputBase):
     attn_metadata: Optional["AttentionMetadata"] = None
     sampling_metadata: Optional["SamplingMetadata"] = None
     multi_modal_kwargs: Optional[BatchedTensorInputs] = None
+    virtual_engine: Optional[int] = None
 
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:
@@ -203,7 +204,9 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         # Run the model with the dummy inputs.
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
-        model_input = self.prepare_model_input(seqs)
+        finished_requests_ids = [seq.request_id for seq in seqs]
+        model_input = self.prepare_model_input(
+            seqs, finished_requests_ids=finished_requests_ids)
         self.execute_model(model_input, kv_caches)
         torch.xpu.synchronize()
         return
@@ -222,53 +225,28 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
             finished_requests_ids: Optional[List[str]] = None
     ) -> ModelInputForXPU:
         multi_modal_kwargs = None
-        if self.is_driver_worker:
-            # NOTE: We assume that all sequences in the group are all prompts or
-            # all decodes.
-            is_prompt = seq_group_metadata_list[0].is_prompt
-            # Prepare input tensors.
-            if is_prompt:
-                (input_tokens, input_positions, attn_metadata, seq_lens,
-                 multi_modal_kwargs
-                 ) = self._prepare_prompt(seq_group_metadata_list)
-            else:
-                (input_tokens, input_positions,
-                 attn_metadata) = self._prepare_decode(seq_group_metadata_list)
-                seq_lens = []
-            sampling_metadata = SamplingMetadata.prepare(
-                seq_group_metadata_list,
-                seq_lens,
-                # subquery_lens is not needed if chunked prefill is not
-                # supported. Since CPU worker doesn't support chunked prefill
-                # just use seq_lens instead.
-                seq_lens,
-                self.device,
-                pin_memory=False,
-                generators=self.get_generators(finished_requests_ids))
-            # Broadcast the metadata.
-            metadata_dict = {
-                "input_tokens": input_tokens,
-                "input_positions": input_positions,
-                "selected_token_indices":
-                sampling_metadata.selected_token_indices,
-                "multi_modal_kwargs": multi_modal_kwargs,
-            }
-            metadata_dict.update(attn_metadata.asdict_zerocopy())
-            broadcast_tensor_dict(metadata_dict, src=0)
+        # NOTE: We assume that all sequences in the group are all prompts or
+        # all decodes.
+        is_prompt = seq_group_metadata_list[0].is_prompt
+        # Prepare input tensors.
+        if is_prompt:
+            (input_tokens, input_positions, attn_metadata, seq_lens,
+             multi_modal_kwargs
+             ) = self._prepare_prompt(seq_group_metadata_list)
         else:
-            metadata_dict = broadcast_tensor_dict(src=0)
-            input_tokens = metadata_dict.pop("input_tokens")
-            input_positions = metadata_dict.pop("input_positions")
-            selected_token_indices = metadata_dict.pop(
-                "selected_token_indices")
-            multi_modal_kwargs = metadata_dict.pop("multi_modal_kwargs")
-            attn_metadata = self.attn_backend.make_metadata(**metadata_dict)
-            sampling_metadata = SamplingMetadata(
-                seq_groups=None,
-                selected_token_indices=selected_token_indices,
-                categorized_sample_indices=None,
-                num_prompts=0,
-            )
+            (input_tokens, input_positions,
+             attn_metadata) = self._prepare_decode(seq_group_metadata_list)
+            seq_lens = []
+        sampling_metadata = SamplingMetadata.prepare(
+            seq_group_metadata_list,
+            seq_lens,
+            # subquery_lens is not needed if chunked prefill is not
+            # supported. Since XPU worker doesn't support chunked prefill
+            # just use seq_lens instead.
+            seq_lens,
+            self.device,
+            pin_memory=False,
+            generators=self.get_generators(finished_requests_ids))
 
         return ModelInputForXPU(input_tokens=input_tokens,
                                 input_positions=input_positions,
