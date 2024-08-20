@@ -21,7 +21,7 @@ steps:
           containers:
           - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
             command:
-            - bash .buildkite/nightly-benchmarks/run-benchmarks-suite.sh
+            - bash .buildkite/nightly-benchmarks/scripts/run-performance-benchmarks.sh
             resources:
               limits:
                 nvidia.com/gpu: 8
