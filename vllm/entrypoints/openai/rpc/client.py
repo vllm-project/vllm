@@ -18,18 +18,22 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 
+# Time to wait before checking it the server process is alive.
+SERVER_START_TIMEOUT_MS = 1000
+
 
 class AsyncEngineRPCClient:
 
-    def __init__(self, port: int):
+    def __init__(self, rpc_path: str):
         self.context = zmq.asyncio.Context()
-        self.path = f"tcp://localhost:{port}"
+        self.rpc_path = rpc_path
 
     async def setup(self):
         """Setup the client before it starts sending server requests."""
 
         # Wait until server is ready.
         await self.wait_for_server()
+        self._errored = False
 
         # Get the configs.
         self.model_config = await self._get_model_config_rpc()
@@ -58,10 +62,19 @@ class AsyncEngineRPCClient:
         # to enable streaming.
         socket = self.context.socket(zmq.constants.DEALER)
         try:
-            socket.connect(self.path)
+            socket.connect(self.rpc_path)
             yield socket
         finally:
-            socket.close()
+            # linger == 0 means discard unsent messages
+            # when the socket is closed. This is necessary
+            # because otherwise self.context.destroy() will
+            # wait for 30 seconds until unsent messages are
+            # received, which is impossible if the server
+            # crashed. In the absence of a server crash we
+            # always expect a response before closing the
+            # socket anyway.
+            # Reference: http://api.zeromq.org/4-2:zmq-setsockopt#toc24
+            socket.close(linger=0)
 
     async def _send_get_data_rpc_request(self, request: RPCUtilityRequest,
                                          expected_type: Any,
@@ -85,14 +98,19 @@ class AsyncEngineRPCClient:
 
         return data
 
-    async def _send_one_way_rpc_request(self, request: RPC_REQUEST_TYPE,
-                                        error_message: str):
+    async def _send_one_way_rpc_request(self,
+                                        request: RPC_REQUEST_TYPE,
+                                        error_message: str,
+                                        timeout: Optional[int] = None):
         """Send one-way RPC request to trigger an action."""
         with self.socket() as socket:
             # Ping RPC Server with request.
             await socket.send(cloudpickle.dumps(request))
 
             # Await acknowledgement from RPCServer.
+            if timeout is not None and await socket.poll(timeout=timeout) == 0:
+                raise TimeoutError(f"server didn't reply within {timeout} ms")
+
             response = cloudpickle.loads(await socket.recv())
 
         if not isinstance(response, str) or response != VLLM_RPC_SUCCESS_STR:
@@ -117,7 +135,8 @@ class AsyncEngineRPCClient:
 
         await self._send_one_way_rpc_request(
             request=RPCUtilityRequest.IS_SERVER_READY,
-            error_message="Unable to start RPC Server.")
+            error_message="Unable to start RPC Server.",
+            timeout=SERVER_START_TIMEOUT_MS)
 
     async def _get_model_config_rpc(self) -> ModelConfig:
         """Get the ModelConfig object from the RPC Server"""
@@ -151,7 +170,7 @@ class AsyncEngineRPCClient:
             expected_type=SchedulerConfig,
             error_message="Could not get SchedulerConfig from RPC Server")
 
-    async def _get_lora_config_rpc(self):
+    async def _get_lora_config_rpc(self) -> LoRAConfig:
         """Get LoRAConfig from the RPCServer"""
 
         return await self._send_get_data_rpc_request(
@@ -159,7 +178,7 @@ class AsyncEngineRPCClient:
             expected_type=LoRAConfig,
             error_message="Could not get LoRAConfig from RPC Server")
 
-    async def _is_tracing_enabled_rpc(self) -> ParallelConfig:
+    async def _is_tracing_enabled_rpc(self) -> bool:
         """Get is_tracing_enabled flag from the RPCServer"""
 
         return await self._send_get_data_rpc_request(
@@ -181,6 +200,18 @@ class AsyncEngineRPCClient:
         await self._send_one_way_rpc_request(
             request=RPCUtilityRequest.DO_LOG_STATS,
             error_message="RPCRequest DO_LOG_STATS failed.")
+
+    @property
+    def is_running(self) -> bool:
+        return not self._errored
+
+    @property
+    def is_stopped(self) -> bool:
+        return self._errored
+
+    @property
+    def errored(self) -> bool:
+        return self._errored
 
     async def generate(
         self,
@@ -215,6 +246,15 @@ class AsyncEngineRPCClient:
                     request_output = cloudpickle.loads(message)
 
                     if isinstance(request_output, Exception):
+                        # On exception, check if the server is still healthy.
+                        # Use this to set the sync `is_running` and `errored`
+                        # properties.
+                        try:
+                            await self.check_health()
+                        except Exception:
+                            self._errored = True
+                        # NB: do before raising here so that the flag is set
+                        # by the time the caller receives this exception
                         raise request_output
 
                     finished = request_output.finished

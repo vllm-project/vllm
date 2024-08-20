@@ -3,15 +3,15 @@ from typing import List, Optional, Tuple, TypeVar
 
 import torch
 from PIL import Image
-from transformers import PreTrainedTokenizerBase
 
 from vllm.config import ModelConfig
 from vllm.inputs.registry import InputContext
 from vllm.logger import init_logger
 from vllm.transformers_utils.image_processor import get_image_processor
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
+from vllm.utils import is_list_of
 
-from .base import MultiModalInputs, MultiModalPlugin
+from .base import MultiModalData, MultiModalInputs, MultiModalPlugin
 
 logger = init_logger(__name__)
 
@@ -39,7 +39,7 @@ def repeat_and_pad_token(
 
 
 def repeat_and_pad_image_tokens(
-    tokenizer: PreTrainedTokenizerBase,
+    tokenizer: AnyTokenizer,
     prompt: Optional[str],
     prompt_token_ids: List[int],
     *,
@@ -110,10 +110,15 @@ class ImagePlugin(MultiModalPlugin):
             model_config.model,
             trust_remote_code=model_config.trust_remote_code)
 
-    def _default_input_mapper(self, ctx: InputContext,
-                              data: object) -> MultiModalInputs:
+    def _default_input_mapper(
+        self,
+        ctx: InputContext,
+        data: MultiModalData[object],
+    ) -> MultiModalInputs:
         model_config = ctx.model_config
-        if isinstance(data, (Image.Image, list)):
+
+        # PIL image
+        if isinstance(data, Image.Image) or is_list_of(data, Image.Image):
             image_processor = self._get_hf_image_processor(model_config)
             if image_processor is None:
                 raise RuntimeError("No HuggingFace processor is available "
@@ -127,8 +132,10 @@ class ImagePlugin(MultiModalPlugin):
                 raise
 
             return MultiModalInputs(batch_data)
-        elif isinstance(data, torch.Tensor):
-            raise NotImplementedError("Embeddings input is not supported yet")
+
+        # Image embedding
+        elif isinstance(data, torch.Tensor) or is_list_of(data, torch.Tensor):
+            return MultiModalInputs({"image_embeds": data})
 
         raise TypeError(f"Invalid image type: {type(data)}")
 
