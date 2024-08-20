@@ -28,7 +28,11 @@ This benchmark aims to:
 
 In the following plots, the dot shows the mean and the error bar shows the standard error of the mean. Value 0 means that the corresponding benchmark crashed.
 
-<img src="artifact://nightly_results.png" alt="Benchmarking results" height=250 >
+<img src="artifact://nightly_results_sharegpt.png" alt="Benchmarking results" height=250 >
+
+<img src="artifact://nightly_results_sonnet_2048_128.png" alt="Benchmarking results" height=250 >
+
+<img src="artifact://nightly_results_sonnet_128_2048.png" alt="Benchmarking results" height=250 >
 
 ## Results
 
