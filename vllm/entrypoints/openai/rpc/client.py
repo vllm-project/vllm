@@ -10,7 +10,6 @@ import zmq.asyncio
 from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.entrypoints.openai.rpc import (RPC_REQUEST_TYPE,
-                                         VLLM_ABORT_DRAIN_TIMEOUT_MS,
                                          VLLM_RPC_HEALTH_TIMEOUT_MS,
                                          VLLM_RPC_SERVER_START_TIMEOUT_MS,
                                          VLLM_RPC_SOCKET_LIMIT_CUTOFF,
@@ -193,7 +192,7 @@ class AsyncEngineRPCClient:
             if expected_type == LoRAConfig and data is None:
                 pass
             elif isinstance(data, Exception):
-                logger.warning(error_message)
+                logger.error(error_message)
                 raise data
             else:
                 raise ValueError(error_message)
@@ -230,7 +229,7 @@ class AsyncEngineRPCClient:
 
         if not isinstance(response, str) or response != VLLM_RPC_SUCCESS_STR:
             if isinstance(response, Exception):
-                logger.warning(error_message)
+                logger.error(error_message)
                 raise response
             raise ValueError(error_message)
 
@@ -342,7 +341,6 @@ class AsyncEngineRPCClient:
         finished = False
         try:
             with self.to_proxy_socket(request_id) as socket:
-            
                 # Send RPCGenerateRequest to the RPCServer.
                 await socket.send_multipart([
                     cloudpickle.dumps(
@@ -378,7 +376,7 @@ class AsyncEngineRPCClient:
                     yield request_output
 
         finally:
-            # Request was canceled by the client and engine still running.
+            # Request was canceled by the client.
             if not finished and not self._errored:
                 await self.abort(request_id)
 
