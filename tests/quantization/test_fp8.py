@@ -9,6 +9,7 @@ from tests.quantization.utils import is_quant_method_supported
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.fp8 import (Fp8KVCacheMethod,
                                                          Fp8LinearMethod)
+from vllm.platforms import current_platform
 
 MODELS = [
     "neuralmagic/Meta-Llama-3-8B-Instruct-FP8-KV",
@@ -20,7 +21,12 @@ MODELS = [
 @pytest.mark.skipif(not is_quant_method_supported("fp8"),
                     reason="FP8 is not supported on this GPU type.")
 @pytest.mark.parametrize("model_id", MODELS)
-def test_model_load_and_run(vllm_runner, model_id: str):
+@pytest.mark.parametrize("force_marlin", [False, True])
+def test_model_load_and_run(vllm_runner, model_id: str, force_marlin: bool,
+                            monkeypatch) -> None:
+    if force_marlin:
+        monkeypatch.setenv("VLLM_TEST_FORCE_FP8_MARLIN", "1")
+
     with vllm_runner(model_id) as llm:
         # note: this does not test accuracy, just that we can run through
         # see lm-eval tests for accuracy
@@ -61,7 +67,12 @@ def test_kv_cache_model_load_and_run(vllm_runner, model_id: str):
 @pytest.mark.skipif(not is_quant_method_supported("fp8"),
                     reason="FP8 is not supported on this GPU type.")
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
-def test_load_fp16_model(vllm_runner, kv_cache_dtype: str) -> None:
+@pytest.mark.parametrize("force_marlin", [False, True])
+def test_load_fp16_model(vllm_runner, kv_cache_dtype: str, force_marlin: bool,
+                         monkeypatch) -> None:
+    if force_marlin:
+        monkeypatch.setenv("VLLM_TEST_FORCE_FP8_MARLIN", "1")
+
     with vllm_runner("facebook/opt-125m",
                      quantization="fp8",
                      kv_cache_dtype=kv_cache_dtype) as llm:
@@ -75,9 +86,9 @@ def test_load_fp16_model(vllm_runner, kv_cache_dtype: str) -> None:
             assert attn._k_scale == 1.0
             assert attn._v_scale == 1.0
 
-        capability = torch.cuda.get_device_capability()
+        capability = current_platform.get_device_capability()
         capability = capability[0] * 10 + capability[1]
-        if capability >= 89:
+        if capability >= 89 and not force_marlin:
             # For GPUs with hardware support, we keep weights in fp8
             assert fc1.weight.dtype == torch.float8_e4m3fn
         else:
@@ -116,16 +127,18 @@ def test_scaled_fp8_quant(dtype) -> None:
 
     # Reference dynamic quantizaton
     y = quantize_ref(x, inv_scale)
-    assert torch.allclose(ref_y, per_tensor_dequantize(y, inv_scale, dtype))
+    torch.testing.assert_close(ref_y,
+                               per_tensor_dequantize(y, inv_scale, dtype))
 
     # Static quantization
     y, _ = ops.scaled_fp8_quant(x, inv_scale)
-    assert torch.allclose(ref_y, per_tensor_dequantize(y, inv_scale, dtype))
+    torch.testing.assert_close(ref_y,
+                               per_tensor_dequantize(y, inv_scale, dtype))
 
     # Padding
     y, _ = ops.scaled_fp8_quant(x, inv_scale, num_token_padding=17)
     assert y.shape[0] == 17
-    assert torch.allclose(
+    torch.testing.assert_close(
         ref_y,
         per_tensor_dequantize(torch.narrow(y, 0, 0, x.shape[0]), inv_scale,
                               dtype))

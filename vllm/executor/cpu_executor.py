@@ -13,7 +13,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
-from vllm.utils import (get_distributed_init_method, get_open_port,
+from vllm.utils import (GiB_bytes, get_distributed_init_method, get_open_port,
                         get_vllm_instance_id, make_async)
 from vllm.worker.worker_base import WorkerWrapperBase
 
@@ -141,7 +141,6 @@ class CPUExecutor(ExecutorBase):
             rank=rank,
             distributed_init_method=self.distributed_init_method,
             lora_config=self.lora_config,
-            multimodal_config=self.multimodal_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             prompt_adapter_config=self.prompt_adapter_config,
             is_driver_worker=rank == 0,
@@ -332,7 +331,6 @@ def _verify_and_get_scheduler_config(
 
 
 def _verify_and_get_cache_config(config: CacheConfig) -> CacheConfig:
-    _GB = 1 << 30
     if config.enable_prefix_caching:
         logger.warning("Prefix caching is not supported on CPU, disable it.")
         config.enable_prefix_caching = False
@@ -341,11 +339,11 @@ def _verify_and_get_cache_config(config: CacheConfig) -> CacheConfig:
 
     if kv_cache_space >= 0:
         if kv_cache_space == 0:
-            config.cpu_kvcache_space_bytes = 4 * _GB  # type: ignore
+            config.cpu_kvcache_space_bytes = 4 * GiB_bytes  # type: ignore
             logger.warning("Environment variable VLLM_CPU_KVCACHE_SPACE (GB) "
                            "for CPU backend is not set, using 4 by default.")
         else:
-            config.cpu_kvcache_space_bytes = kv_cache_space * _GB  # type: ignore
+            config.cpu_kvcache_space_bytes = kv_cache_space * GiB_bytes  # type: ignore
     else:
         raise RuntimeError(
             "Invalid environment variable VLLM_CPU_KVCACHE_SPACE"

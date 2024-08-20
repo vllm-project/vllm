@@ -3,7 +3,7 @@ import os
 from typing import List, Optional
 
 try:
-    from ray.exceptions import ActorDiedError
+    from ray.exceptions import ActorDiedError  # type: ignore
 except ImportError:
     # For older versions of Ray
     from ray.exceptions import RayActorError as ActorDiedError  # type: ignore
@@ -13,8 +13,9 @@ from vllm.config import TokenizerPoolConfig
 from vllm.executor.ray_utils import ray
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 
-from .base_tokenizer_group import AnyTokenizer, BaseTokenizerGroup
+from .base_tokenizer_group import BaseTokenizerGroup
 from .tokenizer_group import TokenizerGroup
 
 logger = init_logger(__name__)
