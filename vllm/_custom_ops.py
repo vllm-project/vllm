@@ -451,6 +451,26 @@ def ggml_mul_mat_a8(
     return torch.ops._C.ggml_mul_mat_a8(W, X, quant_type, row)
 
 
+# mamba
+def causal_conv1d_fwd(x: torch.Tensor, weight: torch.Tensor,
+                      bias_: Optional[torch.Tensor],
+                      seq_idx_: Optional[torch.Tensor],
+                      seq_pos_idx_: Optional[torch.Tensor],
+                      initial_states_: Optional[torch.Tensor],
+                      final_states_out_: Optional[torch.Tensor],
+                      silu_activation: bool) -> torch.Tensor:
+    return torch.ops._C.causal_conv1d_fwd(x, weight, bias_, seq_idx_,
+                                          seq_pos_idx_, initial_states_,
+                                          final_states_out_, silu_activation)
+
+
+def causal_conv1d_update(x: torch.Tensor, conv_state: torch.Tensor,
+                         weight: torch.Tensor, bias_: Optional[torch.Tensor],
+                         silu_activation: bool) -> torch.Tensor:
+    return torch.ops._C.causal_conv1d_update(x, conv_state, weight, bias_,
+                                             silu_activation)
+
+
 # moe
 def moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
                          block_size: int, sorted_token_ids: torch.Tensor,
