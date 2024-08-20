@@ -27,6 +27,9 @@ Easy, fast, and cheap LLM serving for everyone
 - [2023/06] We officially released vLLM! FastChat-vLLM integration has powered [LMSYS Vicuna and Chatbot Arena](https://chat.lmsys.org) since mid-April. Check out our [blog post](https://vllm.ai).
 
 ---
+## Usage
+glm-4v: Colab(https://colab.research.google.com/drive/1jpCM0H3thZjN1XqcnpHm3S5g2Z9Pz89k?usp=sharing)
+
 ## About
 vLLM is a fast and easy-to-use library for LLM inference and serving.
 
