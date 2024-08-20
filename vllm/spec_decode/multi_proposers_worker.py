@@ -15,13 +15,14 @@ logger = init_logger(__name__)
 
 
 class MultiProposersWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
+
     def __init__(self, *args, **kwargs):
         self.vocab_size = kwargs["model_config"].get_vocab_size()
         self._workers = kwargs.pop('worker_list', {})
 
         draft_parallel_config: ParallelConfig = kwargs['parallel_config']
         draft_tp = draft_parallel_config.tensor_parallel_size
-        
+
         # TP>1 is not supported currently because DraftModelRunner does
         # not support TP>1.
         # TODO: Remove this when TP>1 is supported and #5814 is fixed.
@@ -55,7 +56,7 @@ class MultiProposersWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
         own Top1Proposers to call their sampler_output functions.
         """
         raise NotImplementedError
-    
+
     def get_spec_proposals(
         self,
         execute_model_req: ExecuteModelRequest,
@@ -80,24 +81,19 @@ class MultiProposersWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
             execute_model_req,
             # Once we support more policies, we can make this configurable.
             scheduling_policy="proposal_latency")
-        
+
         if chosen_proposer == "disable":
             batch_size = len(execute_model_req.seq_group_metadata_list)
             proposal_len = execute_model_req.num_lookahead_slots
-            proposal_tokens = torch.tensor(-1,
-                                           dtype=torch.long).expand(
-                                               batch_size, proposal_len)
-            proposal_probs = torch.tensor(0,
-                                          dtype=torch.float32).expand(
-                                              batch_size, proposal_len,
-                                              self.vocab_size)
+            proposal_tokens = torch.tensor(-1, dtype=torch.long).expand(
+                batch_size, proposal_len)
+            proposal_probs = torch.tensor(0, dtype=torch.float32).expand(
+                batch_size, proposal_len, self.vocab_size)
             proposal_lens_tensor = torch.tensor(0, dtype=torch.long)
-            return SpeculativeProposals(
-                proposal_token_ids=proposal_tokens,
-                proposal_probs=proposal_probs,
-                proposal_lens=proposal_lens_tensor,
-                no_proposals=True
-                )
+            return SpeculativeProposals(proposal_token_ids=proposal_tokens,
+                                        proposal_probs=proposal_probs,
+                                        proposal_lens=proposal_lens_tensor,
+                                        no_proposals=True)
         return self._workers[chosen_proposer].get_spec_proposals(
             execute_model_req, seq_ids_with_bonus_token_in_last_step)
 
@@ -114,7 +110,7 @@ class MultiProposersWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
         # times.
         if execute_model_req is None:
             return []
-        
+
         # Currently, if one seq_group requires to perform execute_model through
         # MultiStepWorker, all seq_groups in the same batch have to perform
         # execute_model together. We have not found a good way to avoid this.
@@ -138,21 +134,21 @@ class MultiProposersWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
                     break
         else:
             return []
-        
+
         return self._workers[proposer].execute_model(execute_model_req)
 
     def get_cache_block_size_bytes(self) -> int:
         for worker in self._workers.values():
             if self.is_multi_step_worker_instance(worker):
                 return worker.get_cache_block_size_bytes()
-            
+
         return 0
-    
+
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         for worker in self._workers.values():
             if self.is_multi_step_worker_instance(worker):
                 return worker.determine_num_available_blocks()
-            
+
         return -1, -1
 
     def initialize_cache(self, num_gpu_blocks: int,
@@ -160,9 +156,9 @@ class MultiProposersWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
         for worker in self._workers.values():
             if self.is_multi_step_worker_instance(worker):
                 worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
-            
+
         return
-    
+
     def _get_proposer_for_this_step(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None,
@@ -221,7 +217,7 @@ class MultiProposersWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
             raise NotImplementedError(
                 f"scheduling_policy: '{scheduling_policy}' has not been "
                 f"implemented yet.")
-        
+
         else:
             raise ValueError(
                 f"Invalid scheduling_policy: '{scheduling_policy}'.")
