@@ -37,8 +37,7 @@ def reverse_awq_order(t: torch.Tensor):
 # scales   - [R // G, C     ], float16
 # zeros    - [R // G, C // 8], int32
 def awq_dequantize_torch(qweight: torch.Tensor, scales: torch.Tensor,
-                         qzeros: torch.Tensor, split_k_iters: int, thx: int,
-                         thy: int) -> torch.Tensor:
+                         qzeros: torch.Tensor) -> torch.Tensor:
     bits = 4
     group_size = 128
     shifts = torch.arange(0, 32, bits, device=qzeros.device)
@@ -77,8 +76,7 @@ def awq_gemm_torch(input: torch.Tensor, qweight: torch.Tensor,
     print(f"awq_gemm_torch:input_rows = {input_rows} input_cols = {input_cols}"
           f" qweight_rows = {qweight_rows} qweight_cols = {qweight_cols}"
           f" scales_rows = {scales_rows} scales_cols = {scales_cols}")
-    weights, zeros = awq_dequantize_torch(qweight, scales, qzeros,
-                                          split_k_iters, 0, 0)
+    weights, zeros = awq_dequantize_torch(qweight, scales, qzeros)
     return torch.matmul(input, weights)
 
 
@@ -102,9 +100,6 @@ def test_dequantize(qweight_rows, qweight_cols):
     zeros_rows = scales_rows
     zeros_cols = qweight_cols
     zeros_dtype = torch.int32
-    split_k_iters = 0
-    thx = 0
-    thy = 0
 
     torch.manual_seed(0)
 
@@ -122,14 +117,13 @@ def test_dequantize(qweight_rows, qweight_cols):
                           device=device)
     print(f"qweight = {qweight}")
 
-    iweights_triton = awq_dequantize_triton(qweight, scales, zeros,
-                                            split_k_iters, thx, thy)
+    iweights_triton = awq_dequantize_triton(qweight, scales, zeros)
+
     print(f"Triton result:iweights_triton = {iweights_triton}")
     print("Any infs in triton result? -->"
           f"{torch.any(torch.isinf(iweights_triton))}")
 
-    iweights_torch, _ = awq_dequantize_torch(qweight, scales, zeros,
-                                             split_k_iters, thx, thy)
+    iweights_torch, _ = awq_dequantize_torch(qweight, scales, zeros)
     print(f"Torch result:iweights_torch = {iweights_torch}")
 
     diff = iweights_torch - iweights_triton

@@ -8,9 +8,6 @@ def awq_dequantize_kernel(
         qweight_ptr,  # quantized matrix
         scales_ptr,  # scales, per group
         zeros_ptr,  # zeros, per group
-        split_k_iters,  # Not used
-        thx,  # Not used
-        thy,  # Not used
         group_size,  # Should always be 128
         result_ptr,  # Output matrix
         num_cols,  # input num cols in qweight
@@ -224,10 +221,7 @@ def awq_gemm_kernel(a_ptr, b_ptr, c_ptr, zeros_ptr, scales_ptr, M, N, K,
 def awq_dequantize_triton(
         qweight: torch.Tensor,
         scales: torch.Tensor,
-        zeros: torch.Tensor,
-        split_k_iters: int,  # Not used
-        thx: int,  # Not used
-        thy: int  # Not used
+        zeros: torch.Tensor
 ) -> torch.Tensor:
     K = qweight.shape[0]
     M = scales.shape[1]
@@ -258,9 +252,6 @@ def awq_dequantize_triton(
     awq_dequantize_kernel[grid](qweight,
                                 scales,
                                 zeros,
-                                split_k_iters,
-                                thx,
-                                thy,
                                 group_size,
                                 result,
                                 X,
