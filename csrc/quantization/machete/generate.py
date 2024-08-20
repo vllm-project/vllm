@@ -324,6 +324,8 @@ def create_sources(impl_config: ImplConfig, num_impl_files=2):
 
 
 def generate():
+    # See csrc/quantization/machete/Readme.md, the Codegeneration for more info
+    # about how this works
     SCRIPT_DIR = os.path.dirname(__file__)
 
     schedules = [
