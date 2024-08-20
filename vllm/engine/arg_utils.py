@@ -736,12 +736,12 @@ class EngineArgs:
             "modules. This involves use of possibly costly and or blocking "
             "operations and hence might have a performance impact.")
 
-        parser.add_argument('--disable-output-proc-callback',
-                            action='store_true',
-                            default=False,
-                            help="Use output processing callback to remove "
-                            "python overheads in decoding. If False, "
-                            "will default to older version.")
+        parser.add_argument(
+            '--disable-output-proc-callback',
+            action='store_true',
+            default=False,
+            help="Disable async output processing. This may result in "
+            "lower performance.")
         return parser
 
     @classmethod

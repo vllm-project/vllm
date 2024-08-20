@@ -605,7 +605,6 @@ class LLM:
             inputs = [inputs]
 
         num_requests = len(inputs)
-        print(f'{num_requests=}')
         if isinstance(params, list) and len(params) != num_requests:
             raise ValueError("The lengths of prompts and params "
                              "must be the same.")

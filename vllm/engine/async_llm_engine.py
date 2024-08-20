@@ -896,10 +896,6 @@ class AsyncLLMEngine:
         else:
             request_outputs = await self.engine.step_async(virtual_engine)
 
-        # HACK: no output returned in first step
-        if not request_outputs:
-            return False
-
         # Put the outputs into the corresponding streams.
         finished = True
         for request_output in request_outputs:
