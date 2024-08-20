@@ -158,6 +158,104 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         layer.a2_scale = None
         layer.marlin_state = GPTQMarlinState.REPACK
 
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+
+        def replace_tensor(name, new_t):
+            # It is important to use resize_() here since it ensures
+            # the same buffer is reused
+            getattr(layer, name).resize_(new_t.shape)
+            getattr(layer, name).copy_(new_t)
+            del new_t
+
+        def get_scale_perms(num_bits: int):
+            scale_perm: List[int] = []
+            for i in range(8):
+                scale_perm.extend([i + 8 * j for j in range(8)])
+            scale_perm_single: List[int] = []
+            for i in range(4):
+                scale_perm_single.extend(
+                    [2 * i + j for j in [0, 1, 8, 9, 16, 17, 24, 25]])
+            return scale_perm, scale_perm_single
+
+        def marlin_permute_scales(s: torch.Tensor, size_k: int, size_n: int,
+                                  group_size: int, num_bits: int):
+            scale_perm, scale_perm_single = get_scale_perms(num_bits)
+            if group_size < size_k and group_size != -1:
+                s = s.reshape((-1, len(scale_perm)))[:, scale_perm]
+            else:
+                s = s.reshape((-1, len(scale_perm_single)))[:,
+                                                            scale_perm_single]
+            s = s.reshape((-1, size_n)).contiguous()
+            return s
+
+        def marlin_moe_permute_scales(s: torch.Tensor, size_k: int,
+                                      size_n: int, group_size: int,
+                                      num_bits: int):
+            num_experts = s.shape[0]
+            output = torch.empty((num_experts, s.shape[1], s.shape[2]),
+                                 device=s.device,
+                                 dtype=s.dtype)
+            for e in range(num_experts):
+                output[e] = marlin_permute_scales(s[e], size_k, size_n,
+                                                  group_size, num_bits)
+            return output
+
+        size_k2 = layer.w2_weight_packed.shape[2]
+        size_k13 = layer.w13_weight_packed.shape[2]
+
+        num_experts = layer.w13_g_idx.shape[0]
+        device = layer.w13_g_idx.device
+        layer.w13_g_idx = torch.nn.Parameter(
+            torch.empty((num_experts, 0), dtype=torch.int32, device=device),
+            requires_grad=False,
+        )
+        layer.w2_g_idx = torch.nn.Parameter(
+            torch.empty((num_experts, 0), dtype=torch.int32, device=device),
+            requires_grad=False,
+        )
+        layer.w13_g_idx_sort_indices = torch.nn.Parameter(
+            torch.empty((num_experts, 0), dtype=torch.int32, device=device),
+            requires_grad=False,
+        )
+        layer.w2_g_idx_sort_indices = torch.nn.Parameter(
+            torch.empty((num_experts, 0), dtype=torch.int32, device=device),
+            requires_grad=False,
+        )
+
+        marlin_w13_qweight = ops.gptq_marlin_moe_repack(
+            layer.w13_weight_packed,
+            layer.w13_g_idx_sort_indices,
+            layer.w13_weight_packed.shape[1] * self.packed_factor,
+            layer.w13_weight_packed.shape[2],
+            self.num_bits,
+        )
+        replace_tensor("w13_weight_packed", marlin_w13_qweight)
+        marlin_w2_qweight = ops.gptq_marlin_moe_repack(
+            layer.w2_weight_packed,
+            layer.w2_g_idx_sort_indices,
+            layer.w2_weight_packed.shape[1] * self.packed_factor,
+            layer.w2_weight_packed.shape[2],
+            self.num_bits,
+        )
+        replace_tensor("w2_weight_packed", marlin_w2_qweight)
+        # Repack scales
+        marlin_w13_scales = marlin_moe_permute_scales(
+            layer.w13_weight_scale,
+            size_k13,
+            layer.w13_weight_scale.shape[2],
+            self.group_size,
+            self.num_bits,
+        )
+        replace_tensor("w13_weight_scale", marlin_w13_scales)
+        marlin_w2_scales = marlin_moe_permute_scales(
+            layer.w2_weight_scale,
+            layer.w2_weight_scale.shape[1] * self.packed_factor,
+            size_k2,
+            self.group_size,
+            self.num_bits,
+        )
+        replace_tensor("w2_weight_scale", marlin_w2_scales)
+
     def apply(self,
               layer: torch.nn.Module,
               x: torch.Tensor,
@@ -170,106 +268,6 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
 
         from vllm.model_executor.layers.fused_moe.fused_moe import (
             fused_marlin_moe)
-        if layer.marlin_state == GPTQMarlinState.REPACK:
-            layer.marlin_state = GPTQMarlinState.READY
-
-            def replace_tensor(name, new_t):
-                # It is important to use resize_() here since it ensures
-                # the same buffer is reused
-                getattr(layer, name).resize_(new_t.shape)
-                getattr(layer, name).copy_(new_t)
-                del new_t
-
-            def get_scale_perms(num_bits: int):
-                scale_perm: List[int] = []
-                for i in range(8):
-                    scale_perm.extend([i + 8 * j for j in range(8)])
-                scale_perm_single: List[int] = []
-                for i in range(4):
-                    scale_perm_single.extend(
-                        [2 * i + j for j in [0, 1, 8, 9, 16, 17, 24, 25]])
-                return scale_perm, scale_perm_single
-
-            def marlin_permute_scales(s: torch.Tensor, size_k: int,
-                                      size_n: int, group_size: int,
-                                      num_bits: int):
-                scale_perm, scale_perm_single = get_scale_perms(num_bits)
-                if group_size < size_k and group_size != -1:
-                    s = s.reshape((-1, len(scale_perm)))[:, scale_perm]
-                else:
-                    s = s.reshape(
-                        (-1, len(scale_perm_single)))[:, scale_perm_single]
-                s = s.reshape((-1, size_n)).contiguous()
-                return s
-
-            def marlin_moe_permute_scales(s: torch.Tensor, size_k: int,
-                                          size_n: int, group_size: int,
-                                          num_bits: int):
-                num_experts = s.shape[0]
-                output = torch.empty((num_experts, s.shape[1], s.shape[2]),
-                                     device=s.device,
-                                     dtype=s.dtype)
-                for e in range(num_experts):
-                    output[e] = marlin_permute_scales(s[e], size_k, size_n,
-                                                      group_size, num_bits)
-                return output
-
-            num_experts = layer.w13_g_idx.shape[0]
-            device = layer.w13_g_idx.device
-            layer.w13_g_idx = torch.nn.Parameter(
-                torch.empty((num_experts, 0), dtype=torch.int32,
-                            device=device),
-                requires_grad=False,
-            )
-            layer.w2_g_idx = torch.nn.Parameter(
-                torch.empty((num_experts, 0), dtype=torch.int32,
-                            device=device),
-                requires_grad=False,
-            )
-            layer.w13_g_idx_sort_indices = torch.nn.Parameter(
-                torch.empty((num_experts, 0), dtype=torch.int32,
-                            device=device),
-                requires_grad=False,
-            )
-            layer.w2_g_idx_sort_indices = torch.nn.Parameter(
-                torch.empty((num_experts, 0), dtype=torch.int32,
-                            device=device),
-                requires_grad=False,
-            )
-
-            marlin_w13_qweight = ops.gptq_marlin_moe_repack(
-                layer.w13_weight_packed,
-                layer.w13_g_idx_sort_indices,
-                layer.w13_weight_packed.shape[1] * self.packed_factor,
-                layer.w13_weight_packed.shape[2],
-                self.num_bits,
-            )
-            replace_tensor("w13_weight_packed", marlin_w13_qweight)
-            marlin_w2_qweight = ops.gptq_marlin_moe_repack(
-                layer.w2_weight_packed,
-                layer.w2_g_idx_sort_indices,
-                layer.w2_weight_packed.shape[1] * self.packed_factor,
-                layer.w2_weight_packed.shape[2],
-                self.num_bits,
-            )
-            replace_tensor("w2_weight_packed", marlin_w2_qweight)
-            # Repack scales
-            marlin_w13_scales = marlin_moe_permute_scales(
-                layer.w13_weight_scale,
-                x.shape[1],
-                layer.w13_weight_scale.shape[2],
-                self.group_size,
-                self.num_bits,
-            )
-            replace_tensor("w13_weight_scale", marlin_w13_scales)
-            marlin_w2_scales = marlin_moe_permute_scales(
-                layer.w2_weight_scale,
-                layer.w2_weight_scale.shape[1] * self.packed_factor,
-                x.shape[1],
-                self.group_size,
-                self.num_bits,
-            )
-            replace_tensor("w2_weight_scale", marlin_w2_scales)
 
         return fused_marlin_moe(x,
                                 layer.w13_weight_packed,
