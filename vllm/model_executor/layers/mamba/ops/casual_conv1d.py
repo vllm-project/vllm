@@ -108,7 +108,7 @@ def causal_conv1d_ref(
         else:
             final_states_out = final_states
     out = (out if activation is None else F.silu(out)).to(dtype=dtype_in)
-    return out if not return_final_states else (out, final_states_out)
+    return (out, None) if not return_final_states else (out, final_states_out)
 
 
 def causal_conv1d_update(x, conv_state, weight, bias=None, activation=None):
@@ -123,8 +123,7 @@ def causal_conv1d_update(x, conv_state, weight, bias=None, activation=None):
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError("activation must be None, silu, or swish")
     activation = activation in ["silu", "swish"]
-    return causal_conv1d_cuda.causal_conv1d_update(x, conv_state, weight, bias,
-                                                   activation)
+    return ops.causal_conv1d_update(x, conv_state, weight, bias, activation)
 
 
 def causal_conv1d_update_ref(x,
