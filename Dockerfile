@@ -148,7 +148,7 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 # Install pip
 RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} && python3 -m pip --version
 RUN apt-get update -y \
-    && apt-get install libibverbs-dev
+    && apt-get install -y libibverbs-dev
 RUN ldconfig /usr/local/cuda-$(echo ${CUDA_VERSION} | cut -d. -f1,2)/compat/
 
 # install vllm wheel first, so that torch etc will be installed
