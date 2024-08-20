@@ -12,13 +12,11 @@ from vllm.connections import global_http_connection
 from vllm.envs import VLLM_AUDIO_FETCH_TIMEOUT, VLLM_IMAGE_FETCH_TIMEOUT
 from vllm.logger import init_logger
 from vllm.multimodal.base import MultiModalDataDict
-from vllm.transformers_utils.processor import get_processor
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
 
 logger = init_logger(__name__)
 
 cached_get_tokenizer = lru_cache(get_tokenizer)
-cached_get_processor = lru_cache(get_processor)
 
 
 def _load_image_from_bytes(b: bytes):

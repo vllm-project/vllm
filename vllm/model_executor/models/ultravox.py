@@ -4,7 +4,9 @@
 import itertools
 import math
 from array import array
-from typing import Iterable, List, Mapping, Optional, Tuple, Union, cast
+from functools import lru_cache
+from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
+                    TypedDict, Union, cast)
 
 import librosa
 import numpy as np
@@ -12,7 +14,6 @@ import torch
 import torch.utils.checkpoint
 from torch import nn
 from torch.nn import functional as F
-from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.whisper import WhisperFeatureExtractor
 from transformers.models.whisper.modeling_whisper import WhisperEncoder
 
@@ -22,7 +23,7 @@ from vllm.inputs import INPUT_REGISTRY
 from vllm.inputs.data import LLMInputs
 from vllm.inputs.registry import InputContext
 from vllm.logger import init_logger
-from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -33,8 +34,8 @@ from vllm.model_executor.models.utils import (filter_weights,
                                               merge_multimodal_embeddings)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.base import BatchedTensors, MultiModalInputs
-from vllm.multimodal.utils import (cached_get_processor, cached_get_tokenizer,
+from vllm.multimodal.base import MultiModalInputs
+from vllm.multimodal.utils import (cached_get_tokenizer,
                                    repeat_and_pad_placeholder_tokens)
 from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE, SamplerOutput, SequenceData
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
@@ -45,10 +46,29 @@ _AUDIO_TOKENS_PER_SECOND = 6.25
 logger = init_logger(__name__)
 
 
+class UltravoxAudioFeatureInputs(TypedDict):
+    type: Literal["audio_features"]
+    data: Union[torch.Tensor, List[torch.Tensor]]
+    """Shape: `(batch_size, 80, M)"""
+
+
+class UltravoxAudioEmbeddingInputs(TypedDict):
+    type: Literal["audio_embeds"]
+    data: torch.Tensor
+
+
+UltravoxAudioInputs = Union[UltravoxAudioFeatureInputs,
+                            UltravoxAudioEmbeddingInputs]
+
+
+@lru_cache
+def cached_feature_extractor(model_id: str) -> WhisperFeatureExtractor:
+    return WhisperFeatureExtractor.from_pretrained(model_id)
+
+
 def whisper_feature_extractor(ctx: InputContext) -> WhisperFeatureExtractor:
-    whisper_processor = cached_get_processor(
+    return cached_feature_extractor(
         ctx.get_hf_config(UltravoxConfig).audio_model_id)
-    return whisper_processor.feature_extractor
 
 
 def get_ultravox_max_audio_tokens(ctx: InputContext):
@@ -96,11 +116,13 @@ def input_mapper_for_ultravox(ctx: InputContext, data: object):
             # Not enough audio; pad it.
             audio = np.pad(audio, (0, minimum_audio_length - len(audio)))
 
-        return MultiModalInputs(
+        return MultiModalInputs({
+            "audio_features":
             feature_extractor(audio,
                               sampling_rate=sr,
                               padding="longest",
-                              return_tensors="pt"))
+                              return_tensors="pt")["input_features"]
+        })
 
     raise NotImplementedError(f"Unsupported data type: {type(data)}")
 
@@ -167,14 +189,16 @@ class StackAudioFrames(nn.Module):
         return audio_embeds
 
 
-class SwiGLU(nn.Module):
+class FlippedSiluAndMul(SiluAndMul):
+    """Ultravox is trained with SwiGLU with flipped halves."""
 
-    def forward(self, x):
-        x, gate = x.chunk(2, dim=-1)
-        return F.silu(gate) * x
+    def forward(self, x: torch.Tensor):
+        a, b = x.chunk(2, dim=-1)
+        flipped = torch.cat((b, a), dim=-1)
+        return super().forward(flipped)
 
 
-class UltravoxProjector(nn.Sequential):
+class UltravoxProjector(nn.Module):
 
     def __init__(self, config: UltravoxConfig):
         super().__init__()
@@ -184,10 +208,13 @@ class UltravoxProjector(nn.Sequential):
         self.ln_pre = RMSNorm(dim)
         self.linear_1 = nn.Linear(dim, self.hidden_dim, bias=False)
         dim = self.hidden_dim
-        self.act = SwiGLU(
-        ) if config.projector_act == "swiglu" else get_act_fn(
-            config.projector_act)
-        dim = dim // 2 if config.projector_act == "swiglu" else dim
+
+        if config.projector_act == "swiglu":
+            self.act = FlippedSiluAndMul()
+            dim = dim // 2
+        else:
+            self.act = get_act_fn(config.projector_act)
+
         self.linear_2 = nn.Linear(dim,
                                   config.text_config.hidden_size,
                                   bias=False)
@@ -225,11 +252,6 @@ class ModifiedWhisperEncoder(WhisperEncoder):
     def forward(
         self,
         input_features,
-        attention_mask=None,
-        head_mask=None,
-        output_attentions=None,
-        output_hidden_states=None,
-        return_dict=None,
     ):
         expected_seq_length = (self.config.max_source_positions *
                                self.conv1.stride[0] * self.conv2.stride[0])
@@ -240,13 +262,6 @@ class ModifiedWhisperEncoder(WhisperEncoder):
                 f"{input_features.shape[-1]}. Make sure to pad the input mel "
                 f"features to {expected_seq_length}.")
 
-        output_attentions = (output_attentions if output_attentions is not None
-                             else self.config.output_attentions)
-        output_hidden_states = (output_hidden_states
-                                if output_hidden_states is not None else
-                                self.config.output_hidden_states)
-        return_dict = (return_dict if return_dict is not None else
-                       self.config.use_return_dict)
         inputs_embeds = nn.functional.gelu(self.conv1(input_features))
         inputs_embeds = nn.functional.gelu(self.conv2(inputs_embeds))
 
@@ -258,63 +273,17 @@ class ModifiedWhisperEncoder(WhisperEncoder):
                                               p=self.dropout,
                                               training=self.training)
 
-        encoder_states = () if output_hidden_states else None
-        all_attentions = () if output_attentions else None
+        for encoder_layer in self.layers:
+            layer_outputs = encoder_layer(
+                hidden_states,
+                None,
+                layer_head_mask=None,
+            )
 
-        # check if head_mask has a correct number of layers specified if desired
-        if head_mask is not None:
-            assert head_mask.size()[0] == (len(self.layers)), (
-                f"The head_mask should be specified for {len(self.layers)} "
-                f"layers, but it is for {head_mask.size()[0]}.")
-
-        for idx, encoder_layer in enumerate(self.layers):
-            if output_hidden_states:
-                encoder_states = encoder_states + (hidden_states, )
-            # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description) # noqa: E501
-            to_drop = False
-            if self.training:
-                dropout_probability = torch.rand([])
-                if dropout_probability < self.layerdrop:  # skip the layer
-                    to_drop = True
-
-            if to_drop:
-                layer_outputs = (None, None)
-            else:
-                if self.gradient_checkpointing and self.training:
-                    layer_outputs = self._gradient_checkpointing_func(
-                        encoder_layer.__call__,
-                        hidden_states,
-                        None,
-                        (head_mask[idx] if head_mask is not None else None),
-                        output_attentions,
-                    )
-                else:
-                    layer_outputs = encoder_layer(
-                        hidden_states,
-                        None,
-                        layer_head_mask=(head_mask[idx]
-                                         if head_mask is not None else None),
-                        output_attentions=output_attentions,
-                    )
-
-                hidden_states = layer_outputs[0]
-
-            if output_attentions:
-                all_attentions = all_attentions + (layer_outputs[1], )
+            hidden_states = layer_outputs[0]
 
         hidden_states = self.layer_norm(hidden_states)
-        if output_hidden_states:
-            encoder_states = encoder_states + (hidden_states, )
-
-        if not return_dict:
-            return tuple(
-                v for v in [hidden_states, encoder_states, all_attentions]
-                if v is not None)
-        return BaseModelOutput(
-            last_hidden_state=hidden_states,
-            hidden_states=encoder_states,
-            attentions=all_attentions,
-        )
+        return hidden_states
 
 
 @MULTIMODAL_REGISTRY.register_input_mapper("audio", input_mapper_for_ultravox)
@@ -343,24 +312,63 @@ class UltravoxModel(nn.Module, SupportsMultiModal):
         self.language_model = init_vllm_registered_model(
             config.text_config, cache_config, quant_config)
 
-    def _audio_features_to_embeddings(self, input_features: torch.Tensor,
-                                      dtype: torch.dtype) -> torch.Tensor:
+    def _audio_features_to_embeddings(
+            self, input_features: torch.Tensor) -> torch.Tensor:
         audio_input = input_features.to(self.audio_tower.dtype)
-        audio_features = self.audio_tower(audio_input).last_hidden_state
+        audio_features = self.audio_tower(audio_input)
         audio_features = audio_features.to(self.audio_tower.dtype)
-        audio_embeddings = self.multi_modal_projector(audio_features).to(dtype)
+        audio_embeddings = self.multi_modal_projector(audio_features)
         return audio_embeddings
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-        intermediate_tensors: Optional[torch.Tensor],
-        *,
-        input_features: Optional[BatchedTensors] = None,
-    ) -> SamplerOutput:
+    def _parse_and_validate_audio_input(
+            self, **kwargs: object) -> Optional[UltravoxAudioInputs]:
+        audio_features = kwargs.pop("audio_features", None)
+        audio_embeds = kwargs.pop("audio_embeds", None)
+
+        if audio_features is None and audio_embeds is None:
+            return None
+
+        if audio_features is not None:
+            if not isinstance(audio_features, (torch.Tensor, list)):
+                raise ValueError("Incorrect type of audio features. "
+                                 f"Got type: {type(audio_features)}")
+
+            return UltravoxAudioFeatureInputs(type="audio_features",
+                                              data=audio_features)
+
+        if audio_embeds is not None:
+            if not isinstance(audio_embeds, torch.Tensor):
+                raise ValueError("Incorrect type of audio embeds. "
+                                 f"Got type: {type(audio_embeds)}")
+
+            return UltravoxAudioEmbeddingInputs(type="audio_embeds",
+                                                data=audio_embeds)
+
+        raise AssertionError("This line should be unreachable.")
+
+    def _process_audio_input(
+        self, audio_input: UltravoxAudioInputs
+    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+        if audio_input["type"] == "audio_embeds":
+            return audio_input["data"]
+
+        audio_features = audio_input["data"]
+        if isinstance(audio_features, list):
+            # TODO: Batch these through the encoder/projector instead of
+            # serializing them.
+            return [
+                self._audio_features_to_embeddings(
+                    features.unsqueeze(0)).squeeze(0)
+                for features in audio_features
+            ]
+        else:
+            return self._audio_features_to_embeddings(audio_features)
+
+    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
+                kv_caches: List[torch.Tensor],
+                attn_metadata: AttentionMetadata,
+                intermediate_tensors: Optional[torch.Tensor],
+                **kwargs) -> SamplerOutput:
         """Run forward pass for Ultravox
 
         One key thing to understand is the `input_ids` already accounts for the
@@ -373,29 +381,15 @@ class UltravoxModel(nn.Module, SupportsMultiModal):
         Args:
             input_features: A batch of audio inputs, [1, 80, M].
         """
-        if input_features is not None:
+        audio_input = self._parse_and_validate_audio_input(**kwargs)
+        if audio_input is not None:
+            audio_embeddings = self._process_audio_input(audio_input)
             inputs_embeds = self.language_model.model.get_input_embeddings(
                 input_ids)
-            if isinstance(input_features, list):
-                # TODO: Batch these through the encoder/projector instead of
-                # serializing them.
-                audio_embeddings = [
-                    self._audio_features_to_embeddings(
-                        single_features.unsqueeze(0),
-                        inputs_embeds.dtype).squeeze(0)
-                    for single_features in input_features
-                ]
-            elif isinstance(input_features, torch.Tensor):
-                audio_embeddings = self._audio_features_to_embeddings(
-                    input_features, inputs_embeds.dtype)
-            else:
-                raise ValueError(
-                    "The input audio features should be a tensor or a list "
-                    f"of tensors, not {type(input_features)}")
 
-            merge_multimodal_embeddings(input_ids, inputs_embeds,
-                                        audio_embeddings,
-                                        _AUDIO_PLACEHOLDER_TOKEN)
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, audio_embeddings,
+                _AUDIO_PLACEHOLDER_TOKEN)
             input_ids = None
         else:
             inputs_embeds = None
