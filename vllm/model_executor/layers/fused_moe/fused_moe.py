@@ -377,34 +377,39 @@ def fused_topk(
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
+    routing_func: callable = torch.topk,
 ):
     assert hidden_states.shape[0] == gating_output.shape[0], (
         "Number of tokens mismatch")
 
     M, _ = hidden_states.shape
 
-    topk_weights = torch.empty(M,
-                               topk,
-                               dtype=torch.float32,
-                               device=hidden_states.device)
-    topk_ids = torch.empty(M,
-                           topk,
-                           dtype=torch.int32,
-                           device=hidden_states.device)
-    token_expert_indicies = torch.empty(M,
-                                        topk,
-                                        dtype=torch.int32,
-                                        device=hidden_states.device)
-    ops.topk_softmax(
-        topk_weights,
-        topk_ids,
-        token_expert_indicies,
-        gating_output.float(),  # TODO(woosuk): Optimize this.
-    )
-    del token_expert_indicies  # Not used. Will be used in the future.
+    if routing_func != torch.topk:
+        topk_weights, topk_ids = routing_func(gating_output, topk)
+    else:
+        topk_weights = torch.empty(M,
+                                topk,
+                                dtype=torch.float32,
+                                device=hidden_states.device)
+        topk_ids = torch.empty(M,
+                            topk,
+                            dtype=torch.int32,
+                            device=hidden_states.device)
+        token_expert_indicies = torch.empty(M,
+                                            topk,
+                                            dtype=torch.int32,
+                                            device=hidden_states.device)
+        ops.topk_softmax(
+            topk_weights,
+            topk_ids,
+            token_expert_indicies,
+            gating_output.float(),  # TODO(woosuk): Optimize this.
+        )
+        del token_expert_indicies  # Not used. Will be used in the future.
 
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+
     return topk_weights, topk_ids
 
 
@@ -584,7 +589,6 @@ def fused_experts(hidden_states: torch.Tensor,
                   out=out_hidden_states[begin_chunk_idx:end_chunk_idx])
     return out_hidden_states
 
-
 def fused_moe(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -597,6 +601,7 @@ def fused_moe(
     use_grouped_topk: bool = False,
     num_expert_group: Optional[int] = None,
     topk_group: Optional[int] = None,
+    routing_func: callable = torch.topk,
     use_fp8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     w1_scale: Optional[torch.Tensor] = None,
@@ -646,7 +651,7 @@ def fused_moe(
                                               num_expert_group, topk_group)
     else:
         topk_weights, topk_ids = fused_topk(hidden_states, gating_output, topk,
-                                            renormalize)
+                                            renormalize, routing_func)
 
     return fused_experts(hidden_states,
                          w1,

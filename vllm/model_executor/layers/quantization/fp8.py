@@ -7,7 +7,7 @@ from torch.nn.parameter import Parameter
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
+from vllm.model_executor.layers.fused_moe import PhiFusedMoE, FusedMoE, FusedMoEMethodBase
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import (
@@ -25,6 +25,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils import is_hip, print_warning_once
+
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
@@ -84,6 +85,8 @@ class Fp8Config(QuantizationConfig):
             if is_layer_skipped(prefix, self.ignored_layers):
                 return UnquantizedLinearMethod()
             return Fp8LinearMethod(self)
+        elif isinstance(layer, PhiFusedMoE):
+            return PhiFp8MoEMethod(self)
         elif isinstance(layer, FusedMoE):
             return Fp8MoEMethod(self)
         elif isinstance(layer, Attention):
@@ -265,6 +268,200 @@ class Fp8LinearMethod(LinearMethodBase):
             use_per_token_if_dynamic=False)
 
 
+class PhiFp8MoEMethod(FusedMoEMethodBase):
+    """Phi MoE method for FP8.
+    Supports loading FP8 checkpoints with static weight scale and
+    dynamic/static activation scale.
+
+    Also supports loading quantized FP16/BF16 model checkpoints with dynamic
+    activation scaling. The weight scaling factor will be initialized after
+    the model weights are loaded.
+
+    Args:
+        quant_config: The quantization config.
+    """
+
+    def __init__(self, quant_config: Fp8Config):
+        self.quant_config = quant_config
+        self.fast_a100_fp8 = True
+        self.run_on_sm80 = self.is_sm80()
+
+        if self.is_sm80():
+            if not self.fast_a100_fp8:
+                from vllm.model_executor.layers.phi_ops.moe.vllm_moe.ampere_fp8_fused_moe import fused_moe
+                self.phi_fused_moe_forward = fused_moe
+            else:
+                # This is to be removed soon
+                from vllm.model_executor.layers.phi_ops.moe.tensorrt_llm_moe.ampere_fp8_fused_moe import fused_moe
+                self.phi_fused_moe_forward = fused_moe
+        else:
+            from vllm.model_executor.layers.fused_moe import fused_moe
+            self.phi_fused_moe_forward = fused_moe
+            
+    
+    def is_sm80(self, device_id=0):
+        if not torch.cuda.is_available():
+            return False
+        device_properties = torch.cuda.get_device_properties(device_id)
+        return (device_properties.major == 8 and device_properties.minor == 0)
+    
+    def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
+                       intermediate_size: int, params_dtype: torch.dtype,
+                       **extra_weight_attrs):
+
+        if self.quant_config.is_checkpoint_fp8_serialized:
+            params_dtype = torch.float8_e4m3fn
+
+        # WEIGHTS
+        w13_weight = torch.nn.Parameter(torch.empty(num_experts,
+                                                    2 * intermediate_size,
+                                                    hidden_size,
+                                                    device="cpu",
+                                                    dtype=params_dtype),
+                                        requires_grad=False)
+        layer.register_parameter("w13_weight", w13_weight)
+        set_weight_attrs(w13_weight, extra_weight_attrs)
+
+        w2_weight = torch.nn.Parameter(torch.empty(num_experts,
+                                                   hidden_size,
+                                                   intermediate_size,
+                                                   device="cpu",
+                                                   dtype=params_dtype),
+                                       requires_grad=False)
+        layer.register_parameter("w2_weight", w2_weight)
+        set_weight_attrs(w2_weight, extra_weight_attrs)
+
+        # WEIGHT_SCALES
+        # Allocate 2 scales for w1 and w3 respectively.
+        # They will be combined to a single scale after weight loading.
+        w13_weight_scale = torch.nn.Parameter(torch.ones(num_experts,
+                                                         2,
+                                                         dtype=torch.float32),
+                                              requires_grad=False)
+        layer.register_parameter("w13_weight_scale", w13_weight_scale)
+
+        w2_weight_scale = torch.nn.Parameter(torch.ones(num_experts,
+                                                        dtype=torch.float32),
+                                             requires_grad=False)
+        layer.register_parameter("w2_weight_scale", w2_weight_scale)
+
+
+    def process_weights_after_loading(self, layer: Module) -> None:
+        # If checkpoint is fp16, quantize in place.
+        if not self.run_on_sm80: 
+            w13_weight = torch.empty_like(layer.w13_weight.data,
+                                          dtype=torch.float8_e4m3fn,
+                                          device="cuda")
+            w2_weight = torch.empty_like(layer.w2_weight.data,
+                                         dtype=torch.float8_e4m3fn,
+                                         device="cuda")
+
+            # Re-initialize w13_scale because we directly quantize
+            # merged w13 weights and generate a single scaling factor.
+            layer.w13_weight_scale = torch.nn.Parameter(torch.ones(
+                layer.num_experts,
+                dtype=torch.float32,
+                device=w13_weight.device), requires_grad=False)
+            for expert in range(layer.num_experts):
+                w13_weight[expert, :, :], layer.w13_weight_scale[
+                    expert] = ops.scaled_fp8_quant(
+                        layer.w13_weight.data[expert, :, :])
+                w2_weight[expert, :, :], layer.w2_weight_scale[
+                    expert] = ops.scaled_fp8_quant(
+                        layer.w2_weight.data[expert, :, :])
+            
+            layer.w13_weight = torch.nn.Parameter(torch.empty(0),
+                                                requires_grad=False)
+            layer.w2_weight = torch.nn.Parameter(torch.empty(0),
+                                                requires_grad=False)
+            # This is to skip the move to cpu 
+            layer.register_parameter("w13_weight_fp8", torch.nn.Parameter(w13_weight, requires_grad=False))
+            layer.register_parameter("w2_weight_fp8", torch.nn.Parameter(w2_weight, requires_grad=False))
+            return
+        else:
+            # Currently used by PhiMOE
+            w13_weight = torch.empty_like(layer.w13_weight.data,
+                                        dtype=torch.float8_e4m3fn,
+                                        device="cuda")
+            w2_weight = torch.empty_like(layer.w2_weight.data,
+                                        dtype=torch.float8_e4m3fn,
+                                        device="cuda")
+            # Re-initialize w13_scale because we directly quantize
+            # merged w13 weights and generate a single scaling factor.
+            layer.w13_weight_scale = torch.nn.Parameter(torch.ones(
+                layer.num_experts,
+                dtype=torch.float32,
+                device=w13_weight.device),
+                                                requires_grad=False)
+            for expert in range(layer.num_experts):
+                w13_weight[expert, :, :], layer.w13_weight_scale[
+                    expert] = ops.scaled_fp8_quant(
+                        layer.w13_weight.data[expert, :, :].cuda())
+                w2_weight[expert, :, :], layer.w2_weight_scale[
+                    expert] = ops.scaled_fp8_quant(
+                        layer.w2_weight.data[expert, :, :].cuda())
+
+            if self.fast_a100_fp8:
+                print_warning_once("Preprocessing weights for A100 FP8 fused MoE")
+                w13_weight =  torch.ops._phi_C.preprocess_weights_for_mixed_gemm(
+                    w13_weight.view(torch.int8).transpose(1,2).contiguous().cpu()).to(w13_weight.device)
+                w2_weight =  torch.ops._phi_C.preprocess_weights_for_mixed_gemm(
+                    w2_weight.view(torch.int8).transpose(1,2).contiguous().cpu()).to(w2_weight.device)
+                layer.w13_weight_scale = torch.nn.Parameter(
+                    layer.w13_weight_scale.to(dtype=torch.bfloat16)
+                    .unsqueeze(1)
+                    .expand(-1, w13_weight.size(-1))
+                    .contiguous(),
+                    requires_grad=False,
+                )
+                layer.w2_weight_scale = torch.nn.Parameter(
+                    layer.w2_weight_scale.to(dtype=torch.bfloat16)
+                    .unsqueeze(1)
+                    .expand(-1, w2_weight.size(-1))
+                    .contiguous(),
+                    requires_grad=False,
+                )
+
+            # This is to skip the move to cpu 
+            layer.register_parameter("w13_weight_fp8", torch.nn.Parameter(w13_weight, requires_grad=False))
+            layer.register_parameter("w2_weight_fp8", torch.nn.Parameter(w2_weight, requires_grad=False))
+
+            layer.w13_weight = torch.nn.Parameter(torch.empty(0),
+                                                requires_grad=False)
+            layer.w2_weight = torch.nn.Parameter(torch.empty(0),
+                                                requires_grad=False)
+            return
+
+    def apply(self,
+              layer: torch.nn.Module,
+              x: torch.Tensor,
+              router_logits: torch.Tensor,
+              top_k: int,
+              renormalize: bool,
+              use_grouped_topk: bool,
+              topk_group: Optional[int] = None,
+              num_expert_group: Optional[int] = None,
+              routing_func: callable = torch.topk) -> torch.Tensor:
+        
+        return self.phi_fused_moe_forward(x,
+                                        layer.w13_weight_fp8,
+                                        layer.w2_weight_fp8,
+                                        router_logits,
+                                        top_k,
+                                        renormalize=renormalize,
+                                        inplace=True,
+                                        use_fp8=True,
+                                        w1_scale=layer.w13_weight_scale,
+                                        w2_scale=layer.w2_weight_scale,
+                                        a1_scale=None,
+                                        a2_scale=None,
+                                        use_grouped_topk=use_grouped_topk,
+                                        num_expert_group=num_expert_group,
+                                        topk_group=topk_group,
+                                        routing_func=routing_func,
+                                        )
+
+    
 class Fp8MoEMethod(FusedMoEMethodBase):
     """MoE method for FP8.
     Supports loading FP8 checkpoints with static weight scale and

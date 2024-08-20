@@ -80,7 +80,7 @@ class EngineArgs:
     max_parallel_loading_workers: Optional[int] = None
     block_size: int = 16
     enable_prefix_caching: bool = False
-    disable_sliding_window: bool = False
+    disable_sliding_window: bool = True
     use_v2_block_manager: bool = False
     swap_space: float = 4  # GiB
     cpu_offload_gb: float = 0  # GiB
