@@ -5,16 +5,14 @@ As a result, in this test, we just confirm that the top selected tokens of the
 bitblas/GPTQ models are in the top 3 selections of each other.
 
 Note: bitblas internally uses locks to synchronize the threads. This can
-result in very slight nondeterminism for bitblas. As a result, we re-run the test
-up to 3 times to see if we pass.
+result in very slight nondeterminism for bitblas. As a result, we re-run the 
+test up to 3 times to see if we pass.
 
 Run `pytest tests/models/test_bitblas.py`.
 """
 from dataclasses import dataclass
 
 import pytest
-
-from tests.quantization.utils import is_quant_method_supported
 
 from .utils import check_logprobs_close
 
@@ -32,8 +30,7 @@ model_pairs = [
 
 
 @pytest.mark.flaky(reruns=2)
-@pytest.mark.skipif(True,
-                    reason="BitBLAS takes too much time for tuning.")
+@pytest.mark.skipif(True, reason="BitBLAS takes too much time for tuning.")
 @pytest.mark.parametrize("model_pair", model_pairs)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
