@@ -7,19 +7,20 @@ import time
 import warnings
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import openai
-import ray
 import requests
 from transformers import AutoTokenizer
+from typing_extensions import ParamSpec
 
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.entrypoints.openai.cli_args import make_arg_parser
+from vllm.platforms import current_platform
 from vllm.utils import FlexibleArgumentParser, get_open_port, is_hip
 
-if is_hip():
+if current_platform.is_rocm():
     from amdsmi import (amdsmi_get_gpu_vram_usage,
                         amdsmi_get_processor_handles, amdsmi_init,
                         amdsmi_shut_down)
@@ -31,7 +32,7 @@ if is_hip():
             yield
         finally:
             amdsmi_shut_down()
-else:
+elif current_platform.is_cuda():
     from pynvml import (nvmlDeviceGetHandleByIndex, nvmlDeviceGetMemoryInfo,
                         nvmlInit, nvmlShutdown)
 
@@ -42,6 +43,11 @@ else:
             yield
         finally:
             nvmlShutdown()
+else:
+
+    @contextmanager
+    def _nvml():
+        yield
 
 
 VLLM_PATH = Path(__file__).parent.parent
@@ -50,7 +56,7 @@ VLLM_PATH = Path(__file__).parent.parent
 
 class RemoteOpenAIServer:
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
-    MAX_START_WAIT_S = 120  # wait for server to start for 120 seconds
+    MAX_START_WAIT_S = 240  # wait for server to start for 240 seconds
 
     def __init__(
         self,
@@ -292,6 +298,8 @@ def multi_process_parallel(
     pp_size: int,
     test_target: Any,
 ) -> None:
+    import ray
+
     # Using ray helps debugging the error when it failed
     # as compared to multiprocessing.
     # NOTE: We need to set working_dir for distributed tests,
@@ -360,18 +368,23 @@ def wait_for_gpu_memory_to_clear(devices: List[int],
         time.sleep(5)
 
 
-def fork_new_process_for_each_test(f):
+_P = ParamSpec("_P")
+
+
+def fork_new_process_for_each_test(
+        f: Callable[_P, None]) -> Callable[_P, None]:
     """Decorator to fork a new process for each test function.
     See https://github.com/vllm-project/vllm/issues/7053 for more details.
     """
 
     @functools.wraps(f)
-    def wrapper(*args, **kwargs):
+    def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> None:
         # Make the process the leader of its own process group
         # to avoid sending SIGTERM to the parent process
         os.setpgrp()
         from _pytest.outcomes import Skipped
         pid = os.fork()
+        print(f"Fork a new process to run a test {pid}")
         if pid == 0:
             try:
                 f(*args, **kwargs)
@@ -389,11 +402,11 @@ def fork_new_process_for_each_test(f):
             pgid = os.getpgid(pid)
             _pid, _exitcode = os.waitpid(pid, 0)
             # ignore SIGTERM signal itself
-            old_singla_handler = signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            old_signal_handler = signal.signal(signal.SIGTERM, signal.SIG_IGN)
             # kill all child processes
             os.killpg(pgid, signal.SIGTERM)
             # restore the signal handler
-            signal.signal(signal.SIGTERM, old_singla_handler)
+            signal.signal(signal.SIGTERM, old_signal_handler)
             assert _exitcode == 0, (f"function {f} failed when called with"
                                     f" args {args} and kwargs {kwargs}")
 

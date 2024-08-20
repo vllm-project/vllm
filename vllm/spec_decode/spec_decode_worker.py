@@ -295,7 +295,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         """
         (self.scorer_worker.model_runner.model.sampler.include_gpu_probs_tensor
          ) = True
+        (self.scorer_worker.model_runner.model.sampler.
+         should_modify_greedy_probs_inplace) = True
         self.proposer_worker.set_include_gpu_probs_tensor()
+        self.proposer_worker.set_should_modify_greedy_probs_inplace()
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of cache blocks to use.
@@ -643,9 +646,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         hidden_states = proposal_scores.hidden_states
         if hidden_states is not None:
             # Contract hidden states based on accepted tokens
-            hs_size = hidden_states.shape[1]
-            hidden_states = hidden_states.reshape(-1, max_proposal_len + 1,
-                                                  hs_size)
+            hs_size = hidden_states.shape[-1]
+
             accepted_index = accepted_token_ids + 1  # Convert -1 to 0
             accepted_index = accepted_index.count_nonzero(dim=1).add_(-1)
             index = accepted_index[:, None, None].expand(-1, 1, hs_size)

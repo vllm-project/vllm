@@ -33,6 +33,7 @@ class AsyncEngineRPCClient:
 
         # Wait until server is ready.
         await self.wait_for_server()
+        self._errored = False
 
         # Get the configs.
         self.model_config = await self._get_model_config_rpc()
@@ -169,7 +170,7 @@ class AsyncEngineRPCClient:
             expected_type=SchedulerConfig,
             error_message="Could not get SchedulerConfig from RPC Server")
 
-    async def _get_lora_config_rpc(self):
+    async def _get_lora_config_rpc(self) -> LoRAConfig:
         """Get LoRAConfig from the RPCServer"""
 
         return await self._send_get_data_rpc_request(
@@ -177,7 +178,7 @@ class AsyncEngineRPCClient:
             expected_type=LoRAConfig,
             error_message="Could not get LoRAConfig from RPC Server")
 
-    async def _is_tracing_enabled_rpc(self) -> ParallelConfig:
+    async def _is_tracing_enabled_rpc(self) -> bool:
         """Get is_tracing_enabled flag from the RPCServer"""
 
         return await self._send_get_data_rpc_request(
@@ -199,6 +200,18 @@ class AsyncEngineRPCClient:
         await self._send_one_way_rpc_request(
             request=RPCUtilityRequest.DO_LOG_STATS,
             error_message="RPCRequest DO_LOG_STATS failed.")
+
+    @property
+    def is_running(self) -> bool:
+        return not self._errored
+
+    @property
+    def is_stopped(self) -> bool:
+        return self._errored
+
+    @property
+    def errored(self) -> bool:
+        return self._errored
 
     async def generate(
         self,
@@ -233,6 +246,15 @@ class AsyncEngineRPCClient:
                     request_output = cloudpickle.loads(message)
 
                     if isinstance(request_output, Exception):
+                        # On exception, check if the server is still healthy.
+                        # Use this to set the sync `is_running` and `errored`
+                        # properties.
+                        try:
+                            await self.check_health()
+                        except Exception:
+                            self._errored = True
+                        # NB: do before raising here so that the flag is set
+                        # by the time the caller receives this exception
                         raise request_output
 
                     finished = request_output.finished
