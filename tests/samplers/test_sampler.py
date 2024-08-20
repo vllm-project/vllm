@@ -1,5 +1,6 @@
 import itertools
 import random
+from array import array
 from typing import Dict, List, Optional, Tuple
 from unittest.mock import Mock, patch
 
@@ -7,10 +8,12 @@ import pytest
 import torch
 from transformers import GenerationConfig, GenerationMixin
 
+import vllm.envs as envs
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_random_seed
-from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
+from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, SamplingParams,
+                           SequenceData, SequenceGroupMetadata)
 from vllm.utils import Counter, is_pin_memory_available
 
 
@@ -56,7 +59,9 @@ def _do_sample(
             SequenceGroupMetadata(
                 request_id=f"test_{i}",
                 is_prompt=True,
-                seq_data={0: SequenceData([1, 2, 3])},
+                seq_data={
+                    0: SequenceData(array(VLLM_TOKEN_ID_ARRAY_TYPE, [1, 2, 3]))
+                },
                 sampling_params=sampling_params,
                 block_tables={0: [1]},
             ))
@@ -201,7 +206,8 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
 
     def create_sequence_data(num_input=3, num_generated=0):
         seq_data = SequenceData(
-            random.choices(range(0, VOCAB_SIZE), k=num_input))
+            array(VLLM_TOKEN_ID_ARRAY_TYPE,
+                  random.choices(range(0, VOCAB_SIZE), k=num_input)))
         if num_generated > 0:
             seq_data.output_token_ids = random.choices(range(0, VOCAB_SIZE),
                                                        k=num_generated)
@@ -504,7 +510,9 @@ def test_sampler_mixed(seed: int, device: str):
             SequenceGroupMetadata(
                 request_id=f"test_{i}",
                 is_prompt=True,
-                seq_data={0: SequenceData([1, 2, 3])},
+                seq_data={
+                    0: SequenceData(array(VLLM_TOKEN_ID_ARRAY_TYPE, [1, 2, 3]))
+                },
                 sampling_params=sampling_params,
                 block_tables={0: [1]},
             ))
@@ -600,7 +608,9 @@ def test_sampler_top_k_top_p(seed: int, device: str):
             SequenceGroupMetadata(
                 request_id=f"test_{i}",
                 is_prompt=True,
-                seq_data={0: SequenceData([1, 2, 3])},
+                seq_data={
+                    0: SequenceData(array(VLLM_TOKEN_ID_ARRAY_TYPE, [1, 2, 3]))
+                },
                 sampling_params=SamplingParams(
                     temperature=1,
                     top_k=top_k,
@@ -625,15 +635,49 @@ def test_sampler_top_k_top_p(seed: int, device: str):
         return ([[prob.topk(1, dim=-1).indices.tolist(), [0]]
                  for prob in probs], None)
 
-    with patch("vllm.model_executor.layers.sampler._sample", mock_sample):
+    # top-k and top-p is only calculated when flashinfer kernel is not available
+    with patch("vllm.model_executor.layers.sampler._sample", mock_sample), \
+         patch("vllm.model_executor.layers.sampler."
+               "flashinfer_top_k_top_p_sampling", None):
         sampler(logits=fake_logits, sampling_metadata=sampling_metadata)
 
     assert sample_probs is not None
 
     hf_probs = warpers(torch.zeros_like(fake_logits), fake_logits.clone())
     hf_probs = torch.softmax(hf_probs, dim=-1, dtype=torch.float)
-    assert torch.allclose(hf_probs, sample_probs, atol=1e-5)
+    torch.testing.assert_close(hf_probs, sample_probs, rtol=0.0, atol=1e-5)
     assert torch.equal(hf_probs.eq(0), sample_probs.eq(0))
+
+
+@pytest.mark.parametrize("seed", RANDOM_SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_flashinfer_fallback(seed: int, device: str):
+    if not envs.VLLM_USE_FLASHINFER_SAMPLER:
+        pytest.skip("Flashinfer sampler is disabled")
+
+    set_random_seed(seed)
+    torch.set_default_device(device)
+    batch_size = random.randint(1, 256)
+    _, fake_logits, sampler = _prepare_test(batch_size)
+
+    def failing_flashinfer_sampling(*_args, **_kwargs):
+        return None, torch.zeros(batch_size, device=device, dtype=torch.int32)
+
+    sampling_params = SamplingParams(
+        temperature=1.0,
+        n=random.randint(1, 10),
+        seed=random.randint(0, 10000),
+    )
+    sampler_output = _do_sample(batch_size, fake_logits, sampler,
+                                sampling_params, device)
+
+    with patch(
+            "vllm.model_executor.layers.sampler."
+            "flashinfer_top_k_top_p_sampling", failing_flashinfer_sampling):
+        fallback_sampler_output = _do_sample(batch_size, fake_logits, sampler,
+                                             sampling_params, device)
+
+    assert sampler_output == fallback_sampler_output
 
 
 @pytest.mark.parametrize("device", CUDA_DEVICES)
@@ -650,7 +694,11 @@ def test_sampler_repetition_penalty_mixed(device: str):
                 SequenceGroupMetadata(
                     request_id=f"test_{i}",
                     is_prompt=True,
-                    seq_data={0: SequenceData([1, 2, 3])},
+                    seq_data={
+                        0:
+                        SequenceData(array(VLLM_TOKEN_ID_ARRAY_TYPE,
+                                           [1, 2, 3]))
+                    },
                     sampling_params=sampling_params[i],
                     block_tables={0: [1]},
                 ))
