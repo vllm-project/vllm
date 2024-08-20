@@ -8,24 +8,10 @@ from typing import Any, List, NamedTuple, Optional, Tuple, Union
 import pytest
 import torch
 
-from vllm.attention.backends.abstract import (AttentionBackend,
-                                              AttentionMetadata, AttentionType)
+from vllm.attention import AttentionBackend, AttentionMetadata, AttentionType
 from vllm.attention.backends.xformers import XFormersBackend
-from vllm.utils import make_tensor_with_pad
-
-# String name of register which may be set in order to
-# force auto-selection of attention backend by Attention
-# wrapper
-STR_BACKEND_ENV_VAR: str = "VLLM_ATTENTION_BACKEND"
-
-# Possible string values of STR_BACKEND_ENV_VAR
-# register, corresponding to possible backends
-STR_FLASHINFER_ATTN_VAL: str = "FLASHINFER"
-STR_TORCH_SDPA_ATTN_VAL: str = "TORCH_SDPA"
-STR_ROCM_FLASH_ATTN_VAL: str = "ROCM_FLASH"
-STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
-STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
-STR_INVALID_VAL: str = "INVALID"
+from vllm.utils import (STR_BACKEND_ENV_VAR, STR_XFORMERS_ATTN_VAL,
+                        make_tensor_with_pad)
 
 
 class QKVInputs(NamedTuple):
@@ -938,5 +924,5 @@ def assert_actual_matches_ideal(test_params: PhaseTestParameters,
     * output_under_test: actually observed output value
     '''
     ideal_output = test_params.packed_qkvo.ideal_output
-    assert torch.allclose(ideal_output,
-                          output_under_test.view_as(ideal_output))
+    torch.testing.assert_close(ideal_output,
+                               output_under_test.view_as(ideal_output))

@@ -15,6 +15,7 @@ from vllm.model_executor.layers.fused_moe import (fused_marlin_moe, fused_moe,
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     marlin_quantize)
 from vllm.model_executor.models.mixtral import MixtralMoE
+from vllm.scalar_type import scalar_types
 
 
 def torch_moe(a, w1, w2, score, topk):
@@ -69,7 +70,7 @@ def test_fused_moe(
     score = torch.randn((m, e), device='cuda', dtype=dtype)
     triton_output = fused_moe(a, w1, w2, score, topk, renormalize=False)
     torch_output = torch_moe(a, w1, w2, score, topk)
-    assert torch.allclose(triton_output, torch_output, atol=1e-2, rtol=0)
+    torch.testing.assert_close(triton_output, torch_output, atol=1e-2, rtol=0)
 
 
 @pytest.mark.parametrize("dtype",
@@ -114,10 +115,10 @@ def test_mixtral_moe(dtype: torch.dtype):
         torch.bfloat16: 1e-2,
     }
 
-    assert torch.allclose(hf_states.flatten(0, 1),
-                          vllm_states,
-                          rtol=mixtral_moe_tol[dtype],
-                          atol=mixtral_moe_tol[dtype])
+    torch.testing.assert_close(hf_states.flatten(0, 1),
+                               vllm_states,
+                               rtol=mixtral_moe_tol[dtype],
+                               atol=mixtral_moe_tol[dtype])
 
 
 def stack_and_dev(tensors: List[torch.Tensor]):
@@ -163,7 +164,7 @@ def test_fused_marlin_moe(
         if group_size in (k, n):
             return
 
-    num_bits = 4
+    quant_type = scalar_types.uint4b8
     dtype = torch.float16
     a = torch.randn((m, k), device='cuda', dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device='cuda', dtype=dtype) / 10
@@ -180,7 +181,8 @@ def test_fused_marlin_moe(
     for i in range(w1.shape[0]):
         test_perm = torch.randperm(k)
         w_ref1, qweight1, scales1, g_idx1, sort_indices1, _ = marlin_quantize(
-            w1[i].transpose(1, 0), num_bits, group_size, act_order, test_perm)
+            w1[i].transpose(1, 0), quant_type, group_size, act_order,
+            test_perm)
         w_ref1_l.append(w_ref1)
         qweight1_l.append(qweight1)
         scales1_l.append(scales1)
@@ -202,7 +204,8 @@ def test_fused_marlin_moe(
     for i in range(w2.shape[0]):
         test_perm = torch.randperm(n)
         w_ref2, qweight2, scales2, g_idx2, sort_indices2, _ = marlin_quantize(
-            w2[i].transpose(1, 0), num_bits, group_size, act_order, test_perm)
+            w2[i].transpose(1, 0), quant_type, group_size, act_order,
+            test_perm)
         w_ref2_l.append(w_ref2)
         qweight2_l.append(qweight2)
         scales2_l.append(scales2)
@@ -270,7 +273,7 @@ def test_single_marlin_moe(
         if group_size == k:
             return
 
-    num_bits = 4
+    quant_type = scalar_types.uint4b8
     dtype = torch.float16
     a = torch.randn((m, k), device='cuda', dtype=dtype) / 10
     w = torch.randn((e, n, k), device='cuda', dtype=dtype) / 10
@@ -284,7 +287,7 @@ def test_single_marlin_moe(
     for i in range(w.shape[0]):
         test_perm = torch.randperm(k)
         w_ref, qweight, scales, g_idx, sort_indices, _ = marlin_quantize(
-            w[i].transpose(1, 0), num_bits, group_size, act_order, test_perm)
+            w[i].transpose(1, 0), quant_type, group_size, act_order, test_perm)
         w_ref_l.append(w_ref)
         qweights_l.append(qweight)
         scales_l.append(scales)

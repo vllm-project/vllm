@@ -75,6 +75,9 @@ class AttentionBackend(ABC):
     ) -> None:
         raise NotImplementedError
 
+    def advance_step(self, num_seqs: int, num_queries: int):
+        raise NotImplementedError
+
 
 @dataclass
 class AttentionMetadata:
@@ -150,6 +153,7 @@ class AttentionImpl(ABC, Generic[T]):
         sliding_window: Optional[int] = None,
         kv_cache_dtype: str = "auto",
         blocksparse_params: Optional[Dict[str, Any]] = None,
+        logits_soft_cap: Optional[float] = None,
     ) -> None:
         raise NotImplementedError
 

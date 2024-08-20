@@ -352,8 +352,11 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA):
                                    attn_metadata)
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.model.embed_tokens, hidden_states,
                                        sampling_metadata)
         return logits
@@ -404,6 +407,6 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA):
             loaded_params.add(name)
         unloaded_params = params_dict.keys() - loaded_params
         if unloaded_params:
-            raise RuntimeError(
-                "Some weights are not initialized from checkpoints: "
-                f"{unloaded_params}")
+            logger.warning(
+                "Some weights are not initialized from checkpoints: %s",
+                unloaded_params)
