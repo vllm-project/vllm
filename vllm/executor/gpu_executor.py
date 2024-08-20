@@ -62,6 +62,18 @@ class GPUExecutor(ExecutorBase):
             observability_config=self.observability_config,
         )
 
+    def _get_worker_module_and_class(self) -> Tuple[str, str]:
+        if self.scheduler_config.is_multi_step:
+            worker_module_name = "vllm.worker.multi_step_worker"
+            worker_class_name = "MultiStepWorker"
+        elif self.speculative_config:
+            worker_module_name = "vllm.spec_decode.spec_decode_worker"
+            worker_class_name = "create_spec_worker"
+        else:
+            worker_module_name = "vllm.worker.worker"
+            worker_class_name = "Worker"
+        return (worker_module_name, worker_class_name)
+
     def _get_create_worker_kwargs(
             self,
             local_rank: int = 0,
@@ -70,17 +82,10 @@ class GPUExecutor(ExecutorBase):
         worker_kwargs = self._get_worker_kwargs(local_rank, rank,
                                                 distributed_init_method)
 
-        if self.scheduler_config.is_multi_step:
-            worker_kwargs.update(
-                worker_module_name="vllm.worker.multi_step_worker",
-                worker_class_name="MultiStepWorker")
-        elif self.speculative_config:
-            worker_kwargs.update(
-                worker_module_name="vllm.spec_decode.spec_decode_worker",
-                worker_class_name="create_spec_worker")
-        else:
-            worker_kwargs.update(worker_module_name="vllm.worker.worker",
-                                 worker_class_name="Worker")
+        (worker_module_name,
+         worker_class_name) = self._get_worker_module_and_class()
+        worker_kwargs.update(worker_module_name=worker_module_name,
+                             worker_class_name=worker_class_name)
 
         return worker_kwargs
 

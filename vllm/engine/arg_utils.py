@@ -664,8 +664,10 @@ class EngineArgs:
 
         parser.add_argument(
             '--disable-logprobs-during-spec-decoding',
-            type=bool,
+            action=StoreBoolean,
             default=EngineArgs.disable_logprobs_during_spec_decoding,
+            nargs="?",
+            const="True",
             help='If set to True, token log probabilities are not returned '
             'during speculative decoding. If set to False, log probabilities '
             'are returned according to the settings in SamplingParams. If '
