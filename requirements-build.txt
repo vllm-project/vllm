@@ -5,3 +5,4 @@ packaging
 setuptools>=49.4.0
 torch==2.4.0
 wheel
+jinja2
