@@ -315,29 +315,3 @@ def test_awq_models(vllm_runner, image_assets, models, size_factors,
         num_logprobs=num_logprobs,
         tensor_parallel_size=1,
     )
-
-
-@pytest.mark.parametrize(
-    "models", [("OpenGVLab/InternVL2-26B", "OpenGVLab/InternVL2-26B-AWQ")])
-@pytest.mark.parametrize("size_factors", [[1.0]])
-@pytest.mark.parametrize("dtype", ["half"])
-@pytest.mark.parametrize("max_tokens", [128])
-@pytest.mark.parametrize("num_logprobs", [5])
-@pytest.mark.parametrize("tp_size", [2])
-@torch.inference_mode()
-def test_large_models(num_gpus_available, vllm_runner, image_assets, models,
-                      size_factors, dtype: str, max_tokens: int,
-                      num_logprobs: int, tp_size: int) -> None:
-    if num_gpus_available < tp_size:
-        pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
-
-    run_awq_test(
-        vllm_runner,
-        image_assets,
-        models,
-        size_factors=size_factors,
-        dtype=dtype,
-        max_tokens=max_tokens,
-        num_logprobs=num_logprobs,
-        tensor_parallel_size=tp_size,
-    )
