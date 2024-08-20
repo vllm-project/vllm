@@ -36,6 +36,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from .utils import is_pp_missing_parameter, make_layers
 
+
+
 class QWenMLP(nn.Module):
 
     def __init__(
@@ -239,11 +241,18 @@ class QWenModel(nn.Module):
         hidden_states, _ = self.ln_f(hidden_states, residual)
         return hidden_states
 
-### Stubs that need to be implemented...
+
 def get_max_qwen_image_tokens(ctx: InputContext):
-    # TODO: calculate this
-    print("STUB: using hardcoded max image tokens for qwen")
-    return 2048
+    """Calculates the max number of image tokens for qwen, i.e., the number of patches."""
+    config = ctx.get_hf_config()
+    vision_config = config.visual
+    # Images and patches are square and are usually 448/14, respectively
+    image_size = vision_config["image_size"]
+    patch_size = vision_config["patch_size"]
+    # Features will be of size (grid_height, grid_height)
+    # so usually our max tokens will be 1024 for qwen-vl/chat
+    grid_height = image_size // patch_size
+    return grid_height ** 2
 
 def input_processor_for_qwen(ctx: InputContext, llm_inputs: LLMInputs):
     multi_modal_data = llm_inputs.get("multi_modal_data")
