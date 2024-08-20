@@ -418,7 +418,6 @@ class FlashAttentionMetadataBuilder(
             self.block_tables.append(block_table)
 
             # Compute slot mapping.
-            # NOTE(Alan): 构建slot mapping，也就是真实的kvcache与block_table关系对应
             is_profile_run = is_block_tables_empty(block_tables)
             start_idx = compute_slot_mapping_start_idx(
                 is_prompt, query_len, context_len, self.sliding_window,
