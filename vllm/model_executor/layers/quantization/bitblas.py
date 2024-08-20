@@ -13,6 +13,7 @@ logger = init_logger(__name__)
 
 try:
     import bitblas
+    from bitblas import Matmul, MatmulConfig
     from bitblas.utils import auto_detect_nvidia_target
 except ImportError as e:
     bitblas_import_exception = e
@@ -467,7 +468,6 @@ class BitBLASLinearMethod(LinearMethodBase):
         bits,
         out_dtype="float16",
     ):
-        from bitblas import MatmulConfig
 
         bitblas_dtype = self.BITBLAS_DTYPES[params_dtype]
 
@@ -509,7 +509,6 @@ class BitBLASLinearMethod(LinearMethodBase):
             matmul_config, enable_tuning)
 
     def _get_or_create_bitblas_operator(self, config, enable_tuning):
-        from bitblas import Matmul
         from bitblas.cache import global_operator_cache
 
         if global_operator_cache.size() == 0:
