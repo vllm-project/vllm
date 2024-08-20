@@ -388,7 +388,7 @@ class LLMEngine:
         self.output_queue: Deque[Tuple[List[SamplerOutput],
                                        List[Tuple[ScheduledSequenceGroup,
                                                   SequenceGroupMetadata]],
-                                       List[SequenceGroup]]] = deque()
+                                       SchedulerOutputs]] = deque()
         self.request_outputs: List[Union[RequestOutput,
                                          EmbeddingRequestOutput]] = []
 
@@ -1196,7 +1196,7 @@ class LLMEngine:
             return None
 
         (outputs, scheduled_ids,
-         ignored_seq_groups) = self.output_queue.popleft()
+         scheduler_outputs) = self.output_queue.popleft()
         # Organize outputs by [step][sequence group] instead of
         # [sequence group][step].
         if len(outputs) > 1:
@@ -1266,9 +1266,16 @@ class LLMEngine:
                 request_output = RequestOutputFactory.create(seq_group)
                 self.request_outputs.append(request_output)
 
-        for seq_group in ignored_seq_groups:
+        for seq_group in scheduler_outputs.ignored_seq_groups:
             request_output = RequestOutputFactory.create(seq_group)
             self.request_outputs.append(request_output)
+
+        if is_async:
+            # Log stats.
+            self.do_log_stats(scheduler_outputs, outputs)
+
+            # Tracing
+            self.do_tracing(scheduler_outputs)
 
         return None
 
@@ -1388,8 +1395,7 @@ class LLMEngine:
 
         # Add results to the output_queue
         # (for async or non-async postprocessing)
-        self.output_queue.append(
-            (output, scheduled_ids, scheduler_outputs.ignored_seq_groups))
+        self.output_queue.append((output, scheduled_ids, scheduler_outputs))
 
         if (len(output) > 0) and allow_output_proc_callback:
             assert len(output) == 1, ("Multi step decoding does not work "
@@ -1401,11 +1407,11 @@ class LLMEngine:
         if not allow_output_proc_callback:
             self._process_model_outputs(is_async=False)
 
-        # Log stats.
-        self.do_log_stats(scheduler_outputs, output)
+            # Log stats.
+            self.do_log_stats(scheduler_outputs, output)
 
-        # Tracing
-        self.do_tracing(scheduler_outputs)
+            # Tracing
+            self.do_tracing(scheduler_outputs)
 
         if not self.has_unfinished_requests():
             # Stop the execute model loop in parallel workers until there are

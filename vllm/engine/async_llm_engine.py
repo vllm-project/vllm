@@ -365,7 +365,7 @@ class _AsyncLLMEngine(LLMEngine):
 
             # Cache results in engine
             self.output_queue.append(
-                (output, scheduled_ids, scheduler_outputs.ignored_seq_groups))
+                (output, scheduled_ids, scheduler_outputs))
 
             if (len(output) > 0) and allow_output_proc_callback:
                 assert len(
@@ -377,14 +377,14 @@ class _AsyncLLMEngine(LLMEngine):
 
             if not allow_output_proc_callback:
                 self._process_model_outputs(is_async=False)
+
+                # Log stats.
+                self.do_log_stats(scheduler_outputs, output)
+                # Tracing
+                self.do_tracing(scheduler_outputs)
+
         else:
             self.request_outputs = []
-
-        # Log stats.
-        self.do_log_stats(scheduler_outputs, output)
-
-        # Tracing
-        self.do_tracing(scheduler_outputs)
 
         return self.request_outputs
 
