@@ -1006,13 +1006,15 @@ class QCrossKVParallelLinear(QKVParallelLinear):
         '''
 
         if self._param_views_not_cached:
-            q_shard_size = self._get_shard_offset_mapping('k')
+            q_shard_begin_offset = self._get_shard_offset_mapping('q')
+            kv_shards_begin_offset = self._get_shard_offset_mapping('k')
             self._cached_q_weights_wrapper = _WeightWrapper(
-                self.weight[0:q_shard_size, :])
+                self.weight[q_shard_begin_offset:kv_shards_begin_offset, :])
             self._cached_kv_weights_wrapper = _WeightWrapper(
-                self.weight[q_shard_size:, :])
-            self._cached_q_bias = self.bias[0:q_shard_size]
-            self._cached_kv_bias = self.bias[q_shard_size:]
+                self.weight[kv_shards_begin_offset:, :])
+            self._cached_q_bias = self.bias[
+                q_shard_begin_offset:kv_shards_begin_offset]
+            self._cached_kv_bias = self.bias[kv_shards_begin_offset:]
             self._param_views_not_cached = False
 
     def _maybe_gather_output(
