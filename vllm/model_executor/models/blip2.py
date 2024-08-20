@@ -494,6 +494,9 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         super().__init__()
 
+        # currently all existing BLIP-2 models have `tie_word_embeddings`
+        # enabled
+        assert config.tie_word_embeddings
         self.config = config
         self.multimodal_config = multimodal_config
 

@@ -368,6 +368,8 @@ class Phi3SmallForCausalLM(nn.Module):
             padding_size=DEFAULT_VOCAB_PADDING_SIZE,
             quant_config=quant_config,
         )
+        if self.config.tie_word_embeddings:
+            self.lm_head.weight = self.model.embed_tokens.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
@@ -449,4 +451,3 @@ class Phi3SmallForCausalLM(nn.Module):
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
-        self.lm_head.weight.data.copy_(self.model.embed_tokens.weight.data)
