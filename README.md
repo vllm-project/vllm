@@ -28,7 +28,7 @@ Easy, fast, and cheap LLM serving for everyone
 
 ---
 ## Usage
-glm-4v: Colab(https://colab.research.google.com/drive/1jpCM0H3thZjN1XqcnpHm3S5g2Z9Pz89k?usp=sharing)
+glm-4v: [Colab Notebook](https://colab.research.google.com/drive/1jpCM0H3thZjN1XqcnpHm3S5g2Z9Pz89k?usp=sharing)
 
 ## About
 vLLM is a fast and easy-to-use library for LLM inference and serving.
