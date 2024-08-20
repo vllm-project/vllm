@@ -1,10 +1,9 @@
-import asyncio
 from abc import ABC, abstractmethod
 from typing import List, Optional, Set, Tuple
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, MultiModalConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig,
+                         ModelConfig, MultiModalConfig, ObservabilityConfig,
+                         ParallelConfig, PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig)
 from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -19,6 +18,8 @@ class ExecutorBase(ABC):
     that can execute the model on multiple devices.
     """
 
+    uses_ray: bool  # whether the executor uses Ray for orchestration.
+
     def __init__(
         self,
         model_config: ModelConfig,
@@ -31,6 +32,7 @@ class ExecutorBase(ABC):
         multimodal_config: Optional[MultiModalConfig],
         speculative_config: Optional[SpeculativeConfig],
         prompt_adapter_config: Optional[PromptAdapterConfig],
+        observability_config: Optional[ObservabilityConfig],
     ) -> None:
         self.model_config = model_config
         self.cache_config = cache_config
@@ -42,7 +44,7 @@ class ExecutorBase(ABC):
         self.multimodal_config = multimodal_config
         self.speculative_config = speculative_config
         self.prompt_adapter_config = prompt_adapter_config
-
+        self.observability_config = observability_config
         self._init_executor()
 
     @abstractmethod
@@ -131,26 +133,6 @@ class ExecutorBase(ABC):
 
 
 class ExecutorAsyncBase(ExecutorBase):
-
-    def __init__(
-        self,
-        model_config: ModelConfig,
-        cache_config: CacheConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        load_config: LoadConfig,
-        lora_config: Optional[LoRAConfig],
-        multimodal_config: Optional[MultiModalConfig],
-        speculative_config: Optional[SpeculativeConfig],
-        prompt_adapter_config: Optional[PromptAdapterConfig],
-    ) -> None:
-        self.pp_locks: Optional[List[asyncio.Lock]] = None
-
-        super().__init__(model_config, cache_config, parallel_config,
-                         scheduler_config, device_config, load_config,
-                         lora_config, multimodal_config, speculative_config,
-                         prompt_adapter_config)
 
     @abstractmethod
     async def execute_model_async(

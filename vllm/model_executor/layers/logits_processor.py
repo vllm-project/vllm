@@ -5,10 +5,12 @@ from typing import Optional, Union
 import torch
 import torch.nn as nn
 
-from vllm.distributed import tensor_model_parallel_gather
+from vllm.distributed import (tensor_model_parallel_all_gather,
+                              tensor_model_parallel_gather)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.platforms import current_platform
 
 
 class LogitsProcessor(nn.Module):
@@ -39,6 +41,8 @@ class LogitsProcessor(nn.Module):
         self.org_vocab_size = org_vocab_size or vocab_size
         # Soft cap the logits. Used in Gemma 2.
         self.soft_cap = soft_cap
+        # Whether to use gather or all-gather to gather the logits.
+        self.use_gather = not current_platform.is_tpu()
 
     def forward(
         self,
@@ -46,7 +50,7 @@ class LogitsProcessor(nn.Module):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
         embedding_bias: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Optional[torch.Tensor]:
         if self.logits_as_input:
             logits = hidden_states
         else:
@@ -82,7 +86,7 @@ class LogitsProcessor(nn.Module):
         logits = tensor_model_parallel_gather(logits)
         # Remove paddings in vocab (if any).
         if logits is not None:
-            logits = logits[:, :self.org_vocab_size]
+            logits = logits[..., :self.org_vocab_size]
         return logits
 
     def extra_repr(self) -> str:

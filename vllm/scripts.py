@@ -1,18 +1,21 @@
 # The CLI entrypoint to vLLM.
 import argparse
+import asyncio
 import os
 import signal
 import sys
-from typing import Optional
+from typing import List, Optional
 
 from openai import OpenAI
+from openai.types.chat import ChatCompletionMessageParam
 
+from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.openai.api_server import run_server
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.utils import FlexibleArgumentParser
 
 
-def registrer_signal_handlers():
+def register_signal_handlers():
 
     def signal_handler(sig, frame):
         sys.exit(0)
@@ -22,14 +25,20 @@ def registrer_signal_handlers():
 
 
 def serve(args: argparse.Namespace) -> None:
+    # The default value of `--model`
+    if args.model != EngineArgs.model:
+        raise ValueError(
+            "With `vllm serve`, you should provide the model as a "
+            "positional argument instead of via the `--model` option.")
+
     # EngineArgs expects the model name to be passed as --model.
     args.model = args.model_tag
 
-    run_server(args)
+    asyncio.run(run_server(args))
 
 
 def interactive_cli(args: argparse.Namespace) -> None:
-    registrer_signal_handlers()
+    register_signal_handlers()
 
     base_url = args.url
     api_key = args.api_key or os.environ.get("OPENAI_API_KEY", "EMPTY")
@@ -62,15 +71,14 @@ def complete(model_name: str, client: OpenAI) -> None:
 
 def chat(system_prompt: Optional[str], model_name: str,
          client: OpenAI) -> None:
-    conversation = []
+    conversation: List[ChatCompletionMessageParam] = []
     if system_prompt is not None:
         conversation.append({"role": "system", "content": system_prompt})
 
     print("Please enter a message for the chat model:")
     while True:
         input_message = input("> ")
-        message = {"role": "user", "content": input_message}
-        conversation.append(message)
+        conversation.append({"role": "user", "content": input_message})
 
         chat_completion = client.chat.completions.create(model=model_name,
                                                          messages=conversation)
@@ -78,7 +86,7 @@ def chat(system_prompt: Optional[str], model_name: str,
         response_message = chat_completion.choices[0].message
         output = response_message.content
 
-        conversation.append(response_message)
+        conversation.append(response_message)  # type: ignore
         print(output)
 
 
