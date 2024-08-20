@@ -101,7 +101,7 @@ class MultiModalRegistry:
         mapper: Optional[MultiModalInputMapper] = None,
     ):
         """
-        Register an input mapper for image data to a model class.
+        Register an input mapper for speech data to a model class.
 
         See :meth:`MultiModalPlugin.register_input_mapper` for more details.
         """
@@ -173,6 +173,16 @@ class MultiModalRegistry:
         image, that are passed to the language model for a model class.
         """
         return self.register_max_multimodal_tokens("image", max_mm_tokens)
+    
+    def register_max_speech_tokens(
+        self,
+        max_mm_tokens: Optional[MultiModalTokensCalc] = None,
+    ):
+        """
+        Register the maximum number of speech tokens, corresponding to a single
+        speech, that are passed to the language model for a model class.
+        """
+        return self.register_max_multimodal_tokens("audio", max_mm_tokens)
 
     def get_max_multimodal_tokens(self, model_config: ModelConfig) -> int:
         """
