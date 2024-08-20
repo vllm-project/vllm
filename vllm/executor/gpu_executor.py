@@ -55,13 +55,24 @@ class GPUExecutor(ExecutorBase):
             rank=rank,
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
-            multimodal_config=self.multimodal_config,
             speculative_config=self.speculative_config,
             prompt_adapter_config=self.prompt_adapter_config,
             is_driver_worker=(not self.parallel_config)
             or (rank % self.parallel_config.tensor_parallel_size == 0),
             observability_config=self.observability_config,
         )
+
+    def _get_worker_module_and_class(self) -> Tuple[str, str]:
+        if self.scheduler_config.is_multi_step:
+            worker_module_name = "vllm.worker.multi_step_worker"
+            worker_class_name = "MultiStepWorker"
+        elif self.speculative_config:
+            worker_module_name = "vllm.spec_decode.spec_decode_worker"
+            worker_class_name = "create_spec_worker"
+        else:
+            worker_module_name = "vllm.worker.worker"
+            worker_class_name = "Worker"
+        return (worker_module_name, worker_class_name)
 
     def _get_create_worker_kwargs(
             self,
@@ -70,13 +81,12 @@ class GPUExecutor(ExecutorBase):
             distributed_init_method: Optional[str] = None) -> Dict:
         worker_kwargs = self._get_worker_kwargs(local_rank, rank,
                                                 distributed_init_method)
-        if self.speculative_config is None:
-            worker_kwargs.update(worker_module_name="vllm.worker.worker",
-                                 worker_class_name="Worker")
-        else:
-            worker_kwargs.update(
-                worker_module_name="vllm.spec_decode.spec_decode_worker",
-                worker_class_name="create_spec_worker")
+
+        (worker_module_name,
+         worker_class_name) = self._get_worker_module_and_class()
+        worker_kwargs.update(worker_module_name=worker_module_name,
+                             worker_class_name=worker_class_name)
+
         return worker_kwargs
 
     def _create_worker(self,
