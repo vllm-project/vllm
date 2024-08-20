@@ -8,7 +8,7 @@ import tempfile
 from argparse import Namespace
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import AsyncIterator, Optional, Set
+from typing import AsyncIterator, Set
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -79,10 +79,7 @@ async def lifespan(app: FastAPI):
     async def _force_log():
         while True:
             await asyncio.sleep(1.)
-            try:
-                await async_engine_client.do_log_stats()
-            except Exception as e:
-                print(e)
+            await async_engine_client.do_log_stats()
 
     if not engine_args.disable_log_stats:
         task = asyncio.create_task(_force_log())
