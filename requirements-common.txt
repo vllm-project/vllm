@@ -26,3 +26,4 @@ librosa # Required for audio processing
 soundfile # Required for audio processing
 gguf == 0.9.1
 importlib_metadata
+bitblas==0.0.1.dev14 # Require for bitblas kernel
