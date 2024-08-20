@@ -305,19 +305,6 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA):
             assert linear_method is None or isinstance(
                 linear_method, UnquantizedLinearMethod)
 
-        self.lm_head = ParallelLMHead(
-            self.unpadded_vocab_size,
-            config.hidden_size,
-            org_num_embeddings=config.vocab_size,
-            padding_size=DEFAULT_VOCAB_PADDING_SIZE
-            # We need bigger padding if using lora for kernel
-            # compatibility
-            if not lora_config else lora_config.lora_vocab_padding_size,
-            quant_config=QuantizationConfigOverride(TiedWeightLinearMethod),
-            params_dtype=torch.float16,
-        )
-        self.lm_head.register_parameter("weight", self.transformer.wte.weight)
-
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
         self.sampler = Sampler()
