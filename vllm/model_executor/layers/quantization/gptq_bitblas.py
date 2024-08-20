@@ -2,7 +2,6 @@ import enum
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-import bitblas.cache
 import torch
 from torch.nn.parameter import Parameter
 
@@ -13,20 +12,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 
 logger = init_logger(__name__)
-
-try:
-    import bitblas
-    from bitblas.utils import auto_detect_nvidia_target
-except ImportError as e:
-    bitblas_import_exception = e
-    raise ValueError(
-        "Trying to use the bitblas backend, but could not import dependencies"
-        f"with the following error: {bitblas_import_exception}"
-    ) from bitblas_import_exception
-
-bitblas.set_log_level("Debug")
-BITBLAS_TARGET = auto_detect_nvidia_target()
-BITBLAS_DATABASE_PATH = bitblas.cache.get_database_path()
 
 GPTQ_BITBLAS_SUPPORTED_NUM_BITS = [1, 2, 4, 8]
 GPTQ_BITBLAS_SUPPORTED_SYM = [False, True]
@@ -415,8 +400,10 @@ class GPTQBitBLASLinearMethod(LinearMethodBase):
             matmul_config, enable_tuning)
 
     def _get_or_create_bitblas_operator(self, config, enable_tuning):
-        from bitblas import Matmul
-        from bitblas.cache import global_operator_cache
+        from bitblas import Matmul, auto_detect_nvidia_target
+        from bitblas.cache import get_database_path, global_operator_cache
+        BITBLAS_DATABASE_PATH = get_database_path()
+        BITBLAS_TARGET = auto_detect_nvidia_target()
 
         if global_operator_cache.size() == 0:
             global_operator_cache.load_from_database(BITBLAS_DATABASE_PATH,
