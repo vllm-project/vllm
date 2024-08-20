@@ -58,8 +58,8 @@ get_current_llm_serving_engine() {
   fi
 
   if which trtllm-build >/dev/null; then
-    echo "Container: trt"
-    export CURRENT_LLM_SERVING_ENGINE=trt
+    echo "Container: tensorrt-llm"
+    export CURRENT_LLM_SERVING_ENGINE=tensorrt-llm
     return
   fi
 
