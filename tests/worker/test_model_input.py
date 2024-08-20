@@ -5,9 +5,9 @@ import torch
 
 from vllm.attention import AttentionMetadata, AttentionMetadataBuilder
 from vllm.attention.backends.abstract import AttentionBackend
+from vllm.attention.backends.utils import CommonAttentionState
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.pooling_metadata import PoolingMetadata
-from vllm.attention.backends.utils import CommonAttentionState
 from vllm.worker.embedding_model_runner import (
     ModelInputForGPUWithPoolingMetadata)
 from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
