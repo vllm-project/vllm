@@ -100,6 +100,39 @@ class RayGPUExecutor(DistributedGPUExecutor):
             trust_remote_code=self.model_config.trust_remote_code,
         )
 
+    def _get_env_vars_to_be_updated(self):
+        # Get the set of GPU IDs used on each node.
+        worker_node_and_gpu_ids = self._run_workers("get_node_and_gpu_ids",
+                                                    use_dummy_driver=True)
+
+        node_workers = defaultdict(list)
+        node_gpus = defaultdict(list)
+
+        for i, (node_id, gpu_ids) in enumerate(worker_node_and_gpu_ids):
+            node_workers[node_id].append(i)
+            # `gpu_ids` can be a list of strings or integers.
+            # convert them to integers for consistency.
+            # NOTE: gpu_ids can be larger than 9 (e.g. 16 GPUs),
+            # string sorting is not sufficient.
+            # see https://github.com/vllm-project/vllm/issues/5590
+            gpu_ids = [int(x) for x in gpu_ids]
+            node_gpus[node_id].extend(gpu_ids)
+        for node_id, gpu_ids in node_gpus.items():
+            node_gpus[node_id] = sorted(gpu_ids)
+
+        VLLM_INSTANCE_ID = get_vllm_instance_id()
+
+        # Set environment variables for the driver and workers.
+        all_args_to_update_environment_variables = [({
+            "CUDA_VISIBLE_DEVICES":
+            ",".join(map(str, node_gpus[node_id])),
+            "VLLM_INSTANCE_ID":
+            VLLM_INSTANCE_ID,
+            "VLLM_TRACE_FUNCTION":
+            str(envs.VLLM_TRACE_FUNCTION),
+        }, ) for (node_id, _) in worker_node_and_gpu_ids]
+        return all_args_to_update_environment_variables
+
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
         if (self.parallel_config.tensor_parallel_size == 1
@@ -213,19 +246,8 @@ class RayGPUExecutor(DistributedGPUExecutor):
         for node_id, gpu_ids in node_gpus.items():
             node_gpus[node_id] = sorted(gpu_ids)
 
-        VLLM_INSTANCE_ID = get_vllm_instance_id()
-
-        # Set environment variables for the driver and workers.
-        all_args_to_update_environment_variables = [({
-            "CUDA_VISIBLE_DEVICES":
-            ",".join(map(str, node_gpus[node_id])),
-            "VLLM_INSTANCE_ID":
-            VLLM_INSTANCE_ID,
-            "VLLM_TRACE_FUNCTION":
-            str(envs.VLLM_TRACE_FUNCTION),
-        }, ) for (node_id, _) in worker_node_and_gpu_ids]
         self._run_workers("update_environment_variables",
-                          all_args=all_args_to_update_environment_variables)
+                          all_args=self._get_env_vars_to_be_updated())
 
         if len(node_gpus) == 1:
             # in single node case, we don't need to get the IP address.
