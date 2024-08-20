@@ -329,7 +329,7 @@ def get_phi3v_image_feature_size(
     input_height: int,
     input_width: int,
 ) -> int:
-    num_crops = getattr(hf_config, "num_crops", 16)
+    num_crops = hf_config.get("num_crops", 4)
     new_width, new_height = _calc_hd_transform_size(width=input_width,
                                                     height=input_height,
                                                     hd_num=num_crops)
@@ -341,7 +341,7 @@ def get_phi3v_image_feature_size(
 def get_max_phi3v_image_tokens(ctx: InputContext):
 
     return get_phi3v_image_feature_size(
-        ctx.get_hf_config(),
+        ctx.get_hf_image_processor_config(),
         input_height=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
         input_width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
     )
@@ -395,7 +395,7 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
         return llm_inputs
 
     model_config = ctx.model_config
-    hf_config = ctx.get_hf_config()
+    hf_config = ctx.get_hf_image_processor_config()
 
     image_data = multi_modal_data["image"]
     if isinstance(image_data, Image.Image):
