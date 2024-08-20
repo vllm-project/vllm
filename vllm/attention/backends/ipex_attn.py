@@ -168,6 +168,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         k_scale: float = 1.0,
         v_scale: float = 1.0,
         attn_type: AttentionType = AttentionType.DECODER,
+        aux_stream: torch.cuda.Stream = None
     ) -> torch.Tensor:
         """Forward pass with IPEX varlen_attention and PagedAttention.
 

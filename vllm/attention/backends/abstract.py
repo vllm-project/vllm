@@ -217,5 +217,6 @@ class AttentionImpl(ABC, Generic[T]):
         k_scale: float = 1.0,
         v_scale: float = 1.0,
         attn_type: AttentionType = AttentionType.DECODER,
+        aux_stream: torch.cuda.Stream = None
     ) -> torch.Tensor:
         raise NotImplementedError

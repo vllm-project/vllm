@@ -418,6 +418,7 @@ class FlashAttentionMetadataBuilder(
             self.block_tables.append(block_table)
 
             # Compute slot mapping.
+            # NOTE(Alan): 构建slot mapping，也就是真实的kvcache与block_table关系对应
             is_profile_run = is_block_tables_empty(block_tables)
             start_idx = compute_slot_mapping_start_idx(
                 is_prompt, query_len, context_len, self.sliding_window,
@@ -599,6 +600,7 @@ class FlashAttentionImpl(AttentionImpl):
         k_scale: float = 1.0,
         v_scale: float = 1.0,
         attn_type: AttentionType = AttentionType.DECODER,
+        aux_stream: torch.cuda.Stream = None
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 
@@ -660,6 +662,76 @@ class FlashAttentionImpl(AttentionImpl):
 
         assert query.shape[0] == num_prefill_tokens
         assert decode_query.shape[0] == num_decode_tokens
+
+        # NOTE(alan): only enabled when chunked prefill flag is true
+        enabled_chunked_prefill = (num_prefill_tokens != 0 and num_decode_tokens != 0)
+        if enabled_chunked_prefill:
+            prefill_stream = aux_stream if aux_stream is not None else torch.cuda.default_stream()
+            decode_stream = torch.cuda.default_stream()
+            if prefill_meta := attn_metadata.prefill_metadata:
+                # Prompt run.
+                with torch.cuda.stream(prefill_stream):
+                    if (kv_cache is None or prefill_meta.block_tables is None
+                            or prefill_meta.block_tables.numel() == 0):
+                        # normal attention
+                        # When block_tables are not filled, it means q and k are the
+                        # prompt, and they have the same length.
+                        out = torch.ops.vllm.flash_attn_varlen_func(
+                            q=query,
+                            k=key,
+                            v=value,
+                            cu_seqlens_q=prefill_meta.seq_start_loc,
+                            cu_seqlens_k=prefill_meta.seq_start_loc,
+                            max_seqlen_q=prefill_meta.max_prefill_seq_len,
+                            max_seqlen_k=prefill_meta.max_prefill_seq_len,
+                            softmax_scale=self.scale,
+                            causal=True,
+                            window_size=self.sliding_window,
+                            alibi_slopes=self.alibi_slopes,
+                            softcap=self.logits_soft_cap,
+                        )
+                        assert output[:num_prefill_tokens].shape == out.shape
+                        output[:num_prefill_tokens] = out
+                    else:
+                        # prefix-enabled attention
+                        assert prefill_meta.seq_lens is not None
+                        max_seq_len = max(prefill_meta.seq_lens)
+                        output[:
+                            num_prefill_tokens] = torch.ops.vllm.flash_attn_varlen_func(  # noqa
+                                q=query,
+                                k=key_cache,
+                                v=value_cache,
+                                cu_seqlens_q=prefill_meta.query_start_loc,
+                                max_seqlen_q=prefill_meta.max_query_len,
+                                cu_seqlens_k=prefill_meta.seq_start_loc,
+                                max_seqlen_k=max_seq_len,
+                                softmax_scale=self.scale,
+                                causal=True,
+                                alibi_slopes=self.alibi_slopes,
+                                block_table=prefill_meta.block_tables,
+                                softcap=self.logits_soft_cap,
+                            )
+
+            if decode_meta := attn_metadata.decode_metadata:
+                with torch.cuda.stream(decode_stream):
+                    # Decoding run.
+                    output[
+                        num_prefill_tokens:] = torch.ops.vllm.flash_attn_with_kvcache(
+                            decode_query.unsqueeze(1),
+                            key_cache,
+                            value_cache,
+                            block_table=decode_meta.block_tables,
+                            cache_seqlens=decode_meta.seq_lens_tensor,
+                            softmax_scale=self.scale,
+                            causal=True,
+                            alibi_slopes=self.alibi_slopes,
+                            softcap=self.logits_soft_cap,
+                        ).squeeze(1)
+
+            prefill_stream.synchronize()
+            decode_stream.synchronize()
+
+            return output.view(num_tokens, hidden_size)
 
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
