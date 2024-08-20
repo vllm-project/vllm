@@ -458,8 +458,9 @@ def causal_conv1d_fwd(x: torch.Tensor, weight: torch.Tensor,
                       initial_states_: Optional[torch.Tensor],
                       final_states_out_: Optional[torch.Tensor],
                       silu_activation: bool) -> torch.Tensor:
-    return torch.ops._C.causal_conv1d_fwd(x, weight, bias_, seq_idx_, initial_states_,
-                                          final_states_out_, silu_activation)
+    return torch.ops._C.causal_conv1d_fwd(x, weight, bias_, seq_idx_,
+                                          initial_states_, final_states_out_,
+                                          silu_activation)
 
 
 def causal_conv1d_update(x: torch.Tensor, conv_state: torch.Tensor,
@@ -467,6 +468,17 @@ def causal_conv1d_update(x: torch.Tensor, conv_state: torch.Tensor,
                          silu_activation: bool) -> torch.Tensor:
     return torch.ops._C.causal_conv1d_update(x, conv_state, weight, bias_,
                                              silu_activation)
+
+
+def selective_scan_fwd(u: torch.Tensor, delta: torch.Tensor, A: torch.Tensor,
+                       B: torch.Tensor, C: torch.Tensor,
+                       D_: Optional[torch.Tensor], z_: Optional[torch.Tensor],
+                       delta_bias_: Optional[torch.Tensor],
+                       delta_softplus: bool, index_: Optional[torch.Tensor],
+                       x: Optional[torch.Tensor]) -> List[torch.Tensor]:
+    return torch.ops._C.selective_scan_fwd(u, delta, A, B, C, D_, z_,
+                                           delta_bias_, delta_softplus, index_,
+                                           x)
 
 
 # moe

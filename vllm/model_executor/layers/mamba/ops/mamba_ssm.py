@@ -10,9 +10,21 @@ import triton
 import triton.language as tl
 
 from einops import rearrange, repeat
+from vllm import _custom_ops as ops
+from packaging import version
 
-from mamba_ssm.ops.triton.softplus import softplus
+TRITON3 = version.parse(triton.__version__) >= version.parse("3.0.0")
 
+if TRITON3:
+    @triton.jit
+    def softplus(dt):
+        dt = tl.where(dt <= 20.0, tl.math.log(tl.math.exp(dt) + 1), dt)
+        return dt
+else:
+    @triton.jit
+    def softplus(dt):
+        dt = tl.where(dt <= 20.0, tl.math.log1p(tl.exp(dt)), dt)
+        return dt
 
 @triton.heuristics({"HAS_DT_BIAS": lambda args: args["dt_bias_ptr"] is not None})
 @triton.heuristics({"HAS_D": lambda args: args["D_ptr"] is not None})
@@ -296,7 +308,7 @@ def selective_scan_fn(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_
     x[:, :, 0, 0::2] = 1
     if prev_state is not None:
         x[:, :, 0, 1::2].copy_(prev_state)
-    out, x, *rest = selective_scan_cuda.fwd(u, delta, A, B, C, D, z, delta_bias, delta_softplus, position_indices, x)
+    out, x, *rest = ops.selective_scan_fwd(u, delta, A, B, C, D, z, delta_bias, delta_softplus, position_indices, x)
     last_state = x[:, :, -1, 1::2]  # (batch, dim, dstate)
     if z is not None:
         return out if not return_last_state else (out, last_state)
