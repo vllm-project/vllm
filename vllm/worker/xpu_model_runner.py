@@ -137,7 +137,6 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
                 device_config=self.device_config,
                 load_config=self.load_config,
                 lora_config=self.lora_config,
-                multimodal_config=self.multimodal_config,
                 parallel_config=self.parallel_config,
                 scheduler_config=self.scheduler_config,
                 cache_config=self.cache_config,
