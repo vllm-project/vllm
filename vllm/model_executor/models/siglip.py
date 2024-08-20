@@ -3,7 +3,7 @@ within a vision language model."""
 
 import math
 from array import array
-from typing import Iterable, Optional, Tuple, Union, List
+from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 from PIL import Image

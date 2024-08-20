@@ -44,12 +44,12 @@ def repeat_and_pad_image_tokens(
     prompt_token_ids: List[int],
     *,
     image_token_id: int,
-    repeat_count: Union[int, List[int]] = 1,
+    repeat_count: Union[int, List[int]],
     pad_token_left: Optional[int] = None,
     pad_token_right: Optional[int] = None,
 ) -> Tuple[Optional[str], List[int]]:
-    if not isinstance(repeat_count, list):
-        repeat_count = [repeat_count] * len(prompt_token_ids)
+    if isinstance(repeat_count, int):
+        repeat_count = [repeat_count]
 
     if prompt is None:
         new_prompt = None
@@ -59,13 +59,6 @@ def repeat_and_pad_image_tokens(
                               tokenizer.decode(pad_token_left))
         pad_token_str_right = (None if pad_token_right is None else
                                tokenizer.decode(pad_token_right))
-        replacement_str = "".join(
-            repeat_and_pad_token(
-                image_token_str,
-                repeat_count=repeat_count[0],
-                pad_token_left=pad_token_str_left,
-                pad_token_right=pad_token_str_right,
-            ))
 
         image_token_count = prompt.count(image_token_str)
         # This is an arbitrary number to distinguish between the two cases
@@ -74,22 +67,45 @@ def repeat_and_pad_image_tokens(
                 "Please follow the prompt format that is "
                 "documented on HuggingFace which does not involve "
                 "repeating %s tokens.", image_token_str)
+        if image_token_count < len(repeat_count):
+            logger.warning(
+                "The number of image tokens in the prompt is less than "
+                "the number of image inputs. Extra image tokens will be "
+                "treated as plain text")
+            repeat_count = repeat_count[:image_token_count]
 
-        # The image tokens are removed to be consistent with HuggingFace
-        new_prompt = prompt.replace(image_token_str, replacement_str)
+        prompt_parts = prompt.split(image_token_str,
+                                    maxsplit=len(repeat_count))
+        new_prompt = ""
+        for i in range(len(repeat_count)):
+            replacement_str = "".join(
+                repeat_and_pad_token(
+                    image_token_str,
+                    repeat_count=repeat_count[i],
+                    pad_token_left=pad_token_str_left,
+                    pad_token_right=pad_token_str_right,
+                ))
+            # The image tokens are removed to be consistent with HuggingFace
+            new_prompt += prompt_parts[i] + replacement_str
+        new_prompt += prompt_parts[-1]
 
     new_token_ids: List[int] = []
-    idx = 0
+    image_token_idx = 0
     for i, token in enumerate(prompt_token_ids):
         if token == image_token_id:
             replacement_ids = repeat_and_pad_token(
                 image_token_id,
-                repeat_count=repeat_count[idx],
+                repeat_count=repeat_count[image_token_idx],
                 pad_token_left=pad_token_left,
                 pad_token_right=pad_token_right,
             )
             new_token_ids.extend(replacement_ids)
-            idx += 1
+            image_token_idx += 1
+
+            # No need to further scan the list since we replaced all tokens
+            if image_token_idx >= len(repeat_count):
+                new_token_ids.extend(prompt_token_ids[i + 1:])
+                break
         else:
             new_token_ids.append(token)
 
