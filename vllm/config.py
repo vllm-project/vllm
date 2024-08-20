@@ -12,7 +12,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import current_platform
-from vllm.tracing import is_otel_installed
+from vllm.tracing import is_otel_available, otel_import_error_traceback
 from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import (STR_NOT_IMPL_ENC_DEC_CUDAGRAPH, GiB_bytes,
                         cuda_device_count_stateless, get_cpu_memory, is_cpu,
@@ -36,6 +36,7 @@ _PP_SUPPORTED_MODELS = [
     "AquilaForCausalLM",
     "DeepseekV2ForCausalLM",
     "InternLMForCausalLM",
+    "JAISLMHeadModel",
     "LlamaForCausalLM",
     "LLaMAForCausalLM",
     "MistralForCausalLM",
@@ -108,6 +109,8 @@ class ModelConfig:
             matches the model name exposed via the APIs. If multiple model 
             names provided, the first name will be used. If not specified, 
             the model name will be the same as `model`.
+        limit_mm_per_prompt: Maximum number of data instances per modality 
+            per prompt. Only applicable for multimodal models.
     """
 
     def __init__(
@@ -133,7 +136,7 @@ class ModelConfig:
         disable_sliding_window: bool = False,
         skip_tokenizer_init: bool = False,
         served_model_name: Optional[Union[str, List[str]]] = None,
-        multimodal_config: Optional["MultiModalConfig"] = None,
+        limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -210,13 +213,28 @@ class ModelConfig:
             sliding_window_len=self.get_hf_config_sliding_window())
         self.served_model_name = get_served_model_name(model,
                                                        served_model_name)
-        self.multimodal_config = multimodal_config
-
+        self.multimodal_config = self._init_multimodal_config(
+            limit_mm_per_prompt)
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
         self._verify_embedding_mode()
         self._verify_quantization()
         self._verify_cuda_graph()
+
+    def _init_multimodal_config(
+        self, limit_mm_per_prompt: Optional[Mapping[str, int]]
+    ) -> Optional["MultiModalConfig"]:
+        architectures = getattr(self.hf_config, "architectures", [])
+        if any(
+                ModelRegistry.is_multimodal_model(arch)
+                for arch in architectures):
+            return MultiModalConfig(limit_per_prompt=limit_mm_per_prompt or {})
+        else:
+            if limit_mm_per_prompt:
+                raise ValueError(
+                    "limit_mm_per_prompt is only supported for multimodal "
+                    "models.")
+            return None
 
     def _verify_tokenizer_mode(self) -> None:
         tokenizer_mode = self.tokenizer_mode.lower()
@@ -240,10 +258,11 @@ class ModelConfig:
 
     def _verify_quantization(self) -> None:
         supported_quantization = [*QUANTIZATION_METHODS]
-        rocm_supported_quantization = ["gptq", "squeezellm"]
+        rocm_supported_quantization = ["gptq", "squeezellm", "fp8"]
         optimized_quantization_methods = [
             "fp8", "marlin", "gptq_marlin_24", "gptq_marlin", "awq_marlin",
-            "fbgemm_fp8", "compressed_tensors", "compressed-tensors"
+            "fbgemm_fp8", "compressed_tensors", "compressed-tensors",
+            "experts_int8"
         ]
         tpu_supported_quantization = ["tpu_int8"]
         if self.quantization is not None:
@@ -464,6 +483,18 @@ class ModelConfig:
             t for t in self.get_layers_block_type(parallel_config)
             if t != "attention"
         ])
+
+    def get_multimodal_config(self) -> "MultiModalConfig":
+        """
+        Get the multimodal configuration of the model.
+
+        Raises:
+            ValueError: If the model is not multimodal.
+        """
+        if self.multimodal_config is None:
+            raise ValueError("The model is not multimodal.")
+
+        return self.multimodal_config
 
     @property
     def is_encoder_decoder_model(self) -> bool:
@@ -739,8 +770,8 @@ class ParallelConfig:
         self.tokenizer_pool_config = tokenizer_pool_config
         self.ray_workers_use_nsight = ray_workers_use_nsight
         self.placement_group = placement_group
-
         self.world_size = pipeline_parallel_size * self.tensor_parallel_size
+
         if worker_use_ray:
             if self.distributed_executor_backend is None:
                 self.distributed_executor_backend = "ray"
@@ -836,6 +867,11 @@ class SchedulerConfig:
             swapping. However, when the sequence group has multiple sequences
             (e.g., beam search), recomputation is not currently supported. In
             such a case, we use swapping instead.
+        send_delta_data: Private API. If used, scheduler sends delta data to
+            workers instead of an entire data. It should be enabled only
+            when SPMD worker architecture is enabled. I.e.,
+            VLLM_USE_RAY_SPMD_WORKER=1
+
     """
 
     def __init__(self,
@@ -848,7 +884,8 @@ class SchedulerConfig:
                  enable_chunked_prefill: bool = False,
                  embedding_mode: Optional[bool] = False,
                  preemption_mode: Optional[str] = None,
-                 num_scheduler_steps: int = 1) -> None:
+                 num_scheduler_steps: int = 1,
+                 send_delta_data: bool = False) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
         else:
@@ -878,6 +915,7 @@ class SchedulerConfig:
         self.embedding_mode = embedding_mode
         self.preemption_mode = preemption_mode
         self.num_scheduler_steps = num_scheduler_steps
+        self.send_delta_data = send_delta_data
         self._verify_args()
 
     def _verify_args(self) -> None:
@@ -1448,7 +1486,7 @@ class PromptAdapterConfig:
 class MultiModalConfig:
     """Controls the behavior of multimodal models."""
 
-    limit_per_prompt: Mapping[str, int]
+    limit_per_prompt: Mapping[str, int] = field(default_factory=dict)
     """
     The maximum number of multi-modal input instances allowed per prompt
     for each :class:`~vllm.multimodal.MultiModalPlugin`.
@@ -1683,9 +1721,11 @@ class ObservabilityConfig:
     collect_model_execute_time: bool = False
 
     def __post_init__(self):
-        if not is_otel_installed() and self.otlp_traces_endpoint is not None:
-            raise ValueError("OpenTelemetry packages must be installed before "
-                             "configuring 'otlp_traces_endpoint'")
+        if not is_otel_available() and self.otlp_traces_endpoint is not None:
+            raise ValueError(
+                "OpenTelemetry is not available. Unable to configure "
+                "'otlp_traces_endpoint'. Ensure OpenTelemetry packages are "
+                f"installed. Original error:\n{otel_import_error_traceback}")
 
         if ((self.collect_model_forward_time
              or self.collect_model_execute_time)
@@ -1708,7 +1748,6 @@ class EngineConfig:
     device_config: DeviceConfig
     load_config: LoadConfig
     lora_config: Optional[LoRAConfig]
-    multimodal_config: Optional[MultiModalConfig]
     speculative_config: Optional[SpeculativeConfig]
     decoding_config: Optional[DecodingConfig]
     observability_config: Optional[ObservabilityConfig]

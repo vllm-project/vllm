@@ -37,9 +37,9 @@ check_hf_token() {
 ensure_sharegpt_downloaded() {
   local FILE=ShareGPT_V3_unfiltered_cleaned_split.json
   if [ ! -f "$FILE" ]; then
-      wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/$FILE
+    wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/$FILE
   else
-      echo "$FILE already exists."
+    echo "$FILE already exists."
   fi
 }
 
@@ -68,35 +68,38 @@ wait_for_server() {
     done' && return 0 || return 1
 }
 
-kill_gpu_processes() {
-  # kill all processes on GPU.
-  pids=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader)
-  if [ -z "$pids" ]; then
-      echo "No GPU processes found."
+kill_processes_launched_by_current_bash() {
+  # Kill all python processes launched from current bash script
+  current_shell_pid=$$
+  processes=$(ps -eo pid,ppid,command | awk -v ppid="$current_shell_pid" -v proc="$1" '$2 == ppid && $3 ~ proc {print $1}')
+  if [ -n "$processes" ]; then
+    echo "Killing the following processes matching '$1':"
+    echo "$processes"
+    echo "$processes" | xargs kill -9
   else
-      for pid in $pids; do
-          kill -9 "$pid"
-          echo "Killed process with PID: $pid"
-      done
-
-      echo "All GPU processes have been killed."
+    echo "No processes found matching '$1'."
   fi
+}
 
-  # waiting for GPU processes to be fully killed
-  # loop while nvidia-smi returns any processes
-  while [ -n "$(nvidia-smi --query-compute-apps=pid --format=csv,noheader)" ]; do
+kill_gpu_processes() {
+
+  ps -aux
+  lsof -t -i:8000 | xargs -r kill -9
+  pkill -f pt_main_thread
+  # this line doesn't work now
+  # ps aux | grep python | grep openai | awk '{print $2}' | xargs -r kill -9
+  pkill -f python3
+  pkill -f /usr/bin/python3
+
+
+  # wait until GPU memory usage smaller than 1GB
+  while [ $(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -n 1) -ge 1000 ]; do
     sleep 1
-    echo "Waiting for GPU processes to be killed"
   done
 
   # remove vllm config file
   rm -rf ~/.config/vllm
 
-  # Print the GPU memory usage
-  # so that we know if all GPU processes are killed.
-  gpu_memory_usage=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i 0)
-  # The memory usage should be 0 MB.
-  echo "GPU 0 Memory Usage: $gpu_memory_usage MB"
 }
 
 upload_to_buildkite() {
@@ -114,7 +117,7 @@ upload_to_buildkite() {
   fi
 
   # Use the determined command to annotate and upload artifacts
-  $BUILDKITE_AGENT_COMMAND annotate --style "info" --context "$BUILDKITE_LABEL-benchmark-results" < $RESULTS_FOLDER/benchmark_results.md
+  $BUILDKITE_AGENT_COMMAND annotate --style "info" --context "$BUILDKITE_LABEL-benchmark-results" <$RESULTS_FOLDER/benchmark_results.md
   $BUILDKITE_AGENT_COMMAND artifact upload "$RESULTS_FOLDER/*"
 }
 
@@ -166,7 +169,7 @@ run_latency_tests() {
         latency_command: $latency,
         gpu_type: $gpu
       }')
-    echo "$jq_output" > "$RESULTS_FOLDER/$test_name.commands"
+    echo "$jq_output" >"$RESULTS_FOLDER/$test_name.commands"
 
     # run the benchmark
     eval "$latency_command"
@@ -175,7 +178,6 @@ run_latency_tests() {
 
   done
 }
-
 
 run_throughput_tests() {
   # run throughput tests using `benchmark_throughput.py`
@@ -224,7 +226,7 @@ run_throughput_tests() {
         throughput_command: $command,
         gpu_type: $gpu
       }')
-    echo "$jq_output" > "$RESULTS_FOLDER/$test_name.commands"
+    echo "$jq_output" >"$RESULTS_FOLDER/$test_name.commands"
 
     # run the benchmark
     eval "$throughput_command"
@@ -255,7 +257,6 @@ run_serving_tests() {
       echo "Skip test case $test_name."
       continue
     fi
-
 
     # get client and server arguments
     server_params=$(echo "$params" | jq -r '.server_parameters')
@@ -334,7 +335,7 @@ run_serving_tests() {
           client_command: $client,
           gpu_type: $gpu
         }')
-      echo "$jq_output" > "$RESULTS_FOLDER/${new_test_name}.commands"
+      echo "$jq_output" >"$RESULTS_FOLDER/${new_test_name}.commands"
 
     done
 
@@ -351,6 +352,7 @@ main() {
   # dependencies
   (which wget && which curl) || (apt-get update && apt-get install -y wget curl)
   (which jq) || (apt-get update && apt-get -y install jq)
+  (which lsof) || (apt-get update && apt-get install -y lsof)
 
   # get the current IP address, required by benchmark_serving.py
   export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
@@ -368,7 +370,6 @@ main() {
   run_serving_tests $QUICK_BENCHMARK_ROOT/tests/serving-tests.json
   run_latency_tests $QUICK_BENCHMARK_ROOT/tests/latency-tests.json
   run_throughput_tests $QUICK_BENCHMARK_ROOT/tests/throughput-tests.json
-
 
   # postprocess benchmarking results
   pip install tabulate pandas

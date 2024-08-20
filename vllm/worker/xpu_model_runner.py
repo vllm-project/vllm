@@ -125,6 +125,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         self.mm_registry = mm_registry
         self.multi_modal_input_mapper = mm_registry \
             .create_input_mapper(model_config)
+        self.mm_registry.init_mm_limits_per_prompt(self.model_config)
 
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
@@ -136,7 +137,6 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
                 device_config=self.device_config,
                 load_config=self.load_config,
                 lora_config=self.lora_config,
-                multimodal_config=self.multimodal_config,
                 parallel_config=self.parallel_config,
                 scheduler_config=self.scheduler_config,
                 cache_config=self.cache_config,
@@ -166,14 +166,8 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         # To exercise the worst scenario for GPU memory consumption,
         # the number of seqs (batch_size) is chosen to maximize the number
         # of images processed.
-        model_config = self.model_config
-        mm_config = self.multimodal_config
-
-        input_registry = self.input_registry
-        mm_registry = self.mm_registry
-        mm_registry.init_mm_limits_per_prompt(model_config, mm_config)
-
-        max_mm_tokens = mm_registry.get_max_multimodal_tokens(model_config)
+        max_mm_tokens = self.mm_registry.get_max_multimodal_tokens(
+            self.model_config)
         if max_mm_tokens > 0:
             max_num_seqs_orig = max_num_seqs
             max_num_seqs = min(max_num_seqs,
@@ -190,8 +184,10 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
             seq_len = (max_num_batched_tokens // max_num_seqs +
                        (group_id < max_num_batched_tokens % max_num_seqs))
 
-            seq_data, dummy_multi_modal_data = input_registry \
-                .dummy_data_for_profiling(model_config, seq_len, mm_registry)
+            seq_data, dummy_multi_modal_data = self.input_registry \
+                .dummy_data_for_profiling(self.model_config,
+                                          seq_len,
+                                          self.mm_registry)
 
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),

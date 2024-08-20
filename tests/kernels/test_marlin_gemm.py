@@ -122,7 +122,7 @@ def test_gptq_marlin_repack(k_chunk, n_chunk, quant_type, group_size,
     )
     torch.cuda.synchronize()
 
-    assert torch.allclose(marlin_q_w_1, marlin_q_w_2)
+    torch.testing.assert_close(marlin_q_w_1, marlin_q_w_2)
 
 
 @pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
@@ -174,7 +174,7 @@ def test_awq_marlin_repack(k_chunk, n_chunk, quant_type, group_size,
     )
     torch.cuda.synchronize()
 
-    assert torch.allclose(marlin_q_w_1, marlin_q_w_2)
+    torch.testing.assert_close(marlin_q_w_1, marlin_q_w_2)
 
 
 @pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
