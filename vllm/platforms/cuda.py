@@ -18,6 +18,12 @@ logger = init_logger(__name__)
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
+if pynvml.__file__.endswith("__init__.py"):
+    logger.warning(
+        "You are using a deprecated `pynvml` package. Please install"
+        " `nvidia-ml-py` instead. See https://pypi.org/project/pynvml "
+        "for more information.")
+
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
 # all the related functions work on real physical device ids.
