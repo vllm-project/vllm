@@ -11,7 +11,7 @@ RUN python3 -m pip install torch_xla[pallas] -f https://storage.googleapis.com/j
 # Build vLLM.
 COPY . /workspace/vllm
 ENV VLLM_TARGET_DEVICE="tpu"
-RUN cd /workspace/vllm && python3 -m pip install -r requirements-tpu.txt
+RUN cd /workspace/vllm && python3 -m pip install -r setup-files/requirements-tpu.txt
 RUN cd /workspace/vllm && python3 setup.py develop
 
 CMD ["/bin/bash"]

@@ -6,11 +6,11 @@
 # docs/source/assets/dev/dockerfile-stages-dependency.png
 
 ARG CUDA_VERSION=12.4.1
-ARG PYTHON_VERSION=3.10
 #################### BASE IMAGE ####################
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04 AS base
 ARG CUDA_VERSION=12.4.1
 ARG PYTHON_VERSION=3.10
+ARG PYTHON_VERSION_BUILD=${PYTHON_VERSION}
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PIP_USE_DEPRECATED=legacy-resolver
 
@@ -21,15 +21,12 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && apt-get install -y ccache software-properties-common git curl sudo \
     && add-apt-repository ppa:deadsnakes/ppa \
     && apt-get update -y \
-    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
-    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
-    && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
-    && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
-    && python3 --version
-
-# Install pip
-RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} && python3 -m pip --version
-RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
+    && apt-get install -y python${PYTHON_VERSION_BUILD} python${PYTHON_VERSION_BUILD}-dev python${PYTHON_VERSION_BUILD}-venv \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION_BUILD} 1 \
+    && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION_BUILD} \
+    && ln -sf /usr/bin/python${PYTHON_VERSION_BUILD}-config /usr/bin/python3-config \
+    && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION_BUILD} \
+    && python3 -m pip --version
 
 WORKDIR /workspace
 
@@ -37,9 +34,6 @@ WORKDIR /workspace
 COPY setup_files/* /workspace/
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install -r requirements-cuda.txt
-
-ARG torch_cuda_arch_list='7.0 7.5 8.0 8.6 8.9 9.0+PTX'
-ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 #################### BASE IMAGE ####################
 
 
@@ -47,13 +41,14 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 FROM base AS wheel-build
 ARG PYTHON_VERSION=3.10
 ARG USE_SCCACHE
-ARG max_jobs=2
-ENV MAX_JOBS=${max_jobs}
+ARG MAX_JOBS=2
+ENV MAX_JOBS=${MAX_JOBS}
 ARG NVCC_THREADS=8
 ENV NVCC_THREADS=${NVCC_THREADS}
-ARG buildkite_commit
+ARG BUILDKITE_COMMIT
 ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
-ENV BUILDKITE_COMMIT=${buildkite_commit}
+ARG SCCACHE_REGION=us-west-2
+ENV BUILDKITE_COMMIT=${BUILDKITE_COMMIT}
 ENV CCACHE_DIR=/root/.cache/ccache
 
 # Install build dependencies
@@ -79,7 +74,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         && sudo mv sccache-v0.8.1-x86_64-unknown-linux-musl/sccache /usr/bin/sccache \
         && rm -rf sccache.tar.gz sccache-v0.8.1-x86_64-unknown-linux-musl \
         && export SCCACHE_BUCKET=${SCCACHE_BUCKET_NAME} \
-        && export SCCACHE_REGION=us-west-2 \
+        && export SCCACHE_REGION=${SCCACHE_REGION} \
         && export CMAKE_BUILD_TYPE=Release \
         && sccache --show-stats \
         && python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 \
@@ -139,17 +134,12 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && apt-get install -y ccache software-properties-common git curl sudo vim gcc \
     && add-apt-repository ppa:deadsnakes/ppa \
     && apt-get update -y \
-    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
+    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv libiverbs-dev \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
-    && python3 --version
-    
-# Install pip
-RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} && python3 -m pip --version
-RUN apt-get update -y \
-    && apt-get install -y libibverbs-dev
-RUN ldconfig /usr/local/cuda-$(echo ${CUDA_VERSION} | cut -d. -f1,2)/compat/
+    && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
+    && python3 --version && python3 -m pip --version
 
 # install vllm wheel first, so that torch etc will be installed
 RUN --mount=type=bind,from=wheel-build,src=/workspace/dist,target=/vllm-workspace/dist \
@@ -182,10 +172,9 @@ RUN apt-get update -y \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION_TEST} 1 \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION_TEST} \
     && ln -sf /usr/bin/python${PYTHON_VERSION_TEST}-config /usr/bin/python3-config \
-    && python3 --version
+    && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION_TEST} \
+    && python3 --version && python3 -m pip --version
 
-# Install pip
-RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION_TEST} && python3 -m pip --version
 COPY setup_files/* .
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/pip \
@@ -198,7 +187,7 @@ RUN mkdir test_docs && mv docs test_docs/ && mv vllm test_docs/
 # openai api server alternative
 FROM vllm-base AS vllm-openai
 
-ARG PYTHON_VERSION_OPENAI="${PYTHON_VERSION}"
+ARG PYTHON_VERSION=3.10
 WORKDIR /vllm-workspace
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -207,13 +196,12 @@ RUN apt-get update -y \
     && apt-get install -y ccache software-properties-common git curl sudo \
     && add-apt-repository ppa:deadsnakes/ppa \
     && apt-get update -y \
-    && apt-get install -y python${PYTHON_VERSION_OPENAI} python${PYTHON_VERSION_OPENAI}-dev python${PYTHON_VERSION_OPENAI}-venv \
-    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION_OPENAI} 1 \
-    && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION_OPENAI} \
-    && ln -sf /usr/bin/python${PYTHON_VERSION_OPENAI}-config /usr/bin/python3-config \
-    && python3 --version
-# Install pip
-RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION_OPENAI} && python3 -m pip --version
+    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
+    && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
+    && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
+    && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
+    && python3 --version && python3 -m pip --version
 
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/pip \

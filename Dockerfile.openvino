@@ -8,9 +8,9 @@ RUN apt-get update -y && \
 WORKDIR /workspace
 
 # copy requirements
-COPY requirements-build.txt /workspace/vllm/
-COPY requirements-common.txt /workspace/vllm/
-COPY requirements-openvino.txt /workspace/vllm/
+COPY setup-files/requirements-build.txt /workspace/vllm/
+COPY setup-files/requirements-common.txt /workspace/vllm/
+COPY setup-files/requirements-openvino.txt /workspace/vllm/
 
 COPY vllm/ /workspace/vllm/vllm
 COPY csrc/core /workspace/vllm/csrc/core

@@ -14,7 +14,7 @@ COPY ./ /workspace/vllm
 WORKDIR /workspace/vllm
 
 # These packages will be in rocketce eventually
-RUN pip install -v -r requirements-cpu.txt --prefer-binary --extra-index-url https://repo.fury.io/mgiessing
+RUN pip install -v -r setup-files/requirements-cpu.txt --prefer-binary --extra-index-url https://repo.fury.io/mgiessing
 
 RUN VLLM_TARGET_DEVICE=cpu python3 setup.py install
 
