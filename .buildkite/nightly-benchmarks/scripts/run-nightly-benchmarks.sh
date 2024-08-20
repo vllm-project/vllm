@@ -29,6 +29,20 @@ check_hf_token() {
   fi
 }
 
+
+upload_to_buildkite() {
+  # upload the benchmarking results to buildkite
+
+  # if the agent binary is not found, skip uploading the results, exit 0
+  if [ ! -f /workspace/buildkite-agent ]; then
+    echo "buildkite-agent binary not found. Skip uploading the results."
+    return 0
+  fi
+  # /workspace/buildkite-agent annotate --style "success" --context "benchmark-results" --append < $RESULTS_FOLDER/${CURRENT_LLM_SERVING_ENGINE}_nightly_results.md
+  /workspace/buildkite-agent artifact upload "$RESULTS_FOLDER/*"
+}
+
+
 get_current_llm_serving_engine() {
 
   if which lmdeploy >/dev/null; then
