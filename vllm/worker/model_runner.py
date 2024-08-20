@@ -68,6 +68,10 @@ _NUM_WARMUP_ITERS = 2
 
 TModelInputForGPU = TypeVar('TModelInputForGPU', bound="ModelInputForGPU")
 
+# For now, bump up cache limits for recompilations during CUDA graph warmups.
+torch._dynamo.config.cache_size_limit = 128
+torch._dynamo.config.accumulated_cache_size_limit = 128
+
 
 @dataclass(frozen=True)
 class ModelInputForGPU(ModelRunnerInputBase):
@@ -946,7 +950,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     "This may lead to less accurate results!")
 
         if envs.VLLM_TEST_DYNAMO_GRAPH_CAPTURE:
-            self.model = optimizer(self.model, fullgraph=True)
+            self.model = optimizer(
+                self.model,
+                fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                backend="eager")
 
     def save_sharded_state(
         self,

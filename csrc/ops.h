@@ -70,27 +70,14 @@ torch::Tensor aqlm_dequant(
     const torch::Tensor& codes, const torch::Tensor& codebooks,
     const std::vector<int64_t>& codebook_partition_sizes);
 
-torch::Tensor aqlm_dequant_meta(const torch::Tensor& codes,
-                                const torch::Tensor& codebooks,
-                                const torch::Tensor& codebook_partition_sizes);
-
 torch::Tensor awq_gemm(torch::Tensor _in_feats, torch::Tensor _kernel,
                        torch::Tensor _scaling_factors, torch::Tensor _zeros,
                        int64_t split_k_iters);
-
-torch::Tensor awq_gemm_meta(torch::Tensor _in_feats, torch::Tensor _kernel,
-                            torch::Tensor _scaling_factors,
-                            torch::Tensor _zeros, int64_t split_k_iters);
 
 torch::Tensor awq_dequantize(torch::Tensor _kernel,
                              torch::Tensor _scaling_factors,
                              torch::Tensor _zeros, int64_t split_k_iters,
                              int64_t thx, int64_t thy);
-
-torch::Tensor awq_dequantize_meta(torch::Tensor _kernel,
-                                  torch::Tensor _scaling_factors,
-                                  torch::Tensor _zeros, int64_t split_k_iters,
-                                  int64_t thx, int64_t thy);
 
 torch::Tensor marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                           torch::Tensor& b_scales, torch::Tensor& workspace,
@@ -123,11 +110,6 @@ torch::Tensor gptq_marlin_24_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                                   int64_t size_m, int64_t size_n,
                                   int64_t size_k);
 
-torch::Tensor gptq_marlin_24_gemm_meta(
-    torch::Tensor& a, torch::Tensor& b_q_weight, torch::Tensor& b_meta,
-    torch::Tensor& b_scales, torch::Tensor& workspace, int64_t num_bits,
-    int64_t size_m, int64_t size_n, int64_t size_k);
-
 torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                                torch::Tensor& b_scales, torch::Tensor& b_zeros,
                                torch::Tensor& g_idx, torch::Tensor& perm,
@@ -137,22 +119,20 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                                bool is_k_full, bool has_zp,
                                bool use_fp32_reduce);
 
-torch::Tensor gptq_marlin_gemm_meta(
-    torch::Tensor& a, torch::Tensor& b_q_weight, torch::Tensor& b_scales,
-    torch::Tensor& b_zeros, torch::Tensor& g_idx, torch::Tensor& perm,
-    torch::Tensor& workspace, int64_t num_bits, int64_t size_m, int64_t size_n,
-    int64_t size_k, bool is_k_full, bool has_zp);
-
 torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
                                  int64_t size_k, int64_t size_n,
                                  int64_t num_bits);
 
 torch::Tensor gptq_marlin_repack_meta(torch::Tensor& b_q_weight,
-                                      torch::Tensor& perm, int64_t size_k,
-                                      int64_t size_n, int64_t num_bits);
+                                      torch::Tensor& perm, c10::SymInt size_k,
+                                      c10::SymInt size_n, int64_t num_bits);
 
 torch::Tensor awq_marlin_repack(torch::Tensor& b_q_weight, int64_t size_k,
                                 int64_t size_n, int64_t num_bits);
+
+torch::Tensor awq_marlin_repack_meta(torch::Tensor& b_q_weight,
+                                     c10::SymInt size_k, c10::SymInt size_n,
+                                     int64_t num_bits);
 
 torch::Tensor ggml_dequantize(torch::Tensor W, int64_t type, int64_t m,
                               int64_t n);
@@ -167,12 +147,6 @@ torch::Tensor fp8_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                               torch::Tensor& b_scales, torch::Tensor& workspace,
                               int64_t num_bits, int64_t size_m, int64_t size_n,
                               int64_t size_k);
-
-torch::Tensor fp8_marlin_gemm_meta(torch::Tensor& a, torch::Tensor& b_q_weight,
-                                   torch::Tensor& b_scales,
-                                   torch::Tensor& workspace, int64_t num_bits,
-                                   int64_t size_m, int64_t size_n,
-                                   int64_t size_k);
 
 bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability);
 
@@ -280,6 +254,8 @@ void register_buffer(fptr_t _fa, torch::Tensor& t,
                      const std::vector<std::string>& handles,
                      const std::vector<int64_t>& offsets);
 std::tuple<torch::Tensor, std::vector<int64_t>> get_graph_buffer_ipc_meta(
+    fptr_t _fa);
+std::tuple<torch::Tensor, std::vector<int64_t>> get_graph_buffer_ipc_meta_meta(
     fptr_t _fa);
 void register_graph_buffers(fptr_t _fa, const std::vector<std::string>& handles,
                             const std::vector<std::vector<int64_t>>& offsets);
