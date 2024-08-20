@@ -312,12 +312,7 @@ main() {
   check_hf_token
   get_current_llm_serving_engine
 
-  if [[ $CURRENT_LLM_SERVING_ENGINE = "tensorrt-llm" ]]; then
-    # update transformers version for tensorrt-llm
-    # Issue: https://github.com/NVIDIA/TensorRT-LLM/issues/2105
-    pip install -U transformers
-  fi
-  
+  pip install -U transformers
 
   # check storage
   df -h
