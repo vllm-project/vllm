@@ -123,7 +123,7 @@ def split_batch_by_proposal_len(
 
 def sampler_output_to_torch(
     sampler_output_list: List[SamplerOutput], sampler_transposed: bool
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """Utility function which converts a list of SamplerOutput to tensors.
 
         sampler_transposed here is used as the indicator for whether
@@ -169,7 +169,23 @@ def sampler_output_to_torch(
     if sampler_transposed:
         sampled_token_ids = sampled_token_ids.transpose(0, 1)
 
-    return sampled_token_ids, sampled_token_probs, sampled_token_logprobs
+    if sampler_output_list[0].hidden_states is not None:
+        # shape: [batch_size, num_sampler_output, hidden_dim]
+        sampled_hidden_states = torch.stack(
+            [
+                sampler_output.hidden_states
+                for sampler_output in sampler_output_list
+            ],
+            dim=0,
+        )
+
+        if sampler_transposed:
+            sampled_hidden_states = sampled_hidden_states.transpose(0, 1)
+    else:
+        sampled_hidden_states = None
+
+    return (sampled_token_ids, sampled_token_probs, sampled_token_logprobs,
+            sampled_hidden_states)
 
 
 def maybe_mock_device_tensors(sampler_output: SamplerOutput, batch_size: int,
