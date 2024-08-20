@@ -1,6 +1,6 @@
+import asyncio
 import time
-from typing import (AsyncGenerator, AsyncIterator, Awaitable, Dict, List,
-                    Optional)
+from typing import AsyncGenerator, AsyncIterator, Dict, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Union
 
@@ -8,10 +8,11 @@ from fastapi import Request
 from transformers import PreTrainedTokenizer
 
 from vllm.config import ModelConfig
-from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.engine.protocol import AsyncEngineClient
 from vllm.entrypoints.chat_utils import (ConversationMessage,
+                                         apply_chat_template,
                                          load_chat_template,
-                                         parse_chat_message_content)
+                                         parse_chat_messages)
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionLogProb, ChatCompletionLogProbs,
@@ -30,7 +31,7 @@ from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
-from vllm.utils import random_uuid
+from vllm.utils import iterate_with_cancellation, random_uuid
 
 logger = init_logger(__name__)
 
@@ -39,7 +40,7 @@ class OpenAIServingChat(OpenAIServing):
 
     def __init__(
         self,
-        engine: AsyncLLMEngine,
+        async_engine_client: AsyncEngineClient,
         model_config: ModelConfig,
         served_model_names: List[str],
         response_role: str,
@@ -50,7 +51,7 @@ class OpenAIServingChat(OpenAIServing):
         chat_template: Optional[str],
         return_tokens_as_token_ids: bool = False,
     ):
-        super().__init__(engine=engine,
+        super().__init__(async_engine_client=async_engine_client,
                          model_config=model_config,
                          served_model_names=served_model_names,
                          lora_modules=lora_modules,
@@ -82,6 +83,16 @@ class OpenAIServingChat(OpenAIServing):
         if error_check_ret is not None:
             return error_check_ret
 
+        if request.prompt_logprobs is not None:
+            if request.stream and request.prompt_logprobs > 0:
+                return self.create_error_response(
+                    "Prompt_logprobs are not available when stream is enabled")
+
+            if request.prompt_logprobs < 0:
+                return self.create_error_response(
+                    f"Prompt_logprobs set to invalid "
+                    f"negative value: {request.prompt_logprobs}")
+
         try:
             (
                 lora_request,
@@ -89,29 +100,23 @@ class OpenAIServingChat(OpenAIServing):
             ) = self._maybe_get_adapters(request)
 
             model_config = self.model_config
-            tokenizer = await self.engine.get_tokenizer(lora_request)
+            tokenizer = await self.async_engine_client.get_tokenizer(
+                lora_request)
 
-            conversation: List[ConversationMessage] = []
-            mm_futures: List[Awaitable[MultiModalDataDict]] = []
-
-            for msg in request.messages:
-                chat_parsed_result = parse_chat_message_content(
-                    msg, model_config, tokenizer)
-
-                conversation.extend(chat_parsed_result.messages)
-                mm_futures.extend(chat_parsed_result.mm_futures)
+            conversation, mm_futures = parse_chat_messages(
+                request.messages, model_config, tokenizer)
 
             tool_dicts = None if request.tools is None else [
                 tool.model_dump() for tool in request.tools
             ]
 
-            prompt = tokenizer.apply_chat_template(
+            prompt = apply_chat_template(
+                tokenizer,
                 conversation=conversation,
-                tokenize=False,
+                chat_template=request.chat_template or self.chat_template,
                 add_generation_prompt=request.add_generation_prompt,
                 tools=tool_dicts,
                 documents=request.documents,
-                chat_template=request.chat_template or self.chat_template,
                 **(request.chat_template_kwargs or {}),
             )
         except Exception as e:
@@ -161,7 +166,8 @@ class OpenAIServingChat(OpenAIServing):
             if mm_data is not None:
                 engine_inputs["multi_modal_data"] = mm_data
 
-            is_tracing_enabled = await self.engine.is_tracing_enabled()
+            is_tracing_enabled = (
+                await self.async_engine_client.is_tracing_enabled())
             trace_headers = None
             if is_tracing_enabled and raw_request:
                 trace_headers = extract_trace_headers(raw_request.headers)
@@ -169,7 +175,7 @@ class OpenAIServingChat(OpenAIServing):
                     and contains_trace_headers(raw_request.headers)):
                 log_tracing_disabled_warning()
 
-            result_generator = self.engine.generate(
+            result_generator = self.async_engine_client.generate(
                 engine_inputs,
                 sampling_params,
                 request_id,
@@ -181,18 +187,20 @@ class OpenAIServingChat(OpenAIServing):
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
+        if raw_request:
+            result_generator = iterate_with_cancellation(
+                result_generator, raw_request.is_disconnected)
+
         # Streaming response
         if request.stream:
             return self.chat_completion_stream_generator(
                 request, result_generator, request_id, conversation, tokenizer)
-        else:
-            try:
-                return await self.chat_completion_full_generator(
-                    request, raw_request, result_generator, request_id,
-                    conversation, tokenizer)
-            except ValueError as e:
-                # TODO: Use a vllm-specific Validation Error
-                return self.create_error_response(str(e))
+        try:
+            return await self.chat_completion_full_generator(
+                request, result_generator, request_id, conversation, tokenizer)
+        except ValueError as e:
+            # TODO: Use a vllm-specific Validation Error
+            return self.create_error_response(str(e))
 
     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:
         if request.add_generation_prompt:
@@ -427,7 +435,6 @@ class OpenAIServingChat(OpenAIServing):
     async def chat_completion_full_generator(
         self,
         request: ChatCompletionRequest,
-        raw_request: Optional[Request],
         result_generator: AsyncIterator[RequestOutput],
         request_id: str,
         conversation: List[ConversationMessage],
@@ -438,12 +445,12 @@ class OpenAIServingChat(OpenAIServing):
         created_time = int(time.time())
         final_res: Optional[RequestOutput] = None
 
-        async for res in result_generator:
-            if raw_request is not None and await raw_request.is_disconnected():
-                # Abort the request if the client disconnects.
-                await self.engine.abort(request_id)
-                return self.create_error_response("Client disconnected")
-            final_res = res
+        try:
+            async for res in result_generator:
+                final_res = res
+        except asyncio.CancelledError:
+            return self.create_error_response("Client disconnected")
+
         assert final_res is not None
 
         choices: List[ChatCompletionResponseChoice] = []
@@ -509,6 +516,7 @@ class OpenAIServingChat(OpenAIServing):
             model=model_name,
             choices=choices,
             usage=usage,
+            prompt_logprobs=final_res.prompt_logprobs,
         )
 
         return response

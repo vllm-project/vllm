@@ -1,15 +1,7 @@
 """Block manager utils."""
 from vllm.sequence import SequenceGroup
-
-# Exception strings for non-implemented block manager enc/dec scenarios
-
-STR_NOT_IMPL_ENC_DEC_SWA = \
-    "Sliding window attention for encoder/decoder models " + \
-                    "is not currently supported."
-
-STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE = \
-    "Prefix caching for encoder/decoder models " + \
-                    "is not currently supported."
+from vllm.utils import (STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE,
+                        STR_NOT_IMPL_ENC_DEC_SWA)
 
 
 def _get_block_mgr_sliding_window_attr(block_mgr):

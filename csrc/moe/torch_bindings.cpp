@@ -1,4 +1,4 @@
-#include "registration.h"
+#include "core/registration.h"
 #include "moe_ops.h"
 #include "marlin_moe_ops.h"
 

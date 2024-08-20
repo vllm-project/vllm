@@ -21,43 +21,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Mixtral model."""
+import logging
 from typing import Iterable, List, Optional, Tuple
+
 import torch
 from torch import nn
 from transformers import MixtralConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
-from vllm.distributed import (
-    get_pp_group,
-    get_tensor_model_parallel_world_size
-)
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (
-    QKVParallelLinear,
-    ReplicatedLinear,
-    RowParallelLinear,
-)
+from vllm.model_executor.layers.linear import (QKVParallelLinear,
+                                               ReplicatedLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
-    ParallelLMHead,
-    VocabParallelEmbedding,
-)
+    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
-)
+    default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .interfaces import SupportsLoRA
 from .utils import is_pp_missing_parameter, make_layers
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -403,8 +395,11 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                                    attn_metadata, intermediate_tensors)
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits

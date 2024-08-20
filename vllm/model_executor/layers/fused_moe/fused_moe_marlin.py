@@ -1,11 +1,13 @@
 """Fused MoE utilities for GPTQ."""
 import functools
+from typing import Any, Dict, Optional
+
 import torch
 
-from typing import Any, Dict, Optional
 from vllm import _custom_ops as ops
 
-from .fused_moe import fused_topk, moe_align_block_size, try_get_optimal_moe_config
+from .fused_moe import (fused_topk, moe_align_block_size,
+                        try_get_optimal_moe_config)
 
 
 def single_marlin_moe(
@@ -84,6 +86,7 @@ def single_marlin_moe(
         True, False)
 
     return torch.sum(intermediate_cache.view(*intermediate_cache.shape), dim=1)
+
 
 def fused_moe_marlin(
     hidden_states: torch.Tensor,

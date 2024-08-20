@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.8", "3.9", "3.10", "3.11"]
+        python-version: ["3.8", "3.9", "3.10", "3.11", "3.12"]
     steps:
     - uses: actions/checkout@v2
     - name: Set up Python ${{ matrix.python-version }}
@@ -25,13 +25,14 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install mypy==1.9.0
+        pip install mypy==1.11.1
         pip install types-setuptools
         pip install types-PyYAML
         pip install types-requests
         pip install types-setuptools
     - name: Mypy
       run: |
+        mypy
         mypy tests --follow-imports skip
         mypy vllm/attention --follow-imports skip
         mypy vllm/core --follow-imports skip
@@ -44,5 +45,4 @@ jobs:
         mypy vllm/prompt_adapter --follow-imports skip
         mypy vllm/spec_decode --follow-imports skip
         mypy vllm/worker --follow-imports skip
-        mypy
 
