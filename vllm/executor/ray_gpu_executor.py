@@ -91,21 +91,18 @@ class RayGPUExecutor(DistributedGPUExecutor):
         return ray_remote_kwargs
 
     def _get_worker_wrapper_args(self) -> Dict[str, Any]:
-        if self.speculative_config is not None:
-            worker_module_name = "vllm.spec_decode.spec_decode_worker"
-            worker_class_name = "create_spec_worker"
-        elif self.scheduler_config.is_multi_step:
-            worker_module_name = "vllm.worker.multi_step_worker"
-            worker_class_name = "MultiStepWorker"
-        else:
-            worker_module_name = "vllm.worker.worker"
-            worker_class_name = "Worker"
+        (worker_module_name,
+         worker_class_name) = self._get_worker_module_and_class()
 
         return dict(
             worker_module_name=worker_module_name,
             worker_class_name=worker_class_name,
             trust_remote_code=self.model_config.trust_remote_code,
         )
+
+    # child class could overwrite this to return actual env vars.
+    def _get_env_vars_to_be_updated(self):
+        return self._env_vars_for_all_workers
 
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
@@ -231,8 +228,12 @@ class RayGPUExecutor(DistributedGPUExecutor):
             "VLLM_TRACE_FUNCTION":
             str(envs.VLLM_TRACE_FUNCTION),
         }, ) for (node_id, _) in worker_node_and_gpu_ids]
+
+        self._env_vars_for_all_workers = (
+            all_args_to_update_environment_variables)
+
         self._run_workers("update_environment_variables",
-                          all_args=all_args_to_update_environment_variables)
+                          all_args=self._get_env_vars_to_be_updated())
 
         if len(node_gpus) == 1:
             # in single node case, we don't need to get the IP address.
