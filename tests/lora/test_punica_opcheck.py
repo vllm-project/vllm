@@ -1,8 +1,5 @@
 """
-This script is mainly used to tests various hidden_sizes. We have collected the 
-hidden_sizes included in the LoRA models currently supported by vLLM. It tests
-whether the corresponding Triton kernel can run normally when tensor parallelism
-is set to [1, 2, 4, 8, 16, 32, 64].
+This script is used to run torch.library.opcheck on the punica kernels.
 """
 import random
 
@@ -40,15 +37,6 @@ MAX_RANKS = [32]
 SCALES = [0.5]
 SEED = [0]
 CUDA_DEVICES = [f"cuda:{0}"]
-
-
-def assert_close(a, b):
-    rtol, atol = {
-        torch.float16: (6e-2, 6e-2),
-        torch.bfloat16: (6e-2, 6e-2),
-        torch.float32: (1e-2, 1e-2),
-    }[a.dtype]
-    torch.testing.assert_close(a, b, rtol=rtol, atol=atol)
 
 
 @pytest.mark.parametrize("batches", BATCHES)
