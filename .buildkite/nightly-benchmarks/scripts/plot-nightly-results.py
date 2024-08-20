@@ -51,14 +51,19 @@ def get_perf_w_std(df, method, model, metric):
     
     if metric in ["TTFT", "ITL"]:
         mean = get_perf(df, method, model, "Mean " + metric + " (ms)")
+        mean = mean.tolist()
         std = get_perf(df, method, model, "Std " + metric + " (ms)")
+        if std.mean() == 0:
+            std = None
         success = get_perf(df, method, model, "Successful req.")
         if std is not None:
             std = std / np.sqrt(success)
+            std = std.tolist()
 
     else:
         assert metric == "Tput"
         mean = get_perf(df, method, model, "Input Tput (tok/s)") + get_perf(df, method, model, "Output Tput (tok/s)")
+        mean = mean.tolist()
         std = None
 
     return mean, std
@@ -99,24 +104,30 @@ def main(args):
     for i, model in enumerate(["llama8B", "llama70B", "mixtral8x7B"]):
         for j, metric in enumerate(["TTFT", "ITL", "Tput"]):
             ax = axes[i, j]
-            ax.set_ylim(bottom=0)
             if metric in ["TTFT", "ITL"]:
                 ax.set_ylabel(f"{metric} (ms)")
             else:
                 ax.set_ylabel(f"{metric} (tok/s)")
             ax.set_xlabel("QPS")
-            ax.set_title(f"{model} {metric}")
+            ax.set_title(f"{model} {args.dataset} {metric}")
             ax.grid(axis='y')
             print("New line")
             print(model, metric)
             for k, method in enumerate(methods):
                 mean, std = get_perf_w_std(df, method, model, metric)
                 print(method, mean, std)
-                ax.errorbar(["2", "4", "8", "16", "inf"], 
+                ax.errorbar(range(len(mean)),
                             mean, 
                             yerr=std, 
                             capsize=10, 
-                            label=method,)
+                            capthick=4,
+                            label=method,
+                            lw=4,)
+            ax.set_ylim(bottom=0)
+            if metric == "TTFT":
+                ax.set_ylim(0, 5000)
+            ax.set_xticks(range(len(mean)))
+            ax.set_xticklabels(["2", "4", "8", "16", "inf"])
 
             ax.legend()
 
