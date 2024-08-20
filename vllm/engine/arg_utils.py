@@ -2,11 +2,15 @@ import argparse
 import dataclasses
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Optional, Tuple, Type, Union
+from typing import (TYPE_CHECKING, Dict, List, Mapping, Optional, Tuple, Type,
+                    Union)
 
+import torch
+
+import vllm.envs as envs
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
-                         MultiModalConfig, ObservabilityConfig, ParallelConfig,
+                         ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig, TokenizerPoolConfig)
 from vllm.executor.executor_base import ExecutorBase
@@ -15,8 +19,7 @@ from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.utils import FlexibleArgumentParser
 
 if TYPE_CHECKING:
-    from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
-        BaseTokenizerGroup)
+    from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 
 logger = init_logger(__name__)
 
@@ -29,11 +32,32 @@ def nullable_str(val: str):
     return val
 
 
+def nullable_kvs(val: str) -> Optional[Mapping[str, int]]:
+    if len(val) == 0:
+        return None
+
+    out_dict: Dict[str, int] = {}
+    for item in val.split(","):
+        try:
+            key, value = item.split("=")
+        except TypeError as exc:
+            msg = "Each item should be in the form KEY=VALUE"
+            raise ValueError(msg) from exc
+
+        try:
+            out_dict[key] = int(value)
+        except ValueError as exc:
+            msg = f"Failed to parse value of item {key}={value}"
+            raise ValueError(msg) from exc
+
+    return out_dict
+
+
 @dataclass
 class EngineArgs:
     """Arguments for vLLM engine."""
     model: str = 'facebook/opt-125m'
-    served_model_name: Optional[Union[List[str]]] = None
+    served_model_name: Optional[Union[str, List[str]]] = None
     tokenizer: Optional[str] = None
     skip_tokenizer_init: bool = False
     tokenizer_mode: str = 'auto'
@@ -81,6 +105,7 @@ class EngineArgs:
     # notice.
     tokenizer_pool_type: Union[str, Type["BaseTokenizerGroup"]] = "ray"
     tokenizer_pool_extra_config: Optional[dict] = None
+    limit_mm_per_prompt: Optional[Mapping[str, int]] = None
     enable_lora: bool = False
     max_loras: int = 1
     max_lora_rank: int = 16
@@ -90,9 +115,10 @@ class EngineArgs:
     fully_sharded_loras: bool = False
     lora_extra_vocab_size: int = 256
     long_lora_scaling_factors: Optional[Tuple[float]] = None
-    lora_dtype: str = 'auto'
+    lora_dtype: Optional[Union[str, torch.dtype]] = 'auto'
     max_cpu_loras: Optional[int] = None
     device: str = 'auto'
+    num_scheduler_steps: int = 1
     ray_workers_use_nsight: bool = False
     num_gpu_blocks_override: Optional[int] = None
     num_lookahead_slots: int = 0
@@ -106,6 +132,7 @@ class EngineArgs:
     guided_decoding_backend: str = 'outlines'
     # Speculative decoding configuration.
     speculative_model: Optional[str] = None
+    speculative_model_quantization: Optional[str] = None
     speculative_draft_tensor_parallel_size: Optional[int] = None
     num_speculative_tokens: Optional[int] = None
     speculative_max_model_len: Optional[int] = None
@@ -293,7 +320,7 @@ class EngineArgs:
         parser.add_argument('--block-size',
                             type=int,
                             default=EngineArgs.block_size,
-                            choices=[8, 16, 32],
+                            choices=[8, 16, 32, 128, 256, 512, 1024, 2048],
                             help='Token block size for contiguous chunks of '
                             'tokens.')
 
@@ -435,6 +462,21 @@ class EngineArgs:
                             'This should be a JSON string that will be '
                             'parsed into a dictionary. Ignored if '
                             'tokenizer_pool_size is 0.')
+
+        # Multimodal related configs
+        parser.add_argument(
+            '--limit-mm-per-prompt',
+            type=nullable_kvs,
+            default=EngineArgs.limit_mm_per_prompt,
+            # The default value is given in
+            # MultiModalRegistry.init_mm_limits_per_prompt
+            help=('For each multimodal plugin, limit how many '
+                  'input instances to allow for each prompt. '
+                  'Expects a comma-separated list of items, '
+                  'e.g.: `image=16,video=2` allows a maximum of 16 '
+                  'images and 2 videos per prompt. Defaults to 1 for '
+                  'each modality.'))
+
         # LoRA related configs
         parser.add_argument('--enable-lora',
                             action='store_true',
@@ -506,6 +548,11 @@ class EngineArgs:
                                 "tpu", "xpu"
                             ],
                             help='Device type for vLLM execution.')
+        parser.add_argument('--num-scheduler-steps',
+                            type=int,
+                            default=1,
+                            help=('Maximum number of forward steps per '
+                                  'scheduler call.'))
 
         parser.add_argument(
             '--scheduler-delay-factor',
@@ -528,6 +575,18 @@ class EngineArgs:
             default=EngineArgs.speculative_model,
             help=
             'The name of the draft model to be used in speculative decoding.')
+        # Quantization settings for speculative model.
+        parser.add_argument(
+            '--speculative-model-quantization',
+            type=nullable_str,
+            choices=[*QUANTIZATION_METHODS, None],
+            default=EngineArgs.speculative_model_quantization,
+            help='Method used to quantize the weights of speculative model.'
+            'If None, we first check the `quantization_config` '
+            'attribute in the model config file. If that is '
+            'None, we assume the model weights are not '
+            'quantized and use `dtype` to determine the data '
+            'type of the weights.')
         parser.add_argument(
             '--num-speculative-tokens',
             type=int,
@@ -709,8 +768,6 @@ class EngineArgs:
             "CPU offload space must be non-negative"
             f", but got {self.cpu_offload_gb}")
 
-        multimodal_config = MultiModalConfig()
-
         device_config = DeviceConfig(device=self.device)
         model_config = ModelConfig(
             model=self.model,
@@ -734,7 +791,8 @@ class EngineArgs:
             disable_sliding_window=self.disable_sliding_window,
             skip_tokenizer_init=self.skip_tokenizer_init,
             served_model_name=self.served_model_name,
-            multimodal_config=multimodal_config)
+            limit_mm_per_prompt=self.limit_mm_per_prompt,
+        )
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
@@ -795,11 +853,19 @@ class EngineArgs:
                 "in low performance due to small KV cache space. Consider "
                 "setting --max-model-len to a smaller value.", max_model_len)
 
+        if self.num_scheduler_steps > 1 and not self.use_v2_block_manager:
+            self.use_v2_block_manager = True
+            logger.warning(
+                "Enabled BlockSpaceManagerV2 because it is "
+                "required for multi-step (--num-scheduler-steps > 1)")
+
         speculative_config = SpeculativeConfig.maybe_create_spec_config(
             target_model_config=model_config,
             target_parallel_config=parallel_config,
             target_dtype=self.dtype,
             speculative_model=self.speculative_model,
+            speculative_model_quantization = \
+                self.speculative_model_quantization,
             speculative_draft_tensor_parallel_size = \
                 self.speculative_draft_tensor_parallel_size,
             num_speculative_tokens=self.num_speculative_tokens,
@@ -820,18 +886,35 @@ class EngineArgs:
             disable_logprobs=self.disable_logprobs_during_spec_decoding,
         )
 
+        if self.num_scheduler_steps > 1:
+            if speculative_config is not None:
+                raise ValueError("Speculative decoding is not supported with "
+                                 "multi-step (--num-scheduler-steps > 1)")
+            if self.enable_chunked_prefill:
+                raise ValueError("Chunked prefill is not supported with "
+                                 "multi-step (--num-scheduler-steps > 1)")
+
+        # make sure num_lookahead_slots is set the higher value depending on
+        # if we are using speculative decoding or multi-step
+        num_lookahead_slots = max(self.num_lookahead_slots,
+                                  self.num_scheduler_steps - 1)
+        num_lookahead_slots = num_lookahead_slots \
+            if speculative_config is None \
+            else speculative_config.num_lookahead_slots
+
         scheduler_config = SchedulerConfig(
             max_num_batched_tokens=self.max_num_batched_tokens,
             max_num_seqs=self.max_num_seqs,
             max_model_len=model_config.max_model_len,
             use_v2_block_manager=self.use_v2_block_manager,
-            num_lookahead_slots=(self.num_lookahead_slots
-                                 if speculative_config is None else
-                                 speculative_config.num_lookahead_slots),
+            num_lookahead_slots=num_lookahead_slots,
             delay_factor=self.scheduler_delay_factor,
             enable_chunked_prefill=self.enable_chunked_prefill,
             embedding_mode=model_config.embedding_mode,
             preemption_mode=self.preemption_mode,
+            num_scheduler_steps=self.num_scheduler_steps,
+            send_delta_data=(envs.VLLM_USE_RAY_SPMD_WORKER
+                             and parallel_config.use_ray),
         )
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
@@ -873,11 +956,6 @@ class EngineArgs:
                 raise ValueError(
                     f"Invalid module {m} in collect_detailed_traces. "
                     f"Valid modules are {ALLOWED_DETAILED_TRACE_MODULES}")
-            if (m == "model"
-                    or m == "all") and self.pipeline_parallel_size > 1:
-                raise ValueError(
-                    "Collection of detailed traces for the 'model' module is "
-                    "not yet supported with pipeline parallelism.")
         observability_config = ObservabilityConfig(
             otlp_traces_endpoint=self.otlp_traces_endpoint,
             collect_model_forward_time="model" in detailed_trace_modules
@@ -900,7 +978,6 @@ class EngineArgs:
             scheduler_config=scheduler_config,
             device_config=device_config,
             lora_config=lora_config,
-            multimodal_config=multimodal_config,
             speculative_config=speculative_config,
             load_config=load_config,
             decoding_config=decoding_config,
@@ -923,7 +1000,13 @@ class AsyncEngineArgs(EngineArgs):
         parser.add_argument('--engine-use-ray',
                             action='store_true',
                             help='Use Ray to start the LLM engine in a '
-                            'separate process as the server process.')
+                            'separate process as the server process.'
+                            '(DEPRECATED. This argument is deprecated '
+                            'and will be removed in a future update. '
+                            'Set `VLLM_ALLOW_ENGINE_USE_RAY=1` to force '
+                            'use it. See '
+                            'https://github.com/vllm-project/vllm/issues/7045.'
+                            ')')
         parser.add_argument('--disable-log-requests',
                             action='store_true',
                             help='Disable logging requests.')

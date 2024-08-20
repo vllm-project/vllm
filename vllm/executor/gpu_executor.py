@@ -55,7 +55,6 @@ class GPUExecutor(ExecutorBase):
             rank=rank,
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
-            multimodal_config=self.multimodal_config,
             speculative_config=self.speculative_config,
             prompt_adapter_config=self.prompt_adapter_config,
             is_driver_worker=(not self.parallel_config)
@@ -70,13 +69,19 @@ class GPUExecutor(ExecutorBase):
             distributed_init_method: Optional[str] = None) -> Dict:
         worker_kwargs = self._get_worker_kwargs(local_rank, rank,
                                                 distributed_init_method)
-        if self.speculative_config is None:
-            worker_kwargs.update(worker_module_name="vllm.worker.worker",
-                                 worker_class_name="Worker")
-        else:
+
+        if self.scheduler_config.is_multi_step:
+            worker_kwargs.update(
+                worker_module_name="vllm.worker.multi_step_worker",
+                worker_class_name="MultiStepWorker")
+        elif self.speculative_config:
             worker_kwargs.update(
                 worker_module_name="vllm.spec_decode.spec_decode_worker",
                 worker_class_name="create_spec_worker")
+        else:
+            worker_kwargs.update(worker_module_name="vllm.worker.worker",
+                                 worker_class_name="Worker")
+
         return worker_kwargs
 
     def _create_worker(self,
