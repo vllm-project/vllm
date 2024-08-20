@@ -524,7 +524,7 @@ struct NumericArrayConverter<cutlass::bfloat16_t, vllm_uint4b8_t, N, Round> {
       // Below constructs the following temporary:
       uint32_t const prmt_indices[4] = {0xF4F0, 0xF5F1, 0xF6F2, 0xF7F3};
       static_assert(RegArray::kElements <= 4,
-                    "Too many inputs for BF16 -> I4 vector converter");
+                    "Too many inputs for uint4b8_t -> BF16 vector converter");
       CUTLASS_PRAGMA_UNROLL
       for (int ii = 0; ii < RegArray::kElements; ++ii) {
         asm volatile(

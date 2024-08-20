@@ -88,7 +88,7 @@ namespace machete {
 std::vector<std::string> supported_schedules(
     vllm::ScalarTypeTorchPtr const& btype);
 
-torch::Tensor gemm(torch::Tensor const A, torch::Tensor const B,
+torch::Tensor gemm(torch::Tensor const& A, torch::Tensor const& B,
                    vllm::ScalarTypeTorchPtr const& btype,
                    c10::optional<torch::Tensor> const& scales,
                    c10::optional<torch::Tensor> const& zeros,
@@ -97,7 +97,7 @@ torch::Tensor gemm(torch::Tensor const A, torch::Tensor const B,
                    c10::optional<double> alpha, c10::optional<double> beta,
                    c10::optional<std::string> schedule);
 
-torch::Tensor prepack_B(torch::Tensor const B,
+torch::Tensor prepack_B(torch::Tensor const& B,
                         vllm::ScalarTypeTorchPtr const& btype);
 
 };  // namespace machete

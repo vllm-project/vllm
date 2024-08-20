@@ -25,8 +25,9 @@ CUTE_HOST_DEVICE static constexpr bool is_identity_layout() {
   else {
     constexpr auto coalesced_layout = coalesce(Layout{});
     if constexpr (rank(coalesced_layout) == 1 &&
-                  stride<0>(coalesced_layout) == 1)
+                  stride<0>(coalesced_layout) == 1) {
       return true;
+    }
     return false;
   }
 }
@@ -51,16 +52,17 @@ static constexpr auto get_logical_ptr(PointerType* ptr) {
 template <typename T, typename Elements>
 CUTE_HOST_DEVICE static constexpr auto create_auto_vectorizing_copy() {
   constexpr auto bits = sizeof_bits_v<T> * Elements{};
-  if constexpr (bits % 128 == 0)
+  if constexpr (bits % 128 == 0) {
     return AutoVectorizingCopyWithAssumedAlignment<128>{};
-  else if constexpr (bits % 64 == 0)
+  } else if constexpr (bits % 64 == 0) {
     return AutoVectorizingCopyWithAssumedAlignment<64>{};
-  else if constexpr (bits % 32 == 0)
+  } else if constexpr (bits % 32 == 0) {
     return AutoVectorizingCopyWithAssumedAlignment<32>{};
-  else if constexpr (bits % 16 == 0)
+  } else if constexpr (bits % 16 == 0) {
     return AutoVectorizingCopyWithAssumedAlignment<16>{};
-  else
+  } else {
     return AutoVectorizingCopyWithAssumedAlignment<8>{};
+  }
 }
 
 };  // namespace cute

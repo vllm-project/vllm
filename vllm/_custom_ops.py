@@ -336,7 +336,7 @@ def machete_supported_schedules(b_type: ScalarType) -> List[str]:
 
 def machete_gemm(
     a: torch.Tensor,
-    b_q: torch.Tensor,
+    b_q: torch.Tensor,  # Should be the tensor returned by machete_prepack_B
     b_type: ScalarType,
     b_scales: Optional[torch.Tensor] = None,
     b_zeros: Optional[torch.Tensor] = None,

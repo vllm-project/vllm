@@ -17,7 +17,7 @@ namespace detail {
 template <class T, class F, class G, int... I>
 CUTE_HOST_DEVICE constexpr auto tapply_with_idx(T&& t, F&& f, G&& g,
                                                 seq<I...>) {
-  return g(f(get<I>(static_cast<T&&>(t)), I)...);
+  return g(f(cute::get<I>(static_cast<T&&>(t)), I)...);
 }
 
 template <class F, int... I>
@@ -29,7 +29,7 @@ CUTE_HOST_DEVICE constexpr auto make_shape_from_idx(F&& f, seq<I...>) {
 
 template <class T, class F>
 CUTE_HOST_DEVICE constexpr auto transform_with_idx(T const& t, F&& f) {
-  if constexpr (is_tuple<T>::value) {
+  if constexpr (cute::is_tuple<T>::value) {
     return detail::tapply_with_idx(
         t, f, [](auto const&... a) { return cute::make_tuple(a...); },
         tuple_seq<T>{});
@@ -72,8 +72,9 @@ static inline auto make_cute_layout(torch::Tensor const& tensor,
           }
         } else {
           // Extra strides are assumed to be 0 or 1
-          if constexpr (cute::is_static_v<StrideEle>)
+          if constexpr (cute::is_static_v<StrideEle>) {
             static_assert(StrideEle::value == 0 || StrideEle::value == 1);
+          }
           return StrideEle{};
         }
       });

@@ -42,7 +42,7 @@ std::vector<std::string> supported_schedules(ScalarTypeTorchPtr const& btype) {
   });
 }
 
-torch::Tensor gemm(torch::Tensor const A, torch::Tensor const B,
+torch::Tensor gemm(torch::Tensor const& A, torch::Tensor const& B,
                    ScalarTypeTorchPtr const& btype,
                    c10::optional<torch::Tensor> const& scales,
                    c10::optional<torch::Tensor> const& zeros,
@@ -69,7 +69,7 @@ torch::Tensor gemm(torch::Tensor const A, torch::Tensor const B,
   });
 }
 
-torch::Tensor prepack_B(torch::Tensor const B,
+torch::Tensor prepack_B(torch::Tensor const& B,
                         ScalarTypeTorchPtr const& btype) {
   return scalar_type_dispatch(*btype, [&](auto BType) {
     return PrepackBDispatcher<half_t, decltype(BType), half_t>::dispatch(B);

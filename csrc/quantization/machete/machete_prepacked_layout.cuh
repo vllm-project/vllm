@@ -30,6 +30,17 @@ using namespace cute;
 
 struct IlvBlkLayoutAuto {};
 
+// This defines a prepacked layout for the B matrix, where the matrix is broken
+// up into PPBlockShape_NK blocks. The data within each block is then compactly
+// stored in memory such that when performing a TiledMMA operation with the same
+// shape as prepacked block, all the data for a given thread is contiguous in
+// memory. This allows us to use wider shared memory loads when loading B from
+// shared memory. The values within a thread are also potentially interlaeved
+// inorder to allow for more efficient upconverting.
+//
+// The contract here is that the `TiledMma` determined below matches the one
+// ultimately used in the kernel. (this is also why the other element types are
+// required along with the kernel schedule)
 template <typename ElementA_, typename ElementB_, typename ElementD_,
           typename AccumulatorT, class LayoutB, class KernelSchedule,
           typename IlvBlkLayout_ = IlvBlkLayoutAuto>
@@ -57,6 +68,12 @@ struct PrepackedLayoutBTemplate {
   // TODO (LucasWilkinson): compare the performance for other sizes
   // Prepacked block shape, smallest layout atom for loading into registers
   //   (can contain multiple wgmma instructions worth of data in one block)
+  // We ideally want this to be configured such that a thread can perform 128bit
+  // loads, i.e. we amount of data associated with each thread within a
+  // prepacked block is a multiple of 128bits, when using a cooperative sechdule
+  // we have 256 threads working a single block at a time, this means each
+  // thread works on `sizeof_bits_v<ElementB> * (128*64) / 256` bits of data,
+  // for a 4bit type this would be 128bits
   using PPBlockShape_NK = Shape<_128, _64>;
 
   // Create the shape of the tile anticipated to be used by the GEMM kernel,
@@ -70,6 +87,9 @@ struct PrepackedLayoutBTemplate {
 
   static constexpr cute::GMMA::Major GmmaMajorB =
       gmma_rs_tag_to_major_B<LayoutB>();
+
+  // For coop schedules we have two warp groups cooperatively issuing wgmma
+  // instructions so we use 2 atoms along the M dim (one for each warpgroup)
   using AtomLayoutMNK = cute::conditional_t<
       cute::is_same_v<KernelSchedule,
                       KernelTmaWarpSpecializedCooperativeMixedInput>,
