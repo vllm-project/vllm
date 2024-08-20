@@ -38,12 +38,12 @@ QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "fbgemm_fp8": FBGEMMFp8Config,
     # The order of gptq methods is important for config.py iteration over
     # override_quantization_method(..)
-    "bitnet_bitblas": BITNETBitBLASConfig,
     "marlin": MarlinConfig,
     "bitblas": BitBLASConfig,
     "gptq_marlin_24": GPTQMarlin24Config,
     "gptq_marlin": GPTQMarlinConfig,
     "gptq_bitblas": GPTQBitBLASConfig,
+    "bitnet_bitblas": BITNETBitBLASConfig,
     "gguf": GGUFConfig,
     "awq_marlin": AWQMarlinConfig,
     "gptq": GPTQConfig,

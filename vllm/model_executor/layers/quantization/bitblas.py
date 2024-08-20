@@ -475,6 +475,9 @@ class BitBLASLinearMethod(LinearMethodBase):
             with_scaling = True
             with_zeros = True
             W_dtype = f"uint{bits}"
+            if self.quant_config.is_sym:
+                with_zeros = False
+                W_dtype = f"int{bits}"
             group_size = self.quant_config.group_size
             zeros_mode = self.quant_config.zeros_mode
         elif self.quant_config.quant_method == "bitnet":
@@ -560,7 +563,10 @@ class BitBLASLinearMethod(LinearMethodBase):
 
         x_2d = x.view(-1, x.shape[-1])
 
-        output_2d = self.bitblas_matmul(x_2d, qweight, scales, qzeros)
+        if self.quant_config.is_sym:
+            output_2d = self.bitblas_matmul(x_2d, qweight, scales)
+        else:
+            output_2d = self.bitblas_matmul(x_2d, qweight, scales, qzeros)
 
         output = output_2d.view(x.shape[:-1] + (output_2d.shape[1], ))
 
