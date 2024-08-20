@@ -214,7 +214,6 @@ def main():
         if known_args.test == "dequantize":
             qweight_rows = 3584
             qweight_cols = 576
-            group_size = 128
             small_test_size = False
             if small_test_size:
                 qweight_rows = 256
@@ -226,7 +225,7 @@ def main():
             K = 256 if small_test_size else 3584
             M = 32 if small_test_size else 448
             splitK = 1
-            test_gemm(N, K, M, 1)
+            test_gemm(N, K, M, splitK)
         else:
             print(f"Unknown test {known_args.test}")
     else:
