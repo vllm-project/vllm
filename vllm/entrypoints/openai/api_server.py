@@ -144,7 +144,7 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
         rpc_server_process.start()
         logger.info("Started engine process with PID %d",
                     rpc_server_process.pid)
-        
+
         try:
             while True:
                 try:

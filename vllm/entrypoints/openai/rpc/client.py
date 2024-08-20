@@ -10,9 +10,9 @@ import zmq.asyncio
 from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.entrypoints.openai.rpc import (RPC_REQUEST_TYPE,
+                                         VLLM_ABORT_DRAIN_TIMEOUT_MS,
                                          VLLM_RPC_HEALTH_TIMEOUT_MS,
                                          VLLM_RPC_SERVER_START_TIMEOUT_MS,
-                                         VLLM_ABORT_DRAIN_TIMEOUT_MS,
                                          VLLM_RPC_SOCKET_LIMIT_CUTOFF,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCGenerateRequest, RPCUtilityRequest)
@@ -28,6 +28,7 @@ logger = init_logger(__name__)
 
 # Path used for inprocess proxy.
 INPROC_PROXY_PATH = f"inproc://{uuid4()}"
+
 
 class AsyncEngineRPCClient:
     """
@@ -68,7 +69,7 @@ class AsyncEngineRPCClient:
     improves performance by avoiding syscalls (~5%) and avoids resource limits
     such as ulimit, which defaults to 1024 on ubuntu.
 
-    Note: we run set_hwm(0) on each socket, whihc sets the HWM to inf,
+    Note: we run set_hwm(0) on each socket, which sets the HWM to inf,
     which is required to avoid dropping messages under high load. 
     This is generally not advisable. However, since we are in control
     of both sides of the connection + failure on either side is
@@ -82,7 +83,7 @@ class AsyncEngineRPCClient:
 
     def __init__(self, rpc_path: str):
         self.context = zmq.asyncio.Context()
-        
+
         # Maximum number of sockets that can be opened (typically 65536).
         # ZMQ_SOCKET_LIMIT (http://api.zeromq.org/4-2:zmq-ctx-get)
         socket_limit = self.context.get(zmq.constants.SOCKET_LIMIT)
@@ -96,7 +97,7 @@ class AsyncEngineRPCClient:
         # We only have 1 ipc connection that uses unix sockets, so
         # safe to set MAX_SOCKETS to the zmq SOCKET_LIMIT (i.e. will
         # not run into ulimit issues)
-        self.context.set(zmq.constants.MAX_SOCKETS, socket_limit) 
+        self.context.set(zmq.constants.MAX_SOCKETS, socket_limit)
 
         # IPC connection to RPC Server (uses unix sockets).
         self.to_rpc_server = self.context.socket(zmq.constants.DEALER)
@@ -114,11 +115,11 @@ class AsyncEngineRPCClient:
 
         # Since we open 1 inproc socket per request, we have a hard cap on
         # the number of requests that can run in vLLM w. frontend
-        # mulitprocessing. This value is used uvicorn to launch 
+        # mulitprocessing. This value is used uvicorn to launch
         # with --limit-concurrency to return 503 when server is overloaded.
         # We need 2 sockets per request - 2:
         # 1 for generate(), 1 for abort(), do_log_stats(), check_health()
-        self.limit_concurrency = socket_limit // 2 - 2 
+        self.limit_concurrency = socket_limit // 2 - 2
 
     async def run_proxy(self, socket_from, socket_to):
         """Background task that runs a proxy"""
@@ -134,7 +135,6 @@ class AsyncEngineRPCClient:
             if socket_to in events:
                 identity, msg = await socket_to.recv_multipart()
                 await socket_from.send_multipart([identity, msg])
-
 
     async def setup(self):
         """Setup the client before it starts sending server requests."""
@@ -200,15 +200,17 @@ class AsyncEngineRPCClient:
 
         return data
 
-    async def _send_one_way_rpc_request(self,
-                                        request: RPC_REQUEST_TYPE,
-                                        error_message: str,
-                                        timeout: Optional[int] = None,
-                                        socket: Optional[zmq.asyncio.Socket] = None):
+    async def _send_one_way_rpc_request(
+            self,
+            request: RPC_REQUEST_TYPE,
+            error_message: str,
+            timeout: Optional[int] = None,
+            socket: Optional[zmq.asyncio.Socket] = None):
         """Send one-way RPC request to trigger an action."""
-        
+
         async def do_rpc_call(socket: zmq.asyncio.Socket,
-                              request: RPC_REQUEST_TYPE, timeout=None):
+                              request: RPC_REQUEST_TYPE,
+                              timeout=None):
 
             await socket.send_multipart([cloudpickle.dumps(request)])
 
@@ -231,7 +233,6 @@ class AsyncEngineRPCClient:
                 logger.warning(error_message)
                 raise response
             raise ValueError(error_message)
-        
 
     async def get_tokenizer(self, lora_request: LoRARequest):
         return await self.tokenizer.get_lora_tokenizer_async(lora_request)
@@ -363,12 +364,17 @@ class AsyncEngineRPCClient:
                         # On exception, check if the server is still healthy.
                         # Use this to set the sync `is_running` and `errored`
                         # properties.
-                        try:
-                            await self.check_health(socket=socket)
-                        except Exception:
-                            self._errored = True
-                            import traceback
-                            logger.error(traceback.format_exc())
+
+                        if not self._errored:
+                            try:
+                                await self.check_health(socket=socket)
+                            except Exception as e:
+                                self._errored = True
+                                finished = True
+                                logger.exception(
+                                    'Error occurred during execution: %s',
+                                    repr(e))
+
                         # NB: do before raising here so that the flag is set
                         # by the time the caller receives this exception
                         raise request_output
@@ -382,14 +388,14 @@ class AsyncEngineRPCClient:
                     # Call abort over the RPC.
                     await self.abort(request_id)
 
-                    # Drain the socket. 
-                    # This helps to avoid hitting the HWM in the proxy when the 
+                    # Drain the socket. TODO: is this needed?
+                    # This helps to avoid hitting the HWM in the proxy when the
                     # under heavy load, since there will be 1-3 messages from
-                    # the RPCServer after abort is called. IF the socket is closed
-                    # the ROUTER in the proxy will queue and eventually drop messages.
-                    # The draining here ensures that the RPCServer is done sending
+                    # the RPCServer after abort is called. The draining here
+                    # ensures that the RPCServer is done sending
                     # messages to this connection before closing the socket.
-                    while await socket.poll(timeout=VLLM_ABORT_DRAIN_TIMEOUT_MS) != 0:
+                    while await socket.poll(timeout=VLLM_ABORT_DRAIN_TIMEOUT_MS
+                                            ) != 0:
                         message = await socket.recv()
                         request_output = cloudpickle.loads(message)
 
@@ -397,9 +403,9 @@ class AsyncEngineRPCClient:
                         if request_output == asyncio.exceptions.CancelledError:
                             break
 
-
-    async def check_health(self, 
-                           socket: Optional[zmq.asyncio.Socket] = None) -> None:
+    async def check_health(self,
+                           socket: Optional[zmq.asyncio.Socket] = None
+                           ) -> None:
         """Raise if unhealthy"""
 
         await self._send_one_way_rpc_request(

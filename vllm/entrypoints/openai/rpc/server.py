@@ -1,6 +1,6 @@
 import asyncio
 import signal
-from typing import Any, Coroutine
+from typing import Any, Coroutine, Union
 
 import cloudpickle
 import uvloop
@@ -60,8 +60,7 @@ class AsyncEngineRPCServer:
                 [identity, cloudpickle.dumps(config)])
 
         except Exception as e:
-            await self.socket.send_multipart(
-                [identity, cloudpickle.dumps(e)])
+            await self.socket.send_multipart([identity, cloudpickle.dumps(e)])
 
     async def is_tracing_enabled(self, identity):
         """Send the is_tracing_enabled flag"""
@@ -87,11 +86,10 @@ class AsyncEngineRPCServer:
         try:
             # Abort the request in the llm engine.
             await self.engine.abort(request.request_id)
-            result = VLLM_RPC_SUCCESS_STR
+            result: Union[str, Exception] = VLLM_RPC_SUCCESS_STR
         except Exception as e:
             result = e
-        await self.socket.send_multipart(
-            [identity, cloudpickle.dumps(result)])
+        await self.socket.send_multipart([identity, cloudpickle.dumps(result)])
 
     async def generate(self, identity, generate_request: RPCGenerateRequest):
         try:
@@ -108,8 +106,7 @@ class AsyncEngineRPCServer:
                     [identity, cloudpickle.dumps(request_output)])
 
         except Exception as e:
-            await self.socket.send_multipart(
-                [identity, cloudpickle.dumps(e)])
+            await self.socket.send_multipart([identity, cloudpickle.dumps(e)])
 
     async def check_health(self, identity):
         try:
@@ -118,10 +115,10 @@ class AsyncEngineRPCServer:
                 [identity, cloudpickle.dumps(VLLM_RPC_SUCCESS_STR)])
 
         except Exception as e:
-            await self.socket.send_multipart(
-                [identity, cloudpickle.dumps(e)])
+            await self.socket.send_multipart([identity, cloudpickle.dumps(e)])
 
-    def _make_handler_coro(self, identity, message) -> Coroutine[Any, Any, Never]:
+    def _make_handler_coro(self, identity,
+                           message) -> Coroutine[Any, Any, Never]:
         """Route the zmq message to the handler coroutine."""
 
         request = cloudpickle.loads(message)
@@ -134,11 +131,11 @@ class AsyncEngineRPCServer:
 
         elif isinstance(request, RPCUtilityRequest):
             if request in [
-                RPCUtilityRequest.GET_MODEL_CONFIG,
-                RPCUtilityRequest.GET_PARALLEL_CONFIG,
-                RPCUtilityRequest.GET_DECODING_CONFIG,
-                RPCUtilityRequest.GET_SCHEDULER_CONFIG,
-                RPCUtilityRequest.GET_LORA_CONFIG
+                    RPCUtilityRequest.GET_MODEL_CONFIG,
+                    RPCUtilityRequest.GET_PARALLEL_CONFIG,
+                    RPCUtilityRequest.GET_DECODING_CONFIG,
+                    RPCUtilityRequest.GET_SCHEDULER_CONFIG,
+                    RPCUtilityRequest.GET_LORA_CONFIG
             ]:
                 return self.get_config(identity, request)
             elif request == RPCUtilityRequest.DO_LOG_STATS:
