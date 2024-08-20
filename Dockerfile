@@ -136,7 +136,7 @@ RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
     && apt-get update -y \
-    && apt-get install -y ccache software-properties-common git curl sudo \
+    && apt-get install -y ccache software-properties-common git curl sudo vim \
     && add-apt-repository ppa:deadsnakes/ppa \
     && apt-get update -y \
     && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
@@ -144,13 +144,11 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
     && python3 --version
-
-RUN apt-get update -y \
-    && apt-get install -y git vim curl libibverbs-dev
     
 # Install pip
 RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} && python3 -m pip --version
-
+RUN apt-get update -y \
+    && apt-get install libibverbs-dev
 RUN ldconfig /usr/local/cuda-$(echo ${CUDA_VERSION} | cut -d. -f1,2)/compat/
 
 # install vllm wheel first, so that torch etc will be installed
