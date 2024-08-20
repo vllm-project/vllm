@@ -96,11 +96,11 @@ def get_attn_backend(
     dtype: torch.dtype,
     kv_cache_dtype: Optional[str],
     block_size: int,
-    num_attention_layers: int,
+    is_attention_free: bool, #TODO: pass in from all users 
     is_blocksparse: bool = False,
 ) -> Type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
-
+    
     if is_blocksparse:
         logger.info("Using BlocksparseFlashAttention backend.")
         from vllm.attention.backends.blocksparse_attn import (
@@ -109,7 +109,7 @@ def get_attn_backend(
 
     backend = which_attn_to_use(num_heads, head_size, num_kv_heads,
                                 sliding_window, dtype, kv_cache_dtype,
-                                num_attention_layers, block_size)
+                                block_size, is_attention_free)
     if backend == _Backend.FLASH_ATTN:
         from vllm.attention.backends.flash_attn import (  # noqa: F401
             FlashAttentionBackend)
@@ -164,7 +164,7 @@ def which_attn_to_use(
     dtype: torch.dtype,
     kv_cache_dtype: Optional[str],
     block_size: int,
-    num_attention_layers: int,
+    is_attention_free: bool,
 ) -> _Backend:
     """Returns which flash attention backend to use."""
     # Default case.
@@ -172,7 +172,7 @@ def which_attn_to_use(
 
     # If there are no attention layers (e.g. we are running Mamba),
     # use the placeholder NO_ATTENTION
-    if num_attention_layers == 0:
+    if is_attention_free:
         return _Backend.NO_ATTENTION
 
     # Check whether a particular choice of backend was

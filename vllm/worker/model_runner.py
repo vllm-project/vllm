@@ -859,6 +859,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             self.model_config.dtype,
             self.kv_cache_dtype,
             self.block_size,
+            self.model_config.is_attention_free(),
         ) if num_attn_heads else PlaceholderAttentionBackend()
 
         # Multi-modal data support

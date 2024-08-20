@@ -60,7 +60,7 @@ class CacheEngine:
             model_config.dtype,
             cache_config.cache_dtype,
             self.block_size,
-            self.num_attention_layers,
+            model_config.is_attention_free()
         )
 
         # Initialize the cache.
