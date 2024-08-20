@@ -57,12 +57,7 @@ class InputContext:
 
     def get_hf_image_processor_config(self) -> Dict:
         """
-        Get the HuggingFace configuration
-        (:class:`transformers.PretrainedConfig`) of the model,
-        additionally checking its type.
-
-        Raises:
-            TypeError: If the model is not of the specified type.
+        Get the HuggingFace image processor configuration of the model.
         """
 
         return self.model_config.hf_image_processor_config

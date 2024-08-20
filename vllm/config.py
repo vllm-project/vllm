@@ -169,7 +169,7 @@ class ModelConfig:
                                     code_revision, rope_scaling, rope_theta)
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.hf_image_processor_config = get_hf_image_processor_config(
-            self.model, trust_remote_code, revision)
+            self.model, revision)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
 
         # Choose a default enforce_eager value if the user did not specify
