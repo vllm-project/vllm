@@ -1,9 +1,8 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-from vllm.model_executor.layers.quantization.bitblas import (BITBLAS_TARGET,
-                                                             Matmul,
-                                                             MatmulConfig)
+from bitblas import Matmul, MatmulConfig, auto_detect_nvidia_target
+
 from vllm.utils import FlexibleArgumentParser
 
 parser = FlexibleArgumentParser(
@@ -13,7 +12,7 @@ parser = FlexibleArgumentParser(
 parser.add_argument(
     "--target",
     type=str,
-    default=BITBLAS_TARGET,
+    default=auto_detect_nvidia_target(),
     help="Specify the target device for benchmarking.",
 )
 parser.add_argument("--group_size",
