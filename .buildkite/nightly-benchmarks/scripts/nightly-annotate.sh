@@ -32,10 +32,21 @@ main() {
     python3 -m pip install tabulate pandas matplotlib
     python3 $VLLM_SOURCE_CODE_LOC/.buildkite/nightly-benchmarks/scripts/plot-nightly-results.py \
         --description $description \
-        --results-folder results/
+        --results-folder results/ \
+        --dataset sharegpt
+
+    python3 $VLLM_SOURCE_CODE_LOC/.buildkite/nightly-benchmarks/scripts/plot-nightly-results.py \
+        --description $description \
+        --results-folder results/ \
+        --dataset sonnet_2048_128
+
+    python3 $VLLM_SOURCE_CODE_LOC/.buildkite/nightly-benchmarks/scripts/plot-nightly-results.py \
+        --description $description \
+        --results-folder results/ \
+        --dataset sonnet_128_2048
     
     # upload results and figures
-    /workspace/buildkite-agent artifact upload "nightly_results.png"
+    /workspace/buildkite-agent artifact upload "nightly_results*.png"
     /workspace/buildkite-agent artifact upload $VLLM_SOURCE_CODE_LOC/.buildkite/nightly-benchmarks/nightly-pipeline.yaml
     /workspace/buildkite-agent artifact upload $VLLM_SOURCE_CODE_LOC/.buildkite/nightly-benchmarks/tests/nightly-tests.json
     /workspace/buildkite-agent annotate --style "success" --context "nightly-benchmarks-results" --append < nightly_results.md
