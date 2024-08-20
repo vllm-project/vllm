@@ -340,8 +340,9 @@ class AsyncEngineRPCClient:
         """Send an RPCGenerateRequest to the RPCServer and stream responses."""
 
         finished = False
-        with self.to_proxy_socket(request_id) as socket:
-            try:
+        try:
+            with self.to_proxy_socket(request_id) as socket:
+            
                 # Send RPCGenerateRequest to the RPCServer.
                 await socket.send_multipart([
                     cloudpickle.dumps(
@@ -356,24 +357,18 @@ class AsyncEngineRPCClient:
 
                 # Stream back the results from the RPC Server.
                 while not finished:
-
                     message = await socket.recv()
                     request_output = cloudpickle.loads(message)
 
                     if isinstance(request_output, Exception):
-                        # On exception, check if the server is still healthy.
-                        # Use this to set the sync `is_running` and `errored`
-                        # properties.
-
+                        # On exception, check if the server is still healthy
+                        # possibly setting the `errored` property.
                         if not self._errored:
                             try:
                                 await self.check_health(socket=socket)
                             except Exception as e:
                                 self._errored = True
-                                finished = True
-                                logger.exception(
-                                    'Error occurred during execution: %s',
-                                    repr(e))
+                                logger.exception(repr(e))
 
                         # NB: do before raising here so that the flag is set
                         # by the time the caller receives this exception
@@ -382,26 +377,10 @@ class AsyncEngineRPCClient:
                     finished = request_output.finished
                     yield request_output
 
-            finally:
-                # Request was canceled by the client + we broke out of the loop.
-                if not finished:
-                    # Call abort over the RPC.
-                    await self.abort(request_id)
-
-                    # Drain the socket. TODO: is this needed?
-                    # This helps to avoid hitting the HWM in the proxy when the
-                    # under heavy load, since there will be 1-3 messages from
-                    # the RPCServer after abort is called. The draining here
-                    # ensures that the RPCServer is done sending
-                    # messages to this connection before closing the socket.
-                    while await socket.poll(timeout=VLLM_ABORT_DRAIN_TIMEOUT_MS
-                                            ) != 0:
-                        message = await socket.recv()
-                        request_output = cloudpickle.loads(message)
-
-                        # If aborted, CancelledError is injected.
-                        if request_output == asyncio.exceptions.CancelledError:
-                            break
+        finally:
+            # Request was canceled by the client and engine still running.
+            if not finished and not self._errored:
+                await self.abort(request_id)
 
     async def check_health(self,
                            socket: Optional[zmq.asyncio.Socket] = None
