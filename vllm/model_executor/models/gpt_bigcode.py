@@ -271,6 +271,11 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA):
         self.quant_config = quant_config
         self.transformer = GPTBigCodeModel(config, cache_config, quant_config,
                                            lora_config)
+
+        self.unpadded_vocab_size = config.vocab_size
+        if lora_config:
+            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
+
         if self.config.tie_word_embeddings:
             if quant_config is not None:
                 linear_method = quant_config.get_quant_method(self)
@@ -296,10 +301,6 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA):
                 self.transformer.vocab_size,
                 self.transformer.embed_dim,
                 org_num_embeddings=self.config.vocab_size)
-
-        self.unpadded_vocab_size = config.vocab_size
-        if lora_config:
-            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
 
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
