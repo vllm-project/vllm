@@ -1103,12 +1103,16 @@ class Scheduler:
         if not self.cache_config.enable_prefix_caching:
             common_computed_block_nums = []
 
+        # TODO: Combine multi-step and async postprocessor
+        allow_output_proc_callback: bool = (
+            self.use_output_proc_callback
+            and not self.scheduler_config.is_multi_step)
+
         # Create list of scheduled request ids
         scheduled_ids: List[Tuple[ScheduledSequenceGroup,
                                   SequenceGroupMetadata]] = []
         # Create input data structures.
         seq_group_metadata_list: List[SequenceGroupMetadata] = []
-        allow_output_proc_callback: bool = False
         for i, scheduled_seq_group in enumerate(
                 scheduler_outputs.scheduled_seq_groups):
             seq_group = scheduled_seq_group.seq_group
@@ -1209,10 +1213,9 @@ class Scheduler:
                 )
             seq_group_metadata_list.append(seq_group_metadata)
 
-            if self.use_output_proc_callback:
-                allow_output_proc_callback = (
-                    allow_output_proc_callback
-                    and self._allow_output_proc_callback(seq_group))
+            if allow_output_proc_callback:
+                allow_output_proc_callback = self._allow_output_proc_callback(
+                    seq_group)
 
             scheduled_ids.append((scheduled_seq_group, seq_group_metadata))
         # Now that the batch has been created, we can assume all blocks in the
