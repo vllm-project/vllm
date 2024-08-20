@@ -66,6 +66,7 @@ DEFAULT_CONDA_PATTERNS = {
     "nccl",
     "transformers",
     "zmq",
+    "nvidia",
 }
 
 DEFAULT_PIP_PATTERNS = {
@@ -79,6 +80,7 @@ DEFAULT_PIP_PATTERNS = {
     "nccl",
     "transformers",
     "zmq",
+    "nvidia",
 }
 
 
