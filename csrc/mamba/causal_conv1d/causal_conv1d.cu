@@ -1,7 +1,6 @@
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
-#include <torch/extension.h>
 
 #include "causal_conv1d.h"
 #include <c10/util/BFloat16.h>
@@ -379,11 +378,10 @@ void causal_conv1d_fwd_kernel(ConvParamsBase params) {
         for (int i = 0; i < 2 * kNElts; ++i) { x_vals[i] = float(x_vals_load[i]); }
 
         float out_vals[kNElts];
-        #pragma unroll
 
+        #pragma unroll
         for (int i = 0; i < kNElts; ++i) {
             out_vals[i] = bias_val;
-            #pragma unroll
             int w = 0;
             if (kHasSeqPosIdx){
                 if(seq_pos_idx_load[i] < kWidth){
@@ -483,7 +481,6 @@ void causal_conv1d_channellast_fwd_kernel(ConvParamsBase params) {
     constexpr int kWidth = Ktraits::kWidth;
     constexpr int kNThreads = Ktraits::kNThreads;
     constexpr int kNElts = Ktraits::kNElts;
-    constexpr int kNWarp = Ktraits::kNWarps;
     constexpr int kNThreadsPerC = Ktraits::kNThreadsPerRow;
     constexpr int kLPerLoad = Ktraits::kNColsPerLoad;
     constexpr int kChunkSizeL = Ktraits::kChunkSizeL;
