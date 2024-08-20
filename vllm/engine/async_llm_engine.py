@@ -380,6 +380,7 @@ class _AsyncLLMEngine(LLMEngine):
 
                 # Log stats.
                 self.do_log_stats(scheduler_outputs, output)
+                
                 # Tracing
                 self.do_tracing(scheduler_outputs)
 
