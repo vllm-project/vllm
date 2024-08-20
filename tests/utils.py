@@ -57,16 +57,13 @@ VLLM_PATH = Path(__file__).parent.parent
 class RemoteOpenAIServer:
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
 
-    def __init__(
-            self,
-            model: str,
-            cli_args: List[str],
-            *,
-            env_dict: Optional[Dict[str, str]] = None,
-            auto_port: bool = True,
-            max_wait_time: Optional[
-                float] = None,  # time in seconds to wait for server to start
-    ) -> None:
+    def __init__(self,
+                 model: str,
+                 cli_args: List[str],
+                 *,
+                 env_dict: Optional[Dict[str, str]] = None,
+                 auto_port: bool = True,
+                 max_wait_seconds: Optional[float] = None) -> None:
         if auto_port:
             if "-p" in cli_args or "--port" in cli_args:
                 raise ValueError("You have manually specified the port"
@@ -91,9 +88,9 @@ class RemoteOpenAIServer:
                                      env=env,
                                      stdout=sys.stdout,
                                      stderr=sys.stderr)
-        max_wait_time = max_wait_time or 240
+        max_wait_seconds = max_wait_seconds or 240
         self._wait_for_server(url=self.url_for("health"),
-                              timeout=max_wait_time)
+                              timeout=max_wait_seconds)
 
     def __enter__(self):
         return self
@@ -148,7 +145,7 @@ def compare_two_settings(model: str,
                          arg2: List[str],
                          env1: Optional[Dict[str, str]] = None,
                          env2: Optional[Dict[str, str]] = None,
-                         max_wait_time: Optional[float] = None) -> None:
+                         max_wait_seconds: Optional[float] = None) -> None:
     """
     Launch API server with two different sets of arguments/environments
     and compare the results of the API calls.
@@ -170,7 +167,7 @@ def compare_two_settings(model: str,
         with RemoteOpenAIServer(model,
                                 args,
                                 env_dict=env,
-                                max_wait_time=max_wait_time) as server:
+                                max_wait_seconds=max_wait_seconds) as server:
             client = server.get_client()
 
             # test models list
