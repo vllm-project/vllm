@@ -218,11 +218,8 @@ def awq_gemm_kernel(a_ptr, b_ptr, c_ptr, zeros_ptr, scales_ptr, M, N, K,
 # qweights - [K     , M // 8], int32
 # scales   - [K // G, M     ], float16
 # zeros    - [K // G, M // 8], int32
-def awq_dequantize_triton(
-        qweight: torch.Tensor,
-        scales: torch.Tensor,
-        zeros: torch.Tensor
-) -> torch.Tensor:
+def awq_dequantize_triton(qweight: torch.Tensor, scales: torch.Tensor,
+                          zeros: torch.Tensor) -> torch.Tensor:
     K = qweight.shape[0]
     M = scales.shape[1]
     awq_group_size = 128
