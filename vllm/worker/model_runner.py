@@ -30,6 +30,7 @@ from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata, SamplingMetadataCache
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+from vllm.model_executor.model_optimizer.model_optimizer import optimizer
 from vllm.model_executor.models.interfaces import (supports_lora,
                                                    supports_multimodal)
 from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
@@ -945,9 +946,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     "This may lead to less accurate results!")
 
         if envs.VLLM_TEST_DYNAMO_GRAPH_CAPTURE:
-            self.model = torch.compile(self.model,
-                                       fullgraph=True,
-                                       backend="eager")
+            self.model = optimizer(self.model, fullgraph=True)
 
     def save_sharded_state(
         self,
