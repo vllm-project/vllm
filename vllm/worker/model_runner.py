@@ -11,6 +11,7 @@ import numpy as np
 import torch
 import torch.distributed
 import torch.nn as nn
+import gguf
 
 try:
     from flashinfer import BatchDecodeWithPagedKVCacheWrapper
@@ -101,7 +102,6 @@ class ModelInputForGPU(ModelRunnerInputBase):
     prompt_adapter_mapping: Optional[PromptAdapterMapping] = None
     prompt_adapter_requests: Optional[Set[PromptAdapterRequest]] = None
     control_vector_requests: Optional[Set[ControlVectorRequest]] = None
-    control_vector_mapping: Optional[ControlVectorMapping] = None
     multi_modal_kwargs: Optional[BatchedTensorInputs] = None
     request_ids_to_seq_ids: Optional[Dict[str, List[int]]] = None
     finished_requests_ids: Optional[List[str]] = None
@@ -223,7 +223,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             prompt_adapter_request: Optional[PromptAdapterRequest] = None,
 
 
-            control_vector_mapping: Optional[List[int]] = None,
             control_vector_request: Optional[ControlVectorRequest] = None,
 
             # Multi-modal inputs.
@@ -257,7 +256,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             self.prompt_adapter_request = prompt_adapter_request
 
             self.control_vector_request = control_vector_request
-            self.control_vector_mapping = control_vector_mapping
 
             self.multi_modal_inputs = multi_modal_inputs
             self.prefix_cache_hit = prefix_cache_hit
@@ -480,16 +478,9 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         seq_group_metadata: SequenceGroupMetadata,
     ):
         if not self.enable_control_vector: 
-                return
+            return
         inter_data.control_vector_request = seq_group_metadata.control_vector_request
-        ##load control_vector_mapping
-
-        from safetensors.torch import load_file
-        if inter_data.control_vector_request:
-            mapping = load_file(inter_data.control_vector_request.control_vector_local_path)
-
-            inter_data.control_vector_mapping = ControlVectorMapping(mapping['prompt_embeddings'])
-
+        
     def _compute_multi_modal_input(self, inter_data: InterDataForSeqGroup,
                                    seq_group_metadata: SequenceGroupMetadata):
         """If multi-modal data is given, add it to the input."""
@@ -637,7 +628,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             )
 
         control_vector_requests: Set[ControlVectorRequest] = set()
-        # control_vector_mapping = None
         if self.enable_control_vector:
             control_vector_requests = set(
                 data.control_vector_request for data in self.inter_data_list if data.control_vector_request

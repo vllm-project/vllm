@@ -3,6 +3,7 @@ from typing import Any, Callable, Dict, Hashable, Optional, TypeVar, List, Type
 from vllm.adapter_commons.models import (AdapterLRUCache, AdapterModel,
                                          AdapterModelManager)
 from torch import nn
+import torch
 from vllm.control_vectors.layers import ControlVectorMapping, MLPWithControlVector, BaseLayerWithControlVector
 from vllm.logger import init_logger
 from vllm.adapter_commons.utils import (add_adapter, deactivate_adapter,
@@ -12,7 +13,7 @@ from vllm.utils import LRUCache
 from vllm.config import ControlVectorConfig
 
 from pathlib import Path
-import torch
+import gguf
 import logging
 
 logger = logging.getLogger(__name__)
@@ -58,10 +59,32 @@ class ControlVectorModel(AdapterModel):
     ) -> "ControlVectorModel":
         
         if Path(control_vector_model_path).exists():
-            from safetensors.torch import load_file
-
-            checkpoint = load_file(control_vector_model_path, device=device)
-            cv_weights = checkpoint['prompt_embeddings'] ##should use .to(dtype)
+            reader = gguf.GGUFReader(control_vector_model_path)
+            archf = reader.get_field("general.architecture")
+            if not archf or not len(archf.parts):
+                # warnings.warn(".gguf file missing architecture field")
+                logger.error(".gguf file missing architecture field")
+            else:
+                arch = str(bytes(archf.parts[-1]), encoding="utf-8", errors="replace")
+                if arch != "controlvector":
+                    logger.error(
+                        f".gguf file with architecture {arch!r} does not appear to be a control vector!"
+                    )
+            modelf = reader.get_field('controlvector.model_hint')
+            if not modelf or not len(modelf.parts):
+                raise ValueError(".gguf file mssing controlvector.model_hint field")
+            model_hint = str(bytes(modelf.parts[-1]), encoding="utf-8")
+            cv_weights = {}
+            for tensor in reader.tensors:
+                if not tensor.name.startswith("direction."):
+                    continue
+                try:
+                    layer = int(tensor.name.split(".")[1])
+                except:
+                    raise ValueError(
+                        f".gguf file has invalid direction field name: {tensor.name}"
+                    )
+                cv_weights[layer] = torch.from_numpy(tensor.data)
         else: 
             from peft.utils import load_peft_weights
 
@@ -111,7 +134,7 @@ class ControlVectorModelManager(AdapterModelManager):
         self.control_vector_index_to_id[index] = control_vector_model.id
         for k, v in self.modules.items():
             layer_index = parse_number_from_string(k)
-            if layer_index < len(control_vector_model.control_vector_weights):
+            if layer_index in control_vector_model.control_vector_weights:
                 v.set_control_vector(index, control_vector_model.control_vector_weights[layer_index] * control_vector_model.scale_factor)
         return True
         
