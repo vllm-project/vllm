@@ -87,12 +87,11 @@ class AsyncEngineRPCServer:
         try:
             # Abort the request in the llm engine.
             await self.engine.abort(request.request_id)
-            await self.socket.send_multipart(
-                [identity, cloudpickle.dumps(VLLM_RPC_SUCCESS_STR)])
-
+            result = VLLM_RPC_SUCCESS_STR
         except Exception as e:
-            await self.socket.send_multipart(
-                [identity, cloudpickle.dumps(e)])
+            result = e
+        await self.socket.send_multipart(
+            [identity, cloudpickle.dumps(result)])
 
     async def generate(self, identity, generate_request: RPCGenerateRequest):
         try:
