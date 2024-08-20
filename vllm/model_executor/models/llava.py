@@ -1,5 +1,6 @@
 import itertools
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
+from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
+                    TypedDict, Union)
 
 import torch
 import torch.nn as nn
@@ -9,8 +10,7 @@ from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -88,9 +88,11 @@ def get_max_llava_image_tokens(ctx: InputContext):
         raise ValueError(f"Unexpected select feature strategy: {strategy}")
 
 
-def dummy_data_for_llava(ctx: InputContext, seq_len: int):
+def dummy_data_for_llava(ctx: InputContext, seq_len: int,
+                         mm_counts: Mapping[str, int]):
     hf_config = ctx.get_hf_config(LlavaConfig)
     vision_config = hf_config.vision_config
+    num_images = mm_counts["image"]
 
     image_feature_size = get_max_llava_image_tokens(ctx)
 
@@ -98,21 +100,23 @@ def dummy_data_for_llava(ctx: InputContext, seq_len: int):
         seq_data = dummy_seq_data_for_clip(
             vision_config,
             seq_len,
+            num_images,
             image_token_id=hf_config.image_token_index,
             image_feature_size_override=image_feature_size,
         )
 
-        mm_data = dummy_image_for_clip(vision_config)
+        mm_data = dummy_image_for_clip(vision_config, num_images)
         return seq_data, mm_data
     elif isinstance(vision_config, SiglipVisionConfig):
         seq_data = dummy_seq_data_for_siglip(
             vision_config,
             seq_len,
+            num_images,
             image_token_id=hf_config.image_token_index,
             image_feature_size_override=image_feature_size,
         )
 
-        mm_data = dummy_image_for_siglip(vision_config)
+        mm_data = dummy_image_for_siglip(vision_config, num_images)
         return seq_data, mm_data
 
     msg = f"Unsupported vision config: {type(vision_config)}"
@@ -309,7 +313,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal):
         278, 2793, 310, 278, 1967, 29973, 13, 22933, 9047, 13566, 29901]`.
 
         To reserve space in KV cache, we have to insert placeholder tokens
-        before they are inputted to the model, so the input processor prepends 
+        before they are inputted to the model, so the input processor prepends
         additional image tokens (denoted as `32000`), resulting in:
         `[1, 3148, 1001, 29901, 29871, 32000, ..., 32000, 29871, 13, 5618,
         29915, 29879, 278, 2793, 310, 278, 1967, 29973, 13, 22933, 9047, 13566,
@@ -327,7 +331,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal):
             input_ids: Flattened (concatenated) input_ids corresponding to a
                 batch.
             pixel_values: The pixels in each input image.
-        
+
         See also:
             :class:`LlavaImageInputs`
         """
