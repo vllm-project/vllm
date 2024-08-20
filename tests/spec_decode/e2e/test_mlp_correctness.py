@@ -99,6 +99,48 @@ def test_mlp_e2e_greedy_correctness(baseline_llm_generator, test_llm_generator,
 
         # Main model
         "model": MAIN_MODEL,
+    }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize("test_llm_kwargs", [
+    {
+        "speculative_model": SPEC_MODEL,
+    },
+])
+@pytest.mark.parametrize("output_len", [2048])
+@pytest.mark.parametrize("batch_size", [1, 32])
+@pytest.mark.parametrize("seed", [1])
+def test_mlp_e2e_acceptance_rate(baseline_llm_generator, test_llm_generator,
+                                 batch_size: int, output_len: int):
+    """Verify acceptance rate with different batch size and large output 
+    length."""
+    run_equality_correctness_test(baseline_llm_generator,
+                                  test_llm_generator,
+                                  batch_size,
+                                  max_output_len=output_len,
+                                  temperature=0.0,
+                                  seeded=True,
+                                  force_output_len=True,
+                                  expected_acceptance_rate=0.48)
+
+
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [{
+        # Skip cuda graph recording for fast test.
+        "enforce_eager": True,
+
+        # Required for spec decode.
+        "use_v2_block_manager": True,
+
+        # Print spec metrics.
+        "disable_log_stats": False,
+
+        # Precision
+        "dtype": PRECISION,
+
+        # Main model
+        "model": MAIN_MODEL,
 
         # Speculative model
         "speculative_model": SPEC_MODEL,
