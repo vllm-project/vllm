@@ -229,7 +229,8 @@ class RayGPUExecutor(DistributedGPUExecutor):
             str(envs.VLLM_TRACE_FUNCTION),
         }, ) for (node_id, _) in worker_node_and_gpu_ids]
 
-        self._env_vars_for_all_workers = all_args_to_update_environment_variables
+        self._env_vars_for_all_workers = (
+            all_args_to_update_environment_variables)
 
         self._run_workers("update_environment_variables",
                           all_args=self._get_env_vars_to_be_updated())
