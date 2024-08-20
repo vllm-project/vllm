@@ -78,8 +78,26 @@ class MultiProposersWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
         """
         chosen_proposer = self._get_proposer_for_this_step(
             execute_model_req,
-            schedule_policy="proposal_latency")
-
+            # Once we support more policies, we can make this configurable.
+            scheduling_policy="proposal_latency")
+        
+        if chosen_proposer == "disable":
+            batch_size = len(execute_model_req.seq_group_metadata_list)
+            proposal_len = execute_model_req.num_lookahead_slots
+            proposal_tokens = torch.tensor(-1,
+                                           dtype=torch.long).expand(
+                                               batch_size, proposal_len)
+            proposal_probs = torch.tensor(0,
+                                          dtype=torch.float32).expand(
+                                              batch_size, proposal_len,
+                                              self.vocab_size)
+            proposal_lens_tensor = torch.tensor(0, dtype=torch.long)
+            return SpeculativeProposals(
+                proposal_token_ids=proposal_tokens,
+                proposal_probs=proposal_probs,
+                proposal_lens=proposal_lens_tensor,
+                no_proposals=True
+                )
         return self._workers[chosen_proposer].get_spec_proposals(
             execute_model_req, seq_ids_with_bonus_token_in_last_step)
 
@@ -108,6 +126,8 @@ class MultiProposersWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
             if sd_params is not None:
                 proposer = sd_params.get_proposer()
                 if proposer not in valid_proposers:
+                    if proposer == "disable":
+                        return []
                     logger.info(
                         "proposer_name must be in %s, or set to None. "
                         "Got '%s' instead. Use '[ngram]' as replacement.",
@@ -146,22 +166,24 @@ class MultiProposersWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
     def _get_proposer_for_this_step(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None,
-        schedule_policy: Optional[str] = "proposal_latency",
+        scheduling_policy: Optional[str] = "proposal_latency",
     ) -> str:
         """Get the current proposer for the given sequence batch according to
-        required schedule_policy.
+        required scheduling_policy.
         """
         chosen_proposer = '[ngram]'
         seq_group_metadata_list = execute_model_req.seq_group_metadata_list
         valid_proposers = list(self._workers.keys())
 
-        if schedule_policy == "popularity":
+        if scheduling_policy == "popularity":
             proposer_count: Dict[str, int] = {}
             for seq in seq_group_metadata_list:
                 sd_params = seq.spec_decode_params
                 if sd_params is not None:
                     proposer = sd_params.get_proposer()
                     if proposer not in valid_proposers:
+                        if proposer == "disable":
+                            return "disable"
                         continue
                     if proposer not in proposer_count:
                         proposer_count[proposer] = 0
@@ -169,12 +191,14 @@ class MultiProposersWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
             if len(proposer_count.keys()) != 0:
                 chosen_proposer = max(proposer_count, key=proposer_count.get)
 
-        elif schedule_policy == "proposal_latency":
+        elif scheduling_policy == "proposal_latency":
             for _, seq in enumerate(seq_group_metadata_list):
                 sd_params = seq.spec_decode_params
                 if sd_params:
                     proposer = sd_params.get_proposer()
                     if proposer not in valid_proposers:
+                        if proposer == "disable":
+                            return "disable"
                         continue
                     else:
                         chosen_proposer = proposer
@@ -186,15 +210,21 @@ class MultiProposersWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
                         if chosen_proposer == '[ngram]':
                             break
 
-        elif schedule_policy == "proposal_quality":
+        elif scheduling_policy == "proposal_quality":
             # TODO: Use SpecDecodeWorkerMetrics to select the proposer with the
             # best draft_acceptance_rate dynamically.
             raise NotImplementedError(
-                f"schedule_policy: '{schedule_policy}' has not been "
+                f"scheduling_policy: '{scheduling_policy}' has not been "
+                f"implemented yet.")
+        elif scheduling_policy == "given_priority":
+            # TODO: Select the proposer according to a given priority order
+            raise NotImplementedError(
+                f"scheduling_policy: '{scheduling_policy}' has not been "
                 f"implemented yet.")
         
         else:
-            raise ValueError(f"Invalid schedule_policy: '{schedule_policy}'.")
+            raise ValueError(
+                f"Invalid scheduling_policy: '{scheduling_policy}'.")
 
         return chosen_proposer
 
@@ -206,4 +236,3 @@ class MultiProposersWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
                 return self.is_multi_step_worker_instance(obj._worker)
         else:
             return False
-
