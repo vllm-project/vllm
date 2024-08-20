@@ -11,8 +11,9 @@ from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.entrypoints.openai.rpc import (RPC_REQUEST_TYPE,
                                          VLLM_RPC_HEALTH_TIMEOUT_MS,
-                                         VLLM_RPC_DO_LOG_STATS_TIMEOUT_MS,
                                          VLLM_RPC_SERVER_START_TIMEOUT_MS,
+                                         VLLM_ABORT_DRAIN_TIMEOUT_MS,
+                                         VLLM_RPC_SOCKET_LIMIT_CUTOFF,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCGenerateRequest, RPCUtilityRequest)
 from vllm.inputs import PromptInputs
@@ -27,13 +28,6 @@ logger = init_logger(__name__)
 
 # Path used for inprocess proxy.
 INPROC_PROXY_PATH = f"inproc://{uuid4()}"
-
-# Timeout for draining
-ABORT_DRAIN_TIMEOUT_MS = 1000
-
-# Cutoff for value of MAX_SOCKETS.
-SOCKET_LIMIT_CUTOFF = 0
-
 
 class AsyncEngineRPCClient:
     """
@@ -92,7 +86,7 @@ class AsyncEngineRPCClient:
         # Maximum number of sockets that can be opened (typically 65536).
         # ZMQ_SOCKET_LIMIT (http://api.zeromq.org/4-2:zmq-ctx-get)
         socket_limit = self.context.get(zmq.constants.SOCKET_LIMIT)
-        if socket_limit < SOCKET_LIMIT_CUTOFF:
+        if socket_limit < VLLM_RPC_SOCKET_LIMIT_CUTOFF:
             raise ValueError(
                 f"Found zmq.constants.SOCKET_LIMIT={socket_limit}, which caps "
                 "the number of concurrent requests vLLM can process. Launch "
@@ -395,7 +389,7 @@ class AsyncEngineRPCClient:
                     # the ROUTER in the proxy will queue and eventually drop messages.
                     # The draining here ensures that the RPCServer is done sending
                     # messages to this connection before closing the socket.
-                    while await socket.poll(timeout=ABORT_DRAIN_TIMEOUT_MS) != 0:
+                    while await socket.poll(timeout=VLLM_ABORT_DRAIN_TIMEOUT_MS) != 0:
                         message = await socket.recv()
                         request_output = cloudpickle.loads(message)
 
