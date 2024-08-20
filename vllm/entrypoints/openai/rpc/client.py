@@ -39,6 +39,9 @@ class AsyncEngineRPCClient:
     """
     RPCClient that connects to the RPCServer wrapping AsyncLLMEngine.
     
+    The overall design mirrors the Asynchronous Client Server Pattern
+    https://zguide.zeromq.org/docs/chapter3/#The-Asynchronous-Client-Server-Pattern
+
     On startup, the RPCClient:
         - makes DEALER socket (to_rpc_server) that connects to the RPCServer 
             via ipc, which uses unix sockets under the hood
@@ -71,8 +74,16 @@ class AsyncEngineRPCClient:
     improves performance by avoiding syscalls (~5%) and avoids resource limits
     such as ulimit, which defaults to 1024 on ubuntu.
 
-    See: https://zguide.zeromq.org/docs/chapter3/ for more details on the
-    Request-Reply pattern of zeromq sockets.
+    Note: we run set_hwm(0) on each socket, whihc sets the HWM to inf,
+    which is required to avoid dropping messages under high load. 
+    This is generally not advisable. However, since we are in control
+    of both sides of the connection + failure on either side is
+    catastrophic to the overall system health and memory profiling
+    suggests limited memory overhead relative to asyncio, we will 
+    proceed for now.
+
+    See https://zguide.zeromq.org/docs/chapter2/#High-Water-Marks 
+    for more details on high water marks.
     """
 
     def __init__(self, rpc_path: str):
@@ -94,28 +105,26 @@ class AsyncEngineRPCClient:
         self.context.set(zmq.constants.MAX_SOCKETS, socket_limit) 
 
         # IPC connection to RPC Server (uses unix sockets).
-        self.to_rcp_server = self.context.socket(zmq.constants.DEALER)
-        self.to_rcp_server.set_hwm(0)
-        self.to_rcp_server.bind(rpc_path)
+        self.to_rpc_server = self.context.socket(zmq.constants.DEALER)
+        self.to_rpc_server.set_hwm(0)
+        self.to_rpc_server.bind(rpc_path)
 
         # In process proxy to RPC Server (uses memory-based messaging).
         self.from_api_server = self.context.socket(zmq.constants.ROUTER)
-        # self.from_api_server.set_hwm(0)
+        self.from_api_server.set_hwm(0)
         self.from_api_server.bind(INPROC_PROXY_PATH)
 
         # Asyncio background task for the proxy.
         self.proxy_task = asyncio.create_task(
-            self.run_proxy(self.from_api_server, self.to_rcp_server))
+            self.run_proxy(self.from_api_server, self.to_rpc_server))
 
         # Since we open 1 inproc socket per request, we have a hard cap on
         # the number of requests that can run in vLLM w. frontend
         # mulitprocessing. This value is used uvicorn to launch 
         # with --limit-concurrency to return 503 when server is overloaded.
-        
-        # We need 2 sockets per request - 1 for generate() and 1 for abort()
-        # We need 2 sockets for do_log_stats() and check_health()
-        self.limit_concurrency = socket_limit // 2
-        
+        # We need 2 sockets per request - 2:
+        # 1 for generate(), 1 for abort(), do_log_stats(), check_health()
+        self.limit_concurrency = socket_limit // 2 - 2 
 
     async def run_proxy(self, socket_from, socket_to):
         """Background task that runs a proxy"""
@@ -166,7 +175,7 @@ class AsyncEngineRPCClient:
         # Note that we use DEALER to enable asynchronous communication
         # to enable streaming.
         socket = self.context.socket(zmq.constants.DEALER)
-        # socket.set_hwm(0)
+        socket.set_hwm(0)
         try:
             socket.connect(INPROC_PROXY_PATH)
             yield socket
@@ -195,7 +204,7 @@ class AsyncEngineRPCClient:
             else:
                 raise ValueError(error_message)
 
-        return data                 
+        return data
 
     async def _send_one_way_rpc_request(self,
                                         request: RPC_REQUEST_TYPE,
