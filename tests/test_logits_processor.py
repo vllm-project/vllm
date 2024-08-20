@@ -1,4 +1,5 @@
 import random
+from array import array
 from typing import Tuple
 from unittest.mock import patch
 
@@ -8,7 +9,8 @@ import torch
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_random_seed
-from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
+from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, SamplingParams,
+                           SequenceData, SequenceGroupMetadata)
 from vllm.utils import is_pin_memory_available
 
 
@@ -69,7 +71,9 @@ def test_logits_processors(seed: int, device: str):
             SequenceGroupMetadata(
                 request_id=f"test_{i}",
                 is_prompt=True,
-                seq_data={0: SequenceData([1, 2, 3])},
+                seq_data={
+                    0: SequenceData(array(VLLM_TOKEN_ID_ARRAY_TYPE, [1, 2, 3]))
+                },
                 sampling_params=SamplingParams(temperature=0,
                                                logits_processors=[pick_ith]),
                 block_tables={0: [1]},
@@ -90,5 +94,7 @@ def test_logits_processors(seed: int, device: str):
     assert torch.isinf(logits_processor_output[:, 0]).all()
 
     fake_logits *= logits_processor.scale
-    assert torch.allclose(logits_processor_output[:, 1], fake_logits[:, 1],
-                          1e-4)
+    torch.testing.assert_close(logits_processor_output[:, 1],
+                               fake_logits[:, 1],
+                               rtol=1e-4,
+                               atol=0.0)
