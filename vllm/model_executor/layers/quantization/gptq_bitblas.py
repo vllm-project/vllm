@@ -32,7 +32,7 @@ GPTQ_BITBLAS_SUPPORTED_NUM_BITS = [1, 2, 4, 8]
 GPTQ_BITBLAS_SUPPORTED_SYM = [False, True]
 
 
-def unpack_qzeros(qzeros, bits) -> torch.Tensor:
+def unpack_qzeros(qzeros, bits, is_gptq_v2=False) -> torch.Tensor:
     qzeros = qzeros.view(torch.int32)
     elems_per_int32 = 32 // bits
     unpacked_zeros = torch.zeros(
@@ -46,8 +46,26 @@ def unpack_qzeros(qzeros, bits) -> torch.Tensor:
         i = col % elems_per_int32
         unpacked_zeros[:, col] = (qzeros[:, col // elems_per_int32] >>
                                   (bits * i)) & 0xF
+    if not is_gptq_v2:
+        return unpacked_zeros + 1
+    return unpacked_zeros
 
-    return unpacked_zeros + 1
+
+def unpack_qweight(qweight, bits):
+    qweight = qweight.view(torch.int8)
+    elems_per_int8 = 8 // bits
+    unpacked_weight = torch.zeros(
+        (qweight.shape[0], qweight.shape[1] * elems_per_int8),
+        dtype=torch.int8,
+        device=qweight.device,
+        requires_grad=False,
+    )
+    for col in range(unpacked_weight.shape[1]):
+        i = col % elems_per_int8
+        unpacked_weight[:, col] = (qweight[:, col // elems_per_int8] >>
+                                   (bits * i))
+
+    return torch.bitwise_and(unpacked_weight, 2**bits - 1)
 
 
 class GPTQBitBLASConfig(QuantizationConfig):
@@ -432,9 +450,11 @@ class GPTQBitBLASLinearMethod(LinearMethodBase):
         # (outfeatures, infeatures), should be transposed.
         qweight = b_q_weight.T.contiguous().view(
             self.quant_config.TORCH_BITBLAS_STORAGE_DTYPE)
+        intweight = unpack_qweight(qweight,
+                                   self.quant_config.weight_bits).contiguous()
         if self.bitblas_matmul.weight_transform is not None:
             qweight = self.bitblas_matmul.weight_transform(
-                qweight.cpu()).cuda()
+                intweight.cpu()).cuda()
         # scales in gptq old quant linear stored with
         # (infeatures // group_size, outfeatures), should be transposed.
         scales = scales.T.contiguous()
