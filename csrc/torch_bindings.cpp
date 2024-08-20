@@ -243,16 +243,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "()");
   ops.impl("dynamic_scaled_int8_quant", torch::kCUDA,
            &dynamic_scaled_int8_quant);
-  
+
   // Mamba selective scan kerenl
-  ops.def("selective_scan_fwd(Tensor! u, Tensor! delta,"
-                  "Tensor! A, Tensor! B, Tensor C,"
-                  "Tensor! D_, Tensor! z_, Tensor! delta_bias_,"
-                  "bool delta_softplus,"
-          "Tensor! index_, Tensor! &x) -> ()");
-  ops.impl("selective_scan_fwd", torch::kCUDA,
-           &selective_scan_fwd);
-        
+  ops.def(
+      "selective_scan_fwd(Tensor! u, Tensor! delta,"
+      "Tensor! A, Tensor! B, Tensor C,"
+      "Tensor! D_, Tensor! z_, Tensor! delta_bias_,"
+      "bool delta_softplus,"
+      "Tensor! index_, Tensor! &x) -> ()");
+  ops.impl("selective_scan_fwd", torch::kCUDA, &selective_scan_fwd);
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
