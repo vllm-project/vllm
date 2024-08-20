@@ -289,7 +289,6 @@ async def async_request_openai_completions(
                 else:
                     output.error = response.reason or ""
                     output.success = False
-
         except Exception:
             output.success = False
             exc_info = sys.exc_info()
