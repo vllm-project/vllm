@@ -10,7 +10,8 @@ from vllm.model_executor.layers.spec_decode_base_sampler import (
 
 logger = init_logger(__name__)
 
-try:
+
+if envs.VLLM_USE_FLASHINFER_SAMPLER and find_spec("flashinfer"):
     """
     Consider utilizing the FlashInfer rejection sampling kernel initially,
     as it employs a dedicated kernel rather than relying on 
@@ -19,7 +20,7 @@ try:
     """
     from flashinfer.sampling import chain_speculative_sampling
     logger.info("Use flashinfer for rejection sampling.")
-except ImportError:
+else:
     chain_speculative_sampling = None
 
 

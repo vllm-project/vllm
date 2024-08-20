@@ -43,9 +43,10 @@ def mock_causal_accepted_tensor(
     "which_tokens_accepted",
     ["all_tokens_accepted", "no_tokens_accepted", "some_tokens_accepted"])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("use_flashinfer", [True, False])
 @torch.inference_mode()
 def test_correct_output_format(which_tokens_accepted: str, seed: int,
-                               device: str):
+                               device: str, use_flashinfer: bool):
     """Verify the output has correct format given predetermined accepted matrix.
     """
     set_random_seed(seed)
@@ -83,7 +84,7 @@ def test_correct_output_format(which_tokens_accepted: str, seed: int,
                                     dtype=torch.int64)
 
     rejection_sampler = RejectionSampler(disable_bonus_tokens=False,
-                                         use_flashinfer=True)
+                                         use_flashinfer=use_flashinfer)
     rejection_sampler.init_gpu_tensors(device=device)
     output_token_ids = rejection_sampler._create_output(  # pylint: disable=protected-access
         accepted,
@@ -127,12 +128,13 @@ def test_correct_output_format(which_tokens_accepted: str, seed: int,
 @pytest.mark.parametrize("vocab_size", [30_000, 50_000])
 @pytest.mark.parametrize("batch_size", list(range(1, 32)))
 @pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("use_flashinfer", [True, False])
 @torch.inference_mode()
 def test_no_crash_with_varying_dims(k: int, vocab_size: int, batch_size: int,
-                                    device: str):
+                                    device: str, use_flashinfer: bool):
     torch.set_default_device(device)
     rejection_sampler = RejectionSampler(disable_bonus_tokens=False,
-                                         use_flashinfer=True)
+                                         use_flashinfer=use_flashinfer)
     rejection_sampler.init_gpu_tensors(device=device)
 
     draft_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
@@ -159,13 +161,14 @@ def test_no_crash_with_varying_dims(k: int, vocab_size: int, batch_size: int,
 @pytest.mark.parametrize("batch_size", [1, 8, 32, 128])
 @pytest.mark.parametrize("n_rep", [100])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("use_flashinfer", [True, False])
 @torch.inference_mode()
 def test_deterministic_when_seeded(k: int, vocab_size: int, batch_size: int,
                                    frac_seeded: float, n_rep: int,
-                                   device: str):
+                                   device: str, use_flashinfer: bool):
     torch.set_default_device(device)
     rejection_sampler = RejectionSampler(disable_bonus_tokens=False,
-                                         use_flashinfer=True)
+                                         use_flashinfer=use_flashinfer)
     rejection_sampler.init_gpu_tensors(device=device)
 
     draft_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
@@ -204,9 +207,10 @@ def test_deterministic_when_seeded(k: int, vocab_size: int, batch_size: int,
 @pytest.mark.parametrize("vocab_size", [30_000, 50_000])
 @pytest.mark.parametrize("batch_size", [1, 8, 32, 128])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("use_flashinfer", [True, False])
 @torch.inference_mode()
 def test_nonflashinfer_backend(k: int, vocab_size: int, batch_size: int,
-                               device: str):
+                               device: str, use_flashinfer: bool):
     torch.set_default_device(device)
     torch.manual_seed(0)
     draft_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
@@ -230,7 +234,7 @@ def test_nonflashinfer_backend(k: int, vocab_size: int, batch_size: int,
     }
 
     flashinfer_rejection_sampler = RejectionSampler(disable_bonus_tokens=False,
-                                                    use_flashinfer=True)
+                                                    use_flashinfer=use_flashinfer)
     flashinfer_rejection_sampler.init_gpu_tensors(device=device)
     flashinfer_rejection_sampler(target_probs, bonus_token_ids, draft_probs,
                                  draft_token_ids, seeded_seqs)
@@ -257,16 +261,18 @@ def test_nonflashinfer_backend(k: int, vocab_size: int, batch_size: int,
 @pytest.mark.parametrize("which_token_ids",
                          ["bonus_token_ids", "draft_token_ids"])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("use_flashinfer", [True, False])
 @torch.inference_mode()
 def test_raises_when_vocab_oob(above_or_below_vocab_range: str,
-                               which_token_ids: str, device: str):
+                               which_token_ids: str, device: str,
+                               use_flashinfer: bool):
     k = 3
     batch_size = 5
     vocab_size = 30_000
     torch.set_default_device(device)
 
     rejection_sampler = RejectionSampler(disable_bonus_tokens=False,
-                                         use_flashinfer=True,
+                                         use_flashinfer=use_flashinfer,
                                          strict_mode=True)
     rejection_sampler.init_gpu_tensors(device=device)
 
@@ -308,9 +314,10 @@ def test_raises_when_vocab_oob(above_or_below_vocab_range: str,
 
 @pytest.mark.parametrize("draft_and_target_probs_equal", [True, False])
 @pytest.mark.parametrize("seed", list(range(5)))
+@pytest.mark.parametrize("use_flashinfer", [True, False])
 @torch.inference_mode()
 def test_rejection_sampling_approximates_target_distribution(
-        seed: int, draft_and_target_probs_equal: bool):
+        seed: int, draft_and_target_probs_equal: bool, use_flashinfer: bool):
     """Verify rejection sampling approximates target distribution,
     despite sampling from a potentially distinct draft distribution.
 
@@ -343,7 +350,7 @@ def test_rejection_sampling_approximates_target_distribution(
     helper = _CorrectnessTestHelper(
         vocab_size=10,
         rejection_sampler=RejectionSampler(disable_bonus_tokens=False,
-                                           use_flashinfer=True),
+                                           use_flashinfer=use_flashinfer),
     )
 
     draft_probs, target_probs, reference_probs = helper.generate_probs_for_test(
