@@ -368,6 +368,29 @@ try:
                               size_k: int) -> torch.Tensor:
         return torch.empty((size_m, size_n), dtype=a.dtype, device=a.device)
 
+    @torch.library.register_fake("_C::machete_gemm")
+    def machete_gemm_fake(
+        a: torch.Tensor,
+        b_q: torch.
+        Tensor,  # Should be the tensor returned by machete_prepack_B
+        b_type: ScalarType,
+        b_scales: Optional[torch.Tensor] = None,
+        b_zeros: Optional[torch.Tensor] = None,
+        b_group_size: Optional[int] = None,
+        c: Optional[torch.Tensor] = None,
+        alpha: Optional[float] = None,
+        beta: Optional[float] = None,
+        schedule: Optional[str] = None,
+    ) -> torch.Tensor:
+        m = a.size(0)
+        n = b_q.size(1)
+        return torch.empty((m, n), device=a.device, dtype=a.dtype)
+
+    @torch.library.register_fake("_C::machete_prepack_B")
+    def machete_prepack_B_fake(b_q_weight: torch.Tensor,
+                               b_type: ScalarType) -> torch.Tensor:
+        return torch.empty_like(b_q_weight)
+
 except Exception:
     pass
 
