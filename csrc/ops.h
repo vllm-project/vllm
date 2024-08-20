@@ -83,6 +83,25 @@ torch::Tensor marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                           torch::Tensor& b_scales, torch::Tensor& workspace,
                           int64_t size_m, int64_t size_n, int64_t size_k);
 
+namespace machete {
+
+std::vector<std::string> supported_schedules(
+    vllm::ScalarTypeTorchPtr const& btype);
+
+torch::Tensor gemm(torch::Tensor const& A, torch::Tensor const& B,
+                   vllm::ScalarTypeTorchPtr const& btype,
+                   c10::optional<torch::Tensor> const& scales,
+                   c10::optional<torch::Tensor> const& zeros,
+                   c10::optional<int64_t> group_size,
+                   c10::optional<torch::Tensor> const& C,
+                   c10::optional<double> alpha, c10::optional<double> beta,
+                   c10::optional<std::string> schedule);
+
+torch::Tensor prepack_B(torch::Tensor const& B,
+                        vllm::ScalarTypeTorchPtr const& btype);
+
+};  // namespace machete
+
 torch::Tensor gptq_marlin_24_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                                   torch::Tensor& b_meta,
                                   torch::Tensor& b_scales,
