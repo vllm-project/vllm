@@ -24,6 +24,7 @@ class RequestFuncInput:
     model: str
     best_of: int = 1
     use_beam_search: bool = False
+    ignore_eos: bool = False
 
 
 @dataclass
@@ -53,6 +54,7 @@ async def async_request_tgi(
             "do_sample": True,
             "temperature": 0.01,  # TGI does not accept 0.0 temperature.
             "top_p": 0.99,  # TGI does not accept 1.0 top_p.
+            # TGI does not accept ignore_eos flag.
         }
         payload = {
             "inputs": request_func_input.prompt,
@@ -127,6 +129,8 @@ async def async_request_trt_llm(
             "max_tokens": request_func_input.output_len,
             "stream": True,
         }
+        if request_func_input.ignore_eos:
+            payload["min_length"] = request_func_input.output_len
         output = RequestFuncOutput()
         output.prompt_len = request_func_input.prompt_len
 
@@ -237,6 +241,7 @@ async def async_request_openai_completions(
             "best_of": request_func_input.best_of,
             "max_tokens": request_func_input.output_len,
             "stream": True,
+            "ignore_eos": request_func_input.ignore_eos,
         }
         headers = {
             "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"

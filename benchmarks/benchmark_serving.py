@@ -302,6 +302,7 @@ async def benchmark(
     use_beam_search: bool,
     request_rate: float,
     disable_tqdm: bool,
+    ignore_eos: bool,
 ):
     if backend in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[backend]
@@ -318,6 +319,7 @@ async def benchmark(
         output_len=test_output_len,
         best_of=best_of,
         use_beam_search=use_beam_search,
+        ignore_eos=ignore_eos,
     )
     test_output = await request_func(request_func_input=test_input)
     if not test_output.success:
@@ -513,6 +515,7 @@ def main(args: argparse.Namespace):
             use_beam_search=args.use_beam_search,
             request_rate=args.request_rate,
             disable_tqdm=args.disable_tqdm,
+            ignore_eos=args.ignore_eos,
         ))
 
     # Save config and results to json
@@ -721,6 +724,13 @@ if __name__ == "__main__":
         "If not specified, results will be saved in "
         "{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"
         " format.",
+    )
+    parser.add_argument(
+        "--ignore-eos",
+        type=bool,
+        default=False,
+        action="store_true",
+        help="Set ignore_eos flag when sending the benchmark request."
     )
 
     args = parser.parse_args()
