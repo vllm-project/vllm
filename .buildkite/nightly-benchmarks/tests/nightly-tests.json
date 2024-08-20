@@ -20,7 +20,7 @@
         "tgi_client_parameters": {
             "endpoint": "/generate_stream"
         },
-        "trt_server_parameters": {
+        "tensorrt-llm_server_parameters": {
             "model_type": "llama",
             "model_dtype": "float16",
             "max_batch_size": 2048,
@@ -29,7 +29,7 @@
             "max_num_tokens": 16384,
             "trt_llm_version": "v0.11.0"
         },
-        "trt_client_parameters": {
+        "tensorrt-llm_client_parameters": {
             "endpoint": "/v2/models/ensemble/generate_stream"
         },
         "vllm_server_parameters": {
