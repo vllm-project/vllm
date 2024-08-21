@@ -11,6 +11,7 @@ namespace machete {
 struct PyTorchArguments {
   torch::Tensor const& A;
   torch::Tensor const& B;
+  c10::optional<at::ScalarType> const& out_type;
   c10::optional<torch::Tensor> const& scales;
   c10::optional<torch::Tensor> const& zeros;
   c10::optional<int64_t> group_size;
@@ -84,11 +85,14 @@ torch::Tensor run_impl(PyTorchArguments args) {
   return D;
 };
 
-template <typename ElementA, typename ElementB, typename ElementD = ElementA,
-          typename AccumulatorT = float, typename ScaleT = ElementA,
-          typename ZeroT = ElementA>
+template <typename ElementA, typename ElementB>
 struct GemmDispatcher {
-  static torch::Tensor dispatch(PyTorchArguments args);
+ private:
+  template <typename ElementD, typename ElementS, typename ElementZ>
+  static torch::Tensor dispatch_internal(PyTorchArguments args);
+
+ public:
+  static torch::Tensor dispatch(PyTorchArguments args) {}
   static std::vector<std::string> supported_schedules();
 };
 

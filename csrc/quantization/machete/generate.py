@@ -29,11 +29,7 @@ DISPATCH_TEMPLATE = """
 namespace machete {
 using GemmDispatcher_ = GemmDispatcher<
     {{DataTypeTag[type_config.element_a]}},  // ElementA
-    {{DataTypeTag[type_config.element_b]}},  // ElementB
-    {{DataTypeTag[type_config.element_d]}},  // ElementD
-    {{DataTypeTag[type_config.accumulator]}}, // Accumulator
-    {{DataTypeTag[type_config.element_b_scale]}}, // Scales
-    {{DataTypeTag[type_config.element_b_zeropoint]}}>; // Zeropoints
+    {{DataTypeTag[type_config.element_b]}}>; // ElementB
 
 {% for s in schedules %}extern torch::Tensor 
 impl_{{type_name}}_sch_{{ gen_sch_name(s) }}(PyTorchArguments args);
@@ -179,8 +175,6 @@ class TypeConfig:
 @dataclass
 class Specialization:
     with_C: bool
-    with_zeropoints: bool
-    with_scales: bool
 
 
 @dataclass
