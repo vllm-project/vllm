@@ -21,6 +21,8 @@ serving_column_mapping = {
     "std_itl_ms": "Std ITL (ms)",
     "input_throughput": "Input Tput (tok/s)",
     "output_throughput": "Output Tput (tok/s)",
+    "total_input_tokens": "Total input tokens",
+    "total_output_tokens": "Total output tokens",
     "engine": "Engine",
 }
 
