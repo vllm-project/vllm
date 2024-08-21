@@ -34,6 +34,7 @@ def test_multi_node_bad_topology(
     - the tensor parallel size exceeds the available GPUs in a current node.
     """
     dtype = "half"
+    ray.init()
     assert ray.cluster_resources()["GPU"] == 4.0, (
         "At leasts 4 gpus are required to run a test.")
     # Creating tp == 4. Since TP workers are supposed to spread to 2 workers

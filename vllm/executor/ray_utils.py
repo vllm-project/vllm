@@ -3,9 +3,6 @@ from collections import defaultdict
 from typing import Dict, List, Optional, Tuple, Union
 
 import msgspec
-from ray._private.state import available_resources_per_node
-from ray.util import placement_group_table
-from ray.util.placement_group import PlacementGroup
 
 from vllm.config import ParallelConfig
 from vllm.executor.msgspec_utils import decode_hook, encode_hook
@@ -20,6 +17,9 @@ PG_WAIT_TIMEOUT = 1800
 
 try:
     import ray
+    from ray._private.state import available_resources_per_node
+    from ray.util import placement_group_table
+    from ray.util.placement_group import PlacementGroup
 
     class RayWorkerWrapper(WorkerWrapperBase):
         """Ray wrapper for vllm.worker.Worker, allowing Worker to be
