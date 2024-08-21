@@ -106,8 +106,8 @@ def parse_fine_tuned_lora_name(name: str) -> Tuple[str, bool, bool]:
     assert parts[0] == "base_model"
     assert parts[1] == "model"
     if parts[-1] == "weight":
-        assert parts[-2] == "lora_A" or parts[-2] == "lora_B"
-        return ".".join(parts[2:-2]), parts[-2] == "lora_A", False
+        if parts[-2] == "lora_A" or parts[-2] == "lora_B":
+            return ".".join(parts[2:-2]), parts[-2] == "lora_A", False
 
     if parts[-1] == "lora_embedding_A" or parts[-1] == "lora_embedding_B":
         return ".".join(parts[2:-1]), parts[-1] == "lora_embedding_A", False
