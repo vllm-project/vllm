@@ -8,6 +8,8 @@ from huggingface_hub import HfApi, hf_hub_download
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
 from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
+from mistral_common.tokens.tokenizers.tekken import Tekkenizer
+from mistral_common.tokens.tokenizers.sentencepiece import SentencePieceTokenizer
 
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
@@ -68,6 +70,9 @@ class VLLMMistralTokenizer:
         self.vocab_size = len(self.tokenizer.vocab())
         self.is_mistral = True
 
+        assert isinstance(self.tokenizer, (Tekkenizer, SentencePieceTokenizer)), type(self.tokenizer)
+        self._is_tekken = isinstance(self.tokenizer, Tekkenizer)
+
     @classmethod
     def from_pretrained(cls, repo_id: str, *, revision: Optional[str] = None) -> "VLLMMistralTokenizer":
         tokenizer_file = cls._download_mistral_tokenizer_from_hf(repo_id, revision)
@@ -95,7 +100,10 @@ class VLLMMistralTokenizer:
         return self.tokenizer.encode(prompt, bos=False, eos=False)
 
     def convert_tokens_to_string(self, ids: List[str]) -> str:
-        return self.tokenizer.decode(ids)
+        if self._is_tekken:
+            return "".join(ids)
+        else:
+            return self.tokenizer.decode(ids)
 
     @property
     def eos_token_id(self):
