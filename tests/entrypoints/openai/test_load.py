@@ -8,9 +8,10 @@ This test confirms that even at high load with many
 concurrent requests, zmq does not drop any messages.
 """
 
-import aiohttp
 import asyncio
 import json
+
+import aiohttp
 import pytest
 
 from ...utils import RemoteOpenAIServer
@@ -49,7 +50,7 @@ def server_data(server):
 
 
 # Cannot use Async OpenAIClient due to limitations in maximum
-# number of concurrent requests that can be sent to the server 
+# number of concurrent requests that can be sent to the server
 # from the client.
 async def async_openai_chat(model_name, url, api_key):
     async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
