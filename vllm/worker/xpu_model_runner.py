@@ -544,6 +544,11 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
                 "XPUModelRunner does not support multi-step execution.")
 
         model_executable = self.model
+        if (self.observability_config is not None
+                and self.observability_config.collect_model_forward_time):
+            model_forward_start = torch.xpu.Event(enable_timing=True)
+            model_forward_end = torch.xpu.Event(enable_timing=True)
+            model_forward_start.record()
 
         hidden_states = model_executable(
             input_ids=model_input.input_tokens,
@@ -553,6 +558,9 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
             intermediate_tensors=intermediate_tensors,
             **MultiModalInputs.as_kwargs(model_input.multi_modal_kwargs or {},
                                          device=self.device))
+        if (self.observability_config is not None
+                and self.observability_config.collect_model_forward_time):
+            model_forward_end.record()
 
         # Compute the logits.
         logits = self.model.compute_logits(hidden_states,
@@ -567,4 +575,16 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
         )
+        if (self.observability_config is not None
+                and self.observability_config.collect_model_forward_time
+                and output is not None):
+            model_forward_end.synchronize()
+            model_forward_time = model_forward_start.elapsed_time(
+                model_forward_end)
+            # If there are multiple workers, we are still tracking the latency
+            # from the start time of the driver worker to the end time of the
+            # driver worker. The model forward time will then end up covering
+            # the communication time as well.
+            output.model_forward_time = model_forward_time
+
         return [output]
