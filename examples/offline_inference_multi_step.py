@@ -25,6 +25,7 @@ llm = LLM(
     gpu_memory_utilization=0.9,
     num_scheduler_steps=8,
     use_v2_block_manager=True,
+    enforce_eager=True,
 )
 # Generate texts from the prompts. The output is a list of RequestOutput objects
 # that contain the prompt, generated text, and other information.

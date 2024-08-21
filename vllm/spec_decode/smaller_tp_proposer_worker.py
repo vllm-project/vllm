@@ -6,7 +6,8 @@ from vllm.distributed.parallel_state import (get_tp_group,
                                              init_model_parallel_group,
                                              patch_tensor_parallel_group)
 from vllm.logger import init_logger
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.sequence import ExecuteModelRequest
 from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase

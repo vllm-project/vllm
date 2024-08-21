@@ -10,9 +10,8 @@ from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig, ParallelConfig, SchedulerConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import SamplerOutput
 
 TORCH_DTYPE_TO_NEURON_AMP = {
     "auto": "f32",

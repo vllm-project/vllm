@@ -2,7 +2,8 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 from vllm.distributed import broadcast_tensor_dict, get_pp_group
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.sequence import ExecuteModelRequest
 from vllm.worker.model_runner_base import BroadcastableModelInput
 from vllm.worker.multi_step_model_runner import (MultiStepModelRunner,
                                                  StatefulModelInput)

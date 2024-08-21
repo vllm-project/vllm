@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 try:
     from vllm.attention.backends.flash_attn import FlashAttentionMetadata
@@ -10,13 +10,15 @@ except ModuleNotFoundError:
 
 import torch
 
-from vllm.model_executor.layers.sampler import _get_logprobs
 from vllm import _custom_ops as ops
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
+from vllm.model_executor.layers.sampler import (PromptLogprobs, SampleLogprobs,
+                                                SamplerOutput,
+                                                SamplingMetadata, get_logprobs,
+                                                get_pythonized_sample_results)
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
-                           Logprob, SamplerOutput, SequenceGroupMetadata,
-                           SequenceOutput)
+                           SequenceGroupMetadata, SequenceOutput)
 from vllm.worker.model_runner import (GPUModelRunnerBase,
                                       ModelInputForGPUWithSamplingMetadata)
 from vllm.worker.model_runner_base import (
@@ -296,7 +298,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
             model_input.cached_outputs.append(
                 ModelOutput(output[0], output_ready_event,
                             output[0].sampled_token_ids, False))
-            
+
             # Pythonize the output if CPU is ahead and the previous step is
             # ready.
             for model_output in model_input.cached_outputs:
@@ -412,6 +414,38 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         return self._base_model_runner.vocab_size
 
 
+DeferredLogprobsReturnType = Tuple[Optional[List[Optional[PromptLogprobs]]],
+                                   Optional[List[SampleLogprobs]]]
+
+
+def _maybe_deferred_pythonize_logprobs(
+        skip_sampler_cpu_output: bool, output: SamplerOutput,
+        sampling_metadata: SamplingMetadata) -> DeferredLogprobsReturnType:
+    if skip_sampler_cpu_output:
+        # Perform deferred logprob Pythonization
+
+        # - Deferred pythonized sample result computation
+        sample_result = get_pythonized_sample_results(
+            output.deferred_sample_results_args)
+
+        # - Erase the CUDA-side deferred sample_result
+        #   computation args
+        output.deferred_sample_results_args = None
+
+        # - Compute logprobs
+        (
+            prompt_logprobs,
+            sample_logprobs,
+        ) = get_logprobs(output.logprobs, sampling_metadata, sample_result)
+
+        assert len(prompt_logprobs) == len(sampling_metadata.seq_groups)
+        assert len(sample_logprobs) == len(sampling_metadata.seq_groups)
+
+        return prompt_logprobs, sample_logprobs
+
+    return None, None
+
+
 def _pythonize_sampler_output(model_input: StatefulModelInput,
                               output: SamplerOutput,
                               pinned_sampled_token_buffer: torch.Tensor,
@@ -437,8 +471,33 @@ def _pythonize_sampler_output(model_input: StatefulModelInput,
 
     sampling_metadata = frozen_model_input.sampling_metadata
 
-    for (seq_group, sample_result) in zip(sampling_metadata.seq_groups,
-                                          samples_list):
+    skip_sampler_cpu_output = (
+        frozen_model_input.sampling_metadata.skip_sampler_cpu_output)
+
+    (
+        prompt_logprobs,
+        sample_logprobs,
+    ) = _maybe_deferred_pythonize_logprobs(skip_sampler_cpu_output, output,
+                                           sampling_metadata)
+
+    for sgdx, (seq_group, sample_result) in enumerate(
+            zip(sampling_metadata.seq_groups, samples_list)):
+
+        if skip_sampler_cpu_output:
+            assert prompt_logprobs is not None
+            assert sample_logprobs is not None
+
+            (
+                group_prompt_logprobs,
+                group_sample_logprobs,
+            ) = (  # Utilize deferred pythonization results
+                prompt_logprobs[sgdx],
+                sample_logprobs[sgdx],
+            ) if skip_sampler_cpu_output else (
+                # profile_run: use already-computed logprobs
+                output.outputs[sgdx].prompt_logprobs,
+                [sample.logprobs for sample in output.outputs[sgdx].samples])
+
         seq_ids = seq_group.seq_ids
         next_token_ids = sample_result
         parent_ids = [0]
@@ -446,11 +505,11 @@ def _pythonize_sampler_output(model_input: StatefulModelInput,
         if seq_group.sampling_params.logits_processors:
             assert len(seq_group.sampling_params.logits_processors) == 0, (
                 "Logits Processors are not supported in multi-step decoding")
-        for parent_id, next_token_id in zip(parent_ids, next_token_ids):
-            # TODO(will): support logprobs
-            # Hard coded logprob
+        for (parent_id, next_token_id,
+             logprobs) in zip(parent_ids, next_token_ids,
+                              group_sample_logprobs):
             seq_outputs.append(
-                SequenceOutput(seq_ids[parent_id], next_token_id,
-                               {next_token_id: Logprob(logprob=-1)}))
-        output.outputs.append(CompletionSequenceGroupOutput(seq_outputs, None))
+                SequenceOutput(seq_ids[parent_id], next_token_id, logprobs))
+        output.outputs.append(
+            CompletionSequenceGroupOutput(seq_outputs, group_prompt_logprobs))
     assert len(output.outputs) > 0
