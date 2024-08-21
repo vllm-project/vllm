@@ -18,8 +18,6 @@
 #include "cute/atom/mma_atom.hpp"
 #include "cutlass/numeric_types.h"
 
-#include "cutlass/util/device_memory.h"
-
 #include "cutlass/gemm/device/gemm_universal_adapter.h"
 #include "cutlass/gemm/kernel/gemm_universal.hpp"
 #include "cutlass/epilogue/collective/collective_builder.hpp"
@@ -44,11 +42,6 @@ using namespace cute;
 
 namespace {
 
-uint32_t next_pow_2(uint32_t const num) {
-  if (num <= 1) return num;
-  return 1 << (CHAR_BIT * sizeof(num) - __builtin_clz(num - 1));
-}
-
 // A wrapper for the GEMM kernel that is used to guard against compilation on
 // architectures that will never use the kernel. The purpose of this is to
 // reduce the size of the compiled binary.
@@ -61,6 +54,66 @@ struct enable_sm90_or_later : Kernel {
   #if defined __CUDA_ARCH__ && __CUDA_ARCH__ >= 900
     Kernel::operator()(std::forward<Args>(args)...);
   #endif
+  }
+};
+
+/*
+ * This class provides the common load descriptors for the
+ * ScaledEpilogue[...] classes
+ */
+template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
+struct ScaledEpilogueBase {
+ protected:
+  using Accum = cutlass::epilogue::fusion::Sm90AccFetch;
+
+  template <typename T>
+  using ColOrScalarLoad = cutlass::epilogue::fusion::Sm90ColOrScalarBroadcast<
+      0 /*Stages*/, typename EpilogueDescriptor::TileShape, T,
+      Stride<Int<1>, Int<0>, Int<0>>>;
+
+  template <typename T>
+  using RowOrScalarLoad = cutlass::epilogue::fusion::Sm90RowOrScalarBroadcast<
+      0 /*Stages*/, typename EpilogueDescriptor::TileShape, T,
+      Stride<Int<0>, Int<1>, Int<0>>>;
+
+  // Don't want to support nullptr by default
+  template <typename T, bool EnableNullPtr = false>
+  using ColLoad = cutlass::epilogue::fusion::Sm90ColBroadcast<
+      0 /*Stages*/, typename EpilogueDescriptor::TileShape, T,
+      Stride<Int<1>, Int<0>, Int<0>>, 128 / sizeof_bits_v<T>, EnableNullPtr>;
+
+  // Don't want to support nullptr by default
+  template <typename T, bool EnableNullPtr = false>
+  using RowLoad = cutlass::epilogue::fusion::Sm90RowBroadcast<
+      0 /*Stages*/, typename EpilogueDescriptor::TileShape, T,
+      Stride<Int<0>, Int<1>, Int<0>>, 128 / sizeof_bits_v<T>, EnableNullPtr>;
+
+  // This utility function constructs the arguments for the load descriptors
+  // from a tensor. It can handle both row and column, as well as row/column or
+  // scalar cases.
+  template <typename Descriptor, typename T>
+  static auto args_from_tensor(torch::Tensor const& tensor) {
+    using Arguments = typename Descriptor::Arguments;
+    auto* data_ptr = static_cast<T*>(tensor.data_ptr());
+    if constexpr (std::is_same_v<Descriptor, ColOrScalarLoad<T>> ||
+                  std::is_same_v<Descriptor, RowOrScalarLoad<T>>) {
+      return Arguments{data_ptr, tensor.numel() != 1};
+    } else {
+      static_assert(!std::is_same_v<Descriptor, ColLoad<T, true>> &&
+                    !std::is_same_v<Descriptor, RowLoad<T, true>>);
+      return Arguments{data_ptr};
+    }
+  }
+
+  // This overload handles the case where there might not be a tensor, in which
+  // case a nullptr is passed and a constant (0) is used.
+  template <typename Descriptor, typename T>
+  static auto args_from_tensor(c10::optional<torch::Tensor> const& tensor) {
+    using Arguments = typename Descriptor::Arguments;
+    auto* data_ptr = tensor ? static_cast<T*>(tensor->data_ptr()) : nullptr;
+    static_assert(std::is_same_v<Descriptor, ColLoad<T, true>> ||
+                  std::is_same_v<Descriptor, RowLoad<T, true>>);
+    return Arguments{data_ptr};
   }
 };
 
@@ -81,21 +134,13 @@ struct enable_sm90_or_later : Kernel {
    per row or column.
 */
 template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
-struct ScaledEpilogue {
+struct ScaledEpilogue
+    : private ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor> {
  private:
-  using Accum = cutlass::epilogue::fusion::Sm90AccFetch;
-
-  using ScaleA = cutlass::epilogue::fusion::Sm90ColOrScalarBroadcast<
-      0 /*Stages*/, typename EpilogueDescriptor::TileShape, float,
-      Stride<Int<1>, Int<0>, Int<0>>>;
-
-  using ScaleBDescriptor =
-      cutlass::epilogue::collective::detail::RowBroadcastDescriptor<
-          EpilogueDescriptor, float>;
-
-  using ScaleB = cutlass::epilogue::fusion::Sm90RowOrScalarBroadcast<
-      ScaleBDescriptor::Stages, typename EpilogueDescriptor::TileShape,
-      typename ScaleBDescriptor::Element, Stride<Int<0>, Int<1>, Int<0>>>;
+  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor>;
+  using Accum = typename SUPER::Accum;
+  using ScaleA = typename SUPER::template ColOrScalarLoad<float>;
+  using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
 
   using Compute0 = cutlass::epilogue::fusion::Sm90Compute<
       cutlass::multiplies, float, float,
@@ -115,13 +160,198 @@ struct ScaledEpilogue {
 
   static ArgumentType prepare_args(torch::Tensor const& a_scales,
                                    torch::Tensor const& b_scales) {
-    using ScaleA_Args = typename ScaleA::Arguments;
-    using ScaleB_Args = typename ScaleB::Arguments;
+    auto a_args = SUPER::template args_from_tensor<ScaleA, float>(a_scales);
+    auto b_args = SUPER::template args_from_tensor<ScaleB, float>(b_scales);
 
-    ScaleA_Args a_args{a_scales.data_ptr<float>(), a_scales.numel() != 1, {}};
-    ScaleB_Args b_args{b_scales.data_ptr<float>(), b_scales.numel() != 1, {}};
+    typename EVTCompute0::Arguments evt0_args{b_args};
+    return ArgumentType{a_args, evt0_args};
+  }
+};
 
-    return ArgumentType{a_args, {b_args}};
+/*
+ * This epilogue performs the same operation as ScaledEpilogue, but adds a bias.
+ * This bias can also be used in the per-tensor azp case, where the activation
+ * zero point (azp) is used to compute an azp correction term,
+ * which is folded into the bias.
+ *
+ * The bias tensor must be per-output channel.
+ * ScaleA and ScaleB can be per-tensor or per-token/per-channel.
+ */
+template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
+struct ScaledEpilogueBias
+    : private ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor> {
+ private:
+  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor>;
+  using Accum = typename SUPER::Accum;
+  using ScaleA = typename SUPER::template ColOrScalarLoad<float>;
+  using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
+  using Bias = typename SUPER::template RowLoad<ElementD>;
+
+  using Compute0 = cutlass::epilogue::fusion::Sm90Compute<
+      cutlass::multiplies, float, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+  using EVTCompute0 =
+      cutlass::epilogue::fusion::Sm90EVT<Compute0, ScaleB, Accum>;
+
+  using Compute1 = cutlass::epilogue::fusion::Sm90Compute<
+      cutlass::multiply_add, ElementD, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+ public:
+  using EVTCompute =
+      cutlass::epilogue::fusion::Sm90EVT<Compute1, ScaleA, EVTCompute0, Bias>;
+
+  using ArgumentType = typename EVTCompute::Arguments;
+  static ArgumentType prepare_args(torch::Tensor const& a_scales,
+                                   torch::Tensor const& b_scales,
+                                   torch::Tensor const& bias) {
+    auto a_args = SUPER::template args_from_tensor<ScaleA, float>(a_scales);
+    auto b_args = SUPER::template args_from_tensor<ScaleB, float>(b_scales);
+    auto bias_args = SUPER::template args_from_tensor<Bias, ElementD>(bias);
+
+    typename EVTCompute0::Arguments evt0_args{b_args};
+    return ArgumentType{a_args, evt0_args, bias_args};
+  }
+};
+
+/*
+ * This epilogue directly supports per-tensor azp in int32 form.
+ * As opposed to the per-token epilogue below, this epilogue only has an azp_adj
+ * term, which should already be multiplied with the scalar azp.
+ * The azp_adj term is a 1D tensor of shape (1,n), computed as azp * J @ B.
+ *
+ * This epilogue also supports bias, which remains per-channel.
+ */
+template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
+struct ScaledEpilogueBiasAzp
+    : private ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor> {
+ private:
+  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor>;
+  using Accum = typename SUPER::Accum;
+  using ScaleA = typename SUPER::template ColOrScalarLoad<float>;
+  using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
+  using Bias = typename SUPER::template RowLoad<ElementD, true>;
+
+  // This is the full AZP term, azp * J @ B, shape (1,n)
+  using AzpWithAdj = typename SUPER::template RowLoad<int32_t>;
+
+  // Compute float(accum - azp_adj), both operands are int32_t
+  using ComputeAzp = cutlass::epilogue::fusion::Sm90Compute<
+      cutlass::minus, float, int32_t,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+  using EVTComputeAzp =
+      cutlass::epilogue::fusion::Sm90EVT<ComputeAzp, Accum, AzpWithAdj>;
+
+  using ComputeScaleB = cutlass::epilogue::fusion::Sm90Compute<
+      cutlass::multiplies, float, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+  using EVTComputeScaleB =
+      cutlass::epilogue::fusion::Sm90EVT<ComputeScaleB, ScaleB, EVTComputeAzp>;
+
+  using ComputeScaleBiasA = cutlass::epilogue::fusion::Sm90Compute<
+      cutlass::multiply_add, ElementD, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+ public:
+  using EVTCompute =
+      cutlass::epilogue::fusion::Sm90EVT<ComputeScaleBiasA, ScaleA,
+                                         EVTComputeScaleB, Bias>;
+  using ArgumentType = typename EVTCompute::Arguments;
+
+  static ArgumentType prepare_args(torch::Tensor const& a_scales,
+                                   torch::Tensor const& b_scales,
+                                   torch::Tensor const& azp_adj,
+                                   c10::optional<torch::Tensor> const& bias) {
+    auto a_args = SUPER::template args_from_tensor<ScaleA, float>(a_scales);
+    auto b_args = SUPER::template args_from_tensor<ScaleB, float>(b_scales);
+    auto bias_args = SUPER::template args_from_tensor<Bias, ElementD>(bias);
+    auto azp_adj_args =
+        SUPER::template args_from_tensor<AzpWithAdj, int32_t>(azp_adj);
+
+    typename EVTComputeAzp::Arguments evt_azp_args{{}, azp_adj_args};
+    typename EVTComputeScaleB::Arguments evt_scale_b_args{b_args, evt_azp_args};
+    return ArgumentType{a_args, evt_scale_b_args, bias_args};
+  }
+};
+
+/*
+ * This epilogue supports per-token azp by computing and applying
+ * the correction term using a rank-1 update. If the term were materialized,
+ * it would require O(m*n) space, and this way it only requires O(m+n) space.
+ * The azp term is a 1D tensor of shape (m,1), and represents the unscaled zero
+ * point for each row of A.
+ * The azp_adj term is a 1D tensor of shape (1,n), computed as J @ B.
+ *
+ * This epilogue also supports bias, which remains per-channel.
+ */
+template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
+struct ScaledEpilogueBiasAzpToken
+    : private ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor> {
+ private:
+  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor>;
+  using Accum = typename SUPER::Accum;
+  using ScaleA = typename SUPER::template ColOrScalarLoad<float>;
+  using ScaleB = typename SUPER::template RowOrScalarLoad<float>;
+  using Bias = typename SUPER::template RowLoad<ElementD, true>;
+
+  // Per-token azp term, shape (m,1)
+  using Azp = typename SUPER::template ColLoad<int32_t>;
+
+  // This is the AZP adjustment term, J @ B, shape (1,n)
+  using AzpAdj = typename SUPER::template RowLoad<int32_t>;
+
+  // Compute azp * azp_adj
+  using ComputeAzp = cutlass::epilogue::fusion::Sm90Compute<
+      cutlass::multiplies, int32_t, int32_t,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+  using EVTComputeAzp =
+      cutlass::epilogue::fusion::Sm90EVT<ComputeAzp, Azp, AzpAdj>;
+
+  // Compute float(accum - azp*azp_adj), all operands are int32_t
+  using ComputeAcc = cutlass::epilogue::fusion::Sm90Compute<
+      cutlass::minus, float, int32_t,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+  using EVTComputeAcc =
+      cutlass::epilogue::fusion::Sm90EVT<ComputeAcc, Accum, EVTComputeAzp>;
+
+  using ComputeScaleB = cutlass::epilogue::fusion::Sm90Compute<
+      cutlass::multiplies, float, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+  using EVTComputeScaleB =
+      cutlass::epilogue::fusion::Sm90EVT<ComputeScaleB, ScaleB, EVTComputeAcc>;
+
+  using ComputeScaleBiasA = cutlass::epilogue::fusion::Sm90Compute<
+      cutlass::multiply_add, ElementD, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+ public:
+  using EVTCompute =
+      cutlass::epilogue::fusion::Sm90EVT<ComputeScaleBiasA, ScaleA,
+                                         EVTComputeScaleB, Bias>;
+  using ArgumentType = typename EVTCompute::Arguments;
+
+  static ArgumentType prepare_args(torch::Tensor const& a_scales,
+                                   torch::Tensor const& b_scales,
+                                   torch::Tensor const& azp_adj,
+                                   torch::Tensor const& azp,
+                                   c10::optional<torch::Tensor> const& bias) {
+    auto a_args = SUPER::template args_from_tensor<ScaleA, float>(a_scales);
+    auto b_args = SUPER::template args_from_tensor<ScaleB, float>(b_scales);
+    auto bias_args = SUPER::template args_from_tensor<Bias, ElementD>(bias);
+    auto azp_args = SUPER::template args_from_tensor<Azp, int32_t>(azp);
+    auto azp_adj_args =
+        SUPER::template args_from_tensor<AzpAdj, int32_t>(azp_adj);
+
+    typename EVTComputeAzp::Arguments evt_azp_args{azp_args, azp_adj_args};
+    typename EVTComputeAcc::Arguments evt_acc_args{{}, evt_azp_args};
+    typename EVTComputeScaleB::Arguments evt_scale_b_args{b_args, evt_acc_args};
+    return ArgumentType{a_args, evt_scale_b_args, bias_args};
   }
 };
 
@@ -194,12 +424,12 @@ void cutlass_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
   int64_t ldb = b.stride(1);
   int64_t ldc = out.stride(0);
 
-  using StrideA = Stride<int64_t, Int<1>, Int<0>>;
-  using StrideB = Stride<int64_t, Int<1>, Int<0>>;
+  using StrideA = Stride<int64_t, Int<1>, int64_t>;
+  using StrideB = Stride<int64_t, Int<1>, int64_t>;
   using StrideC = typename Gemm::StrideC;
 
-  StrideA a_stride{lda, Int<1>{}, Int<0>{}};
-  StrideB b_stride{ldb, Int<1>{}, Int<0>{}};
+  StrideA a_stride{lda, Int<1>{}, 0};
+  StrideB b_stride{ldb, Int<1>{}, 0};
   StrideC c_stride{ldc, Int<1>{}, Int<0>{}};
 
   using GemmKernel = typename Gemm::GemmKernel;
@@ -225,24 +455,26 @@ void cutlass_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
   CUTLASS_CHECK(gemm_op.can_implement(args));
 
   size_t workspace_size = gemm_op.get_workspace_size(args);
-  cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
+  auto const workspace_options =
+      torch::TensorOptions().dtype(torch::kUInt8).device(a.device());
+  auto workspace = torch::empty(workspace_size, workspace_options);
 
   auto stream = at::cuda::getCurrentCUDAStream(a.get_device());
 
-  cutlass::Status status = gemm_op.run(args, workspace.get(), stream);
+  cutlass::Status status = gemm_op.run(args, workspace.data_ptr(), stream);
   CUTLASS_CHECK(status);
 }
 
 template <typename InType, typename OutType,
-          template <typename, typename, typename> typename Epilogue, int32_t M>
-struct sm90_fp8_config {
+          template <typename, typename, typename> typename Epilogue>
+struct sm90_fp8_config_default {
+  // M in (128, inf)
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
   using KernelSchedule =
       cutlass::gemm::KernelTmaWarpSpecializedPingpongFP8FastAccum;
   using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
   using TileShape = Shape<_128, _128, _128>;
   using ClusterShape = Shape<_2, _1, _1>;
-
   using Cutlass3xGemm =
       cutlass_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
                       KernelSchedule, EpilogueSchedule>;
@@ -250,14 +482,14 @@ struct sm90_fp8_config {
 
 template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue>
-struct sm90_fp8_config<InType, OutType, Epilogue, 128> {
+struct sm90_fp8_config_M128 {
+  // M in (64, 128]
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
   using KernelSchedule =
       cutlass::gemm::KernelTmaWarpSpecializedPingpongFP8FastAccum;
   using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
   using TileShape = Shape<_64, _128, _128>;
   using ClusterShape = Shape<_2, _1, _1>;
-
   using Cutlass3xGemm =
       cutlass_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
                       KernelSchedule, EpilogueSchedule>;
@@ -265,7 +497,8 @@ struct sm90_fp8_config<InType, OutType, Epilogue, 128> {
 
 template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue>
-struct sm90_fp8_config<InType, OutType, Epilogue, 64> {
+struct sm90_fp8_config_M64 {
+  // M in [1, 64]
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
   using KernelSchedule =
       cutlass::gemm::KernelTmaWarpSpecializedPingpongFP8FastAccum;
@@ -273,6 +506,78 @@ struct sm90_fp8_config<InType, OutType, Epilogue, 64> {
   using TileShape = Shape<_64, _64, _128>;
   using ClusterShape = Shape<_1, _8, _1>;
 
+  using Cutlass3xGemm =
+      cutlass_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
+                      KernelSchedule, EpilogueSchedule>;
+};
+
+template <typename InType, typename OutType,
+          template <typename, typename, typename> typename Epilogue>
+struct sm90_int8_config_default {
+  // For M > 128 and any N
+  static_assert(std::is_same<InType, int8_t>());
+  using KernelSchedule =
+      typename cutlass::gemm::KernelTmaWarpSpecializedPingpong;
+  using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
+  using TileShape = Shape<_128, _128, _128>;
+  using ClusterShape = Shape<_2, _1, _1>;
+  using Cutlass3xGemm =
+      cutlass_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
+                      KernelSchedule, EpilogueSchedule>;
+};
+
+template <typename InType, typename OutType,
+          template <typename, typename, typename> typename Epilogue>
+struct sm90_int8_config_M128 {
+  // For M in (64, 128] and any N
+  static_assert(std::is_same<InType, int8_t>());
+  using KernelSchedule =
+      typename cutlass::gemm::KernelTmaWarpSpecializedPingpong;
+  using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
+  using TileShape = Shape<_64, _128, _128>;
+  using ClusterShape = Shape<_2, _1, _1>;
+  using Cutlass3xGemm =
+      cutlass_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
+                      KernelSchedule, EpilogueSchedule>;
+};
+
+template <typename InType, typename OutType,
+          template <typename, typename, typename> typename Epilogue>
+struct sm90_int8_config_M64 {
+  // For M in (32, 64] and any N
+  static_assert(std::is_same<InType, int8_t>());
+  using KernelSchedule = typename cutlass::gemm::KernelTmaWarpSpecialized;
+  using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
+  using TileShape = Shape<_64, _64, _256>;
+  using ClusterShape = Shape<_1, _1, _1>;
+  using Cutlass3xGemm =
+      cutlass_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
+                      KernelSchedule, EpilogueSchedule>;
+};
+
+template <typename InType, typename OutType,
+          template <typename, typename, typename> typename Epilogue>
+struct sm90_int8_config_M32_NBig {
+  // For M in [1, 32] and N >= 8192
+  static_assert(std::is_same<InType, int8_t>());
+  using KernelSchedule = typename cutlass::gemm::KernelTmaWarpSpecialized;
+  using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
+  using TileShape = Shape<_64, _128, _256>;
+  using ClusterShape = Shape<_1, _4, _1>;
+  using Cutlass3xGemm =
+      cutlass_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
+                      KernelSchedule, EpilogueSchedule>;
+};
+
+template <typename InType, typename OutType,
+          template <typename, typename, typename> typename Epilogue>
+struct sm90_int8_config_M32_NSmall {
+  // For M in [1, 32] and N < 8192
+  static_assert(std::is_same<InType, int8_t>());
+  using KernelSchedule = typename cutlass::gemm::KernelTmaWarpSpecialized;
+  using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
+  using TileShape = Shape<_64, _64, _256>;
+  using ClusterShape = Shape<_1, _8, _1>;
   using Cutlass3xGemm =
       cutlass_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
                       KernelSchedule, EpilogueSchedule>;
@@ -291,11 +596,12 @@ void cutlass_gemm_sm90_fp8_dispatch(torch::Tensor& out, torch::Tensor const& a,
   TORCH_CHECK(b.dtype() == torch::kFloat8_e4m3fn);
 
   using Cutlass3xGemmDefault =
-      typename sm90_fp8_config<InType, OutType, Epilogue, 0>::Cutlass3xGemm;
+      typename sm90_fp8_config_default<InType, OutType,
+                                       Epilogue>::Cutlass3xGemm;
   using Cutlass3xGemmM64 =
-      typename sm90_fp8_config<InType, OutType, Epilogue, 64>::Cutlass3xGemm;
+      typename sm90_fp8_config_M64<InType, OutType, Epilogue>::Cutlass3xGemm;
   using Cutlass3xGemmM128 =
-      typename sm90_fp8_config<InType, OutType, Epilogue, 128>::Cutlass3xGemm;
+      typename sm90_fp8_config_M128<InType, OutType, Epilogue>::Cutlass3xGemm;
 
   uint32_t const m = a.size(0);
   uint32_t const mp2 =
@@ -316,48 +622,129 @@ void cutlass_gemm_sm90_fp8_dispatch(torch::Tensor& out, torch::Tensor const& a,
   }
 }
 
-void cutlass_scaled_mm_sm90(torch::Tensor& out, torch::Tensor const& a,
-                            torch::Tensor const& b,
-                            torch::Tensor const& a_scales,
-                            torch::Tensor const& b_scales) {
-  TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
-  TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
+template <typename InType, typename OutType,
+          template <typename, typename, typename> typename Epilogue,
+          typename... EpilogueArgs>
+void cutlass_gemm_sm90_int8_dispatch(torch::Tensor& out, torch::Tensor const& a,
+                                     torch::Tensor const& b,
+                                     EpilogueArgs&&... args) {
+  static_assert(std::is_same<InType, int8_t>());
+  TORCH_CHECK(a.dtype() == torch::kInt8);
+  TORCH_CHECK(b.dtype() == torch::kInt8);
 
+  using Cutlass3xGemmDefault =
+      typename sm90_int8_config_default<InType, OutType,
+                                        Epilogue>::Cutlass3xGemm;
+  using Cutlass3xGemmM128 =
+      typename sm90_int8_config_M128<InType, OutType, Epilogue>::Cutlass3xGemm;
+  using Cutlass3xGemmM64 =
+      typename sm90_int8_config_M64<InType, OutType, Epilogue>::Cutlass3xGemm;
+  using Cutlass3xGemmM32NBig =
+      typename sm90_int8_config_M32_NBig<InType, OutType,
+                                         Epilogue>::Cutlass3xGemm;
+  using Cutlass3xGemmM32NSmall =
+      typename sm90_int8_config_M32_NSmall<InType, OutType,
+                                           Epilogue>::Cutlass3xGemm;
+
+  uint32_t const n = out.size(1);
+  bool const is_small_n = n < 8192;
+
+  uint32_t const m = a.size(0);
+  uint32_t const mp2 =
+      std::max(static_cast<uint32_t>(32), next_pow_2(m));  // next power of 2
+
+  if (mp2 <= 32) {
+    // m in [1, 32]
+    if (is_small_n) {
+      return cutlass_gemm_caller<Cutlass3xGemmM32NSmall>(
+          out, a, b, std::forward<EpilogueArgs>(args)...);
+    } else {
+      return cutlass_gemm_caller<Cutlass3xGemmM32NBig>(
+          out, a, b, std::forward<EpilogueArgs>(args)...);
+    }
+  } else if (mp2 <= 64) {
+    // m in (32, 64]
+    return cutlass_gemm_caller<Cutlass3xGemmM64>(
+        out, a, b, std::forward<EpilogueArgs>(args)...);
+  } else if (mp2 <= 128) {
+    // m in (64, 128]
+    return cutlass_gemm_caller<Cutlass3xGemmM128>(
+        out, a, b, std::forward<EpilogueArgs>(args)...);
+  } else {
+    // m in (128, inf)
+    return cutlass_gemm_caller<Cutlass3xGemmDefault>(
+        out, a, b, std::forward<EpilogueArgs>(args)...);
+  }
+}
+
+template <template <typename, typename, typename> typename Epilogue,
+          typename... EpilogueArgs>
+void cutlass_scaled_mm_sm90_epilogue(torch::Tensor& out, torch::Tensor const& a,
+                                     torch::Tensor const& b,
+                                     EpilogueArgs&&... epilogue_args) {
   if (a.dtype() == torch::kInt8) {
     TORCH_CHECK(b.dtype() == torch::kInt8);
 
-    using TileShape = Shape<_128, _128, _128>;
-    using ClusterShape = Shape<_1, _2, _1>;
-    using KernelSchedule =
-        typename cutlass::gemm::KernelTmaWarpSpecializedPingpong;
-    using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
-
     if (out.dtype() == torch::kBFloat16) {
-      return cutlass_gemm_caller<cutlass_3x_gemm<
-          int8_t, cutlass::bfloat16_t, ScaledEpilogue, TileShape, ClusterShape,
-          KernelSchedule, EpilogueSchedule>>(out, a, b, a_scales, b_scales);
+      return cutlass_gemm_sm90_int8_dispatch<int8_t, cutlass::bfloat16_t,
+                                             Epilogue>(
+          out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
     } else {
       TORCH_CHECK(out.dtype() == torch::kFloat16);
-
-      return cutlass_gemm_caller<
-          cutlass_3x_gemm<int8_t, cutlass::half_t, ScaledEpilogue, TileShape,
-                          ClusterShape, KernelSchedule, EpilogueSchedule>>(
-          out, a, b, a_scales, b_scales);
+      return cutlass_gemm_sm90_int8_dispatch<int8_t, cutlass::half_t, Epilogue>(
+          out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
     }
   } else {
     TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
     TORCH_CHECK(b.dtype() == torch::kFloat8_e4m3fn);
 
     if (out.dtype() == torch::kBFloat16) {
-      return cutlass_gemm_sm90_fp8_dispatch<
-          cutlass::float_e4m3_t, cutlass::bfloat16_t, ScaledEpilogue>(
-          out, a, b, a_scales, b_scales);
+      return cutlass_gemm_sm90_fp8_dispatch<cutlass::float_e4m3_t,
+                                            cutlass::bfloat16_t, Epilogue>(
+          out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
     } else {
       TORCH_CHECK(out.dtype() == torch::kFloat16);
       return cutlass_gemm_sm90_fp8_dispatch<cutlass::float_e4m3_t,
-                                            cutlass::half_t, ScaledEpilogue>(
-          out, a, b, a_scales, b_scales);
+                                            cutlass::half_t, Epilogue>(
+          out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
     }
+  }
+}
+
+void cutlass_scaled_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
+                            torch::Tensor const& b,
+                            torch::Tensor const& a_scales,
+                            torch::Tensor const& b_scales,
+                            c10::optional<torch::Tensor> const& bias) {
+  TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
+  TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
+  if (bias) {
+    TORCH_CHECK(bias->dtype() == c.dtype(),
+                "currently bias dtype must match output dtype ", c.dtype());
+    return cutlass_scaled_mm_sm90_epilogue<ScaledEpilogueBias>(
+        c, a, b, a_scales, b_scales, *bias);
+  } else {
+    return cutlass_scaled_mm_sm90_epilogue<ScaledEpilogue>(c, a, b, a_scales,
+                                                           b_scales);
+  }
+}
+
+void cutlass_scaled_mm_azp_sm90(torch::Tensor& out, torch::Tensor const& a,
+                                torch::Tensor const& b,
+                                torch::Tensor const& a_scales,
+                                torch::Tensor const& b_scales,
+                                torch::Tensor const& azp_adj,
+                                c10::optional<torch::Tensor> const& azp,
+                                c10::optional<torch::Tensor> const& bias) {
+  TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
+  TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
+
+  if (azp) {
+    return cutlass_scaled_mm_sm90_epilogue<ScaledEpilogueBiasAzpToken>(
+        out, a, b, a_scales, b_scales, azp_adj, *azp, bias);
+  } else {
+    return cutlass_scaled_mm_sm90_epilogue<ScaledEpilogueBiasAzp>(
+        out, a, b, a_scales, b_scales, azp_adj, bias);
   }
 }
 

@@ -1,8 +1,6 @@
 import functools
 from typing import Callable, List
 
-from transformers import PreTrainedTokenizer
-
 from vllm.core.scheduler import Scheduler
 from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
@@ -12,6 +10,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import (Sequence, SequenceGroup, SequenceGroupOutput,
                            SequenceOutput, SequenceStatus)
 from vllm.transformers_utils.detokenizer import Detokenizer
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import Counter
 
 logger = init_logger(__name__)
@@ -34,9 +33,9 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
     def __init__(
         self,
         detokenizer: Detokenizer,
-        scheduler: Scheduler,
+        scheduler: List[Scheduler],
         seq_counter: Counter,
-        get_tokenizer_for_seq: Callable[[Sequence], PreTrainedTokenizer],
+        get_tokenizer_for_seq: Callable[[Sequence], AnyTokenizer],
         stop_checker: StopChecker,
     ):
         self.detokenizer = detokenizer
@@ -141,4 +140,5 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
                 break
 
         if seq.is_finished():
-            self.scheduler.free_seq(seq)
+            for scheduler in self.scheduler:
+                scheduler.free_seq(seq)

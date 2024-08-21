@@ -2,13 +2,16 @@ from typing import List, Optional, Tuple
 
 import pytest
 import torch
-from vllm_flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 
-NUM_HEADS = [(16, 16), (32, 8), (64, 8)]
+import vllm.attention.backends.flash_attn  # noqa: F401
+
+NUM_HEADS = [(4, 4), (8, 2), (16, 2)]
 HEAD_SIZES = [128, 256]
 BLOCK_SIZES = [16, 32]
 DTYPES = [torch.float16, torch.bfloat16]
-NUM_BLOCKS = 32768  # Large enough to test overflow in index calculation.
+# one value large enough to test overflow in index calculation.
+# one value small enough to test the schema op check
+NUM_BLOCKS = [32768, 2048]
 
 
 def ref_paged_attn(
@@ -20,12 +23,13 @@ def ref_paged_attn(
     block_tables: torch.Tensor,
     scale: float,
     sliding_window: Optional[int] = None,
+    soft_cap: Optional[float] = None,
 ) -> torch.Tensor:
     num_seqs = len(query_lens)
     block_tables = block_tables.cpu().numpy()
     _, block_size, num_kv_heads, head_size = key_cache.shape
 
-    outputs = []
+    outputs: List[torch.Tensor] = []
     start_idx = 0
     for i in range(num_seqs):
         query_len = query_lens[i]
@@ -53,6 +57,8 @@ def ref_paged_attn(
                                              (query_len + sliding_window) +
                                              1).bool().logical_not()
             mask |= sliding_window_mask
+        if soft_cap is not None:
+            attn = soft_cap * torch.tanh(attn / soft_cap)
         attn.masked_fill_(mask, float("-inf"))
         attn = torch.softmax(attn, dim=-1).to(v.dtype)
         out = torch.einsum("hqk,khd->qhd", attn, v)
@@ -68,13 +74,17 @@ def ref_paged_attn(
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
-@torch.inference_mode
+@pytest.mark.parametrize("soft_cap", [None, 10.0, 50.0])
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@torch.inference_mode()
 def test_flash_attn_with_paged_kv(
-    kv_lens: List[Tuple[int, int]],
+    kv_lens: List[int],
     num_heads: Tuple[int, int],
     head_size: int,
     dtype: torch.dtype,
     block_size: int,
+    soft_cap: Optional[float],
+    num_blocks: int,
 ) -> None:
     torch.set_default_device("cuda")
     torch.cuda.manual_seed_all(0)
@@ -86,7 +96,7 @@ def test_flash_attn_with_paged_kv(
     scale = head_size**-0.5
 
     query = torch.randn(num_seqs, num_query_heads, head_size, dtype=dtype)
-    key_cache = torch.randn(NUM_BLOCKS,
+    key_cache = torch.randn(num_blocks,
                             block_size,
                             num_kv_heads,
                             head_size,
@@ -96,19 +106,39 @@ def test_flash_attn_with_paged_kv(
 
     max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
     block_tables = torch.randint(0,
-                                 NUM_BLOCKS,
+                                 num_blocks,
                                  (num_seqs, max_num_blocks_per_seq),
                                  dtype=torch.int32)
 
-    output = flash_attn_with_kvcache(
-        q=query.unsqueeze(1),
-        k_cache=key_cache,
-        v_cache=value_cache,
+    output = torch.ops.vllm.flash_attn_with_kvcache(
+        decode_query=query.unsqueeze(1),
+        key_cache=key_cache,
+        value_cache=value_cache,
         softmax_scale=scale,
         causal=True,
         block_table=block_tables,
         cache_seqlens=kv_lens_tensor,
+        softcap=soft_cap if soft_cap is not None else 0,
     ).squeeze(1)
+
+    if num_blocks <= 2048:
+        test_utils = ["test_faketensor", "test_schema"]
+    else:
+        test_utils = ["test_faketensor"]
+
+    torch.library.opcheck(torch.ops.vllm.flash_attn_with_kvcache,
+                          args=tuple(),
+                          kwargs=dict(
+                              decode_query=query.unsqueeze(1),
+                              key_cache=key_cache,
+                              value_cache=value_cache,
+                              softmax_scale=scale,
+                              causal=True,
+                              block_table=block_tables,
+                              cache_seqlens=kv_lens_tensor,
+                              softcap=soft_cap if soft_cap is not None else 0,
+                          ),
+                          test_utils=test_utils)
 
     ref_output = ref_paged_attn(
         query=query,
@@ -118,8 +148,9 @@ def test_flash_attn_with_paged_kv(
         kv_lens=kv_lens,
         block_tables=block_tables,
         scale=scale,
+        soft_cap=soft_cap,
     )
-    assert torch.allclose(output, ref_output, atol=1e-2, rtol=1e-2), \
+    torch.testing.assert_close(output, ref_output, atol=2e-2, rtol=1e-2), \
         f"{torch.max(torch.abs(output - ref_output))}"
 
 
@@ -129,7 +160,9 @@ def test_flash_attn_with_paged_kv(
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("sliding_window", [None])
 @pytest.mark.parametrize("dtype", DTYPES)
-@torch.inference_mode
+@pytest.mark.parametrize("soft_cap", [None, 10.0, 50.0])
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@torch.inference_mode()
 def test_varlen_with_paged_kv(
     seq_lens: List[Tuple[int, int]],
     num_heads: Tuple[int, int],
@@ -137,6 +170,8 @@ def test_varlen_with_paged_kv(
     sliding_window: Optional[int],
     dtype: torch.dtype,
     block_size: int,
+    soft_cap: Optional[float],
+    num_blocks: int,
 ) -> None:
     torch.set_default_device("cuda")
     torch.cuda.manual_seed_all(0)
@@ -157,16 +192,12 @@ def test_varlen_with_paged_kv(
                         num_query_heads,
                         head_size,
                         dtype=dtype)
-    key_cache = torch.randn(NUM_BLOCKS,
+    key_cache = torch.randn(num_blocks,
                             block_size,
                             num_kv_heads,
                             head_size,
                             dtype=dtype)
     value_cache = torch.randn_like(key_cache)
-    # Normalize the scale of the key and value caches to mitigate
-    # numerical instability.
-    key_cache /= head_size**0.5
-    value_cache /= head_size**0.5
     cu_query_lens = torch.tensor([0] + query_lens,
                                  dtype=torch.int32).cumsum(dim=0,
                                                            dtype=torch.int32)
@@ -176,11 +207,11 @@ def test_varlen_with_paged_kv(
 
     max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
     block_tables = torch.randint(0,
-                                 NUM_BLOCKS,
+                                 num_blocks,
                                  (num_seqs, max_num_blocks_per_seq),
                                  dtype=torch.int32)
 
-    output = flash_attn_varlen_func(
+    output = torch.ops.vllm.flash_attn_varlen_func(
         q=query,
         k=key_cache,
         v=value_cache,
@@ -192,7 +223,31 @@ def test_varlen_with_paged_kv(
         causal=True,
         window_size=window_size,
         block_table=block_tables,
+        softcap=soft_cap if soft_cap is not None else 0,
     )
+
+    if num_blocks <= 2048:
+        test_utils = ["test_faketensor", "test_schema"]
+    else:
+        test_utils = ["test_faketensor"]
+
+    torch.library.opcheck(torch.ops.vllm.flash_attn_varlen_func,
+                          args=tuple(),
+                          kwargs=dict(
+                              q=query,
+                              k=key_cache,
+                              v=value_cache,
+                              cu_seqlens_q=cu_query_lens,
+                              cu_seqlens_k=cu_kv_lens,
+                              max_seqlen_q=max_query_len,
+                              max_seqlen_k=max_kv_len,
+                              softmax_scale=scale,
+                              causal=True,
+                              window_size=window_size,
+                              block_table=block_tables,
+                              softcap=soft_cap if soft_cap is not None else 0,
+                          ),
+                          test_utils=test_utils)
 
     ref_output = ref_paged_attn(
         query=query,
@@ -203,6 +258,7 @@ def test_varlen_with_paged_kv(
         block_tables=block_tables,
         scale=scale,
         sliding_window=sliding_window,
+        soft_cap=soft_cap,
     )
-    assert torch.allclose(output, ref_output, atol=1e-2, rtol=1e-2), \
+    torch.testing.assert_close(output, ref_output, atol=2e-2, rtol=1e-2), \
         f"{torch.max(torch.abs(output - ref_output))}"
