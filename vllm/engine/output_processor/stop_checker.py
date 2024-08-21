@@ -1,10 +1,9 @@
 from typing import Callable, Optional
 
-from transformers import PreTrainedTokenizer
-
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import Sequence, SequenceStatus
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 
 class StopChecker:
@@ -15,8 +14,7 @@ class StopChecker:
     """
 
     def __init__(self, max_model_len: int,
-                 get_tokenizer_for_seq: Callable[[Sequence],
-                                                 PreTrainedTokenizer]):
+                 get_tokenizer_for_seq: Callable[[Sequence], AnyTokenizer]):
         # Do not use it directly, but use `self._get_max_model_len`.
         self._max_model_len = max_model_len
         self.get_tokenizer_for_seq = get_tokenizer_for_seq
