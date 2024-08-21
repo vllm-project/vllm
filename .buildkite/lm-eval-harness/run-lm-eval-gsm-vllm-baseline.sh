@@ -49,3 +49,6 @@ lm_eval --model vllm \
   --model_args pretrained=$MODEL,tensor_parallel_size=$TP_SIZE,distributed_executor_backend="ray",trust_remote_code=true,max_model_len=4096 \
   --tasks gsm8k --num_fewshot $FEWSHOT --limit $LIMIT \
   --batch_size $BATCH_SIZE
+
+  lm_eval --model vllm \
+  --model_args pretrained=$MODEL --tasks gsm8k --batch_size auto
