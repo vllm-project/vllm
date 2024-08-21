@@ -205,7 +205,7 @@ FROM vllm-openai as vllm-grpc-adapter
 USER root
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install vllm-tgis-adapter==0.3.0
+    pip install vllm-tgis-adapter==0.4.0
 
 ENV GRPC_PORT=8033 \
     PORT=8000 \
