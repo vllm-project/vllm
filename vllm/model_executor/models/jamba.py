@@ -1,7 +1,7 @@
 # coding=utf-8
 """Inference-only Jamba model."""
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 import torch
 from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
@@ -31,13 +31,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import HasInnerState
+from vllm.model_executor.models.mamba_cache import MambaCacheManager
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.worker.model_runner import (_BATCH_SIZES_TO_CAPTURE,
                                       _get_graph_batch_size)
-
-from vllm.model_executor.models.mamba_cache import MambaCacheManager
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -610,9 +609,10 @@ class JambaForCausalLM(nn.Module, HasInnerState):
                 **kwargs):
         if not self.mamba_cache.initialized:
             max_batch_size = (_get_graph_batch_size(
-                self.scheduler_config.max_num_seqs) if self.scheduler_config else
-                              max(_BATCH_SIZES_TO_CAPTURE) + 2)
-            self.mamba_cache.prepare(self.lm_head.weight.dtype, max_batch_size)
+                self.scheduler_config.max_num_seqs) if self.scheduler_config
+                              else max(_BATCH_SIZES_TO_CAPTURE) + 2)
+            self.mamba_cache.initialize_tensors(self.lm_head.weight.dtype,
+                                                max_batch_size)
 
         if "seqlen_agnostic_capture_inputs" not in kwargs:
             # We get here only on Prefill/Eager mode runs
@@ -622,23 +622,24 @@ class JambaForCausalLM(nn.Module, HasInnerState):
 
             request_ids_to_seq_ids = kwargs["request_ids_to_seq_ids"]
             finished_requests_ids = kwargs["finished_requests_ids"]
-            self.mamba_cache.release(finished_requests_ids)
+            self.mamba_cache.release_finished_requests(finished_requests_ids)
             batch_size = input_ids.shape[0]
             if attn_metadata.prefill_metadata:
                 batch_size = len(request_ids_to_seq_ids)
-            mamba_cache = self.mamba_cache.prepare_current_run_state(
+            mamba_cache_tensors = self.mamba_cache.prepare_current_run_state(
                 request_ids_to_seq_ids, batch_size, finished_requests_ids)
         else:
             # CUDA graph capturing runs
-            mamba_cache = kwargs["seqlen_agnostic_capture_inputs"]
+            mamba_cache_tensors = kwargs["seqlen_agnostic_capture_inputs"]
 
         hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, mamba_cache[0],
-                                   mamba_cache[1])
+                                   attn_metadata, mamba_cache_tensors[0],
+                                   mamba_cache_tensors[1])
         return hidden_states
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
-        return self.mamba_cache.copy_inputs_before_cuda_graphs(input_buffers, **kwargs)
+        return self.mamba_cache.copy_inputs_before_cuda_graphs(
+            input_buffers, **kwargs)
 
     def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
         return self.mamba_cache.get_seqlen_agnostic_capture_inputs(batch_size)

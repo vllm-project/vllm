@@ -2,9 +2,11 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 
-from vllm.distributed import (get_tensor_model_parallel_world_size)
+from vllm.distributed import get_tensor_model_parallel_world_size
+
 
 class MambaCacheManager:
+
     def __init__(self, config):
         self.mamba_cache: Tuple[torch.Tensor, torch.Tensor] = tuple()
 
@@ -12,7 +14,6 @@ class MambaCacheManager:
         # and its index inside the self.mamba_cache
         self.mamba_cache_indices_mapping: Dict[str, Dict[int, int]] = {}
         self.config = config
-
         self.initialized = False
 
     def _swap_mamba_cache(self, from_index: int, to_index: int):
@@ -75,9 +76,10 @@ class MambaCacheManager:
                     from_index=cache_index_already_exists,
                     to_index=destination_index)
 
-    def prepare_current_run_state(
-            self, request_ids_to_seq_ids: Dict[str, list[int]],
-            batch_size: int, finished_requests_ids: List[str]):
+    def prepare_current_run_state(self,
+                                  request_ids_to_seq_ids: Dict[str, list[int]],
+                                  batch_size: int,
+                                  finished_requests_ids: List[str]):
         running_indices = []
         request_ids_to_seq_ids_flatten = [
             (req_id, seq_id)
@@ -157,11 +159,10 @@ class MambaCacheManager:
             key in kwargs
             for key in ["request_ids_to_seq_ids", "finished_requests_ids"])
         finished_requests_ids = kwargs["finished_requests_ids"]
-        self.release(finished_requests_ids)
+        self.release_finished_requests(finished_requests_ids)
         request_ids_to_seq_ids = kwargs["request_ids_to_seq_ids"]
         cg_batch_size = input_buffers['input_ids'].shape[0]
-        self.prepare_current_run_state(request_ids_to_seq_ids,
-                                       cg_batch_size,
+        self.prepare_current_run_state(request_ids_to_seq_ids, cg_batch_size,
                                        finished_requests_ids)
 
     def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
@@ -172,7 +173,8 @@ class MambaCacheManager:
         """
         return tuple(buffer[:, :batch_size] for buffer in self.mamba_cache)
 
-    def release(self, finished_seq_groups_req_ids: List[str]):
+    def release_finished_requests(self,
+                                  finished_seq_groups_req_ids: List[str]):
         for req_id in finished_seq_groups_req_ids:
             if req_id in self.mamba_cache_indices_mapping:
                 self.mamba_cache_indices_mapping.pop(req_id)
@@ -200,23 +202,25 @@ class MambaCacheManager:
             self.config.mamba_d_conv,
         )
         temporal_state_shape = (
-            self.config.mamba_expand * self.config.hidden_size // world_size,
+            self.config.mamba_expand * hidden_size // world_size,
             self.config.mamba_d_state,
         )
         return conv_state_shape, temporal_state_shape
 
-    def prepare(self, dtype, max_batch_size):
+    def initialize_tensors(self, dtype, max_batch_size):
         layers_type = self.config.layers_block_type
         num_mamba_layers = sum(
             [layer_type == "mamba" for layer_type in layers_type])
         conv_state_shape, temporal_state_shape = self._get_mamba_cache_shape()
         assert conv_state_shape is not None and temporal_state_shape is not None
 
-        self.mamba_cache = (torch.empty(size=(num_mamba_layers, max_batch_size) +
-                                        conv_state_shape,
-                                        dtype=dtype,
-                                        device="cuda"),
-                            torch.empty(size=(num_mamba_layers, max_batch_size) +
-                                        temporal_state_shape,
-                                        dtype=dtype,
-                                        device="cuda"))
+        self.mamba_cache = (torch.empty(
+            size=(num_mamba_layers, max_batch_size) + conv_state_shape,
+            dtype=dtype,
+            device="cuda"),
+                            torch.empty(
+                                size=(num_mamba_layers, max_batch_size) +
+                                temporal_state_shape,
+                                dtype=dtype,
+                                device="cuda"))
+        self.initialized = True

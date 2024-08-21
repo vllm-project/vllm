@@ -80,7 +80,7 @@ class Attention(nn.Module):
         dtype = torch.get_default_dtype()
         attn_backend = get_attn_backend(num_heads, head_size, num_kv_heads,
                                         sliding_window, dtype, kv_cache_dtype,
-                                        block_size, is_attention_free, 
+                                        block_size, is_attention_free,
                                         blocksparse_params is not None)
         impl_cls = attn_backend.get_impl_cls()
         self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
