@@ -57,7 +57,6 @@ if TYPE_CHECKING:
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_TEST_FORCE_FP8_MARLIN: bool = False
     VLLM_RPC_GET_DATA_TIMEOUT_MS: int = 1000
-    VLLM_RPC_GENERATE_TIMEOUT_MS: int = 300000
     VLLM_ALLOW_ENGINE_USE_RAY: bool = False
     VLLM_PLUGINS: Optional[List[str]] = None
 
@@ -376,13 +375,6 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # server for simple data operations
     "VLLM_RPC_GET_DATA_TIMEOUT_MS":
     lambda: int(os.getenv("VLLM_RPC_GET_DATA_TIMEOUT_MS", "1000")),
-
-    # Time in ms for the zmq client to wait for a response from the backend
-    # server for text generation.
-    # This helps ensure we don't leak open http connections and pile up
-    # deadlocked coroutines if something goes wrong with a request.
-    "VLLM_RPC_GENERATE_TIMEOUT_MS":
-    lambda: int(os.getenv("VLLM_RPC_GENERATE_TIMEOUT_MS", "300000")),
 
     # If set, allow running the engine as a separate ray actor,
     # which is a deprecated feature soon to be removed.

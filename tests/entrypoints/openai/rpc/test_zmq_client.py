@@ -117,26 +117,3 @@ async def test_client_errors_after_closing(monkeypatch, dummy_server,
     # But no-ops like aborting will pass
     await client.abort("test-request-id")
     await client.do_log_stats()
-
-
-@pytest.mark.asyncio
-async def test_generation_timeout(monkeypatch, dummy_server,
-                                  client: AsyncEngineRPCClient):
-    with monkeypatch.context() as m:
-        # Make the server _not_ reply with generation results
-        m.setattr(dummy_server, "generate", lambda x: None)
-        m.setattr(client, "_generate_timeout", 10)
-        # make sure client aborts are a no-op to avoid failure
-        # after generation timeout
-        m.setattr(client, "abort", unittest.mock.AsyncMock())
-
-        generator = client.generate(None, None, None)
-
-        async def generate():
-            async for _ in generator:
-                pass
-
-        # Ensure we time out
-        client_task = asyncio.get_running_loop().create_task(generate())
-        with pytest.raises(TimeoutError, match="Server didn't reply within"):
-            await asyncio.wait_for(client_task, timeout=0.05)

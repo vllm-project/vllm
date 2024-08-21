@@ -18,8 +18,7 @@ from vllm.entrypoints.openai.rpc import (RPC_REQUEST_TYPE,
                                          VLLM_RPC_ZMQ_HWM, RPCAbortRequest,
                                          RPCGenerateRequest, RPCUtilityRequest)
 # yapf: enable
-from vllm.envs import (VLLM_RPC_GENERATE_TIMEOUT_MS,
-                       VLLM_RPC_GET_DATA_TIMEOUT_MS)
+from vllm.envs import VLLM_RPC_GET_DATA_TIMEOUT_MS
 from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -92,7 +91,6 @@ class AsyncEngineRPCClient:
     def __init__(self, rpc_path: str):
         self.context = zmq.asyncio.Context()
         self._data_timeout = VLLM_RPC_GET_DATA_TIMEOUT_MS
-        self._generate_timeout = VLLM_RPC_GENERATE_TIMEOUT_MS
         self._errored = False
 
         # Maximum number of sockets that can be opened (typically 65536).
@@ -387,10 +385,6 @@ class AsyncEngineRPCClient:
 
                 # Stream back the results from the RPC Server.
                 while not finished:
-                    # TODO: timeouts
-                    if await socket.poll(timeout=self._generate_timeout) == 0:
-                        raise TimeoutError("Server didn't reply within "
-                                           f"{self._generate_timeout} ms")
                     message = await socket.recv()
                     request_output = cloudpickle.loads(message)
 
