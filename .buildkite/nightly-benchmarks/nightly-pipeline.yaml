@@ -39,20 +39,7 @@ steps:
   - block: ":rocket: Ready for comparing vllm against alternatives? This will take 4 hours."
 
 
-  - label: "A100 trt benchmark"
-    priority: 100
-    agents:
-      queue: A100
-    plugins:
-      - kubernetes:
-          podSpec:
-            <<: *common_pod_spec
-            containers:
-              - image: nvcr.io/nvidia/tritonserver:24.07-trtllm-python-py3
-                <<: *common_container_settings
-
-
-  # - label: "A100 sglang benchmark"
+  # - label: "A100 trt benchmark"
   #   priority: 100
   #   agents:
   #     queue: A100
@@ -61,10 +48,11 @@ steps:
   #         podSpec:
   #           <<: *common_pod_spec
   #           containers:
-  #             - image: lmsysorg/sglang:v0.2.12-cu118
+  #             - image: nvcr.io/nvidia/tritonserver:24.07-trtllm-python-py3
   #               <<: *common_container_settings
 
-  - label: "A100 lmdeploy benchmark"
+
+  - label: "A100 sglang benchmark"
     priority: 100
     agents:
       queue: A100
@@ -73,21 +61,33 @@ steps:
           podSpec:
             <<: *common_pod_spec
             containers:
-              - image: openmmlab/lmdeploy:v0.5.3-cu11
+              - image: lmsysorg/sglang:v0.2.12-cu118
                 <<: *common_container_settings
+
+  # - label: "A100 lmdeploy benchmark"
+  #   priority: 100
+  #   agents:
+  #     queue: A100
+  #   plugins:
+  #     - kubernetes:
+  #         podSpec:
+  #           <<: *common_pod_spec
+  #           containers:
+  #             - image: openmmlab/lmdeploy:v0.5.3-cu11
+  #               <<: *common_container_settings
   
 
-  # - label: "A100 vllm benchmark"
-  #   priority: 100
-  #   agents:
-  #     queue: A100
-  #   plugins:
-  #     - kubernetes:
-  #         podSpec:
-  #           <<: *common_pod_spec
-  #           containers:
-  #             - image: vllm/vllm-openai:latest 
-  #               <<: *common_container_settings
+  - label: "A100 vllm benchmark"
+    priority: 100
+    agents:
+      queue: A100
+    plugins:
+      - kubernetes:
+          podSpec:
+            <<: *common_pod_spec
+            containers:
+              - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:9b73a2f498e8bf8e18305a8afea84536e9330088
+                <<: *common_container_settings
 
   # - label: "A100 tgi benchmark"
   #   priority: 100

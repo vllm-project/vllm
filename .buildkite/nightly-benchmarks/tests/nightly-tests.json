@@ -34,7 +34,8 @@
         },
         "vllm_server_parameters": {
             "disable_log_stats": "",
-            "disable_log_requests": ""
+            "disable_log_requests": "",
+            "num_scheduler_steps": "10"
         },
         "vllm_client_parameters": {
         },
@@ -83,7 +84,8 @@
         },
         "vllm_server_parameters": {
             "disable_log_stats": "",
-            "disable_log_requests": ""
+            "disable_log_requests": "",
+            "num_scheduler_steps": "10"
         },
         "vllm_client_parameters": {
         },
@@ -132,7 +134,8 @@
         },
         "vllm_server_parameters": {
             "disable_log_stats": "",
-            "disable_log_requests": ""
+            "disable_log_requests": "",
+            "num_scheduler_steps": "10"
         },
         "vllm_client_parameters": {
         },
