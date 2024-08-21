@@ -359,6 +359,8 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
             if not lora_config else lora_config.lora_vocab_padding_size,
             quant_config=quant_config,
         )
+        if self.config.tie_word_embeddings:
+            self.lm_head.weight = self.model.embed_tokens.weight
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
         self.sampler = Sampler()
@@ -455,7 +457,7 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                     weight_loader = param.weight_loader
                     weight_loader(param,
                                   loaded_weight,
-                                  weight_name,
+                                  name,
                                   shard_id=shard_id,
                                   expert_id=expert_id)
                     break

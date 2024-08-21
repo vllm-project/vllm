@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import openai
-import ray
 import requests
 from transformers import AutoTokenizer
 from typing_extensions import ParamSpec
@@ -18,9 +17,10 @@ from typing_extensions import ParamSpec
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.entrypoints.openai.cli_args import make_arg_parser
+from vllm.platforms import current_platform
 from vllm.utils import FlexibleArgumentParser, get_open_port, is_hip
 
-if is_hip():
+if current_platform.is_rocm():
     from amdsmi import (amdsmi_get_gpu_vram_usage,
                         amdsmi_get_processor_handles, amdsmi_init,
                         amdsmi_shut_down)
@@ -32,7 +32,7 @@ if is_hip():
             yield
         finally:
             amdsmi_shut_down()
-else:
+elif current_platform.is_cuda():
     from pynvml import (nvmlDeviceGetHandleByIndex, nvmlDeviceGetMemoryInfo,
                         nvmlInit, nvmlShutdown)
 
@@ -43,6 +43,11 @@ else:
             yield
         finally:
             nvmlShutdown()
+else:
+
+    @contextmanager
+    def _nvml():
+        yield
 
 
 VLLM_PATH = Path(__file__).parent.parent
@@ -51,7 +56,6 @@ VLLM_PATH = Path(__file__).parent.parent
 
 class RemoteOpenAIServer:
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
-    DEFAULT_MAX_START_WAIT_S = 120  # needed as a class variable for a test
 
     def __init__(self,
                  model: str,
@@ -59,7 +63,7 @@ class RemoteOpenAIServer:
                  *,
                  env_dict: Optional[Dict[str, str]] = None,
                  auto_port: bool = True,
-                 max_start_wait_s: Optional[int] = None) -> None:
+                 max_wait_seconds: Optional[float] = None) -> None:
         if auto_port:
             if "-p" in cli_args or "--port" in cli_args:
                 raise ValueError("You have manually specified the port"
@@ -74,10 +78,6 @@ class RemoteOpenAIServer:
         self.host = str(args.host or 'localhost')
         self.port = int(args.port)
 
-        if max_start_wait_s:
-            self.max_start_wait_s = max_start_wait_s or \
-                                    RemoteOpenAIServer.DEFAULT_MAX_START_WAIT_S
-
         env = os.environ.copy()
         # the current process might initialize cuda,
         # to be safe, we should use spawn method
@@ -88,8 +88,9 @@ class RemoteOpenAIServer:
                                      env=env,
                                      stdout=sys.stdout,
                                      stderr=sys.stderr)
+        max_wait_seconds = max_wait_seconds or 240
         self._wait_for_server(url=self.url_for("health"),
-                              timeout=self.max_start_wait_s)
+                              timeout=max_wait_seconds)
 
     def __enter__(self):
         return self
@@ -143,7 +144,8 @@ def compare_two_settings(model: str,
                          arg1: List[str],
                          arg2: List[str],
                          env1: Optional[Dict[str, str]] = None,
-                         env2: Optional[Dict[str, str]] = None):
+                         env2: Optional[Dict[str, str]] = None,
+                         max_wait_seconds: Optional[float] = None) -> None:
     """
     Launch API server with two different sets of arguments/environments
     and compare the results of the API calls.
@@ -162,7 +164,10 @@ def compare_two_settings(model: str,
     token_ids = tokenizer(prompt)["input_ids"]
     results = []
     for args, env in ((arg1, env1), (arg2, env2)):
-        with RemoteOpenAIServer(model, args, env_dict=env) as server:
+        with RemoteOpenAIServer(model,
+                                args,
+                                env_dict=env,
+                                max_wait_seconds=max_wait_seconds) as server:
             client = server.get_client()
 
             # test models list
@@ -296,6 +301,8 @@ def multi_process_parallel(
     pp_size: int,
     test_target: Any,
 ) -> None:
+    import ray
+
     # Using ray helps debugging the error when it failed
     # as compared to multiprocessing.
     # NOTE: We need to set working_dir for distributed tests,
@@ -380,6 +387,7 @@ def fork_new_process_for_each_test(
         os.setpgrp()
         from _pytest.outcomes import Skipped
         pid = os.fork()
+        print(f"Fork a new process to run a test {pid}")
         if pid == 0:
             try:
                 f(*args, **kwargs)
@@ -397,11 +405,11 @@ def fork_new_process_for_each_test(
             pgid = os.getpgid(pid)
             _pid, _exitcode = os.waitpid(pid, 0)
             # ignore SIGTERM signal itself
-            old_singla_handler = signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            old_signal_handler = signal.signal(signal.SIGTERM, signal.SIG_IGN)
             # kill all child processes
             os.killpg(pgid, signal.SIGTERM)
             # restore the signal handler
-            signal.signal(signal.SIGTERM, old_singla_handler)
+            signal.signal(signal.SIGTERM, old_signal_handler)
             assert _exitcode == 0, (f"function {f} failed when called with"
                                     f" args {args} and kwargs {kwargs}")
 

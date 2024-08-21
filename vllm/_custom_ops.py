@@ -17,13 +17,7 @@ if not current_platform.is_tpu():
         logger.warning("Failed to import from vllm._C with %r", e)
 
 with contextlib.suppress(ImportError):
-    # ruff: noqa: F401
-    import vllm._moe_C
-
-
-def is_custom_op_supported(op_name: str) -> bool:
-    op, overloads = torch._C._jit_get_operation(op_name)
-    return op is not None
+    import vllm._moe_C  # noqa: F401
 
 
 def hint_on_error(fn):
@@ -280,14 +274,14 @@ def cutlass_scaled_mm_azp(a: torch.Tensor,
 # aqlm
 def aqlm_gemm(input: torch.Tensor, codes: torch.Tensor,
               codebooks: torch.Tensor, scales: torch.Tensor,
-              codebook_partition_sizes: torch.Tensor,
+              codebook_partition_sizes: List[int],
               bias: Optional[torch.Tensor]) -> torch.Tensor:
     return torch.ops._C.aqlm_gemm(input, codes, codebooks, scales,
                                   codebook_partition_sizes, bias)
 
 
 def aqlm_dequant(codes: torch.Tensor, codebooks: torch.Tensor,
-                 codebook_partition_sizes: torch.Tensor) -> torch.Tensor:
+                 codebook_partition_sizes: List[int]) -> torch.Tensor:
     return torch.ops._C.aqlm_dequant(codes, codebooks,
                                      codebook_partition_sizes)
 
@@ -335,6 +329,32 @@ def fp8_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                                         num_bits, size_m, size_n, size_k)
 
 
+# machete
+def machete_supported_schedules(b_type: ScalarType) -> List[str]:
+    return torch.ops._C.machete_supported_schedules(b_type)
+
+
+def machete_gemm(
+    a: torch.Tensor,
+    b_q: torch.Tensor,  # Should be the tensor returned by machete_prepack_B
+    b_type: ScalarType,
+    b_scales: Optional[torch.Tensor] = None,
+    b_zeros: Optional[torch.Tensor] = None,
+    b_group_size: Optional[int] = None,
+    c: Optional[torch.Tensor] = None,
+    alpha: Optional[float] = None,
+    beta: Optional[float] = None,
+    schedule: Optional[str] = None,
+) -> torch.Tensor:
+    return torch.ops._C.machete_gemm(a, b_q, b_type, b_scales, b_zeros,
+                                     b_group_size, c, alpha, beta, schedule)
+
+
+def machete_prepack_B(b_q_weight: torch.Tensor,
+                      b_type: ScalarType) -> torch.Tensor:
+    return torch.ops._C.machete_prepack_B(b_q_weight, b_type)
+
+
 # fp8
 def scaled_fp8_quant(
     input: torch.Tensor,
@@ -369,9 +389,12 @@ def scaled_fp8_quant(
     # This code assumes batch_dim and num_tokens are flattened
     assert (input.ndim == 2)
     shape: Union[Tuple[int, int], torch.Size] = input.shape
+    # For rocm, the output fp8 dtype is torch.float_e3m3fnuz
+    out_dtype: torch.dtype = torch.float8_e4m3fnuz if vllm.utils.is_hip() \
+        else torch.float8_e4m3fn
     if num_token_padding:
         shape = (max(num_token_padding, input.shape[0]), shape[1])
-    output = torch.empty(shape, device=input.device, dtype=torch.float8_e4m3fn)
+    output = torch.empty(shape, device=input.device, dtype=out_dtype)
 
     if scale is None:
         if use_per_token_if_dynamic:
@@ -431,17 +454,9 @@ def marlin_qqq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
 
 
 # gguf
-def ggml_dequantize(W: torch.Tensor, quant_type: int, m: int, n: int):
+def ggml_dequantize(W: torch.Tensor, quant_type: int, m: int,
+                    n: int) -> torch.Tensor:
     return torch.ops._C.ggml_dequantize(W, quant_type, m, n)
-
-
-def ggml_mul_mat_vec(
-    W: torch.Tensor,
-    X: torch.Tensor,
-    quant_type: int,
-    row: int,
-):
-    return torch.ops._C.ggml_mul_mat_vec(W, X, quant_type, row)
 
 
 def ggml_mul_mat_vec_a8(
@@ -449,7 +464,7 @@ def ggml_mul_mat_vec_a8(
     X: torch.Tensor,
     quant_type: int,
     row: int,
-):
+) -> torch.Tensor:
     return torch.ops._C.ggml_mul_mat_vec_a8(W, X, quant_type, row)
 
 
@@ -458,7 +473,7 @@ def ggml_mul_mat_a8(
     X: torch.Tensor,
     quant_type: int,
     row: int,
-):
+) -> torch.Tensor:
     return torch.ops._C.ggml_mul_mat_a8(W, X, quant_type, row)
 
 

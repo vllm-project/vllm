@@ -19,6 +19,7 @@ from typing_extensions import Annotated, Required, TypedDict
 from vllm.entrypoints.openai.logits_processors import get_logits_processors
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import LogitsProcessor, SamplingParams
+from vllm.sequence import Logprob
 from vllm.utils import random_uuid
 
 # yapf: enable
@@ -221,6 +222,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     skip_special_tokens: bool = True
     spaces_between_special_tokens: bool = True
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+    prompt_logprobs: Optional[int] = None
     # doc: end-chat-completion-sampling-params
 
     # doc: begin-chat-completion-extra-params
@@ -332,7 +334,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
             stop=self.stop,
             stop_token_ids=self.stop_token_ids,
             logprobs=self.top_logprobs if self.logprobs else None,
-            prompt_logprobs=self.top_logprobs if self.echo else None,
+            prompt_logprobs=self.prompt_logprobs if self.prompt_logprobs else
+            (self.top_logprobs if self.echo else None),
             ignore_eos=self.ignore_eos,
             max_tokens=max_tokens,
             min_tokens=self.min_tokens,
@@ -480,6 +483,7 @@ class CompletionRequest(OpenAIBaseModel):
     spaces_between_special_tokens: bool = True
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
     allowed_token_ids: Optional[List[int]] = None
+    prompt_logprobs: Optional[int] = None
     # doc: end-completion-sampling-params
 
     # doc: begin-completion-extra-params
@@ -566,7 +570,8 @@ class CompletionRequest(OpenAIBaseModel):
             min_tokens=self.min_tokens,
             use_beam_search=self.use_beam_search,
             early_stopping=self.early_stopping,
-            prompt_logprobs=self.logprobs if self.echo else None,
+            prompt_logprobs=self.prompt_logprobs
+            if self.prompt_logprobs else self.logprobs if self.echo else None,
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
@@ -644,6 +649,7 @@ class CompletionResponseChoice(OpenAIBaseModel):
             "to stop, None if the completion finished for some other reason "
             "including encountering the EOS token"),
     )
+    prompt_logprobs: Optional[List[Optional[Dict[int, Logprob]]]] = None
 
 
 class CompletionResponse(OpenAIBaseModel):
@@ -773,6 +779,7 @@ class ChatCompletionResponse(OpenAIBaseModel):
     model: str
     choices: List[ChatCompletionResponseChoice]
     usage: UsageInfo
+    prompt_logprobs: Optional[List[Optional[Dict[int, Logprob]]]] = None
 
 
 class DeltaMessage(OpenAIBaseModel):
