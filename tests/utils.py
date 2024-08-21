@@ -1,4 +1,3 @@
-import httpx
 import functools
 import os
 import signal
@@ -136,9 +135,8 @@ class RemoteOpenAIServer:
         )
 
     def get_async_client(self):
-        return openai.AsyncOpenAI(
-            base_url=self.url_for("v1"),
-            api_key=self.DUMMY_API_KEY)
+        return openai.AsyncOpenAI(base_url=self.url_for("v1"),
+                                  api_key=self.DUMMY_API_KEY)
 
 
 def compare_two_settings(model: str,
