@@ -60,10 +60,8 @@ class CustomChatCompletionContentPartParam(TypedDict, total=False):
 
 
 ChatCompletionContentPartParam: TypeAlias = Union[
-    OpenAIChatCompletionContentPartParam,
-    ChatCompletionContentPartAudioParam,
-    CustomChatCompletionContentPartParam,
-]
+    OpenAIChatCompletionContentPartParam, ChatCompletionContentPartAudioParam,
+    CustomChatCompletionContentPartParam, ]
 
 
 class CustomChatCompletionMessageParam(TypedDict, total=False):
@@ -83,9 +81,8 @@ class CustomChatCompletionMessageParam(TypedDict, total=False):
     """
 
 
-ChatCompletionMessageParam = Union[
-    OpenAIChatCompletionMessageParam, CustomChatCompletionMessageParam
-]
+ChatCompletionMessageParam = Union[OpenAIChatCompletionMessageParam,
+                                   CustomChatCompletionMessageParam]
 
 
 # TODO: Make fields ReadOnly once mypy supports it
@@ -101,8 +98,7 @@ class ChatMessageParseResult:
 
 
 def load_chat_template(
-    chat_template: Optional[Union[Path, str]],
-) -> Optional[str]:
+    chat_template: Optional[Union[Path, str]], ) -> Optional[str]:
     if chat_template is None:
         return None
     try:
@@ -114,11 +110,9 @@ def load_chat_template(
 
         JINJA_CHARS = "{}\n"
         if not any(c in chat_template for c in JINJA_CHARS):
-            msg = (
-                f"The supplied chat template ({chat_template}) "
-                f"looks like a file path, but it failed to be "
-                f"opened. Reason: {e}"
-            )
+            msg = (f"The supplied chat template ({chat_template}) "
+                   f"looks like a file path, but it failed to be "
+                   f"opened. Reason: {e}")
             raise ValueError(msg) from e
 
         # If opening a file fails, set chat template to be args to
@@ -161,9 +155,8 @@ def _mm_token_str(
 
 # TODO: Let user specify how to insert multimodal tokens into prompt
 # (similar to chat template)
-def _get_full_multimodal_text_prompt(
-    placeholder_token_str: str, text_prompt: str
-) -> str:
+def _get_full_multimodal_text_prompt(placeholder_token_str: str,
+                                     text_prompt: str) -> str:
     """Combine multimodal prompts for a multimodal language model"""
 
     # NOTE: For now we assume all model architectures use the same
@@ -195,16 +188,14 @@ def _parse_chat_message_content_parts(
             modality = "image"
             if len(mm_futures) > 0:
                 raise NotImplementedError(
-                    "Multiple multimodal inputs is currently not supported."
-                )
+                    "Multiple multimodal inputs is currently not supported.")
 
             image_url = _ImageParser.validate_python(part)["image_url"]
 
             if image_url.get("detail", "auto") != "auto":
                 logger.warning(
                     "'image_url.detail' is currently not supported and "
-                    "will be ignored."
-                )
+                    "will be ignored.")
 
             image_future = async_get_and_parse_image(image_url["url"])
             mm_futures.append(image_future)
@@ -212,8 +203,7 @@ def _parse_chat_message_content_parts(
             modality = "audio"
             if len(mm_futures) > 0:
                 raise NotImplementedError(
-                    "Multiple multimodal inputs is currently not supported."
-                )
+                    "Multiple multimodal inputs is currently not supported.")
 
             audio_url = _AudioParser.validate_python(part)["audio_url"]
             audio_future = async_get_and_parse_audio(audio_url["url"])
@@ -224,13 +214,13 @@ def _parse_chat_message_content_parts(
     text_prompt = "\n".join(texts)
 
     if mm_futures:
-        placeholder_token_str = _mm_token_str(model_config, tokenizer, modality)
+        placeholder_token_str = _mm_token_str(model_config, tokenizer,
+                                              modality)
         if placeholder_token_str is not None:
             if placeholder_token_str in text_prompt:
                 logger.warning(
                     "Detected multi-modal token string in the text prompt. "
-                    "Skipping prompt formatting."
-                )
+                    "Skipping prompt formatting.")
             else:
                 text_prompt = _get_full_multimodal_text_prompt(
                     placeholder_token_str=placeholder_token_str,
@@ -273,7 +263,8 @@ def parse_chat_messages(
     mm_futures: List[Awaitable[MultiModalDataDict]] = []
 
     for msg in messages:
-        parse_result = _parse_chat_message_content(msg, model_config, tokenizer)
+        parse_result = _parse_chat_message_content(msg, model_config,
+                                                   tokenizer)
 
         conversation.extend(parse_result.messages)
         mm_futures.extend(parse_result.mm_futures)
@@ -293,8 +284,7 @@ def apply_chat_template(
         raise ValueError(
             "As of transformers v4.44, default chat template is no longer "
             "allowed, so you must provide a chat template if the tokenizer "
-            "does not define one."
-        )
+            "does not define one.")
 
     prompt = tokenizer.apply_chat_template(
         conversation=conversation,

@@ -35,12 +35,12 @@ def get_cached_tokenizer(tokenizer: AnyHFTokenizer) -> AnyHFTokenizer:
 
     tokenizer_all_special_ids = set(tokenizer.all_special_ids)
     tokenizer_all_special_tokens_extended = (
-        tokenizer.all_special_tokens_extended
-    )
+        tokenizer.all_special_tokens_extended)
     tokenizer_all_special_tokens = set(tokenizer.all_special_tokens)
     tokenizer_len = len(tokenizer)
 
     class CachedTokenizer(tokenizer.__class__):  # type: ignore
+
         @property
         def all_special_ids(self):
             return tokenizer_all_special_ids
@@ -95,26 +95,22 @@ def get_tokenizer(
     if tokenizer_mode == "slow":
         if kwargs.get("use_fast", False):
             raise ValueError(
-                "Cannot use the fast tokenizer in slow tokenizer mode."
-            )
+                "Cannot use the fast tokenizer in slow tokenizer mode.")
         kwargs["use_fast"] = False
 
     if "truncation_side" not in kwargs:
         kwargs["truncation_side"] = "left"
 
     # Separate model folder from file path for GGUF models
-    is_gguf = (
-        Path(tokenizer_name).is_file()
-        and Path(tokenizer_name).suffix == ".gguf"
-    )
+    is_gguf = (Path(tokenizer_name).is_file()
+               and Path(tokenizer_name).suffix == ".gguf")
     if is_gguf:
         kwargs["gguf_file"] = Path(tokenizer_name).name
         tokenizer_name = Path(tokenizer_name).parent
 
     if tokenizer_mode == "mistral":
-        tokenizer = MistralTokenizer.from_pretrained(
-            str(tokenizer_name), revision=revision
-        )
+        tokenizer = MistralTokenizer.from_pretrained(str(tokenizer_name),
+                                                     revision=revision)
     else:
         try:
             tokenizer = AutoTokenizer.from_pretrained(
@@ -129,16 +125,13 @@ def get_tokenizer(
             # currently being imported,
             # suggest using the --trust-remote-code flag.
             if not trust_remote_code and (
-                "does not exist or is not currently imported." in str(e)
-                or "requires you to execute the tokenizer file" in str(e)
-            ):
-                err_msg = (
-                    "Failed to load the tokenizer. If the tokenizer "
-                    "is a custom tokenizer not yet available in the "
-                    "HuggingFace transformers library, consider "
-                    "setting `trust_remote_code=True` in LLM or using "
-                    "the `--trust-remote-code` flag in the CLI."
-                )
+                    "does not exist or is not currently imported." in str(e)
+                    or "requires you to execute the tokenizer file" in str(e)):
+                err_msg = ("Failed to load the tokenizer. If the tokenizer "
+                           "is a custom tokenizer not yet available in the "
+                           "HuggingFace transformers library, consider "
+                           "setting `trust_remote_code=True` in LLM or using "
+                           "the `--trust-remote-code` flag in the CLI.")
                 raise RuntimeError(err_msg) from e
             else:
                 raise e
@@ -159,16 +152,14 @@ def get_tokenizer(
         if not isinstance(tokenizer, PreTrainedTokenizerFast):
             logger.warning(
                 "Using a slow tokenizer. This might cause a significant "
-                "slowdown. Consider using a fast tokenizer instead."
-            )
+                "slowdown. Consider using a fast tokenizer instead.")
         tokenizer = get_cached_tokenizer(tokenizer)
 
     return tokenizer
 
 
-def get_lora_tokenizer(
-    lora_request: LoRARequest, *args, **kwargs
-) -> Optional[AnyTokenizer]:
+def get_lora_tokenizer(lora_request: LoRARequest, *args,
+                       **kwargs) -> Optional[AnyTokenizer]:
     if lora_request is None:
         return None
     try:
