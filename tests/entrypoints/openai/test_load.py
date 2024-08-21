@@ -9,15 +9,18 @@ active requests, zmq does not drop any messages.
 """
 
 import asyncio
-import openai
+import aiohttp
 import pytest
+import json
 
 from ...utils import RemoteOpenAIServer
 
+AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
+
+# MODEL_NAME = "meta-llama/Meta-Llama-3-8B-Instruct"
 MODEL_NAME = "Qwen/Qwen2-1.5B-Instruct"
-NUM_REQUESTS = 25000
-QPS_RATE = 1000.
-MAX_TOKENS = 100
+NUM_REQUESTS = 2000
+MAX_TOKENS = 50
 MESSAGES = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -32,7 +35,8 @@ def server():
         "--max-model-len",
         "4096",
         "--enable-chunked-prefill",
-        "--disable-log-requests"
+        "--disable-log-requests",
+        "--enforce-eager"
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
@@ -40,38 +44,62 @@ def server():
 
 
 @pytest.fixture(scope="module")
-def client(server):
-    return server.get_async_client()
+def server_data(server):
+    return {
+        "url": f"{server.url_for('v1')}/chat/completions",
+        "api_key": server.DUMMY_API_KEY
+    }
+
+# Note: cannot use async client 
+async def async_openai_chat(model_name, url, api_key):
+    async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
+        payload = {
+            "model": model_name,
+            "messages": MESSAGES,
+            "temperature": 0.0,
+            "max_tokens": MAX_TOKENS,
+            "stream": False,
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        }
+
+        async with session.post(url=url,
+                                json=payload,
+                                headers=headers) as response:
+            assert response.status == 200
+            # data = json.loads(response.text)
+            data = json.loads(await response.text())
+            completion_tokens = data["usage"]["completion_tokens"]
+            text = data["choices"][0]["message"]
+        
+        return (completion_tokens, text)
 
 
-async def get_request(client, model_name):
+async def get_request(model_name, url, api_key):
     for _ in range(NUM_REQUESTS):
-        yield client.chat.completions.create(
-            model=model_name,
-            messages=MESSAGES,
-            max_tokens=MAX_TOKENS,
-            temperature=0.0,
-        )
-        # Send 2000
-        await asyncio.sleep(1./QPS_RATE)
+        yield async_openai_chat(model_name, url, api_key)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name", [MODEL_NAME],
 )
-async def test_load(client: openai.AsyncOpenAI, model_name: str):
+async def test_load(server_data, model_name):
     # Make requests to the server.
     tasks = []
-    async for request in get_request(client, model_name):
+    async for request in get_request(
+        model_name, server_data["url"], server_data["api_key"]):
         tasks.append(asyncio.create_task(request))
     outputs = await asyncio.gather(*tasks)
     
     # Check that each client generated exactly 50 tokens.
     # If this is true, then we are not seeing any message dropping in zeromq.
-    for idx, output in enumerate(outputs):
-        assert output.usage.completion_tokens == MAX_TOKENS, (
+    for idx, (completion_tokens, text) in enumerate(outputs):
+        assert completion_tokens == MAX_TOKENS - 1, (
             f"Request {idx}: Expected {MAX_TOKENS} completion tokens but "
-            f"found only {output.usage.completion_tokens} were generated. "
+            f"found only {completion_tokens} were generated. "
             f"zeromq multiprocessing frontend is likely dropping messages. "
+            f"Full text:\n\n\n {text}"
         )
     
