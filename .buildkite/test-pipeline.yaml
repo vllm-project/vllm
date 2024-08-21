@@ -160,10 +160,10 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/models
-  parallelism: 4
+  parallelism: 2
   commands:
     - pip install -e ./plugins/vllm_add_dummy_model
-    - pytest -v -s models/test_oot_registration.py # it needs a clean process
+    - pytest -v -s --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT models/test_oot_registration.py # it needs a clean process
     - pytest -v -s --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT models -m \"not vlm\" --ignore=models/test_oot_registration.py
 
 - label: torch compile integration test
