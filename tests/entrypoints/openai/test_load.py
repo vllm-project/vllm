@@ -18,8 +18,7 @@ from ...utils import RemoteOpenAIServer
 
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
-# MODEL_NAME = "meta-llama/Meta-Llama-3-8B-Instruct"
-MODEL_NAME = "Qwen/Qwen2-1.5B-Instruct"
+MODEL_NAME = "Qwen/Qwen2-0.5B-Instruct"
 NUM_REQUESTS = 10000
 MAX_TOKENS = 50
 MESSAGES = [{
@@ -50,9 +49,9 @@ def server_data(server):
     }
 
 
-# Note: cannot use Async OpenAIClient due to limitations in maximum
-# number of concurrent requests that can be sent to the server from the
-# client.
+# Cannot use Async OpenAIClient due to limitations in maximum
+# number of concurrent requests that can be sent to the server 
+# from the client.
 async def async_openai_chat(model_name, url, api_key):
     async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
         payload = {
