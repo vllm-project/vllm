@@ -67,10 +67,13 @@ def get_text_generations(completions: Completion):
 
 
 '''
-Logprobs values are extracted as List[List[Dict[str,float]]], i.e.:
-* For each :class:`SequenceGroup`,
-* for each token offset in a sequence,
-* a mapping from str(token) -> logprob
+Logprobs values are extracted as List[Optional[List[Dict[str,float]]]], i.e.:
+* For each :class:`SequenceGroup`...
+* ...if the completions API was invoked with a non-`None` `logprobs` argument:
+    * ...for each token offset in a sequence...
+    * ...store a mapping from str(token) -> logprob
+* ...else, if the completions API was invoked with `logprobs=None`:
+    * ...store None
 '''
 LogprobType = List[Optional[List[Dict[str, float]]]]
 
@@ -91,13 +94,17 @@ def assert_all_close_logprobs(
     Asserts that logprobs produced by the vLLM engine instance under test
     are very close to a set of ground-truth reference values.
 
-    Each individual reference logprob must be close to the test logprob,
-    according to the formula
+    If the completions API was invoked with a non-`None` `logprobs` argument,
+    then each individual reference logprob must be close to the test logprob,
+    according to the formula:
 
     assert abs(tok_top_test_logprob - 
             tok_top_ref_logprob) <= (atol + 
                                     rtol * abs(
                                         tok_top_ref_logprob))
+
+    Else, if the completions API was invoked with `logprobs=None`, then
+    both the reference & test log probs should be List[None].
 
     Arguments:
 
@@ -134,11 +141,12 @@ def assert_all_close_logprobs(
              token_test_logprobs) in zip(group_ref_logprobs,
                                          group_test_logprobs):
             assert token_ref_logprobs.keys() == token_test_logprobs.keys(), (
-                "Reference & test top-logprob token sets must match.")
+                "Reference & test top tokens must match.")
             for (tok_str_ref,
                  tok_top_ref_logprob) in token_ref_logprobs.items():
                 tok_top_test_logprob = token_test_logprobs[tok_str_ref]
 
+                # Validate logprobs are numerically very close
                 assert abs(tok_top_test_logprob - tok_top_ref_logprob) <= (
                     atol + rtol * abs(tok_top_ref_logprob))
 
@@ -214,7 +222,7 @@ async def test_multi_step(example_prompts, model: str, tp_size: int,
     test_generations = get_text_generations(test_completions)
     assert ref_generations == test_generations
 
-    # Assert multi-step scheduling produces identical logprobs
+    # Assert multi-step scheduling produces nearly-identical logprobs
     # to single-step scheduling.
     ref_logprobs = get_logprob_generations(ref_completions)
     test_logprobs = get_logprob_generations(test_completions)
