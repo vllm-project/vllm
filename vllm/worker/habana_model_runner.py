@@ -1441,6 +1441,15 @@ class HabanaProfilerCounterHelper():
         return counters
 
 
+def unwrap_model(model):
+    if isinstance(model, torch._dynamo.eval_frame.OptimizedModule):
+        return unwrap_model(model._orig_mod)
+    else:
+        model = list(vars(model)['_modules'].values())[0]
+        modules = list(vars(model)['_modules'].values())
+        return modules
+
+
 class HabanaModelRunner(
         HabanaModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
     """
@@ -1558,13 +1567,10 @@ class HabanaModelRunner(
 
         if self.lora_config:
             from vllm.lora.layers import VocabParallelEmbeddingWithLoRA
-            property = vars(self.model.model)
-            model = list(property['_modules'].values())[0]
-            property = vars(model)
-            modules = list(property['_modules'].values())
+            modules = unwrap_model(self.model.model)
             for module in modules:
                 if isinstance(module, VocabParallelEmbeddingWithLoRA):
-                    for i in range(0, 4):
+                    for i in range(0, len(module.indices_len)):
                         module.indices_len[
                             i] = sampling_metadata.selected_token_indices.numel(
                             )
