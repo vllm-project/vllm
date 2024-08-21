@@ -295,6 +295,7 @@ def calculate_metrics(
 async def benchmark(
     backend: str,
     api_url: str,
+    base_url: str,
     model_id: str,
     tokenizer: PreTrainedTokenizerBase,
     input_requests: List[Tuple[str, int, int]],
@@ -302,6 +303,7 @@ async def benchmark(
     use_beam_search: bool,
     request_rate: float,
     disable_tqdm: bool,
+    profile: bool,
 ):
     if backend in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[backend]
@@ -326,6 +328,22 @@ async def benchmark(
             f"are correctly specified. Error: {test_output.error}")
     else:
         print("Initial test run completed. Starting main benchmark run...")
+
+    if profile:
+        print("Starting profiler...")
+        profile_input = RequestFuncInput(
+            model=model_id,
+            prompt=test_prompt,
+            api_url=base_url + "/start_profile",
+            prompt_len=test_prompt_len,
+            output_len=test_output_len,
+            best_of=best_of,
+            use_beam_search=use_beam_search,
+        )
+        profile_output = await request_func(request_func_input=profile_input)
+        if profile_output.success:
+            print("Profiler started")
+
     print(f"Traffic request rate: {request_rate}")
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
@@ -348,6 +366,21 @@ async def benchmark(
                 request_func(request_func_input=request_func_input,
                              pbar=pbar)))
     outputs: List[RequestFuncOutput] = await asyncio.gather(*tasks)
+
+    if profile:
+        print("Stopping profiler...")
+        profile_input = RequestFuncInput(
+            model=model_id,
+            prompt=test_prompt,
+            api_url=base_url + "/stop_profile",
+            prompt_len=test_prompt_len,
+            output_len=test_output_len,
+            best_of=best_of,
+            use_beam_search=use_beam_search,
+        )
+        profile_output = await request_func(request_func_input=profile_input)
+        if profile_output.success:
+            print("Profiler stopped")
 
     if pbar is not None:
         pbar.close()
@@ -433,8 +466,10 @@ def main(args: argparse.Namespace):
 
     if args.base_url is not None:
         api_url = f"{args.base_url}{args.endpoint}"
+        base_url = f"{args.base_url}"
     else:
         api_url = f"http://{args.host}:{args.port}{args.endpoint}"
+        base_url = f"http://{args.host}:{args.port}"
 
     tokenizer = get_tokenizer(tokenizer_id,
                               trust_remote_code=args.trust_remote_code)
@@ -506,6 +541,7 @@ def main(args: argparse.Namespace):
         benchmark(
             backend=backend,
             api_url=api_url,
+            base_url=base_url,
             model_id=model_id,
             tokenizer=tokenizer,
             input_requests=input_requests,
@@ -513,6 +549,7 @@ def main(args: argparse.Namespace):
             use_beam_search=args.use_beam_search,
             request_rate=args.request_rate,
             disable_tqdm=args.disable_tqdm,
+            profile=args.profile,
         ))
 
     # Save config and results to json
@@ -692,6 +729,12 @@ if __name__ == "__main__":
         "--disable-tqdm",
         action="store_true",
         help="Specify to disable tqdm progress bar.",
+    )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Use Torch Profiler. The endpoint must be launched with "
+        "VLLM_TORCH_PROFILER_DIR to enable profiler.",
     )
     parser.add_argument(
         "--save-result",
