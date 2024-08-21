@@ -1,4 +1,5 @@
 import os
+import warnings
 from pathlib import Path
 from typing import Optional, Union
 
@@ -100,6 +101,14 @@ def get_tokenizer(
     if is_gguf:
         kwargs["gguf_file"] = Path(tokenizer_name).name
         tokenizer_name = Path(tokenizer_name).parent
+
+    # if tokenizer is from official mistral org
+    is_from_mistral_org = str(tokenizer_name).split("/")[0] == "mistralai"
+    if is_from_mistral_org and tokenizer_mode != "mistral":
+        warnings.warn(
+            'It is strongly recommended to run mistral models with '
+            '`--tokenizer_mode "mistral"` to ensure correct '
+            'encoding and decoding.', FutureWarning)
 
     if tokenizer_mode == "mistral":
         tokenizer = MistralTokenizer.from_pretrained(str(tokenizer_name),
