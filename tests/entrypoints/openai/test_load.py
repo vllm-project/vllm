@@ -50,7 +50,9 @@ def server_data(server):
     }
 
 
-# Note: cannot use async client
+# Note: cannot use Async OpenAIClient due to limitations in maximum
+# number of concurrent requests that can be sent to the server from the
+# client.
 async def async_openai_chat(model_name, url, api_key):
     async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
         payload = {
