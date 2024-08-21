@@ -269,13 +269,12 @@ class OpenAIServingCompletion(OpenAIServing):
                         delta_text = output.text[len(previous_texts[i]):]
                         delta_token_ids = output.token_ids[
                             previous_num_tokens[i]:]
-                        out_logprobs = (
-                            output.logprobs[previous_num_tokens[i]:]
-                            if output.logprobs else None)
+                        out_logprobs = output.logprobs[previous_num_tokens[
+                            i]:] if output.logprobs else None
 
                     if request.logprobs is not None:
-                        assert (out_logprobs
-                                is not None), "Did not output logprobs"
+                        assert out_logprobs is not None, (
+                            "Did not output logprobs")
                         logprobs = self._create_completion_logprobs(
                             token_ids=delta_token_ids,
                             top_logprobs=out_logprobs,
@@ -303,8 +302,7 @@ class OpenAIServingCompletion(OpenAIServing):
                                 finish_reason=finish_reason,
                                 stop_reason=stop_reason,
                             )
-                        ],
-                    )
+                        ])
                     if (request.stream_options
                             and request.stream_options.include_usage):
                         if (request.stream_options.continuous_usage_stats
@@ -324,7 +322,8 @@ class OpenAIServingCompletion(OpenAIServing):
                     response_json = chunk.model_dump_json(exclude_unset=False)
                     yield f"data: {response_json}\n\n"
 
-            if request.stream_options and request.stream_options.include_usage:
+            if (request.stream_options
+                    and request.stream_options.include_usage):
                 final_usage_chunk = CompletionStreamResponse(
                     id=request_id,
                     created=created_time,
@@ -332,8 +331,8 @@ class OpenAIServingCompletion(OpenAIServing):
                     choices=[],
                     usage=usage,
                 )
-                final_usage_data = final_usage_chunk.model_dump_json(
-                    exclude_unset=False, exclude_none=True)
+                final_usage_data = (final_usage_chunk.model_dump_json(
+                    exclude_unset=False, exclude_none=True))
                 yield f"data: {final_usage_data}\n\n"
 
         except ValueError as e:
@@ -481,8 +480,8 @@ class OpenAIServingCompletion(OpenAIServing):
                         top_lp[1],
                         top_lp[0],
                         tokenizer,
-                        return_as_token_id=self.return_tokens_as_token_ids,
-                    ): max(top_lp[1].logprob, -9999.0)
+                        return_as_token_id=self.return_tokens_as_token_ids):
+                    max(top_lp[1].logprob, -9999.0)
                     for i, top_lp in enumerate(step_top_logprobs.items())
                     if num_output_top_logprobs >= i
                 })

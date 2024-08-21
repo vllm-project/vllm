@@ -446,7 +446,6 @@ class OpenAIServingChat(OpenAIServing):
         conversation: List[ConversationMessage],
         tokenizer: AnyTokenizer,
     ) -> Union[ErrorResponse, ChatCompletionResponse]:
-        
         model_name = self.served_model_names[0]
         created_time = int(time.time())
         final_res: Optional[RequestOutput] = None
@@ -495,8 +494,7 @@ class OpenAIServingChat(OpenAIServing):
                 message=message,
                 logprobs=logprobs,
                 finish_reason=output.finish_reason,
-                stop_reason=output.stop_reason,
-            )
+                stop_reason=output.stop_reason)
             choices.append(choice_data)
 
         if request.echo:

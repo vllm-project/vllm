@@ -377,7 +377,7 @@ class LLM:
             lora_request: LoRA request to use for generation, if any.
             chat_template: The template to use for structuring the chat.
               If not provided, the model's default chat template will be used.
-            add_generation_template: If True, adds a generation template
+            add_generation_template: If True, adds a generation template 
                 to each message.
 
         Returns:
