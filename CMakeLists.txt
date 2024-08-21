@@ -286,7 +286,8 @@ define_gpu_extension_target(
 
 set(VLLM_MOE_EXT_SRC
   "csrc/moe/torch_bindings.cpp"
-  "csrc/moe/topk_softmax_kernels.cu")
+  "csrc/moe/topk_softmax_kernels.cu"
+  "csrc/moe/marlin_moe_ops.cu")
 
 define_gpu_extension_target(
   _moe_C
