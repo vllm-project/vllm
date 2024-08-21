@@ -8,7 +8,7 @@ from vllm.utils import FlexibleArgumentParser
 
 
 @pytest.mark.asyncio
-async def test_mp_crash_detection(capfd):
+async def test_mp_crash_detection():
 
     parser = FlexibleArgumentParser(description="vLLM's remote OpenAI server.")
     parser = make_arg_parser(parser)
