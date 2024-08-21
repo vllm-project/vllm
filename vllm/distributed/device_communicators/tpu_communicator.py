@@ -27,16 +27,20 @@ class TpuCommunicator:
         global_rank = dist.get_rank(group)
         global_world_size = dist.get_world_size(group)
 
-        # Calculate how many TPU nodes are in the current placement group.
+        # Calculate how many TPU nodes are in the current deployment. This
+        # is the Ray placement group if it is deployed with Ray. Default
+        # to the number of nodes in the Ray cluster..
+        num_nodes = len(ray.nodes())
         pg_table = ray.util.placement_group_table()
         current_pg = ray.util.get_current_placement_group()
 
-        nodes_in_pg = set()
-        for pg_key, pg in pg_table.items():
-            if pg_key == current_pg.id.hex():
-                for _, node in pg['bundles_to_node_id'].items():
-                    nodes_in_pg.add(node)
-        num_nodes = len(nodes_in_pg)
+        if current_pg:
+            nodes_in_pg = set()
+            for pg_key, pg in pg_table.items():
+                if pg_key == current_pg.id.hex():
+                    for _, node in pg['bundles_to_node_id'].items():
+                        nodes_in_pg.add(node)
+            num_nodes = len(nodes_in_pg)
 
         local_world_size = global_world_size // num_nodes
         local_rank = global_rank % local_world_size
