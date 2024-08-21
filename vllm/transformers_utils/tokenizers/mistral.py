@@ -3,8 +3,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from huggingface_hub import HfApi, hf_hub_download
-from mistral_common.tokens.tokenizers.mistral import ChatCompletionRequest
 # yapf: disable
+from mistral_common.tokens.tokenizers.mistral import ChatCompletionRequest
 from mistral_common.tokens.tokenizers.mistral import (
     MistralTokenizer as PublicMistralTokenizer)
 # yapf: enable
@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     # yapf: disable
     from vllm.entrypoints.openai.protocol import (
         ChatCompletionRequest as OAIChatCompletionRequest)
+
     # yapf: enable
 
 
