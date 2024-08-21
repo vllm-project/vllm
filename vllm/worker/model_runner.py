@@ -480,7 +480,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         inter_data.orig_seq_lens[seq_idx] = seq_len
         inter_data.context_lens[seq_idx] = context_len
 
-        if isinstance(tokens, list):
+        if isinstance(tokens, list) and isinstance(tokens[0], list) == True:
             inter_data.input_tokens[seq_idx].extend(tokens)
         else:
             inter_data.input_tokens[seq_idx].append(tokens)
@@ -699,7 +699,11 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         # Tokens and positions.
         if cuda_graph_pad_size:
-            input_tokens.extend(itertools.repeat(0, cuda_graph_pad_size))
+            if isinstance(input_tokens[0], list):
+                num_head = len(input_tokens[0])
+                input_tokens.extend(itertools.repeat([0] * num_head, cuda_graph_pad_size))
+            else:
+                input_tokens.extend(itertools.repeat(0, cuda_graph_pad_size))
             input_positions.extend(itertools.repeat(0, cuda_graph_pad_size))
         assert self.runner.device is not None
         input_tokens_tensor = async_tensor_h2d(input_tokens, torch.long,
@@ -1208,7 +1212,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         max_batch_size = max(_BATCH_SIZES_TO_CAPTURE)
        
         seq_data, dummy_multi_modal_data = INPUT_REGISTRY \
-            .dummy_data_for_profiling(self.model_config, max_batch_size)
+            .dummy_data_for_profiling(self.model_config, max_batch_size, self.mm_registry)
         input_tokens = torch.tensor(seq_data.prompt_token_ids, dtype=torch.long).cuda()
         input_positions = torch.zeros(max_batch_size, dtype=torch.long).cuda()
         slot_mapping = torch.empty(max_batch_size, dtype=torch.long).cuda()

@@ -347,6 +347,10 @@ class _AsyncLLMEngine(LLMEngine):
         else:
             assert_never(inputs)
 
+        if hasattr(self.model_config.hf_config, "num_output_head"):
+            # duplicate the prompt_token_ids for each head
+            prompt_token_ids = [[i] *  self.model_config.hf_config.num_output_head for i in prompt_token_ids]
+
         return prompt, prompt_token_ids, multi_modal_data
 
     async def _process_encoder_decoder_prompt_async(
@@ -420,11 +424,6 @@ class _AsyncLLMEngine(LLMEngine):
                 request_id=request_id,
             )
         else:
-            prompt_token_ids = inputs["prompt_token_ids"]
-            
-            if hasattr(self.model_config.hf_config, "num_output_head"):
-                # duplicate the prompt_token_ids for each head
-                prompt_token_ids = [[i] *  self.model_config.hf_config.num_output_head for i in prompt_token_ids]
             if is_explicit_encoder_decoder_prompt(inputs):
                 raise ValueError("Cannot pass encoder-decoder prompt "
                                  "to decoder-only models")

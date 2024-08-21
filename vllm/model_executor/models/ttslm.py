@@ -24,7 +24,6 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 
 import lzma
 import numpy as np
-import pybase16384 as b14
 
 def dummy_data_for_ttsllm(ctx: InputContext, seq_len: int, mm_counts: Mapping[str, int]):
 

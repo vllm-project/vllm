@@ -45,7 +45,7 @@ torch.random.manual_seed(999)
 # # save the model
 # torch.save(tts, '/home/zhn/ttslm/GPT_merged_emb_nonorm.pt')
 
-llm = LLM(model='/home/zhn/ttslm', gpu_memory_utilization=0.5, enforce_eager=True)
+llm = LLM(model='/home/zhn/ttslm', gpu_memory_utilization=0.5)
 prompts = [
     {
         "prompt": "[Stts][empty_spk][speed_5]Your text one[Ptts]",

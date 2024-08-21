@@ -87,7 +87,13 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
             sample = outputs.samples[0]
             # only have one sequence
             seq = seq_group.seqs[0]
-            seq.append_token_id(sample.output_token, sample.logprobs)
+            # if output_tokens more than one, it's has multi-head output
+            if len(sample.output_tokens) > 1:
+                seq.append_token_id(sample.output_tokens,
+                                    sample.logprobs)
+            else:
+                seq.append_token_id(sample.output_token,
+                                    sample.logprobs)
             if sampling_params.detokenize and self.detokenizer:
                 new_char_count = self.detokenizer.decode_sequence_inplace(
                     seq, sampling_params)

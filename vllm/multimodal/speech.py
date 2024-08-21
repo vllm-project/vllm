@@ -15,7 +15,6 @@ from vllm.transformers_utils.image_processor import get_image_processor
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 from .base import MultiModalInputs, MultiModalPlugin
-import pybase16384 as b14
 import base64
 import pickle
 
