@@ -31,6 +31,7 @@ from vllm.sequence import Logprob
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 from vllm.utils import iterate_with_cancellation, random_uuid
 
 logger = init_logger(__name__)
@@ -83,35 +84,42 @@ class OpenAIServingChat(OpenAIServing):
         if error_check_ret is not None:
             return error_check_ret
 
-        try:
-            (
-                lora_request,
-                prompt_adapter_request,
-            ) = self._maybe_get_adapters(request)
+        (
+            lora_request,
+            prompt_adapter_request,
+        ) = self._maybe_get_adapters(request)
 
-            model_config = self.model_config
-            tokenizer = await self.async_engine_client.get_tokenizer(
-                lora_request)
+        tokenizer = await self.async_engine_client.get_tokenizer(lora_request)
 
-            conversation, mm_futures = parse_chat_messages(
-                request.messages, model_config, tokenizer)
+        if isinstance(tokenizer, MistralTokenizer):
+            prompt_inputs = tokenizer.encode_chat_completion(request)
+            conversation = [ConversationMessage(**message) for message in prompt_inputs["messages"]]
 
-            tool_dicts = None if request.tools is None else [
-                tool.model_dump() for tool in request.tools
-            ]
+            # multi-modal is not yet supported
+            mm_futures = []
+        else:
+            try:
+                model_config = self.model_config
+                conversation, mm_futures = parse_chat_messages(
+                    request.messages, model_config, tokenizer)
 
-            prompt = apply_chat_template(
-                tokenizer,
-                conversation=conversation,
-                chat_template=request.chat_template or self.chat_template,
-                add_generation_prompt=request.add_generation_prompt,
-                tools=tool_dicts,
-                documents=request.documents,
-                **(request.chat_template_kwargs or {}),
-            )
-        except Exception as e:
-            logger.error("Error in applying chat template from request: %s", e)
-            return self.create_error_response(str(e))
+                tool_dicts = None if request.tools is None else [
+                    tool.model_dump() for tool in request.tools
+                ]
+
+                prompt = apply_chat_template(
+                    tokenizer,
+                    conversation=conversation,
+                    chat_template=request.chat_template or self.chat_template,
+                    add_generation_prompt=request.add_generation_prompt,
+                    tools=tool_dicts,
+                    documents=request.documents,
+                    **(request.chat_template_kwargs or {}),
+                )
+                prompt_inputs = None
+            except Exception as e:
+                logger.error("Error in applying chat template from request: %s", e)
+                return self.create_error_response(str(e))
 
         mm_data: Optional[MultiModalDataDict] = None
         try:
@@ -130,13 +138,14 @@ class OpenAIServingChat(OpenAIServing):
             guided_decode_logits_processor = (
                 await self._guided_decode_logits_processor(request, tokenizer))
 
-            prompt_inputs = self._tokenize_prompt_input(
-                request,
-                tokenizer,
-                prompt,
-                truncate_prompt_tokens=request.truncate_prompt_tokens,
-                add_special_tokens=request.add_special_tokens,
-            )
+            if prompt_inputs is None:
+                prompt_inputs = self._tokenize_prompt_input(
+                    request,
+                    tokenizer,
+                    prompt,
+                    truncate_prompt_tokens=request.truncate_prompt_tokens,
+                    add_special_tokens=request.add_special_tokens,
+                )
 
             sampling_params = request.to_sampling_params(
                 tokenizer,

@@ -1,4 +1,5 @@
-from typing import Optional, List, TYPE_CHECKING
+from typing import Optional, List, TYPE_CHECKING, Dict, Any
+from dataclasses import dataclass, asdict
 import re
 
 from huggingface_hub import HfApi, hf_hub_download
@@ -8,6 +9,12 @@ from mistral_common.tokens.tokenizers.sentencepiece import SentencePieceTokenize
 
 if TYPE_CHECKING:
     from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+    from vllm.entrypoints.openai.protocol import ChatCompletionRequest as OAIChatCompletionRequest
+
+
+@dataclass
+class Encoding:
+    input_ids: List[int]
 
 class MistralTokenizer:
     def __init__(self, tokenizer: PublicMistralTokenizer) -> None:
@@ -45,6 +52,15 @@ class MistralTokenizer:
         tokenizer_file = hf_hub_download(tokenizer_name, filename=matched_files[0], revision=revision)
         return tokenizer_file
 
+    def __call__(self, prompt: str, add_special_tokens: bool = False, truncation: bool = False, max_length: Optional[int] = None):
+        # Mistral Tokenizers should not add special tokens
+        input_ids = self.encode(prompt)
+
+        if truncation:
+            input_ids = input_ids[:max_length]
+
+        return Encoding(input_ids=input_ids)
+
     def encode(self, prompt: str) -> List[int]:
         return self.tokenizer.encode(prompt, bos=False, eos=False)
 
@@ -52,6 +68,21 @@ class MistralTokenizer:
         request = ChatCompletionRequest(messages=messages)
         encoded = self.mistral.encode_chat_completion(request)
         return encoded.tokens
+
+    def encode_chat_completion(self, oai_request: "OAIChatCompletionRequest") -> Dict[str, Any]:
+        # only fields that shared between OAI and Mistral ChatCompletionRequest should be added
+        # response_format is removed as the format differs between OAI and Mistral
+        allowed_fields = set(ChatCompletionRequest.__annotations__.keys()) - {"response_format"}
+
+        request_dict = {key: value for key, value in oai_request.dict().items() if key in allowed_fields}
+
+        request = ChatCompletionRequest(**request_dict)
+        encoded = self.mistral.encode_chat_completion(request)
+        return {
+            "prompt": encoded.text,
+            "prompt_token_ids": encoded.tokens,
+            "messages": request.dict()["messages"],
+        }
 
     def convert_tokens_to_string(self, ids: List[str]) -> str:
         if self._is_tekken:
