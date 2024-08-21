@@ -7,7 +7,8 @@ import torch
 import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
-from vllm.attention.backends.utils import CommonMetadataBuilder
+from vllm.attention.backends.utils import (CommonAttentionState,
+                                           CommonMetadataBuilder)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.logger import init_logger
@@ -32,6 +33,10 @@ class ROCmFlashAttentionBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> Type["ROCmFlashAttentionMetadataBuilder"]:
         return ROCmFlashAttentionMetadataBuilder
+
+    @staticmethod
+    def get_state_cls() -> Type["CommonAttentionState"]:
+        return CommonAttentionState
 
     @staticmethod
     def get_kv_cache_shape(
