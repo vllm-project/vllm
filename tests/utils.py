@@ -8,6 +8,8 @@ import warnings
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+from utils import RemoteOpenAIServer
+from openai.types.completion import Completion
 
 import openai
 import requests
@@ -414,3 +416,131 @@ def fork_new_process_for_each_test(
                                     f" args {args} and kwargs {kwargs}")
 
     return wrapper
+
+async def completions_with_server_args(
+    prompts: List[str],
+    model_name: str,
+    server_cli_args: List[str],
+    num_logprobs: Optional[int],
+) -> Completion:
+    '''
+    Construct a remote OpenAI server, obtain an async client to the
+    server & invoke the completions API to obtain completions.
+
+    Arguments:
+
+    * prompts: test prompts
+    * model_name: model to spin up on the vLLM server
+    * server_cli_args: CLI args for starting the server
+
+    Returns:
+
+    * OpenAI Completion instance
+    '''
+
+    outputs = None
+    with RemoteOpenAIServer(model_name, server_cli_args) as server:
+        client = server.get_async_client()
+        outputs = await client.completions.create(model=model_name,
+                                                  prompt=prompts,
+                                                  temperature=0,
+                                                  stream=False,
+                                                  max_tokens=5,
+                                                  logprobs=num_logprobs)
+    assert outputs is not None
+
+    return outputs
+
+def get_client_text_generations(completions: Completion):
+    '''Extract generated tokens from the output of a
+    request made to an Open-AI-protocol completions endpoint.'''
+    return [x.text for x in completions.choices]
+
+
+'''Logprobs values are extracted as
+List[Optional[List[Dict[str,float]]]], i.e.:
+
+For each :class:`SequenceGroup`...
+  ...if the completions API was invoked with a non-`None` `logprobs` argument:
+      ...for each token offset in a sequence...
+          ...store a mapping from str(token) -> logprob
+  ...else, if the completions API was invoked with `logprobs=None`:
+      ...store None
+'''
+LogprobType = List[Optional[List[Dict[str, float]]]]
+
+
+def get_client_logprob_generations(completions: Completion) -> LogprobType:
+    '''Operates on the output of a request made to an Open-AI-protocol
+    completions endpoint; obtains top-rank logprobs for each token in
+    each :class:`SequenceGroup`
+    '''
+    return [(None if x.logprobs is None else x.logprobs.top_logprobs)
+            for x in completions.choices]
+
+
+def assert_all_close_logprobs(
+    ref_logprobs: LogprobType,
+    test_logprobs: LogprobType,
+    atol: float = 1e-3,
+    rtol: float = 1e-3,
+) -> None:
+    '''
+    Asserts that logprobs produced by the vLLM engine instance under test
+    are very close to a set of ground-truth reference values.
+
+    If the completions API was invoked with a non-`None` `logprobs` argument,
+    then each individual reference logprob must be close to the test logprob,
+    according to the formula:
+
+    assert abs(tok_top_test_logprob - 
+            tok_top_ref_logprob) <= (atol + 
+                                    rtol * abs(
+                                        tok_top_ref_logprob))
+
+    Else, if the completions API was invoked with `logprobs=None`, then
+    both the reference & test log probs should be List[None].
+
+    Arguments:
+
+    * ref_logprobs: ground-truth logprobs
+    * test_logprobs: logprobs produced by vLLM engine under test
+    * atol: absolute mismatch tolerance when comparing single logprobs
+    * rtol: relative mismatch tolerance when comparing single logprobs
+    '''
+
+    assert len(ref_logprobs) == len(test_logprobs), (
+        "Reference & test logprob SequenceGroup counts must match.")
+
+    if ref_logprobs[0] is None:
+        # It is expected that if one :class:`SequenceGroup` has
+        # `None` logprobs, then all :class:`SequenceGroup`s
+        # in the reference list have `None` logprobs.
+        # Validate this.
+        assert all([x is None for x in ref_logprobs])
+
+        # Next, assert that this is also true for
+        # test logprobs.
+        assert all([x is None for x in test_logprobs])
+        return
+
+    for (group_ref_logprobs,
+         group_test_logprobs) in zip(ref_logprobs, test_logprobs):
+
+        assert group_ref_logprobs is not None
+        assert group_test_logprobs is not None
+        assert len(group_ref_logprobs) == len(group_test_logprobs), (
+            "Reference & test logprob seq lens must match.")
+
+        for (token_ref_logprobs,
+             token_test_logprobs) in zip(group_ref_logprobs,
+                                         group_test_logprobs):
+            assert token_ref_logprobs.keys() == token_test_logprobs.keys(), (
+                "Reference & test top tokens must match.")
+            for (tok_str_ref,
+                 tok_top_ref_logprob) in token_ref_logprobs.items():
+                tok_top_test_logprob = token_test_logprobs[tok_str_ref]
+
+                # Validate logprobs are numerically very close
+                assert abs(tok_top_test_logprob - tok_top_ref_logprob) <= (
+                    atol + rtol * abs(tok_top_ref_logprob))
