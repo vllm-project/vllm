@@ -11,8 +11,6 @@ from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 # yapf: disable
 from vllm.entrypoints.openai.rpc import (RPC_REQUEST_TYPE,
-                                         VLLM_RPC_HEALTH_TIMEOUT_MS,
-                                         VLLM_RPC_SERVER_START_TIMEOUT_MS,
                                          VLLM_RPC_SOCKET_LIMIT_CUTOFF,
                                          VLLM_RPC_SUCCESS_STR,
                                          VLLM_RPC_ZMQ_HWM, RPCAbortRequest,
@@ -239,30 +237,28 @@ class AsyncEngineRPCClient:
             self,
             request: RPC_REQUEST_TYPE,
             error_message: str,
-            timeout: Optional[int] = None,
             socket: Optional[zmq.asyncio.Socket] = None):
         """Send one-way RPC request to trigger an action."""
 
         async def do_rpc_call(socket: zmq.asyncio.Socket,
-                              request: RPC_REQUEST_TYPE,
-                              timeout=None):
+                              request: RPC_REQUEST_TYPE):
 
             await socket.send_multipart([cloudpickle.dumps(request)])
 
-            timeout = timeout or self._data_timeout
-            if await socket.poll(timeout=timeout) == 0:
-                raise TimeoutError(f"Server didn't reply within {timeout} ms")
+            if await socket.poll(timeout=self._data_timeout) == 0:
+                raise TimeoutError("Server didn't reply within "
+                                   f"{self._data_timeout} ms")
 
             return cloudpickle.loads(await socket.recv())
 
         # Make a new socket connection.
         if socket is None:
             with self.to_proxy_socket() as socket:
-                response = await do_rpc_call(socket, request, timeout)
+                response = await do_rpc_call(socket, request)
 
         # Use existing socket connection.
         else:
-            response = await do_rpc_call(socket, request, timeout)
+            response = await do_rpc_call(socket, request)
 
         if not isinstance(response, str) or response != VLLM_RPC_SUCCESS_STR:
             if isinstance(response, Exception):
@@ -287,8 +283,7 @@ class AsyncEngineRPCClient:
 
         await self._send_one_way_rpc_request(
             request=RPCUtilityRequest.IS_SERVER_READY,
-            error_message="Unable to start RPC Server",
-            timeout=VLLM_RPC_SERVER_START_TIMEOUT_MS)
+            error_message="Unable to start RPC Server")
 
     async def _get_model_config_rpc(self) -> ModelConfig:
         """Get the ModelConfig object from the RPC Server"""
@@ -425,7 +420,6 @@ class AsyncEngineRPCClient:
         await self._send_one_way_rpc_request(
             request=RPCUtilityRequest.IS_SERVER_HEALTHY,
             error_message="Got Unhealthy response from RPC Server",
-            timeout=VLLM_RPC_HEALTH_TIMEOUT_MS,
             socket=socket)
 
     async def encode(self, *args,

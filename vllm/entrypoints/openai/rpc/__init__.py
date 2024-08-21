@@ -10,10 +10,6 @@ from vllm.sampling_params import SamplingParams
 # Success string used for RPC instructions.
 VLLM_RPC_SUCCESS_STR = "SUCCESS"
 
-# Timeouts.
-VLLM_RPC_SERVER_START_TIMEOUT_MS = 1000
-VLLM_RPC_HEALTH_TIMEOUT_MS = 10000
-
 # Minimum value of ZMQ.SOCKET_LIMIT to run mp.
 VLLM_RPC_SOCKET_LIMIT_CUTOFF = 2000
 
