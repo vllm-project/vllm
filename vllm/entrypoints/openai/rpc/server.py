@@ -1,6 +1,6 @@
 import asyncio
 import signal
-from typing import Any, Coroutine
+from typing import Any, Coroutine, Union
 
 import cloudpickle
 import uvloop
@@ -9,13 +9,18 @@ import zmq.asyncio
 from typing_extensions import Never
 
 from vllm import AsyncEngineArgs, AsyncLLMEngine
-from vllm.entrypoints.openai.rpc import (VLLM_RPC_HEALTHY_STR,
-                                         VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
+from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig)
+from vllm.entrypoints.openai.rpc import (VLLM_RPC_SUCCESS_STR,
+                                         VLLM_RPC_ZMQ_HWM, RPCAbortRequest,
                                          RPCGenerateRequest, RPCUtilityRequest)
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 
 logger = init_logger(__name__)
+
+CONFIG_TYPE = Union[ModelConfig, DecodingConfig, ParallelConfig,
+                    SchedulerConfig, LoRAConfig]
 
 
 class AsyncEngineRPCServer:
@@ -29,9 +34,10 @@ class AsyncEngineRPCServer:
         # Initialize context.
         self.context = zmq.asyncio.Context()
 
-        # Init socket for readiness state.
-        self.socket = self.context.socket(zmq.constants.ROUTER)
-        self.socket.bind(rpc_path)
+        # Init socket.
+        self.socket = self.context.socket(zmq.constants.DEALER)
+        self.socket.set_hwm(VLLM_RPC_ZMQ_HWM)
+        self.socket.connect(rpc_path)
 
     def cleanup(self):
         """Cleanup all resources."""
@@ -41,39 +47,27 @@ class AsyncEngineRPCServer:
         # Clear the engine reference so that it can be GC'ed.
         del self.engine
 
-    async def get_model_config(self, identity):
-        """Send the ModelConfig"""
-        model_config = await self.engine.get_model_config()
+    async def get_config(self, identity, request):
+        try:
+            config: CONFIG_TYPE
+            if request == RPCUtilityRequest.GET_MODEL_CONFIG:
+                config = await self.engine.get_model_config()
+            elif request == RPCUtilityRequest.GET_DECODING_CONFIG:
+                config = await self.engine.get_decoding_config()
+            elif request == RPCUtilityRequest.GET_LORA_CONFIG:
+                config = await self.engine.get_lora_config()
+            elif request == RPCUtilityRequest.GET_SCHEDULER_CONFIG:
+                config = await self.engine.get_scheduler_config()
+            elif request == RPCUtilityRequest.GET_PARALLEL_CONFIG:
+                config = await self.engine.get_parallel_config()
+            else:
+                raise ValueError("Unknown Config Request: %s", request)
 
-        await self.socket.send_multipart(
-            [identity, cloudpickle.dumps(model_config)])
+            await self.socket.send_multipart(
+                [identity, cloudpickle.dumps(config)])
 
-    async def get_decoding_config(self, identity):
-        """Send the DecodingConfig"""
-        decoding_config = await self.engine.get_decoding_config()
-
-        await self.socket.send_multipart(
-            [identity, cloudpickle.dumps(decoding_config)])
-
-    async def get_lora_config(self, identity):
-        lora_config = await self.engine.get_lora_config()
-
-        await self.socket.send_multipart(
-            [identity, cloudpickle.dumps(lora_config)])
-
-    async def get_scheduler_config(self, identity):
-        """Send the SchedulerConfig"""
-        parallel_config = await self.engine.get_scheduler_config()
-
-        await self.socket.send_multipart(
-            [identity, cloudpickle.dumps(parallel_config)])
-
-    async def get_parallel_config(self, identity):
-        """Send the ParallelConfig"""
-        parallel_config = await self.engine.get_parallel_config()
-
-        await self.socket.send_multipart(
-            [identity, cloudpickle.dumps(parallel_config)])
+        except Exception as e:
+            await self.socket.send_multipart([identity, cloudpickle.dumps(e)])
 
     async def is_tracing_enabled(self, identity):
         """Send the is_tracing_enabled flag"""
@@ -86,31 +80,23 @@ class AsyncEngineRPCServer:
         """Log stats and confirm success."""
         await self.engine.do_log_stats()
 
-        await self.socket.send_multipart([
-            identity,
-            cloudpickle.dumps(VLLM_RPC_SUCCESS_STR),
-        ])
+        await self.socket.send_multipart(
+            [identity, cloudpickle.dumps(VLLM_RPC_SUCCESS_STR)])
 
     async def is_server_ready(self, identity):
         """Notify the client that we are ready."""
-        await self.socket.send_multipart([
-            identity,
-            cloudpickle.dumps(VLLM_RPC_SUCCESS_STR),
-        ])
+        await self.socket.send_multipart(
+            [identity, cloudpickle.dumps(VLLM_RPC_SUCCESS_STR)])
 
     async def abort(self, identity, request: RPCAbortRequest):
         """Abort request and notify the client of success."""
         try:
             # Abort the request in the llm engine.
             await self.engine.abort(request.request_id)
-        except Exception:
-            logger.warning("Failed to abort request %s", request.request_id)
-        finally:
-            # Send confirmation to the client.
-            await self.socket.send_multipart([
-                identity,
-                cloudpickle.dumps(VLLM_RPC_SUCCESS_STR),
-            ])
+            result: Union[str, Exception] = VLLM_RPC_SUCCESS_STR
+        except Exception as e:
+            result = e
+        await self.socket.send_multipart([identity, cloudpickle.dumps(result)])
 
     async def generate(self, identity, generate_request: RPCGenerateRequest):
         try:
@@ -127,14 +113,14 @@ class AsyncEngineRPCServer:
                     [identity, cloudpickle.dumps(request_output)])
 
         except Exception as e:
-            ### Notify client of all failures
             await self.socket.send_multipart([identity, cloudpickle.dumps(e)])
 
     async def check_health(self, identity):
         try:
             await self.engine.check_health()
             await self.socket.send_multipart(
-                [identity, cloudpickle.dumps(VLLM_RPC_HEALTHY_STR)])
+                [identity, cloudpickle.dumps(VLLM_RPC_SUCCESS_STR)])
+
         except Exception as e:
             await self.socket.send_multipart([identity, cloudpickle.dumps(e)])
 
@@ -151,21 +137,19 @@ class AsyncEngineRPCServer:
             return self.abort(identity, request)
 
         elif isinstance(request, RPCUtilityRequest):
-            if request == RPCUtilityRequest.GET_MODEL_CONFIG:
-                return self.get_model_config(identity)
-            elif request == RPCUtilityRequest.GET_PARALLEL_CONFIG:
-                return self.get_parallel_config(identity)
-            elif request == RPCUtilityRequest.GET_DECODING_CONFIG:
-                return self.get_decoding_config(identity)
-            elif request == RPCUtilityRequest.GET_SCHEDULER_CONFIG:
-                return self.get_scheduler_config(identity)
-            elif request == RPCUtilityRequest.GET_LORA_CONFIG:
-                return self.get_lora_config(identity)
+            if request in [
+                    RPCUtilityRequest.GET_MODEL_CONFIG,
+                    RPCUtilityRequest.GET_PARALLEL_CONFIG,
+                    RPCUtilityRequest.GET_DECODING_CONFIG,
+                    RPCUtilityRequest.GET_SCHEDULER_CONFIG,
+                    RPCUtilityRequest.GET_LORA_CONFIG
+            ]:
+                return self.get_config(identity, request)
             elif request == RPCUtilityRequest.DO_LOG_STATS:
                 return self.do_log_stats(identity)
             elif request == RPCUtilityRequest.IS_SERVER_READY:
                 return self.is_server_ready(identity)
-            elif request == RPCUtilityRequest.CHECK_HEALTH:
+            elif request == RPCUtilityRequest.IS_SERVER_HEALTHY:
                 return self.check_health(identity)
             elif request == RPCUtilityRequest.IS_TRACING_ENABLED:
                 return self.is_tracing_enabled(identity)
