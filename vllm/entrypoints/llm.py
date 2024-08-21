@@ -353,7 +353,7 @@ class LLM:
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
         chat_template: Optional[str] = None,
-        add_generation_template: bool = True,
+        add_generation_prompt: bool = True,
     ) -> List[RequestOutput]:
         """
         Generates responses for chat messages.
@@ -374,7 +374,7 @@ class LLM:
             lora_request: LoRA request to use for generation, if any.
             chat_template: The template to use for structuring the chat.
               If not provided, the model's default chat template will be used.
-            add_generation_template: If True, adds a generation template 
+            add_generation_prompt: If True, adds a generation template
                 to each message.
 
         Returns:
@@ -392,7 +392,7 @@ class LLM:
             tokenizer,
             conversations,
             chat_template=chat_template,
-            add_generation_template=add_generation_template)
+            add_generation_prompt=add_generation_prompt)
 
         return self.generate(
             prompts,
