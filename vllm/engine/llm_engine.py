@@ -487,18 +487,15 @@ class LLMEngine:
         if model_executor := getattr(self, "model_executor", None):
             model_executor.shutdown()
 
-    MISSING_TOKENIZER_GROUP_MSG = ("Unable to get tokenizer because "
-                                   "skip_tokenizer_init is True")
-
     def get_tokenizer_group(
         self,
         group_type: Type[_G] = BaseTokenizerGroup,
-        missing_msg: str = MISSING_TOKENIZER_GROUP_MSG,
     ) -> _G:
         tokenizer_group = self.tokenizer
 
         if tokenizer_group is None:
-            raise ValueError(missing_msg)
+            raise ValueError("Unable to get tokenizer because "
+                             "skip_tokenizer_init is True")
         if not isinstance(tokenizer_group, group_type):
             raise TypeError("Invalid type of tokenizer group. "
                             f"Expected type: {group_type}, but "
