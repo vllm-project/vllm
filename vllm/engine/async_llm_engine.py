@@ -1266,3 +1266,9 @@ class AsyncLLMEngine:
                     logger_name=logger_name))
         else:
             self.engine.remove_logger(logger_name=logger_name)
+
+    async def start_profile(self) -> None:
+        self.engine.model_executor._run_workers("start_profile")
+
+    async def stop_profile(self) -> None:
+        self.engine.model_executor._run_workers("stop_profile")
