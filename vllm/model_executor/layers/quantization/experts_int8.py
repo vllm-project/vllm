@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import torch
 
@@ -104,7 +104,8 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
               renormalize: bool = True,
               use_grouped_topk: bool = False,
               num_expert_group: Optional[int] = None,
-              topk_group: Optional[int] = None) -> torch.Tensor:
+              topk_group: Optional[int] = None,
+              routing_func: Callable = torch.topk) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe import fused_experts
 
         topk_weights, topk_ids = FusedMoE.select_experts(
@@ -114,7 +115,8 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
             top_k=top_k,
             renormalize=renormalize,
             topk_group=topk_group,
-            num_expert_group=num_expert_group)
+            num_expert_group=num_expert_group,
+            routing_func=routing_func)
 
         return fused_experts(x,
                              layer.w13_weight,

@@ -21,35 +21,32 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only PhiMoE model."""
-from typing import Iterable, List, Optional, Tuple, Callable
+from typing import Iterable, List, Optional, Tuple
 
 import torch
 from torch import nn
+from transformers.configuration_utils import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.fused_moe import FusedMoE, PhiFusedMoE
-from vllm.model_executor.layers.linear import (
-    QKVParallelLinear,
-    ReplicatedLinear,
-    RowParallelLinear,
-)
+from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.linear import (QKVParallelLinear,
+                                               ReplicatedLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
-    ParallelLMHead,
-    VocabParallelEmbedding,
-)
+    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.utils import print_warning_once
+
 from .interfaces import SupportsLoRA
-from transformers.configuration_utils import PretrainedConfig
 
 
 class PhiMoEConfig(PretrainedConfig):
@@ -169,9 +166,8 @@ def sparsemixer(scores, top_k, jitter_eps=0.01):
         # compute mask for sparsity
         mask_logits_threshold, max_ind = scores.max(dim=-1, keepdim=True)
         factor = scores.abs().clamp(min=mask_logits_threshold)
-        mask_logits_threshold = ((mask_logits_threshold - scores) / factor) > (
-            2 * jitter_eps
-        )
+        mask_logits_threshold = (
+            (mask_logits_threshold - scores) / factor) > (2 * jitter_eps)
 
     # apply mask
     masked_gates = scores.masked_fill(mask_logits_threshold, float("-inf"))
@@ -192,21 +188,24 @@ def sparsemixer(scores, top_k, jitter_eps=0.01):
     )
     with torch.no_grad():
         # compute mask for sparsity
-        mask_logits_threshold, max_ind = masked_scores.max(dim=-1, keepdim=True)
+        mask_logits_threshold, max_ind = masked_scores.max(dim=-1,
+                                                           keepdim=True)
         factor = scores.abs().clamp(min=mask_logits_threshold)
-        mask_logits_threshold = ((mask_logits_threshold - scores) / factor) > (
-            2 * jitter_eps
-        )
+        mask_logits_threshold = (
+            (mask_logits_threshold - scores) / factor) > (2 * jitter_eps)
 
     # apply mask
-    masked_gates_top2 = masked_scores.masked_fill(mask_logits_threshold, float("-inf"))
+    masked_gates_top2 = masked_scores.masked_fill(mask_logits_threshold,
+                                                  float("-inf"))
     selected_experts_top2 = max_ind
     # compute scores for gradients
     masked_gates_top2 = torch.softmax(masked_gates_top2, dim=-1)
-    multiplier_top2 = masked_gates_top2.gather(dim=-1, index=selected_experts_top2)
+    multiplier_top2 = masked_gates_top2.gather(dim=-1,
+                                               index=selected_experts_top2)
 
     multiplier = torch.concat((multiplier, multiplier_top2), dim=-1)
-    selected_experts = torch.concat((selected_experts, selected_experts_top2), dim=-1)
+    selected_experts = torch.concat((selected_experts, selected_experts_top2),
+                                    dim=-1)
 
     return (
         multiplier,
@@ -245,7 +244,7 @@ class PhiMoE(nn.Module):
             quant_config=None,
         )
 
-        self.experts = PhiFusedMoE(
+        self.experts = FusedMoE(
             num_experts=num_experts,
             top_k=top_k,
             hidden_size=hidden_size,
@@ -379,12 +378,12 @@ class PhiMoEDecoderLayer(nn.Module):
             intermediate_size=config.intermediate_size,
             quant_config=quant_config,
         )
-        self.input_layernorm = nn.LayerNorm(
-            config.hidden_size, eps=config.rms_norm_eps, elementwise_affine=True
-        )
-        self.post_attention_layernorm = nn.LayerNorm(
-            config.hidden_size, eps=config.rms_norm_eps, elementwise_affine=True
-        )
+        self.input_layernorm = nn.LayerNorm(config.hidden_size,
+                                            eps=config.rms_norm_eps,
+                                            elementwise_affine=True)
+        self.post_attention_layernorm = nn.LayerNorm(config.hidden_size,
+                                                     eps=config.rms_norm_eps,
+                                                     elementwise_affine=True)
 
     def forward(
         self,
@@ -427,11 +426,8 @@ class PhiMoEModel(nn.Module):
     ) -> None:
         super().__init__()
         self.padding_idx = config.pad_token_id
-        lora_vocab = (
-            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
-            if lora_config
-            else 0
-        )
+        lora_vocab = ((lora_config.lora_extra_vocab_size *
+                       (lora_config.max_loras or 1)) if lora_config else 0)
         self.vocab_size = config.vocab_size + lora_vocab
         self.org_vocab_size = config.vocab_size
 
@@ -440,15 +436,13 @@ class PhiMoEModel(nn.Module):
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
         )
-        self.layers = nn.ModuleList(
-            [
-                PhiMoEDecoderLayer(config, cache_config, quant_config=quant_config)
-                for _ in range(config.num_hidden_layers)
-            ]
-        )
-        self.norm = nn.LayerNorm(
-            config.hidden_size, eps=config.rms_norm_eps, elementwise_affine=True
-        )
+        self.layers = nn.ModuleList([
+            PhiMoEDecoderLayer(config, cache_config, quant_config=quant_config)
+            for _ in range(config.num_hidden_layers)
+        ])
+        self.norm = nn.LayerNorm(config.hidden_size,
+                                 eps=config.rms_norm_eps,
+                                 elementwise_affine=True)
 
     def forward(
         self,
@@ -461,9 +455,9 @@ class PhiMoEModel(nn.Module):
         residual = None
         for i in range(len(self.layers)):
             layer = self.layers[i]
-            hidden_states, residual = layer(
-                positions, hidden_states, kv_caches[i], attn_metadata, residual
-            )
+            hidden_states, residual = layer(positions, hidden_states,
+                                            kv_caches[i], attn_metadata,
+                                            residual)
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
@@ -504,9 +498,10 @@ class PhiMoEForCausalLM(nn.Module, SupportsLoRA):
         self.config = config
         self.lora_config = lora_config
 
-        self.model = PhiMoEModel(
-            config, cache_config, quant_config, lora_config=lora_config
-        )
+        self.model = PhiMoEModel(config,
+                                 cache_config,
+                                 quant_config,
+                                 lora_config=lora_config)
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
@@ -518,15 +513,12 @@ class PhiMoEForCausalLM(nn.Module, SupportsLoRA):
                 DEFAULT_VOCAB_PADDING_SIZE
                 # We need bigger padding if using lora for kernel
                 # compatibility
-                if not lora_config
-                else lora_config.lora_vocab_padding_size
-            ),
+                if not lora_config else lora_config.lora_vocab_padding_size),
             quant_config=None,
             bias=True,
         )
-        self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size
-        )
+        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
+                                                config.vocab_size)
         self.sampler = Sampler()
 
     def forward(
@@ -537,13 +529,14 @@ class PhiMoEForCausalLM(nn.Module, SupportsLoRA):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, kv_caches, attn_metadata)
+        hidden_states = self.model(input_ids, positions, kv_caches,
+                                   attn_metadata)
         return hidden_states
 
-    def compute_logits(
-        self, hidden_states: torch.Tensor, sampling_metadata: SamplingMetadata
-    ) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
+    def compute_logits(self, hidden_states: torch.Tensor,
+                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        logits = self.logits_processor(self.lm_head, hidden_states,
+                                       sampling_metadata)
         return logits
 
     def sample(
@@ -562,56 +555,11 @@ class PhiMoEForCausalLM(nn.Module, SupportsLoRA):
             ("qkv_proj", "v_proj", "v"),
         ]
 
-        expert_params_mapping = (
-            [
-                # These are the weight scales for the experts
-                # (param_name, weight_name, expert_id, shard_id)
-                (
-                    (
-                        "experts.w13_scale"
-                        if weight_name in ["w1", "w3"]
-                        else "experts.w2_scale"
-                    ),
-                    f"experts.{expert_id}.{weight_name}.weight_scale",
-                    expert_id,
-                    shard_id,
-                )
-                for expert_id in range(self.config.num_local_experts)
-                for shard_id, weight_name in enumerate(["w1", "w2", "w3"])
-            ]
-            + [
-                # These are the weights for the experts
-                # (param_name, weight_name, expert_id)
-                (
-                    (
-                        "experts.w13_weight"
-                        if weight_name in ["w1", "w3"]
-                        else "experts.w2_weight"
-                    ),
-                    f"experts.{expert_id}.{weight_name}.weight",
-                    expert_id,
-                    shard_id,
-                )
-                for expert_id in range(self.config.num_local_experts)
-                for shard_id, weight_name in enumerate(["w1", "w2", "w3"])
-            ]
-            + [
-                # These are the activation scales for the experts
-                # (param_name, weight_name, expert_id)
-                (
-                    (
-                        "experts.a13_scale"
-                        if weight_name in ["w1", "w3"]
-                        else "experts.a2_scale"
-                    ),
-                    f"experts.{expert_id}.{weight_name}.input_scale",
-                    expert_id,
-                    shard_id,
-                )
-                for expert_id in range(self.config.num_local_experts)
-                for shard_id, weight_name in enumerate(["w1", "w2", "w3"])
-            ]
-        )
+        expert_params_mapping = FusedMoE.make_expert_params_mapping(
+            ckpt_gate_proj_name="w1",
+            ckpt_down_proj_name="w2",
+            ckpt_up_proj_name="w3",
+            num_experts=self.config.num_local_experts)
 
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
@@ -652,21 +600,18 @@ class PhiMoEForCausalLM(nn.Module, SupportsLoRA):
                     # Remapping the name of FP8 kv-scale.
                     if name.endswith("kv_scale"):
                         remapped_kv_scale_name = name.replace(
-                            ".kv_scale", ".attn.kv_scale"
-                        )
+                            ".kv_scale", ".attn.kv_scale")
                         if remapped_kv_scale_name not in params_dict:
                             print_warning_once(
                                 "Found kv scale in the checkpoint "
                                 f"(e.g. {name}), but not found the expected "
                                 f"name in the model "
                                 f"(e.g. {remapped_kv_scale_name}). "
-                                "kv-scale is not loaded."
-                            )
+                                "kv-scale is not loaded.")
                             continue
                         else:
                             name = remapped_kv_scale_name
                     param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
                     weight_loader(param, loaded_weight)

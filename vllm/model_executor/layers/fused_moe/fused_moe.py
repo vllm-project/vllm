@@ -2,7 +2,7 @@
 import functools
 import json
 import os
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import torch
 import triton
@@ -377,7 +377,7 @@ def fused_topk(
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
-    routing_func: callable = torch.topk,
+    routing_func: Callable = torch.topk,
 ):
     assert hidden_states.shape[0] == gating_output.shape[0], (
         "Number of tokens mismatch")
@@ -388,13 +388,13 @@ def fused_topk(
         topk_weights, topk_ids = routing_func(gating_output, topk)
     else:
         topk_weights = torch.empty(M,
-                                topk,
-                                dtype=torch.float32,
-                                device=hidden_states.device)
+                                   topk,
+                                   dtype=torch.float32,
+                                   device=hidden_states.device)
         topk_ids = torch.empty(M,
-                            topk,
-                            dtype=torch.int32,
-                            device=hidden_states.device)
+                               topk,
+                               dtype=torch.int32,
+                               device=hidden_states.device)
         token_expert_indicies = torch.empty(M,
                                             topk,
                                             dtype=torch.int32,
@@ -589,6 +589,7 @@ def fused_experts(hidden_states: torch.Tensor,
                   out=out_hidden_states[begin_chunk_idx:end_chunk_idx])
     return out_hidden_states
 
+
 def fused_moe(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -601,7 +602,7 @@ def fused_moe(
     use_grouped_topk: bool = False,
     num_expert_group: Optional[int] = None,
     topk_group: Optional[int] = None,
-    routing_func: callable = torch.topk,
+    routing_func: Callable = torch.topk,
     use_fp8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     w1_scale: Optional[torch.Tensor] = None,
