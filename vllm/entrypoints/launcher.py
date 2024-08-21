@@ -10,6 +10,7 @@ from vllm import envs
 from vllm.engine.async_llm_engine import AsyncEngineDeadError
 from vllm.engine.protocol import AsyncEngineClient
 from vllm.logger import init_logger
+from vllm.utils import find_process_using_port
 
 logger = init_logger(__name__)
 
@@ -48,6 +49,12 @@ async def serve_http(app: FastAPI, engine: AsyncEngineClient,
         await server_task
         return dummy_shutdown()
     except asyncio.CancelledError:
+        port = uvicorn_kwargs["port"]
+        process = find_process_using_port(port)
+        if process is not None:
+            logger.debug(
+                "port %s is used by process %s launched with command:\n%s",
+                port, process, " ".join(process.cmdline()))
         logger.info("Gracefully stopping http server")
         return server.shutdown()
 
