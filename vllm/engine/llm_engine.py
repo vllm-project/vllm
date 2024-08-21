@@ -70,9 +70,11 @@ def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
 _O = TypeVar("_O", RequestOutput, EmbeddingRequestOutput)
 
 PromptComponents = Tuple[Optional[str], List[int],
-                         Optional[MultiModalDataDict]]
+                         Optional[MultiModalDataDict],
+                         Optional[str], List[int]]
 DecoderPromptComponents = Tuple[Optional[str], Optional[List[int]],
-                                Optional[MultiModalDataDict]]
+                                Optional[MultiModalDataDict],
+                                Optional[str], Optional[List[int]]]
 
 
 class LLMEngine:
