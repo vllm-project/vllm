@@ -1,6 +1,7 @@
 """A layer that samples the next tokens from the model's outputs."""
 import itertools
 import warnings
+from dataclasses import dataclass
 from importlib.util import find_spec
 from math import inf
 from typing import Dict, List, Optional, Tuple, Union
@@ -14,8 +15,6 @@ from vllm.triton_utils import HAS_TRITON
 
 if HAS_TRITON:
     from vllm.model_executor.layers.ops.sample import sample as sample_triton
-
-from dataclasses import dataclass
 
 import vllm.envs as envs
 from vllm.model_executor.sampling_metadata import (SamplingMetadata,
