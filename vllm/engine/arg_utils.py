@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Dict, List, Mapping, Optional, Tuple, Type,
                     Union)
 
+import torch
+
 import vllm.envs as envs
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
@@ -113,7 +115,7 @@ class EngineArgs:
     fully_sharded_loras: bool = False
     lora_extra_vocab_size: int = 256
     long_lora_scaling_factors: Optional[Tuple[float]] = None
-    lora_dtype: str = 'auto'
+    lora_dtype: Optional[Union[str, torch.dtype]] = 'auto'
     max_cpu_loras: Optional[int] = None
     device: str = 'auto'
     num_scheduler_steps: int = 1
@@ -662,8 +664,10 @@ class EngineArgs:
 
         parser.add_argument(
             '--disable-logprobs-during-spec-decoding',
-            type=bool,
+            action=StoreBoolean,
             default=EngineArgs.disable_logprobs_during_spec_decoding,
+            nargs="?",
+            const="True",
             help='If set to True, token log probabilities are not returned '
             'during speculative decoding. If set to False, log probabilities '
             'are returned according to the settings in SamplingParams. If '
@@ -851,6 +855,12 @@ class EngineArgs:
                 "in low performance due to small KV cache space. Consider "
                 "setting --max-model-len to a smaller value.", max_model_len)
 
+        if self.num_scheduler_steps > 1 and not self.use_v2_block_manager:
+            self.use_v2_block_manager = True
+            logger.warning(
+                "Enabled BlockSpaceManagerV2 because it is "
+                "required for multi-step (--num-scheduler-steps > 1)")
+
         speculative_config = SpeculativeConfig.maybe_create_spec_config(
             target_model_config=model_config,
             target_parallel_config=parallel_config,
@@ -879,7 +889,6 @@ class EngineArgs:
         )
 
         if self.num_scheduler_steps > 1:
-            raise NotImplementedError("Multi-step is not yet supported.")
             if speculative_config is not None:
                 raise ValueError("Speculative decoding is not supported with "
                                  "multi-step (--num-scheduler-steps > 1)")

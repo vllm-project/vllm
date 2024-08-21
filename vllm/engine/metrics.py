@@ -71,6 +71,17 @@ class Metrics:
             documentation="CPU KV-cache usage. 1 means 100 percent usage.",
             labelnames=labelnames,
             multiprocess_mode="sum")
+        #   Prefix caching block hit rate
+        self.gauge_cpu_prefix_cache_hit_rate = self._gauge_cls(
+            name="vllm:cpu_prefix_cache_hit_rate",
+            documentation="CPU prefix cache block hit rate.",
+            labelnames=labelnames,
+            multiprocess_mode="sum")
+        self.gauge_gpu_prefix_cache_hit_rate = self._gauge_cls(
+            name="vllm:gpu_prefix_cache_hit_rate",
+            documentation="GPU prefix cache block hit rate.",
+            labelnames=labelnames,
+            multiprocess_mode="sum")
 
         # Iteration stats
         self.counter_num_preemption = self._counter_cls(
@@ -351,7 +362,13 @@ class LoggingStatLogger(StatLoggerBase):
                 stats.gpu_cache_usage_sys * 100,
                 stats.cpu_cache_usage_sys * 100,
             )
-
+            if (stats.cpu_prefix_cache_hit_rate >= 0
+                    or stats.gpu_prefix_cache_hit_rate >= 0):
+                logger.info(
+                    "Prefix cache hit rate: GPU: %.2f%%, CPU: %.2f%%",
+                    stats.gpu_prefix_cache_hit_rate * 100,
+                    stats.cpu_prefix_cache_hit_rate * 100,
+                )
             if self.spec_decode_metrics is not None:
                 logger.info(
                     self._format_spec_decode_metrics_str(
@@ -423,6 +440,10 @@ class PrometheusStatLogger(StatLoggerBase):
                         stats.gpu_cache_usage_sys)
         self._log_gauge(self.metrics.gauge_cpu_cache_usage,
                         stats.cpu_cache_usage_sys)
+        self._log_gauge(self.metrics.gauge_cpu_prefix_cache_hit_rate,
+                        stats.cpu_prefix_cache_hit_rate)
+        self._log_gauge(self.metrics.gauge_gpu_prefix_cache_hit_rate,
+                        stats.gpu_prefix_cache_hit_rate)
 
         # Iteration level data
         self._log_counter(self.metrics.counter_num_preemption,
