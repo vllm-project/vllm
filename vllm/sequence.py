@@ -253,7 +253,7 @@ class SequenceData(msgspec.Struct,
         self._new_appended_tokens.append(token_id)
         self._cached_all_token_ids.append(token_id)
         self._cached_all_negative_token_ids.append(token_id)
-        self.cumulative_logprob += logprob
+        self._cumulative_logprob += logprob
 
     def get_len(self) -> int:
         return len(self._output_token_ids) + len(self._prompt_token_ids)

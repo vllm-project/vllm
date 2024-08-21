@@ -147,7 +147,7 @@ class SamplingParams(
     logits_processors: Optional[Any] = None
     include_stop_str_in_output: bool = False
     truncate_prompt_tokens: Optional[Annotated[int, msgspec.Meta(ge=1)]] = None
-    guidance_scale: Optional[float] = None,
+    guidance_scale: Optional[float] = None
 
     # The below fields are not supposed to be used as an input.
     # They are set in post_init.
