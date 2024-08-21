@@ -39,8 +39,7 @@ async def test_multi_step(example_prompts, model: str, tp_size: int,
                           pp_size: int, eager_mode: int,
                           num_scheduler_steps: int, num_prompts: int,
                           num_logprobs: Optional[int]):
-    '''
-    Test vLLM engine with multi-step scheduling in an OpenAI-protocol
+    '''Test vLLM engine with multi-step scheduling in an OpenAI-protocol
     client/server environment.
 
     Set up an engine with single-step scheduling as a ground-truth reference.
@@ -51,17 +50,16 @@ async def test_multi_step(example_prompts, model: str, tp_size: int,
     * Generated tokens match
     * Generated logprobs are all very close
 
-    Arguments:
-
-    * example_prompts: test fixture providing example prompts
-    * model: model under test (same for single- and multi-step engines)
-    * tp_size: degree of tensor-parallelism
-    * pp_size: degree of pipeline-parallelism
-    * eager_mode
-    * num_scheduler_steps: for multi-step scheduling, GPU-side steps per
+    Args:
+      example_prompts: test fixture providing example prompts
+      model: model under test (same for single- and multi-step engines)
+      tp_size: degree of tensor-parallelism
+      pp_size: degree of pipeline-parallelism
+      eager_mode
+      num_scheduler_steps: for multi-step scheduling, GPU-side steps per
                            GPU -> CPU output transfer
-    * num_prompts: number of example prompts under test
-    * num_logprobs: corresponds to the `logprobs` argument to the OpenAI
+      num_prompts: number of example prompts under test
+      num_logprobs: corresponds to the `logprobs` argument to the OpenAI
                     completions endpoint; `None` -> no logprobs
     '''
 
