@@ -15,6 +15,7 @@ if current_platform.is_tpu():
 
 
 class TpuCommunicator:
+
     def __init__(self, group: ProcessGroup):
         if not current_platform.is_tpu():
             self.disabled = True
@@ -36,8 +37,7 @@ class TpuCommunicator:
         cluster_resources = ray.cluster_resources()
         total_tpus = int(cluster_resources["TPU"])
         tpus_per_node = (
-            TPUAcceleratorManager.get_current_node_num_accelerators()
-        )
+            TPUAcceleratorManager.get_current_node_num_accelerators())
         num_nodes = total_tpus // tpus_per_node
 
         pg_table = ray.util.placement_group_table()
