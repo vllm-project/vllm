@@ -9,11 +9,11 @@ from fastapi import Request
 from transformers import PreTrainedTokenizer
 
 from vllm.config import ModelConfig
-from vllm.engine.protocol import AsyncEngineClient
-from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.engine.llm_engine import QueueOverflowError
+from vllm.engine.protocol import AsyncEngineClient
+from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               CompletionRequest,
                                               CompletionResponse,
@@ -197,7 +197,15 @@ class OpenAIServingCompletion(OpenAIServing):
                                            final_res_batch)
 
             response = self.request_output_to_completion_response(
-                final_res_batch, request, request_id, created_time, model_name)
+                final_res_batch_checked,
+                request,
+                request_id,
+                created_time,
+                model_name,
+                tokenizer,
+            )
+        except asyncio.CancelledError:
+            return self.create_error_response("Client disconnected")
         except QueueOverflowError as e:
             msg, status_code = e.args
             return self.create_error_response(msg, status_code=status_code)

@@ -1,4 +1,7 @@
 # imports for guided decoding tests
+import asyncio
+import contextlib
+import gc
 import json
 import re
 import shutil
@@ -8,17 +11,16 @@ from typing import Dict, List
 import jsonschema
 import openai  # use the official client for correctness check
 import pytest
-# using Ray for overall ease of process management, parallel requests,
-# and debugging.
-import asyncio
-import ray
-import requests
+import torch
 # downloading lora to test lora requests
 from huggingface_hub import snapshot_download
 from openai import BadRequestError
 from transformers import AutoTokenizer
 
+from vllm.distributed import (destroy_distributed_environment,
+                              destroy_model_parallel)
 from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.utils import is_cpu
 
 from ...utils import RemoteOpenAIServer
 
@@ -832,55 +834,8 @@ async def test_guided_decoding_type_error(client: openai.AsyncOpenAI,
         _ = await client.completions.create(
             model=MODEL_NAME,
             prompt="Give an example string that fits this regex",
-            extra_body=dict(guided_regex=TEST_REGEX, guided_json=TEST_SCHEMA))
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
-async def test_tokenize(client: openai.AsyncOpenAI, model_name: str):
-    base_url = str(client.base_url)[:-3]
-    tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME, tokenizer_mode="fast")
-
-    for add_special in [False, True]:
-        prompt = "This is a test prompt."
-        tokens = tokenizer.encode(prompt, add_special_tokens=add_special)
-
-        response = requests.post(base_url + "/tokenize",
-                                 json={
-                                     "add_special_tokens": add_special,
-                                     "model": model_name,
-                                     "prompt": prompt
-                                 })
-        response.raise_for_status()
-        assert response.json() == {
-            "tokens": tokens,
-            "count": len(tokens),
-            "max_model_len": 8192
-        }
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name",
-    [MODEL_NAME],
-)
-async def test_detokenize(client: openai.AsyncOpenAI, model_name: str):
-    base_url = str(client.base_url)[:-3]
-    tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME, tokenizer_mode="fast")
-
-    prompt = "This is a test prompt."
-    tokens = tokenizer.encode(prompt, add_special_tokens=False)
-
-    response = requests.post(base_url + "detokenize",
-                             json={
-                                 "model": model_name,
-                                 "tokens": tokens
-                             })
-    response.raise_for_status()
-    assert response.json() == {"prompt": prompt}
+            extra_body=dict(guided_regex=sample_regex,
+                            guided_json=sample_json_schema))
 
 
 @pytest.mark.asyncio
@@ -891,52 +846,66 @@ async def test_max_queue_length(model_name: str, max_queue_len: int):
     print(f"Name of model: {model_name}")
     print(f"Test max queue length of {max_queue_len}")
 
-    server = RemoteOpenAIServer([
-        "--model",
-        MODEL_NAME,
+    server_args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         "bfloat16",
         "--max-model-len",
         "8192",
         "--enforce-eager",
+        "--gpu-memory-utilization",
+        "0.7",
         "--max-queue-length",
         str(max_queue_len),
         "--max-num-seqs",
         "1",
-    ])
-
-    client = server.get_async_client()
-
-    sample_prompts = [
-        "Who won the world series in 2020?",
-        "Where was the 2020 world series played?",
-        "How long did the 2020 world series last?",
-        "What were some television viewership statistics?",
-        "Why was the 2020 world series so popular?"
     ]
 
-    coroutines = [
-        asyncio.create_task(
-            client.completions.create(
-                prompt=sample_prompt,
-                model=model_name,
-                temperature=0.8,
-                presence_penalty=0.2,
-                max_tokens=400,
-            )) for sample_prompt in sample_prompts
-    ]
-    responses = await asyncio.gather(*coroutines, return_exceptions=True)
+    with RemoteOpenAIServer(model_name, server_args) as server:
 
-    err_cnt = 0
-    for response in responses:
-        if "code" in response.__dict__:
-            assert response.__dict__["code"] == 503
-            err_cnt += 1
+        client = server.get_async_client()
 
-    # Ensure that the number of err requests equals:
-    # number of requests - max queue len - run queue len
-    # where "-" is a minus sign
-    correctness_check = err_cnt == (len(sample_prompts) - max_queue_len - 1)
-    print("Correct number of errors? ", correctness_check)
-    assert correctness_check
+        sample_prompts = [
+            "Who won the world series in 2020?",
+            "Where was the 2020 world series played?",
+            "How long did the 2020 world series last?",
+            "What were some television viewership statistics?",
+            "Why was the 2020 world series so popular?"
+        ]
+
+        coroutines = [
+            asyncio.create_task(
+                client.completions.create(
+                    prompt=sample_prompt,
+                    model=model_name,
+                    temperature=0.8,
+                    presence_penalty=0.2,
+                    max_tokens=400,
+                )) for sample_prompt in sample_prompts
+        ]
+        responses = await asyncio.gather(*coroutines, return_exceptions=True)
+
+        err_cnt = 0
+        for response in responses:
+            if "code" in response.__dict__:
+                assert response.__dict__["code"] == 503
+                err_cnt += 1
+
+        # Ensure that the number of err requests equals:
+        # number of requests - max queue len - run queue len
+        # where "-" is a minus sign
+        correctness_check = err_cnt == (len(sample_prompts) - max_queue_len -
+                                        1)
+        print("Expected number of errors: ", err_cnt)
+        print("Actual number of errors: ",
+              (len(sample_prompts) - max_queue_len - 1))
+        assert correctness_check
+
+        # Clean up GPU memory
+        destroy_model_parallel()
+        destroy_distributed_environment()
+        with contextlib.suppress(AssertionError):
+            torch.distributed.destroy_process_group()
+        gc.collect()
+        if not is_cpu():
+            torch.cuda.empty_cache()

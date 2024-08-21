@@ -589,14 +589,6 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest],
         trace_headers: Optional[Mapping[str, str]] = None,
     ) -> None:
-        # Check if request would exceed max queue length
-        curr_queue_len = len(self.scheduler.waiting)
-        max_queue_len = self.scheduler.scheduler_config.get_max_queue_length()
-        if max_queue_len > -1 and curr_queue_len >= max_queue_len:
-            raise QueueOverflowError(
-                f"Request {request_id} would exceed the indicated maximum "
-                f"queue length of {max_queue_len}",
-                HTTPStatus.SERVICE_UNAVAILABLE)
         # Create the sequences.
         block_size = self.cache_config.block_size
         seq_id = next(self.seq_counter)
@@ -645,6 +637,16 @@ class LLMEngine:
             for scheduler in self.scheduler
         ]
         min_cost_scheduler = self.scheduler[costs.index(min(costs))]
+
+        # Check if request would exceed max queue length of min_cost_scheduler
+        curr_queue_len = len(min_cost_scheduler.waiting)
+        max_queue_len = min_cost_scheduler.scheduler_config.get_max_queue_length
+        if max_queue_len > -1 and curr_queue_len >= max_queue_len:
+            raise QueueOverflowError(
+                f"Request {request_id} would exceed the indicated maximum "
+                f"queue length of {max_queue_len}",
+                HTTPStatus.SERVICE_UNAVAILABLE)
+
         min_cost_scheduler.add_seq_group(seq_group)
 
     def stop_remote_worker_execution_loop(self) -> None:
