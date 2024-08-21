@@ -1,8 +1,8 @@
 import asyncio
 import time
-from typing import AsyncGenerator, AsyncIterator, Awaitable, Dict, Final, List, Optional
+from typing import AsyncGenerator, AsyncIterator, Awaitable, Dict, Final, List
 from typing import Sequence as GenericSequence
-from typing import Union
+from typing import Optional, Union
 
 from fastapi import Request
 
