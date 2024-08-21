@@ -71,7 +71,7 @@ _O = TypeVar("_O", RequestOutput, EmbeddingRequestOutput)
 
 PromptComponents = Tuple[Optional[str], List[int],
                          Optional[MultiModalDataDict],
-                         Optional[None], List[None]]
+                         Optional[None], Optional[None]]
 DecoderPromptComponents = Tuple[Optional[str], Optional[List[int]],
                                 Optional[MultiModalDataDict],
                                 Optional[None], Optional[None]]
