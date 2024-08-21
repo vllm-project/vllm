@@ -1,25 +1,20 @@
 import os
-import re
 from pathlib import Path
-from typing import Optional, Union, List
+from typing import Optional, Union
 
 import huggingface_hub
-from huggingface_hub import HfApi, hf_hub_download
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
-from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
-from mistral_common.tokens.tokenizers.tekken import Tekkenizer
-from mistral_common.tokens.tokenizers.sentencepiece import SentencePieceTokenizer
 
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.transformers_utils.tokenizers import BaichuanTokenizer
+from vllm.transformers_utils.tokenizers import BaichuanTokenizer, MistralTokenizer
 from vllm.utils import make_async
 
 logger = init_logger(__name__)
 
-AnyTokenizer = Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
+AnyTokenizer = Union[PreTrainedTokenizer, PreTrainedTokenizerFast, MistralTokenizer]
 
 
 def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
@@ -58,64 +53,6 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
 
     tokenizer.__class__ = CachedTokenizer
     return tokenizer
-
-
-class VLLMMistralTokenizer:
-
-    def __init__(self, tokenizer: MistralTokenizer) -> None:
-        self.mistral = tokenizer
-        self.instruct = tokenizer.instruct_tokenizer
-        self.tokenizer = tokenizer.instruct_tokenizer.tokenizer
-
-        self.vocab_size = len(self.tokenizer.vocab())
-        self.is_mistral = True
-
-        assert isinstance(self.tokenizer, (Tekkenizer, SentencePieceTokenizer)), type(self.tokenizer)
-        self._is_tekken = isinstance(self.tokenizer, Tekkenizer)
-
-    @classmethod
-    def from_pretrained(cls, repo_id: str, *, revision: Optional[str] = None) -> "VLLMMistralTokenizer":
-        tokenizer_file = cls._download_mistral_tokenizer_from_hf(repo_id, revision)
-
-        mistral_tokenizer = MistralTokenizer.from_file(tokenizer_file)
-        return cls(mistral_tokenizer)
-
-    @staticmethod
-    def _download_mistral_tokenizer_from_hf(tokenizer_name: str, revision: str) -> str:
-        api = HfApi()
-        repo_info = api.model_info(tokenizer_name)
-        files = [s.rfilename for s in repo_info.siblings]
-        pattern = re.compile(r'^tokenizer\.model\.v.*$|^tekken\.json$')
-
-        matched_files = [file for file in files if pattern.match(file)]
-        if len(matched_files) > 1:
-            raise OSError(f"Found {len(matched_files)} files matching the pattern: {matched_files}. Make sure only one Mistral tokenizer is present in {tokenizer_name}.")
-        elif len(matched_files) == 0: 
-            raise OSError(f"Found {len(matched_files)} files matching the pattern: {matched_files}. Make sure that a Mistral tokenizer is present in {tokenizer_name}.")
-
-        tokenizer_file = hf_hub_download(tokenizer_name, filename=matched_files[0], revision=revision)
-        return tokenizer_file
-
-    def encode(self, prompt: str) -> List[int]:
-        return self.tokenizer.encode(prompt, bos=False, eos=False)
-
-    def convert_tokens_to_string(self, ids: List[str]) -> str:
-        if self._is_tekken:
-            return "".join(ids)
-        else:
-            return self.tokenizer.decode(ids)
-
-    @property
-    def eos_token_id(self):
-        return self.tokenizer.eos_id
-
-    def convert_ids_to_tokens(self, ids: List[int], skip_special_tokens: Optional[bool] = True) -> List[str]:
-        # TODO(Patrick) - potentially allow special tokens to not be skipped
-        assert skip_special_tokens, "Skipping special tokens is not supported for Mistral tokenizers."
-        return [self.tokenizer.id_to_piece(id) for id in ids]
-
-    def __len__(self):
-        return self.vocab_size
 
 
 def get_tokenizer(
@@ -163,7 +100,7 @@ def get_tokenizer(
         tokenizer_name = Path(tokenizer_name).parent
 
     if tokenizer_mode == "mistral":
-        tokenizer = VLLMMistralTokenizer.from_pretrained(tokenizer_name, revision=revision)
+        tokenizer = MistralTokenizer.from_pretrained(tokenizer_name, revision=revision)
     else:
         try:
             tokenizer = AutoTokenizer.from_pretrained(

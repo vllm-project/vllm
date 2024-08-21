@@ -19,8 +19,7 @@ from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-from vllm.transformers_utils.tokenizer import (AnyTokenizer,
-                                               get_cached_tokenizer)
+from vllm.transformers_utils.tokenizer import AnyTokenizer, get_cached_tokenizer, MistralTokenizer
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, deprecate_kwargs
@@ -383,20 +382,28 @@ class LLM:
         """
 
         tokenizer = self.get_tokenizer()
-        model_config = self.llm_engine.get_model_config()
 
-        conversations, _ = parse_chat_messages(messages, model_config,
-                                               tokenizer)
+        if isinstance(tokenizer, MistralTokenizer):
+            prompt_token_ids = tokenizer.encode_messages(messages)
+            prompts = None
+        else:
+            model_config = self.llm_engine.get_model_config()
 
-        prompts = apply_chat_template(
-            tokenizer,
-            conversations,
-            chat_template=chat_template,
-            add_generation_template=add_generation_template)
+            conversations, _ = parse_chat_messages(messages, model_config,
+                                                tokenizer)
+
+            prompts = apply_chat_template(
+                tokenizer,
+                conversations,
+                chat_template=chat_template,
+                add_generation_template=add_generation_template)
+
+            prompt_token_ids = None
 
         return self.generate(
             prompts,
             sampling_params,
+            prompt_token_ids=prompt_token_ids,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
         )
