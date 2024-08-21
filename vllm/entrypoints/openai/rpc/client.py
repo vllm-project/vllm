@@ -9,11 +9,15 @@ import zmq.asyncio
 
 from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
-from vllm.entrypoints.openai.rpc import (
-    RPC_REQUEST_TYPE, VLLM_RPC_HEALTH_TIMEOUT_MS,
-    VLLM_RPC_SERVER_START_TIMEOUT_MS, VLLM_RPC_SOCKET_LIMIT_CUTOFF,
-    VLLM_RPC_SUCCESS_STR, VLLM_RPC_ZMQ_HWM, 
-    RPCAbortRequest, RPCGenerateRequest, RPCUtilityRequest)
+# yapf: disable
+from vllm.entrypoints.openai.rpc import (RPC_REQUEST_TYPE,
+                                         VLLM_RPC_HEALTH_TIMEOUT_MS,
+                                         VLLM_RPC_SERVER_START_TIMEOUT_MS,
+                                         VLLM_RPC_SOCKET_LIMIT_CUTOFF,
+                                         VLLM_RPC_SUCCESS_STR,
+                                         VLLM_RPC_ZMQ_HWM, RPCAbortRequest,
+                                         RPCGenerateRequest, RPCUtilityRequest)
+# yapf: enable
 from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
