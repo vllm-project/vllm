@@ -547,6 +547,16 @@ def get_open_port() -> int:
             return s.getsockname()[1]
 
 
+def find_process_using_port(port: int) -> Optional[psutil.Process]:
+    for conn in psutil.net_connections():
+        if conn.laddr.port == port:
+            try:
+                return psutil.Process(conn.pid)
+            except psutil.NoSuchProcess:
+                return None
+    return None
+
+
 def update_environment_variables(envs: Dict[str, str]):
     for k, v in envs.items():
         if k in os.environ and os.environ[k] != v:
