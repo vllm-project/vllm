@@ -15,8 +15,8 @@
 # limitations under the License.
 import re
 from functools import lru_cache
-from typing import (Dict, Iterable, List, Literal, Mapping, Optional, Tuple,
-                    TypedDict, Union)
+from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional,
+                    Tuple, TypedDict, Union)
 
 import numpy as np
 import torch
@@ -324,7 +324,7 @@ def _calc_hd_transform_size(*, width: int, height: int, hd_num: int = 16):
 
 # Based on https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py#L181
 def get_phi3v_image_feature_size(
-    hf_config: Dict,
+    hf_config: Dict[str, Any],
     *,
     input_height: int,
     input_width: int,

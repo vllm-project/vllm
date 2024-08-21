@@ -1,6 +1,6 @@
 import contextlib
 from pathlib import Path
-from typing import Dict, Optional, Type, Union
+from typing import Any, Dict, Optional, Type, Union
 
 from transformers import GenerationConfig, PretrainedConfig
 from transformers.models.auto.image_processing_auto import (
@@ -103,7 +103,7 @@ def get_hf_image_processor_config(
     model: Union[str, Path],
     revision: Optional[str] = None,
     **kwargs,
-) -> Dict:
+) -> Dict[str, Any]:
     return get_image_processor_config(model, revision=revision, **kwargs)
 
 
