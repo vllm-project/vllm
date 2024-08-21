@@ -114,8 +114,8 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
 
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
-        self.multi_modal_input_mapper = MULTIMODAL_REGISTRY \
-            .create_input_mapper(model_config)
+        self.multi_modal_input_mapper = self.mm_registry \
+            .create_input_mapper(self.model_config)
         self.mm_registry.init_mm_limits_per_prompt(self.model_config)
 
         # Lazy initialization.
