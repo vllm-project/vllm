@@ -340,6 +340,8 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
             nn.Linear(llm_hidden_size, llm_hidden_size))
 
         self.img_context_token_id = None
+        self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
+
 
     def pixel_shuffle(self, x, scale_factor=0.5):
         n, w, h, c = x.size()
@@ -450,7 +452,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: object,
-    ) -> SamplerOutput:
+    ) -> Union[SamplerOutput, IntermediateTensors]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is not None:
             inputs_embeds = self.language_model.model.get_input_embeddings(
@@ -467,7 +469,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
                                                   positions,
                                                   kv_caches,
                                                   attn_metadata,
-                                                  None,
+                                                  intermediate_tensors,
                                                   inputs_embeds=inputs_embeds)
         return hidden_states
 
