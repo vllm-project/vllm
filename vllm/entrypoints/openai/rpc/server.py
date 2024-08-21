@@ -9,7 +9,9 @@ import zmq.asyncio
 from typing_extensions import Never
 
 from vllm import AsyncEngineArgs, AsyncLLMEngine
-from vllm.entrypoints.openai.rpc import (VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
+from vllm.entrypoints.openai.rpc import (VLLM_RPC_SUCCESS_STR, 
+                                         VLLM_RPC_ZMQ_HWM, 
+                                         RPCAbortRequest,
                                          RPCGenerateRequest, RPCUtilityRequest)
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
@@ -30,7 +32,7 @@ class AsyncEngineRPCServer:
 
         # Init socket.
         self.socket = self.context.socket(zmq.constants.DEALER)
-        self.socket.set_hwm(0)
+        self.socket.set_hwm(VLLM_RPC_ZMQ_HWM)
         self.socket.connect(rpc_path)
 
     def cleanup(self):

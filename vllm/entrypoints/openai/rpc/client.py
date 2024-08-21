@@ -10,6 +10,7 @@ import zmq.asyncio
 from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.entrypoints.openai.rpc import (RPC_REQUEST_TYPE,
+                                         VLLM_RPC_ZMQ_HWM,
                                          VLLM_RPC_HEALTH_TIMEOUT_MS,
                                          VLLM_RPC_SERVER_START_TIMEOUT_MS,
                                          VLLM_RPC_SOCKET_LIMIT_CUTOFF,
@@ -100,12 +101,12 @@ class AsyncEngineRPCClient:
 
         # IPC connection to RPC Server (uses unix sockets).
         self.to_rpc_server = self.context.socket(zmq.constants.DEALER)
-        self.to_rpc_server.set_hwm(0)
+        self.to_rpc_server.set_hwm(VLLM_RPC_ZMQ_HWM)
         self.to_rpc_server.bind(rpc_path)
 
         # In process proxy to RPC Server (uses memory-based messaging).
         self.from_api_server = self.context.socket(zmq.constants.ROUTER)
-        self.from_api_server.set_hwm(0)
+        self.from_api_server.set_hwm(VLLM_RPC_ZMQ_HWM)
         self.from_api_server.bind(INPROC_PROXY_PATH)
 
         # Asyncio background task for the proxy.
@@ -170,7 +171,7 @@ class AsyncEngineRPCClient:
         # Note that we use DEALER to enable asynchronous communication
         # to enable streaming.
         socket = self.context.socket(zmq.constants.DEALER)
-        socket.set_hwm(0)
+        socket.set_hwm(VLLM_RPC_ZMQ_HWM)
         try:
             socket.connect(INPROC_PROXY_PATH)
             yield socket
