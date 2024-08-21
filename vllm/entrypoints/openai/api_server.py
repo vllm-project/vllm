@@ -8,7 +8,7 @@ import tempfile
 from argparse import Namespace
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import AsyncIterator, Set
+from typing import AsyncIterator, Optional, Set
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -60,6 +60,7 @@ openai_serving_embedding: OpenAIServingEmbedding
 openai_serving_tokenization: OpenAIServingTokenization
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
 
+# Cannot use __name__ (https://github.com/vllm-project/vllm/pull/4765)
 logger = init_logger('vllm.entrypoints.openai.api_server')
 
 _running_tasks: Set[asyncio.Task] = set()
@@ -94,7 +95,15 @@ async def lifespan(app: FastAPI):
 
 @asynccontextmanager
 async def build_async_engine_client(
-        args: Namespace) -> AsyncIterator[AsyncEngineClient]:
+        args: Namespace) -> AsyncIterator[Optional[AsyncEngineClient]]:
+    """
+    Create AsyncEngineClient, either:
+        - in-process using the AsyncLLMEngine Directly
+        - multiprocess using AsyncLLMEngine RPC
+
+    Returns the Client or None if the creation failed.
+    """
+
     # Context manager to handle async_engine_client lifecycle
     # Ensures everything is shutdown and cleaned up on error/exit
     global engine_args
@@ -157,11 +166,13 @@ async def build_async_engine_client(
                 try:
                     await rpc_client.setup()
                     break
-                except TimeoutError as e:
+                except TimeoutError:
                     if not rpc_server_process.is_alive():
-                        raise RuntimeError(
-                            "The server process died before "
-                            "responding to the readiness probe") from e
+                        logger.error(
+                            "RPCServer process died before responding "
+                            "to readiness probe")
+                        yield None
+                        return
 
             yield async_engine_client
         finally:
@@ -410,6 +421,10 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     logger.info("args: %s", args)
 
     async with build_async_engine_client(args) as async_engine_client:
+        # If None, creation of the client failed and we exit.
+        if async_engine_client is None:
+            return
+
         app = await init_app(async_engine_client, args)
 
         shutdown_task = await serve_http(
