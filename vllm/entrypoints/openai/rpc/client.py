@@ -93,6 +93,7 @@ class AsyncEngineRPCClient:
         self.context = zmq.asyncio.Context()
         self._data_timeout = VLLM_RPC_GET_DATA_TIMEOUT_MS
         self._generate_timeout = VLLM_RPC_GENERATE_TIMEOUT_MS
+        self._errored = False
 
         # Maximum number of sockets that can be opened (typically 65536).
         # ZMQ_SOCKET_LIMIT (http://api.zeromq.org/4-2:zmq-ctx-get)
@@ -151,7 +152,6 @@ class AsyncEngineRPCClient:
 
         # Wait until server is ready.
         await self._wait_for_server_rpc()
-        self._errored = False
 
         # Get the configs.
         self.model_config = await self._get_model_config_rpc()
@@ -209,7 +209,7 @@ class AsyncEngineRPCClient:
             # Make sure the server responds
             timeout = timeout or self._data_timeout
             if await socket.poll(timeout=timeout) == 0:
-                raise TimeoutError(f"server didn't reply within {timeout} ms")
+                raise TimeoutError(f"Server didn't reply within {timeout} ms")
 
             # Await the data from the Server.
             data = cloudpickle.loads(await socket.recv())
@@ -389,7 +389,7 @@ class AsyncEngineRPCClient:
                 while not finished:
                     # TODO: timeouts
                     if await socket.poll(timeout=self._generate_timeout) == 0:
-                        raise TimeoutError("server didn't reply within "
+                        raise TimeoutError("Server didn't reply within "
                                            f"{self._generate_timeout} ms")
                     message = await socket.recv()
                     request_output = cloudpickle.loads(message)

@@ -23,7 +23,7 @@ def tmp_socket():
 async def dummy_server(tmp_socket, monkeypatch):
     dummy_engine = unittest.mock.AsyncMock()
 
-    def dummy_engine_builder(*args):
+    def dummy_engine_builder(*args, **kwargs):
         return dummy_engine
 
     with monkeypatch.context() as m:
@@ -44,7 +44,7 @@ async def dummy_server(tmp_socket, monkeypatch):
 async def client(tmp_socket):
     client = AsyncEngineRPCClient(rpc_path=tmp_socket)
     # Sanity check: the server is connected
-    await client.wait_for_server()
+    await client._wait_for_server_rpc()
 
     try:
         yield client
@@ -57,13 +57,13 @@ async def test_client_data_methods_use_timeouts(monkeypatch, dummy_server,
                                                 client: AsyncEngineRPCClient):
     with monkeypatch.context() as m:
         # Make the server _not_ reply with a model config
-        m.setattr(dummy_server, "get_model_config", lambda x: None)
+        m.setattr(dummy_server, "get_config", lambda x: None)
         m.setattr(client, "_data_timeout", 10)
 
         # And ensure the task completes anyway
-        # (client.setup() invokes server.get_model_config())
+        # (client.setup() invokes server.get_config())
         client_task = asyncio.get_running_loop().create_task(client.setup())
-        with pytest.raises(TimeoutError, match="server didn't reply within"):
+        with pytest.raises(TimeoutError, match="Server didn't reply within"):
             await asyncio.wait_for(client_task, timeout=0.05)
 
 
@@ -78,14 +78,11 @@ async def test_client_aborts_use_timeouts(monkeypatch, dummy_server,
         # Ensure the client doesn't hang
         client_task = asyncio.get_running_loop().create_task(
             client.abort("test request id"))
-        with pytest.raises(TimeoutError, match="server didn't reply within"):
+        with pytest.raises(TimeoutError, match="Server didn't reply within"):
             await asyncio.wait_for(client_task, timeout=0.05)
 
 
-# TODO: needs changes from https://github.com/vllm-project/vllm/pull/7394
-# to work
 @pytest.mark.asyncio
-@pytest.mark.skip
 async def test_client_data_methods_reraise_exceptions(
         monkeypatch, dummy_server, client: AsyncEngineRPCClient):
     with monkeypatch.context() as m:
@@ -101,21 +98,6 @@ async def test_client_data_methods_reraise_exceptions(
         client_task = asyncio.get_running_loop().create_task(client.setup())
         # And ensure the task completes, raising the exception
         with pytest.raises(RuntimeError, match=str(exception)):
-            await asyncio.wait_for(client_task, timeout=0.05)
-
-
-@pytest.mark.asyncio
-async def test_client_health_check_times_out(monkeypatch, dummy_server,
-                                             client: AsyncEngineRPCClient):
-    with monkeypatch.context() as m:
-        # Make the server _not_ reply with a health check
-        m.setattr(dummy_server, "check_health", lambda x: None)
-        m.setattr(client, "_data_timeout", 10)
-
-        # And ensure the health check times out
-        client_task = asyncio.get_running_loop().create_task(
-            client.check_health())
-        with pytest.raises(TimeoutError, match="server didn't reply within"):
             await asyncio.wait_for(client_task, timeout=0.05)
 
 
@@ -156,5 +138,5 @@ async def test_generation_timeout(monkeypatch, dummy_server,
 
         # Ensure we time out
         client_task = asyncio.get_running_loop().create_task(generate())
-        with pytest.raises(TimeoutError, match="server didn't reply within"):
+        with pytest.raises(TimeoutError, match="Server didn't reply within"):
             await asyncio.wait_for(client_task, timeout=0.05)
