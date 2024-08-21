@@ -160,7 +160,9 @@ class AsyncEngineRPCClient:
         """Destroy the ZeroMQ Context."""
         # Close all sockets associated with this context and
         # then terminate the context.
-        self.context.destroy(linger=0)
+        self.from_api_server.close()
+        self.to_proxy_socket.close()
+        self.context.destroy()
 
     @contextmanager
     def to_proxy_socket(self, request_id=None):
@@ -173,7 +175,7 @@ class AsyncEngineRPCClient:
             socket.connect(INPROC_PROXY_PATH)
             yield socket
         finally:
-            socket.close()
+            socket.close(linger=0)
 
     async def _send_get_data_rpc_request(self, request: RPCUtilityRequest,
                                          expected_type: Any,
