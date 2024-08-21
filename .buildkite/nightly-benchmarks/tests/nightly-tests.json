@@ -41,7 +41,7 @@
         "vllm_client_parameters": {
         },
         "sglang_server_parameters": {
-            "disable_radix_cache": "",
+            "disable_radix_cache": ""
         },
         "sglang_client_parameters": {
         }
@@ -91,7 +91,7 @@
         "vllm_client_parameters": {
         },
         "sglang_server_parameters": {
-            "disable_radix_cache": "",
+            "disable_radix_cache": ""
         },
         "sglang_client_parameters": {
         }
@@ -141,7 +141,7 @@
         "vllm_client_parameters": {
         },
         "sglang_server_parameters": {
-            "disable_radix_cache": "",
+            "disable_radix_cache": ""
         },
         "sglang_client_parameters": {
         }
