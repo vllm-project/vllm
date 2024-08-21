@@ -405,6 +405,16 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
         image_feature_size = get_phi3v_image_feature_size(hf_config,
                                                           input_width=w,
                                                           input_height=h)
+    elif isinstance(image_data, list):
+        if not all(isinstance(image, Image.Image) for image in image_data):
+            raise TypeError("Invalid image type in the image list.")
+        image_feature_size = 0
+        for image in image_data:
+            w, h = image.size
+            w, h = _calc_hd_transform_size(width=w, height=h)
+            image_feature_size += get_phi3v_image_feature_size(hf_config,
+                                                              input_width=w,
+                                                              input_height=h)
     elif isinstance(image_data, torch.Tensor):
         image_feature_size = image_data.shape[0]
     else:
@@ -418,26 +428,28 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
             logger.warning("Please follow the prompt format that is "
                            "documented on HuggingFace which does not involve "
                            "repeating <|image|> tokens.")
-        elif len(re.findall(r"(<\|image_\d+\|>)+", prompt)) > 1:
-            logger.warning("Multiple image input is not supported yet, "
-                           "so any extra image tokens will be treated "
-                           "as plain text.")
+        # elif len(re.findall(r"(<\|image_\d+\|>)+", prompt)) > 1:
+        #     logger.warning("Multiple image input is not supported yet, "
+        #                    "so any extra image tokens will be treated "
+        #                    "as plain text.")
 
         new_prompt = prompt
 
     prompt_token_ids = llm_inputs["prompt_token_ids"]
-    image_1_token_ids = _get_image_placeholder_token_ids(model_config, idx=1)
+    image_idx = sorted(list(map(int, re.findall(r"<\|image_(\d+)\|>+", prompt))))
 
     new_token_ids: List[int] = []
-    for i in range(len(prompt_token_ids) - len(image_1_token_ids) + 1):
-        if prompt_token_ids[i:i + len(image_1_token_ids)] == image_1_token_ids:
-            new_token_ids.append(_IMAGE_TOKEN_ID)
+    for idx in image_idx:
+        image_token_ids = _get_image_placeholder_token_ids(model_config, idx=idx)
+        for i in range(len(prompt_token_ids) - len(image_token_ids) + 1):
+            if prompt_token_ids[i:i + len(image_token_ids)] == image_token_ids:
+                new_token_ids.append(_IMAGE_TOKEN_ID)
 
-            # No need to further scan the list since we only replace once
-            new_token_ids.extend(prompt_token_ids[i + len(image_1_token_ids):])
-            break
-        else:
-            new_token_ids.append(prompt_token_ids[i])
+                # No need to further scan the list since we only replace once
+                new_token_ids.extend(prompt_token_ids[i + len(image_token_ids):])
+                break
+            else:
+                new_token_ids.append(prompt_token_ids[i])
 
     # NOTE: Create a defensive copy of the original inputs
     llm_inputs = LLMInputs(prompt_token_ids=new_token_ids,
