@@ -731,6 +731,7 @@ if __name__ == "__main__":
         default=False,
         action="store_true",
         help="Set ignore_eos flag when sending the benchmark request."
+        "Warning: ignore_eos is not supported in deepspeed_mii and tgi."
     )
 
     args = parser.parse_args()
