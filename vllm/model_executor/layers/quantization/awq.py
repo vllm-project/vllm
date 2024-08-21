@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional
 import torch
 from torch.nn.parameter import Parameter
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
@@ -164,8 +165,15 @@ class AWQLinearMethod(LinearMethodBase):
         # num_tokens >= threshold
         FP16_MATMUL_HEURISTIC_CONDITION = x.shape[:-1].numel() >= 256
 
-        if FP16_MATMUL_HEURISTIC_CONDITION:
-            out = ops.awq_dequantize(qweight, scales, qzeros, 0, 0, 0)
+        prefer_torch = envs.VLLM_ROCM_PREFER_TORCH
+        prefer_triton = envs.VLLM_ROCM_PREFER_TRITON
+
+        if (FP16_MATMUL_HEURISTIC_CONDITION
+                or (prefer_torch and not prefer_triton)):
+            if prefer_triton:
+                out = ops.awq_dequantize(qweight, scales, qzeros, 0, 0, 0)
+            else:
+                out = torch_awq_dequantize(qweight, scales, qzeros)
             out = torch.matmul(reshaped_x, out)
         else:
             out = ops.awq_gemm(reshaped_x, qweight, scales, qzeros,
@@ -173,3 +181,44 @@ class AWQLinearMethod(LinearMethodBase):
         if bias is not None:
             out.add_(bias)
         return out.reshape(out_shape)
+
+
+def torch_awq_dequantize(qweights: torch.Tensor, scales: torch.Tensor,
+                         qzeros: torch.Tensor) -> torch.Tensor:
+    reverse_awq_func_desc = torch.tensor([0, 16, 4, 20, 8, 24, 12, 28],
+                                         dtype=torch.int32,
+                                         device=qweights.device)
+    if qzeros is None:
+        qzeros = torch.zeros_like(qweights)
+
+    while qweights.dim() < 2:
+        qweights = torch.unsqueeze(qweights, 0)
+    while qzeros.dim() < 2:
+        qzeros = torch.unsqueeze(qzeros, 0)
+    while scales.dim() < 2:
+        scales = torch.unsqueeze(scales, 0)
+
+    rows = qweights.size(-2)
+    group_size_zeros = rows // qzeros.size(-2)
+    group_size_scales = rows // scales.size(-2)
+
+    qweights_shape = list(qweights.shape)
+    qweights_shape[-1] *= 8
+    qzeros_shape = list(qzeros.shape)
+    qzeros_shape[-1] *= 8
+
+    qweights = torch.unsqueeze(qweights, -1)
+    qzeros = torch.unsqueeze(qzeros, -1)
+
+    unpacked_weights = torch.bitwise_right_shift(qweights,
+                                                 reverse_awq_func_desc)
+    unpacked_weights = torch.bitwise_and(unpacked_weights, 0xf)
+    unpacked_weights = unpacked_weights.to(torch.int8).view(qweights_shape)
+
+    unpacked_zeros = torch.bitwise_right_shift(qzeros, reverse_awq_func_desc)
+    unpacked_zeros = torch.bitwise_and(unpacked_zeros, 0xf)
+    unpacked_zeros = unpacked_zeros.to(torch.int8).view(qzeros_shape)
+    unpacked_zeros = unpacked_zeros.repeat_interleave(group_size_zeros, dim=-2)
+
+    functional_scales = scales.repeat_interleave(group_size_scales, dim=-2)
+    return (unpacked_weights - unpacked_zeros) * functional_scales

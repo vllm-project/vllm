@@ -131,12 +131,12 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
 def awq_dequantize(qweight: torch.Tensor, scales: torch.Tensor,
                    zeros: torch.Tensor, split_k_iters: int, thx: int,
                    thy: int) -> torch.Tensor:
-    print(f"awq_dequantize:qweight.shape = {qweight.shape}"
-          f"scales = {scales.shape},"
-          f"zeros = {zeros.shape},"
-          f"split_k_iters = {split_k_iters},"
-          f"thx = {thx}"
-          f"thy = {thy}")
+    # print(f"awq_dequantize:qweight.shape = {qweight.shape}"
+    #       f"scales = {scales.shape},"
+    #       f"zeros = {zeros.shape},"
+    #       f"split_k_iters = {split_k_iters},"
+    #       f"thx = {thx}"
+    #       f"thy = {thy}")
     if is_hip() and envs.VLLM_USE_TRITON_AWQ:
         from vllm.model_executor.layers.quantization.awq_triton import (
             awq_dequantize_triton)
@@ -153,12 +153,12 @@ def awq_dequantize(qweight: torch.Tensor, scales: torch.Tensor,
 
 def awq_gemm(input: torch.Tensor, qweight: torch.Tensor, qzeros: torch.Tensor,
              scales: torch.Tensor, split_k_iters: int) -> torch.Tensor:
-    if input.shape[0] > 1:
-        print(f"awq_gemm:input.shape = {input.shape},"
-              f"qweight = {qweight.shape},"
-              f"qzeros = {qzeros.shape},"
-              f"scales.shape = {scales.shape},"
-              f"split_k_iters = {split_k_iters}")
+    # if input.shape[0] > 1:
+    #     print(f"awq_gemm:input.shape = {input.shape},"
+    #           f"qweight = {qweight.shape},"
+    #           f"qzeros = {qzeros.shape},"
+    #           f"scales.shape = {scales.shape},"
+    #           f"split_k_iters = {split_k_iters}")
     if is_hip() and envs.VLLM_USE_TRITON_AWQ:
         from vllm.model_executor.layers.quantization.awq_triton import (
             awq_gemm_triton)

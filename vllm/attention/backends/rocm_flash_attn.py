@@ -283,7 +283,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 f"Head size {head_size} is not supported by PagedAttention. "
                 f"Supported head sizes are: {supported_head_sizes}.")
 
-        self.use_naive_attn = False
+        self.use_naive_attn = envs.VLLM_USE_SDPA_ATTENTION  # Default False
         # NOTE: Allow for switching between Triton and CK. Defaulting to triton.
         self.use_triton_flash_attn = envs.VLLM_USE_TRITON_FLASH_ATTN
         if self.use_triton_flash_attn:
@@ -306,7 +306,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
 
             if self.use_naive_attn:
                 self.attn_func = _naive_attention
-                logger.debug("Using naive attention in ROCmBackend")
+                logger.debug("Using naive (SDPA) attention in ROCmBackend")
 
     def repeat_kv(self, x: torch.Tensor, n_rep: int) -> torch.Tensor:
         """torch.repeat_interleave(x, dim=1, repeats=n_rep)"""

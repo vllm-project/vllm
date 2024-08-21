@@ -7,6 +7,7 @@ import argparse
 import pytest
 import torch
 
+from vllm.model_executor.layers.quantization.awq import torch_awq_dequantize
 from vllm.model_executor.layers.quantization.awq_triton import (
     awq_dequantize_triton, awq_gemm_triton)
 
@@ -76,7 +77,7 @@ def awq_gemm_torch(input: torch.Tensor, qweight: torch.Tensor,
     print(f"awq_gemm_torch:input_rows = {input_rows} input_cols = {input_cols}"
           f" qweight_rows = {qweight_rows} qweight_cols = {qweight_cols}"
           f" scales_rows = {scales_rows} scales_cols = {scales_cols}")
-    weights, zeros = awq_dequantize_torch(qweight, scales, qzeros)
+    weights = torch_awq_dequantize(qweight, scales, qzeros)
     return torch.matmul(input, weights)
 
 
@@ -123,7 +124,7 @@ def test_dequantize(qweight_rows, qweight_cols):
     print("Any infs in triton result? -->"
           f"{torch.any(torch.isinf(iweights_triton))}")
 
-    iweights_torch, _ = awq_dequantize_torch(qweight, scales, zeros)
+    iweights_torch = torch_awq_dequantize(qweight, scales, zeros)
     print(f"Torch result:iweights_torch = {iweights_torch}")
 
     diff = iweights_torch - iweights_triton
