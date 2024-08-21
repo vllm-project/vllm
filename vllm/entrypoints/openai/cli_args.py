@@ -7,6 +7,7 @@ purposes.
 import argparse
 import json
 import ssl
+from typing import List, Optional, Sequence, Union
 
 from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
@@ -16,8 +17,19 @@ from vllm.utils import FlexibleArgumentParser
 
 class LoRAParserAction(argparse.Action):
 
-    def __call__(self, parser, namespace, values, option_string=None):
-        lora_list = []
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: Optional[Union[str, Sequence[str]]],
+        option_string: Optional[str] = None,
+    ):
+        if values is None:
+            values = []
+        if isinstance(values, str):
+            raise TypeError("Expected values to be a list")
+
+        lora_list: List[LoRAModulePath] = []
         for item in values:
             name, path = item.split('=')
             lora_list.append(LoRAModulePath(name, path))
@@ -26,8 +38,19 @@ class LoRAParserAction(argparse.Action):
 
 class PromptAdapterParserAction(argparse.Action):
 
-    def __call__(self, parser, namespace, values, option_string=None):
-        adapter_list = []
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: Optional[Union[str, Sequence[str]]],
+        option_string: Optional[str] = None,
+    ):
+        if values is None:
+            values = []
+        if isinstance(values, str):
+            raise TypeError("Expected values to be a list")
+
+        adapter_list: List[PromptAdapterPath] = []
         for item in values:
             name, path = item.split('=')
             adapter_list.append(PromptAdapterPath(name, path))
