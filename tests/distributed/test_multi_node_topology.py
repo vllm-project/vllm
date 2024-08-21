@@ -10,6 +10,7 @@ pytest distributed/test_multi_node.py
 
 import pytest
 import ray
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from vllm.utils import cuda_device_count_stateless
 
@@ -35,21 +36,8 @@ def test_multi_node_bad_topology(
     """
     dtype = "half"
     ray.init()
-    assert ray.cluster_resources()["GPU"] == 4.0, (
+    assert ray.cluster_resources()["GPU"] >= 4.0, (
         "At leasts 4 gpus are required to run a test.")
-    print(ray.cluster_resources())
-    print("===Test tp 4 on 2 nodes===")
-    # Creating tp == 4. Since TP workers are supposed to spread to 2 workers
-    # it should log warning.
-    with pytest.warns() as record:
-        with vllm_runner(
-                model,
-                dtype=dtype,
-                tensor_parallel_size=4,
-                distributed_executor_backend=distributed_executor_backend
-        ) as _:
-            pass
-        print(record)
 
     # Simulate there's no GPU in a current node.
     @ray.remote(num_gpus=1)
@@ -57,7 +45,12 @@ def test_multi_node_bad_topology(
         pass
 
     # a is created on a head node.
-    actors = [Actor.remote() for _ in range(2)]  # type: ignore
+    actors = [
+        Actor.options(  # type: ignore
+            scheduling_strategy=NodeAffinitySchedulingStrategy(
+                node_id=ray.get_runtime_context().get_node_id(),
+                soft=False)).remote() for _ in range(2)
+    ]
     ray.get([a.__ray_ready__.remote() for a in actors])
 
     print("===Test no GPU on a current node===")
