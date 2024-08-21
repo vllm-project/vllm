@@ -80,6 +80,7 @@ async def async_openai_chat(model_name, url, api_key):
 async def get_request(model_name, url, api_key):
     for _ in range(NUM_REQUESTS):
         yield async_openai_chat(model_name, url, api_key)
+        asyncio.sleep(1/200.)
 
 
 @pytest.mark.asyncio
