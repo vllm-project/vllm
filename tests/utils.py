@@ -8,11 +8,10 @@ import warnings
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
-from utils import RemoteOpenAIServer
-from openai.types.completion import Completion
 
 import openai
 import requests
+from openai.types.completion import Completion
 from transformers import AutoTokenizer
 from typing_extensions import ParamSpec
 
@@ -417,6 +416,7 @@ def fork_new_process_for_each_test(
 
     return wrapper
 
+
 async def completions_with_server_args(
     prompts: List[str],
     model_name: str,
@@ -450,6 +450,7 @@ async def completions_with_server_args(
     assert outputs is not None
 
     return outputs
+
 
 def get_client_text_generations(completions: Completion):
     '''Extract generated tokens from the output of a

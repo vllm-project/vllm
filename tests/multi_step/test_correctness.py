@@ -3,10 +3,10 @@
 from typing import List, Optional
 
 import pytest
-from ..utils import (completions_with_server_args,
-                     get_client_text_generations,
+
+from ..utils import (assert_all_close_logprobs, completions_with_server_args,
                      get_client_logprob_generations,
-                     assert_all_close_logprobs)
+                     get_client_text_generations)
 
 MODELS = [
     "JackFram/llama-160m",
@@ -23,6 +23,7 @@ DEFAULT_SERVER_ARGS: List[str] = [
     "--swap-space",
     "16",
 ]
+
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize(("tp_size, pp_size"), [
