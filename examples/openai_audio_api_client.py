@@ -8,6 +8,8 @@ import base64
 import requests
 from openai import OpenAI
 
+from vllm.assets.audio import AudioAsset
+
 # Modify OpenAI's API key and API base to use vLLM's API server.
 openai_api_key = "EMPTY"
 openai_api_base = "http://localhost:8000/v1"
@@ -22,7 +24,7 @@ models = client.models.list()
 model = models.data[0].id
 
 # Any format supported by librosa is supported
-audio_url = "https://upload.wikimedia.org/wikipedia/en/b/bf/Dave_Niehaus_Winning_Call_1995_AL_Division_Series.ogg"
+audio_url = AudioAsset("winning_call").url
 
 # Use audio url in the payload
 chat_completion_from_url = client.chat.completions.create(

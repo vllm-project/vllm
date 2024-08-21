@@ -3,13 +3,14 @@ from typing import Dict, List
 import openai
 import pytest
 
+from vllm.assets.audio import AudioAsset
 from vllm.multimodal.utils import encode_audio_base64, fetch_audio
 
 from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "fixie-ai/ultravox-v0_3"
 TEST_AUDIO_URLS = [
-    "https://upload.wikimedia.org/wikipedia/en/b/bf/Dave_Niehaus_Winning_Call_1995_AL_Division_Series.ogg",
+    AudioAsset("winning_call").url,
 ]
 
 

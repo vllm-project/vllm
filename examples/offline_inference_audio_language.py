@@ -5,22 +5,14 @@ with the correct prompt format on vision language models.
 For most models, the prompt format should follow corresponding examples
 on HuggingFace model repository.
 """
-from io import BytesIO
-
-import librosa
-import requests
 from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
+from vllm.assets.audio import AudioAsset
 from vllm.utils import FlexibleArgumentParser
 
 # Input audio and question
-with requests.get(
-        "https://upload.wikimedia.org/wikipedia/commons/6/63/Thomas_Edison_Mary_had_lamb.ogg",
-        headers={"User-Agent":
-                 "https://github.com/vllm-project/vllm"}) as response:
-    audio_and_sample_rate = librosa.load(BytesIO(response.content))
-
+audio_and_sample_rate = AudioAsset("mary_had_lamb").audio_and_sample_rate
 question = "What is recited in the audio?"
 
 

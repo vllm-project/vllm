@@ -1,12 +1,11 @@
-from io import BytesIO
 from typing import List, Optional, Tuple, Type
 
 import librosa
 import numpy as np
 import pytest
-import requests
 from transformers import AutoModel, AutoTokenizer, BatchEncoding
 
+from vllm.assets.audio import AudioAsset
 from vllm.sequence import SampleLogprobs
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 
@@ -22,11 +21,7 @@ AudioTuple = Tuple[np.ndarray, int]
 
 @pytest.fixture(scope="session")
 def audio_and_sample_rate():
-    with requests.get(
-            "https://upload.wikimedia.org/wikipedia/commons/6/63/Thomas_Edison_Mary_had_lamb.ogg",
-            headers={"User-Agent":
-                     "https://github.com/vllm-project/vllm"}) as response:
-        return librosa.load(BytesIO(response.content), sr=None)
+    return AudioAsset("mary_had_lamb").audio_and_sample_rate
 
 
 @pytest.fixture
