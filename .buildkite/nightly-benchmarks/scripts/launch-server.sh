@@ -181,6 +181,8 @@ launch_sglang_server() {
 
 launch_vllm_server() {
 
+  export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
+
   model=$(echo "$common_params" | jq -r '.model')
   tp=$(echo "$common_params" | jq -r '.tp')
   dataset_name=$(echo "$common_params" | jq -r '.dataset_name')
