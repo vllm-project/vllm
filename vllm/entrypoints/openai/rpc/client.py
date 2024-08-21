@@ -109,7 +109,7 @@ class AsyncEngineRPCClient:
 
             # Await acknowledgement from RPCServer.
             if timeout is not None and await socket.poll(timeout=timeout) == 0:
-                raise TimeoutError(f"server didn't reply within {timeout} ms")
+                raise TimeoutError(f"Server didn't reply within {timeout} ms")
 
             response = cloudpickle.loads(await socket.recv())
 
