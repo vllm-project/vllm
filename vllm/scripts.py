@@ -137,7 +137,7 @@ def main():
                               type=str,
                               required=False,
                               default='',
-                              help="Read CLI options fromm a config file."
+                              help="Read CLI options from a config file."
                                 "Must be a YAML with the following options:"
                                 "https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html#command-line-arguments-for-the-server")
     serve_parser = make_arg_parser(serve_parser)
