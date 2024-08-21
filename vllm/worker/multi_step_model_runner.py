@@ -423,30 +423,22 @@ def deferred_pythonize_logprobs(
     output: SamplerOutput,
     sampling_metadata: SamplingMetadata,
 ) -> DeferredLogprobsReturnType:
-    '''
-    Perform deferred logprob Pythonization.
+    """Perform deferred logprob Pythonization.
 
-    1. Pythonize GPU-side sampler result
-       tensors into CPU-side sampler result.
-    2. Pythonize GPU-side logprobs tensor into
-       CPU-side logprobs lists, utilizing 
-       the Pythonized sampler result computed
-       in step 1.
+    1. Pythonize GPU-side sampler result tensors into CPU-side sampler result.
+    2. Pythonize GPU-side logprobs tensor into CPU-side logprobs lists,
+       utilizing  the Pythonized sampler result computed in step 1.
     
-    These deferred computations are not required for
-    single-step scheduling or the `profile_run()`
-    phase of multi-step scheduling.
+    These deferred computations are not required for single-step scheduling
+    or the `profile_run()` phase of multi-step scheduling.
 
-    Arguments:
-
-    * output: sampler output (under deferred Pythonization)
-    * sampling_metadata
-
+    Args:
+        output: sampler output (under deferred Pythonization)
+        sampling_metadata
+        
     Returns:
-
-    * prompt_logprobs (CPU)
-    * sample_logprobs (CPU)
-    '''
+        prompt_logprobs (CPU), sample_logprobs (CPU)
+    """
 
     # - Deferred pythonization of sample result
     sampler_result = get_pythonized_sample_results(

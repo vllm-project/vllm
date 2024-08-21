@@ -23,8 +23,6 @@ DEFAULT_SERVER_ARGS: List[str] = [
     "16",
 ]
 
-NUM_LOGPROBS = [None, 5]  # `logprobs` argument to OpenAI completions API
-
 
 async def completions_with_server_args(
     prompts: List[str],
@@ -159,7 +157,7 @@ def assert_all_close_logprobs(
 @pytest.mark.parametrize("eager_mode", [False, True])
 @pytest.mark.parametrize("num_scheduler_steps", NUM_SCHEDULER_STEPS)
 @pytest.mark.parametrize("num_prompts", NUM_PROMPTS)
-@pytest.mark.parametrize("num_logprobs", NUM_LOGPROBS)
+@pytest.mark.parametrize("num_logprobs", [None, 5])
 @pytest.mark.asyncio
 async def test_multi_step(example_prompts, model: str, tp_size: int,
                           pp_size: int, eager_mode: int,
