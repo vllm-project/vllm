@@ -54,6 +54,8 @@ class ModelOutput:
     sampler_output_ready_event: torch.cuda.Event
     sampled_token_ids: Optional[torch.Tensor] = None
     pythonized: bool = False
+    # On-device tensor containing the logprobs of each token.
+    logprobs: Optional["torch.Tensor"] = None
 
     def pythonize(self, input_metadata: "StatefulModelInput",
                   copy_stream: torch.cuda.Stream,
@@ -79,7 +81,9 @@ class ModelOutput:
                                   blocking: bool) -> bool:
         """
         If blocking is set, will block until the forward pass for the output is
-        ready and pythonize the output.  
+        ready and pythonize the output. Upon completing Pythonization, erases
+        self.logprobs (note that a non-blocking call that is performed when
+        the sampler output is not yet ready, will not erase self.logprobs.)
         """
         assert self.sampled_token_ids is not None
         if not blocking and not self.sampler_output_ready_event.query():
@@ -90,7 +94,15 @@ class ModelOutput:
         with torch.cuda.stream(copy_stream):
             _pythonize_sampler_output(input_metadata, self.sampler_output,
                                       pinned_sampled_token_buffer,
-                                      self.sampled_token_ids)
+                                      self.sampled_token_ids, self.logprobs)
+
+        # Erase the logprobs GPU-side tensor.
+        # Note that although _pythonize_sampler_output() runs in its
+        # own CUDA stream, nonetheless _pythonize_sampler_output()
+        # cannot return until Pythonization is complete; therefore
+        # we know that by the time the CPU reaches this point,
+        # `self.logprobs` is no longer needed.
+        self.logprobs = None
         return True
 
 
@@ -297,13 +309,15 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
                     0].sampled_token_ids.cpu()
             model_input.cached_outputs.append(
                 ModelOutput(output[0], output_ready_event,
-                            output[0].sampled_token_ids, False))
+                            output[0].sampled_token_ids, False,
+                            output[0].logprobs))
 
             # These GPU tensors are not required by multi-step;
             # erase them to ensure they are not pythonized or
             # transferred to CPU
             output[0].sampled_token_ids = None
             output[0].sampled_token_probs = None
+            output[0].logprobs = None
 
             # Pythonize the output if CPU is ahead and the previous step is
             # ready.
@@ -422,6 +436,7 @@ DeferredLogprobsReturnType = Tuple[Optional[List[Optional[PromptLogprobs]]],
 def deferred_pythonize_logprobs(
     output: SamplerOutput,
     sampling_metadata: SamplingMetadata,
+    logprobs_tensor: Optional[torch.Tensor],
 ) -> DeferredLogprobsReturnType:
     """Perform deferred logprob Pythonization.
 
@@ -453,22 +468,36 @@ def deferred_pythonize_logprobs(
     (
         prompt_logprobs,
         sample_logprobs,
-    ) = get_logprobs(output.logprobs, sampling_metadata, sampler_result)
+    ) = get_logprobs(logprobs_tensor, sampling_metadata, sampler_result)
     assert len(prompt_logprobs) == len(sampling_metadata.seq_groups)
     assert len(sample_logprobs) == len(sampling_metadata.seq_groups)
 
-    # Erase the logprobs GPU tensor to ensure it is never pythonized
-    # or transferred to CPU
-    output.logprobs = None
     return prompt_logprobs, sample_logprobs
 
 
-def _pythonize_sampler_output(model_input: StatefulModelInput,
-                              output: SamplerOutput,
-                              pinned_sampled_token_buffer: torch.Tensor,
-                              sampled_token_ids: torch.Tensor) -> None:
+def _pythonize_sampler_output(
+    model_input: StatefulModelInput,
+    output: SamplerOutput,
+    pinned_sampled_token_buffer: torch.Tensor,
+    sampled_token_ids: torch.Tensor,
+    logprobs_tensor: Optional[torch.Tensor],
+) -> None:
     """ This function is only called when the output tensors are ready. 
-    See ModelOutput
+    See :class:`ModelOutput`. 
+    
+    Modifies `output.outputs` and `pinned_sampled_token_buffer` in-place, 
+    adding a Pythonized output data structure
+    (:class:`CompletionSequenceGroupOutput`) for each :class:`SequenceGroup`.
+
+    Args:
+      model_input
+      output: sampler output
+      pinned_sampled_token_token_buffer: CPU-side pinned memory
+                                         (receives copy of
+                                         GPU-side token buffer.)
+      sampled_token_ids: GPU-side token buffer
+      logprobs_tensor: GPU-side tensor containing 
+                       logprobs computed during sampling
     """
 
     assert model_input.frozen_model_input is not None
@@ -499,7 +528,8 @@ def _pythonize_sampler_output(model_input: StatefulModelInput,
     (
         prompt_logprobs,
         sample_logprobs,
-    ) = (deferred_pythonize_logprobs(output, sampling_metadata)
+    ) = (deferred_pythonize_logprobs(output, sampling_metadata,
+                                     logprobs_tensor)
          if skip_sampler_cpu_output else (None, None))
 
     for sgdx, (seq_group, sample_result) in enumerate(
