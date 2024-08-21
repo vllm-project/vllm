@@ -290,6 +290,7 @@ def detokenize_incrementally(
             [new_token_id], skip_special_tokens=skip_special_tokens)
         if isinstance(new_tokens, str):
             new_tokens = [new_tokens]
+
     output_tokens = prev_tokens + new_tokens
 
     # If this is the first iteration, return all tokens.
@@ -299,7 +300,7 @@ def detokenize_incrementally(
     # The prefix text is necessary only to defeat cleanup algorithms in
     # the decode which decide to add a space or not depending on the
     # surrounding ids.
-    if tokenizer.is_fast or not tokenizer.get_added_vocab():
+    if tokenizer.is_mistral or tokenizer.is_fast or not tokenizer.get_added_vocab():
         prefix_text = tokenizer.convert_tokens_to_string(
             output_tokens[prefix_offset:read_offset])
         new_text = tokenizer.convert_tokens_to_string(
