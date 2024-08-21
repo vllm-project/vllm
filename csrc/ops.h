@@ -119,7 +119,8 @@ void convert_fp8(torch::Tensor& dst_data, torch::Tensor& src_data,
 #ifdef USE_ROCM
 void fp8_mm(torch::Tensor& a, torch::Tensor& b, torch::Tensor& result,
             torch::Tensor& scale_a, torch::Tensor& scale_b,
-            const c10::optional<torch::Tensor>& scale_result, int64_t algo_idx);
+            const c10::optional<torch::Tensor>& scale_result, int64_t algo_idx,
+            int64_t padding_size);
 
 void create_workspace();
 #endif

@@ -67,8 +67,8 @@ void create_workspace() {
 
 void fp8_mm(torch::Tensor& a, torch::Tensor& b, torch::Tensor& result,
             torch::Tensor& scale_a, torch::Tensor& scale_b,
-            const c10::optional<torch::Tensor>& scale_result,
-            int64_t algo_idx) {
+            const c10::optional<torch::Tensor>& scale_result, int64_t algo_idx,
+            int64_t padding_size) {
   auto a_strides{a.strides()};
   auto b_strides{b.strides()};
   auto a_sizes{a.sizes()};
@@ -78,7 +78,8 @@ void fp8_mm(torch::Tensor& a, torch::Tensor& b, torch::Tensor& result,
                   b.dtype() == torch::kFloat8_e4m3fnuz,
               "The input tensors type should be float8_e4m3fnuz.");
   TORCH_CHECK(a.dim() == 2 && b.dim() == 2, "Input tensors must be 2-D.");
-  TORCH_CHECK(a_sizes[1] == b_sizes[0], "a dim 1 must match b dim 0.");
+  TORCH_CHECK(a_sizes[1] == b_sizes[0] - padding_size,
+              "a dim 1 must match b dim 0.");
 
   auto out_dtype = result.dtype();
   TORCH_CHECK(out_dtype == torch::kFloat8_e4m3fnuz ||
@@ -131,7 +132,7 @@ void fp8_mm(torch::Tensor& a, torch::Tensor& b, torch::Tensor& result,
   float alpha = 1.0f;
   float beta = 0.0f;
   int64_t m = a_sizes[transpose_result ? 1 : 0];
-  int64_t k = a_sizes[transpose_result ? 0 : 1];
+  int64_t k = a_sizes[transpose_result ? 0 : 1] - padding_size;
   int64_t n = b_sizes[transpose_result ? 0 : 1];
 
   void* d_a = static_cast<void*>((transpose_result ? b : a).data_ptr());
@@ -170,10 +171,10 @@ void fp8_mm(torch::Tensor& a, torch::Tensor& b, torch::Tensor& result,
   inputs.scaleD = d_scale_d;
 
   auto&& problem = gemm.getProblemTypes();
-  auto lda = problem.op_a == HIPBLAS_OP_N ? m : k;
+  auto lda = problem.op_a == HIPBLAS_OP_N ? m : (k + padding_size);
   auto ldb = problem.op_b == HIPBLAS_OP_N ? k : n;
   auto ldc = m;
-  auto strideA = m * k;
+  auto strideA = m * (k + padding_size);
   auto strideB = n * k;
   auto strideC = m * n;
 

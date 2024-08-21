@@ -3,11 +3,13 @@ from typing import List, Optional, Tuple, Union
 
 import pandas as pd
 import torch
+import torch.nn.functional as F
 from torch.nn import Module
 from torch.nn.parameter import Parameter
 
 import vllm._C
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
@@ -23,6 +25,8 @@ class Fp8RocmConfig(QuantizationConfig):
         self._tuned = {}
         gemm_type = os.getenv("FP8_GEMM", "fp8_16")
         vllm._C.ops.create_workspace()
+
+        self.padding_size = 256 if envs.VLLM_FP8_PADDING else 0
 
         self.shapes = []
         if os.getenv("TUNE_FP8") == "1" and os.path.isfile(
@@ -188,9 +192,11 @@ class Fp8RocmLinearMethod(LinearMethodBase):
         layer.weights_scaling_factor = Parameter(max_w_scale,
                                                  requires_grad=False)
 
-        # WEIGHT
-        #   Transpose weight for passing to torch._scaled_mm
         weight = layer.weight
+        if envs.VLLM_FP8_PADDING:
+            weight = F.pad(weight, (0, self._config.padding_size), "constant",
+                           0)
+            torch.cuda.empty_cache()
         layer.weight = Parameter(weight, requires_grad=False)
 
         if layer.weight.dtype == torch.float8_e4m3fnuz:
@@ -245,7 +251,7 @@ class Fp8RocmLinearMethod(LinearMethodBase):
         if solidx == 0:
             self._config.save_shape(m, n, k)
         res = ops.fp8_mm(x_quant, weight.t(), out_dtype, asf, wsf, osf,
-                         int(solidx))
+                         int(solidx), self._config.padding_size)
 
         if osf is not None:
             res_upscaled = torch.empty_like(res, dtype=x.dtype)
