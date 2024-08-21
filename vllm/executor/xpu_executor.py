@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple, Union
+from typing import Callable, List, Optional, Tuple, Type, Union
 
 import torch
 
@@ -11,6 +11,7 @@ from vllm.executor.gpu_executor import GPUExecutor
 from vllm.logger import init_logger
 from vllm.sequence import ExecuteModelRequest, PoolerOutput, SamplerOutput
 from vllm.utils import make_async
+from vllm.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
 
@@ -52,14 +53,16 @@ class XPUExecutor(GPUExecutor):
         # Instantiate the worker and load the model to GPU.
         self._init_executor()
 
-    def _get_worker_module_and_class(self) -> Tuple[str, str]:
+    def _get_worker_module_and_class(
+            self) -> Tuple[str, str, Optional[Callable[[], Type[WorkerBase]]]]:
+        worker_class_fn = None
         if self.speculative_config is not None:
             raise NotImplementedError(
                 "XPU does not support speculative decoding")
         else:
             worker_module_name = "vllm.worker.xpu_worker"
             worker_class_name = "XPUWorker"
-        return (worker_module_name, worker_class_name)
+        return (worker_module_name, worker_class_name, worker_class_fn)
 
     def execute_model(
         self, execute_model_req: ExecuteModelRequest
