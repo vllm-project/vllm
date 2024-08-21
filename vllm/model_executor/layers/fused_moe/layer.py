@@ -234,9 +234,9 @@ class FusedMoE(torch.nn.Module):
                     or "_qzeros" in weight_name):
                 if "w13" in weight_name:
                     shard_size = loaded_weight.size()[-1]
-                    if shard_id == 0:
+                    if shard_id == "w1":
                         param_data[expert_id, :, :shard_size] = loaded_weight
-                    elif shard_id == 2 or shard_id == 1:
+                    elif shard_id == "w3" or shard_id == "w2":
                         param_data[expert_id, :, shard_size:] = loaded_weight
                     else:
                         raise ValueError(f"Invalid shard_id: {shard_id}: "
@@ -357,12 +357,11 @@ class FusedMoE(torch.nn.Module):
     def make_expert_params_mapping(
             cls, ckpt_gate_proj_name: str, ckpt_down_proj_name: str,
             ckpt_up_proj_name: str,
-            num_experts: int) -> List[Tuple[str, str, int, int]]:
+            num_experts: int) -> List[Tuple[str, str, int, str]]:
         gate_up = [ckpt_gate_proj_name, ckpt_up_proj_name]
         gate_down_up = [
             ckpt_gate_proj_name, ckpt_down_proj_name, ckpt_up_proj_name
         ]
-
         return ([
             # These are the weight scales for the experts
             # (param_name, weight_name, expert_id, shard_id)
@@ -371,7 +370,7 @@ class FusedMoE(torch.nn.Module):
                 if weight_name in gate_up else "experts.w2_scale",
                 f"experts.{expert_id}.{weight_name}.weight_scale",
                 expert_id,
-                shard_id,
+                f"w{shard_id + 1}",
             ) for expert_id in range(num_experts)
             for shard_id, weight_name in enumerate(gate_down_up)
         ] + [
@@ -382,7 +381,7 @@ class FusedMoE(torch.nn.Module):
                 if weight_name in gate_up else "experts.w2_weight",
                 f"experts.{expert_id}.{weight_name}.weight",
                 expert_id,
-                shard_id,
+                f"w{shard_id + 1}",
             ) for expert_id in range(num_experts)
             for shard_id, weight_name in enumerate(gate_down_up)
         ] + [
@@ -393,7 +392,7 @@ class FusedMoE(torch.nn.Module):
                 if weight_name in gate_up else "experts.w2_scales",
                 f"experts.{expert_id}.{weight_name}.scales",
                 expert_id,
-                shard_id,
+                f"w{shard_id + 1}",
             ) for expert_id in range(num_experts)
             for shard_id, weight_name in enumerate(gate_down_up)
         ] + [
@@ -404,7 +403,7 @@ class FusedMoE(torch.nn.Module):
                 if weight_name in gate_up else "experts.a2_scale",
                 f"experts.{expert_id}.{weight_name}.input_scale",
                 expert_id,
-                shard_id,
+                f"a{shard_id + 1}",
             ) for expert_id in range(num_experts)
             for shard_id, weight_name in enumerate(gate_down_up)
         ] + [
@@ -415,7 +414,7 @@ class FusedMoE(torch.nn.Module):
                 if weight_name in gate_up else "experts.w2_qweight",
                 f"experts.{expert_id}.{weight_name}.qweight",
                 expert_id,
-                shard_id,
+                f"w{shard_id + 1}",
             ) for expert_id in range(num_experts)
             for shard_id, weight_name in enumerate(gate_down_up)
         ] + [
@@ -426,7 +425,7 @@ class FusedMoE(torch.nn.Module):
                 if weight_name in gate_up else "experts.w2_g_idx",
                 f"experts.{expert_id}.{weight_name}.g_idx",
                 expert_id,
-                shard_id,
+                f"w{shard_id + 1}",
             ) for expert_id in range(num_experts)
             for shard_id, weight_name in enumerate(gate_down_up)
         ] + [
@@ -437,7 +436,7 @@ class FusedMoE(torch.nn.Module):
                 if weight_name in gate_up else "experts.w2_qzeros",
                 f"experts.{expert_id}.{weight_name}.qzeros",
                 expert_id,
-                shard_id,
+                f"w{shard_id + 1}",
             ) for expert_id in range(num_experts)
             for shard_id, weight_name in enumerate(gate_down_up)
         ])

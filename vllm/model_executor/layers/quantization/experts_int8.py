@@ -157,7 +157,7 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
                 layer.w2_scale.data[expert_id, :].copy_(scales[:, 0])
             else:
                 raise ValueError(
-                    f"Shard id must be in [0,1,2] but got {shard_id}")
+                    f"Shard id must be in ['w1','w2','w3'] but got {shard_id}")
             weight_loader(param, loaded_weight, weight_name, shard_id,
                           expert_id)
 
