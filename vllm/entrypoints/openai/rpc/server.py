@@ -3,6 +3,7 @@ import signal
 from typing import Any, Coroutine
 
 import cloudpickle
+import uvloop
 import zmq
 import zmq.asyncio
 from typing_extensions import Never
@@ -22,8 +23,8 @@ class AsyncEngineRPCServer:
     def __init__(self, async_engine_args: AsyncEngineArgs,
                  usage_context: UsageContext, rpc_path: str):
         # Initialize engine first.
-        self.engine = AsyncLLMEngine.from_engine_args(async_engine_args,
-                                                      usage_context)
+        self.engine = AsyncLLMEngine.from_engine_args(
+            async_engine_args, usage_context=usage_context)
 
         # Initialize context.
         self.context = zmq.asyncio.Context()
@@ -36,6 +37,9 @@ class AsyncEngineRPCServer:
         """Cleanup all resources."""
         self.socket.close()
         self.context.destroy()
+        self.engine.shutdown_background_loop()
+        # Clear the engine reference so that it can be GC'ed.
+        del self.engine
 
     async def get_model_config(self, identity):
         """Send the ModelConfig"""
@@ -96,14 +100,17 @@ class AsyncEngineRPCServer:
 
     async def abort(self, identity, request: RPCAbortRequest):
         """Abort request and notify the client of success."""
-        # Abort the request in the llm engine.
-        await self.engine.abort(request.request_id)
-
-        # Send confirmation to the client.
-        await self.socket.send_multipart([
-            identity,
-            cloudpickle.dumps(VLLM_RPC_SUCCESS_STR),
-        ])
+        try:
+            # Abort the request in the llm engine.
+            await self.engine.abort(request.request_id)
+        except Exception:
+            logger.warning("Failed to abort request %s", request.request_id)
+        finally:
+            # Send confirmation to the client.
+            await self.socket.send_multipart([
+                identity,
+                cloudpickle.dumps(VLLM_RPC_SUCCESS_STR),
+            ])
 
     async def generate(self, identity, generate_request: RPCGenerateRequest):
         try:
@@ -213,4 +220,4 @@ async def run_server(server: AsyncEngineRPCServer):
 def run_rpc_server(async_engine_args: AsyncEngineArgs,
                    usage_context: UsageContext, rpc_path: str):
     server = AsyncEngineRPCServer(async_engine_args, usage_context, rpc_path)
-    asyncio.run(run_server(server))
+    uvloop.run(run_server(server))

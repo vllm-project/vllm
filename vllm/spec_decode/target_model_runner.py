@@ -1,7 +1,7 @@
 from typing import List, Optional
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, MultiModalConfig, ParallelConfig,
+                         ModelConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
 from vllm.sequence import SequenceGroupMetadata
 from vllm.worker.model_runner import (ModelInputForGPUWithSamplingMetadata,
@@ -31,8 +31,8 @@ class TargetModelRunner(ModelRunner):
                  kv_cache_dtype: Optional[str] = "auto",
                  is_driver_worker: bool = False,
                  prompt_adapter_config: Optional[PromptAdapterConfig] = None,
-                 multimodal_config: Optional[MultiModalConfig] = None,
-                 return_hidden_states: bool = False):
+                 return_hidden_states: bool = False,
+                 observability_config: Optional[ObservabilityConfig] = None):
         # An internal boolean member variable to indicate if token log
         # probabilities are needed or not.
         self.disable_logprobs = True
@@ -46,9 +46,9 @@ class TargetModelRunner(ModelRunner):
             lora_config=lora_config,
             kv_cache_dtype=kv_cache_dtype,
             is_driver_worker=is_driver_worker,
-            multimodal_config=multimodal_config,
             prompt_adapter_config=prompt_adapter_config,
             return_hidden_states=return_hidden_states,
+            observability_config=observability_config,
         )
 
     def prepare_model_input(

@@ -1,7 +1,7 @@
 [build-system]
 # Should be mirrored in requirements-build.txt
 requires = [
-    "cmake>=3.21",
+    "cmake>=3.26",
     "ninja",
     "packaging",
     "setuptools >= 49.4.0",
@@ -56,6 +56,7 @@ files = [
     "vllm/*.py",
     "vllm/adapter_commons",
     "vllm/assets",
+    "vllm/entrypoints",
     "vllm/inputs",
     "vllm/logging",
     "vllm/multimodal",
