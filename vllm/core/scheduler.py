@@ -1356,8 +1356,14 @@ class Scheduler:
                 # When prefix caching is enabled, we always allocate
                 # the number of new tokens that is dividable by the block size
                 # to avoid partial block matching.
+                block_size = self.cache_config.block_size
+                if budget.token_budget % block_size != 0:
+                    raise ValueError("When enabling chunked prefill and "
+                                     "prefix caching, max_num_batched_tokens "
+                                     "(chunk size) must be dividable by "
+                                     "block size, but got "
+                                     f"{budget.token_budget % block_size = }")
                 if remaining_token_budget < num_new_tokens:
-                    block_size = self.cache_config.block_size
                     num_new_tokens = (remaining_token_budget //
                                       block_size) * block_size
             else:

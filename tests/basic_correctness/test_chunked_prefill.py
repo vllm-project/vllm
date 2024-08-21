@@ -150,3 +150,72 @@ def test_models_with_fp8_kv_cache(
         name_0="no_chunked_prefill",
         name_1="chunked_prefill",
     )
+
+
+@pytest.mark.parametrize("max_tokens", [16])
+@pytest.mark.parametrize("enforce_eager", [False])
+# NOTE: Increasing this in this suite will fail CI because we currently cannot
+# reset distributed env properly. Use a value > 1 just when you test.
+@pytest.mark.parametrize("tensor_parallel_size", [1])
+def test_with_prefix_caching(
+    vllm_runner,
+    max_tokens: int,
+    enforce_eager: bool,
+    tensor_parallel_size: int,
+) -> None:
+    """
+    Checks exact match decode between huggingface model and vllm runner with
+    chunked prefill.
+    """
+    model = "meta-llama/Llama-2-7b-chat-hf"
+    # The common prompt has 41 tokens with Llama-2 tokenizer.
+    common_prompt = "<s>[INST] You are a helpful assistant. Please answer and elaborate the question user ask below. Your response should be profession and concise. Do not make any facts by yourself."  # noqa: E501
+    unique_prompts = [
+        "Why birds can fly?",  # Warmup
+        "Why birds can fly?",  # Fully cached
+        "What is the capital of France?",  # Partial cached
+    ]
+    full_prompts = [f"{common_prompt}\n{p} [/INST]" for p in unique_prompts]
+
+    # Test an invalid (non-divisible to the block size 16) chunk size.
+    max_num_batched_tokens = max_num_seqs = 14
+    with vllm_runner(
+            model,
+            dtype="half",
+            max_num_batched_tokens=14,
+            enable_chunked_prefill=True,
+            enable_prefix_caching=True,
+            tensor_parallel_size=tensor_parallel_size,
+            enforce_eager=enforce_eager,
+            max_num_seqs=max_num_seqs,
+    ) as vllm_model, pytest.raises(ValueError):
+        vllm_model.generate_greedy(full_prompts[:1], max_tokens)
+
+    # Set the chunked prefill to have more than 2 blocks for
+    # the common prompt.
+    max_num_batched_tokens = max_num_seqs = 16
+
+    outputs = {}  # type: ignore
+    for enable_prefix_caching in (False, True):
+        with vllm_runner(
+                model,
+                dtype="half",
+                max_num_batched_tokens=max_num_batched_tokens,
+                enable_chunked_prefill=True,
+                enable_prefix_caching=enable_prefix_caching,
+                tensor_parallel_size=tensor_parallel_size,
+                enforce_eager=enforce_eager,
+                max_num_seqs=max_num_seqs,
+        ) as vllm_model:
+            outputs[enable_prefix_caching] = []
+            # Send the request one-by-one to ensure the cache is populated.
+            for prompt in full_prompts:
+                outputs[enable_prefix_caching] += vllm_model.generate_greedy(
+                    [prompt], max_tokens)
+
+    check_outputs_equal(
+        outputs_0_lst=outputs[False],
+        outputs_1_lst=outputs[True],
+        name_0="w/o prefix caching",
+        name_1="with prefix caching",
+    )
