@@ -296,8 +296,7 @@ class Sampler(nn.Module):
         prompt_logprobs = None
         sample_logprobs = None
         if not sampling_metadata.skip_sampler_cpu_output:
-            # Pythonize logprobs now (GPU -> CPU); do not
-            # defer.
+            # Pythonize logprobs now (GPU -> CPU); do not defer.
             assert not isinstance(maybe_deferred_sample_results,
                                   SampleResultArgsType)
             prompt_logprobs, sample_logprobs = get_logprobs(
