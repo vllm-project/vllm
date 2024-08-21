@@ -186,7 +186,7 @@ Multimodal Language Models
 
   * - Architecture
     - Models
-    - Supported Modality
+    - Supported Modality(ies)
     - Example HuggingFace Models
     - :ref:`LoRA <lora>`
   * - :code:`Blip2ForConditionalGeneration`
