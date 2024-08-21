@@ -149,7 +149,7 @@ def _verify_bundles(placement_group: "PlacementGroup",
                 device_str, node_id, parallel_config.tensor_parallel_size)
 
 
-def _wait_until_pg_ready(current_placement_group: PlacementGroup):
+def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
     """Wait until a placement group is ready.
 
     It prints the informative log messages if the placement group is
