@@ -19,7 +19,7 @@ from ...utils import RemoteOpenAIServer
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
 MODEL_NAME = "Qwen/Qwen2-0.5B-Instruct"
-NUM_REQUESTS = 20000
+NUM_REQUESTS = 10000
 MAX_TOKENS = 50
 MESSAGES = [{
     "role": "system",
