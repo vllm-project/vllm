@@ -33,6 +33,7 @@ from vllm.sequence import (IntermediateTensors, SamplerOutput, SequenceData,
                            SequenceGroupMetadata)
 from vllm.utils import (HabanaMemoryProfiler, format_bytes,
                         is_pin_memory_available, make_tensor_with_pad)
+import vllm.decode as decode
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase,
     _add_attn_metadata_broadcastable_dict,
@@ -627,6 +628,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         if len(seq_group_metadata_list) == 0:
             return PreparePromptMetadata.empty()
+        decode.is_decode = False
 
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
@@ -834,6 +836,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         if len(seq_group_metadata_list) == 0:
             return PrepareDecodeMetadata.empty()
+        decode.is_decode = True
 
         for seq_group_metadata in seq_group_metadata_list:
             assert not seq_group_metadata.is_prompt
