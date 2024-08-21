@@ -71,9 +71,8 @@ def get_tokenizer(
     download_dir: Optional[str] = None,
     **kwargs,
 ) -> AnyTokenizer:
+    """Gets a tokenizer for the given model name via HuggingFace or ModelScope.
     """
-    Gets a tokenizer for the given model
-    name via HuggingFace or ModelScope."""
     if VLLM_USE_MODELSCOPE:
         # download model from ModelScope hub,
         # lazy import so that modelscope is not required for normal use.
@@ -88,8 +87,7 @@ def get_tokenizer(
                 revision=revision,
                 local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
                 # Ignore weights - we only need the tokenizer.
-                ignore_file_pattern=[".*.pt", ".*.safetensors", ".*.bin"],
-            )
+                ignore_file_pattern=[".*.pt", ".*.safetensors", ".*.bin"])
             tokenizer_name = tokenizer_path
 
     if tokenizer_mode == "slow":
@@ -102,8 +100,8 @@ def get_tokenizer(
         kwargs["truncation_side"] = "left"
 
     # Separate model folder from file path for GGUF models
-    is_gguf = (Path(tokenizer_name).is_file()
-               and Path(tokenizer_name).suffix == ".gguf")
+    is_gguf = Path(tokenizer_name).is_file() and Path(
+        tokenizer_name).suffix == ".gguf"
     if is_gguf:
         kwargs["gguf_file"] = Path(tokenizer_name).name
         tokenizer_name = Path(tokenizer_name).parent
@@ -169,10 +167,7 @@ def get_lora_tokenizer(lora_request: LoRARequest, *args,
         # use base model tokenizer
         logger.warning(
             "No tokenizer found in %s, using base model tokenizer instead. "
-            "(Exception: %s)",
-            lora_request.lora_path,
-            e,
-        )
+            "(Exception: %s)", lora_request.lora_path, e)
         tokenizer = None
     return tokenizer
 
