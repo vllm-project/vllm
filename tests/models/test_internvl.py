@@ -1,5 +1,5 @@
 import types
-from typing import List, Optional, Type
+from typing import List, Optional, Tuple, Type
 
 import pytest
 import torch
@@ -178,6 +178,74 @@ def run_test(
         )
 
 
+def run_awq_test(
+    vllm_runner: Type[VllmRunner],
+    image_assets: _ImageAssets,
+    models: Tuple[str, str],
+    *,
+    size_factors: List[float],
+    dtype: str,
+    max_tokens: int,
+    num_logprobs: int,
+    tensor_parallel_size: int,
+    distributed_executor_backend: Optional[str] = None,
+):
+    source_model, quant_model = models
+
+    images = [asset.pil_image for asset in image_assets]
+
+    inputs_per_image = [(
+        [prompt for _ in size_factors],
+        [rescale_image_size(image, factor) for factor in size_factors],
+    ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
+
+    # NOTE: take care of the order. run vLLM first, and then run HF.
+    # vLLM needs a fresh new process without cuda initialization.
+    # if we run HF first, the cuda initialization will be done and it
+    # will hurt multiprocessing backend with fork method (the default method).
+
+    # max_model_len should be greater than image_feature_size
+    with vllm_runner(source_model,
+                     max_model_len=4096,
+                     dtype=dtype,
+                     tensor_parallel_size=tensor_parallel_size,
+                     distributed_executor_backend=distributed_executor_backend,
+                     enforce_eager=True) as vllm_model:
+        source_outputs_per_image = [
+            vllm_model.generate_greedy_logprobs(prompts,
+                                                max_tokens,
+                                                num_logprobs=num_logprobs,
+                                                images=images)
+            for prompts, images in inputs_per_image
+        ]
+
+    with vllm_runner(quant_model,
+                     quantization="awq",
+                     max_model_len=4096,
+                     dtype=dtype,
+                     tensor_parallel_size=tensor_parallel_size,
+                     distributed_executor_backend=distributed_executor_backend,
+                     enforce_eager=True) as vllm_model:
+        quant_outputs_per_image = [
+            vllm_model.generate_greedy_logprobs(prompts,
+                                                max_tokens,
+                                                num_logprobs=num_logprobs,
+                                                images=images)
+            for prompts, images in inputs_per_image
+        ]
+
+    for source_outputs, quant_outputs in zip(source_outputs_per_image,
+                                             quant_outputs_per_image):
+        # TODO: Check whether using original CLIPVisionModel can improve
+        # consistency against HF
+        check_logprobs_close(
+            outputs_0_lst=source_outputs,
+            outputs_1_lst=quant_outputs,
+            name_0="source",
+            name_1="awq",
+        )
+
+
 target_dtype = "half"
 if is_cpu():
     target_dtype = "bfloat16"
@@ -208,6 +276,39 @@ def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
         vllm_runner,
         image_assets,
         model,
+        size_factors=size_factors,
+        dtype=dtype,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        tensor_parallel_size=1,
+    )
+
+
+@pytest.mark.parametrize(
+    "models", [("OpenGVLab/InternVL2-2B", "OpenGVLab/InternVL2-2B-AWQ")])
+@pytest.mark.parametrize(
+    "size_factors",
+    [
+        # No image
+        [],
+        # Single-scale
+        [1.0],
+        # Single-scale, batched
+        [1.0, 1.0, 1.0],
+        # Multi-scale
+        [0.25, 0.5, 1.0],
+    ],
+)
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("num_logprobs", [5])
+@torch.inference_mode()
+def test_awq_models(vllm_runner, image_assets, models, size_factors,
+                    dtype: str, max_tokens: int, num_logprobs: int) -> None:
+    run_awq_test(
+        vllm_runner,
+        image_assets,
+        models,
         size_factors=size_factors,
         dtype=dtype,
         max_tokens=max_tokens,
