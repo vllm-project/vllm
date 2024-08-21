@@ -10,6 +10,7 @@ except ModuleNotFoundError:
 
 import torch
 
+from vllm.model_executor.layers.sampler import _get_logprobs
 from vllm import _custom_ops as ops
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
@@ -295,15 +296,17 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
             model_input.cached_outputs.append(
                 ModelOutput(output[0], output_ready_event,
                             output[0].sampled_token_ids, False))
-            # make sure we dont try to serialize any GPU tensors
-            output[0].sampled_token_ids = None
-            output[0].sampled_token_probs = None
-            output[0].logprobs = None
+            
             # Pythonize the output if CPU is ahead and the previous step is
             # ready.
             for model_output in model_input.cached_outputs:
                 model_output.maybe_pythonize(model_input, self._copy_stream,
                                              self.pinned_sampled_token_ids)
+
+            # make sure we dont try to serialize any GPU tensors
+            output[0].sampled_token_ids = None
+            output[0].sampled_token_probs = None
+            output[0].logprobs = None
 
         model_input.current_step += 1
 
