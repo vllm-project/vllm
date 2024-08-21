@@ -186,6 +186,11 @@ class BlockAllocator(ABC):
                                num_lookahead_slots: int = 0) -> int:
         pass
 
+    @abstractmethod
+    def get_prefix_cache_hit_rate(self) -> float:
+        """Prefix cache hit rate. -1 means not supported or disabled."""
+        pass
+
     class NoFreeBlocksError(ValueError):
         pass
 
@@ -277,4 +282,9 @@ class DeviceAwareBlockAllocator(ABC):
         been dropped due to sliding window.
         There is at most one null block per allocator.
         """
+        pass
+
+    @abstractmethod
+    def get_prefix_cache_hit_rate(self, device: Device) -> float:
+        """Prefix cache hit rate. -1 means not supported or disabled."""
         pass

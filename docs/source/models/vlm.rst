@@ -52,6 +52,17 @@ To pass an image to the model, note the following in :class:`vllm.inputs.PromptI
     for o in outputs:
         generated_text = o.outputs[0].text
         print(generated_text)
+
+    # Inference with image embeddings as input
+    image_embeds = torch.load(...) # torch.Tensor of shape (1, image_feature_size, hidden_size of LM)
+    outputs = llm.generate({
+        "prompt": prompt,
+        "multi_modal_data": {"image": image_embeds},
+    })
+
+    for o in outputs:
+        generated_text = o.outputs[0].text
+        print(generated_text)
     
     # Batch inference
     image_1 = PIL.Image.open(...)
@@ -73,7 +84,7 @@ To pass an image to the model, note the following in :class:`vllm.inputs.PromptI
         generated_text = o.outputs[0].text
         print(generated_text)
 
-A code example can be found in `examples/llava_example.py <https://github.com/vllm-project/vllm/blob/main/examples/llava_example.py>`_.
+A code example can be found in `examples/offline_inference_vision_language.py <https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_vision_language.py>`_.
 
 
 Online OpenAI Vision API Compatible Inference
