@@ -3,7 +3,9 @@ from contextlib import contextmanager
 from typing import (TYPE_CHECKING, Any, ClassVar, Dict, Iterable, List,
                     Mapping, Optional)
 from typing import Sequence as GenericSequence
-from typing import Set, Tuple, Type, TypeVar, Union
+from typing import Set, Type, Union
+
+from typing_extensions import TypeVar
 
 import vllm.envs as envs
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
@@ -39,11 +41,12 @@ from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
 from vllm.transformers_utils.config import try_get_generation_config
 from vllm.transformers_utils.detokenizer import Detokenizer
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import (
-    AnyTokenizer, BaseTokenizerGroup, init_tokenizer_from_configs)
+    BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
-from vllm.utils import Counter
+from vllm.utils import Counter, Device
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -63,6 +66,7 @@ def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
     return config.to_diff_dict()
 
 
+_G = TypeVar("_G", bound=BaseTokenizerGroup, default=BaseTokenizerGroup)
 _O = TypeVar("_O", RequestOutput, EmbeddingRequestOutput)
 
 
@@ -486,12 +490,21 @@ class LLMEngine:
     MISSING_TOKENIZER_GROUP_MSG = ("Unable to get tokenizer because "
                                    "skip_tokenizer_init is True")
 
-    def get_tokenizer_group(self) -> BaseTokenizerGroup:
-        if self.tokenizer is None:
-            raise ValueError("Unable to get tokenizer because "
-                             "`skip_tokenizer_init` is True")
+    def get_tokenizer_group(
+        self,
+        group_type: Type[_G] = BaseTokenizerGroup,
+        missing_msg: str = MISSING_TOKENIZER_GROUP_MSG,
+    ) -> _G:
+        tokenizer_group = self.tokenizer
 
-        return self.tokenizer
+        if tokenizer_group is None:
+            raise ValueError(missing_msg)
+        if not isinstance(tokenizer_group, group_type):
+            raise TypeError("Invalid type of tokenizer group. "
+                            f"Expected type: {group_type}, but "
+                            f"found type: {type(tokenizer_group)}")
+
+        return tokenizer_group
 
     def get_tokenizer(
         self,
@@ -579,8 +592,6 @@ class LLMEngine:
 
     def stop_remote_worker_execution_loop(self) -> None:
         self.model_executor.stop_remote_worker_execution_loop()
-
-    _LLMInputComponentsType = Tuple[str, List[int]]
 
     def add_request(
         self,
@@ -1012,6 +1023,13 @@ class LLMEngine:
                 for scheduler in self.scheduler)
             cpu_cache_usage_sys = 1.0 - (num_free_cpu / num_total_cpu)
 
+        # Prefix Cache Hit Rate. Note that we always use
+        # the cache hit rate of the first virtual engine.
+        cpu_prefix_cache_hit_rate = self.scheduler[
+            0].get_prefix_cache_hit_rate(Device.CPU)
+        gpu_prefix_cache_hit_rate = self.scheduler[
+            0].get_prefix_cache_hit_rate(Device.GPU)
+
         # Iteration stats
         num_prompt_tokens_iter = 0
         num_generation_tokens_iter = 0
@@ -1120,6 +1138,9 @@ class LLMEngine:
             #   KV Cache Usage in %
             gpu_cache_usage_sys=gpu_cache_usage_sys,
             cpu_cache_usage_sys=cpu_cache_usage_sys,
+            #   Prefix Cache Hit Rate
+            cpu_prefix_cache_hit_rate=cpu_prefix_cache_hit_rate,
+            gpu_prefix_cache_hit_rate=gpu_prefix_cache_hit_rate,
 
             # Iteration stats
             num_prompt_tokens_iter=num_prompt_tokens_iter,
