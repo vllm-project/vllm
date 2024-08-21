@@ -42,13 +42,18 @@ def mock_causal_accepted_tensor(
 @pytest.mark.parametrize(
     "which_tokens_accepted",
     ["all_tokens_accepted", "no_tokens_accepted", "some_tokens_accepted"])
+@pytest.mark.parametrize("disable_bonus_tokens", [True, False])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("use_flashinfer", [True, False])
 @torch.inference_mode()
 def test_correct_output_format(which_tokens_accepted: str, seed: int,
-                               device: str, use_flashinfer: bool):
+                               disable_bonus_tokens: bool, device: str,
+                               use_flashinfer: bool):
     """Verify the output has correct format given predetermined accepted matrix.
     """
+    if use_flashinfer and disable_bonus_tokens:
+        pytest.skip("Flashinfer rejection sampler must enable bonus token.")
+
     set_random_seed(seed)
     torch.set_default_device(device)
 
@@ -83,8 +88,9 @@ def test_correct_output_format(which_tokens_accepted: str, seed: int,
                                     size=(batch_size, 1),
                                     dtype=torch.int64)
 
-    rejection_sampler = RejectionSampler(disable_bonus_tokens=False,
-                                         use_flashinfer=use_flashinfer)
+    rejection_sampler = RejectionSampler(
+        disable_bonus_tokens=disable_bonus_tokens,
+        use_flashinfer=use_flashinfer)
     rejection_sampler.init_gpu_tensors(device=device)
     output_token_ids = rejection_sampler._create_output(  # pylint: disable=protected-access
         accepted,
@@ -94,6 +100,10 @@ def test_correct_output_format(which_tokens_accepted: str, seed: int,
     )
 
     expected_bonus_token_ids = bonus_token_ids.clone()
+    # If bonus tokens disabled. Verify they are set to -1.
+    # See https://github.com/vllm-project/vllm/issues/4212
+    if disable_bonus_tokens:
+        expected_bonus_token_ids = expected_bonus_token_ids * 0 - 1
 
     if which_tokens_accepted == "all_tokens_accepted":
         # Expect all tokens to be equal to draft tokens.
@@ -164,8 +174,8 @@ def test_no_crash_with_varying_dims(k: int, vocab_size: int, batch_size: int,
 @pytest.mark.parametrize("use_flashinfer", [True, False])
 @torch.inference_mode()
 def test_deterministic_when_seeded(k: int, vocab_size: int, batch_size: int,
-                                   frac_seeded: float, n_rep: int,
-                                   device: str, use_flashinfer: bool):
+                                   frac_seeded: float, n_rep: int, device: str,
+                                   use_flashinfer: bool):
     torch.set_default_device(device)
     rejection_sampler = RejectionSampler(disable_bonus_tokens=False,
                                          use_flashinfer=use_flashinfer)
@@ -207,10 +217,13 @@ def test_deterministic_when_seeded(k: int, vocab_size: int, batch_size: int,
 @pytest.mark.parametrize("vocab_size", [30_000, 50_000])
 @pytest.mark.parametrize("batch_size", [1, 8, 32, 128])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-@pytest.mark.parametrize("use_flashinfer", [True, False])
 @torch.inference_mode()
 def test_nonflashinfer_backend(k: int, vocab_size: int, batch_size: int,
-                               device: str, use_flashinfer: bool):
+                               device: str):
+    """
+    Test the flashinfer and nonflashinfer backend generate 
+    the same output metrics.
+    """
     torch.set_default_device(device)
     torch.manual_seed(0)
     draft_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
@@ -234,7 +247,7 @@ def test_nonflashinfer_backend(k: int, vocab_size: int, batch_size: int,
     }
 
     flashinfer_rejection_sampler = RejectionSampler(disable_bonus_tokens=False,
-                                                    use_flashinfer=use_flashinfer)
+                                                    use_flashinfer=True)
     flashinfer_rejection_sampler.init_gpu_tensors(device=device)
     flashinfer_rejection_sampler(target_probs, bonus_token_ids, draft_probs,
                                  draft_token_ids, seeded_seqs)

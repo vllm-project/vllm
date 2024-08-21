@@ -5,8 +5,6 @@ import torch
 import torch.jit
 import torch.nn as nn
 
-Device = Union[int, str]
-
 
 class SpecDecodeBaseSampler(nn.Module):
     """Base class for samplers used for Speculative Decoding verification
@@ -38,7 +36,7 @@ class SpecDecodeBaseSampler(nn.Module):
         self.num_emitted_tokens: Optional[torch.Tensor] = None
         self.num_draft_tokens: int = 0
 
-    def init_gpu_tensors(self, device: Device) -> None:
+    def init_gpu_tensors(self, device: Union[int, str]) -> None:
         assert self.num_accepted_tokens is None
         if isinstance(device, int):
             device = f"cuda:{device}"

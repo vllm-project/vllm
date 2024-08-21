@@ -1,15 +1,16 @@
 from functools import cached_property
+from importlib.util import find_spec
 from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.jit
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.spec_decode_base_sampler import (
     SpecDecodeStochasticBaseSampler)
 
 logger = init_logger(__name__)
-
 
 if envs.VLLM_USE_FLASHINFER_SAMPLER and find_spec("flashinfer"):
     """
@@ -19,7 +20,6 @@ if envs.VLLM_USE_FLASHINFER_SAMPLER and find_spec("flashinfer"):
     reduce memory I/O, and consequently enhances performance.
     """
     from flashinfer.sampling import chain_speculative_sampling
-    logger.info("Use flashinfer for rejection sampling.")
 else:
     chain_speculative_sampling = None
 
@@ -43,13 +43,19 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
             strict_mode: Whether or not to perform shape/device/dtype checks
             during sampling. This catches correctness issues but adds
             nontrivial latency.
+            use_falshinfer: Whether or not to use flashinfer backend
+            for rejection sampling.
         """
         super().__init__(disable_bonus_tokens=disable_bonus_tokens,
                          strict_mode=strict_mode)
-        self.use_flashinfer = use_flashinfer
+        self.use_flashinfer = (use_flashinfer
+                               and chain_speculative_sampling is not None)
         if self.use_flashinfer:
             assert not disable_bonus_tokens, \
                 "flashinfer will enable bonus token by default"
+            logger.info("Use flashinfer for rejection sampling.")
+        else:
+            logger.info("Use pytorch for rejection sampling.")
 
     def forward(
         self,
@@ -105,12 +111,15 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
 
         batch_size, k, _ = draft_probs.shape
 
+        # batch_size = 0 when all requests in the batch are
+        # non_spec requests. In this case, output_token_ids is
+        # just an empty tensor.
         if batch_size == 0:
             return torch.empty(0, k + 1, device=draft_probs.device, dtype=int)
 
         # If use Flashinfer chain_speculative_sampling kernel
         # for rejection sampling
-        if chain_speculative_sampling is not None and self.use_flashinfer:
+        if self.use_flashinfer:
             batch_size, k, _ = draft_probs.shape
             uniform_samples = self._create_uniform_samples(
                 seeded_seqs, batch_size, k, draft_probs.device)
