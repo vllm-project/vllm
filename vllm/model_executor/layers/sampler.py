@@ -674,8 +674,7 @@ def _top_k_top_p_multinomial_with_flashinfer(
 
 def get_pythonized_sample_results(
         sample_result_args: SampleResultArgsType) -> SampleResultType:
-    '''
-    This function consumes GPU-side sampler results and computes
+    '''This function consumes GPU-side sampler results and computes
     Pythonized CPU-side sampler results (GPU -> CPU sync.)
 
     Single-step scheduling: this function is invoked at sampling-time
@@ -684,13 +683,11 @@ def get_pythonized_sample_results(
     Multi-step scheduling: Pythonization is deferred until after multiple
     GPU-side steps have been completed.
 
-    Arguments:
-
-    * sample_result_args: GPU-side inputs to the Pythonization process
+    Args:
+      sample_result_args: GPU-side inputs to the Pythonization process
 
     Returns:
-
-    * Pythonized sampler results
+      Pythonized sampler results
     '''
 
     (
@@ -737,8 +734,7 @@ def _sample_with_torch(
     include_gpu_probs_tensor: bool,
     modify_greedy_probs: bool,
 ) -> SampleReturnType:
-    '''
-    Torch-oriented _sample() implementation.
+    '''Torch-oriented _sample() implementation.
 
     Single-step scheduling: 
     * Perform GPU-side sampling computation
