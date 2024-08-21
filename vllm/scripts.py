@@ -133,7 +133,7 @@ def main():
     serve_parser.add_argument("model_tag",
                               type=str,
                               help="The model tag to serve")
-    serve_parser.add_argument("config",
+    serve_parser.add_argument("--config",
                               type=str,
                               required=False,
                               default='',
