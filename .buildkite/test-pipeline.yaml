@@ -34,7 +34,7 @@ steps:
   fast_check: true
   no_gpu: True
   commands:
-  - python3 -m pip install -r requirements-docs.txt
+  - pip install -r requirements-docs.txt
   - SPHINXOPTS=\"-W\" make html
   # Check API reference (if it fails, you may have missing mock imports)
   - grep \"sig sig-object py\" build/html/dev/sampling_params.html
