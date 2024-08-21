@@ -1,5 +1,6 @@
 # The CLI entrypoint to vLLM.
 import argparse
+import configparser
 import asyncio
 import os
 import signal
@@ -25,6 +26,13 @@ def register_signal_handlers():
 
 
 def serve(args: argparse.Namespace) -> None:
+    if args.config:
+        config_parser = configparser.ConfigParser()
+        config_parser.read(args.config)
+
+        for key, value in config_parser.items():
+            setattr(args, key, value)
+
     # The default value of `--model`
     if args.model != EngineArgs.model:
         raise ValueError(
@@ -125,6 +133,13 @@ def main():
     serve_parser.add_argument("model_tag",
                               type=str,
                               help="The model tag to serve")
+    serve_parser.add_argument("config",
+                              type=str,
+                              required=False,
+                              default='',
+                              help="Read CLI options fromm a config file."
+                                "Must be a YAML with the following options:"
+                                "https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html#command-line-arguments-for-the-server")
     serve_parser = make_arg_parser(serve_parser)
     serve_parser.set_defaults(dispatch_function=serve)
 
