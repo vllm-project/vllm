@@ -1,23 +1,16 @@
-#include "gptq_marlin.cuh"
-
-namespace gptq_marlin {
-
-static constexpr int repack_stages = 8;
-
-static constexpr int repack_threads = 256;
-
-static constexpr int tile_k_size = tile_size;
-static constexpr int tile_n_size = tile_k_size * 4;
+#include "marlin.cuh"
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
 
+namespace marlin {
+
 template <int const num_threads, int const num_bits, bool const has_perm>
-__global__ void marlin_repack_kernel(
+__global__ void gptq_marlin_repack_kernel(
     uint32_t const* __restrict__ b_q_weight_ptr,
     uint32_t const* __restrict__ perm_ptr, uint32_t* __restrict__ out_ptr,
     int size_k, int size_n) {}
 
-}  // namespace gptq_marlin
+}  // namespace marlin
 
 torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
                                  int64_t size_k, int64_t size_n,
@@ -29,8 +22,10 @@ torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
 
 #else
 
+namespace marlin {
+
 template <int const num_threads, int const num_bits, bool const has_perm>
-__global__ void marlin_repack_kernel(
+__global__ void gptq_marlin_repack_kernel(
     uint32_t const* __restrict__ b_q_weight_ptr,
     uint32_t const* __restrict__ perm_ptr, uint32_t* __restrict__ out_ptr,
     int size_k, int size_n) {
@@ -259,28 +254,28 @@ __global__ void marlin_repack_kernel(
   }
 }
 
-}  // namespace gptq_marlin
+}  // namespace marlin
 
-  #define CALL_IF(NUM_BITS, HAS_PERM)                                          \
-    else if (num_bits == NUM_BITS && has_perm == HAS_PERM) {                   \
-      cudaFuncSetAttribute(                                                    \
-          gptq_marlin::marlin_repack_kernel<gptq_marlin::repack_threads,       \
-                                            NUM_BITS, HAS_PERM>,               \
-          cudaFuncAttributeMaxDynamicSharedMemorySize, max_shared_mem);        \
-      gptq_marlin::marlin_repack_kernel<gptq_marlin::repack_threads, NUM_BITS, \
-                                        HAS_PERM>                              \
-          <<<blocks, gptq_marlin::repack_threads, max_shared_mem, stream>>>(   \
-              b_q_weight_ptr, perm_ptr, out_ptr, size_k, size_n);              \
+  #define CALL_IF(NUM_BITS, HAS_PERM)                                         \
+    else if (num_bits == NUM_BITS && has_perm == HAS_PERM) {                  \
+      cudaFuncSetAttribute(                                                   \
+          marlin::gptq_marlin_repack_kernel<marlin::repack_threads, NUM_BITS, \
+                                            HAS_PERM>,                        \
+          cudaFuncAttributeMaxDynamicSharedMemorySize, max_shared_mem);       \
+      marlin::gptq_marlin_repack_kernel<marlin::repack_threads, NUM_BITS,     \
+                                        HAS_PERM>                             \
+          <<<blocks, marlin::repack_threads, max_shared_mem, stream>>>(       \
+              b_q_weight_ptr, perm_ptr, out_ptr, size_k, size_n);             \
     }
 
 torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
                                  int64_t size_k, int64_t size_n,
                                  int64_t num_bits) {
   // Verify compatibility with marlin tile of 16x64
-  TORCH_CHECK(size_k % gptq_marlin::tile_k_size == 0, "size_k = ", size_k,
-              " is not divisible by tile_k_size = ", gptq_marlin::tile_k_size);
-  TORCH_CHECK(size_n % gptq_marlin::tile_n_size == 0, "size_n = ", size_n,
-              " is not divisible by tile_n_size = ", gptq_marlin::tile_n_size);
+  TORCH_CHECK(size_k % marlin::tile_k_size == 0, "size_k = ", size_k,
+              " is not divisible by tile_k_size = ", marlin::tile_k_size);
+  TORCH_CHECK(size_n % marlin::tile_n_size == 0, "size_n = ", size_n,
+              " is not divisible by tile_n_size = ", marlin::tile_n_size);
 
   TORCH_CHECK(num_bits == 4 || num_bits == 8,
               "num_bits must be 4 or 8. Got = ", num_bits);
@@ -308,10 +303,9 @@ torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
   auto options = torch::TensorOptions()
                      .dtype(b_q_weight.dtype())
                      .device(b_q_weight.device());
-  torch::Tensor out =
-      torch::empty({size_k / gptq_marlin::tile_size,
-                    size_n * gptq_marlin::tile_size / pack_factor},
-                   options);
+  torch::Tensor out = torch::empty(
+      {size_k / marlin::tile_size, size_n * marlin::tile_size / pack_factor},
+      options);
 
   // Detect if there is act_order
   bool has_perm = perm.size(0) != 0;

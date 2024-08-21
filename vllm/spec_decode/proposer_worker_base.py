@@ -24,7 +24,11 @@ class ProposerWorkerBase(LoraNotSupportedWorkerBase, SpeculativeProposer):
     ) -> Tuple[Optional[List[SamplerOutput]], bool]:
         raise NotImplementedError
 
-    def set_include_gpu_probs_tensor(self):
+    def set_include_gpu_probs_tensor(self) -> None:
+        """Implementation optional"""
+        pass
+
+    def set_should_modify_greedy_probs_inplace(self) -> None:
         """Implementation optional"""
         pass
 

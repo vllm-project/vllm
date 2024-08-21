@@ -1,4 +1,4 @@
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -18,15 +18,14 @@ from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.speech import SpeechPlugin,FishSpeechPlugin
+from vllm.multimodal.speech import SpeechPlugin
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
 
 import lzma
 import numpy as np
-import pybase16384 as b14
 
-def dummy_data_for_ttsllm(ctx: InputContext, seq_len: int):
+def dummy_data_for_ttsllm(ctx: InputContext, seq_len: int, mm_counts: Mapping[str, int]):
 
     from vllm.sequence import SequenceData
 
@@ -36,8 +35,12 @@ def dummy_data_for_ttsllm(ctx: InputContext, seq_len: int):
 
     return dummy_seq_data, dummy_multi_modal_data
 
+def get_max_speech_tokens(ctx: InputContext):
+    return 16
+
 @MULTIMODAL_REGISTRY.register_speech_input_mapper()
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_ttsllm)
+@MULTIMODAL_REGISTRY.register_max_speech_tokens(get_max_speech_tokens)
 class ChatTtsLlm(nn.Module):
     def __init__(self,
                  config: LlamaConfig,

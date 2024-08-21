@@ -552,9 +552,12 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # runner.
 
         # It returns a list of int although type annotation says list of string.
+        if len(computed_seq_block_ids) == 1:
+            return computed_seq_block_ids[0]
+
         return commonprefix([
             ids for ids in computed_seq_block_ids  # type: ignore
-            if ids != []
+            if ids
         ])
 
     def get_num_blocks_touched(self,
@@ -576,14 +579,17 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         num_touched_blocks = 0
         for block in blocks:
             if not block.is_full:
-                if block.num_empty_slots >= num_lookahead_slots:
-                    num_touched_blocks += 1
-                else:
+                num_touched_blocks += 1
+                if num_lookahead_slots > block.num_empty_slots:
                     num_touched_blocks += cdiv(
                         num_lookahead_slots - block.num_empty_slots,
                         self._block_size)
             else:
-                if not self.is_block_cached(block):
+                # If the block has a match in the cache and the cached block
+                # is not referenced, then we still count it as a touched block
+                if not self.is_block_cached(block) or \
+                    (block.content_hash is not None and \
+                     self._cached_blocks[block.content_hash] in self.evictor):
                     num_touched_blocks += 1
         return num_touched_blocks
 
