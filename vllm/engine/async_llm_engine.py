@@ -766,6 +766,11 @@ class AsyncLLMEngine:
     def errored(self) -> bool:
         return self._errored_with is not None
 
+    @property
+    def limit_concurrency(self) -> Optional[int]:
+        """Maximum number of concurrently running requests."""
+        return None
+
     def set_errored(self, exc: Exception) -> None:
         self._errored_with = exc
 
