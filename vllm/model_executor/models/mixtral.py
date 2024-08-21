@@ -73,6 +73,7 @@ class MixtralMoE(nn.Module):
         self.hidden_size = hidden_size
 
         # Gate always runs at half / full precision for now.
+
         self.gate = ReplicatedLinear(hidden_size,
                                      num_experts,
                                      bias=False,
