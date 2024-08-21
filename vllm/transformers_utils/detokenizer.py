@@ -30,7 +30,7 @@ class Detokenizer:
             prompt_logprobs: The logprobs to decode.
             position_offset: Offset of the first index of the logprobs 
                 relative to the start of the sequence (for chunked prefill).
-
+        
         Returns:
             The prompt logprobs with the decoded tokens.
         """
