@@ -73,7 +73,7 @@ ENV BUILDKITE_COMMIT=${buildkite_commit}
 
 ARG USE_SCCACHE
 ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
-ARG SCCACHE_REGION=us-west-2
+ARG SCCACHE_REGION_NAME=us-west-2
 # if USE_SCCACHE is set, use sccache to speed up compilation
 RUN --mount=type=cache,target=/root/.cache/pip \
     if [ "$USE_SCCACHE" = "1" ]; then \
@@ -83,7 +83,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         && sudo mv sccache-v0.8.1-x86_64-unknown-linux-musl/sccache /usr/bin/sccache \
         && rm -rf sccache.tar.gz sccache-v0.8.1-x86_64-unknown-linux-musl \
         && export SCCACHE_BUCKET=${SCCACHE_BUCKET_NAME} \
-        && export SCCACHE_REGION=${SCCACHE_REGION} \
+        && export SCCACHE_REGION=${SCCACHE_REGION_NAME} \
+        && export SCCACHE_IDLE_TIMEOUT=0 \
         && export CMAKE_BUILD_TYPE=Release \
         && sccache --show-stats \
         && python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 \
