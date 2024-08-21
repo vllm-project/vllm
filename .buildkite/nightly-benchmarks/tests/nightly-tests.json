@@ -7,7 +7,7 @@
             "tp": 1,
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
-            "num_prompts": 1000,
+            "num_prompts": 500,
             "port": 8000,
             "reuse_server": false
         },
@@ -53,7 +53,7 @@
             "tp": 1,
             "dataset_name": "sonnet",
             "dataset_path": "./sonnet_4x.txt",
-            "num_prompts": 1000,
+            "num_prompts": 500,
             "port": 8000,
             "sonnet_input_len": 2048,
             "sonnet_output_len": 128,
