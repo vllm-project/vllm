@@ -186,7 +186,7 @@ Multimodal Language Models
 
   * - Architecture
     - Models
-    - Supported Modality(ies)
+    - Supported Modalities
     - Example HuggingFace Models
     - :ref:`LoRA <lora>`
   * - :code:`Blip2ForConditionalGeneration`
@@ -233,6 +233,11 @@ Multimodal Language Models
     - MiniCPM-V
     - Image
     - :code:`openbmb/MiniCPM-V-2` (see note), :code:`openbmb/MiniCPM-Llama3-V-2_5`, :code:`openbmb/MiniCPM-V-2_6`, etc.
+    -
+  * - :code: `UltravoxModel`
+    - Ultravox
+    - Audio
+    - :code: `fixie-ai/ultravox-v0_3`
     -
 
 .. note::

@@ -37,7 +37,7 @@ from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import cached_get_tokenizer
+from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,

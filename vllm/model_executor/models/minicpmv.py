@@ -54,8 +54,8 @@ from vllm.model_executor.models.minicpm import MiniCPMModel
 from vllm.model_executor.models.qwen2 import Qwen2Model
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import (cached_get_image_processor,
-                                   cached_get_tokenizer)
+from vllm.multimodal.image import cached_get_image_processor
+from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
                            SamplerOutput, SequenceData)
 
