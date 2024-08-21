@@ -20,23 +20,6 @@ logger = init_logger(__name__)
 AnyTokenizer = Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
 
 
-def download_mistral_tokenizer_from_hf(tokenizer_name: str, revision: str) -> str:
-    api = HfApi()
-    repo_info = api.model_info(tokenizer_name)
-    files = [s.rfilename for s in repo_info.siblings]
-    pattern = re.compile(r'^tokenizer\.model\..*$|^tekken\.json$')
-
-    matched_files = [file for file in files if pattern.match(file)]
-    if len(matched_files) > 1:
-        raise OSError(f"Found {len(matched_files)} files matching the pattern: {matched_files}. Make sure only one Mistral tokenizer is present in {tokenizer_name}.")
-    elif len(matched_files) == 0: 
-        raise OSError(f"Found {len(matched_files)} files matching the pattern: {matched_files}. Make sure that a Mistral tokenizer is present in {tokenizer_name}.")
-
-    tokenizer_file = hf_hub_download(tokenizer_name, filename=matched_files[0], revision=revision)
-    return tokenizer_file
-
-
-
 def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
     """Get tokenizer with cached properties.
 
@@ -84,6 +67,29 @@ class VLLMMistralTokenizer:
 
         self.vocab_size = len(self.tokenizer.vocab())
         self.is_mistral = True
+
+    @classmethod
+    def from_pretrained(cls, repo_id: str, *, revision: Optional[str] = None) -> "VLLMMistralTokenizer":
+        tokenizer_file = cls._download_mistral_tokenizer_from_hf(repo_id, revision)
+
+        mistral_tokenizer = MistralTokenizer.from_file(tokenizer_file)
+        return cls(mistral_tokenizer)
+
+    @staticmethod
+    def _download_mistral_tokenizer_from_hf(tokenizer_name: str, revision: str) -> str:
+        api = HfApi()
+        repo_info = api.model_info(tokenizer_name)
+        files = [s.rfilename for s in repo_info.siblings]
+        pattern = re.compile(r'^tokenizer\.model\.v.*$|^tekken\.json$')
+
+        matched_files = [file for file in files if pattern.match(file)]
+        if len(matched_files) > 1:
+            raise OSError(f"Found {len(matched_files)} files matching the pattern: {matched_files}. Make sure only one Mistral tokenizer is present in {tokenizer_name}.")
+        elif len(matched_files) == 0: 
+            raise OSError(f"Found {len(matched_files)} files matching the pattern: {matched_files}. Make sure that a Mistral tokenizer is present in {tokenizer_name}.")
+
+        tokenizer_file = hf_hub_download(tokenizer_name, filename=matched_files[0], revision=revision)
+        return tokenizer_file
 
     def encode(self, prompt: str) -> List[int]:
         return self.tokenizer.encode(prompt, bos=False, eos=False)
@@ -149,10 +155,7 @@ def get_tokenizer(
         tokenizer_name = Path(tokenizer_name).parent
 
     if tokenizer_mode == "mistral":
-        tokenizer_file = download_mistral_tokenizer_from_hf(tokenizer_name, revision)
-
-        mistral_tokenizer = MistralTokenizer.from_file(tokenizer_file)
-        tokenizer = VLLMMistralTokenizer(mistral_tokenizer)
+        tokenizer = VLLMMistralTokenizer.from_pretrained(tokenizer_name, revision=revision)
     else:
         try:
             tokenizer = AutoTokenizer.from_pretrained(
