@@ -489,6 +489,10 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
     assert hidden_states.dtype in [
         torch.float32, torch.float16, torch.bfloat16
     ]
+
+    #TODO fp8 is not implemented yet
+    assert not use_fp8
+
     M, K = hidden_states.shape
     E = w1.shape[0]
     N = w2.shape[1] * 16
