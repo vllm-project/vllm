@@ -1,13 +1,12 @@
 import copy
 
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 
-from vllm.distributed import broadcast_tensor_dict, get_pp_group
 from vllm.config import ParallelConfig, ClassifierFreeGuidanceConfig
+from vllm.distributed import get_pp_group, get_tp_group
 from vllm.logger import init_logger
-from vllm.worker.worker import Worker
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
 from vllm.sequence import ExecuteModelRequest, SamplerOutput, SequenceGroupMetadata, SequenceData
 
@@ -79,11 +78,8 @@ class CFGWorker(LoraNotSupportedWorkerBase):
             (guidance_cache_block_size_bytes + root_cache_block_size_bytes))
         return new_num_gpu_blocks, num_cpu_blocks
 
-    def initialize_cache(
-        self, 
-        num_gpu_blocks: int,
-        num_cpu_blocks: int
-        ):
+    def initialize_cache(self, num_gpu_blocks: int,
+                         num_cpu_blocks: int) -> None:
         self.root_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks,
                                           num_cpu_blocks=num_cpu_blocks)
         self.guidance_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks,
@@ -107,13 +103,19 @@ class CFGWorker(LoraNotSupportedWorkerBase):
                 negative_seq_group_metadata = copy.copy(seq_group_metadata)
                 negative_seq_data: Dict[int, SequenceData] = {}
                 for seq_id, seq_data in seq_group_metadata.seq_data.items():
-                    negative_seq_data[seq_id] = copy.copy(seq_data)
-                    negative_seq_data[seq_id].prompt_token_ids = seq_data.negative_prompt_token_ids
-                    negative_seq_data[seq_id].negative_prompt_token_ids = []
-                    negative_seq_data[seq_id].output_token_ids = seq_data.output_token_ids[:]
+                    negative_seq_data[seq_id] = SequenceData(
+                        seq_data._negative_prompt_token_ids,
+                        _output_token_ids=seq_data._output_token_ids,
+                        _cumulative_logprob=seq_data._cumulative_logprob,
+                        _prompt_token_ids_tuple=seq_data._negative_prompt_token_ids,
+                        _num_computed_tokens=seq_data._num_computed_tokens,
+                        _stage=seq_data.stage,
+                        _cached_all_token_ids=seq_data._cached_all_token_ids,
+                        _new_appended_tokens=seq_data._new_appended_tokens,
+                    )
 
                 if negative_seq_group_metadata.is_prompt:
-                    negative_seq_group_metadata._token_chunk_size = list(negative_seq_data.values())[0].get_len()
+                    negative_seq_group_metadata.token_chunk_size = list(negative_seq_data.values())[0].get_len()
 
                 negative_seq_group_metadata.seq_data = negative_seq_data
                 negative_seq_group_metadata_list.append(negative_seq_group_metadata)
@@ -121,56 +123,41 @@ class CFGWorker(LoraNotSupportedWorkerBase):
         else:
             negative_excute_model_req = None
 
-        if self.is_driver_worker:
-            if execute_model_req is None:
-                if self.do_metadata_broadcast:
-                    # This signals that there's no more requests to process for
-                    # now. All workers are running infinite loop with
-                    # broadcast_tensor_dict, and it stops the loop when the
-                    # driver broadcasts an empty input. Send an empty input to
-                    # notify all other workers to stop their execution loop.
-                    broadcast_tensor_dict({}, src=0)
-                return None
-
-            if self.do_metadata_broadcast:
-                broadcast_data = {"flag": 1}
-                broadcast_tensor_dict(broadcast_data, src=0)
-        else:
-            assert self.do_metadata_broadcast
-            broadcast_data = broadcast_tensor_dict(src=0)
-            if not broadcast_data:
-                return None
+        inputs = self.root_worker.prepare_input(execute_model_req)
+        negative_inputs = self.guidance_worker.prepare_input(negative_excute_model_req)
+        if inputs is None:
+            assert negative_inputs is None
+            return None
 
         # get root models's logits
-        scores = self.root_worker.execute_model_part(execute_model_req)
+        condition_logits = self.root_worker.execute_model_part(inputs)
         # get unconditional logits
-        unconditional_logits = self.guidance_worker.execute_model_part(negative_excute_model_req)
+        unconditional_logits = self.guidance_worker.execute_model_part(negative_inputs)
 
         # do classifier free guidance logist process
-        for seq_group in self.root_worker.model_input.sampling_metadata.seq_groups:
-            seq_ids = seq_group.seq_ids
-            guidance_scale = seq_group.sampling_params.guidance_scale
-            if guidance_scale == 1.0:
-                break
-            for seq_id, logits_row_idx in zip(seq_ids, seq_group.sample_indices):
-                logits_row = torch.nn.functional.log_softmax(scores[logits_row_idx], dim=-1)
-                unconditional_logits_row = torch.nn.functional.log_softmax(unconditional_logits[logits_row_idx], dim=-1)
-                scores[logits_row_idx] = guidance_scale * (logits_row - unconditional_logits_row) + unconditional_logits_row
-
-        # print("scores:", scores.shape, scores)
-        # exit(0)
+        model_input, _ = inputs
+        if condition_logits is not None:
+            for seq_group in model_input.sampling_metadata.seq_groups:
+                seq_ids = seq_group.seq_ids
+                guidance_scale = seq_group.sampling_params.guidance_scale
+                if guidance_scale == 1.0:
+                    break
+                for seq_id, logits_row_idx in zip(seq_ids, seq_group.sample_indices):
+                    logits_row = torch.nn.functional.log_softmax(condition_logits[logits_row_idx], dim=-1)
+                    unconditional_logits_row = torch.nn.functional.log_softmax(unconditional_logits[logits_row_idx], dim=-1)
+                    condition_logits[logits_row_idx] = guidance_scale * (logits_row - unconditional_logits_row) + unconditional_logits_row
 
         # do logist_processor
-        scores = self.root_worker.compute_logits(scores)
+        scores = self.root_worker.compute_logits(condition_logits, model_input)
         if not self.is_driver_worker:
             return []
 
         # do sample
-        output = self.root_worker.do_sample(scores)
+        output = self.root_worker.do_sample(scores, model_input)
 
         if not get_pp_group().is_last_rank:
             # output is IntermediateTensors
-            get_pp_group().send_tensor_dict(output.tensors)
+            get_pp_group().send_tensor_dict(output.tensors, all_gather_group=get_tp_group())
             return [None]
 
         # output is List[SamplerOutput]

@@ -736,6 +736,8 @@ class LLMEngine:
                 lora_request=lora_request,
             )
             multi_modal_data = None
+            negative_prompt = None
+            negative_prompt_token_ids = None
         elif isinstance(inputs, dict):
             if "prompt_token_ids" in inputs:
                 prompt = None
@@ -748,7 +750,7 @@ class LLMEngine:
                     request_id=request_id,
                     lora_request=lora_request,
                 )
-            
+
             if "negative_prompt_token_ids" in inputs:
                 negative_prompt = None
                 negative_prompt_token_ids = inputs["negative_prompt_token_ids"]

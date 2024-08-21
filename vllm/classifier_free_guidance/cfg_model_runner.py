@@ -3,6 +3,7 @@ from typing import List, Optional, Union
 import torch
 
 from vllm.distributed import get_pp_group
+from vllm.multimodal import MultiModalInputs
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.worker.model_runner import (ModelRunner, ModelInputForGPUWithSamplingMetadata, 
                                       FLASHINFER_WORKSPACE_BUFFER_SIZE, BatchDecodeWithPagedKVCacheWrapper,
@@ -88,13 +89,18 @@ class CFGModelRunner(ModelRunner):
             "finished_requests_ids": model_input.finished_requests_ids,
             "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
         } if self.has_seqlen_agnostic else {}
+        if (self.observability_config is not None
+                and self.observability_config.collect_model_forward_time):
+            raise NotImplementedError("")
+
         hidden_or_intermediate_states = model_executable(
             input_ids=model_input.input_tokens,
             positions=model_input.input_positions,
             kv_caches=kv_caches,
             attn_metadata=model_input.attn_metadata,
             intermediate_tensors=intermediate_tensors,
-            **multi_modal_kwargs,
+            **MultiModalInputs.as_kwargs(multi_modal_kwargs,
+                                         device=self.device),
             **seqlen_agnostic_kwargs)
 
         return hidden_or_intermediate_states

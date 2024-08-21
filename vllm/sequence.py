@@ -152,9 +152,11 @@ class SequenceData(msgspec.Struct,
     _output_token_ids: array = msgspec.field(
         default_factory=lambda: array(VLLM_TOKEN_ID_ARRAY_TYPE, []))
 
-    _negative_prompt_token_ids: array
+    _negative_prompt_token_ids: array = msgspec.field(
+        default_factory=lambda: array(VLLM_TOKEN_ID_ARRAY_TYPE, []))
     _negative_prompt_token_ids_tuple: Tuple[int,
                                             ...] = msgspec.field(default_factory=tuple)
+    _cached_all_negative_token_ids: List[int] = msgspec.field(default_factory=list)
 
     ### The below fields should not be passed as an argument ###
     _cumulative_logprob: float = 0.0
@@ -174,6 +176,9 @@ class SequenceData(msgspec.Struct,
         assert self._output_token_ids.typecode == "l"
         self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(
             self._prompt_token_ids)
+        assert self._negative_prompt_token_ids.typecode == "l"
+        self._negative_prompt_token_ids_tuple: Tuple[int, ...] = tuple(
+            self._negative_prompt_token_ids)
         self._update_cached_all_tokens()
         self._update_cached_all_negative_tokens()
 
@@ -425,8 +430,8 @@ class Sequence:
                              "encoder input prompt fields?")
 
         self.data = SequenceData(
-            prompt_token_ids=array(VLLM_TOKEN_ID_ARRAY_TYPE, self.prompt_token_ids),
-            negative_prompt_token_ids=array(VLLM_TOKEN_ID_ARRAY_TYPE, self.negative_prompt_token_ids))
+            array(VLLM_TOKEN_ID_ARRAY_TYPE, self.prompt_token_ids),
+            _negative_prompt_token_ids=array(VLLM_TOKEN_ID_ARRAY_TYPE, self.negative_prompt_token_ids))
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
 

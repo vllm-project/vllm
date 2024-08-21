@@ -6,7 +6,7 @@ from vllm.inputs import PromptInputs
 
 llm = LLM(
     model="facebook/opt-6.7b",
-    tensor_parallel_size=1,
+    tensor_parallel_size=2,
     use_v2_block_manager=True,
     classifier_free_guidance_model="facebook/opt-6.7b"
 )
