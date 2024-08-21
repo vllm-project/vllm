@@ -684,10 +684,6 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         if seq.seq_id not in self.block_tables:
             return
 
-        # max_full_block = seq.get_len() // self.block_size - 1
-        # computed_full_blocks = seq.get_len() // self.block_size
-        # print(f"{seq.data.get_prompt_len()=}")
-
         # When chunked prefill is enabled, the computed full blocks
         # should be calculated based on the number of computed tokens.
         max_computed_tokens = (seq.data.get_num_computed_tokens() +
