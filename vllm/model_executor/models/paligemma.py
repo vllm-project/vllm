@@ -16,7 +16,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.gemma import GemmaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import cached_get_tokenizer
+from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .interfaces import SupportsMultiModal
