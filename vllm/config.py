@@ -12,7 +12,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import current_platform
-from vllm.tracing import is_otel_installed
+from vllm.tracing import is_otel_available, otel_import_error_traceback
 from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import (STR_NOT_IMPL_ENC_DEC_CUDAGRAPH, GiB_bytes,
                         cuda_device_count_stateless, get_cpu_memory, is_cpu,
@@ -770,8 +770,8 @@ class ParallelConfig:
         self.tokenizer_pool_config = tokenizer_pool_config
         self.ray_workers_use_nsight = ray_workers_use_nsight
         self.placement_group = placement_group
-
         self.world_size = pipeline_parallel_size * self.tensor_parallel_size
+
         if worker_use_ray:
             if self.distributed_executor_backend is None:
                 self.distributed_executor_backend = "ray"
@@ -867,6 +867,11 @@ class SchedulerConfig:
             swapping. However, when the sequence group has multiple sequences
             (e.g., beam search), recomputation is not currently supported. In
             such a case, we use swapping instead.
+        send_delta_data: Private API. If used, scheduler sends delta data to
+            workers instead of an entire data. It should be enabled only
+            when SPMD worker architecture is enabled. I.e.,
+            VLLM_USE_RAY_SPMD_WORKER=1
+
     """
 
     def __init__(self,
@@ -879,7 +884,8 @@ class SchedulerConfig:
                  enable_chunked_prefill: bool = False,
                  embedding_mode: Optional[bool] = False,
                  preemption_mode: Optional[str] = None,
-                 num_scheduler_steps: int = 1) -> None:
+                 num_scheduler_steps: int = 1,
+                 send_delta_data: bool = False) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
         else:
@@ -909,6 +915,7 @@ class SchedulerConfig:
         self.embedding_mode = embedding_mode
         self.preemption_mode = preemption_mode
         self.num_scheduler_steps = num_scheduler_steps
+        self.send_delta_data = send_delta_data
         self._verify_args()
 
     def _verify_args(self) -> None:
@@ -1714,9 +1721,11 @@ class ObservabilityConfig:
     collect_model_execute_time: bool = False
 
     def __post_init__(self):
-        if not is_otel_installed() and self.otlp_traces_endpoint is not None:
-            raise ValueError("OpenTelemetry packages must be installed before "
-                             "configuring 'otlp_traces_endpoint'")
+        if not is_otel_available() and self.otlp_traces_endpoint is not None:
+            raise ValueError(
+                "OpenTelemetry is not available. Unable to configure "
+                "'otlp_traces_endpoint'. Ensure OpenTelemetry packages are "
+                f"installed. Original error:\n{otel_import_error_traceback}")
 
         if ((self.collect_model_forward_time
              or self.collect_model_execute_time)
