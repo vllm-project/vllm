@@ -90,7 +90,7 @@ def main(args):
     # plot results
     fig, axes = plt.subplots(3, 3, figsize=(16, 14))
     fig.subplots_adjust(hspace=1)
-    methods = ["vllm", "trtllm", "sglang", "lmdeploy", "tgi"]
+    methods = ["vllm", "trt", "sglang", "lmdeploy"]
     for i, model in enumerate(["llama8B", "llama70B", "mixtral8x7B"]):
         for j, metric in enumerate(["TTFT", "ITL", "Tput"]):
             ax = axes[i, j]
