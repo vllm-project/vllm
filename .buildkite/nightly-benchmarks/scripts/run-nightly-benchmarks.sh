@@ -313,8 +313,6 @@ main() {
   check_hf_token
   get_current_llm_serving_engine
 
-  pip install -U transformers
-
   # check storage
   df -h
 
