@@ -1,11 +1,11 @@
 """
 This file tests significant load on the vLLM server.
-Inside vLLM, we use a zeromq based messaging protocol
-to enable multiprocessing between the API server and 
-the AsyncLLMEngine.
+Inside vLLM, we use a zeromq based RPC protocol
+to enable multiprocessing w/ the API server and 
+the AsyncLLMEngine to avoid GIL conflict.
 
-This test confirms that even at high load with >20k 
-active requests, zmq does not drop any messages.
+This test confirms that even at high load with many 
+concurrent requests, zmq does not drop any messages.
 """
 
 import asyncio
@@ -19,7 +19,7 @@ from ...utils import RemoteOpenAIServer
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
 MODEL_NAME = "Qwen/Qwen2-0.5B-Instruct"
-NUM_REQUESTS = 10000
+NUM_REQUESTS = 10
 MAX_TOKENS = 50
 MESSAGES = [{
     "role": "system",

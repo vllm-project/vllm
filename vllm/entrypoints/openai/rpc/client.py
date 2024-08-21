@@ -166,7 +166,7 @@ class AsyncEngineRPCClient:
         self.context.destroy()
 
     @contextmanager
-    def to_proxy_socket(self, request_id=None):
+    def to_proxy_socket(self):
         # Connect to the RPCServer via the proxy.
         # Note that we use DEALER to enable asynchronous communication
         # to enable streaming.
