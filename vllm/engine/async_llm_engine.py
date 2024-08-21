@@ -2,11 +2,10 @@ import asyncio
 import time
 from dataclasses import dataclass
 from functools import partial
-from typing import (AsyncGenerator, Callable, Dict, Iterable, List, Mapping,
-                    Optional, Set, Tuple, Type, Union)
+from typing import (Any, AsyncGenerator, Callable, Dict, Iterable, List,
+                    Mapping, Optional, Set, Tuple, Type, Union)
 
 import torch
-from transformers import PreTrainedTokenizer
 from typing_extensions import assert_never
 
 import vllm.envs as envs
@@ -31,6 +30,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
                            SequenceGroupMetadata)
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import print_warning_once
 
@@ -85,9 +85,8 @@ class AsyncStream:
 
     def put(self, item: Union[RequestOutput, EmbeddingRequestOutput,
                               Exception]) -> None:
-        if self._finished:
-            return
-        self._queue.put_nowait(item)
+        if not self._finished:
+            self._queue.put_nowait(item)
 
     def finish(
         self,
@@ -96,7 +95,7 @@ class AsyncStream:
         if not self._finished:
             self._finished = True
             self._queue.put_nowait(
-                exception if exception is not None else STOP_ITERATION)
+                exception if self._is_raisable(exception) else STOP_ITERATION)
 
     @property
     def finished(self) -> bool:
@@ -106,9 +105,9 @@ class AsyncStream:
         self
     ) -> AsyncGenerator[Union[RequestOutput, EmbeddingRequestOutput], None]:
         try:
-            while not self._finished:
+            while True:
                 result = await self._queue.get()
-                if isinstance(result, Exception):
+                if self._is_raisable(result):
                     if result == STOP_ITERATION:
                         return
                     raise result
@@ -116,6 +115,12 @@ class AsyncStream:
         except GeneratorExit:
             self._cancel(self.request_id)
             raise asyncio.CancelledError from None
+
+    @staticmethod
+    def _is_raisable(value: Any):
+        return isinstance(value, BaseException) or \
+                (isinstance(value, type) and \
+                 issubclass(value, BaseException))
 
 
 class RequestTracker:
@@ -427,8 +432,8 @@ class _AsyncLLMEngine(LLMEngine):
         lora_request: Optional[LoRARequest],
     ) -> List[int]:
         """Async version of :meth:`_tokenize_prompt`."""
-        tokenizer = self.get_tokenizer_group("prompts must be None if "
-                                             "skip_tokenizer_init is True")
+        tokenizer = self.get_tokenizer_group(
+            missing_msg="prompts must be None if skip_tokenizer_init is True")
 
         return await tokenizer.encode_async(request_id=request_id,
                                             prompt=prompt,
@@ -761,6 +766,11 @@ class AsyncLLMEngine:
     def errored(self) -> bool:
         return self._errored_with is not None
 
+    @property
+    def limit_concurrency(self) -> Optional[int]:
+        """Maximum number of concurrently running requests."""
+        return None
+
     def set_errored(self, exc: Exception) -> None:
         self._errored_with = exc
 
@@ -771,7 +781,7 @@ class AsyncLLMEngine:
     async def get_tokenizer(
         self,
         lora_request: Optional[LoRARequest] = None,
-    ) -> "PreTrainedTokenizer":
+    ) -> AnyTokenizer:
         if self.engine_use_ray:
             return await self.engine.get_tokenizer.remote(  # type: ignore
                 lora_request)
