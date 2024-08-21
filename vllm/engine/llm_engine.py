@@ -1366,6 +1366,15 @@ class LLMEngine:
             for logger in self.stat_loggers.values():
                 logger.log(stats)
 
+    @classmethod
+    def get_queue_length(self) -> int:
+        """
+        Custom for the NATS worker to know when to grab a job
+        """
+        return sum(
+            len(scheduler.waiting) for scheduler in self.scheduler)
+
+
     def _get_stats(
             self,
             scheduler_outputs: Optional[SchedulerOutputs],
