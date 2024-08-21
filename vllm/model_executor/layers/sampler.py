@@ -39,7 +39,7 @@ else:
 SampleResultType = List[Tuple[List[int], List[int]]]
 
 # Types of temporary data structures used for
-# computing sample_results
+# computing sample_result
 SampleMetadataType = Dict[SamplingType, Tuple[List[int],
                                               List[SequenceGroupToSample]]]
 MultinomialSamplesType = Dict[SamplingType, torch.Tensor]
@@ -47,10 +47,14 @@ SampleResultsDictType = Dict[int, Tuple[List[int], List[int]]]
 
 
 # Encapsulates temporary data structures for computing
-# sample_result; for multi-step scheduling: must be returned
-# by sampler.forward() and used later to compute the pythonized
-# sample_result; for single-step scheduling: consumed immediately
-# inside sampler-forward() to compute pythonized sample_result.
+# sample_result.
+#
+# * For multi-step scheduling: must be returned
+#   by `Sampler.forward()` and used later to compute the pythonized
+#   sample_result
+#
+# * For single-step scheduling: consumed immediately
+#   inside `Sampler.forward()` to compute pythonized sample_result.
 @dataclass
 class SampleResultArgsType:
     sample_metadata: SampleMetadataType
@@ -66,7 +70,7 @@ class SampleResultArgsType:
 # sample result types
 MaybeDeferredSampleResultType = Union[SampleResultType, SampleResultArgsType]
 
-# Shorthand for _sample()
+# Abbreviation of the _sample() return type
 SampleReturnType = Tuple[MaybeDeferredSampleResultType, Optional[torch.Tensor]]
 
 
@@ -89,9 +93,9 @@ class SamplerOutput(
     # On-device tensor containing the logprobs of each token.
     logprobs: Optional["torch.Tensor"] = None
 
-    # Holds the pythonized sample result (single-step)
-    # or arguments for deferred pythonized sample result
-    # computation (muliti-step)
+    # Holds either (1) the pythonized sampler result (single-step scheduling)
+    # or (2) what will be arguments for later deferred pythonization of the
+    # sampler result (muliti-step scheduling)
     deferred_sample_results_args: Optional[SampleResultArgsType] = None
 
     # On-device tensor containing the sampled token ids.
@@ -203,6 +207,19 @@ class Sampler(nn.Module):
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
         """
+        Single-step scheduling:
+        * Perform GPU-side sampling computation & compute
+          GPU-side logprobs tensor
+        * Pythonize sampling result & logprobs tensor
+
+        Multi-step scheduling:
+        * Perform GPU-side sampling computation & compute
+          GPU-side logprobs tensor
+        * Defer Pythonization of sampling result & logprobs
+          tensor
+        * Encapsulate arguments required for deferred Pythonization
+          in the :class:`SamplerOutput` structure
+
         Args:
             logits: (num_tokens, vocab_size).
             sampling_metadata: Metadata for sampling.
@@ -265,15 +282,22 @@ class Sampler(nn.Module):
         )
 
         if self.include_gpu_probs_tensor:
+            # Since we will defer sampler result Pythonization,
+            # preserve GPU-side tensors in support of later
+            # deferred pythonization of logprobs
             assert maybe_sampled_tokens_tensor is not None
             on_device_tensors = (probs, logprobs, maybe_sampled_tokens_tensor)
         else:
+            # Since Pythonization has already happened, don't preserve
+            # GPU-side tensors.
             on_device_tensors = None
 
         # Get the logprobs query results.
         prompt_logprobs = None
         sample_logprobs = None
         if not sampling_metadata.skip_sampler_cpu_output:
+            # Pythonize logprobs now (GPU -> CPU); do not
+            # defer.
             assert not isinstance(maybe_deferred_sample_results,
                                   SampleResultArgsType)
             prompt_logprobs, sample_logprobs = get_logprobs(
@@ -717,6 +741,15 @@ def _sample_with_torch(
 ) -> SampleReturnType:
     '''
     Torch-oriented _sample() implementation.
+
+    Single-step scheduling: 
+    * Perform GPU-side sampling computation
+    * Immediately Pythonize sampling result
+
+    Multi-step scheduling:
+    * Perform GPU-side sampling computation
+    * Defer Pythonization & preserve GPU-side
+      tensors required for Pythonization
     '''
 
     categorized_seq_group_ids: Dict[SamplingType,
@@ -807,8 +840,8 @@ def _sample_with_torch(
         else:
             raise ValueError(f"Unsupported sampling type: {sampling_type}")
 
-    # Begin building arguments for computing Pythonized sampler
-    # results.
+    # Encapsulate arguments for computing Pythonized sampler
+    # results, whether deferred or otherwise.
     maybe_deferred_args = SampleResultArgsType(
         sampling_metadata=sampling_metadata,
         sample_metadata=sample_metadata,
@@ -819,7 +852,7 @@ def _sample_with_torch(
 
     if not sampling_metadata.skip_sampler_cpu_output:
         # GPU<->CPU sync happens here.
-        # This also converts the sample output to Python objects.
+        # This also converts the sampler output to a Python object.
         # Return Pythonized sampler result & sampled token ids
         return get_pythonized_sample_results(
             maybe_deferred_args), sampled_token_ids_tensor

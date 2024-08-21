@@ -420,17 +420,23 @@ DeferredLogprobsReturnType = Tuple[Optional[List[Optional[PromptLogprobs]]],
 
 
 def deferred_pythonize_logprobs(
-        output: SamplerOutput,
-        sampling_metadata: SamplingMetadata) -> DeferredLogprobsReturnType:
+    output: SamplerOutput,
+    sampling_metadata: SamplingMetadata,
+) -> DeferredLogprobsReturnType:
     '''
     Perform deferred logprob Pythonization.
 
-    1. Pythonize GPU-side output.deferred_sample_results_args
+    1. Pythonize GPU-side sampler result
        tensors into CPU-side sampler result.
-    2. Pythonize GPU-side output.logprobs tensor into
-       CPU-side logprobs lists, utilizing CPU-side
-       sampler result for the computation.
+    2. Pythonize GPU-side logprobs tensor into
+       CPU-side logprobs lists, utilizing 
+       the Pythonized sampler result computed
+       in step 1.
     
+    These deferred computations are not required for
+    single-step scheduling or the `profile_run()`
+    phase of multi-step scheduling.
+
     Arguments:
 
     * output: sampler output (under deferred Pythonization)
@@ -442,16 +448,16 @@ def deferred_pythonize_logprobs(
     * sample_logprobs (CPU)
     '''
 
-    # - Deferred pythonized sample result computation
+    # - Deferred pythonization of sample result
     sampler_result = get_pythonized_sample_results(
         output.deferred_sample_results_args)
 
-    # - Erase the CUDA-side deferred sample_result
+    # - Erase the GPU-side deferred sample_result
     #   computation args to ensure it is never
     #   pythonized or transferred to CPU
     output.deferred_sample_results_args = None
 
-    # - Compute logprobs
+    # - Deferred pythonization of logprobs
     (
         prompt_logprobs,
         sample_logprobs,
@@ -494,7 +500,10 @@ def _pythonize_sampler_output(model_input: StatefulModelInput,
         frozen_model_input.sampling_metadata.skip_sampler_cpu_output)
 
     # We are guaranteed output tensors are ready, so it is safe to
-    # pythonize the sampler output & obtain CPU-side logprobs
+    # pythonize the sampler output & obtain CPU-side logprobs.
+    #
+    # However this computation may be skipped entirely
+    # if no pythonization was deferred.
     (
         prompt_logprobs,
         sample_logprobs,
