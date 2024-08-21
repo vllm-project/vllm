@@ -1,6 +1,7 @@
 import asyncio
 import time
-from typing import AsyncGenerator, AsyncIterator, Callable, Dict, List, Optional
+from typing import (AsyncGenerator, AsyncIterator, Callable, Dict, List,
+                    Optional)
 from typing import Sequence as GenericSequence
 from typing import Tuple, Union, cast
 
@@ -9,7 +10,6 @@ from fastapi import Request
 from vllm.config import ModelConfig
 from vllm.engine.protocol import AsyncEngineClient
 from vllm.entrypoints.logger import RequestLogger
-
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
@@ -20,19 +20,14 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               CompletionStreamResponse,
                                               ErrorResponse, UsageInfo)
 # yapf: enable
-from vllm.entrypoints.openai.serving_engine import (
-    LoRAModulePath,
-    OpenAIServing,
-    PromptAdapterPath,
-)
+from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
+                                                    OpenAIServing,
+                                                    PromptAdapterPath)
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
-from vllm.tracing import (
-    contains_trace_headers,
-    extract_trace_headers,
-    log_tracing_disabled_warning,
-)
+from vllm.tracing import (contains_trace_headers, extract_trace_headers,
+                          log_tracing_disabled_warning)
 from vllm.transformers_utils.tokenizer import AnyTokenizer, AnyHFTokenizer
 from vllm.utils import merge_async_iterators, random_uuid
 
@@ -57,15 +52,13 @@ class OpenAIServingCompletion(OpenAIServing):
         request_logger: Optional[RequestLogger],
         return_tokens_as_token_ids: bool = False,
     ):
-        super().__init__(
-            async_engine_client=async_engine_client,
-            model_config=model_config,
-            served_model_names=served_model_names,
-            lora_modules=lora_modules,
-            prompt_adapters=prompt_adapters,
-            request_logger=request_logger,
-            return_tokens_as_token_ids=return_tokens_as_token_ids,
-        )
+        super().__init__(async_engine_client=async_engine_client,
+                         model_config=model_config,
+                         served_model_names=served_model_names,
+                         lora_modules=lora_modules,
+                         prompt_adapters=prompt_adapters,
+                         request_logger=request_logger,
+                         return_tokens_as_token_ids=return_tokens_as_token_ids)
 
     async def create_completion(
         self,
@@ -121,18 +114,15 @@ class OpenAIServingCompletion(OpenAIServing):
                     tokenizer,
                     guided_decode_logits_processor,
                     default_max_tokens=self.max_model_len -
-                    len(prompt_inputs["prompt_token_ids"]),
-                )
+                    len(prompt_inputs["prompt_token_ids"]))
 
                 request_id_item = f"{request_id}-{i}"
 
-                self._log_inputs(
-                    request_id_item,
-                    prompt_inputs,
-                    params=sampling_params,
-                    lora_request=lora_request,
-                    prompt_adapter_request=prompt_adapter_request,
-                )
+                self._log_inputs(request_id_item,
+                                 prompt_inputs,
+                                 params=sampling_params,
+                                 lora_request=lora_request,
+                                 prompt_adapter_request=prompt_adapter_request)
 
                 is_tracing_enabled = (
                     await self.async_engine_client.is_tracing_enabled())
@@ -169,15 +159,13 @@ class OpenAIServingCompletion(OpenAIServing):
 
         # Streaming response
         if stream:
-            return self.completion_stream_generator(
-                request,
-                result_generator,
-                request_id,
-                created_time,
-                model_name,
-                num_prompts=len(prompts),
-                tokenizer=tokenizer,
-            )
+            return self.completion_stream_generator(request,
+                                                    result_generator,
+                                                    request_id,
+                                                    created_time,
+                                                    model_name,
+                                                    num_prompts=len(prompts),
+                                                    tokenizer=tokenizer)
 
         # Non-streaming response
         final_res_batch: List[Optional[RequestOutput]] = [None] * len(prompts)

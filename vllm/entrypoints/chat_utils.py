@@ -2,16 +2,8 @@ import codecs
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import (
-    Any,
-    Awaitable,
-    Iterable,
-    List,
-    Literal,
-    Optional,
-    Tuple,
-    Union,
-)
+from typing import (Any, Awaitable, Iterable, List, Literal, Optional, Tuple,
+                    Union)
 
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -29,10 +21,8 @@ from typing_extensions import Required, TypeAlias, TypedDict
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalDataDict
-from vllm.multimodal.utils import (
-    async_get_and_parse_audio,
-    async_get_and_parse_image,
-)
+from vllm.multimodal.utils import (async_get_and_parse_audio,
+                                   async_get_and_parse_image)
 from vllm.transformers_utils.tokenizer import AnyTokenizer, AnyHFTokenizer
 
 logger = init_logger(__name__)
@@ -66,7 +56,6 @@ ChatCompletionContentPartParam: TypeAlias = Union[
 
 class CustomChatCompletionMessageParam(TypedDict, total=False):
     """Enables custom roles in the Chat Completion API."""
-
     role: Required[str]
     """The role of the message's author."""
 
@@ -98,7 +87,7 @@ class ChatMessageParseResult:
 
 
 def load_chat_template(
-    chat_template: Optional[Union[Path, str]]) -> Optional[str]:
+        chat_template: Optional[Union[Path, str]]) -> Optional[str]:
     if chat_template is None:
         return None
     try:
@@ -124,11 +113,8 @@ def load_chat_template(
 
 
 @lru_cache(maxsize=None)
-def _mm_token_str(
-    model_config: ModelConfig,
-    tokenizer: AnyHFTokenizer,
-    modality: Literal["image", "audio"],
-) -> Optional[str]:
+def _mm_token_str(model_config: ModelConfig, tokenizer: AnyTokenizer,
+                  modality: Literal["image", "audio"]) -> Optional[str]:
     # TODO: Let user specify how to insert image tokens into prompt
     # (similar to chat template)
     if modality == "image":

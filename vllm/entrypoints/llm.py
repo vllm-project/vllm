@@ -15,9 +15,7 @@ from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.guided_decoding import (
-    GuidedDecodingRequest,
-    get_local_guided_decoding_logits_processor,
-)
+GuidedDecodingRequest, get_local_guided_decoding_logits_processor)
 from vllm.model_executor.guided_decoding.guided_fields import LLMGuidedOptions
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
@@ -138,14 +136,14 @@ class LLM:
         disable_custom_all_reduce: bool = False,
         **kwargs,
     ) -> None:
-        """
+        '''
         LLM constructor.
 
         Note: if enforce_eager is unset (enforce_eager is None)
         it defaults to False for decoder-only models and True
         for encoder/decoder models, since encoder/decoder models
         do not currently support CUDAGraph.
-        """
+        '''
 
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
@@ -280,7 +278,7 @@ class LLM:
     def generate(
         self,
         prompts: Union[Union[PromptInputs, Sequence[PromptInputs]],
-                       Optional[Union[str, List[str]]], ] = None,
+                       Optional[Union[str, List[str]]]] = None,
         sampling_params: Optional[Union[SamplingParams,
                                         Sequence[SamplingParams]]] = None,
         prompt_token_ids: Optional[Union[List[int], List[List[int]]]] = None,
@@ -288,7 +286,7 @@ class LLM:
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
-                                               GuidedDecodingRequest]] = None,
+                                               GuidedDecodingRequest]] = None
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -347,8 +345,7 @@ class LLM:
             params=sampling_params,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
-            guided_options=guided_options_request,
-        )
+            guided_options=guided_options_request)
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return LLMEngine.validate_outputs(outputs, RequestOutput)
@@ -501,7 +498,7 @@ class LLM:
     def encode(
         self,
         prompts: Union[Union[PromptInputs, Sequence[PromptInputs]],
-                       Optional[Union[str, List[str]]], ] = None,
+                       Optional[Union[str, List[str]]]] = None,
         pooling_params: Optional[Union[PoolingParams,
                                        Sequence[PoolingParams]]] = None,
         prompt_token_ids: Optional[Union[List[int], List[List[int]]]] = None,
@@ -581,8 +578,8 @@ class LLM:
         if prompts is not None:
             num_requests = len(prompts)
         if prompt_token_ids is not None:
-            if num_requests is not None and num_requests != len(
-                    prompt_token_ids):
+            if (num_requests is not None
+                    and num_requests != len(prompt_token_ids)):
                 raise ValueError("The lengths of prompts and prompt_token_ids "
                                  "must be the same.")
 
@@ -610,7 +607,7 @@ class LLM:
         self,
         inputs: Union[PromptInputs, Sequence[PromptInputs]],
         params: Union[SamplingParams, Sequence[SamplingParams], PoolingParams,
-                      Sequence[PoolingParams], ],
+                      Sequence[PoolingParams]],
         lora_request: Optional[Union[Sequence[LoRARequest], LoRARequest]],
         prompt_adapter_request: Optional[PromptAdapterRequest],
         guided_options: Optional[GuidedDecodingRequest] = None,
@@ -665,21 +662,17 @@ class LLM:
         )
 
     def _add_guided_processor(
-        self,
-        params: SamplingParams,
-        guided_options: Optional[GuidedDecodingRequest] = None,
-    ):
+            self,
+            params: SamplingParams,
+            guided_options: Optional[GuidedDecodingRequest] = None):
         if guided_options:
             if guided_options.guided_decoding_backend is None:
                 decoding_config = self.llm_engine.get_decoding_config()
                 guided_options.guided_decoding_backend = (
                     decoding_config.guided_decoding_backend)
-            guided_logits_processor = (
-                get_local_guided_decoding_logits_processor(  # noqa
-                    guided_options.guided_decoding_backend,
-                    guided_options,
-                    self.get_tokenizer(),
-                ))
+            guided_logits_processor = get_local_guided_decoding_logits_processor(  #noqa
+                guided_options.guided_decoding_backend, guided_options,
+                self.get_tokenizer())
             if guided_logits_processor:
                 if params.logits_processors is None:
                     params.logits_processors = []
