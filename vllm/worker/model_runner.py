@@ -101,7 +101,8 @@ class ModelInputForGPU(ModelRunnerInputBase):
     finished_requests_ids: Optional[List[str]] = None
     virtual_engine: int = 0
     callback_fn: Optional[Callable] = None
-
+    use_async_and_multi_step: bool = False
+    
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
@@ -1460,6 +1461,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         kv_caches: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
+        callback_fn = None
     ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         if num_steps > 1:
             raise ValueError("num_steps > 1 is not supported in ModelRunner")
@@ -1573,8 +1575,13 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         if not self.is_driver_worker:
             return []
 
-        if (model_input.callback_fn is not None):
-            model_input.callback_fn(is_async=True)
+        if callback_fn is not None:
+            # Async + multi-step
+            callback_fn()
+        else:
+            # Only async
+            if (model_input.callback_fn is not None):
+                model_input.callback_fn(is_async=True)
 
         # Sample the next token.
         output: SamplerOutput = self.model.sample(

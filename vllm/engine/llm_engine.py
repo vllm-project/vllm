@@ -1183,20 +1183,30 @@ class LLMEngine:
 
         return
 
-    def _process_model_outputs(self, is_async) -> None:
+    def _process_model_outputs(self,
+                               is_async: bool,
+                               sampler_output: Optional[SamplerOutput] = None,
+                               is_last_output: bool = False) -> None:
         """Apply the model output to the sequences in the scheduled seq groups.
 
         Returns RequestOutputs that can be returned to the client.
         """
         now = time.time()
 
-        self.request_outputs.clear()
+        if sampler_output is None:
+            self.request_outputs.clear()
 
         if len(self.output_queue) == 0:
             return None
 
-        (outputs, scheduled_ids,
-         scheduler_outputs) = self.output_queue.popleft()
+        if sampler_output is not None:
+            (outputs, scheduled_ids, scheduler_outputs) = self.output_queue[0]
+            assert outputs is None
+            outputs = [sampler_output]
+        else:
+            (outputs, scheduled_ids,
+             scheduler_outputs) = self.output_queue.popleft()
+
         # Organize outputs by [step][sequence group] instead of
         # [sequence group][step].
         if len(outputs) > 1:
@@ -1250,14 +1260,18 @@ class LLMEngine:
                 self.output_processor.process_outputs(seq_group, output,
                                                       is_async)
 
+        if sampler_output is not None and not is_last_output:
+            return
+
         # Free the finished sequence groups.
         for scheduler in self.scheduler:
             scheduler.free_finished_seq_groups()
 
         # Create the outputs.
         for i, (scheduled_seq_group, _) in enumerate(scheduled_ids):
-            if i in finished_before:
-                continue  # Avoids double processing
+            if sampler_output is None:
+                if i in finished_before:
+                    continue  # Avoids double processing
 
             seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)

@@ -60,7 +60,7 @@ async def test_multi_step(example_prompts, model: str, tp_size: int,
 
     server_args = DEFAULT_SERVER_ARGS + ["--enforce-eager"]
     ms_server_args = DEFAULT_SERVER_ARGS + \
-        ["--num-scheduler-steps", f"{num_scheduler_steps}"]
+        ["--num-scheduler-steps", f"{num_scheduler_steps}"]#, "--disable-output-proc-callback"]
 
     if eager_mode:
         ms_server_args.append("--enforce-eager")
@@ -82,4 +82,11 @@ async def test_multi_step(example_prompts, model: str, tp_size: int,
 
     ref_generations = get_text_generations(ref_completions)
     test_generations = get_text_generations(test_completions)
+
+    print("ref_generations:")
+    for gen in ref_generations:
+        print("ref_gen: {}".format(gen))
+    print("test_generations:")
+    for gen in test_generations:
+        print("test_gen: {}".format(gen))
     assert ref_generations == test_generations

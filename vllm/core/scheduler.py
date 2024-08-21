@@ -1104,9 +1104,7 @@ class Scheduler:
             common_computed_block_nums = []
 
         # TODO: Combine multi-step and async postprocessor
-        allow_output_proc_callback: bool = (
-            self.use_output_proc_callback
-            and not self.scheduler_config.is_multi_step)
+        allow_output_proc_callback: bool = self.use_output_proc_callback
 
         # Create list of scheduled request ids
         scheduled_ids: List[Tuple[ScheduledSequenceGroup,

@@ -293,6 +293,7 @@ class _AsyncLLMEngine(LLMEngine):
         scheduler_outputs = cached_outputs.scheduler_outputs
         scheduled_ids = cached_outputs.scheduled_ids
         allow_output_proc_callback = cached_outputs.allow_output_proc_callback
+
         # skip the scheduler if there are any remaining steps in the seq groups.
         # This ensures that the scheduler is only called again when the current
         # batch has completed.
@@ -300,6 +301,8 @@ class _AsyncLLMEngine(LLMEngine):
             (seq_group_metadata_list, scheduler_outputs, scheduled_ids,
              allow_output_proc_callback
              ) = self.scheduler[virtual_engine].schedule()
+
+            self.request_outputs.clear()
 
             if (self.scheduler_config.is_multi_step
                     and scheduler_outputs.num_lookahead_slots > 0):
@@ -309,9 +312,18 @@ class _AsyncLLMEngine(LLMEngine):
                     virtual_engine, seq_group_metadata_list, scheduler_outputs,
                     scheduled_ids, allow_output_proc_callback)
 
+            if self.scheduler_config.is_multi_step and allow_output_proc_callback:
+                assert len(self.output_queue) == 0
+                self.output_queue.append(
+                    (None, scheduled_ids, scheduler_outputs))
+
         assert seq_group_metadata_list is not None
         assert scheduler_outputs is not None
         assert scheduled_ids is not None
+
+        # Detect async + multi-step
+        use_async_and_multi_step = (self.scheduler_config.is_multi_step
+                                    and allow_output_proc_callback)
 
         if not scheduler_outputs.is_empty():
             finished_requests_ids = self.scheduler[
@@ -339,6 +351,7 @@ class _AsyncLLMEngine(LLMEngine):
 
             if allow_output_proc_callback:
                 execute_model_req.callback_fn = self._process_model_outputs
+                execute_model_req.use_async_and_multi_step = use_async_and_multi_step
 
             # Execute the model.
             output = await self.model_executor.execute_model_async(
@@ -348,7 +361,7 @@ class _AsyncLLMEngine(LLMEngine):
             if self.scheduler_config.is_multi_step:
                 self._update_cached_scheduler_output(virtual_engine, output)
         else:
-            if len(self.output_queue) > 0:
+            if not use_async_and_multi_step and len(self.output_queue) > 0:
                 self._process_model_outputs(is_async=True)
             output = []
 
@@ -363,29 +376,32 @@ class _AsyncLLMEngine(LLMEngine):
                 self.cached_scheduler_outputs[
                     virtual_engine] = SchedulerOutputState()
 
-            # Cache results in engine
-            self.output_queue.append(
-                (output, scheduled_ids, scheduler_outputs))
+            if use_async_and_multi_step:
+                self.output_queue.clear()
 
-            if (len(output) > 0) and allow_output_proc_callback:
-                assert len(
-                    output
-                ) == 1, "Multi step decoding does not work with output processor callback"  # noqa: E501
-                self._advance_to_next_step(
-                    output[0], seq_group_metadata_list,
-                    scheduler_outputs.scheduled_seq_groups)
+            if not use_async_and_multi_step:
+                self.output_queue.append(
+                    (output, scheduled_ids, scheduler_outputs))
+
+                if (len(output) > 0) and allow_output_proc_callback:
+                    assert len(
+                        output
+                    ) == 1, "Multi step decoding does not work with output processor callback"  # noqa: E501
+                    self._advance_to_next_step(
+                        output[0], seq_group_metadata_list,
+                        scheduler_outputs.scheduled_seq_groups)
 
             if not allow_output_proc_callback:
                 self._process_model_outputs(is_async=False)
 
                 # Log stats.
                 self.do_log_stats(scheduler_outputs, output)
-                
+
                 # Tracing
                 self.do_tracing(scheduler_outputs)
 
         else:
-            self.request_outputs = []
+            return []
 
         return self.request_outputs
 

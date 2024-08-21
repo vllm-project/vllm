@@ -215,6 +215,19 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         )
         return model_input
 
+    def async_process_outputs(self):
+        process_model_outputs_fn = self._cur_model_input.frozen_model_input.callback_fn
+        assert process_model_outputs_fn is not None
+
+        for model_output in self._cur_model_input.cached_outputs:
+            if not model_output.pythonized:
+                model_output.maybe_pythonize(self._cur_model_input,
+                                            self._copy_stream,
+                                            self.pinned_sampled_token_ids)
+                if model_output.pythonized:
+                    process_model_outputs_fn(
+                        is_async=False, sampler_output=model_output.sampler_output)
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -272,10 +285,15 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
                 model_input, model_input.cached_outputs[-1].sampler_output)
 
         # Execute the model
-        output = self._base_model_runner.execute_model(frozen_model_input,
-                                                       kv_caches,
-                                                       intermediate_tensors,
-                                                       num_steps=1)
+        self._cur_model_input = model_input
+
+        output = self._base_model_runner.execute_model(
+            frozen_model_input,
+            kv_caches,
+            intermediate_tensors,
+            num_steps=1,
+            callback_fn=self.async_process_outputs
+            if frozen_model_input.use_async_and_multi_step else None)
 
         # record the event for the current step so that the next step can sync
         model_input.record_step_event(current_stream)
@@ -301,9 +319,11 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
             output[0].logprobs = None
             # Pythonize the output if CPU is ahead and the previous step is
             # ready.
-            for model_output in model_input.cached_outputs:
-                model_output.maybe_pythonize(model_input, self._copy_stream,
-                                             self.pinned_sampled_token_ids)
+            if not frozen_model_input.use_async_and_multi_step:
+                for model_output in model_input.cached_outputs:
+                    model_output.maybe_pythonize(model_input,
+                                                 self._copy_stream,
+                                                 self.pinned_sampled_token_ids)
 
         model_input.current_step += 1
 
@@ -317,9 +337,23 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         # Pythonize the output and block if needed since it is the last step
         if model_input.is_last_step:
             outputs = []
-            for output in model_input.cached_outputs:
-                output.pythonize(model_input, self._copy_stream,
-                                 self.pinned_sampled_token_ids)
+            for output_id in range(len(model_input.cached_outputs)):
+                is_last_output = output_id == len(
+                    model_input.cached_outputs) - 1
+
+                output = model_input.cached_outputs[output_id]
+                if not output.pythonized:
+                    output.pythonize(model_input, self._copy_stream,
+                                     self.pinned_sampled_token_ids)
+
+                    if model_input.frozen_model_input.use_async_and_multi_step:
+                        process_model_outputs_fn = model_input.frozen_model_input.callback_fn
+                        assert process_model_outputs_fn is not None
+                        process_model_outputs_fn(
+                            is_async=False,
+                            sampler_output=output.sampler_output,
+                            is_last_output=is_last_output)
+
                 outputs.append(output.sampler_output)
             return outputs
 
