@@ -59,7 +59,7 @@ get_current_llm_serving_engine() {
 
   if which trtllm-build >/dev/null; then
     echo "Container: tensorrt-llm"
-    export CURRENT_LLM_SERVING_ENGINE=tensorrt-llm
+    export CURRENT_LLM_SERVING_ENGINE=trt
     return
   fi
 
@@ -212,6 +212,12 @@ run_serving_tests() {
       fi
 
       new_test_name=$test_name"_qps_"$qps
+
+      backend=$CURRENT_LLM_SERVING_ENGINE
+
+      if [[ $backend = "trt" ]]; then
+        backend="tensorrt-llm"
+      fi
 
       if [[ "$dataset_name" = "sharegpt" ]]; then
 
