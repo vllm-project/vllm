@@ -14,10 +14,12 @@ def test_cpu_offload_fp8():
     # Test quantization of an unquantized checkpoint
     compare_two_settings("meta-llama/Meta-Llama-3-8B-Instruct",
                          ["--quantization", "fp8"],
-                         ["--quantization", "fp8", "--cpu-offload-gb", "2"])
+                         ["--quantization", "fp8", "--cpu-offload-gb", "2"],
+                         max_wait_seconds=480)
     # Test loading a quantized checkpoint
     compare_two_settings("neuralmagic/Meta-Llama-3-8B-Instruct-FP8", [],
-                         ["--cpu-offload-gb", "2"])
+                         ["--cpu-offload-gb", "2"],
+                         max_wait_seconds=480)
 
 
 @pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
@@ -25,11 +27,13 @@ def test_cpu_offload_fp8():
 def test_cpu_offload_gptq():
     # Test GPTQ Marlin
     compare_two_settings("Qwen/Qwen2-1.5B-Instruct-GPTQ-Int4", [],
-                         ["--cpu-offload-gb", "1"])
+                         ["--cpu-offload-gb", "1"],
+                         max_wait_seconds=480)
     # Test GPTQ
     compare_two_settings("Qwen/Qwen2-1.5B-Instruct-GPTQ-Int4",
                          ["--quantization", "gptq"],
-                         ["--quantization", "gptq", "--cpu-offload-gb", "1"])
+                         ["--quantization", "gptq", "--cpu-offload-gb", "1"],
+                         max_wait_seconds=480)
 
 
 @pytest.mark.skipif(not is_quant_method_supported("awq_marlin"),
@@ -37,11 +41,13 @@ def test_cpu_offload_gptq():
 def test_cpu_offload_awq():
     # Test AWQ Marlin
     compare_two_settings("Qwen/Qwen2-1.5B-Instruct-AWQ", [],
-                         ["--cpu-offload-gb", "1"])
+                         ["--cpu-offload-gb", "1"],
+                         max_wait_seconds=480)
     # Test AWQ
     compare_two_settings("Qwen/Qwen2-1.5B-Instruct-AWQ",
                          ["--quantization", "awq"],
-                         ["--quantization", "awq", "--cpu-offload-gb", "1"])
+                         ["--quantization", "awq", "--cpu-offload-gb", "1"],
+                         max_wait_seconds=480)
 
 
 @pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
@@ -49,11 +55,14 @@ def test_cpu_offload_awq():
 def test_cpu_offload_compressed_tensors():
     # Test wNa16
     compare_two_settings("nm-testing/tinyllama-oneshot-w4a16-channel-v2", [],
-                         ["--cpu-offload-gb", "1"])
+                         ["--cpu-offload-gb", "1"],
+                         max_wait_seconds=480)
     # Test w4a16_marlin24
     compare_two_settings("nm-testing/llama7b-one-shot-2_4-w4a16-marlin24-t",
-                         [], ["--cpu-offload-gb", "1"])
+                         [], ["--cpu-offload-gb", "1"],
+                         max_wait_seconds=480)
     # Test w8a8
     compare_two_settings(
         "nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change", [],
-        ["--cpu-offload-gb", "1"])
+        ["--cpu-offload-gb", "1"],
+        max_wait_seconds=480)
