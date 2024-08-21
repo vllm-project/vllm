@@ -164,8 +164,8 @@ def test_with_prefix_caching(
     tensor_parallel_size: int,
 ) -> None:
     """
-    Checks exact match decode between huggingface model and vllm runner with
-    chunked prefill.
+    Checks exact match decode with and without prefix caching
+    with chunked prefill enabled.
     """
     model = "meta-llama/Llama-2-7b-chat-hf"
     # The common prompt has 41 tokens with Llama-2 tokenizer.
