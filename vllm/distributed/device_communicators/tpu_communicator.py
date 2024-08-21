@@ -8,9 +8,9 @@ from vllm.platforms import current_platform
 
 if current_platform.is_tpu():
     import ray
-    from ray._private.accelerators import TPUAcceleratorManager
     import torch_xla.core.xla_model as xm
     import torch_xla.runtime as xr
+    from ray._private.accelerators import TPUAcceleratorManager
     from torch_xla._internal import pjrt
 
 
