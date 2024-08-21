@@ -17,7 +17,7 @@ from ...utils import RemoteOpenAIServer
 MODEL_NAME = "Qwen/Qwen2-1.5B-Instruct"
 NUM_REQUESTS = 25000
 QPS_RATE = 1000.
-MAX_TOKENS = 50
+MAX_TOKENS = 100
 MESSAGES = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -52,7 +52,7 @@ async def get_request(client, model_name):
             max_tokens=MAX_TOKENS,
             temperature=0.0,
         )
-        # Send 200
+        # Send 2000
         await asyncio.sleep(1./QPS_RATE)
 
 @pytest.mark.asyncio
