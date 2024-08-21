@@ -57,7 +57,8 @@ openai_serving_embedding: OpenAIServingEmbedding
 openai_serving_tokenization: OpenAIServingTokenization
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
 
-logger = init_logger(__name__)
+# Cannot use __name__ (https://github.com/vllm-project/vllm/pull/4765)
+logger = init_logger('vllm.entrypoints.openai.api_server')
 
 _running_tasks: Set[asyncio.Task] = set()
 
