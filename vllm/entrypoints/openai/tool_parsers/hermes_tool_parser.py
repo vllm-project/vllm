@@ -1,6 +1,6 @@
 import json
 import re
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Sequence, Union
 
 import partial_json_parser
 from partial_json_parser.core.options import Allow
@@ -108,9 +108,14 @@ class Hermes2ProToolParser(ToolParser):
                                                     content=model_output)
 
     def extract_tool_calls_streaming(
-            self, previous_text: str, current_text: str, delta_text: str,
-            previous_token_ids: List[int], current_token_ids: List[int],
-            delta_token_ids: List[int]) -> Union[DeltaMessage, None]:
+        self,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
+    ) -> Union[DeltaMessage, None]:
 
         logger.debug("delta_text: %s", delta_text)
         logger.debug("delta_token_ids: %s", delta_token_ids)

@@ -1,4 +1,4 @@
-from typing import Dict, List, Union
+from typing import Dict, List, Sequence, Union
 
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
@@ -46,9 +46,9 @@ class ToolParser:
         previous_text: str,
         current_text: str,
         delta_text: str,
-        previous_token_ids: List[int],
-        current_token_ids: List[int],
-        delta_token_ids: List[int],
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
     ) -> Union[DeltaMessage, None]:
         """
         Instance method that should be implemented for extracting tool calls

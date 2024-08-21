@@ -2,24 +2,21 @@
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
 from argparse import Namespace
-from typing import Any, Dict, List, Literal, Optional, Union, final
+from typing import Any, Dict, List, Literal, Optional, Union
 
 import torch
 # yapf conflicts with isort for this block
 # yapf: disable
 from openai.types.chat import ChatCompletionContentPartParam
-from openai.types.chat import (
-    ChatCompletionContentPartParam as OpenAIChatCompletionContentPartParam)
-from openai.types.chat import (
-    ChatCompletionMessageParam as OpenAIChatCompletionMessageParam)
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from transformers import PreTrainedTokenizer
 from typing_extensions import Annotated, Required, TypedDict
 
+from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.openai.logits_processors import get_logits_processors
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import LogitsProcessor, SamplingParams
 from vllm.sequence import Logprob
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
 
 # yapf: enable
@@ -27,6 +24,7 @@ from vllm.utils import random_uuid
 # torch is mocked during docs generation,
 # so we have to provide the values as literals
 _MOCK_LONG_INFO = Namespace(min=-9223372036854775808, max=9223372036854775807)
+_LONG_INFO: Union["torch.iinfo", Namespace]
 
 try:
     from sphinx.ext.autodoc.mock import _MockModule
@@ -60,44 +58,6 @@ class CustomChatCompletionMessageParam(TypedDict, total=False):
     tool_call_id: Optional[str]
 
     tool_calls: Optional[List[dict]]
-
-
-@final  # So that it should be compatible with Dict[str, str]
-class ConversationMessage(TypedDict, total=False):
-    role: str
-    content: Optional[str]
-    tool_call_id: Optional[str]
-    name: Optional[str]
-    tool_calls: Optional[List]
-
-
-class CustomChatCompletionContentPartParam(TypedDict, total=False):
-    __pydantic_config__ = ConfigDict(extra="allow")  # type: ignore
-
-    type: Required[str]
-    """The type of the content part."""
-
-
-class AudioURL(TypedDict, total=False):
-    url: Required[str]
-    """
-    Either a URL of the audio or a data URL with base64 encoded audio data.
-    """
-
-
-class ChatCompletionContentPartAudioParam(TypedDict, total=False):
-    audio_url: Required[AudioURL]
-
-    type: Required[Literal["audio_url"]]
-    """The type of the content part."""
-
-
-ChatCompletionContentPartParam = Union[OpenAIChatCompletionContentPartParam,
-                                       ChatCompletionContentPartAudioParam,
-                                       CustomChatCompletionContentPartParam]
-
-ChatCompletionMessageParam = Union[OpenAIChatCompletionMessageParam,
-                                   CustomChatCompletionMessageParam]
 
 
 class OpenAIBaseModel(BaseModel):
@@ -304,12 +264,16 @@ class ChatCompletionRequest(OpenAIBaseModel):
     # doc: end-chat-completion-extra-params
 
     def to_sampling_params(
-            self, tokenizer: PreTrainedTokenizer,
+            self, tokenizer: AnyTokenizer,
             guided_decode_logits_processor: Optional[LogitsProcessor],
             default_max_tokens: int) -> SamplingParams:
         max_tokens = self.max_tokens
         if max_tokens is None:
             max_tokens = default_max_tokens
+
+        prompt_logprobs = self.prompt_logprobs
+        if prompt_logprobs is None and self.echo:
+            prompt_logprobs = self.top_logprobs
 
         # We now allow logprobs being true without top_logrobs.
         logits_processors = get_logits_processors(
@@ -320,7 +284,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if guided_decode_logits_processor:
             logits_processors.append(guided_decode_logits_processor)
 
-        return SamplingParams(
+        return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
             presence_penalty=self.presence_penalty,
@@ -334,8 +298,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             stop=self.stop,
             stop_token_ids=self.stop_token_ids,
             logprobs=self.top_logprobs if self.logprobs else None,
-            prompt_logprobs=self.prompt_logprobs if self.prompt_logprobs else
-            (self.top_logprobs if self.echo else None),
+            prompt_logprobs=prompt_logprobs,
             ignore_eos=self.ignore_eos,
             max_tokens=max_tokens,
             min_tokens=self.min_tokens,
@@ -349,14 +312,36 @@ class ChatCompletionRequest(OpenAIBaseModel):
             truncate_prompt_tokens=self.truncate_prompt_tokens,
         )
 
-    @model_validator(mode='before')
+    @model_validator(mode="before")
     @classmethod
-    def validate_stream_options(cls, values):
-        if (values.get('stream_options') is not None
-                and not values.get('stream')):
+    def validate_stream_options(cls, data):
+        if data.get("stream_options") and not data.get("stream"):
             raise ValueError(
-                "stream_options can only be set if stream is true")
-        return values
+                "Stream options can only be defined when `stream=True`.")
+
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_logprobs(cls, data):
+        if (prompt_logprobs := data.get("prompt_logprobs")) is not None:
+            if data.get("stream") and prompt_logprobs > 0:
+                raise ValueError(
+                    "`prompt_logprobs` are not available when `stream=True`.")
+
+            if prompt_logprobs < 0:
+                raise ValueError("`prompt_logprobs` must be a positive value.")
+
+        if (top_logprobs := data.get("top_logprobs")) is not None:
+            if top_logprobs < 0:
+                raise ValueError("`top_logprobs` must be a positive value.")
+
+            if not data.get("logprobs"):
+                raise ValueError(
+                    "when using `top_logprobs`, `logprobs` must be set to true."
+                )
+
+        return data
 
     @model_validator(mode="before")
     @classmethod
@@ -430,19 +415,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     raise ValueError(
                         "The tool specified in `tool_choice` does not match any"
                         " of the specified `tools`")
-        return data
-
-    @model_validator(mode="before")
-    @classmethod
-    def check_logprobs(cls, data):
-        if "top_logprobs" in data and data["top_logprobs"] is not None:
-            if "logprobs" not in data or data["logprobs"] is False:
-                raise ValueError(
-                    "when using `top_logprobs`, `logprobs` must be set to true."
-                )
-            elif data["top_logprobs"] < 0:
-                raise ValueError(
-                    "`top_logprobs` must be a value a positive value.")
         return data
 
 
@@ -534,12 +506,16 @@ class CompletionRequest(OpenAIBaseModel):
     # doc: end-completion-extra-params
 
     def to_sampling_params(
-            self, tokenizer: PreTrainedTokenizer,
+            self, tokenizer: AnyTokenizer,
             guided_decode_logits_processor: Optional[LogitsProcessor],
             default_max_tokens: int) -> SamplingParams:
         max_tokens = self.max_tokens
         if max_tokens is None:
             max_tokens = default_max_tokens
+
+        prompt_logprobs = self.prompt_logprobs
+        if prompt_logprobs is None and self.echo:
+            prompt_logprobs = self.logprobs
 
         echo_without_generation = self.echo and self.max_tokens == 0
 
@@ -551,7 +527,7 @@ class CompletionRequest(OpenAIBaseModel):
         if guided_decode_logits_processor:
             logits_processors.append(guided_decode_logits_processor)
 
-        return SamplingParams(
+        return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
             presence_penalty=self.presence_penalty,
@@ -570,8 +546,7 @@ class CompletionRequest(OpenAIBaseModel):
             min_tokens=self.min_tokens,
             use_beam_search=self.use_beam_search,
             early_stopping=self.early_stopping,
-            prompt_logprobs=self.prompt_logprobs
-            if self.prompt_logprobs else self.logprobs if self.echo else None,
+            prompt_logprobs=prompt_logprobs,
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
@@ -597,9 +572,17 @@ class CompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_logprobs(cls, data):
-        if "logprobs" in data and data[
-                "logprobs"] is not None and not data["logprobs"] >= 0:
-            raise ValueError("if passed, `logprobs` must be a positive value.")
+        if (prompt_logprobs := data.get("prompt_logprobs")) is not None:
+            if data.get("stream") and prompt_logprobs > 0:
+                raise ValueError(
+                    "`prompt_logprobs` are not available when `stream=True`.")
+
+            if prompt_logprobs < 0:
+                raise ValueError("`prompt_logprobs` must be a positive value.")
+
+        if (logprobs := data.get("logprobs")) is not None and logprobs < 0:
+            raise ValueError("`logprobs` must be a positive value.")
+
         return data
 
     @model_validator(mode="before")
@@ -607,7 +590,8 @@ class CompletionRequest(OpenAIBaseModel):
     def validate_stream_options(cls, data):
         if data.get("stream_options") and not data.get("stream"):
             raise ValueError(
-                "Stream options can only be defined when stream is true.")
+                "Stream options can only be defined when `stream=True`.")
+
         return data
 
 
@@ -616,7 +600,7 @@ class EmbeddingRequest(OpenAIBaseModel):
     # https://platform.openai.com/docs/api-reference/embeddings
     model: str
     input: Union[List[int], List[List[int]], str, List[str]]
-    encoding_format: Optional[str] = Field('float', pattern='^(float|base64)$')
+    encoding_format: Literal["float", "base64"] = "float"
     dimensions: Optional[int] = None
     user: Optional[str] = None
 

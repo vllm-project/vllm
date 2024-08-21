@@ -7,15 +7,18 @@ from typing import (Any, Awaitable, Iterable, List, Literal, Optional, Tuple,
 
 # yapf conflicts with isort for this block
 # yapf: disable
-from openai.types.chat import (ChatCompletionContentPartImageParam,
-                               ChatCompletionContentPartTextParam)
+from openai.types.chat import ChatCompletionContentPartImageParam
+from openai.types.chat import (
+    ChatCompletionContentPartParam as OpenAIChatCompletionContentPartParam)
+from openai.types.chat import ChatCompletionContentPartTextParam
+from openai.types.chat import (
+    ChatCompletionMessageParam as OpenAIChatCompletionMessageParam)
 # yapf: enable
-from transformers import PreTrainedTokenizer
+# pydantic needs the TypedDict from typing_extensions
+from pydantic import ConfigDict, TypeAdapter
+from typing_extensions import Required, TypeAlias, TypedDict
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionContentPartAudioParam, ChatCompletionContentPartParam,
-    ChatCompletionMessageParam, ConversationMessage)
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.utils import (async_get_and_parse_audio,
@@ -23,6 +26,63 @@ from vllm.multimodal.utils import (async_get_and_parse_audio,
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 logger = init_logger(__name__)
+
+
+class AudioURL(TypedDict, total=False):
+    url: Required[str]
+    """
+    Either a URL of the audio or a data URL with base64 encoded audio data.
+    """
+
+
+class ChatCompletionContentPartAudioParam(TypedDict, total=False):
+    audio_url: Required[AudioURL]
+
+    type: Required[Literal["audio_url"]]
+    """The type of the content part."""
+
+
+class CustomChatCompletionContentPartParam(TypedDict, total=False):
+    __pydantic_config__ = ConfigDict(extra="allow")  # type: ignore
+
+    type: Required[str]
+    """The type of the content part."""
+
+
+ChatCompletionContentPartParam: TypeAlias = Union[
+    OpenAIChatCompletionContentPartParam, ChatCompletionContentPartAudioParam,
+    CustomChatCompletionContentPartParam, ]
+
+
+class CustomChatCompletionMessageParam(TypedDict, total=False):
+    """Enables custom roles in the Chat Completion API."""
+    role: Required[str]
+    """The role of the message's author."""
+
+    content: Union[str, List[ChatCompletionContentPartParam]]
+    """The contents of the message."""
+
+    name: str
+    """An optional name for the participant.
+
+    Provides the model information to differentiate between participants of the
+    same role.
+    """
+    tool_call_id: Optional[str]
+    tool_calls: Optional[List]
+
+
+ChatCompletionMessageParam = Union[OpenAIChatCompletionMessageParam,
+                                   CustomChatCompletionMessageParam]
+
+
+# TODO: Make fields ReadOnly once mypy supports it
+class ConversationMessage(TypedDict, total=False):
+    role: str
+    content: Optional[str]
+    tool_call_id: Optional[str]
+    name: Optional[str]
+    tool_calls: Optional[List]
 
 
 @dataclass(frozen=True)
@@ -58,7 +118,7 @@ def load_chat_template(
 
 
 @lru_cache(maxsize=None)
-def _mm_token_str(model_config: ModelConfig, tokenizer: PreTrainedTokenizer,
+def _mm_token_str(model_config: ModelConfig, tokenizer: AnyTokenizer,
                   modality: Literal["image", "audio"]) -> Optional[str]:
     # TODO: Let user specify how to insert image tokens into prompt
     # (similar to chat template)
@@ -95,11 +155,16 @@ def _get_full_multimodal_text_prompt(placeholder_token_str: str,
     return f"{placeholder_token_str}\n{text_prompt}"
 
 
+_TextParser = TypeAdapter(ChatCompletionContentPartTextParam)
+_ImageParser = TypeAdapter(ChatCompletionContentPartImageParam)
+_AudioParser = TypeAdapter(ChatCompletionContentPartAudioParam)
+
+
 def _parse_chat_message_content_parts(
     role: str,
     parts: Iterable[ChatCompletionContentPartParam],
     model_config: ModelConfig,
-    tokenizer: PreTrainedTokenizer,
+    tokenizer: AnyTokenizer,
 ) -> ChatMessageParseResult:
     texts: List[str] = []
     mm_futures: List[Awaitable[MultiModalDataDict]] = []
@@ -108,7 +173,7 @@ def _parse_chat_message_content_parts(
     for part in parts:
         part_type = part["type"]
         if part_type == "text":
-            text = cast(ChatCompletionContentPartTextParam, part)["text"]
+            text = _TextParser.validate_python(part)["text"]
             texts.append(text)
         elif part_type == "image_url":
             modality = "image"
@@ -116,8 +181,7 @@ def _parse_chat_message_content_parts(
                 raise NotImplementedError(
                     "Multiple multimodal inputs is currently not supported.")
 
-            image_url = cast(ChatCompletionContentPartImageParam,
-                             part)["image_url"]
+            image_url = _ImageParser.validate_python(part)["image_url"]
 
             if image_url.get("detail", "auto") != "auto":
                 logger.warning(
@@ -132,8 +196,7 @@ def _parse_chat_message_content_parts(
                 raise NotImplementedError(
                     "Multiple multimodal inputs is currently not supported.")
 
-            audio_url = cast(ChatCompletionContentPartAudioParam,
-                             part)["audio_url"]
+            audio_url = _AudioParser.validate_python(part)["audio_url"]
             audio_future = async_get_and_parse_audio(audio_url["url"])
             mm_futures.append(audio_future)
         else:
@@ -163,12 +226,12 @@ def _parse_chat_message_content_parts(
 def _parse_chat_message_content(
     message: ChatCompletionMessageParam,
     model_config: ModelConfig,
-    tokenizer: PreTrainedTokenizer,
+    tokenizer: AnyTokenizer,
 ) -> ChatMessageParseResult:
-    role = message["role"]
+    role = cast(str, message["role"])  # can be iterable in some cases, so cast
     content = message.get("content")
     tool_call_id = message.get("tool_call_id")
-    tool_calls = message.get("tool_calls")
+    tool_calls = message.get("tool_calls", [])
     # no longer used by OpenAI, but some models still use it for tool calls.
     name = message.get("name", "")
 
@@ -201,14 +264,18 @@ def _parse_chat_message_content(
         messages = [ConversationMessage(role=role, content=content)]
         return ChatMessageParseResult(messages=messages, mm_futures=[])
 
-    return _parse_chat_message_content_parts(role, cast(Iterable, content),
-                                             model_config, tokenizer)
+    return _parse_chat_message_content_parts(
+        role,
+        content,  # type: ignore
+        model_config,
+        tokenizer,
+    )
 
 
 def parse_chat_messages(
     messages: List[ChatCompletionMessageParam],
     model_config: ModelConfig,
-    tokenizer: PreTrainedTokenizer,
+    tokenizer: AnyTokenizer,
 ) -> Tuple[List[ConversationMessage], List[Awaitable[MultiModalDataDict]]]:
     conversation: List[ConversationMessage] = []
     mm_futures: List[Awaitable[MultiModalDataDict]] = []
