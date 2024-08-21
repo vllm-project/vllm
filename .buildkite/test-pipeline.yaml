@@ -111,10 +111,10 @@ steps:
   commands:
   - pytest -v -s metrics 
   - "pip install \
-      opentelemetry-sdk \
-      opentelemetry-api \
-      opentelemetry-exporter-otlp \
-      opentelemetry-semantic-conventions-ai"
+      'opentelemetry-sdk>=1.26.0,<1.27.0' \
+      'opentelemetry-api>=1.26.0,<1.27.0' \
+      'opentelemetry-exporter-otlp>=1.26.0,<1.27.0' \
+      'opentelemetry-semantic-conventions-ai>=0.4.1,<0.5.0'"
   - pytest -v -s tracing
 
 ##### fast check tests  #####
@@ -310,6 +310,15 @@ steps:
   - pytest -v -s distributed/test_distributed_oot.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s distributed/test_utils.py
+
+- label: Multi-step Tests (4 GPUs) # 10min
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 4
+  source_file_dependencies:
+  - vllm/
+  - tests/multi_step/test_correctness.py
+  commands:
+  - pytest -v -s multi_step/test_correctness.py
 
 - label: Pipeline Parallelism Test # 23min
   working_dir: "/vllm-workspace/tests"
