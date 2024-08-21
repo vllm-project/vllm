@@ -111,6 +111,29 @@ directory [here](https://github.com/vllm-project/vllm/tree/main/examples/)
 :prog: vllm serve
 ```
 
+### Config file
+
+You may also supply these CLI args using a config file. For example:
+
+```yaml
+# config.yaml
+
+host: "127.0.0.1"
+port: 6379
+uvicorn-log-level: "info"
+```
+
+```bash
+$ vllm serve --model SOME_MODEL --config config.yaml
+```
+
+---
+**NOTE** 
+
+In case an argument is supplied using CLI and the config file, the value from the config file will take precedence.
+
+---
+
 ## Tool calling in the chat completion API
 vLLM supports only named function calling in the chat completion API. The `tool_choice` options `auto` and `required` are **not yet supported** but on the roadmap.
 
