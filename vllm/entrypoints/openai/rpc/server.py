@@ -12,11 +12,16 @@ from vllm import AsyncEngineArgs, AsyncLLMEngine
 from vllm.entrypoints.openai.rpc import (VLLM_RPC_SUCCESS_STR,
                                          VLLM_RPC_ZMQ_HWM, RPCAbortRequest,
                                          RPCGenerateRequest, RPCUtilityRequest)
+from vllm.config import (
+    ModelConfig, DecodingConfig, 
+    ParallelConfig, SchedulerConfig, LoRAConfig)
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 
 logger = init_logger(__name__)
 
+CONFIG_TYPE = Union[ModelConfig, DecodingConfig, ParallelConfig,
+                    SchedulerConfig, LoRAConfig]
 
 class AsyncEngineRPCServer:
 
@@ -42,8 +47,9 @@ class AsyncEngineRPCServer:
         # Clear the engine reference so that it can be GC'ed.
         del self.engine
 
-    async def get_config(self, identity, request):
+    async def get_config(self, identity, request) -> CONFIG_TYPE:
         try:
+            config: CONFIG_TYPE
             if request == RPCUtilityRequest.GET_MODEL_CONFIG:
                 config = await self.engine.get_model_config()
             elif request == RPCUtilityRequest.GET_DECODING_CONFIG:
