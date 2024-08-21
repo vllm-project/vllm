@@ -1,7 +1,7 @@
 # coding=utf-8
 """PyTorch MAMBA model."""
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 import torch
 from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
@@ -28,6 +28,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import HasInnerState
+from vllm.model_executor.models.mamba_cache import MambaCacheManager
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors, SamplerOutput
@@ -420,15 +421,10 @@ class MambaForCausalLM(nn.Module, HasInnerState):
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
 
         self.lm_head = self.backbone.embeddings
-        # Current step used indices
-        self.current_indices: List[int] = []
+
         # Used to track and store by the Mamba cache between steps.
-        self.mamba_cache: Tuple[torch.Tensor, torch.Tensor] = tuple()
-        # Used as an input_buffer for the CUDA graph runs.
-        self.mamba_gc_cache_buffer: Tuple[torch.Tensor, torch.Tensor] = tuple()
-        # Maps between the request id and a dict that maps between the seq_id
-        # and its index inside the self.mamba_cache
-        self.mamba_cache_indices_mapping: Dict[str, Dict[int, int]] = {}
+        self.mamba_cache: Optional[MambaCacheManager] = None
+
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
         self.sampler = Sampler()
@@ -440,8 +436,14 @@ class MambaForCausalLM(nn.Module, HasInnerState):
                 attn_metadata: AttentionMetadata,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 **kwargs):
-        if not self.mamba_cache:
-            self._prepare_mamba_cache()
+        if self.mamba_cache is None:
+            max_batch_size = (_get_graph_batch_size(
+                self.scheduler_config.max_num_seqs) if self.scheduler_config
+                              else max(_BATCH_SIZES_TO_CAPTURE) + 2)
+            self.mamba_cache = MambaCacheManager(self.lm_head.weight.dtype,
+                                                self.config.num_hidden_layers,
+                                                max_batch_size,
+                                                *self._get_mamba_cache_shape())
 
         if "seqlen_agnostic_capture_inputs" not in kwargs:
             # We get here only on Prefill/Eager mode runs
@@ -451,169 +453,25 @@ class MambaForCausalLM(nn.Module, HasInnerState):
 
             request_ids_to_seq_ids = kwargs["request_ids_to_seq_ids"]
             finished_requests_ids = kwargs["finished_requests_ids"]
+            self.mamba_cache.release_finished_requests(finished_requests_ids)
+
             batch_size = input_ids.shape[0]
             if attn_metadata.prefill_metadata:
                 batch_size = len(request_ids_to_seq_ids)
-            (
-                current_seqlen_agnostic_cache,
-                indices,
-            ) = self._prepare_current_run_mamba_cache(request_ids_to_seq_ids,
-                                                      batch_size,
-                                                      finished_requests_ids)
-            finished_requests_ids = kwargs["finished_requests_ids"]
-            self._release_mamba_cache(finished_requests_ids)
+            mamba_cache_tensors = self.mamba_cache.prepare_current_run_state(
+                request_ids_to_seq_ids, batch_size, finished_requests_ids)
+
         else:
             # CUDA graph capturing runs
-            current_seqlen_agnostic_cache, indices = (
-                kwargs["seqlen_agnostic_capture_inputs"],
-                [],
-            )
-        self.current_indices = indices
+            mamba_cache_tensors = kwargs["seqlen_agnostic_capture_inputs"]
 
         hidden_states = self.backbone(input_ids, positions, kv_caches,
-                                      attn_metadata,
-                                      current_seqlen_agnostic_cache[0],
-                                      current_seqlen_agnostic_cache[1])
-
-        if "seqlen_agnostic_capture_inputs" not in kwargs:
-            self._copy_mamba_cache_by_indices(self.current_indices,
-                                              current_seqlen_agnostic_cache)
+                                      attn_metadata, mamba_cache_tensors[0],
+                                      mamba_cache_tensors[1])
 
         return hidden_states
 
-    def _copy_mamba_cache_by_indices(
-            self, indices: List[int],
-            current_seqlen_agnostic_cache: Tuple[torch.Tensor, torch.Tensor]):
-        for i, offset in enumerate(indices):
-            self._copy_mamba_cache(offset, i, current_seqlen_agnostic_cache)
-
-    def _copy_mamba_cache(self, index_to: int, index_from: int,
-                          from_buffer: Tuple[torch.Tensor, torch.Tensor]):
-        assert len(self.mamba_cache) > 0
-        for (cache_t, from_buffer_t) in zip(self.mamba_cache, from_buffer):
-            cache_t[:, index_to].copy_(from_buffer_t[:, index_from],
-                                       non_blocking=True)
-
-    def _assign_seq_id_to_mamba_cache(self, cur_rid: str,
-                                      seqs_id: List[int]) -> List[int]:
-        indices_for_current_run = []
-        for seq_id in seqs_id:
-            if cur_rid not in self.mamba_cache_indices_mapping:
-                self.mamba_cache_indices_mapping[cur_rid] = {}
-                first_free_index = self._first_free_index_in_mamba_cache()
-                self.mamba_cache_indices_mapping[cur_rid][
-                    seq_id] = first_free_index
-                index_for_current_run = first_free_index
-            ## case of decoding n>1, copy prefill cache to decoding indices
-            elif seq_id not in (seq_ids2indices :=
-                                self.mamba_cache_indices_mapping[cur_rid]):
-                first_free_index = self._first_free_index_in_mamba_cache()
-                index_exist = list(seq_ids2indices.values())[0]
-                self._copy_mamba_cache(index_from=index_exist,
-                                       index_to=first_free_index,
-                                       from_buffer=self.mamba_cache)
-                self.mamba_cache_indices_mapping[cur_rid][
-                    seq_id] = first_free_index
-                index_for_current_run = first_free_index
-            else:
-                index_for_current_run = self.mamba_cache_indices_mapping[
-                    cur_rid][seq_id]
-
-            indices_for_current_run.append(index_for_current_run)
-        return indices_for_current_run
-
-    def _prepare_current_run_mamba_cache(
-        self, request_ids_to_seq_ids: Dict[str, list[int]], batch_size: int,
-        finished_requests_ids: List[str]
-    ) -> Tuple[Tuple[torch.Tensor, torch.Tensor], List[int]]:
-        indices_for_current_run = []
-        for request_id, seqs_id in request_ids_to_seq_ids.items():
-            if request_id in finished_requests_ids:
-                # Do not allocate cache for requests that run
-                # and finish right after
-                continue
-            indices_for_current_run += self._assign_seq_id_to_mamba_cache(
-                request_id, seqs_id)
-        ## Pad the batch in case of running batch that was not captured via CG
-        padded_indices = indices_for_current_run.copy()
-        pad_index = self._first_free_index_in_mamba_cache()
-
-        for _ in range(batch_size - len(indices_for_current_run)):
-            padded_indices.append(pad_index)
-
-        conv_state = self.mamba_cache[0][:, padded_indices]
-        temporal_state = self.mamba_cache[1][:, padded_indices]
-
-        return (conv_state, temporal_state), indices_for_current_run
-
-    def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
-        """
-        Copy the relevant Mamba cache into the CUDA graph input buffer 
-        that was provided during the capture runs 
-        (MambaForCausalLM.mamba_gc_cache_buffer). 
-        """
-        assert all(
-            key in kwargs
-            for key in ["request_ids_to_seq_ids", "finished_requests_ids"])
-        finished_requests_ids = kwargs["finished_requests_ids"]
-        self._release_mamba_cache(finished_requests_ids)
-        request_ids_to_seq_ids = kwargs["request_ids_to_seq_ids"]
-        cg_batch_size = input_buffers['input_ids'].shape[0]
-        (
-            current_mamba_cache,
-            indices,
-        ) = self._prepare_current_run_mamba_cache(request_ids_to_seq_ids,
-                                                  cg_batch_size,
-                                                  finished_requests_ids)
-        self.current_indices = indices
-        finished_requests_ids = kwargs["finished_requests_ids"]
-        self._release_mamba_cache(finished_requests_ids)
-
-        for input_buffer, current_cache_buffer in zip(
-                input_buffers["seqlen_agnostic_capture_inputs"],
-                current_mamba_cache):
-            input_buffer.copy_(current_cache_buffer, non_blocking=True)
-
-    def copy_outputs_after_cuda_graphs(self, input_buffers, **kwargs):
-        """
-        Copy the relevant Mamba cache from the CUDA graph input_buffers
-        back to the MambaForCausalLM.mamba_cache after CUDA
-        graph replay run is done.
-        """
-        self._copy_mamba_cache_by_indices(
-            self.current_indices,
-            input_buffers["seqlen_agnostic_capture_inputs"])
-
-    def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
-        """
-        Provide the CUDA graph capture runs with a buffer in adjusted size.
-        The buffer is used to maintain the Mamba Cache during the CUDA graph
-        replay runs.
-        """
-        return tuple(buffer[:, :batch_size]
-                     for buffer in self.mamba_gc_cache_buffer)
-
-    def _release_mamba_cache(self, finished_seq_groups_req_ids: List[str]):
-        for req_id in finished_seq_groups_req_ids:
-            if req_id in self.mamba_cache_indices_mapping:
-                self.mamba_cache_indices_mapping.pop(req_id)
-
-    def _first_free_index_in_mamba_cache(self) -> int:
-        if self.mamba_cache:
-            max_possible_batch_size = self.mamba_cache[0].shape[1]
-            occupied = [
-                id for seq_ids in self.mamba_cache_indices_mapping.values()
-                for id in seq_ids.values()
-            ]
-            first_free_index = [
-                i not in occupied for i in range(max_possible_batch_size)
-            ].index(True)
-            return first_free_index
-        return 0
-
-    def _get_mamba_cache_shape(
-            self
-    ) -> Tuple[Optional[Tuple[int, int]], Optional[Tuple[int, int]]]:
+    def _get_mamba_cache_shape(self) -> Tuple[Tuple[int, int], Tuple[int, int]]:
         world_size = get_tensor_model_parallel_world_size()
         conv_state_shape = (
             self.config.intermediate_size // world_size,
@@ -625,25 +483,12 @@ class MambaForCausalLM(nn.Module, HasInnerState):
         )
         return conv_state_shape, temporal_state_shape
 
-    def _prepare_mamba_cache(self):
-        dtype = self.lm_head.weight.dtype
-        num_mamba_layers = self.config.num_hidden_layers
-        max_batch_size = (_get_graph_batch_size(
-            self.scheduler_config.max_num_seqs) if self.scheduler_config else
-                          max(_BATCH_SIZES_TO_CAPTURE)) + 10
-        conv_state_shape, temporal_state_shape = self._get_mamba_cache_shape()
-        assert conv_state_shape is not None and temporal_state_shape is not None
+    def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
+        return self.mamba_cache.copy_inputs_before_cuda_graphs(
+            input_buffers, **kwargs)
 
-        for buffername in ["mamba_cache", "mamba_gc_cache_buffer"]:
-            buffer = (torch.empty(size=(num_mamba_layers, max_batch_size) +
-                                  conv_state_shape,
-                                  dtype=dtype,
-                                  device="cuda"),
-                      torch.empty(size=(num_mamba_layers, max_batch_size) +
-                                  temporal_state_shape,
-                                  dtype=dtype,
-                                  device="cuda"))
-            setattr(self, buffername, buffer)
+    def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
+        return self.mamba_cache.get_seqlen_agnostic_capture_inputs(batch_size)
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:

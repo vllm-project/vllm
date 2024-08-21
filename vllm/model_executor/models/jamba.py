@@ -594,7 +594,7 @@ class JambaForCausalLM(nn.Module, HasInnerState):
             if not lora_config else lora_config.lora_vocab_padding_size,
         )
         # Used to track and store by the Mamba cache between steps.
-        self.mamba_cache = MambaCacheManager(config)
+        self.mamba_cache: Optional[MambaCacheManager] = None
 
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
@@ -607,12 +607,19 @@ class JambaForCausalLM(nn.Module, HasInnerState):
                 attn_metadata: AttentionMetadata,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 **kwargs):
-        if not self.mamba_cache.initialized:
+        if self.mamba_cache is None:
             max_batch_size = (_get_graph_batch_size(
                 self.scheduler_config.max_num_seqs) if self.scheduler_config
                               else max(_BATCH_SIZES_TO_CAPTURE) + 2)
-            self.mamba_cache.initialize_tensors(self.lm_head.weight.dtype,
-                                                max_batch_size)
+
+            layers_type = self.config.layers_block_type
+            num_mamba_layers = sum(
+                [layer_type == "mamba" for layer_type in layers_type])
+
+            self.mamba_cache = MambaCacheManager(self.lm_head.weight.dtype,
+                                                num_mamba_layers,
+                                                max_batch_size,
+                                                *self._get_mamba_cache_shape())
 
         if "seqlen_agnostic_capture_inputs" not in kwargs:
             # We get here only on Prefill/Eager mode runs
@@ -623,6 +630,7 @@ class JambaForCausalLM(nn.Module, HasInnerState):
             request_ids_to_seq_ids = kwargs["request_ids_to_seq_ids"]
             finished_requests_ids = kwargs["finished_requests_ids"]
             self.mamba_cache.release_finished_requests(finished_requests_ids)
+
             batch_size = input_ids.shape[0]
             if attn_metadata.prefill_metadata:
                 batch_size = len(request_ids_to_seq_ids)
@@ -636,6 +644,19 @@ class JambaForCausalLM(nn.Module, HasInnerState):
                                    attn_metadata, mamba_cache_tensors[0],
                                    mamba_cache_tensors[1])
         return hidden_states
+
+    def _get_mamba_cache_shape(self) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+        world_size = get_tensor_model_parallel_world_size()
+        hidden_size = self.config.hidden_size
+        conv_state_shape = (
+            self.config.mamba_expand * hidden_size // world_size,
+            self.config.mamba_d_conv,
+        )
+        temporal_state_shape = (
+            self.config.mamba_expand * hidden_size // world_size,
+            self.config.mamba_d_state,
+        )
+        return conv_state_shape, temporal_state_shape
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
         return self.mamba_cache.copy_inputs_before_cuda_graphs(

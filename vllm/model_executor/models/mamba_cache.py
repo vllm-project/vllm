@@ -7,14 +7,23 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 
 class MambaCacheManager:
 
-    def __init__(self, config):
-        self.mamba_cache: Tuple[torch.Tensor, torch.Tensor] = tuple()
+    def __init__(self, dtype, num_mamba_layers, max_batch_size,
+                           conv_state_shape, temporal_state_shape):
+
+        conv_state = torch.empty(size=(num_mamba_layers, max_batch_size) +
+                                 conv_state_shape,
+                                 dtype=dtype,
+                                 device="cuda")
+        temporal_state = torch.empty(size=(num_mamba_layers, max_batch_size) +
+                                     temporal_state_shape,
+                                     dtype=dtype,
+                                     device="cuda")
+
+        self.mamba_cache = (conv_state, temporal_state)
 
         # Maps between the request id and a dict that maps between the seq_id
         # and its index inside the self.mamba_cache
         self.mamba_cache_indices_mapping: Dict[str, Dict[int, int]] = {}
-        self.config = config
-        self.initialized = False
 
     def _swap_mamba_cache(self, from_index: int, to_index: int):
         assert len(self.mamba_cache) > 0
@@ -192,35 +201,17 @@ class MambaCacheManager:
         raise Exception("Couldn't find a free spot in the mamba cache! This"
                         "should never happen")
 
-    def _get_mamba_cache_shape(
-            self
-    ) -> Tuple[Optional[Tuple[int, int]], Optional[Tuple[int, int]]]:
-        world_size = get_tensor_model_parallel_world_size()
-        hidden_size = self.config.hidden_size
-        conv_state_shape = (
-            self.config.mamba_expand * hidden_size // world_size,
-            self.config.mamba_d_conv,
-        )
-        temporal_state_shape = (
-            self.config.mamba_expand * hidden_size // world_size,
-            self.config.mamba_d_state,
-        )
-        return conv_state_shape, temporal_state_shape
+    def initialize_tensors(self, dtype, num_mamba_layers, max_batch_size,
+                           conv_state_shape, temporal_state_shape):
 
-    def initialize_tensors(self, dtype, max_batch_size):
-        layers_type = self.config.layers_block_type
-        num_mamba_layers = sum(
-            [layer_type == "mamba" for layer_type in layers_type])
-        conv_state_shape, temporal_state_shape = self._get_mamba_cache_shape()
-        assert conv_state_shape is not None and temporal_state_shape is not None
+        conv_state = torch.empty(size=(num_mamba_layers, max_batch_size) +
+                                 conv_state_shape,
+                                 dtype=dtype,
+                                 device="cuda")
+        temporal_state = torch.empty(size=(num_mamba_layers, max_batch_size) +
+                                     temporal_state_shape,
+                                     dtype=dtype,
+                                     device="cuda")
 
-        self.mamba_cache = (torch.empty(
-            size=(num_mamba_layers, max_batch_size) + conv_state_shape,
-            dtype=dtype,
-            device="cuda"),
-                            torch.empty(
-                                size=(num_mamba_layers, max_batch_size) +
-                                temporal_state_shape,
-                                dtype=dtype,
-                                device="cuda"))
+        self.mamba_cache = (conv_state, temporal_state)
         self.initialized = True
