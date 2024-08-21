@@ -33,8 +33,15 @@ logger = init_logger(__name__)
 INPROC_PROXY_PATH = f"inproc://{uuid4()}"
 
 
-class ClientClosedError(Exception):
-    """Exception class raised when the client is used post-shutdown"""
+class RPCClientClosedError(Exception):
+    """Exception class raised when the client is used post-close.
+    
+    The client can be closed, which closes the ZMQ context. This normally
+    happens on server shutdown. In some cases, methods like abort and 
+    do_log_stats will still be called and then try to open a socket, which 
+    causes a ZMQError and creates a huge stack trace.
+    So, we throw this error such that we can suppress it.
+    """
 
 
 class AsyncEngineRPCClient:
@@ -177,11 +184,13 @@ class AsyncEngineRPCClient:
     def to_proxy_socket(self):
         # Connect to the RPCServer via the proxy.
 
-        # Raise a sensible error if the client was already closed
+        # Raise a sensible error if the client was already closed.
         # This can happen if a server shutdown is triggered but some coroutines
         # are still running requests.
+        # There should not be a race condition with this check because we don't
+        # yield to the event loop between here and opening the socket.
         if self.context.closed:
-            raise ClientClosedError("The ZMQ client has already shut down")
+            raise RPCClientClosedError("The ZMQ client has already shut down")
 
         # Note that we use DEALER to enable asynchronous communication
         # to enable streaming.
@@ -193,11 +202,9 @@ class AsyncEngineRPCClient:
         finally:
             socket.close(linger=0)
 
-    async def _send_get_data_rpc_request(self,
-                                         request: RPCUtilityRequest,
+    async def _send_get_data_rpc_request(self, request: RPCUtilityRequest,
                                          expected_type: Any,
-                                         error_message: str,
-                                         timeout: Optional[int] = None) -> Any:
+                                         error_message: str) -> Any:
         """Send an RPC request that is expecting data back."""
 
         with self.to_proxy_socket() as socket:
@@ -205,9 +212,9 @@ class AsyncEngineRPCClient:
             await socket.send_multipart([cloudpickle.dumps(request)])
 
             # Make sure the server responds
-            timeout = timeout or self._data_timeout
-            if await socket.poll(timeout=timeout) == 0:
-                raise TimeoutError(f"Server didn't reply within {timeout} ms")
+            if await socket.poll(timeout=self._data_timeout) == 0:
+                raise TimeoutError("Server didn't reply within "
+                                   f"{self._data_timeout} ms")
 
             # Await the data from the Server.
             data = cloudpickle.loads(await socket.recv())
@@ -333,14 +340,14 @@ class AsyncEngineRPCClient:
 
     async def abort(self, request_id: str):
         """Send an ABORT_REQUEST signal to the RPC Server"""
-        with suppress(ClientClosedError):
+        with suppress(RPCClientClosedError):
             await self._send_one_way_rpc_request(
                 request=RPCAbortRequest(request_id),
                 error_message=f"RPCAbortRequest {request_id} failed")
 
     async def do_log_stats(self):
         """Send a DO_LOG_STATS signal to the RPC Server"""
-        with suppress(ClientClosedError):
+        with suppress(RPCClientClosedError):
             await self._send_one_way_rpc_request(
                 request=RPCUtilityRequest.DO_LOG_STATS,
                 error_message="RPCRequest DO_LOG_STATS failed.")
@@ -414,6 +421,7 @@ class AsyncEngineRPCClient:
                            socket: Optional[zmq.asyncio.Socket] = None
                            ) -> None:
         """Raise if unhealthy"""
+
         await self._send_one_way_rpc_request(
             request=RPCUtilityRequest.IS_SERVER_HEALTHY,
             error_message="Got Unhealthy response from RPC Server",

@@ -9,7 +9,7 @@ import pytest_asyncio
 
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.rpc.client import (AsyncEngineRPCClient,
-                                                ClientClosedError)
+                                                RPCClientClosedError)
 from vllm.entrypoints.openai.rpc.server import AsyncEngineRPCServer
 
 
@@ -108,9 +108,9 @@ async def test_client_errors_after_closing(monkeypatch, dummy_server,
     client.close()
 
     # Healthchecks and generate requests will fail with explicit errors
-    with pytest.raises(ClientClosedError):
+    with pytest.raises(RPCClientClosedError):
         await client.check_health()
-    with pytest.raises(ClientClosedError):
+    with pytest.raises(RPCClientClosedError):
         async for _ in client.generate(None, None, None):
             pass
 
