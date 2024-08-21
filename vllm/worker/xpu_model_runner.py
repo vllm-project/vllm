@@ -1,4 +1,5 @@
 import dataclasses
+import time
 import weakref
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type,
@@ -358,6 +359,8 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
         self.is_driver_worker = is_driver_worker
         self.prompt_adapter_config = prompt_adapter_config
         self.observability_config = observability_config
+        if self.observability_config is not None:
+            print(f"observability_config is {self.observability_config}")
         self.return_hidden_states = return_hidden_states
 
         self.device = self.device_config.device
@@ -532,9 +535,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
         model_executable = self.model
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
-            model_forward_start = torch.xpu.Event(enable_timing=True)
-            model_forward_end = torch.xpu.Event(enable_timing=True)
-            model_forward_start.record()
+            model_forward_start_time = time.time()
 
         hidden_states = model_executable(
             input_ids=model_input.input_tokens,
@@ -546,7 +547,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
                                          device=self.device))
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
-            model_forward_end.record()
+            model_forward_end_time = time.time()
 
         # Compute the logits.
         logits = self.model.compute_logits(hidden_states,
@@ -564,9 +565,8 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time
                 and output is not None):
-            model_forward_end.synchronize()
-            model_forward_time = model_forward_start.elapsed_time(
-                model_forward_end)
+            model_forward_time = (model_forward_end_time -
+                                  model_forward_start_time)
             # If there are multiple workers, we are still tracking the latency
             # from the start time of the driver worker to the end time of the
             # driver worker. The model forward time will then end up covering
