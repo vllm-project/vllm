@@ -193,7 +193,3 @@ hip_compat.h
 
 # Benchmark dataset
 benchmarks/*.json
-
-# my scripts
-install_config.sh
-ssh_add.sh
