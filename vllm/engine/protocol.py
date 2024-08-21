@@ -91,3 +91,11 @@ class AsyncEngineClient(Protocol):
     async def check_health(self) -> None:
         """Raise if unhealthy"""
         ...
+
+    async def start_profile(self) -> None:
+        """Start profiling the engine"""
+        ...
+
+    async def stop_profile(self) -> None:
+        """Start profiling the engine"""
+        ...

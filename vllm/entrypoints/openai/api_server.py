@@ -305,6 +305,26 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
     assert_never(generator)
 
 
+if envs.VLLM_TORCH_PROFILER_DIR:
+    logger.warning(
+        "Torch Profiler is enabled in the API server. This should ONLY be "
+        "used for local development!")
+
+    @router.post("/start_profile")
+    async def start_profile():
+        logger.info("Starting profiler...")
+        await async_engine_client.start_profile()
+        logger.info("Profiler started.")
+        return Response(status_code=200)
+
+    @router.post("/stop_profile")
+    async def stop_profile():
+        logger.info("Stopping profiler...")
+        await async_engine_client.stop_profile()
+        logger.info("Profiler stopped.")
+        return Response(status_code=200)
+
+
 def build_app(args: Namespace) -> FastAPI:
     app = FastAPI(lifespan=lifespan)
     app.include_router(router)

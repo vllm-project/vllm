@@ -124,6 +124,26 @@ class AsyncEngineRPCServer:
         except Exception as e:
             await self.socket.send_multipart([identity, cloudpickle.dumps(e)])
 
+    async def start_profile(self, identity):
+        logger.info("Starting profiler...")
+        await self.engine.start_profile()
+        logger.info("Profiler started.")
+
+        await self.socket.send_multipart([
+            identity,
+            cloudpickle.dumps(VLLM_RPC_SUCCESS_STR),
+        ])
+
+    async def stop_profile(self, identity):
+        logger.info("Stopping profiler...")
+        await self.engine.stop_profile()
+        logger.info("Profiler stopped.")
+
+        await self.socket.send_multipart([
+            identity,
+            cloudpickle.dumps(VLLM_RPC_SUCCESS_STR),
+        ])
+
     def _make_handler_coro(self, identity,
                            message) -> Coroutine[Any, Any, Never]:
         """Route the zmq message to the handler coroutine."""
@@ -153,6 +173,10 @@ class AsyncEngineRPCServer:
                 return self.check_health(identity)
             elif request == RPCUtilityRequest.IS_TRACING_ENABLED:
                 return self.is_tracing_enabled(identity)
+            elif request == RPCUtilityRequest.START_PROFILE:
+                return self.start_profile(identity)
+            elif request == RPCUtilityRequest.STOP_PROFILE:
+                return self.stop_profile(identity)
             else:
                 raise ValueError(f"Unknown RPCUtilityRequest type: {request}")
 
