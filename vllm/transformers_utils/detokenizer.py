@@ -2,7 +2,7 @@ from typing import Dict, List, Optional, Tuple
 
 from vllm.sequence import Logprob, SamplingParams, Sequence, SequenceGroup
 
-from .tokenizer import AnyTokenizer, AnyHFTokenizer
+from .tokenizer import AnyHFTokenizer, AnyTokenizer
 from .tokenizer_group import BaseTokenizerGroup
 
 # Used eg. for marking rejected tokens in spec decoding.

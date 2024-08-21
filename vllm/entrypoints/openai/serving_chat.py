@@ -1,8 +1,9 @@
 import asyncio
 import time
-from typing import AsyncGenerator, AsyncIterator, Awaitable, Dict, Final, List
+from typing import (AsyncGenerator, AsyncIterator, Awaitable, Dict, Final,
+                    List, Optional)
 from typing import Sequence as GenericSequence
-from typing import Optional, Union
+from typing import Union
 
 from fastapi import Request
 
@@ -31,7 +32,7 @@ from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
-from vllm.transformers_utils.tokenizer import AnyTokenizer, AnyHFTokenizer
+from vllm.transformers_utils.tokenizer import AnyHFTokenizer, AnyTokenizer
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 from vllm.utils import iterate_with_cancellation, random_uuid
 

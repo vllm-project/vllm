@@ -1,20 +1,19 @@
-from typing import Optional, List, TYPE_CHECKING, Dict, Any
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from huggingface_hub import HfApi, hf_hub_download
+from mistral_common.tokens.tokenizers.mistral import ChatCompletionRequest
 from mistral_common.tokens.tokenizers.mistral import (
-    ChatCompletionRequest,
-    MistralTokenizer as PublicMistralTokenizer,
-)
-from mistral_common.tokens.tokenizers.tekken import Tekkenizer
+    MistralTokenizer as PublicMistralTokenizer)
 from mistral_common.tokens.tokenizers.sentencepiece import (
-    SentencePieceTokenizer, )
+    SentencePieceTokenizer)
+from mistral_common.tokens.tokenizers.tekken import Tekkenizer
 
 if TYPE_CHECKING:
     from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
     from vllm.entrypoints.openai.protocol import (
-        ChatCompletionRequest as OAIChatCompletionRequest, )
+        ChatCompletionRequest as OAIChatCompletionRequest)
 
 
 @dataclass
