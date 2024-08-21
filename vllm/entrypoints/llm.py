@@ -398,9 +398,8 @@ class LLM:
                 conversations,
                 chat_template=chat_template,
                 add_generation_prompt=add_generation_prompt)
-            
-            prompt_token_ids = None
 
+            prompt_token_ids = None
 
         return self.generate(
             prompts,  # type: ignore[arg-type]
