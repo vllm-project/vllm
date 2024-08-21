@@ -621,7 +621,6 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 output[:num_prefill_tokens] = out
 
         if decode_meta := attn_metadata.decode_metadata:
-
             (
                 seq_lens_arg,
                 max_seq_len_arg,

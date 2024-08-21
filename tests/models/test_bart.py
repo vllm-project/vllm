@@ -153,7 +153,7 @@ if not is_cpu():
         # model we must explicitly specify enforce_eager=True in the VllmRunner
         # constructor.
         #print('test_case_prompts ' + str(test_case_prompts))
-        with vllm_runner(model, dtype=dtype, enforce_eager=False) as vllm_model:
+        with vllm_runner(model, dtype=dtype, enforce_eager=True) as vllm_model:
             vllm_outputs = vllm_model.generate_encoder_decoder_greedy_logprobs(
                 test_case_prompts, max_tokens, num_logprobs)
         print('vllm_outputs ' + str(vllm_outputs))

@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple, Type, cast
 import itertools
 import torch
 import torch.distributed
+import torch.nn as nn
 
 from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata)
@@ -19,15 +20,71 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import (IntermediateTensors, PoolerOutput, SamplerOutput,
                            SequenceGroupMetadata)
 from vllm.utils import STR_NOT_IMPL_ENC_DEC_BACKEND, make_tensor_with_pad
-from vllm.worker.model_runner import (_PAD_SLOT_ID, GPUModelRunnerBase,
+from vllm.worker.model_runner import (_PAD_SLOT_ID, CUDAGraphRunner,
+                                      GPUModelRunnerBase,
                                       ModelInputForGPUBuilder,
-                                      ModelInputForGPUWithSamplingMetadata, _get_graph_batch_size)
+                                      ModelInputForGPUWithSamplingMetadata,
+                                      _get_graph_batch_size)
 from vllm.worker.model_runner_base import (
     _add_attn_metadata_broadcastable_dict,
-    _add_sampling_metadata_broadcastable_dict)
+    _add_sampling_metadata_broadcastable_dict,
+)
 from vllm.worker.utils import assert_enc_dec_mr_supported_scenario
 
 logger = init_logger(__name__)
+
+
+class EncoderDecoderCUDAGraphRunner(CUDAGraphRunner):
+
+    def __init__(self, model: nn.Module, backend_name: str):
+        super().__init__(model=model, backend_name=backend_name)
+
+    def _save_input_buffers(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_inputs: Optional[IntermediateTensors],
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+        **kwargs,
+    ):
+        super()._save_input_buffers(input_ids=input_ids,
+                                    positions=positions,
+                                    intermediate_inputs=intermediate_inputs,
+                                    kv_caches=kv_caches,
+                                    attn_metadata=attn_metadata,
+                                    **kwargs)
+        self.input_buffers["encoder_seq_lens_tensor"] = (
+            attn_metadata.decode_metadata.encoder_seq_lens_tensor)
+        self.input_buffers["cross_slot_mapping"] = (
+            attn_metadata.decode_metadata.cross_slot_mapping)
+        self.input_buffers["cross_block_tables"] = (
+            attn_metadata.decode_metadata.cross_block_tables)
+
+    def _populate_input_buffers_from_model_input(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors],
+        **kwargs,
+    ):
+        super()._populate_input_buffers_from_model_input(
+            input_ids=input_ids,
+            positions=positions,
+            attn_metadata=attn_metadata,
+            intermediate_tensors=intermediate_tensors,
+            **kwargs)
+        self.input_buffers["encoder_seq_lens_tensor"].copy_(
+            attn_metadata.encoder_seq_lens_tensor, non_blocking=True)
+        self.input_buffers["cross_slot_mapping"].copy_(
+            attn_metadata.cross_slot_mapping, non_blocking=True)
+        self.input_buffers["cross_block_tables"].copy_(
+            attn_metadata.cross_block_tables, non_blocking=True)
+        self.input_buffers["encoder_input_ids"].copy_(
+            kwargs['encoder_input_ids'], non_blocking=True)
+        self.input_buffers["encoder_positions"].copy_(
+            kwargs['encoder_positions'], non_blocking=True)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -174,22 +231,17 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             raise ValueError("num_steps > 1 is not supported in "
                              "EncoderDecoderModelRunner")
 
-        if (model_input.attn_metadata.prefill_metadata is None and
-            model_input.attn_metadata.decode_metadata.use_cuda_graph):
+        if (model_input.attn_metadata is not None
+                and model_input.attn_metadata.prefill_metadata is None
+                and model_input.attn_metadata.decode_metadata.use_cuda_graph):
             print('Executing as cuda graph')
             assert model_input.input_tokens is not None
             graph_batch_size = model_input.input_tokens.shape[0]
-            model_executable = self.graph_runners[model_input.virtual_engine][
-                graph_batch_size]
-            print('encoder_seq_lens_tensor.shape ' + str(
-                model_input.attn_metadata.encoder_seq_lens_tensor.shape))
-
+            model_executable = self.graph_runners[
+                model_input.virtual_engine][graph_batch_size]
         else:
             print('Executing without cuda graph')
             model_executable = self.model
-
-        
-        #model_executable = self.model
 
         seqlen_agnostic_kwargs = {
             "finished_requests_ids": model_input.finished_requests_ids,
@@ -226,7 +278,6 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             attn_backend=self.attn_backend,
         )
 
-
     def prepare_model_input(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
@@ -250,6 +301,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             encoder_input_positions_tensor,
         ) = (self._prepare_encoder_model_input_tensors(seq_group_metadata_list,
                                                        model_input))
+        print('attn_metadata.max_encoder_seq_len 1 ' +
+              str(attn_metadata.max_encoder_seq_len))
 
         # Inject attn_metadata encoder/cross-attention fields &
         # encoder input tokens/positions into model_input.
@@ -444,19 +497,22 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                     cross_block_table is None) else cross_block_table)
 
             # Convert cross-attention block tables to encoder input tensor
-            if model_input.attn_metadata.decode_metadata.use_cuda_graph:
-                #max_len = self.max_seq_len_to_capture
+            if (model_input.attn_metadata is not None
+                    and model_input.attn_metadata.use_cuda_graph):
                 max_len = self.get_max_block_per_batch()
                 batch_size = len(encoder_seq_lens)
                 graph_batch_size = _get_graph_batch_size(batch_size)
                 assert graph_batch_size >= batch_size
                 cuda_graph_pad_size = graph_batch_size - batch_size
-                print('cuda_graph_pad_size-1' + str(cuda_graph_pad_size))
-                cross_block_tables.extend([[] for _ in range(cuda_graph_pad_size)])
-                encoder_seq_lens.extend(itertools.repeat(1, cuda_graph_pad_size))
+                cross_block_tables.extend([[]
+                                           for _ in range(cuda_graph_pad_size)
+                                           ])
+                encoder_seq_lens.extend(
+                    itertools.repeat(1, cuda_graph_pad_size))
 
             else:
-                max_len = max(len(block_table) for block_table in cross_block_tables)
+                max_len = max(
+                    len(block_table) for block_table in cross_block_tables)
 
             cross_block_tables = make_tensor_with_pad(
                 cross_block_tables,

@@ -114,6 +114,7 @@ class PagedAttention:
         output = torch.empty_like(query)
         block_size = value_cache.shape[3]
         num_seqs, num_heads, head_size = query.shape
+        print('max_seq_len ' + str(max_seq_len))
         max_num_partitions = ((max_seq_len + _PARTITION_SIZE - 1) //
                               _PARTITION_SIZE)
         #print('max_seq_len ' + str(max_seq_len))
