@@ -1,13 +1,18 @@
 from ._core_ext import NanRepr, ScalarType
 
-# naming generally follows: https://github.com/jax-ml/ml_dtypes
+# naming generally follows:
+#   https://github.com/jax-ml/ml_dtypes#specifications-of-implemented-floating-point-formats
+#   https://onnx.ai/onnx/technical/float8.html
+#   https://github.com/openxla/xla/blob/38c9f654dc308c1247374199a272ac636a5fb79e/xla/xla_data.proto#L85-L100
 # for floating point types (leading f) the scheme is:
 #  `float<size_bits>_e<exponent_bits>m<mantissa_bits>[flags]`
 #  flags:
 #  - no-flags: means it follows IEEE 754 conventions
 #  - f: means finite values only (no infinities)
 #  - n: means nans are supported (non-standard encoding)
-#  - uz: means NAN is represented using `-0.0`
+#  - uz: means NAN is represented using `-0.0`, (freeing up all 1s for an actual
+#        value), uz also implies the exponent_bias is increased by 1, this is
+#        the convention used by the references above
 # for integer types the scheme is:
 #  `[u]int<size_bits>[b<bias>]`
 #  - if bias is not present it means its zero
