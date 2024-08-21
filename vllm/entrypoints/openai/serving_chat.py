@@ -158,8 +158,7 @@ class OpenAIServingChat(OpenAIServing):
                 tokenizer,
                 guided_decode_logits_processor,
                 default_max_tokens=self.max_model_len -
-                len(prompt_inputs["prompt_token_ids"])
-            )
+                len(prompt_inputs["prompt_token_ids"]))
 
             self._log_inputs(request_id,
                              prompt_inputs,

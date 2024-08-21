@@ -70,9 +70,7 @@ def repeat_and_pad_image_tokens(
             logger.warning(
                 "Please follow the prompt format that is "
                 "documented on HuggingFace which does not involve "
-                "repeating %s tokens.",
-                image_token_str,
-            )
+                "repeating %s tokens.", image_token_str)
         elif image_token_count > 1:
             logger.warning("Multiple image input is not supported yet, "
                            "so any extra image tokens will be treated "
@@ -126,8 +124,9 @@ class ImagePlugin(MultiModalPlugin):
                 raise RuntimeError("No HuggingFace processor is available "
                                    "to process the image object")
             try:
-                batch_data = image_processor.preprocess(
-                    data, return_tensors="pt").data
+                batch_data = image_processor \
+                    .preprocess(data, return_tensors="pt") \
+                    .data
             except Exception:
                 logger.error("Failed to process image (%s)", data)
                 raise
