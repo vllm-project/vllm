@@ -115,7 +115,8 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def mark_blocks_as_computed(self, seq_group: SequenceGroup):
+    def mark_blocks_as_computed(self, seq_group: SequenceGroup,
+                                token_chunk_size: int):
         pass
 
     @abstractmethod

@@ -4,15 +4,14 @@ from typing import List
 import pytest
 import torch
 
-from tests.kernels.utils import (STR_FLASH_ATTN_VAL,
-                                 override_backend_env_variable)
+from tests.kernels.utils import override_backend_env_variable
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, SamplingParams,
                            SequenceData, SequenceGroupMetadata)
-from vllm.utils import get_open_port
+from vllm.utils import STR_FLASH_ATTN_VAL, get_open_port
 from vllm.worker.model_runner import ModelRunner, _get_graph_batch_size
 
 

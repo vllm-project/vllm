@@ -286,7 +286,8 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             self._last_access_blocks_tracker.update_last_access(
                 seq.seq_id, now)
 
-    def mark_blocks_as_computed(self, seq_group: SequenceGroup):
+    def mark_blocks_as_computed(self, seq_group: SequenceGroup,
+                                token_chunk_size: int):
         # The only need for mark block as computed is for prefix caching,
         # while currently we could determine whether one block is computed
         # or not by check whether it has content hash.

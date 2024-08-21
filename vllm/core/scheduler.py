@@ -1145,7 +1145,8 @@ class Scheduler:
         # will crash the vLLM instance / will not retry.
         for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
             self.block_manager.mark_blocks_as_computed(
-                scheduled_seq_group.seq_group)
+                scheduled_seq_group.seq_group,
+                scheduled_seq_group.token_chunk_size)
 
         scheduler_time = time.perf_counter() - scheduler_start_time
         # Add this to scheduler time to all the sequences that are currently
