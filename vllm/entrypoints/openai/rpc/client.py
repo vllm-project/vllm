@@ -343,7 +343,7 @@ class AsyncEngineRPCClient:
 
         finished = False
         try:
-            with self.to_proxy_socket(request_id) as socket:
+            with self.to_proxy_socket() as socket:
                 # Send RPCGenerateRequest to the RPCServer.
                 await socket.send_multipart([
                     cloudpickle.dumps(
