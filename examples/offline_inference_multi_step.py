@@ -15,18 +15,16 @@ prompts = [
     "The future of AI is",
 ]
 # Create a sampling params object.
-sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+sampling_params = SamplingParams(temperature=0.8, top_p=0.95, logprobs=5)
 
 # Create an LLM.
-llm = LLM(
-    model="JackFram/llama-160m",
-    swap_space=16,
-    tensor_parallel_size=1,
-    gpu_memory_utilization=0.9,
-    num_scheduler_steps=8,
-    use_v2_block_manager=True,
-    enforce_eager=True,
-)
+llm = LLM(model="JackFram/llama-160m",
+          swap_space=16,
+          tensor_parallel_size=1,
+          gpu_memory_utilization=0.9,
+          num_scheduler_steps=8,
+          use_v2_block_manager=True,
+          enforce_eager=True)
 # Generate texts from the prompts. The output is a list of RequestOutput objects
 # that contain the prompt, generated text, and other information.
 outputs = llm.generate(prompts, sampling_params)

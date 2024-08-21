@@ -15,6 +15,8 @@ from vllm.triton_utils import HAS_TRITON
 if HAS_TRITON:
     from vllm.model_executor.layers.ops.sample import sample as sample_triton
 
+from dataclasses import dataclass
+
 import vllm.envs as envs
 from vllm.model_executor.sampling_metadata import (SamplingMetadata,
                                                    SamplingTensors,
@@ -49,13 +51,14 @@ SampleResultsDictType = Dict[int, Tuple[List[int], List[int]]]
 # by sampler.forward() and used later to compute the pythonized
 # sample_result; for single-step scheduling: consumed immediately
 # inside sampler-forward() to compute pythonized sample_result.
+@dataclass
 class SampleResultArgsType:
     sample_metadata: SampleMetadataType
-    sampling_metadata: SamplingMetadata
-    greedy_samples: Optional[torch.Tensor] = None
     multinomial_samples: MultinomialSamplesType
-    beam_search_logprobs: Optional[torch.Tensor] = None
     sample_results_dict: SampleResultsDictType
+    sampling_metadata: SamplingMetadata
+    greedy_samples: Optional[torch.Tensor]
+    beam_search_logprobs: Optional[torch.Tensor]
 
 
 # Union of non-deferred (single-step scheduling)
@@ -648,7 +651,7 @@ def _top_k_top_p_multinomial_with_flashinfer(
 
 
 def get_pythonized_sample_results(
-    sample_result_args: SampleResultArgsType, ) -> SampleResultType:
+        sample_result_args: SampleResultArgsType) -> SampleResultType:
     '''
     This function consumes GPU-side sampler results and computes
     Pythonized CPU-side sampler results (GPU -> CPU sync.)
@@ -716,11 +719,6 @@ def _sample_with_torch(
     Torch-oriented _sample() implementation.
     '''
 
-    # Begin building arguments for computing Pythonized sampler
-    # results.
-    maybe_deferred_args = SampleResultArgsType()
-    maybe_deferred_args.sampling_metadata = sampling_metadata
-
     categorized_seq_group_ids: Dict[SamplingType,
                                     List[int]] = {t: []
                                                   for t in SamplingType}
@@ -733,6 +731,8 @@ def _sample_with_torch(
     sample_results_dict: SampleResultsDictType = {}
     sample_metadata: SampleMetadataType = {}
     multinomial_samples: MultinomialSamplesType = {}
+    greedy_samples: Optional[torch.Tensor] = None
+    beam_search_logprobs: Optional[torch.Tensor] = None
 
     # Create output tensor for sampled token ids.
     if include_gpu_probs_tensor:
@@ -758,7 +758,6 @@ def _sample_with_torch(
         if sampling_type == SamplingType.GREEDY:
             greedy_samples = torch.argmax(logprobs[long_sample_indices],
                                           dim=-1)
-            maybe_deferred_args.greedy_samples = greedy_samples
 
             if sampled_token_ids_tensor is not None:
                 # Store sampled tokens in output tensor.
@@ -805,20 +804,25 @@ def _sample_with_torch(
 
         elif sampling_type == SamplingType.BEAM:
             beam_search_logprobs = logprobs[sample_indices]
-            maybe_deferred_args.beam_search_logprobs = beam_search_logprobs
         else:
             raise ValueError(f"Unsupported sampling type: {sampling_type}")
 
-    maybe_deferred_args.sample_metadata = sample_metadata
-    maybe_deferred_args.multinomial_samples = multinomial_samples
-    maybe_deferred_args.sample_results_dict = sample_results_dict
+    # Begin building arguments for computing Pythonized sampler
+    # results.
+    maybe_deferred_args = SampleResultArgsType(
+        sampling_metadata=sampling_metadata,
+        sample_metadata=sample_metadata,
+        multinomial_samples=multinomial_samples,
+        greedy_samples=greedy_samples,
+        beam_search_logprobs=beam_search_logprobs,
+        sample_results_dict=sample_results_dict)
 
     if not sampling_metadata.skip_sampler_cpu_output:
         # GPU<->CPU sync happens here.
         # This also converts the sample output to Python objects.
         # Return Pythonized sampler result & sampled token ids
         return get_pythonized_sample_results(
-            maybe_deferred_args, ), sampled_token_ids_tensor
+            maybe_deferred_args), sampled_token_ids_tensor
     else:
         # Defer sampler result Pythonization; return deferred
         # Pythonization args & sampled token ids

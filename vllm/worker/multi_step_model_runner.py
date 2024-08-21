@@ -299,16 +299,17 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
                 ModelOutput(output[0], output_ready_event,
                             output[0].sampled_token_ids, False))
 
+            # These GPU tensors are not required by multi-step;
+            # erase them to ensure they are not pythonized or
+            # transferred to CPU
+            output[0].sampled_token_ids = None
+            output[0].sampled_token_probs = None
+
             # Pythonize the output if CPU is ahead and the previous step is
             # ready.
             for model_output in model_input.cached_outputs:
                 model_output.maybe_pythonize(model_input, self._copy_stream,
                                              self.pinned_sampled_token_ids)
-
-            # make sure we dont try to serialize any GPU tensors
-            output[0].sampled_token_ids = None
-            output[0].sampled_token_probs = None
-            output[0].logprobs = None
 
         model_input.current_step += 1
 
@@ -418,32 +419,50 @@ DeferredLogprobsReturnType = Tuple[Optional[List[Optional[PromptLogprobs]]],
                                    Optional[List[SampleLogprobs]]]
 
 
-def _maybe_deferred_pythonize_logprobs(
-        skip_sampler_cpu_output: bool, output: SamplerOutput,
+def deferred_pythonize_logprobs(
+        output: SamplerOutput,
         sampling_metadata: SamplingMetadata) -> DeferredLogprobsReturnType:
-    if skip_sampler_cpu_output:
-        # Perform deferred logprob Pythonization
+    '''
+    Perform deferred logprob Pythonization.
 
-        # - Deferred pythonized sample result computation
-        sample_result = get_pythonized_sample_results(
-            output.deferred_sample_results_args)
+    1. Pythonize GPU-side output.deferred_sample_results_args
+       tensors into CPU-side sampler result.
+    2. Pythonize GPU-side output.logprobs tensor into
+       CPU-side logprobs lists, utilizing CPU-side
+       sampler result for the computation.
+    
+    Arguments:
 
-        # - Erase the CUDA-side deferred sample_result
-        #   computation args
-        output.deferred_sample_results_args = None
+    * output: sampler output (under deferred Pythonization)
+    * sampling_metadata
 
-        # - Compute logprobs
-        (
-            prompt_logprobs,
-            sample_logprobs,
-        ) = get_logprobs(output.logprobs, sampling_metadata, sample_result)
+    Returns:
 
-        assert len(prompt_logprobs) == len(sampling_metadata.seq_groups)
-        assert len(sample_logprobs) == len(sampling_metadata.seq_groups)
+    * prompt_logprobs (CPU)
+    * sample_logprobs (CPU)
+    '''
 
-        return prompt_logprobs, sample_logprobs
+    # - Deferred pythonized sample result computation
+    sampler_result = get_pythonized_sample_results(
+        output.deferred_sample_results_args)
 
-    return None, None
+    # - Erase the CUDA-side deferred sample_result
+    #   computation args to ensure it is never
+    #   pythonized or transferred to CPU
+    output.deferred_sample_results_args = None
+
+    # - Compute logprobs
+    (
+        prompt_logprobs,
+        sample_logprobs,
+    ) = get_logprobs(output.logprobs, sampling_metadata, sampler_result)
+    assert len(prompt_logprobs) == len(sampling_metadata.seq_groups)
+    assert len(sample_logprobs) == len(sampling_metadata.seq_groups)
+
+    # Erase the logprobs GPU tensor to ensure it is never pythonized
+    # or transferred to CPU
+    output.logprobs = None
+    return prompt_logprobs, sample_logprobs
 
 
 def _pythonize_sampler_output(model_input: StatefulModelInput,
@@ -474,11 +493,13 @@ def _pythonize_sampler_output(model_input: StatefulModelInput,
     skip_sampler_cpu_output = (
         frozen_model_input.sampling_metadata.skip_sampler_cpu_output)
 
+    # We are guaranteed output tensors are ready, so it is safe to
+    # pythonize the sampler output & obtain CPU-side logprobs
     (
         prompt_logprobs,
         sample_logprobs,
-    ) = _maybe_deferred_pythonize_logprobs(skip_sampler_cpu_output, output,
-                                           sampling_metadata)
+    ) = (deferred_pythonize_logprobs(output, sampling_metadata)
+         if skip_sampler_cpu_output else (None, None))
 
     for sgdx, (seq_group, sample_result) in enumerate(
             zip(sampling_metadata.seq_groups, samples_list)):

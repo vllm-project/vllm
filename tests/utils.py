@@ -133,7 +133,7 @@ class RemoteOpenAIServer:
             api_key=self.DUMMY_API_KEY,
         )
 
-    def get_async_client(self):
+    def get_async_client(self) -> openai.AsyncOpenAI:
         return openai.AsyncOpenAI(
             base_url=self.url_for("v1"),
             api_key=self.DUMMY_API_KEY,
