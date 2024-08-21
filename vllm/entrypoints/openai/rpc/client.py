@@ -162,7 +162,7 @@ class AsyncEngineRPCClient:
         # Close all sockets associated with this context and
         # then terminate the context.
         self.from_api_server.close()
-        self.to_proxy_socket.close()
+        self.to_rpc_server.close()
         self.context.destroy()
 
     @contextmanager
