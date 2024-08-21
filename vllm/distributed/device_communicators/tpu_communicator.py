@@ -15,7 +15,6 @@ if current_platform.is_tpu():
 
 
 class TpuCommunicator:
-
     def __init__(self, group: ProcessGroup):
         if not current_platform.is_tpu():
             self.disabled = True
@@ -36,7 +35,9 @@ class TpuCommunicator:
         # with both CPUs and TPUs.
         cluster_resources = ray.cluster_resources()
         total_tpus = int(cluster_resources["TPU"])
-        tpus_per_node = TPUAcceleratorManager.get_current_node_num_accelerators()
+        tpus_per_node = (
+            TPUAcceleratorManager.get_current_node_num_accelerators()
+        )
         num_nodes = total_tpus // tpus_per_node
 
         pg_table = ray.util.placement_group_table()
@@ -46,7 +47,7 @@ class TpuCommunicator:
             nodes_in_pg = set()
             for pg_key, pg in pg_table.items():
                 if pg_key == current_pg.id.hex():
-                    for _, node in pg['bundles_to_node_id'].items():
+                    for _, node in pg["bundles_to_node_id"].items():
                         nodes_in_pg.add(node)
             num_nodes = len(nodes_in_pg)
 
@@ -54,8 +55,8 @@ class TpuCommunicator:
         local_rank = global_rank % local_world_size
 
         # Ensure environment variables are set for multihost deployments.
-        os.environ['CLOUD_TPU_TASK_ID'] = str(global_rank)
-        os.environ['TPU_VISIBLE_CHIPS'] = str(local_rank)
+        os.environ["CLOUD_TPU_TASK_ID"] = str(global_rank)
+        os.environ["TPU_VISIBLE_CHIPS"] = str(local_rank)
 
         pjrt.initialize_multiprocess(local_rank, local_world_size)
         xr._init_world_size_ordinal()
