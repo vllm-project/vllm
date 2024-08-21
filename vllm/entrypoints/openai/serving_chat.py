@@ -446,6 +446,7 @@ class OpenAIServingChat(OpenAIServing):
         conversation: List[ConversationMessage],
         tokenizer: AnyTokenizer,
     ) -> Union[ErrorResponse, ChatCompletionResponse]:
+
         model_name = self.served_model_names[0]
         created_time = int(time.time())
         final_res: Optional[RequestOutput] = None
