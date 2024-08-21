@@ -397,7 +397,7 @@ class LLM:
                 tokenizer,
                 conversations,
                 chat_template=chat_template,
-                add_generation_template=add_generation_template)
+                add_generation_prompt=add_generation_prompt)
             
             prompt_token_ids = None
 
