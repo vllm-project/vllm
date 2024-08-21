@@ -92,6 +92,14 @@ async def lifespan(app: FastAPI):
 @asynccontextmanager
 async def build_async_engine_client(
     args) -> AsyncIterator[Optional[AsyncEngineClient]]:
+    """
+    Create AsyncEngineClient, either:
+        - in-process using the AsyncLLMEngine Directly
+        - multiprocess using AsyncLLMEngine RPC
+
+    Returns the Client or None if the creation failed.
+    """
+
     # Context manager to handle async_engine_client lifecycle
     # Ensures everything is shutdown and cleaned up on error/exit
     global engine_args
