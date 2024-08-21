@@ -234,6 +234,11 @@ Multimodal Language Models
     - Image
     - :code:`openbmb/MiniCPM-V-2` (see note), :code:`openbmb/MiniCPM-Llama3-V-2_5`, :code:`openbmb/MiniCPM-V-2_6`, etc.
     -
+  * - :code: `UltravoxModel`
+    - Ultravox
+    - Audio
+    - :code: `fixie-ai/ultravox-v0_3`
+    -
 
 .. note::
   For :code:`openbmb/MiniCPM-V-2`, the official repo doesn't work yet, so we need to use a fork (:code:`HwwwH/MiniCPM-V-2`) for now.

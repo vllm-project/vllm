@@ -21,6 +21,7 @@ client = OpenAI(
 models = client.models.list()
 model = models.data[0].id
 
+# Any format supported by librosa is supported
 audio_url = "https://upload.wikimedia.org/wikipedia/en/b/bf/Dave_Niehaus_Winning_Call_1995_AL_Division_Series.ogg"
 
 # Use audio url in the payload
@@ -73,6 +74,7 @@ chat_completion_from_base64 = client.chat.completions.create(
             {
                 "type": "audio_url",
                 "audio_url": {
+                    # Any format supported by librosa is supported
                     "url": f"data:audio/ogg;base64,{audio_base64}"
                 },
             },
