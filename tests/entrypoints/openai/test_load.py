@@ -69,7 +69,6 @@ async def async_openai_chat(model_name, url, api_key):
         async with session.post(url=url, json=payload,
                                 headers=headers) as response:
             assert response.status == 200
-            # data = json.loads(response.text)
             data = json.loads(await response.text())
             completion_tokens = data["usage"]["completion_tokens"]
             text = data["choices"][0]["message"]
@@ -80,7 +79,7 @@ async def async_openai_chat(model_name, url, api_key):
 async def get_request(model_name, url, api_key):
     for _ in range(NUM_REQUESTS):
         yield async_openai_chat(model_name, url, api_key)
-        asyncio.sleep(1/200.)
+        await asyncio.sleep(1/200.)
 
 
 @pytest.mark.asyncio
