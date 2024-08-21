@@ -77,11 +77,11 @@ def repeat_and_pad_image_tokens(
         prompt_parts = prompt.split(image_token_str,
                                     maxsplit=len(repeat_count))
         new_prompt = ""
-        for i in range(len(repeat_count)):
+        for i, repeat_count_item in enumerate(repeat_count):
             replacement_str = "".join(
                 repeat_and_pad_token(
                     image_token_str,
-                    repeat_count=repeat_count[i],
+                    repeat_count=repeat_count_item,
                     pad_token_left=pad_token_str_left,
                     pad_token_right=pad_token_str_right,
                 ))

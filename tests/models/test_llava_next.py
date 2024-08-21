@@ -14,16 +14,11 @@ pytestmark = pytest.mark.vlm
 
 _LIMIT_IMAGE_PER_PROMPT = 4
 
-_PREFACE = (
-    "A chat between a curious human and an artificial intelligence assistant. "
-    "The assistant gives helpful, detailed, and polite answers to the human's "
-    "questions.")
-
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "stop_sign":
-    f"{_PREFACE} USER: <image>\nWhat's the content of the image? ASSISTANT:",
+    "[INST] <image>\nWhat's the content of the image? [/INST]",
     "cherry_blossom":
-    f"{_PREFACE} USER: <image>\nWhat is the season? ASSISTANT:",
+    "[INST] <image>\nWhat is the season? [/INST]",
 })
 
 models = ["llava-hf/llava-v1.6-mistral-7b-hf"]
@@ -256,10 +251,10 @@ def test_models_multiple_image_inputs(hf_runner, vllm_runner, image_assets,
 
     inputs = [(
         [
-            f"{_PREFACE} USER: <image><image>\nDescribe the 2 images. ASSISTANT:",  # noqa: E501
-            f"{_PREFACE} USER: <image><image>\nDescribe the 2 images. ASSISTANT:",  # noqa: E501
-            f"{_PREFACE} USER: <image><image><image><image>\nDescribe the 4 images. ASSISTANT:",  # noqa: E501
-            f"{_PREFACE} USER: <image>\nWhat is the season? ASSISTANT:"
+            "[INST] <image><image>\nDescribe 2 images. [/INST]",
+            "[INST] <image><image>\nDescribe 2 images. [/INST]",
+            "[INST] <image><image><image><image>\nDescribe 4 images. [/INST]",
+            "[INST] <image>\nWhat is the season? [/INST]"
         ],
         [
             [stop_sign, cherry_blossom],
