@@ -306,9 +306,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
   custom_ar.def("init_custom_ar", &init_custom_ar);
   custom_ar.impl("init_custom_ar", torch::kCUDA, &init_custom_ar);
 
-  custom_ar.def("should_custom_ar", &should_custom_ar);
-  custom_ar.impl("should_custom_ar", torch::kCUDA, &should_custom_ar);
-
   custom_ar.def("all_reduce_reg(int fa, Tensor inp, Tensor! out) -> ()");
   custom_ar.impl("all_reduce_reg", torch::kCUDA, &all_reduce_reg);
 

@@ -170,7 +170,7 @@ class GroupCoordinator:
 
         from vllm.distributed.device_communicators.tpu_communicator import (
             TpuCommunicator)
-        self.tpu_communicator: Optional[TpuCommunicator]
+        self.tpu_communicator: Optional[TpuCommunicator] = None
         if use_tpu_communicator and self.world_size > 1:
             self.tpu_communicator = TpuCommunicator(group=self.cpu_group)
 
@@ -262,27 +262,9 @@ class GroupCoordinator:
             with maybe_pynccl_context:
                 yield graph_capture_context
 
-    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
-        """
-        NOTE: This operation will be applied in-place or out-of-place. 
-        Always assume this function modifies its input, but use the return
-        value as the output.
-        """
-        ca_comm = self.ca_comm
-
-        # Bypass the function if we are using only 1 GPU.
+    def in_place_ar(self, input_: torch.Tensor):
         if self.world_size == 1:
-            return input_
-
-        # For TPUs, use TPU communicator.
-        tpu_comm = self.tpu_communicator
-        if tpu_comm is not None and not tpu_comm.disabled:
-            return tpu_comm.all_reduce(input_)
-
-        if ca_comm is not None:
-            out = ca_comm.custom_all_reduce(input_)
-            if out is not None:
-                return out
+            return
         pynccl_comm = self.pynccl_comm
         if (pynccl_comm is not None and not pynccl_comm.disabled):
             pynccl_comm.all_reduce(input_)
@@ -291,7 +273,45 @@ class GroupCoordinator:
             ipex.distributed.all_reduce(input_, group=self.device_group)
         else:
             torch.distributed.all_reduce(input_, group=self.device_group)
-        return input_
+
+    def out_of_place_ar(self, input_: torch.Tensor) -> torch.Tensor:
+        if self.world_size == 1:
+            return input_
+        ca_comm = self.ca_comm
+        tpu_comm = self.tpu_communicator
+        if tpu_comm and not tpu_comm.disabled:
+            return tpu_comm.all_reduce(input_).clone()
+
+        assert ca_comm is not None and not ca_comm.disabled and ca_comm.should_custom_ar(
+            input_)
+        out = ca_comm.custom_all_reduce(input_)
+        assert out is not None
+        return out.clone()
+
+    def should_run_in_place_ar(self, input_):
+        # Should run on TPU
+        tpu_comm = self.tpu_communicator
+        if tpu_comm and not tpu_comm.disabled:
+            return False
+
+        # Should run custom ar
+        ca_comm = self.ca_comm
+        use_ca = ca_comm is not None and not ca_comm.disabled and ca_comm.should_custom_ar(
+            input_)
+        if use_ca:
+            return False
+
+        # Otherwise, return True
+        return True
+
+    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
+        if self.world_size == 1:
+            return input_
+        if self.should_run_in_place_ar(input_):
+            self.in_place_ar(input_)
+            return input_
+        else:
+            return self.out_of_place_ar(input_)
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         world_size = self.world_size
