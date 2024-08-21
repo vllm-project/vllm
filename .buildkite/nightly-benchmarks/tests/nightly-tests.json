@@ -3,7 +3,7 @@
         "test_name": "llama8B_tp1_sharegpt",
         "qps_list": [2,4,8,16,"inf"],
         "common_parameters": {
-            "model": "meta-llama/Meta-Llama-3-8B-Instruct",
+            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
             "tp": 1,
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
@@ -50,7 +50,7 @@
         "test_name": "llama8B_tp1_sonnet_2048_128",
         "qps_list": [2,4,8,16,"inf"],
         "common_parameters": {
-            "model": "meta-llama/Meta-Llama-3-8B-Instruct",
+            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
             "tp": 1,
             "dataset_name": "sonnet",
             "dataset_path": "./sonnet_4x.txt",
@@ -100,7 +100,7 @@
         "test_name": "llama8B_tp1_sonnet_128_2048",
         "qps_list": [2,4,8,16,"inf"],
         "common_parameters": {
-            "model": "meta-llama/Meta-Llama-3-8B-Instruct",
+            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
             "tp": 1,
             "dataset_name": "sonnet",
             "dataset_path": "./sonnet_4x.txt",
