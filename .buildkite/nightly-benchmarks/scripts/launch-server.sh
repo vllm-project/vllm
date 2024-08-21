@@ -153,6 +153,7 @@ launch_sglang_server() {
   dataset_path=$(echo "$common_params" | jq -r '.dataset_path')
   port=$(echo "$common_params" | jq -r '.port')
   num_prompts=$(echo "$common_params" | jq -r '.num_prompts')
+  server_args=$(json2args "$server_params")
 
   if echo "$common_params" | jq -e 'has("fp8")' >/dev/null; then
     echo "Key 'fp8' exists in common params. Use neuralmagic fp8 model for convenience."
@@ -186,6 +187,7 @@ launch_vllm_server() {
   dataset_path=$(echo "$common_params" | jq -r '.dataset_path')
   port=$(echo "$common_params" | jq -r '.port')
   num_prompts=$(echo "$common_params" | jq -r '.num_prompts')
+  server_args=$(json2args "$server_params")
 
   if echo "$common_params" | jq -e 'has("fp8")' >/dev/null; then
     echo "Key 'fp8' exists in common params. Use neuralmagic fp8 model for convenience."
