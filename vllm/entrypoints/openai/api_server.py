@@ -81,8 +81,11 @@ async def lifespan(app: FastAPI):
 
     async def _force_log():
         while True:
-            await asyncio.sleep(10)
-            await async_engine_client.do_log_stats()
+            await asyncio.sleep(1.0)
+            try:
+                await async_engine_client.do_log_stats()
+            except Exception as e:
+                logger.info("do_log_stats failed with: %s", repr(e))
 
     if not engine_args.disable_log_stats:
         task = asyncio.create_task(_force_log())
