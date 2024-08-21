@@ -98,7 +98,7 @@ class ChatMessageParseResult:
 
 
 def load_chat_template(
-    chat_template: Optional[Union[Path, str]], ) -> Optional[str]:
+    chat_template: Optional[Union[Path, str]]) -> Optional[str]:
     if chat_template is None:
         return None
     try:
