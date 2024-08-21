@@ -30,6 +30,12 @@ main() {
 
     # generate figures
     python3 -m pip install tabulate pandas matplotlib
+
+    python3 $VLLM_SOURCE_CODE_LOC/.buildkite/nightly-benchmarks/scripts/generate-nightly-markdown.py \
+        --description $description \
+        --results-folder results/ 
+
+
     python3 $VLLM_SOURCE_CODE_LOC/.buildkite/nightly-benchmarks/scripts/plot-nightly-results.py \
         --description $description \
         --results-folder results/ \

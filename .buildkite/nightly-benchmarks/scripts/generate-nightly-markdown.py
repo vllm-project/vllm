@@ -21,10 +21,6 @@ def parse_arguments():
                         type=str,
                         required=True,
                         help='Description of the results.')
-    parser.add_argument('--dataset',
-                        type=str,
-                        required=True,
-                        help="The dataset used for the benchmark.")
 
     args = parser.parse_args()
     return args
@@ -83,48 +79,16 @@ def main(args):
     df = pd.DataFrame.from_dict(results)
     df = df[df["Test name"].str.contains(args.dataset)]
 
+    md_table = tabulate(df, headers='keys', tablefmt='pipe', showindex=False)
 
-    plt.rcParams.update({'font.size': 18})
-    plt.set_cmap("cividis")
+    with open(args.description, "r") as f:
+        description = f.read()
 
-    # plot results
-    fig, axes = plt.subplots(3, 3, figsize=(16, 14))
-    fig.subplots_adjust(hspace=1)
-    methods = ["vllm", "trtllm", "sglang", "lmdeploy", "tgi"]
-    for i, model in enumerate(["llama8B", "llama70B", "mixtral8x7B"]):
-        for j, metric in enumerate(["TTFT", "ITL", "Tput"]):
-            ax = axes[i, j]
-            if metric in ["TTFT", "ITL"]:
-                ax.set_ylabel(f"{metric} (ms)")
-            else:
-                ax.set_ylabel(f"{metric} (tok/s)")
-            ax.set_xlabel("QPS")
-            ax.set_title(f"{model} {args.dataset} {metric}")
-            ax.grid(axis='y')
-            print("New line")
-            print(model, metric)
-            for k, method in enumerate(methods):
-                mean, std = get_perf_w_std(df, method, model, metric)
-                print(method, mean, std)
-                ax.errorbar(range(len(mean)),
-                            mean, 
-                            yerr=std, 
-                            capsize=10, 
-                            capthick=4,
-                            label=method,
-                            lw=4,)
-            ax.set_ylim(bottom=0)
-            if metric == "TTFT":
-                ax.set_ylim(0, 5000)
-            ax.set_xticks(range(len(mean)))
-            ax.set_xticklabels(["2", "4", "8", "16", "inf"])
+    description = description.format(
+        nightly_results_benchmarking_table=md_table)
 
-            ax.legend()
-
-
-    fig.tight_layout()
-    fig.savefig(f"nightly_results_{args.dataset}.png", bbox_inches='tight', dpi=400)
-
+    with open("nightly_results.md", "w") as f:
+        f.write(description)
 
 if __name__ == '__main__':
     args = parse_arguments()
