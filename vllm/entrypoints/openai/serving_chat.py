@@ -22,7 +22,8 @@ from vllm.entrypoints.openai.protocol import (
     FunctionCall, ToolCall, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing,
-                                                    PromptAdapterPath)
+                                                    PromptAdapterPath,
+                                                    TextTokensPrompt)
 from vllm.inputs import TokensPrompt
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalDataDict

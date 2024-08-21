@@ -113,7 +113,7 @@ def load_chat_template(
 
 
 @lru_cache(maxsize=None)
-def _mm_token_str(model_config: ModelConfig, tokenizer: AnyTokenizer,
+def _mm_token_str(model_config: ModelConfig, tokenizer: AnyHFTokenizer,
                   modality: Literal["image", "audio"]) -> Optional[str]:
     # TODO: Let user specify how to insert image tokens into prompt
     # (similar to chat template)

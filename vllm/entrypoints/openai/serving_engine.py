@@ -395,7 +395,7 @@ class OpenAIServing:
     @staticmethod
     def _get_decoded_token(logprob: Logprob,
                            token_id: int,
-                           tokenizer: AnyTokenizer,
+                           tokenizer: AnyHFTokenizer,
                            return_as_token_id: bool = False) -> str:
         if return_as_token_id:
             return f"token_id:{token_id}"
