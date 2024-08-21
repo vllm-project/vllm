@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import torch
 
-from vllm.config import ParallelConfig, SpeculativeConfig, ModelConfig
+from vllm.config import ModelConfig, ParallelConfig, SpeculativeConfig
 from vllm.distributed.communication_op import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
@@ -154,10 +154,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
             proposer_worker = SmallerTpProposerWorker.maybe_wrap_worker(
                 proposer_worker, draft_tp, target_tp)
-            
+
             worker_list: Dict[str, ProposerWorkerBase] = {}
-            worker_list[draft_worker_kwargs[
-                'model_config'].model] = proposer_worker
+            worker_list[
+                draft_worker_kwargs['model_config'].model] = proposer_worker
 
             # Currently, MultiProposersWorker is designed to support NGram
             # proposer as a backup to pair up with another slower but more
@@ -167,13 +167,12 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             if ngram_prompt_lookup_max > 0:
                 backup_proposer_worker = NGramWorker(**draft_worker_kwargs)
                 backup_proposer_worker.set_ngram_window_size(
-                    ngram_prompt_lookup_min,
-                    ngram_prompt_lookup_max)
+                    ngram_prompt_lookup_min, ngram_prompt_lookup_max)
                 worker_list['[ngram]'] = backup_proposer_worker
-            
+
             if len(worker_list.keys()) > 1:
-                proposer_worker = MultiProposersWorker(
-                    **draft_worker_kwargs, worker_list=worker_list)
+                proposer_worker = MultiProposersWorker(**draft_worker_kwargs,
+                                                       worker_list=worker_list)
 
         logger.info("Configuring SpecDecodeWorker with proposer=%s",
                     type(proposer_worker))
@@ -424,6 +423,18 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # to stop trading off throughput for latency.
         disable_all_speculation = (execute_model_req.running_queue_size >=
                                    self.disable_by_batch_size)
+
+        # When the engine maintainer explicitly disables speculative decoding,
+        # stop trading off throughput for latency.
+        if not disable_all_speculation:
+            seq_group_metadata_list = execute_model_req.seq_group_metadata_list
+            for _, seq in enumerate(seq_group_metadata_list):
+                sd_params = seq.spec_decode_params
+                if sd_params is not None:
+                    proposer = sd_params.get_proposer()
+                    if proposer == "disable":
+                        disable_all_speculation = True
+                        break
 
         return disable_all_speculation
 

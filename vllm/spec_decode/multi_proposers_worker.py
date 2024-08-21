@@ -82,18 +82,6 @@ class MultiProposersWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
             # Once we support more policies, we can make this configurable.
             scheduling_policy="proposal_latency")
 
-        if chosen_proposer == "disable":
-            batch_size = len(execute_model_req.seq_group_metadata_list)
-            proposal_len = execute_model_req.num_lookahead_slots
-            proposal_tokens = torch.tensor(-1, dtype=torch.long).expand(
-                batch_size, proposal_len)
-            proposal_probs = torch.tensor(0, dtype=torch.float32).expand(
-                batch_size, proposal_len, self.vocab_size)
-            proposal_lens_tensor = torch.tensor(0, dtype=torch.long)
-            return SpeculativeProposals(proposal_token_ids=proposal_tokens,
-                                        proposal_probs=proposal_probs,
-                                        proposal_lens=proposal_lens_tensor,
-                                        no_proposals=True)
         return self._workers[chosen_proposer].get_spec_proposals(
             execute_model_req, seq_ids_with_bonus_token_in_last_step)
 
@@ -122,8 +110,6 @@ class MultiProposersWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
             if sd_params is not None:
                 proposer = sd_params.get_proposer()
                 if proposer not in valid_proposers:
-                    if proposer == "disable":
-                        return []
                     logger.info(
                         "proposer_name must be in %s, or set to None. "
                         "Got '%s' instead. Use '[ngram]' as replacement.",
@@ -178,8 +164,6 @@ class MultiProposersWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
                 if sd_params is not None:
                     proposer = sd_params.get_proposer()
                     if proposer not in valid_proposers:
-                        if proposer == "disable":
-                            return "disable"
                         continue
                     if proposer not in proposer_count:
                         proposer_count[proposer] = 0
@@ -193,8 +177,6 @@ class MultiProposersWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
                 if sd_params:
                     proposer = sd_params.get_proposer()
                     if proposer not in valid_proposers:
-                        if proposer == "disable":
-                            return "disable"
                         continue
                     else:
                         chosen_proposer = proposer
