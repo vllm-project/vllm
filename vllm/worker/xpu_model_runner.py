@@ -177,11 +177,6 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
             # is always the first token in the sequence.
             input_positions.extend(list(range(computed_len, seq_len)))
 
-            # mm_data = seq_group_metadata.multi_modal_data
-            # if mm_data:
-            #     mm_kwargs = self.multi_modal_input_mapper(mm_data)
-            #     multi_modal_inputs_list.append(mm_kwargs)
-
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized
                 # yet. In this case, we just use a dummy slot mapping.
@@ -506,15 +501,6 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
         """Prepare the model input based on a given sequence group, including
         metadata for the sampling step.
 
-        The API assumes seq_group_metadata_list is sorted by prefill -> decode.
-
-        The result tensors and data structure also batches input in prefill
-        -> decode order. For example,
-
-        - input_tokens[:num_prefill_tokens] contains prefill tokens.
-        - input_tokens[num_prefill_tokens:] contains decode tokens.
-
-        If cuda graph is required, this API automatically pads inputs.
         """
         model_input = self._prepare_model_input_tensors(
             seq_group_metadata_list, finished_requests_ids)
