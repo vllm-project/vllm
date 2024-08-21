@@ -8,10 +8,9 @@ This test confirms that even at high load with many
 concurrent requests, zmq does not drop any messages.
 """
 
+import aiohttp
 import asyncio
 import json
-
-import aiohttp
 import pytest
 
 from ...utils import RemoteOpenAIServer
@@ -19,7 +18,7 @@ from ...utils import RemoteOpenAIServer
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
 MODEL_NAME = "Qwen/Qwen2-0.5B-Instruct"
-NUM_REQUESTS = 10
+NUM_REQUESTS = 20000
 MAX_TOKENS = 50
 MESSAGES = [{
     "role": "system",
