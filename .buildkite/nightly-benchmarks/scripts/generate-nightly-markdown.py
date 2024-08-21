@@ -77,7 +77,6 @@ def main(args):
 
     # generate markdown table
     df = pd.DataFrame.from_dict(results)
-    df = df[df["Test name"].str.contains(args.dataset)]
 
     md_table = tabulate(df, headers='keys', tablefmt='pipe', showindex=False)
 
