@@ -6,7 +6,6 @@ from typing import (AsyncGenerator, Callable, Dict, Iterable, List, Mapping,
                     Optional, Set, Tuple, Type, Union)
 
 import torch
-from transformers import PreTrainedTokenizer
 from typing_extensions import assert_never
 
 import vllm.envs as envs
@@ -31,6 +30,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
                            SequenceGroupMetadata)
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import print_warning_once
 
@@ -427,8 +427,8 @@ class _AsyncLLMEngine(LLMEngine):
         lora_request: Optional[LoRARequest],
     ) -> List[int]:
         """Async version of :meth:`_tokenize_prompt`."""
-        tokenizer = self.get_tokenizer_group("prompts must be None if "
-                                             "skip_tokenizer_init is True")
+        tokenizer = self.get_tokenizer_group(
+            missing_msg="prompts must be None if skip_tokenizer_init is True")
 
         return await tokenizer.encode_async(request_id=request_id,
                                             prompt=prompt,
@@ -771,7 +771,7 @@ class AsyncLLMEngine:
     async def get_tokenizer(
         self,
         lora_request: Optional[LoRARequest] = None,
-    ) -> "PreTrainedTokenizer":
+    ) -> AnyTokenizer:
         if self.engine_use_ray:
             return await self.engine.get_tokenizer.remote(  # type: ignore
                 lora_request)
