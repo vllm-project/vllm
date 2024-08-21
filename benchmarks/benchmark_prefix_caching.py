@@ -135,7 +135,10 @@ def main(args):
               enforce_eager=True,
               use_v2_block_manager=args.use_v2_block_manager,
               tensor_parallel_size=args.tensor_parallel_size,
-              enable_prefix_caching=args.enable_prefix_caching)
+              enable_prefix_caching=args.enable_prefix_caching,
+              enable_chunked_prefill=True,
+              max_num_batched_tokens=128,
+              max_num_seqs=128)
 
     sampling_params = SamplingParams(temperature=0, max_tokens=args.output_len)
 
