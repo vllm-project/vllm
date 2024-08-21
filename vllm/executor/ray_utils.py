@@ -104,8 +104,8 @@ def assert_ray_available():
                          "`pip install ray`.") from ray_import_err
 
 
-def _verify_bundles(placement_group: PlacementGroup,
-                    parallel_config: ParallelConfig):
+def _verify_bundles(placement_group: "PlacementGroup",
+                    parallel_config: ParallelConfig, device_str: str):
     """Verify a given placement group has bundles located in the right place.
 
     There are 2 rules.
@@ -139,14 +139,14 @@ def _verify_bundles(placement_group: PlacementGroup,
         if len(bundles) < parallel_config.tensor_parallel_size:
             logger.warning(
                 "tensor_parallel_size=%d "
-                "is smaller than the reserved number of GPUs ({len(bundles)} "
-                "GPUs) in a node %s. Tensor parallel workers can be "
-                "spread out to 2 nodes which can degrade the performance. "
+                "is bigger than a reserved number of %ss (%d "
+                "%ss) in a node %s. Tensor parallel workers can be "
+                "spread out to 2+ nodes which can degrade the performance "
                 "unless you have fast interconnect across nodes, like "
                 "Infiniband. To resolve this issue, make sure you have more "
                 "than %d GPUs available at each node.",
-                parallel_config.tensor_parallel_size, node_id,
-                parallel_config.tensor_parallel_size)
+                parallel_config.tensor_parallel_size, device_str, len(bundles),
+                device_str, node_id, parallel_config.tensor_parallel_size)
 
 
 def _wait_until_pg_ready(current_placement_group: PlacementGroup):
@@ -271,6 +271,6 @@ def initialize_ray_cluster(
         _wait_until_pg_ready(current_placement_group)
 
     assert current_placement_group is not None
-    _verify_bundles(current_placement_group, parallel_config)
+    _verify_bundles(current_placement_group, parallel_config, device_str)
     # Set the placement group in the parallel config
     parallel_config.placement_group = current_placement_group

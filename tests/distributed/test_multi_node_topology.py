@@ -37,6 +37,8 @@ def test_multi_node_bad_topology(
     ray.init()
     assert ray.cluster_resources()["GPU"] == 4.0, (
         "At leasts 4 gpus are required to run a test.")
+    print(ray.cluster_resources())
+    print("===Test tp 4 on 2 nodes===")
     # Creating tp == 4. Since TP workers are supposed to spread to 2 workers
     # it should log warning.
     with pytest.warns() as record:
@@ -58,6 +60,7 @@ def test_multi_node_bad_topology(
     actors = [Actor.remote() for _ in range(2)]  # type: ignore
     ray.get([a.__ray_ready__.remote() for a in actors])
 
+    print("===Test no GPU on a current node===")
     # Now vLLM is created on a head node, but there's no GPU. It should raise
     # an exception.
     with pytest.raises(RuntimeError), vllm_runner(
