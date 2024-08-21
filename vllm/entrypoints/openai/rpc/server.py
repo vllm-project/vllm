@@ -23,8 +23,8 @@ class AsyncEngineRPCServer:
     def __init__(self, async_engine_args: AsyncEngineArgs,
                  usage_context: UsageContext, rpc_path: str):
         # Initialize engine first.
-        self.engine = AsyncLLMEngine.from_engine_args(async_engine_args,
-                                                      usage_context)
+        self.engine = AsyncLLMEngine.from_engine_args(
+            async_engine_args, usage_context=usage_context)
 
         # Initialize context.
         self.context = zmq.asyncio.Context()
@@ -38,6 +38,8 @@ class AsyncEngineRPCServer:
         self.socket.close()
         self.context.destroy()
         self.engine.shutdown_background_loop()
+        # Clear the engine reference so that it can be GC'ed.
+        del self.engine
 
     async def get_model_config(self, identity):
         """Send the ModelConfig"""
