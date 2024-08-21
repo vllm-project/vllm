@@ -73,7 +73,7 @@ steps:
           podSpec:
             <<: *common_pod_spec
             containers:
-              - image: openmmlab/lmdeploy:v0.5.0
+              - image: openmmlab/lmdeploy:v0.5.3
                 <<: *common_container_settings
   
 
@@ -98,7 +98,7 @@ steps:
           podSpec:
             <<: *common_pod_spec
             containers:
-              - image: ghcr.io/huggingface/text-generation-inference:2.1 
+              - image: ghcr.io/huggingface/text-generation-inference:2.2.0
                 <<: *common_container_settings
         
   - wait
