@@ -3,12 +3,12 @@ This file test accuracy of the vLLM server via LMEval.
 It uses local-completions, which interacts with vLLM
 through the OAI API with N concurrent connections.
 This simulates real work usage of the API and makes
-sure that the zmq frontent mp RPC message passing and
+sure that the zmq frontend mp RPC message passing and
 AsyncLLMEngine are working correctly.
 """
 
-import pytest
 import lm_eval
+import pytest
 
 from ...utils import RemoteOpenAIServer
 
@@ -39,21 +39,17 @@ def server_data(server):
 
 
 def test_lm_eval_accuracy(server_data):
-    model_args = (
-        f"model={MODEL_NAME},"
-        f"base_url={server_data['url']},"
-        f"num_concurrent={NUM_CONCURRENT},tokenized_requests=False"
-    )
+    model_args = (f"model={MODEL_NAME},"
+                  f"base_url={server_data['url']},"
+                  f"num_concurrent={NUM_CONCURRENT},tokenized_requests=False")
 
     results = lm_eval.simple_evaluate(
         model="local-completions",
         model_args=model_args,
         tasks=TASK,
-        limit=10,
     )
 
     measured_value = results["results"][TASK][FILTER]
-    assert (
-        measured_value - RTOL < EXPECTED_VALUE and
-        measured_value + RTOL > EXPECTED_VALUE
-    ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
+    assert (measured_value - RTOL < EXPECTED_VALUE
+            and measured_value + RTOL > EXPECTED_VALUE
+            ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
