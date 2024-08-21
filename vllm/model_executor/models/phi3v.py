@@ -329,7 +329,7 @@ def get_phi3v_image_feature_size(
     input_height: int,
     input_width: int,
 ) -> int:
-    num_crops = hf_config.get("num_crops", 4)
+    num_crops = hf_config.get("num_crops", 16)
     new_width, new_height = _calc_hd_transform_size(width=input_width,
                                                     height=input_height,
                                                     hd_num=num_crops)

@@ -227,7 +227,7 @@ Multimodal Language Models
   * - :code:`Phi3VForCausalLM`
     - Phi-3-Vision
     - Image
-    - :code:`microsoft/Phi-3-vision-128k-instruct`, etc.
+    - :code:`microsoft/Phi-3-vision-128k-instruct`, :code:`microsoft/Phi-3.5-vision-instruct` etc.
     -
   * - :code:`MiniCPMV`
     - MiniCPM-V
