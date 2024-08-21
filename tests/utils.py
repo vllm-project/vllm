@@ -423,19 +423,16 @@ async def completions_with_server_args(
     server_cli_args: List[str],
     num_logprobs: Optional[int],
 ) -> Completion:
-    '''
-    Construct a remote OpenAI server, obtain an async client to the
+    '''Construct a remote OpenAI server, obtain an async client to the
     server & invoke the completions API to obtain completions.
 
-    Arguments:
-
-    * prompts: test prompts
-    * model_name: model to spin up on the vLLM server
-    * server_cli_args: CLI args for starting the server
+    Args:
+      prompts: test prompts
+      model_name: model to spin up on the vLLM server
+      server_cli_args: CLI args for starting the server
 
     Returns:
-
-    * OpenAI Completion instance
+      OpenAI Completion instance
     '''
 
     outputs = None
@@ -454,7 +451,8 @@ async def completions_with_server_args(
 
 def get_client_text_generations(completions: Completion):
     '''Extract generated tokens from the output of a
-    request made to an Open-AI-protocol completions endpoint.'''
+    request made to an Open-AI-protocol completions endpoint.
+    '''
     return [x.text for x in completions.choices]
 
 
@@ -486,8 +484,7 @@ def assert_all_close_logprobs(
     atol: float = 1e-3,
     rtol: float = 1e-3,
 ) -> None:
-    '''
-    Asserts that logprobs produced by the vLLM engine instance under test
+    '''Asserts that logprobs produced by the vLLM engine instance under test
     are very close to a set of ground-truth reference values.
 
     If the completions API was invoked with a non-`None` `logprobs` argument,
@@ -502,12 +499,11 @@ def assert_all_close_logprobs(
     Else, if the completions API was invoked with `logprobs=None`, then
     both the reference & test log probs should be List[None].
 
-    Arguments:
-
-    * ref_logprobs: ground-truth logprobs
-    * test_logprobs: logprobs produced by vLLM engine under test
-    * atol: absolute mismatch tolerance when comparing single logprobs
-    * rtol: relative mismatch tolerance when comparing single logprobs
+    Args:
+      ref_logprobs: ground-truth logprobs
+      test_logprobs: logprobs produced by vLLM engine under test
+      atol: absolute mismatch tolerance when comparing single logprobs
+      rtol: relative mismatch tolerance when comparing single logprobs
     '''
 
     assert len(ref_logprobs) == len(test_logprobs), (
