@@ -5,17 +5,15 @@ from tqdm import tqdm
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
-from vllm.entrypoints.chat_utils import (
-    ChatCompletionMessageParam,
-    apply_chat_template,
-    parse_chat_messages,
-)
+from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
+                                         apply_chat_template,
+                                         parse_chat_messages)
 from vllm.inputs import PromptInputs, TextPrompt, TokensPrompt
 from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.guided_decoding import (
-GuidedDecodingRequest, get_local_guided_decoding_logits_processor)
+    GuidedDecodingRequest, get_local_guided_decoding_logits_processor)
 from vllm.model_executor.guided_decoding.guided_fields import LLMGuidedOptions
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
