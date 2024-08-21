@@ -61,15 +61,31 @@ class BenchmarkMetrics:
     mean_ttft_ms: float
     median_ttft_ms: float
     std_ttft_ms: float
+    p25_ttft_ms: float
+    p75_ttft_ms: float
+    p95_ttft_ms: float
     p99_ttft_ms: float
     mean_tpot_ms: float
     median_tpot_ms: float
     std_tpot_ms: float
+    p25_tpot_ms: float
+    p75_tpot_ms: float
+    p95_tpot_ms: float
     p99_tpot_ms: float
     mean_itl_ms: float
     median_itl_ms: float
     std_itl_ms: float
+    p25_itl_ms: float
+    p75_itl_ms: float
+    p95_itl_ms: float
     p99_itl_ms: float
+    mean_latency_ms: float
+    median_latency_ms: float
+    std_latency_ms: float
+    p25_latency_ms: float
+    p75_latency_ms: float
+    p95_latency_ms: float
+    p99_latency_ms: float
 
 
 def sample_sharegpt_requests(
@@ -242,6 +258,7 @@ def calculate_metrics(
     itls: List[float] = []
     tpots: List[float] = []
     ttfts: List[float] = []
+    latencies: List[float] = []
     for i in range(len(outputs)):
         if outputs[i].success:
             # We use the tokenizer to count the number of output tokens for all
@@ -258,6 +275,7 @@ def calculate_metrics(
                     (outputs[i].latency - outputs[i].ttft) / (output_len - 1))
             itls += outputs[i].itl
             ttfts.append(outputs[i].ttft)
+            latencies.append(outputs[i].latency)
             completed += 1
         else:
             actual_output_lens.append(0)
@@ -276,17 +294,33 @@ def calculate_metrics(
         output_throughput=sum(actual_output_lens) / dur_s,
         mean_ttft_ms=np.mean(ttfts or 0) *
         1000,  # ttfts is empty if streaming is not supported by backend
-        median_ttft_ms=np.median(ttfts or 0) * 1000,
         std_ttft_ms=np.std(ttfts or 0) * 1000,
+        p25_ttft_ms=np.percentile(ttfts or 0, 25) * 1000,
+        median_ttft_ms=np.median(ttfts or 0) * 1000,
+        p75_ttft_ms=np.percentile(ttfts or 0, 75) * 1000,
+        p95_ttft_ms=np.percentile(ttfts or 0, 95) * 1000,
         p99_ttft_ms=np.percentile(ttfts or 0, 99) * 1000,
         mean_tpot_ms=np.mean(tpots or 0) * 1000,
-        median_tpot_ms=np.median(tpots or 0) * 1000,
         std_tpot_ms=np.std(tpots or 0) * 1000,
+        p25_tpot_ms=np.percentile(tpots or 0, 25) * 1000,
+        median_tpot_ms=np.median(tpots or 0) * 1000,
+        p75_tpot_ms=np.percentile(tpots or 0, 75) * 1000,
+        p95_tpot_ms=np.percentile(tpots or 0, 95) * 1000,
         p99_tpot_ms=np.percentile(tpots or 0, 99) * 1000,
         mean_itl_ms=np.mean(itls or 0) * 1000,
-        median_itl_ms=np.median(itls or 0) * 1000,
         std_itl_ms=np.std(itls or 0) * 1000,
+        p25_itl_ms=np.percentile(itls or 0, 25) * 1000,
+        median_itl_ms=np.median(itls or 0) * 1000,
+        p75_itl_ms=np.percentile(itls or 0, 75) * 1000,
+        p95_itl_ms=np.percentile(itls or 0, 95) * 1000,
         p99_itl_ms=np.percentile(itls or 0, 99) * 1000,
+        mean_latency_ms=np.median(latencies or 0) * 1000,
+        std_latency_ms=np.std(latencies or 0) * 1000,
+        p25_latency_ms=np.percentile(latencies or 0, 25) * 1000,
+        median_latency_ms=np.mean(latencies or 0) * 1000,
+        p75_latency_ms=np.percentile(latencies or 0, 75) * 1000,
+        p95_latency_ms=np.percentile(latencies or 0, 95) * 1000,
+        p99_latency_ms=np.percentile(latencies or 0, 99) * 1000,
     )
 
     return metrics, actual_output_lens
@@ -409,20 +443,37 @@ async def benchmark(
                                     metrics.output_throughput))
     print("{s:{c}^{n}}".format(s='Time to First Token', n=50, c='-'))
     print("{:<40} {:<10.2f}".format("Mean TTFT (ms):", metrics.mean_ttft_ms))
-    print("{:<40} {:<10.2f}".format("Median TTFT (ms):",
-                                    metrics.median_ttft_ms))
+    print("{:<40} {:<10.2f}".format("P25 TTFT (ms):", metrics.p25_ttft_ms))
+    print("{:<40} {:<10.2f}".format("P75 TTFT (ms):", metrics.p75_ttft_ms))
+    print("{:<40} {:<10.2f}".format("p50 TTFT (ms):", metrics.median_ttft_ms))
+    print("{:<40} {:<10.2f}".format("P95 TTFT (ms):", metrics.p95_ttft_ms))
     print("{:<40} {:<10.2f}".format("P99 TTFT (ms):", metrics.p99_ttft_ms))
     print("{s:{c}^{n}}".format(s='Time per Output Token (excl. 1st token)',
                                n=50,
                                c='-'))
     print("{:<40} {:<10.2f}".format("Mean TPOT (ms):", metrics.mean_tpot_ms))
-    print("{:<40} {:<10.2f}".format("Median TPOT (ms):",
-                                    metrics.median_tpot_ms))
+    print("{:<40} {:<10.2f}".format("P25 TPOT (ms):", metrics.p25_tpot_ms))
+    print("{:<40} {:<10.2f}".format("P50 TPOT (ms):", metrics.median_tpot_ms))
+    print("{:<40} {:<10.2f}".format("P75 TPOT (ms):", metrics.p75_tpot_ms))
+    print("{:<40} {:<10.2f}".format("P95 TPOT (ms):", metrics.p95_tpot_ms))
     print("{:<40} {:<10.2f}".format("P99 TPOT (ms):", metrics.p99_tpot_ms))
+
     print("{s:{c}^{n}}".format(s='Inter-token Latency', n=50, c='-'))
     print("{:<40} {:<10.2f}".format("Mean ITL (ms):", metrics.mean_itl_ms))
-    print("{:<40} {:<10.2f}".format("Median ITL (ms):", metrics.median_itl_ms))
+    print("{:<40} {:<10.2f}".format("P25 ITL (ms):", metrics.p25_itl_ms))
+    print("{:<40} {:<10.2f}".format("P50 ITL (ms):", metrics.median_itl_ms))
+    print("{:<40} {:<10.2f}".format("P75 ITL (ms):", metrics.p75_itl_ms))
+    print("{:<40} {:<10.2f}".format("P95 ITL (ms):", metrics.p95_itl_ms))
     print("{:<40} {:<10.2f}".format("P99 ITL (ms):", metrics.p99_itl_ms))
+
+    print("{s:{c}^{n}}".format(s='End-to-end Latency', n=50, c='-'))
+    print("{:<40} {:<10.2f}".format("Mean EEL (ms):", metrics.mean_latency_ms))
+    print("{:<40} {:<10.2f}".format("P25 EEL (ms):", metrics.p25_latency_ms))
+    print("{:<40} {:<10.2f}".format("P50 EEL (ms):",
+                                    metrics.median_latency_ms))
+    print("{:<40} {:<10.2f}".format("P75 EEL (ms):", metrics.p75_latency_ms))
+    print("{:<40} {:<10.2f}".format("P95 EEL (ms):", metrics.p95_latency_ms))
+    print("{:<40} {:<10.2f}".format("P99 EEL (ms):", metrics.p99_latency_ms))
     print("=" * 50)
 
     result = {
