@@ -163,7 +163,7 @@ async def build_async_engine_client(
                             "The server process died before "
                             "responding to the readiness probe") from e
 
-            yield rpc_client
+            yield async_engine_client
         finally:
             # Ensure rpc server process was terminated
             rpc_server_process.terminate()
