@@ -71,10 +71,10 @@ _O = TypeVar("_O", RequestOutput, EmbeddingRequestOutput)
 
 PromptComponents = Tuple[Optional[str], List[int],
                          Optional[MultiModalDataDict],
-                         Optional[str], List[int]]
+                         Optional[None], List[None]]
 DecoderPromptComponents = Tuple[Optional[str], Optional[List[int]],
                                 Optional[MultiModalDataDict],
-                                Optional[str], Optional[List[int]]]
+                                Optional[None], Optional[None]]
 
 
 class LLMEngine:
@@ -916,14 +916,17 @@ class LLMEngine:
         prompt_comps: PromptComponents,
         prompt_adapter_request: Optional[PromptAdapterRequest],
     ) -> LLMInputs:
-        prompt, prompt_token_ids, multi_modal_data = prompt_comps
+        prompt, prompt_token_ids, multi_modal_data, \
+            negative_prompt, negative_prompt_token_ids = prompt_comps
 
         prompt_token_ids = self._apply_prompt_adapter(
             prompt_token_ids, prompt_adapter_request=prompt_adapter_request)
 
         return LLMInputs(prompt_token_ids=prompt_token_ids,
                          prompt=prompt,
-                         multi_modal_data=multi_modal_data)
+                         multi_modal_data=multi_modal_data,
+                         negative_prompt_token_ids=negative_prompt_token_ids,
+                         negative_prompt=negative_prompt)
 
     def _process_decoder_only_prompt(
         self,
