@@ -8,6 +8,7 @@ from vllm.platforms import current_platform
 
 if current_platform.is_tpu():
     import ray
+    from ray._private.accelerators import TPUAcceleratorManager
     import torch_xla.core.xla_model as xm
     import torch_xla.runtime as xr
     from torch_xla._internal import pjrt
@@ -29,8 +30,15 @@ class TpuCommunicator:
 
         # Calculate how many TPU nodes are in the current deployment. This
         # is the Ray placement group if it is deployed with Ray. Default
-        # to the number of nodes in the Ray cluster..
-        num_nodes = len(ray.nodes())
+        # to the number of TPU nodes in the Ray cluster. The number of TPU
+        # nodes is computed by the total number of TPUs divided by the
+        # number of TPU accelerators per node, to account for clusters
+        # with both CPUs and TPUs.
+        cluster_resources = ray.cluster_resources()
+        total_tpus = int(cluster_resources["TPU"])
+        tpus_per_node = TPUAcceleratorManager.get_current_node_num_accelerators()
+        num_nodes = total_tpus // tpus_per_node
+
         pg_table = ray.util.placement_group_table()
         current_pg = ray.util.get_current_placement_group()
 
