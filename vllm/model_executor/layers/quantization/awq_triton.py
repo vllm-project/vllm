@@ -202,19 +202,6 @@ def awq_gemm_kernel(a_ptr, b_ptr, c_ptr, zeros_ptr, scales_ptr, M, N, K,
     else:
         tl.atomic_add(c_ptrs, c, mask=c_mask)
 
-
-# Example input:
-#   qweight.size=torch.Size([3584, 576]),
-#   qweight.dtype = torch.int32,
-#   scales.size=torch.Size([28, 4608]),
-#   scales.dtype=torch.float16,
-#   zeros.size=torch.Size([28, 576]),
-#   zeros.dtype=torch.int32
-#   split_k_iters=0
-#   thx=0
-#   thy=0
-
-
 # qweights - [K     , M // 8], int32
 # scales   - [K // G, M     ], float16
 # zeros    - [K // G, M // 8], int32

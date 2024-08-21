@@ -2,8 +2,6 @@
 
 Run `pytest tests/kernels/test_awq_triton.py`.
 """
-import argparse
-
 import pytest
 import torch
 
