@@ -9,6 +9,8 @@ import zmq.asyncio
 from typing_extensions import Never
 
 from vllm import AsyncEngineArgs, AsyncLLMEngine
+from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig)
 from vllm.entrypoints.openai.rpc import (VLLM_RPC_SUCCESS_STR,
                                          VLLM_RPC_ZMQ_HWM, RPCAbortRequest,
                                          RPCGenerateRequest, RPCUtilityRequest)
@@ -16,6 +18,9 @@ from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 
 logger = init_logger(__name__)
+
+CONFIG_TYPE = Union[ModelConfig, DecodingConfig, ParallelConfig,
+                    SchedulerConfig, LoRAConfig]
 
 
 class AsyncEngineRPCServer:
@@ -44,6 +49,7 @@ class AsyncEngineRPCServer:
 
     async def get_config(self, identity, request):
         try:
+            config: CONFIG_TYPE
             if request == RPCUtilityRequest.GET_MODEL_CONFIG:
                 config = await self.engine.get_model_config()
             elif request == RPCUtilityRequest.GET_DECODING_CONFIG:
