@@ -81,7 +81,7 @@ async def lifespan(app: FastAPI):
 
     async def _force_log():
         while True:
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(10)
             try:
                 await async_engine_client.do_log_stats()
             except Exception as e:
