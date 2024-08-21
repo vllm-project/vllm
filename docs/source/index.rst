@@ -136,6 +136,7 @@ Documentation
    dev/input_processing/model_inputs_index
    dev/multimodal/multimodal_index
    dev/dockerfile/dockerfile
+   dev/profiling/profiling_index
 
 .. toctree::
    :maxdepth: 1

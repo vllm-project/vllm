@@ -46,6 +46,8 @@ class RPCUtilityRequest(Enum):
     DO_LOG_STATS = 7
     IS_SERVER_HEALTHY = 8
     IS_TRACING_ENABLED = 9
+    START_PROFILE = 10
+    STOP_PROFILE = 11
 
 
 RPC_REQUEST_TYPE = Union[RPCGenerateRequest, RPCAbortRequest,
