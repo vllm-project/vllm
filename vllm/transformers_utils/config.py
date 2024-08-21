@@ -104,6 +104,9 @@ def get_hf_image_processor_config(
     revision: Optional[str] = None,
     **kwargs,
 ) -> Dict[str, Any]:
+    # Separate model folder from file path for GGUF models
+    if Path(model).is_file() and Path(model).suffix == ".gguf":
+        model = Path(model).parent
     return get_image_processor_config(model, revision=revision, **kwargs)
 
 
