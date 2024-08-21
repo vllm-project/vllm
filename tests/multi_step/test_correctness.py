@@ -68,16 +68,17 @@ def get_text_generations(completions: Completion):
 
 '''
 Logprobs values are extracted as List[List[Dict[str,float]]], i.e.:
-* For each `SequenceGroup`,
+* For each :class:`SequenceGroup`,
 * for each token offset in a sequence,
 * a mapping from str(token) -> logprob
 '''
-LogprobType = List[List[Dict[str, float]]]
+LogprobType = List[Optional[List[Dict[str, float]]]]
 
 
 def get_logprob_generations(completions: Completion) -> LogprobType:
-    '''Obtain top-rank logprobs for each token in each `SequenceGroup`'''
-    return [x.logprobs.top_logprobs for x in completions.choices]
+    '''Obtain top-rank logprobs for each token in each :class:`SequenceGroup`'''
+    return [(None if x.logprobs is None else x.logprobs.top_logprobs)
+            for x in completions.choices]
 
 
 def assert_all_close_logprobs(
@@ -109,10 +110,26 @@ def assert_all_close_logprobs(
     assert len(ref_logprobs) == len(test_logprobs), (
         "Reference & test logprob SequenceGroup counts must match.")
 
+    if ref_logprobs[0] is None:
+        # It is expected that if one :class:`SequenceGroup` has
+        # `None` logprobs, then all :class:`SequenceGroup`s
+        # in the reference list have `None` logprobs.
+        # Validate this.
+        assert all([x is None for x in ref_logprobs])
+
+        # Next, assert that this is also true for
+        # test logprobs.
+        assert all([x is None for x in test_logprobs])
+        return
+
     for (group_ref_logprobs,
          group_test_logprobs) in zip(ref_logprobs, test_logprobs):
+
+        assert group_ref_logprobs is not None
+        assert group_test_logprobs is not None
         assert len(group_ref_logprobs) == len(group_test_logprobs), (
             "Reference & test logprob seq lens must match.")
+
         for (token_ref_logprobs,
              token_test_logprobs) in zip(group_ref_logprobs,
                                          group_test_logprobs):
