@@ -91,7 +91,7 @@ async def lifespan(app: FastAPI):
 
 @asynccontextmanager
 async def build_async_engine_client(
-    args) -> AsyncIterator[Optional[AsyncEngineClient]]:
+        args) -> AsyncIterator[Optional[AsyncEngineClient]]:
     """
     Create AsyncEngineClient, either:
         - in-process using the AsyncLLMEngine Directly
@@ -158,7 +158,7 @@ async def build_async_engine_client(
                 try:
                     await async_engine_client.setup()
                     break
-                except TimeoutError as e:
+                except TimeoutError:
                     if not rpc_server_process.is_alive():
                         logger.error(
                             "RPCServer process died before responding "
@@ -412,6 +412,7 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     logger.info("args: %s", args)
 
     async with build_async_engine_client(args) as async_engine_client:
+        # If None, creation of the client failed and we exit.
         if async_engine_client is None:
             return
 

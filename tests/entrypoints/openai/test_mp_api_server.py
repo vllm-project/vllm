@@ -1,5 +1,6 @@
-import pytest
 import time
+
+import pytest
 
 from vllm.entrypoints.openai.api_server import build_async_engine_client
 from vllm.entrypoints.openai.cli_args import make_arg_parser
@@ -9,8 +10,7 @@ from vllm.utils import FlexibleArgumentParser
 @pytest.mark.asyncio
 async def test_mp_crash_detection(capfd):
 
-    parser = FlexibleArgumentParser(
-        description="vLLM's remote OpenAI server.")
+    parser = FlexibleArgumentParser(description="vLLM's remote OpenAI server.")
     parser = make_arg_parser(parser)
     args = parser.parse_args([])
     # use an invalid tensor_parallel_size to trigger the
@@ -22,11 +22,8 @@ async def test_mp_crash_detection(capfd):
         pass
     end = time.perf_counter()
 
-    assert end - start < 60, (
-        "Expected vLLM to gracefully shutdown in <60s "
-        "if there is an error in the startup."
-    )
-
+    assert end - start < 60, ("Expected vLLM to gracefully shutdown in <60s "
+                              "if there is an error in the startup.")
 
 
 @pytest.mark.asyncio
