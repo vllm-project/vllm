@@ -6,7 +6,8 @@ from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
 import numpy as np
 import torch
 import torch.nn as nn
-from transformers import CLIPVisionConfig, LlavaNextVideoConfig, SiglipVisionConfig
+from transformers import (CLIPVisionConfig, LlavaNextVideoConfig,
+                          SiglipVisionConfig)
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
@@ -26,10 +27,10 @@ from vllm.utils import is_list_of
 
 from .clip import dummy_image_for_clip, dummy_seq_data_for_clip
 from .interfaces import SupportsMultiModal
-from .utils import (filter_weights, init_vllm_registered_model,
-                    merge_multimodal_embeddings)
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip)
+from .utils import (filter_weights, init_vllm_registered_model,
+                    merge_multimodal_embeddings)
 
 logger = init_logger(__name__)
 
@@ -59,6 +60,7 @@ def get_llava_next_video_frame_feature_size(
     spatial_pool_stride = hf_config.spatial_pool_stride
 
     return int((image_size / patch_size / spatial_pool_stride)**2)
+
 
 def _get_max_llm_tokens(ctx: InputContext) -> int:
     """
@@ -135,7 +137,7 @@ def dummy_data_for_llava_next_video(ctx: InputContext, seq_len: int,
         mm_data_per_video = np.repeat([np_frame], frames_per_video, axis=0)
         mm_data = {"video": mm_data_per_video}
         return seq_data, mm_data
-    
+
     msg = f"Unsupported vision config: {type(vision_config)}"
     raise NotImplementedError(msg)
 
@@ -201,7 +203,7 @@ def _init_vision_tower(hf_config: LlavaNextVideoConfig):
             vision_config,
             num_hidden_layers_override=num_hidden_layers,
         )
-    
+
     msg = f"Unsupported vision config: {type(vision_config)}"
     raise NotImplementedError(msg)
 
@@ -241,6 +243,7 @@ class LlavaNextVideoPooler(nn.Module):
 
         return image_features_spatial.flatten(2).transpose(1, 2).contiguous()
 
+
 class LlavaNextMultiModalProjector(nn.Module):
 
     def __init__(self, vision_hidden_size: int, text_hidden_size: int,
@@ -260,7 +263,6 @@ class LlavaNextMultiModalProjector(nn.Module):
         hidden_states = self.act(hidden_states)
         hidden_states = self.linear_2(hidden_states)
         return hidden_states
-
 
 
 @MULTIMODAL_REGISTRY.register_input_mapper("video")
