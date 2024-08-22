@@ -339,8 +339,7 @@ class FlashInferMetadata(AttentionMetadata):
                 self.head_dim,
                 self.page_size,
                 # Disable flashinfer's pos encoding and use vllm's rope.
-                pos_encoding_mode="NONE",
-                data_type=self.data_type)
+                pos_encoding_mode="NONE")
 
     def asdict_zerocopy(self,
                         skip_fields: Optional[Set[str]] = None
@@ -674,6 +673,12 @@ class FlashInferImpl(AttentionImpl):
                 k_scale,
                 v_scale,
             )
+            # The FlashInfer api requires data to be in fp8_e4m3 or fp8_e5m2 
+            # to process the cache in fp8
+            if(self.kv_cache_dtype == 'fp8' or self.kv_cache_dtype == 'fp8_e4m3'
+                                  or self.kv_cache_dtype == 'fp8_e5m2'):
+                kv_cache = kv_cache.view(
+                    get_kv_cache_torch_dtype(self.kv_cache_dtype))
 
         query = query.contiguous(
         )  # Flashinfer requires query to be contiguous
@@ -711,5 +716,7 @@ class FlashInferImpl(AttentionImpl):
                 query,
                 kv_cache,
                 sm_scale=self.scale,
-                logits_soft_cap=self.logits_soft_cap)
+                logits_soft_cap=self.logits_soft_cap,
+                k_scale=k_scale,
+                v_scale=v_scale)
         return output.view(num_tokens, hidden_size)
