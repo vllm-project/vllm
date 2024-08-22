@@ -96,7 +96,10 @@ class MistralTokenizer:
     def encode(self, prompt: str) -> List[int]:
         return self.tokenizer.encode(prompt, bos=False, eos=False)
 
-    def apply_chat_template(self, conversation: List["ChatCompletionMessageParam"], tools: Optional[Dict[str, Any]] = None, **kwargs) -> Dict[str, List[int] | str]:
+    def apply_chat_template(self,
+                            conversation: List["ChatCompletionMessageParam"],
+                            tools: Optional[Dict[str, Any]] = None,
+                            **kwargs) -> Dict[str, List[int] | str]:
         assert tools is None, "`tools` are not yet supported."
 
         request = ChatCompletionRequest(

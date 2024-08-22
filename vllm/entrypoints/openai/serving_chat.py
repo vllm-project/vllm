@@ -141,7 +141,8 @@ class OpenAIServingChat(OpenAIServing):
                     add_special_tokens=request.add_special_tokens,
                 )
             else:
-                prompt_inputs = TextTokensPrompt(prompt=prompt, prompt_token_ids=prompt_token_ids)
+                prompt_inputs = TextTokensPrompt(
+                    prompt=prompt, prompt_token_ids=prompt_token_ids)
 
             assert prompt_inputs is not None
 

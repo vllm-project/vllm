@@ -286,4 +286,4 @@ def apply_chat_template(
         prompt = input["prompt"]
         prompt_token_ids = input["prompt_token_ids"]
 
-    return prompt, prompt_token_ids 
+    return prompt, prompt_token_ids
