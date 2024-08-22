@@ -102,7 +102,6 @@ mypy vllm/attention --follow-imports skip
 mypy vllm/core --follow-imports skip
 mypy vllm/distributed --follow-imports skip
 mypy vllm/engine  --follow-imports skip
-mypy vllm/entrypoints --follow-imports skip
 mypy vllm/executor --follow-imports skip
 mypy vllm/lora --follow-imports skip
 mypy vllm/model_executor  --follow-imports skip

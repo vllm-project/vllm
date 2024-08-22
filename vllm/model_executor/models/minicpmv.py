@@ -54,8 +54,8 @@ from vllm.model_executor.models.minicpm import MiniCPMModel
 from vllm.model_executor.models.qwen2 import Qwen2Model
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import (cached_get_image_processor,
-                                   cached_get_tokenizer)
+from vllm.multimodal.image import cached_get_image_processor
+from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
                            SamplerOutput, SequenceData)
 
@@ -496,6 +496,10 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
+        # All MiniCPM-V models disable `tie_word_embeddings` but
+        # `PretrainedConfig.tie_word_embeddings` defaults to True; we cannot
+        # check `tie_word_embeddings` until vLLM integrate MiniCPM-V model
+        # and config class
         self.config = config
         self.multimodal_config = multimodal_config
 

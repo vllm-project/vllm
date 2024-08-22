@@ -10,6 +10,7 @@ pytest distributed/test_basic_distributed_correctness_enc_dec.py
 """
 
 import pytest
+from transformers import AutoModelForSeq2SeqLM
 
 from vllm.utils import cuda_device_count_stateless
 
@@ -85,7 +86,7 @@ def test_models(
     }
 
     with hf_runner(model, dtype=dtype,
-                   is_encoder_decoder_model=True) as hf_model:
+                   auto_cls=AutoModelForSeq2SeqLM) as hf_model:
         hf_outputs = (hf_model.generate_encoder_decoder_greedy_logprobs_limit(
             test_prompts,
             max_tokens,
