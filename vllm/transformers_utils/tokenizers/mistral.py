@@ -114,11 +114,12 @@ class MistralTokenizer:
         encoded = self.mistral.encode_chat_completion(request)
 
         # encode-decode to get clean prompt
-        prompt_encoded = self.tokenizer.encode(encoded.text, bos=False, eos=False)
+        prompt_encoded = self.tokenizer.encode(encoded.text,
+                                               bos=False,
+                                               eos=False)
         prompt = self.decode(prompt_encoded)
 
         return Encoding(input_ids=encoded.tokens, prompt=prompt)
-
 
     def convert_tokens_to_string(self, tokens: List[str]) -> str:
         if self._is_tekken:
