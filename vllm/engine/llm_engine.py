@@ -591,6 +591,7 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest],
         trace_headers: Optional[Mapping[str, str]] = None,
     ) -> None:
+        self._validate_model_inputs(processed_inputs)
         # Create the sequences.
         block_size = self.cache_config.block_size
         seq_id = next(self.seq_counter)
@@ -900,8 +901,10 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest],
     ) -> LLMInputs:
         prompt, prompt_token_ids, multi_modal_data = prompt_comps
+
         prompt_token_ids = self._apply_prompt_adapter(
             prompt_token_ids, prompt_adapter_request=prompt_adapter_request)
+
         return LLMInputs(prompt_token_ids=prompt_token_ids,
                          prompt=prompt,
                          multi_modal_data=multi_modal_data)
@@ -1034,7 +1037,6 @@ class LLMEngine:
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
         )
-        self._validate_model_inputs(processed_inputs)
 
         self._add_processed_request(
             request_id=request_id,

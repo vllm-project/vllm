@@ -581,7 +581,6 @@ class _AsyncLLMEngine(LLMEngine):
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
         )
-        self._validate_model_inputs(processed_inputs)
 
         self._add_processed_request(
             request_id=request_id,
