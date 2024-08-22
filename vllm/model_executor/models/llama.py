@@ -54,7 +54,6 @@ from vllm.utils import is_hip
 from .interfaces import SupportsLoRA
 from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
 
-
 class LlamaMLP(nn.Module):
 
     def __init__(
@@ -174,12 +173,14 @@ class LlamaAttention(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
-        aux_stream: Optional[torch.cuda.Stream] = None
+        aux_stream: Optional[torch.cuda.Stream] = None,
+        event_start: Optional[torch.cuda.Event] = None,
+        event_end: Optional[torch.cuda.Event] = None
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata, aux_stream=aux_stream)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata, aux_stream=aux_stream, event_start=event_start, event_end=event_end)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -241,7 +242,9 @@ class LlamaDecoderLayer(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
-        aux_stream: Optional[torch.cuda.Stream] = None
+        aux_stream: Optional[torch.cuda.Stream] = None,
+        event_start: Optional[torch.cuda.Event] = None,
+        event_end: Optional[torch.cuda.Event] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
@@ -255,7 +258,9 @@ class LlamaDecoderLayer(nn.Module):
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
-            aux_stream=aux_stream
+            aux_stream=aux_stream,
+            event_start=event_start,
+            event_end=event_end
         )
 
         # Fully Connected
@@ -307,6 +312,8 @@ class LlamaModel(nn.Module):
         # Cuda stream for parallel run prefill attention and 
         # decode attention kernel when enable chunk prefill 
         self.aux_stream = torch.cuda.Stream()
+        self.event_start = torch.cuda.Event()
+        self.event_end = torch.cuda.Event()
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -339,7 +346,9 @@ class LlamaModel(nn.Module):
                 kv_caches[i - self.start_layer],
                 attn_metadata,
                 residual,
-                self.aux_stream
+                self.aux_stream,
+                self.event_start,
+                self.event_end
             )
 
         if not get_pp_group().is_last_rank:

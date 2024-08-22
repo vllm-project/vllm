@@ -599,7 +599,9 @@ class FlashAttentionImpl(AttentionImpl):
         k_scale: float = 1.0,
         v_scale: float = 1.0,
         attn_type: AttentionType = AttentionType.DECODER,
-        aux_stream: torch.cuda.Stream = None
+        aux_stream: torch.cuda.Stream = None,
+        event_start: torch.cuda.Event = None,
+        event_end: torch.cuda.Event = None
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 
@@ -667,6 +669,10 @@ class FlashAttentionImpl(AttentionImpl):
         if enabled_chunked_prefill:
             prefill_stream = aux_stream if aux_stream is not None else torch.cuda.default_stream()
             decode_stream = torch.cuda.default_stream()
+
+            decode_stream.record_event(event_start)
+            prefill_stream.wait_event(event_start)
+
             if prefill_meta := attn_metadata.prefill_metadata:
                 # Prompt run.
                 with torch.cuda.stream(prefill_stream):
@@ -726,6 +732,9 @@ class FlashAttentionImpl(AttentionImpl):
                             alibi_slopes=self.alibi_slopes,
                             softcap=self.logits_soft_cap,
                         ).squeeze(1)
+
+            prefill_stream.record_event(event_end)
+            decode_stream.wait_event(event_end)
 
             prefill_stream.synchronize()
             decode_stream.synchronize()
