@@ -340,7 +340,7 @@ def selective_scan_fn(u,
     out, x, *rest = ops.selective_scan_fwd(u, delta, A, B, C, D, z, delta_bias,
                                            delta_softplus, position_indices, x)
     last_state = x[:, :, -1, 1::2]  # (batch, dim, dstate)
-    if z is not None:
+    if z is None:
         return out if not return_last_state else (out, last_state)
     else:
         out_z = rest[0]

@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 import pytest
 
-from vllm.model_executor.layers.mamba.ops.mamba_ssm import selective_scan_fn
+from vllm.model_executor.layers.mamba.ops.mamba_ssm import selective_scan_fn, selective_state_update
 
 
 def selective_state_update_ref(state,
@@ -229,16 +229,10 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_z
         delta_bias = None
     u = torch.randn(batch_size, dim, seqlen, device=device, dtype=itype)
     delta = (0.5 * torch.rand(batch_size, dim, seqlen, device=device, dtype=itype))
-    A_ref = A.detach().clone()
-    B_ref = B.detach().clone()
-    C_ref = C.detach().clone()
-    D_ref = D.detach().clone() if D is not None else None
-    z_ref = z.detach().clone() if z is not None else None
-    u_ref = u.detach().clone()
-    delta_ref = delta.detach().clone()
-    delta_bias_ref = delta_bias.detach().clone() if delta_bias is not None else None
     state = None
     state_ref = None
+    out = None
+    out_ref = None
     outs = []
     for c in range(scan_chunks):
         chunked_prompt_len = seqlen // scan_chunks
@@ -254,6 +248,7 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_z
             _C = C[...,chunk_start:chunk_end]
         _z = z
         if has_z:
+            assert z is not None
             _z = z[...,chunk_start:chunk_end]
         out, *rest = selective_scan_fn(
             u[...,chunk_start:chunk_end], delta[...,chunk_start:chunk_end], A, _B, _C, D, z=_z,
@@ -266,16 +261,56 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_z
     if len(outs) > 1:
         out = torch.cat(outs,dim=-1)
     out_ref, *rest = selective_scan_ref(
-        u_ref, delta_ref, A_ref, B_ref, C_ref, D_ref, z=z_ref,
-        delta_bias=delta_bias_ref, delta_softplus=delta_softplus,
+        u, delta, A, B, C, D, z=z,
+        delta_bias=delta_bias, delta_softplus=delta_softplus,
         return_last_state=return_last_state
     )
     if return_last_state:
         state_ref = rest[0]
 
+    assert out is not None and out_ref is not None
     print(f'Output max diff: {(out - out_ref).abs().max().item()}')
     print(f'Output mean diff: {(out - out_ref).abs().mean().item()}')
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
     if return_last_state:
+        assert state is not None and state_ref is not None
         print(f'State max diff: {(state - state_ref).abs().max().item()}')
         assert torch.allclose(state, state_ref, rtol=rtol, atol=atol)
+
+
+
+@pytest.mark.parametrize("itype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("has_z", [False, True])
+@pytest.mark.parametrize("dstate", [16, 32, 64])
+@pytest.mark.parametrize("dim", [2048, 2048 + 16, 4096])
+def test_selective_state_update(dim, dstate, has_z, itype):
+    device = "cuda"
+    rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (5e-3, 1e-2)
+    if itype == torch.bfloat16:
+        rtol, atol = 1e-2, 5e-2
+        if torch.version.hip:
+            atol *= 2
+    # set seed
+    torch.random.manual_seed(0)
+    batch_size = 2
+    state = torch.randn(batch_size, dim, dstate, dtype=itype, device=device)
+    x = torch.randn(batch_size, dim, device=device, dtype=itype)
+    dt = torch.randn(batch_size, dim, device=device, dtype=itype)
+    dt_bias = torch.rand(dim, device=device) - 4.0
+    A = -torch.rand(dim, dstate, device=device) - 1.0
+    B = torch.randn(batch_size, dstate, device=device)
+    C = torch.randn(batch_size, dstate, device=device)
+    D = torch.randn(dim, device=device)
+    if has_z:
+        z = torch.randn_like(x)
+    else:
+        z = None
+    state_ref = state.detach().clone()
+    out = selective_state_update(state, x, dt, A, B, C, D=D, z=z, dt_bias=dt_bias, dt_softplus=True)
+    out_ref = selective_state_update_ref(state_ref, x, dt, A, B, C, D=D, z=z, dt_bias=dt_bias, dt_softplus=True)
+
+    print(f"Output max diff: {(out - out_ref).abs().max().item()}")
+    print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
+    assert torch.allclose(state, state_ref, rtol=rtol, atol=atol)
+    assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
+
