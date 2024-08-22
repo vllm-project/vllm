@@ -54,8 +54,8 @@ class ToolParser:
         Instance method that should be implemented for extracting tool calls
         from an incomplete response; for use when handling tool calls and
         streaming. Has to be an instance method because  it requires state -
-        the current text/ tokens/diffs, but also the information about what has
-        previously been  parsed and extracted (see constructor)
+        the current tokens/diffs, but also the information about what has
+        previously been parsed and extracted (see constructor)
         """
         raise NotImplementedError(
             "AbstractToolParser.extract_tool_calls_streaming has not been "
