@@ -39,7 +39,7 @@ async def test_multi_step(example_prompts, model: str, tp_size: int,
                           pp_size: int, eager_mode: int,
                           num_scheduler_steps: int, num_prompts: int,
                           num_logprobs: Optional[int]):
-    '''Test vLLM engine with multi-step scheduling in an OpenAI-protocol
+    """Test vLLM engine with multi-step scheduling in an OpenAI-protocol
     client/server environment.
 
     Set up an engine with single-step scheduling as a ground-truth reference.
