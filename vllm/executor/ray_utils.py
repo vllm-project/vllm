@@ -1,7 +1,10 @@
 import os
 from typing import List, Optional, Tuple, Union
 
+import msgspec
+
 from vllm.config import ParallelConfig
+from vllm.executor.msgspec_utils import decode_hook, encode_hook
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
@@ -25,6 +28,10 @@ try:
             # that thread.
             self.compiled_dag_cuda_device_set = False
 
+            self.input_decoder = msgspec.msgpack.Decoder(ExecuteModelRequest,
+                                                         dec_hook=decode_hook)
+            self.output_encoder = msgspec.msgpack.Encoder(enc_hook=encode_hook)
+
         def get_node_ip(self) -> str:
             return get_ip()
 
@@ -34,16 +41,26 @@ try:
             return node_id, gpu_ids
 
         def execute_model_spmd(
-            self, req_or_tuple: Union[ExecuteModelRequest,
-                                      Tuple[ExecuteModelRequest,
-                                            IntermediateTensors]]):
+            self, req_or_tuple: Union[bytes,
+                                      Tuple[bytes,
+                                            Optional[IntermediateTensors]]]
+        ) -> bytes:
             """Execute model in SPMD fashion: used only when SPMD worker and
             compiled DAG are both enabled.
 
             Args:
-                req_or_tuple: The request to execute the model, or a tuple
-                    containing the request and intermediate tensors.
+                req_or_tuple: A request or a tuple containing the
+                    request and intermediate tensors. Intermediate tensors are
+                    None unless if it is provided because it is > 0 pipeline
+                    stage. The request is serialized by msgspec.
             """
+            if isinstance(req_or_tuple, bytes):
+                serialized_req, intermediate_tensors = req_or_tuple, None
+            else:
+                serialized_req, intermediate_tensors = req_or_tuple
+
+            execute_model_req = self.input_decoder.decode(serialized_req)
+
             # TODO(swang): This is needed right now because Ray aDAG executes
             # on a background thread, so we need to reset torch's current
             # device.
@@ -52,16 +69,14 @@ try:
                 torch.cuda.set_device(self.worker.device)
                 self.compiled_dag_cuda_device_set = True
 
-            if isinstance(req_or_tuple, tuple):
-                execute_model_req, intermediate_tensors = req_or_tuple
-            else:
-                execute_model_req = req_or_tuple
-                intermediate_tensors = None
-
             output = self.worker._execute_model_spmd(execute_model_req,
                                                      intermediate_tensors)
+            # Pipeline model request and output to the next pipeline stage.
             if isinstance(output, IntermediateTensors):
-                return execute_model_req, output
+                output = serialized_req, output
+            else:
+                output = self.output_encoder.encode(output)
+
             return output
 
         def override_env_vars(self, vars):
