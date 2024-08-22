@@ -12,7 +12,8 @@ from vllm.executor.distributed_gpu_executor import (  # yapf: disable
     DistributedGPUExecutor, DistributedGPUExecutorAsync)
 from vllm.executor.gpu_executor import create_worker
 from vllm.executor.multiproc_worker_utils import (ProcessWorkerWrapper,
-                                                  ResultHandler, WorkerMonitor)
+                                                  ResultHandler, WorkerMonitor,
+                                                  force_spawn)
 from vllm.logger import init_logger
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.triton_utils import maybe_set_triton_cache_manager
@@ -45,6 +46,12 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
 
         # Disable torch async compiling which won't work with daemonic processes
         os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
+
+        # For multi-step execution, we need to force "spawn" processes
+        # (due to cuda init issues)
+        if self.scheduler_config.num_scheduler_steps > 1:
+            force_spawn()
+            os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
         # Configure thread parallelism if OMP_NUM_THREADS isn't set
         #

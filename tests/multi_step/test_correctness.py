@@ -88,9 +88,9 @@ async def test_multi_step(example_prompts, model: str, tp_size: int,
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
-@pytest.mark.parametrize("tp_size", [1])
+@pytest.mark.parametrize("tp_size", [1, 2])
 @pytest.mark.parametrize("max_tokens", [5])
-@pytest.mark.parametrize("enforce_eager", [False, True])
+@pytest.mark.parametrize("enforce_eager", [True, False])
 @pytest.mark.parametrize("num_scheduler_steps", NUM_SCHEDULER_STEPS)
 @pytest.mark.parametrize("num_prompts", NUM_PROMPTS)
 def test_multi_step_llm(hf_runner, vllm_runner, example_prompts, model: str,
