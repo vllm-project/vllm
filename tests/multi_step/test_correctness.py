@@ -61,7 +61,7 @@ async def test_multi_step(example_prompts, model: str, tp_size: int,
       num_prompts: number of example prompts under test
       num_logprobs: corresponds to the `logprobs` argument to the OpenAI
                     completions endpoint; `None` -> no logprobs
-    '''
+    """
 
     prompts = example_prompts
     if len(prompts) < num_prompts:
