@@ -394,10 +394,14 @@ class LLM:
             chat_template=chat_template,
             add_generation_prompt=add_generation_prompt)
 
+        if prompt_token_ids is not None:
+            inputs = TokensPrompt(prompt_token_ids=prompt_token_ids)
+        else:
+            inputs = TextPrompt(prompt=prompts)
+
         return self.generate(
-            prompts,
+            inputs,
             sampling_params,
-            prompt_token_ids=prompt_token_ids,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
         )
