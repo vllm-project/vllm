@@ -55,16 +55,18 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
-    def apply(self,
-              layer: torch.nn.Module,
-              x: torch.Tensor,
-              router_logits: torch.Tensor,
-              top_k: int,
-              renormalize: bool,
-              use_grouped_topk: bool,
-              topk_group: Optional[int] = None,
-              num_expert_group: Optional[int] = None,
-              custom_routing_function: Optional[Callable] = None) -> torch.Tensor:
+    def apply(
+            self,
+            layer: torch.nn.Module,
+            x: torch.Tensor,
+            router_logits: torch.Tensor,
+            top_k: int,
+            renormalize: bool,
+            use_grouped_topk: bool,
+            topk_group: Optional[int] = None,
+            num_expert_group: Optional[int] = None,
+            custom_routing_function: Optional[Callable] = None
+    ) -> torch.Tensor:
 
         return self.forward(x=x,
                             layer=layer,
@@ -76,16 +78,18 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                             num_expert_group=num_expert_group,
                             custom_routing_function=custom_routing_function)
 
-    def forward_cuda(self,
-                     layer: torch.nn.Module,
-                     x: torch.Tensor,
-                     use_grouped_topk: bool,
-                     top_k: int,
-                     router_logits: torch.Tensor,
-                     renormalize: bool,
-                     topk_group: Optional[int] = None,
-                     num_expert_group: Optional[int] = None,
-                     custom_routing_function: Optional[Callable] = None) -> torch.Tensor:
+    def forward_cuda(
+            self,
+            layer: torch.nn.Module,
+            x: torch.Tensor,
+            use_grouped_topk: bool,
+            top_k: int,
+            router_logits: torch.Tensor,
+            renormalize: bool,
+            topk_group: Optional[int] = None,
+            num_expert_group: Optional[int] = None,
+            custom_routing_function: Optional[Callable] = None
+    ) -> torch.Tensor:
 
         from vllm.model_executor.layers.fused_moe.fused_moe import (
             fused_experts)
@@ -111,16 +115,18 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         raise NotImplementedError(
             "The CPU backend currently does not support MoE.")
 
-    def forward_tpu(self,
-                    layer: torch.nn.Module,
-                    x: torch.Tensor,
-                    use_grouped_topk: bool,
-                    top_k: int,
-                    router_logits: torch.Tensor,
-                    renormalize: bool,
-                    topk_group: Optional[int] = None,
-                    num_expert_group: Optional[int] = None,
-                    custom_routing_function: Optional[Callable] = None) -> torch.Tensor:
+    def forward_tpu(
+            self,
+            layer: torch.nn.Module,
+            x: torch.Tensor,
+            use_grouped_topk: bool,
+            top_k: int,
+            router_logits: torch.Tensor,
+            renormalize: bool,
+            topk_group: Optional[int] = None,
+            num_expert_group: Optional[int] = None,
+            custom_routing_function: Optional[Callable] = None
+    ) -> torch.Tensor:
 
         from vllm.model_executor.layers.fused_moe.moe_pallas import fused_moe
         assert not use_grouped_topk
@@ -286,10 +292,11 @@ class FusedMoE(torch.nn.Module):
                                                 topk=top_k,
                                                 renormalize=renormalize)
         else:
-            topk_weights, topk_ids = custom_routing_function(hidden_states=hidden_states,
-                                                            gating_output=router_logits,
-                                                            topk=top_k,
-                                                            renormalize=renormalize)
+            topk_weights, topk_ids = custom_routing_function(
+                hidden_states=hidden_states,
+                gating_output=router_logits,
+                topk=top_k,
+                renormalize=renormalize)
 
         return topk_weights, topk_ids
 

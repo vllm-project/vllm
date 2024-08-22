@@ -206,11 +206,12 @@ def sparsemixer(scores, top_k, jitter_eps=0.01):
     multiplier = torch.concat((multiplier, multiplier_top2), dim=-1)
     selected_experts = torch.concat((selected_experts, selected_experts_top2),
                                     dim=-1)
-    
+
     return (
         multiplier,
         selected_experts,
     )
+
 
 def phimoe_routing_function(
     hidden_states: torch.Tensor,
@@ -269,8 +270,7 @@ class PhiMoE(nn.Module):
             renormalize=False,
             quant_config=quant_config,
             tp_size=tp_size,
-            custom_routing_function=phimoe_routing_function
-        )
+            custom_routing_function=phimoe_routing_function)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.
