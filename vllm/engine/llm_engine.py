@@ -1651,11 +1651,7 @@ class LLMEngine:
 
     def _validate_model_inputs(self, inputs: Union[LLMInputs,
                                                    EncoderDecoderLLMInputs]):
-        if self.is_encoder_decoder_model():
-            if "encoder_prompt_token_ids" not in inputs or\
-                len(inputs["encoder_prompt_token_ids"]) == 0:
-                raise ValueError("Empty prompt")
-        else:
-            if "prompt_token_ids" not in inputs or len(
-                    inputs["prompt_token_ids"]) == 0:
-                raise ValueError("Empty prompt")
+        prompt_key = "encoder_prompt_token_ids" \
+            if self.is_encoder_decoder_model() else "prompt_token_ids"
+        if not inputs.get(prompt_key):
+            raise ValueError("Prompt cannot be empty")
