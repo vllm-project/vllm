@@ -465,7 +465,7 @@ def extract_previous_hidden_states(
             Dict[str, torch.Tensor]:
     """If data contains previous_hidden_states, extract it. This returns a dict
     which can be used directly as additional kwargs in any following 
-    execute_model calls."""
+    execute_model calls. This is used in draft models like EAGLE."""
     output = {}
 
     # When called from non-driver worker, data is dict but when called from
