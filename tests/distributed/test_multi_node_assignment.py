@@ -22,15 +22,16 @@ from vllm.utils import get_ip
 VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
 
 
-class Actor:
-
-    def get_ip(self):
-        return get_ip()
-
-
 @pytest.mark.skipif(not VLLM_MULTI_NODE,
                     reason="Need at least 2 nodes to run the test.")
 def test_multi_node_assignment() -> None:
+
+    # NOTE: important to keep this class definition here
+    # to let ray use cloudpickle to serialize it.
+    class Actor:
+
+        def get_ip(self):
+            return get_ip()
 
     for _ in range(10):
         config = ParallelConfig(1, 2)
