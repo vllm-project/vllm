@@ -13,6 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import itertools
 import re
 from functools import lru_cache
 from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional,
@@ -39,6 +40,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors, SamplerOutput
+from vllm.utils import is_list_of
 
 from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
                    input_processor_for_clip)
@@ -405,7 +407,8 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
         image_feature_size = get_phi3v_image_feature_size(hf_config,
                                                           input_width=w,
                                                           input_height=h)
-    elif isinstance(image_data, list):
+        image_data = [image_data]
+    elif is_list_of(image_data, Image.Image):
         if not all(isinstance(image, Image.Image) for image in image_data):
             raise TypeError("Invalid image type in the image list.")
         image_feature_size = 0
@@ -428,28 +431,27 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
             logger.warning("Please follow the prompt format that is "
                            "documented on HuggingFace which does not involve "
                            "repeating <|image|> tokens.")
-        # elif len(re.findall(r"(<\|image_\d+\|>)+", prompt)) > 1:
-        #     logger.warning("Multiple image input is not supported yet, "
-        #                    "so any extra image tokens will be treated "
-        #                    "as plain text.")
-
+        elif (num_image_tags := len(re.findall(r"(<\|image_\d+\|>)+", prompt))) > 1:
+            assert num_image_tags == len(image_data), "The count of image_placeholder not match image's"
         new_prompt = prompt
 
     prompt_token_ids = llm_inputs["prompt_token_ids"]
     image_idx = sorted(list(map(int, re.findall(r"<\|image_(\d+)\|>+", prompt))))
 
-    new_token_ids: List[int] = []
+    # masked place_holder with image token id
     for idx in image_idx:
         image_token_ids = _get_image_placeholder_token_ids(model_config, idx=idx)
         for i in range(len(prompt_token_ids) - len(image_token_ids) + 1):
-            if prompt_token_ids[i:i + len(image_token_ids)] == image_token_ids:
-                new_token_ids.append(_IMAGE_TOKEN_ID)
-
-                # No need to further scan the list since we only replace once
-                new_token_ids.extend(prompt_token_ids[i + len(image_token_ids):])
-                break
-            else:
-                new_token_ids.append(prompt_token_ids[i])
+            if prompt_token_ids[i:i+len(image_token_ids)] == image_token_ids:
+                prompt_token_ids[i:i+len(image_token_ids)] = [_IMAGE_TOKEN_ID] * len(image_token_ids)
+    
+    # merge consecutive image token ids
+    new_token_ids = []
+    for is_placeholder, token_ids in itertools.groupby(prompt_token_ids, lambda x: x==_IMAGE_TOKEN_ID):
+        if is_placeholder:
+            new_token_ids += [_IMAGE_TOKEN_ID]
+        else:
+            new_token_ids += list(token_ids)
 
     # NOTE: Create a defensive copy of the original inputs
     llm_inputs = LLMInputs(prompt_token_ids=new_token_ids,
