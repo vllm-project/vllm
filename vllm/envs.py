@@ -56,6 +56,7 @@ if TYPE_CHECKING:
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_TEST_FORCE_FP8_MARLIN: bool = False
+    VLLM_RPC_GET_DATA_TIMEOUT_MS: int = 5000
     VLLM_ALLOW_ENGINE_USE_RAY: bool = False
     VLLM_PLUGINS: Optional[List[str]] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
@@ -137,7 +138,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
             os.path.join(get_default_cache_root(), "vllm"),
         )),
 
-    # used in distributed environment to determine the master address
+    # used in distributed environment to determine the ip address
+    # of the current node, when the node has multiple network interfaces.
+    # If you are using multi-node inference, you should set this differently
+    # on each node.
     'VLLM_HOST_IP':
     lambda: os.getenv('VLLM_HOST_IP', "") or os.getenv("HOST_IP", ""),
 
@@ -370,6 +374,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda:
     (os.environ.get("VLLM_TEST_FORCE_FP8_MARLIN", "0").strip().lower() in
      ("1", "true")),
+
+    # Time in ms for the zmq client to wait for a response from the backend
+    # server for simple data operations
+    "VLLM_RPC_GET_DATA_TIMEOUT_MS":
+    lambda: int(os.getenv("VLLM_RPC_GET_DATA_TIMEOUT_MS", "5000")),
 
     # If set, allow running the engine as a separate ray actor,
     # which is a deprecated feature soon to be removed.
