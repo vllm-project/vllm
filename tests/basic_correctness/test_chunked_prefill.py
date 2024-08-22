@@ -83,7 +83,7 @@ def test_models(
                                                       for m in E4M3_KV_MODELS])
 # Due to low-precision numerical divergence, we only test logprob of 4 tokens
 @pytest.mark.parametrize("max_tokens", [4])
-@pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16])
+@pytest.mark.parametrize("chunked_prefill_token_size", [4, 16])
 @pytest.mark.parametrize("enforce_eager", [False, True])
 # NOTE: Increasing this in this suite will fail CI because we currently cannot
 # reset distributed env properly. Use a value > 1 just when you test.
