@@ -7,7 +7,6 @@ ARG COMMON_WORKDIR=/app
 ARG BUILD_HIPBLASLT="1"
 ARG BUILD_RCCL="1"
 ARG BUILD_FA="1"
-ARG BUILD_CUPY="0"
 ARG BUILD_TRITON="1"
 # This ARG should also be "0" or "1". If "1", the vLLM development directory is obtained via git clone.
 # If "0", it is copied in from the local working directory.
@@ -82,24 +81,6 @@ ARG COMMON_WORKDIR
 COPY --from=build_flash_attn ${COMMON_WORKDIR}/flash-attention/dist/*.whl /
 FROM scratch AS export_flash_attn_0
 FROM export_flash_attn_${BUILD_FA} AS export_flash_attn
-
-# -----------------------
-# CuPy build stages
-FROM base AS build_cupy
-ARG CUPY_BRANCH="hipgraph_enablement"
-RUN git clone  https://github.com/ROCm/cupy.git \
-    && cd cupy \
-    && git checkout $CUPY_BRANCH \
-    && git submodule update --init --recursive \
-    && pip install mpi4py-mpich scipy==1.9.3 cython==0.29.* \
-    && CC=$MPI_HOME/bin/mpicc python -m pip install mpi4py \
-    && CUPY_INSTALL_USE_HIP=1 ROCM_HOME=/opt/rocm HCC_AMDGPU_TARGET=${PYTORCH_ROCM_ARCH} \
-       python3 setup.py bdist_wheel --dist-dir=dist
-FROM build_cupy AS export_cupy_1
-ARG COMMON_WORKDIR
-COPY --from=build_cupy ${COMMON_WORKDIR}/cupy/dist/*.whl /
-FROM scratch AS export_cupy_0
-FROM export_cupy_${BUILD_CUPY} AS export_cupy
 
 # -----------------------
 # Triton build stages
@@ -201,13 +182,6 @@ RUN --mount=type=bind,from=export_flash_attn,src=/,target=/install \
     if ls /install/*.whl; then \
         # Preemptively uninstall to prevent pip same-version no-installs
         pip uninstall -y flash-attn \
-        && pip install /install/*.whl; \
-    fi
-
-RUN --mount=type=bind,from=export_cupy,src=/,target=/install \
-    if ls /install/*.whl; then \
-        # Preemptively uninstall to prevent pip same-version no-installs
-        pip uninstall -y cupy \
         && pip install /install/*.whl; \
     fi
 
