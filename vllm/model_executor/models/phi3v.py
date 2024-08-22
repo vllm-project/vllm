@@ -42,8 +42,7 @@ from vllm.multimodal.utils import cached_get_tokenizer, repeat_and_pad_token
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.utils import is_list_of
 
-from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
-                   input_processor_for_clip)
+from .clip import dummy_image_for_clip, dummy_seq_data_for_clip
 from .interfaces import SupportsMultiModal
 from .utils import merge_multimodal_embeddings
 
