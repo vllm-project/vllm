@@ -38,7 +38,7 @@ from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.utils import cached_get_tokenizer
+from vllm.multimodal.utils import cached_get_tokenizer, repeat_and_pad_token
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.utils import is_list_of
 
@@ -404,20 +404,18 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
         w, h = image_data.size
         w, h = _calc_hd_transform_size(width=w, height=h)
 
-        image_feature_size = get_phi3v_image_feature_size(hf_config,
+        image_feature_size = [get_phi3v_image_feature_size(hf_config,
                                                           input_width=w,
-                                                          input_height=h)
+                                                          input_height=h)]
         image_data = [image_data]
     elif is_list_of(image_data, Image.Image):
-        if not all(isinstance(image, Image.Image) for image in image_data):
-            raise TypeError("Invalid image type in the image list.")
-        image_feature_size = 0
+        image_feature_size = []
         for image in image_data:
             w, h = image.size
             w, h = _calc_hd_transform_size(width=w, height=h)
-            image_feature_size += get_phi3v_image_feature_size(hf_config,
+            image_feature_size.append(get_phi3v_image_feature_size(hf_config,
                                                               input_width=w,
-                                                              input_height=h)
+                                                              input_height=h))
     elif isinstance(image_data, torch.Tensor):
         image_feature_size = image_data.shape[0]
     else:
@@ -438,33 +436,40 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
     prompt_token_ids = llm_inputs["prompt_token_ids"]
     image_idx = sorted(list(map(int, re.findall(r"<\|image_(\d+)\|>+", prompt))))
 
-    # masked place_holder with image token id
+    # masked place_holder with tag idx
     for idx in image_idx:
         image_token_ids = _get_image_placeholder_token_ids(model_config, idx=idx)
         for i in range(len(prompt_token_ids) - len(image_token_ids) + 1):
             if prompt_token_ids[i:i+len(image_token_ids)] == image_token_ids:
                 prompt_token_ids[i:i+len(image_token_ids)] = [_IMAGE_TOKEN_ID] * len(image_token_ids)
     
-    # merge consecutive image token ids
+    # merge consecutive tag ids
     new_token_ids = []
     for is_placeholder, token_ids in itertools.groupby(prompt_token_ids, lambda x: x==_IMAGE_TOKEN_ID):
         if is_placeholder:
             new_token_ids += [_IMAGE_TOKEN_ID]
         else:
             new_token_ids += list(token_ids)
+    
+    # TODO: Move this to utils or intergrate with clip.
+    placeholder_idx = 0
+    token_ids = []
+    while new_token_ids:
+        token_id = new_token_ids.pop(0)
+        if token_id == _IMAGE_TOKEN_ID:
+            token_ids.extend(repeat_and_pad_token(
+                _IMAGE_TOKEN_ID,
+                repeat_count=image_feature_size[placeholder_idx],
+            ))
+            placeholder_idx += 1
+        else:
+            token_ids.append(token_id)
 
     # NOTE: Create a defensive copy of the original inputs
-    llm_inputs = LLMInputs(prompt_token_ids=new_token_ids,
+    llm_inputs = LLMInputs(prompt_token_ids=token_ids,
                            prompt=new_prompt,
                            multi_modal_data=multi_modal_data)
-
-    return input_processor_for_clip(
-        model_config,
-        CLIP_VIT_LARGE_PATCH14_336_CONFIG,
-        llm_inputs,
-        image_token_id=_IMAGE_TOKEN_ID,
-        image_feature_size_override=image_feature_size,
-    )
+    return llm_inputs
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
