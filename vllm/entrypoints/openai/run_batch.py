@@ -60,7 +60,21 @@ def parse_args():
                         'ID numbers being printed in log.'
                         '\n\nDefault: Unlimited')
 
-    parser.add_argument("--port", type=int, default=8000, help="port number")
+    parser.add_argument(
+        "--enable-metrics", action="store_true", help="Enable Prometheus metrics"
+    )
+    parser.add_argument(
+        "--url",
+        type=str,
+        default="0.0.0.0",
+        help="URL to the Prometheus metrics server",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Port number for the Prometheus metrics server",
+    )
 
     return parser.parse_args()
 
@@ -192,6 +206,10 @@ if __name__ == "__main__":
 
     # Start the Prometheus metrics server. LLMEngine uses the Prometheus client
     # to publish metrics at the /metrics endpoint.
-    start_http_server(args.port)
+    if args.enable_metrics:
+        logger.info("Prometheus metrics enabled")
+        start_http_server(port=args.port, addr=args.url)
+    else:
+        logger.info("Prometheus metrics disabled")
 
     asyncio.run(main(args))
