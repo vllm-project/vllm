@@ -4,8 +4,8 @@ import torch
 import torch.nn as nn
 
 from vllm.attention.backends.abstract import AttentionMetadata
-from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
