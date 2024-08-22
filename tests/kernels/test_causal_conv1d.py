@@ -137,21 +137,22 @@ def test_causal_conv1d(batch, dim, seqlen, width, has_bias, silu_activation,
     initial_states_ref = initial_states.detach().clone(
     ) if initial_states is not None else None
     activation = None if not silu_activation else "silu"
-    out, _ = causal_conv1d_fn(x,
-                              weight,
-                              bias,
-                              initial_states=initial_states,
-                              return_final_states=return_final_states,
-                              activation=activation)
-    out_ref, _ = causal_conv1d_ref(x_ref,
-                                   weight_ref,
-                                   bias_ref,
-                                   initial_states=initial_states_ref,
-                                   return_final_states=return_final_states,
-                                   activation=activation)
+    out, final_states = causal_conv1d_fn(
+        x,
+        weight,
+        bias,
+        initial_states=initial_states,
+        return_final_states=return_final_states,
+        activation=activation)
+    out_ref, final_states_ref = causal_conv1d_ref(
+        x_ref,
+        weight_ref,
+        bias_ref,
+        initial_states=initial_states_ref,
+        return_final_states=return_final_states,
+        activation=activation)
     if return_final_states:
-        out, final_states = out
-        out_ref, final_states_ref = out_ref
+        assert final_states is not None and final_states_ref is not None
         assert torch.allclose(final_states,
                               final_states_ref,
                               rtol=rtol,
