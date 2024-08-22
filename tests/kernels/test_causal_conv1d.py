@@ -15,7 +15,7 @@ def causal_conv1d_ref(
     bias: Optional[torch.Tensor] = None,
     initial_states: Optional[torch.Tensor] = None,
     return_final_states: bool = False,
-    final_states_out:Optional[torch.Tensor]=None,
+    final_states_out: Optional[torch.Tensor] = None,
     activation: Optional[str] = "silu",
 ):
     """
@@ -54,11 +54,11 @@ def causal_conv1d_ref(
     return (out, None) if not return_final_states else (out, final_states_out)
 
 
-def causal_conv1d_update_ref(x:torch.Tensor,
-                             conv_state:torch.Tensor,
-                             weight:torch.Tensor,
-                             bias:Optional[torch.Tensor]=None,
-                             activation:Optional[str]=None):
+def causal_conv1d_update_ref(x: torch.Tensor,
+                             conv_state: torch.Tensor,
+                             weight: torch.Tensor,
+                             bias: Optional[torch.Tensor] = None,
+                             activation: Optional[str] = None):
     """
     x: (batch, dim)
     conv_state: (batch, dim, width)

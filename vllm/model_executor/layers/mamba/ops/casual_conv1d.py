@@ -66,7 +66,11 @@ def causal_conv1d_fn(
     return (out, None) if not return_final_states else (out, final_states_out)
 
 
-def causal_conv1d_update(x, conv_state, weight, bias=None, activation=None):
+def causal_conv1d_update(x: torch.Tensor,
+                         conv_state: torch.Tensor,
+                         weight: torch.Tensor,
+                         bias: Optional[torch.Tensor] = None,
+                         activation: Optional[str] = None):
     """
     x: (batch, dim)
     conv_state: (batch, dim, width)
@@ -77,5 +81,6 @@ def causal_conv1d_update(x, conv_state, weight, bias=None, activation=None):
     """
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError("activation must be None, silu, or swish")
-    activation = activation in ["silu", "swish"]
-    return ops.causal_conv1d_update(x, conv_state, weight, bias, activation)
+    activation_bool = activation in ["silu", "swish"]
+    return ops.causal_conv1d_update(x, conv_state, weight, bias,
+                                    activation_bool)
