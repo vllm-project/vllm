@@ -5,6 +5,7 @@ from typing import Sequence as GenericSequence
 from typing import Union
 
 from fastapi import Request
+from torch import isin
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import AsyncEngineClient
@@ -131,8 +132,7 @@ class OpenAIServingChat(OpenAIServing):
             guided_decode_logits_processor = (
                 await self._guided_decode_logits_processor(request, tokenizer))
 
-            if 
-                assert prompt is not None
+            if isinstance(prompt, str):
                 prompt_inputs = self._tokenize_prompt_input(
                     request,
                     tokenizer,
@@ -140,8 +140,6 @@ class OpenAIServingChat(OpenAIServing):
                     truncate_prompt_tokens=request.truncate_prompt_tokens,
                     add_special_tokens=request.add_special_tokens,
                 )
-
-
             else:
                 assert isinstance(prompt, list) and isinstance(prompt[0], int), f"Prompt has to be either a string or a list of token ids"
                 prompt_inputs = TextTokensPrompt(
