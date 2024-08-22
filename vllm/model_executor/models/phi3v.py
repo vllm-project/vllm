@@ -463,8 +463,8 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
     # TODO: Move this to utils or integrate with clip.
     new_token_ids: List[int] = []
     placeholder_idx = 0
-    while new_token_ids:
-        token_id = new_token_ids.pop(0)
+    while merged_token_ids:
+        token_id = merged_token_ids.pop(0)
         if token_id == _IMAGE_TOKEN_ID:
             new_token_ids.extend(
                 repeat_and_pad_token(
