@@ -1,6 +1,4 @@
 import time
-import torch
-
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, ClassVar, Dict, Iterable, List,
@@ -8,6 +6,7 @@ from typing import (TYPE_CHECKING, Any, ClassVar, Dict, Iterable, List,
 from typing import Sequence as GenericSequence
 from typing import Set, Tuple, Type, Union
 
+import torch
 from typing_extensions import TypeVar, assert_never
 
 import vllm.envs as envs
