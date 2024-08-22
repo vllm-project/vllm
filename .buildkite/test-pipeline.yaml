@@ -95,7 +95,8 @@ steps:
   num_gpus: 4
   fast_check: true
   source_file_dependencies:
-  - vllm/
+  - vllm/distributed/
+  - vllm/core/
   - tests/distributed
   - tests/spec_decode/e2e/test_integration_dist_tp4
   commands:
@@ -284,8 +285,11 @@ steps:
   num_gpus: 2
   num_nodes: 2
   source_file_dependencies:
-  - vllm/
-  - tests/distributed/test_same_node
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/executor/
+  - vllm/model_executor/models/
+  - tests/distributed/
   commands:
   - # the following commands are for the first node, with ip 192.168.10.10 (ray environment already set up)
     - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py
@@ -298,8 +302,11 @@ steps:
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   source_file_dependencies:
-  - vllm/
-  - tests/distributed
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/executor/
+  - vllm/model_executor/models/
+  - tests/distributed/
   commands:
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py
   - TARGET_TEST_SUITE=L4 pytest -v -s distributed/test_basic_distributed_correctness.py
@@ -333,9 +340,11 @@ steps:
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
   source_file_dependencies:
-  - vllm/
-  - tests/distributed/test_pp_cudagraph.py
-  - tests/distributed/test_pipeline_parallel
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/executor/
+  - vllm/model_executor/models/
+  - tests/distributed/
   commands:
   - pytest -v -s distributed/test_pp_cudagraph.py
   - pytest -v -s distributed/test_pipeline_parallel.py
