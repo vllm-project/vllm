@@ -3,6 +3,7 @@
 from typing import List
 
 import pytest
+import ray
 
 from ..models.utils import check_outputs_equal
 from ..utils import RemoteOpenAIServer
@@ -113,7 +114,8 @@ def test_multi_step_llm(hf_runner, vllm_runner, example_prompts, model: str,
                      gpu_memory_utilization=0.7,
                      tensor_parallel_size=tp_size,
                      use_v2_block_manager=True,
-                     num_scheduler_steps=num_scheduler_steps) as vllm_model:
+                     num_scheduler_steps=num_scheduler_steps,
+                     worker_use_ray=True) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(prompts, max_tokens)
 
     check_outputs_equal(
@@ -122,3 +124,5 @@ def test_multi_step_llm(hf_runner, vllm_runner, example_prompts, model: str,
         name_0="hf",
         name_1="vllm",
     )
+
+    ray.shutdown()
