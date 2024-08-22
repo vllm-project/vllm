@@ -6,12 +6,13 @@ from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
 import numpy as np
 import torch
 import torch.nn as nn
-from transformers import CLIPVisionConfig, LlavaNextVideoConfig
+from transformers import CLIPVisionConfig, LlavaNextVideoConfig, SiglipVisionConfig
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
+from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -25,9 +26,10 @@ from vllm.utils import is_list_of
 
 from .clip import dummy_image_for_clip, dummy_seq_data_for_clip
 from .interfaces import SupportsMultiModal
-from .llava import LlavaMultiModalProjector
 from .utils import (filter_weights, init_vllm_registered_model,
                     merge_multimodal_embeddings)
+from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
+                     dummy_seq_data_for_siglip)
 
 logger = init_logger(__name__)
 
@@ -51,13 +53,12 @@ class LlavaNextVideoPixelInputs(TypedDict):
 
 def get_llava_next_video_frame_feature_size(
         hf_config: LlavaNextVideoConfig) -> int:
-
+    # Support both CLIPVisionConfig and SiglipVisionConfig
     image_size = hf_config.vision_config.image_size
     patch_size = hf_config.vision_config.patch_size
     spatial_pool_stride = hf_config.spatial_pool_stride
 
     return int((image_size / patch_size / spatial_pool_stride)**2)
-
 
 def _get_max_llm_tokens(ctx: InputContext) -> int:
     """
@@ -80,8 +81,8 @@ def _get_max_llm_tokens(ctx: InputContext) -> int:
 
 
 def get_max_llava_next_video_tokens(ctx: InputContext) -> int:
-    # Currently set to 32 frames, need
-    # max_tokens = _get_max_llm_tokens(ctx)
+    # Currently set to 32 frames
+    # TODO: max_tokens = _get_max_llm_tokens(ctx)
     hf_config = ctx.get_hf_config(LlavaNextVideoConfig)
     tokens_per_frame = get_llava_next_video_frame_feature_size(hf_config)
     return _MAX_FRAMES_PER_VIDEO * tokens_per_frame
@@ -120,7 +121,21 @@ def dummy_data_for_llava_next_video(ctx: InputContext, seq_len: int,
         mm_data_per_video = np.repeat([np_frame], frames_per_video, axis=0)
         mm_data = {"video": mm_data_per_video}
         return seq_data, mm_data
+    elif isinstance(vision_config, SiglipVisionConfig):
+        seq_data = dummy_seq_data_for_siglip(
+            vision_config,
+            seq_len,
+            num_videos,
+            image_token_id=hf_config.video_token_index,
+            image_feature_size_override=video_feature_size,
+        )
 
+        pil_frame = dummy_image_for_siglip(vision_config, num_images=1)
+        np_frame = np.array(pil_frame["image"])
+        mm_data_per_video = np.repeat([np_frame], frames_per_video, axis=0)
+        mm_data = {"video": mm_data_per_video}
+        return seq_data, mm_data
+    
     msg = f"Unsupported vision config: {type(vision_config)}"
     raise NotImplementedError(msg)
 
@@ -137,19 +152,11 @@ def input_processor_for_llava_next_video(ctx: InputContext,
     vision_config = hf_config.vision_config
 
     if isinstance(video_data, np.ndarray):
+        # Supports both CLIP and Siglip
         num_frames = video_data.shape[0]
         frame_feature_size = \
             get_llava_next_video_frame_feature_size(hf_config)
         video_feature_size = num_frames * frame_feature_size
-
-        strategy = hf_config.vision_feature_select_strategy
-        if strategy == "default":
-            pass
-        elif strategy == "full":
-            raise NotImplementedError(
-                "Unsupported select feature strategy: full")
-        else:
-            raise ValueError(f"Unexpected select feature strategy: {strategy}")
 
         tokenizer = cached_get_tokenizer(model_config.tokenizer)
 
@@ -189,7 +196,12 @@ def _init_vision_tower(hf_config: LlavaNextVideoConfig):
             vision_config,
             num_hidden_layers_override=num_hidden_layers,
         )
-
+    elif isinstance(vision_config, SiglipVisionConfig):
+        return SiglipVisionModel(
+            vision_config,
+            num_hidden_layers_override=num_hidden_layers,
+        )
+    
     msg = f"Unsupported vision config: {type(vision_config)}"
     raise NotImplementedError(msg)
 
@@ -229,6 +241,27 @@ class LlavaNextVideoPooler(nn.Module):
 
         return image_features_spatial.flatten(2).transpose(1, 2).contiguous()
 
+class LlavaNextMultiModalProjector(nn.Module):
+
+    def __init__(self, vision_hidden_size: int, text_hidden_size: int,
+                 projector_hidden_act: str):
+        super().__init__()
+
+        self.linear_1 = nn.Linear(vision_hidden_size,
+                                  text_hidden_size,
+                                  bias=True)
+        self.act = get_act_fn(projector_hidden_act)
+        self.linear_2 = nn.Linear(text_hidden_size,
+                                  text_hidden_size,
+                                  bias=True)
+
+    def forward(self, image_features: torch.Tensor) -> torch.Tensor:
+        hidden_states = self.linear_1(image_features)
+        hidden_states = self.act(hidden_states)
+        hidden_states = self.linear_2(hidden_states)
+        return hidden_states
+
+
 
 @MULTIMODAL_REGISTRY.register_input_mapper("video")
 @MULTIMODAL_REGISTRY.register_max_multimodal_tokens(
@@ -249,7 +282,7 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         # Initialize the vision tower only up to the required feature layer
         self.vision_tower = _init_vision_tower(config)
-        self.multi_modal_projector = LlavaMultiModalProjector(
+        self.multi_modal_projector = LlavaNextMultiModalProjector(
             vision_hidden_size=config.vision_config.hidden_size,
             text_hidden_size=config.text_config.hidden_size,
             projector_hidden_act=config.projector_hidden_act)
@@ -315,7 +348,7 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def _video_pixels_to_features(
         self,
-        vision_tower: Union[CLIPVisionModel],
+        vision_tower: Union[CLIPVisionModel, SiglipVisionModel],
         pixel_values: torch.Tensor,
     ) -> torch.Tensor:
 
