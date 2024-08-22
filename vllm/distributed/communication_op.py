@@ -35,11 +35,11 @@ def _tp_in_place_ar_fake(input_: torch.Tensor):
 
 
 def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
-    if get_tp_group().should_run_in_place_ar(input_):
+    if get_tp_group().should_run_out_of_place_ar(input_):
+        return torch.ops.vllm.tp_out_of_place_ar(input_)
+    else:
         torch.ops.vllm.tp_in_place_ar(input_)
         return input_
-    else:
-        return torch.ops.vllm.tp_out_of_place_ar(input_)
 
 
 def tensor_model_parallel_all_gather(input_: torch.Tensor,

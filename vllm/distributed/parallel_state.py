@@ -271,17 +271,9 @@ class GroupCoordinator:
         return (ca_comm is not None and not ca_comm.disabled
                 and ca_comm.should_custom_ar(input_))
 
-    def should_run_in_place_ar(self, input_):
-        # Should run on TPU
-        if self.should_use_tpu_comm():
-            return False
-
-        # Should run custom ar
-        if self.should_use_ca_comm(input_):
-            return False
-
-        # Otherwise, return True
-        return True
+    def should_run_out_of_place_ar(self, input_):
+        # Should run on TPU or with the custom all reduce kernel
+        return self.should_use_tpu_comm() or self.should_use_ca_comm(input_)
 
     def in_place_ar(self, input_: torch.Tensor):
         if self.world_size == 1:
@@ -316,11 +308,11 @@ class GroupCoordinator:
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         if self.world_size == 1:
             return input_
-        if self.should_run_in_place_ar(input_):
+        if self.should_run_out_of_place_ar(input_):
+            return self.out_of_place_ar(input_)
+        else:
             self.in_place_ar(input_)
             return input_
-        else:
-            return self.out_of_place_ar(input_)
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         world_size = self.world_size
