@@ -73,6 +73,7 @@ class MixtralMoE(nn.Module):
         self.hidden_size = hidden_size
 
         # Gate always runs at half / full precision for now.
+
         self.gate = ReplicatedLinear(hidden_size,
                                      num_experts,
                                      bias=False,
@@ -359,6 +360,8 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
             if not lora_config else lora_config.lora_vocab_padding_size,
             quant_config=quant_config,
         )
+        if self.config.tie_word_embeddings:
+            self.lm_head.weight = self.model.embed_tokens.weight
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
         self.sampler = Sampler()

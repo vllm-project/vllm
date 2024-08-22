@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     VLLM_LOGGING_CONFIG_PATH: Optional[str] = None
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
+    VLLM_USE_FLASHINFER_SAMPLER: bool = False
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
@@ -57,6 +58,7 @@ if TYPE_CHECKING:
     VLLM_TEST_FORCE_FP8_MARLIN: bool = False
     VLLM_ALLOW_ENGINE_USE_RAY: bool = False
     VLLM_PLUGINS: Optional[List[str]] = None
+    VLLM_TORCH_PROFILER_DIR: Optional[str] = None
 
 
 def get_default_cache_root():
@@ -135,7 +137,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
             os.path.join(get_default_cache_root(), "vllm"),
         )),
 
-    # used in distributed environment to determine the master address
+    # used in distributed environment to determine the ip address
+    # of the current node, when the node has multiple network interfaces.
+    # If you are using multi-node inference, you should set this differently
+    # on each node.
     'VLLM_HOST_IP':
     lambda: os.getenv('VLLM_HOST_IP', "") or os.getenv("HOST_IP", ""),
 
@@ -255,6 +260,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # - "FLASHINFER": use flashinfer
     "VLLM_ATTENTION_BACKEND":
     lambda: os.getenv("VLLM_ATTENTION_BACKEND", None),
+
+    # If set, vllm will use flashinfer sampler
+    "VLLM_USE_FLASHINFER_SAMPLER":
+    lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_SAMPLER", "0"))),
 
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION":
@@ -379,6 +388,12 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_PLUGINS":
     lambda: None if "VLLM_PLUGINS" not in os.environ else os.environ[
         "VLLM_PLUGINS"].split(","),
+
+    # Enables torch profiler if set. Path to the directory where torch profiler
+    # traces are saved. Note that it must be an absolute path.
+    "VLLM_TORCH_PROFILER_DIR":
+    lambda: (None if os.getenv("VLLM_TORCH_PROFILER_DIR", None) is None else os
+             .path.expanduser(os.getenv("VLLM_TORCH_PROFILER_DIR", "."))),
 }
 
 # end-env-vars-definition
