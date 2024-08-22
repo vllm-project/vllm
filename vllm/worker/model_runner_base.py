@@ -202,6 +202,17 @@ class ModelRunnerBase(ABC, Generic[T]):
         """
         raise NotImplementedError
 
+    @property
+    def not_compiled_model(self):
+        """
+        Return the model that is not compiled.
+        """
+        if hasattr(self, "_not_compiled_model"):
+            return self._not_compiled_model
+        if hasattr(self, "model"):
+            return self.model
+        raise RuntimeError("No model found")
+
     def get_generators(self, finished_request_ids: Optional[List[str]] = None):
         """
         Return dict of per-request generators used for random sampling.

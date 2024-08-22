@@ -145,6 +145,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         model = model.eval()
         xm.wait_device_ops()
         model = ModelWrapper(model)
+        self._not_compiled_model = model
         self.model = torch.compile(model,
                                    backend="openxla",
                                    fullgraph=True,
@@ -156,6 +157,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         seq_len: int,
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
         is_prompt: bool,
+        compiled: bool = True,
     ) -> None:
         if is_prompt:
             seq_len = (seq_len + 15) // 16 * 16
@@ -235,7 +237,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             torch._dynamo.mark_dynamic(t, 0)
             torch._dynamo.mark_dynamic(p, 0)
         # Dummy run.
-        self.model(token_ids, position_ids, attn_metadata, input_lens, t, p,
+        executable = self.model if compiled else self.not_compiled_model
+        executable(token_ids, position_ids, attn_metadata, input_lens, t, p,
                    num_samples, kv_caches)
 
     def warmup_model(
@@ -510,6 +513,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         kv_caches: Optional[List[Any]],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
+        compiled: bool = True,
     ) -> List[SamplerOutput]:
         assert intermediate_tensors is None
         if num_steps > 1:
@@ -530,7 +534,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                     if getattr(arg, "context_lens", None) is not None:
                         arg.context_lens = arg.context_lens.to(self.device)
                 new_args.append(arg)
-            return self.model(*new_args)
+            executable = self.model if compiled else self.not_compiled_model
+            return executable(*new_args)
 
         num_prefills = model_input.attn_metadata.num_prefills
         is_prompt = num_prefills > 0

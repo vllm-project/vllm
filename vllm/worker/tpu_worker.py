@@ -120,6 +120,7 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             seq_len=self.scheduler_config.max_num_batched_tokens,
             kv_caches=kv_caches,
             is_prompt=True,
+            compiled=False,
         )
         # Synchronize before measuring the memory usage.
         xm.wait_device_ops()
