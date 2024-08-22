@@ -10,7 +10,7 @@ from ...utils import RemoteOpenAIServer
 @pytest.mark.asyncio
 async def test_empty_prompt():
     model_name = "gpt2"
-    server_args = ["--disable-frontend-multiprocessing", "--enforce-eager"]
+    server_args = ["--enforce-eager"]
     with RemoteOpenAIServer(model_name, server_args) as remote_server:
         client = remote_server.get_async_client()
 
