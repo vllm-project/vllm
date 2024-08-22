@@ -394,6 +394,7 @@ class LLM:
             chat_template=chat_template,
             add_generation_prompt=add_generation_prompt)
 
+        inputs: PromptInputs
         if prompt_token_ids is not None:
             inputs = TokensPrompt(prompt_token_ids=prompt_token_ids)
         else:
@@ -401,7 +402,7 @@ class LLM:
 
         return self.generate(
             inputs,
-            sampling_params,
+            sampling_params=sampling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
         )
