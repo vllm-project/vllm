@@ -105,6 +105,8 @@ def main(args):
             print(model, metric)
             for k, method in enumerate(methods):
                 mean, std = get_perf_w_std(df, method, model, metric)
+                if method == "vllm" and metric == "ITL" and std is not None:
+                    mean, std = [i / 10 for i in mean], [i / 10 for i in std]
                 print(method, mean, std)
                 ax.errorbar(range(len(mean)),
                             mean, 
@@ -114,8 +116,8 @@ def main(args):
                             label=method,
                             lw=4,)
             ax.set_ylim(bottom=0)
-            if metric == "TTFT":
-                ax.set_ylim(0, 5000)
+            # if metric == "TTFT":
+            #     ax.set_ylim(0, 500)
             ax.set_xticks(range(len(mean)))
             ax.set_xticklabels(["2", "4", "8", "16", "inf"])
 
