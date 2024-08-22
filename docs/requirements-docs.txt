@@ -3,9 +3,10 @@ sphinx-book-theme==1.0.1
 sphinx-copybutton==0.5.2
 myst-parser==2.0.0
 sphinx-argparse==0.4.0
+msgspec
 
 # packages to install to build the documentation
-pydantic
+pydantic >= 2.8
 -f https://download.pytorch.org/whl/cpu
 torch
 py-cpuinfo

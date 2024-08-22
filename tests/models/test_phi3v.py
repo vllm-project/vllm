@@ -21,7 +21,7 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "<|user|>\n<|image_1|>\nWhat is the season?<|end|>\n<|assistant|>\n",
 })
 
-models = ["microsoft/Phi-3-vision-128k-instruct"]
+models = ["microsoft/Phi-3.5-vision-instruct"]
 
 
 def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
@@ -73,7 +73,7 @@ def run_test(
     All the image fixtures for the test is under tests/images.
     For huggingface runner, we provide the PIL images as input.
     For vllm runner, we provide MultiModalDataDict objects 
-    and corresponding vision language config as input.
+    and corresponding MultiModalConfig as input.
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """
