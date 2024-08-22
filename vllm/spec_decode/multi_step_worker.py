@@ -4,8 +4,8 @@ from typing import Dict, List, Set, Tuple
 
 import torch
 
-from vllm.sequence import (ExecuteModelRequest, SamplerOutput, SequenceData,
-                           SequenceGroupMetadata)
+from vllm.sequence import (ExecuteModelRequest, HiddenStates, SamplerOutput,
+                           SequenceData, SequenceGroupMetadata)
 from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeProposer)
@@ -157,6 +157,12 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
 
         updated_execute_model_req.seq_group_metadata_list =\
             updated_seq_group_metadata_list
+
+        if isinstance(updated_execute_model_req.previous_hidden_states,
+                      HiddenStates):
+            updated_execute_model_req.previous_hidden_states\
+                .expand_with_bonus_tokens(seq_with_bonus_token_in_last_step)
+
         return updated_execute_model_req, indices_of_original_sequence_groups
 
     @staticmethod

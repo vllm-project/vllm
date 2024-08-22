@@ -1,5 +1,7 @@
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
+
+import torch
 
 from vllm.distributed import broadcast_tensor_dict, get_pp_group
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
@@ -43,7 +45,7 @@ class MultiStepWorker(Worker):
 
     def _get_driver_input_and_broadcast(
         self, execute_model_req: ExecuteModelRequest
-    ) -> Tuple[BroadcastableModelInput, WorkerInput]:
+    ) -> Tuple[BroadcastableModelInput, WorkerInput, Dict[str, torch.Tensor]]:
         """
         Get the driver input and broadcast it to other workers.
         """
@@ -85,7 +87,9 @@ class MultiStepWorker(Worker):
             broadcast_data.update(model_input.as_broadcastable_tensor_dict())
             broadcast_tensor_dict(broadcast_data, src=0)
 
-        return model_input, worker_input
+        # Retuning empty dict here to keep this compatible with
+        # `LocalOrDistributedWorkerBase._get_driver_input_and_broadcast`
+        return model_input, worker_input, {}
 
     def _prepare_last_sampled_token_ids_for_tp_workers(
         self,
@@ -130,7 +134,8 @@ class MultiStepWorker(Worker):
     def prepare_input(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None,
-    ) -> Optional[Tuple[StatefulModelInput, WorkerInput]]:
+    ) -> Optional[Tuple[StatefulModelInput, WorkerInput, Dict[str,
+                                                              torch.Tensor]]]:
         """
         Depending on the current state of the request and multi step worker,
         this method may skip the normal _prepare_model_input and
@@ -148,8 +153,8 @@ class MultiStepWorker(Worker):
                 return None
 
             virtual_engine = execute_model_req.virtual_engine
-            model_input, worker_input = self._get_driver_input_and_broadcast(
-                execute_model_req)
+            (model_input, worker_input,
+             kwargs) = self._get_driver_input_and_broadcast(execute_model_req)
             assert isinstance(model_input, StatefulModelInput)
             if execute_model_req.is_first_multi_step:
                 # cache the worker input and model input for the next steps
@@ -162,7 +167,7 @@ class MultiStepWorker(Worker):
             # loop
             if broadcast_data is None:
                 return None
-            model_input, worker_input = broadcast_data
+            model_input, worker_input, kwargs = broadcast_data
             assert isinstance(model_input, StatefulModelInput)
             virtual_engine = worker_input.virtual_engine
             if model_input.is_first_multi_step:
@@ -186,4 +191,4 @@ class MultiStepWorker(Worker):
 
         assert model_input is not None
         assert worker_input is not None
-        return model_input, worker_input
+        return model_input, worker_input, kwargs
