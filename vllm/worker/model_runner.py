@@ -1,5 +1,6 @@
 import dataclasses
 import gc
+import inspect
 import itertools
 import time
 import warnings
@@ -1192,6 +1193,18 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         max_batch_size = max(_BATCH_SIZES_TO_CAPTURE)
         input_tokens = torch.zeros(max_batch_size, dtype=torch.long).cuda()
         input_positions = torch.zeros(max_batch_size, dtype=torch.long).cuda()
+
+        # Prepare dummy previous_hidden_states only if needed by the model.
+        # This is used by draft models such as EAGLE.
+        previous_hidden_states = None
+        if "previous_hidden_states" in inspect.signature(
+                self.model.forward).parameters:
+            previous_hidden_states = torch.empty(
+                [max_batch_size,
+                 self.model_config.get_hidden_size()],
+                dtype=self.model_config.dtype,
+                device=self.device)
+
         intermediate_inputs = None
         if not get_pp_group().is_first_rank:
             intermediate_inputs = self.model.make_empty_intermediate_tensors(
@@ -1264,6 +1277,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         "stream":
                         graph_capture_context.stream
                     }
+                    if previous_hidden_states is not None:
+                        capture_inputs[
+                            "previous_hidden_states"] = previous_hidden_states[:
+                                                                               batch_size]
+
                     if self.has_seqlen_agnostic:
                         # Only used by Mamba-based models CUDA graph atm (Jamba)
                         capture_inputs.update({
@@ -1462,6 +1480,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             if model_input.is_prompt:
                 hidden_states = hidden_or_intermediate_states.index_select(
                     0, indices)
+                output.prefill_hidden_states = hidden_or_intermediate_states
             elif decode_meta.use_cuda_graph:
                 hidden_states = hidden_or_intermediate_states[:len(indices)]
             else:
@@ -1510,11 +1529,11 @@ class CUDAGraphRunner:
         # Note one iteration is not enough for torch.jit.script
         for _ in range(_NUM_WARMUP_ITERS):
             self.model(
-                input_ids,
-                positions,
-                kv_caches,
-                attn_metadata,
-                intermediate_inputs,
+                input_ids=input_ids,
+                positions=positions,
+                kv_caches=kv_caches,
+                attn_metadata=attn_metadata,
+                intermediate_tensors=intermediate_inputs,
                 **kwargs,
             )
         torch.cuda.synchronize()
@@ -1523,11 +1542,11 @@ class CUDAGraphRunner:
         self._graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self._graph, pool=memory_pool, stream=stream):
             output_hidden_or_intermediate_states = self.model(
-                input_ids,
-                positions,
-                kv_caches,
-                attn_metadata,
-                intermediate_inputs,
+                input_ids=input_ids,
+                positions=positions,
+                kv_caches=kv_caches,
+                attn_metadata=attn_metadata,
+                intermediate_tensors=intermediate_inputs,
                 **kwargs,
             )
             if hidden_or_intermediate_states is not None:
@@ -1588,6 +1607,11 @@ class CUDAGraphRunner:
         if "seqlen_agnostic_capture_inputs" in self.input_buffers:
             self.model.copy_inputs_before_cuda_graphs(self.input_buffers,
                                                       **kwargs)
+
+        if "previous_hidden_states" in self.input_buffers:
+            self.input_buffers["previous_hidden_states"].copy_(
+                kwargs["previous_hidden_states"], non_blocking=True)
+
         if intermediate_tensors is not None:
             for key in intermediate_tensors.tensors:
                 if key != "model_execute_time" and key != "model_forward_time":

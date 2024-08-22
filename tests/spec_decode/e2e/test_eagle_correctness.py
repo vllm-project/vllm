@@ -15,7 +15,7 @@ However, we still need to verify below scenario could be passed:
     * Test greedy equality under preemption
     * Test greedy equality under various number of speculative tokens.
 
-With those tests, we can say at least, Medusa would not break the
+With those tests, we can say at least, EAGLE would not break the
 correctess for the target model outputs.
 """
 
@@ -24,16 +24,14 @@ import pytest
 from .conftest import run_greedy_equality_correctness_test
 
 # main model
-# lmsys/vicuna-7b-v1.3 was to be used but it's causing
-# OOM in CI pipeline, so using a smaller model.
 MAIN_MODEL = "JackFram/llama-68m"
 
 # speculative model
-SPEC_MODEL = "abhigoyal/vllm-medusa-llama-68m-random"
+SPEC_MODEL = "abhigoyal/vllm-eagle-llama-68m-random"
 
 # max. number of speculative tokens: this corresponds to
 # num_heads in the config.json of the speculator model.
-MAX_SPEC_TOKENS = 5
+MAX_SPEC_TOKENS = 4
 
 # precision
 PRECISION = "float32"
@@ -70,9 +68,9 @@ PRECISION = "float32"
 ])
 @pytest.mark.parametrize("batch_size", [1, 32])
 @pytest.mark.parametrize("seed", [1])
-def test_medusa_e2e_greedy_correctness(baseline_llm_generator,
-                                       test_llm_generator, batch_size: int,
-                                       output_len: int):
+def test_eagle_e2e_greedy_correctness(baseline_llm_generator,
+                                      test_llm_generator, batch_size: int,
+                                      output_len: int):
     """Verify greedy equality with different batch size."""
     run_greedy_equality_correctness_test(baseline_llm_generator,
                                          test_llm_generator,
@@ -111,10 +109,10 @@ def test_medusa_e2e_greedy_correctness(baseline_llm_generator,
 ])
 @pytest.mark.parametrize("batch_size", [1, 32])
 @pytest.mark.parametrize("seed", [1])
-def test_medusa_e2e_greedy_correctness_cuda_graph(baseline_llm_generator,
-                                                  test_llm_generator,
-                                                  batch_size: int,
-                                                  output_len: int):
+def test_eagle_e2e_greedy_correctness_cuda_graph(baseline_llm_generator,
+                                                 test_llm_generator,
+                                                 batch_size: int,
+                                                 output_len: int):
     """Verify greedy equality with cuda graph enabled and different 
     batch sizes."""
     run_greedy_equality_correctness_test(baseline_llm_generator,
@@ -160,10 +158,10 @@ def test_medusa_e2e_greedy_correctness_cuda_graph(baseline_llm_generator,
     ])
 @pytest.mark.parametrize("batch_size", [4])
 @pytest.mark.parametrize("seed", [1])
-def test_medusa_e2e_greedy_correctness_with_preemption(baseline_llm_generator,
-                                                       test_llm_generator,
-                                                       batch_size: int,
-                                                       output_len: int):
+def test_eagle_e2e_greedy_correctness_with_preemption(baseline_llm_generator,
+                                                      test_llm_generator,
+                                                      batch_size: int,
+                                                      output_len: int):
     """Verify greedy equality, even when some sequences are preempted mid-
     generation.
     """
@@ -209,9 +207,9 @@ def test_medusa_e2e_greedy_correctness_with_preemption(baseline_llm_generator,
         32,
     ])
 @pytest.mark.parametrize("seed", [1])
-def test_medusa_different_k(baseline_llm_generator, test_llm_generator,
-                            batch_size: int, output_len: int):
-    """Verify that medusa speculative decoding produces exact equality
+def test_eagle_different_k(baseline_llm_generator, test_llm_generator,
+                           batch_size: int, output_len: int):
+    """Verify that eagle speculative decoding produces exact equality
     to without spec decode with different values of num_speculative_tokens.
     """
     run_greedy_equality_correctness_test(baseline_llm_generator,
@@ -252,9 +250,9 @@ def test_medusa_different_k(baseline_llm_generator, test_llm_generator,
         32,
     ])
 @pytest.mark.parametrize("seed", [1])
-def test_medusa_disable_queue(baseline_llm_generator, test_llm_generator,
-                              batch_size: int, output_len: int):
-    """Verify that medusa speculative decoding produces exact equality
+def test_eagle_disable_queue(baseline_llm_generator, test_llm_generator,
+                             batch_size: int, output_len: int):
+    """Verify that eagle speculative decoding produces exact equality
     to without spec decode when speculation is disabled for large
     batch sizes.
     """
