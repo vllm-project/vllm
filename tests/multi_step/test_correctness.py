@@ -49,10 +49,9 @@ async def completions_with_server_args(prompts: List[str], model_name: str,
 @pytest.mark.parametrize("num_scheduler_steps", NUM_SCHEDULER_STEPS)
 @pytest.mark.parametrize("num_prompts", NUM_PROMPTS)
 @pytest.mark.asyncio
-async def test_multi_step_async_llm(example_prompts, model: str, tp_size: int,
-                                    pp_size: int, eager_mode: int,
-                                    num_scheduler_steps: int,
-                                    num_prompts: int):
+async def test_multi_step(example_prompts, model: str, tp_size: int,
+                          pp_size: int, eager_mode: int,
+                          num_scheduler_steps: int, num_prompts: int):
 
     prompts = example_prompts
     if len(prompts) < num_prompts:
