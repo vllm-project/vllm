@@ -233,7 +233,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # Generate sources:
   execute_process(
     COMMAND ${CMAKE_COMMAND} -E env 
-    PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/:${CUTLASS_DIR}/python/:$PYTHONPATH 
+    PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/:${CUTLASS_DIR}/python/:${VLLM_PYTHON_PATH}:$PYTHONPATH 
       ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/machete/generate.py
     RESULT_VARIABLE machete_generation_result
     OUTPUT_VARIABLE machete_generation_output
@@ -286,7 +286,8 @@ define_gpu_extension_target(
 
 set(VLLM_MOE_EXT_SRC
   "csrc/moe/torch_bindings.cpp"
-  "csrc/moe/topk_softmax_kernels.cu")
+  "csrc/moe/topk_softmax_kernels.cu"
+  "csrc/moe/marlin_moe_ops.cu")
 
 define_gpu_extension_target(
   _moe_C
