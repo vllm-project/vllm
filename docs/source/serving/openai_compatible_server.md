@@ -124,13 +124,13 @@ uvicorn-log-level: "info"
 ```
 
 ```bash
-$ vllm serve --model SOME_MODEL --config config.yaml
+$ vllm serve SOME_MODEL --config config.yaml
 ```
 
 ---
 **NOTE** 
 
-In case an argument is supplied using CLI and the config file, the value from the config file will take precedence.
+In case an argument is supplied using CLI and the config file, the value from the CLI will take precedence.
 
 ---
 

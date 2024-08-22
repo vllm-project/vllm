@@ -1,19 +1,22 @@
 # The CLI entrypoint to vLLM.
 import argparse
 import asyncio
-import configparser
 import os
 import signal
 import sys
-from typing import List, Optional
+from typing import Dict, List, Optional, Union
 
+import yaml
 from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.openai.api_server import run_server
 from vllm.entrypoints.openai.cli_args import make_arg_parser
+from vllm.logger import init_logger
 from vllm.utils import FlexibleArgumentParser
+
+logger = init_logger(__name__)
 
 
 def register_signal_handlers():
@@ -25,13 +28,48 @@ def register_signal_handlers():
     signal.signal(signal.SIGTSTP, signal_handler)
 
 
-def serve(args: argparse.Namespace) -> None:
-    if args.config:
-        config_parser = configparser.ConfigParser()
-        config_parser.read(args.config)
+def _merge_args_and_config(args: argparse.Namespace):
+    """
+        merge args from cli and config file supplied in the cli. 
+        If an argument is present in cli and args then choose args value
+        over config file.
 
-        for key, value in config_parser.items():
-            setattr(args, key, value)
+        example:
+        # config.yaml
+        port: 1231
+
+        # invoke server
+        $ vllm serve --config ../config.yaml --port 3122
+
+        # selected port = 3122
+    """
+    assert args.config, 'No config file specified.'
+
+    # only expecting a flat dictionary of atomic types
+    config: Dict[str, Union[int, str]] = {}
+
+    try:
+        with open(args.config, 'r') as config_file:
+            config = yaml.safe_load(config_file)
+    except Exception as ex:
+        logger.error("Unable to read the config file at %s", args.config)
+        logger.error(ex)
+
+    for key, value in config.items():
+        if hasattr(args, key):
+            logger.info("Argument %s is specified via config and commandline.",
+                        key)
+            logger.info("Selecting the %s=%s from commandline.", key,
+                        getattr(args, key))
+            continue
+
+        setattr(args, key, value)
+
+
+def serve(args: argparse.Namespace) -> None:
+
+    if args.config:
+        _merge_args_and_config(args)
 
     # The default value of `--model`
     if args.model != EngineArgs.model:
