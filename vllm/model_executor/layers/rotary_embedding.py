@@ -503,8 +503,8 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
         dtype: torch.dtype,
         short_factor: List[float],
         long_factor: List[float],
-        short_mscale: float = 1.0,
-        long_mscale: float = 1.0,
+        short_mscale: float = None,
+        long_mscale: float = None,
     ):
         super().__init__()
 
@@ -523,6 +523,17 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
         self.base = base
         self.short_factor = short_factor
         self.long_factor = long_factor
+
+        scale = self.max_position_embeddings / self.original_max_position_embeddings
+        if scale <= 1.0:
+            scaling_factor = 1.0
+        else:
+            scaling_factor = math.sqrt(1 + math.log(scale) / math.log(self.original_max_position_embeddings))
+        if short_mscale is None:
+            short_mscale = scaling_factor
+        if long_mscale is None:
+            long_mscale = scaling_factor
+
         self.short_mscale = short_mscale
         self.long_mscale = long_mscale
 
