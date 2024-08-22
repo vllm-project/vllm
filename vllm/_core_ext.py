@@ -218,6 +218,9 @@ elif core_C_available:
         def bias_getter(self) -> int:
             return self.ScalarType.bias
 
+        def exponent_bias_getter(self) -> int:
+            return self.ScalarType.exponent_bias
+
         def exponent_getter(self) -> int:
             return self.ScalarType.exponent
 
