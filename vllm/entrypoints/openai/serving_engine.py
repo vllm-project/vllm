@@ -31,7 +31,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import LogitsProcessor, SamplingParams
 from vllm.sequence import Logprob
-from vllm.transformers_utils.tokenizer import AnyHFTokenizer, AnyTokenizer
+from vllm.transformers_utils.tokenizer import AnyTokenizer, AnyTokenizer
 
 logger = init_logger(__name__)
 
@@ -219,7 +219,7 @@ class OpenAIServing:
     def _normalize_prompt_tokens_to_input(
         self,
         request: AnyRequest,
-        tokenizer: AnyHFTokenizer,
+        tokenizer: AnyTokenizer,
         prompt_ids: List[int],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]],
     ) -> TextTokensPrompt:
@@ -395,7 +395,7 @@ class OpenAIServing:
     @staticmethod
     def _get_decoded_token(logprob: Logprob,
                            token_id: int,
-                           tokenizer: AnyHFTokenizer,
+                           tokenizer: AnyTokenizer,
                            return_as_token_id: bool = False) -> str:
         if return_as_token_id:
             return f"token_id:{token_id}"

@@ -32,7 +32,7 @@ from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
-from vllm.transformers_utils.tokenizer import AnyHFTokenizer, AnyTokenizer
+from vllm.transformers_utils.tokenizer import AnyTokenizer, AnyTokenizer
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 from vllm.utils import iterate_with_cancellation, random_uuid
 
@@ -548,7 +548,7 @@ class OpenAIServingChat(OpenAIServing):
         self,
         token_ids: GenericSequence[int],
         top_logprobs: GenericSequence[Optional[Dict[int, Logprob]]],
-        tokenizer: AnyHFTokenizer,
+        tokenizer: AnyTokenizer,
         num_output_top_logprobs: Optional[int] = None,
     ) -> ChatCompletionLogProbs:
         """Create OpenAI-style logprobs."""

@@ -28,7 +28,7 @@ from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
-from vllm.transformers_utils.tokenizer import AnyHFTokenizer, AnyTokenizer
+from vllm.transformers_utils.tokenizer import AnyTokenizer, AnyTokenizer
 from vllm.utils import merge_async_iterators, random_uuid
 
 logger = init_logger(__name__)
@@ -434,7 +434,7 @@ class OpenAIServingCompletion(OpenAIServing):
         token_ids: GenericSequence[int],
         top_logprobs: GenericSequence[Optional[Dict[int, Logprob]]],
         num_output_top_logprobs: int,
-        tokenizer: AnyHFTokenizer,
+        tokenizer: AnyTokenizer,
         initial_text_offset: int = 0,
     ) -> CompletionLogProbs:
         """Create logprobs for OpenAI Completion API."""

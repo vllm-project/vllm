@@ -16,11 +16,11 @@ from vllm.utils import make_async
 
 logger = init_logger(__name__)
 
-AnyHFTokenizer = Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
-AnyTokenizer = Union[AnyHFTokenizer, MistralTokenizer]
+AnyTokenizer = Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
+AnyTokenizer = Union[AnyTokenizer, MistralTokenizer]
 
 
-def get_cached_tokenizer(tokenizer: AnyHFTokenizer) -> AnyHFTokenizer:
+def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
     """Get tokenizer with cached properties.
 
     This will patch the tokenizer object in place.

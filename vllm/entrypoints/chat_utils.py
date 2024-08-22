@@ -23,7 +23,7 @@ from vllm.logger import init_logger
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.utils import (async_get_and_parse_audio,
                                    async_get_and_parse_image)
-from vllm.transformers_utils.tokenizer import AnyHFTokenizer, AnyTokenizer
+from vllm.transformers_utils.tokenizer import AnyTokenizer, AnyTokenizer
 
 logger = init_logger(__name__)
 
@@ -113,7 +113,7 @@ def load_chat_template(
 
 
 @lru_cache(maxsize=None)
-def _mm_token_str(model_config: ModelConfig, tokenizer: AnyHFTokenizer,
+def _mm_token_str(model_config: ModelConfig, tokenizer: AnyTokenizer,
                   modality: Literal["image", "audio"]) -> Optional[str]:
     # TODO: Let user specify how to insert image tokens into prompt
     # (similar to chat template)
@@ -259,7 +259,7 @@ def parse_chat_messages(
 
 
 def apply_chat_template(
-    tokenizer: AnyHFTokenizer,
+    tokenizer: AnyTokenizer,
     conversation: List[ConversationMessage],
     chat_template: Optional[str],
     *,

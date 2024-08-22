@@ -2,7 +2,7 @@ from typing import Dict, List, Optional, Tuple
 
 from vllm.sequence import Logprob, SamplingParams, Sequence, SequenceGroup
 
-from .tokenizer import AnyHFTokenizer, AnyTokenizer
+from .tokenizer import AnyTokenizer, AnyTokenizer
 from .tokenizer_group import BaseTokenizerGroup
 
 # Used eg. for marking rejected tokens in spec decoding.
@@ -172,7 +172,7 @@ def _replace_none_with_empty(tokens: List[Optional[str]]):
 
 
 def _convert_tokens_to_string_with_added_encoders(
-    tokenizer: AnyHFTokenizer,
+    tokenizer: AnyTokenizer,
     output_tokens: List[str],
     skip_special_tokens: bool,
     spaces_between_special_tokens: bool,
