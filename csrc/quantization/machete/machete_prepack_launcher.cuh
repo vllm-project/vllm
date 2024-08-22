@@ -2,6 +2,7 @@
 
 #include "machete_prepack_kernel.cuh"
 #include "cutlass_extensions/torch_utils.hpp"
+#include "core/scalar_type.hpp"
 
 namespace machete {
 
@@ -61,11 +62,7 @@ torch::Tensor prepack_impl(torch::Tensor const B) {
   return D;
 };
 
-template <typename ElementA, typename ElementB, typename ElementD,
-          typename AccumulatorT = float, typename ScaleT = cutlass::half_t,
-          typename ZeroT = cutlass::half_t>
-struct PrepackBDispatcher {
-  static torch::Tensor dispatch(torch::Tensor B);
-};
+torch::Tensor prepack_B_dispatch(torch::Tensor B, at::ScalarType const& atype,
+                                 vllm::ScalarType const& btype);
 
 };  // namespace machete

@@ -5,12 +5,14 @@
 
 #include "machete_mm_kernel.cuh"
 #include "cutlass_extensions/torch_utils.hpp"
+#include "core/scalar_type.hpp"
 
 namespace machete {
 
 struct PyTorchArguments {
   torch::Tensor const& A;
   torch::Tensor const& B;
+  vllm::ScalarType const& btype;
   c10::optional<at::ScalarType> const& out_type;
   c10::optional<torch::Tensor> const& scales;
   c10::optional<torch::Tensor> const& zeros;
@@ -85,15 +87,6 @@ torch::Tensor run_impl(PyTorchArguments args) {
   return D;
 };
 
-template <typename ElementA, typename ElementB>
-struct GemmDispatcher {
- private:
-  template <typename ElementD, typename ElementS, typename ElementZ>
-  static torch::Tensor dispatch_internal(PyTorchArguments args);
-
- public:
-  static torch::Tensor dispatch(PyTorchArguments args) {}
-  static std::vector<std::string> supported_schedules();
-};
+torch::Tensor gemm_dispatch(PyTorchArguments args);
 
 };  // namespace machete

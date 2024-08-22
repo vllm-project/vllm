@@ -38,16 +38,21 @@ using namespace cute;
 //   we compute the transpose to move it to the left-hand side.
 template <typename ElementA_, typename ElementB_, typename ElementD_,
           typename AccumulatorT, typename ScaleT, typename ZeroT,
-          class KernelSchedule, typename ScheduleConfig, bool with_C,
-          bool with_scales, bool with_zeropoints>
+          class KernelSchedule, typename ScheduleConfig>
 struct MacheteKernelTemplate {
+  static constexpr bool with_C = false;  // not ever used
+  static constexpr bool with_scales = !std::is_same_v<ScaleT, void>;
+  static constexpr bool with_zeropoints = !std::is_same_v<ZeroT, void>;
+
   using MmaType = ElementA_;
   using ElementA = ElementA_;
   using ElementB = ElementB_;
   using ElementD = ElementD_;
   using ElementC = cute::conditional_t<with_C, ElementD, void>;
-  using ElementZ = ZeroT;
-  using ElementS = ScaleT;
+  // if !with_scales or !with_zeropoints, we use dummy values so we can
+  //   still construct the kernel
+  using ElementZ = cute::conditional_t<with_zeropoints, ZeroT, MmaType>;
+  using ElementS = cute::conditional_t<with_scales, ScaleT, MmaType>;
 
   using ElementAccumulator =
       AccumulatorT;  // Element type for internal accumulation
@@ -85,7 +90,7 @@ struct MacheteKernelTemplate {
   using OperatorClass = cutlass::arch::OpClassTensorOp;
 
   using PrepackedLayoutB =
-      PrepackedLayoutBTemplate<ElementA_, ElementB_, ElementD_, AccumulatorT,
+      PrepackedLayoutBTemplate<ElementA_, ElementB_, AccumulatorT,
                                LayoutA_Transpose, KernelSchedule>;
 
   static int constexpr TileShapeK =

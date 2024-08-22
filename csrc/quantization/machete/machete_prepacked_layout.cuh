@@ -41,15 +41,14 @@ struct IlvBlkLayoutAuto {};
 // The contract here is that the `TiledMma` determined below matches the one
 // ultimately used in the kernel. (this is also why the other element types are
 // required along with the kernel schedule)
-template <typename ElementA_, typename ElementB_, typename ElementD_,
-          typename AccumulatorT, class LayoutB, class KernelSchedule,
+template <typename ElementA_, typename ElementB_, typename AccumulatorT,
+          class LayoutB, class KernelSchedule,
           typename IlvBlkLayout_ = IlvBlkLayoutAuto>
 // clang-format on
 struct PrepackedLayoutBTemplate {
   using MmaType = ElementA_;
   using ElementA = ElementA_;
   using ElementB = ElementB_;
-  using ElementD = ElementD_;
   using ElementAccumulator =
       AccumulatorT;  // Element type for internal accumulation
   using ElementMma = MmaType;
@@ -173,6 +172,15 @@ struct PrepackedLayoutBTemplate {
     // ((athrid, val), (BlocksN, BlocksK, L))
     //   => ((athrid, val), (BlocksN, BlocksK), L)
     return group<1, 3>(result(_, repeat<rank<1>(result)>(_)));
+  }
+
+  // ((athrid_val), (BlocksN, BlocksK, L)) -> (N, K, L)
+  template <typename Shape_NKL>
+  CUTE_HOST_DEVICE static constexpr auto TVbNbKL_to_offset_copy(
+      Shape_NKL shape_mkl) {
+    auto layout = TVbNbKL_to_offset(shape_mkl);
+    return make_layout(coalesce(get<0>(layout)), get<1>(layout),
+                       get<2>(layout));
   }
 
   // ((BlockN, BlockK), (BlocksN, BlocksK), L) -> (storage_idx)

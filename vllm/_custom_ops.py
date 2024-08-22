@@ -612,6 +612,20 @@ def fp8_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
 
 
 # machete
+def machete_catch_unsupported(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except RuntimeError as e:
+            if "Unsupported schedule" in str(e):
+                logger.warning("Unsupported schedule in Machete, falling back to default")
+                return fn(*args, schedule="default", **kwargs)
+            else:
+                raise e
+
+    return wrapper
+
 def machete_supported_schedules(b_type: ScalarType) -> List[str]:
     return torch.ops._C.machete_supported_schedules(b_type)
 
@@ -633,8 +647,9 @@ def machete_gemm(
 
 
 def machete_prepack_B(b_q_weight: torch.Tensor,
+                      a_type: torch.dtype,
                       b_type: ScalarType) -> torch.Tensor:
-    return torch.ops._C.machete_prepack_B(b_q_weight, b_type)
+    return torch.ops._C.machete_prepack_B(b_q_weight, a_type, b_type)
 
 
 if hasattr(torch.ops._C, "permute_cols"):

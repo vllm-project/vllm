@@ -185,11 +185,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "machete_gemm(Tensor A, Tensor B,"
       "             __torch__.torch.classes._core_C.ScalarType btype,"
-      "             Tensor? scales, Tensor? zeros, int? group_size,"
-      "             Tensor? C, float? alpha, float? beta, str? schedule)"
+      "             ScalarType? out_type, Tensor? scales, Tensor? zeros,"
+      "             int? group_size, Tensor? C, float? alpha, float? beta,"
+      "             str? schedule)"
       "-> Tensor");
   ops.def(
-      "machete_prepack_B(Tensor B,"
+      "machete_prepack_B(Tensor B, ScalarType atype,"
       "                  __torch__.torch.classes._core_C.ScalarType btype)"
       "-> Tensor");
   // conditionally compiled so impl registration is in source file
