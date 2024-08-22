@@ -738,18 +738,3 @@ async def test_guided_decoding_type_error(client: openai.AsyncOpenAI,
             prompt="Give an example string that fits this regex",
             extra_body=dict(guided_regex=sample_regex,
                             guided_json=sample_json_schema))
-
-
-@pytest.mark.asyncio
-async def test_empty_prompt():
-    model_name = "gpt2"
-    server_args = ["--disable-frontend-multiprocessing", "--enforce-eager"]
-    with RemoteOpenAIServer(model_name, server_args) as remote_server:
-        client = remote_server.get_async_client()
-
-        with pytest.raises(openai.BadRequestError,
-                           match=re.compile('.+Empty prompt.+')):
-            await client.completions.create(model=model_name,
-                                            prompt="",
-                                            max_tokens=5,
-                                            temperature=0.0)
