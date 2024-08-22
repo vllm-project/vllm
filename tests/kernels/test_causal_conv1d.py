@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional as F
 import pytest
 
-from vllm.model_executor.layers.mamba.ops.casual_conv1d import causal_conv1d_fn
+from vllm.model_executor.layers.mamba.ops.casual_conv1d import causal_conv1d_fn, causal_conv1d_update
 
 
 def causal_conv1d_ref(
