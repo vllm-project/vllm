@@ -86,7 +86,7 @@ class Worker(LocalOrDistributedWorkerBase):
             or (speculative_config.draft_model_config.model ==
                 model_config.model) \
             or (speculative_config.draft_model_config.hf_config.model_type
-                not in ["medusa", "mlp_speculator"]) \
+                not in ["medusa", "mlp_speculator", "eagle"]) \
                     else {"return_hidden_states": True}
 
         ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
