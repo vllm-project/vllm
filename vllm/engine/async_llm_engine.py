@@ -766,6 +766,11 @@ class AsyncLLMEngine:
     def errored(self) -> bool:
         return self._errored_with is not None
 
+    @property
+    def limit_concurrency(self) -> Optional[int]:
+        """Maximum number of concurrently running requests."""
+        return None
+
     def set_errored(self, exc: Exception) -> None:
         self._errored_with = exc
 
@@ -1261,3 +1266,9 @@ class AsyncLLMEngine:
                     logger_name=logger_name))
         else:
             self.engine.remove_logger(logger_name=logger_name)
+
+    async def start_profile(self) -> None:
+        self.engine.model_executor._run_workers("start_profile")
+
+    async def stop_profile(self) -> None:
+        self.engine.model_executor._run_workers("stop_profile")
