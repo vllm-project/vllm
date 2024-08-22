@@ -106,6 +106,8 @@ def run_vllm(
         max_num_batched_tokens=max_num_batched_tokens,
         distributed_executor_backend=distributed_executor_backend,
         load_format=load_format,
+        num_scheduler_steps=8,
+        use_v2_block_manager=True,
     )
 
     # Add the requests to the engine.
