@@ -156,7 +156,8 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
                     "input_dim": 0,
                     "output_dim": 0,
                     "pack_factor": 1,
-                    "use_bitsandbytes_8bit": True
+                    "use_bitsandbytes_8bit": True,
+                    "generation": 0
                 })
             return qweight
 
@@ -216,6 +217,7 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
         offsets = qweight.bnb_shard_offsets
         quant_states = qweight.bnb_quant_state
         matmul_states = qweight.matmul_state
+        generation = qweight.generation
 
         out_dim_0 = x.shape[0]
         out_dim_1 = sum(
@@ -229,7 +231,9 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
         for i in range(len(quant_states)):
             output_size = quant_states[i].shape[0]
 
-            if matmul_states[i] is None:
+            # in profile_run or the first generation of inference,
+            # create new matmul_states
+            if generation == 0 or generation == 1:
                 matmul_states[i] = MatmulLtState()
                 matmul_states[i].CB = qweight[offsets[i]:offsets[i + 1]]
                 matmul_states[i].SCB = quant_states[i]
@@ -251,16 +255,20 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
 
             current_index += output_size
 
-        if (not self.quant_config.llm_int8_has_fp16_weight
-                and matmul_states[i].CB is not None
-                and matmul_states[i].CxB is not None):
-            del matmul_states[i].CB
-            qweight[offsets[i]:offsets[i + 1]] = matmul_states[i].CxB
+            # only update the matmul_states if it is not profile_run
+            if (generation > 0
+                    and not self.quant_config.llm_int8_has_fp16_weight
+                    and matmul_states[i].CB is not None
+                    and matmul_states[i].CxB is not None):
+                del matmul_states[i].CB
+                qweight[offsets[i]:offsets[i + 1]] = matmul_states[i].CxB
 
         out = out.to(original_type)
 
         if bias is not None:
             out += bias
+
+        qweight.generation += 1
 
         return out
 
