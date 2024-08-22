@@ -22,7 +22,8 @@ from vllm.entrypoints.openai.protocol import (
     FunctionCall, ToolCall, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing,
-                                                    PromptAdapterPath)
+                                                    PromptAdapterPath,
+                                                    TextTokensPrompt)
 from vllm.inputs import TokensPrompt
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalDataDict
@@ -100,7 +101,7 @@ class OpenAIServingChat(OpenAIServing):
                 tool.model_dump() for tool in request.tools
             ]
 
-            prompt = apply_chat_template(
+            prompt, prompt_token_ids = apply_chat_template(
                 tokenizer,
                 conversation=conversation,
                 chat_template=request.chat_template or self.chat_template,
@@ -130,13 +131,19 @@ class OpenAIServingChat(OpenAIServing):
             guided_decode_logits_processor = (
                 await self._guided_decode_logits_processor(request, tokenizer))
 
-            prompt_inputs = self._tokenize_prompt_input(
-                request,
-                tokenizer,
-                prompt,
-                truncate_prompt_tokens=request.truncate_prompt_tokens,
-                add_special_tokens=request.add_special_tokens,
-            )
+            if prompt_token_ids is None:
+                assert prompt is not None
+                prompt_inputs = self._tokenize_prompt_input(
+                    request,
+                    tokenizer,
+                    prompt,
+                    truncate_prompt_tokens=request.truncate_prompt_tokens,
+                    add_special_tokens=request.add_special_tokens,
+                )
+            else:
+                prompt_inputs = TextTokensPrompt(prompt=prompt, prompt_token_ids=prompt_token_ids)
+
+            assert prompt_inputs is not None
 
             sampling_params = request.to_sampling_params(
                 tokenizer,

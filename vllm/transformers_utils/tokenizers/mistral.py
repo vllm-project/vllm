@@ -14,11 +14,6 @@ from mistral_common.tokens.tokenizers.tekken import Tekkenizer
 
 if TYPE_CHECKING:
     from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
-    # yapf: disable
-    from vllm.entrypoints.openai.protocol import (
-        ChatCompletionRequest as OAIChatCompletionRequest)
-
-    # yapf: enable
 
 
 @dataclass
@@ -101,36 +96,14 @@ class MistralTokenizer:
     def encode(self, prompt: str) -> List[int]:
         return self.tokenizer.encode(prompt, bos=False, eos=False)
 
-    def apply_chat_template(
-            self, conversation: List["ChatCompletionMessageParam"], **kwargs) -> List[int]:
+    def apply_chat_template(self, conversation: List["ChatCompletionMessageParam"], tools: Optional[Dict[str, Any]] = None, **kwargs) -> Dict[str, List[int] | str]:
+        assert tools is None, "`tools` are not yet supported."
+
         request = ChatCompletionRequest(
             messages=conversation)  # type: ignore[type-var]
         encoded = self.mistral.encode_chat_completion(request)
-        return encoded.tokens
 
-    def encode_chat_completion(
-            self, oai_request: "OAIChatCompletionRequest") -> Dict[str, Any]:
-        # only fields that shared between OAI and Mistral
-        # ChatCompletionRequest should be added
-        # response_format is removed as the format differs
-        # between OAI and Mistral
-        allowed_fields = set(ChatCompletionRequest.__annotations__.keys()) - {
-            "response_format"
-        }
-
-        request_dict = {
-            key: value
-            for key, value in oai_request.dict().items()
-            if key in allowed_fields
-        }
-
-        request = ChatCompletionRequest(**request_dict)
-        encoded = self.mistral.encode_chat_completion(request)
-        return {
-            "prompt": encoded.text,
-            "prompt_token_ids": encoded.tokens,
-            "messages": request.messages,
-        }
+        return {"prompt_token_ids": encoded.tokens, "prompt": encoded.text}
 
     def convert_tokens_to_string(self, ids: List[str]) -> str:
         if self._is_tekken:

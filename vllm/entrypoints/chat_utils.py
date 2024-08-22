@@ -272,16 +272,18 @@ def apply_chat_template(
             "allowed, so you must provide a chat template if the tokenizer "
             "does not define one.")
 
-    prompt = tokenizer.apply_chat_template(
+    input = tokenizer.apply_chat_template(
         conversation=conversation,
         chat_template=chat_template,
         tokenize=tokenize,
         **kwargs,
     )
-    if isinstance(prompt, list) and isinstance(prompt[0], int):
-        prompt_token_ids = prompt
-        prompt = None
-    else:
+    if isinstance(input, str):
+        prompt = input
         prompt_token_ids = None
+    else:
+        assert isinstance(input, dict), type(input)
+        prompt = input["prompt"]
+        prompt_token_ids = input["prompt_token_ids"]
 
-    return prompt, prompt_token_ids
+    return prompt, prompt_token_ids 
