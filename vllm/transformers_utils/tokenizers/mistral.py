@@ -98,7 +98,10 @@ class MistralTokenizer:
         return []
 
     def encode(self, prompt: str) -> List[int]:
-        return self.tokenizer.encode(prompt, bos=False, eos=False)
+        # `encode ` should only be used for prompt completion
+        # it should never be used for chat_completion.
+        # For chat completion use `apply_chat_template`
+        return self.tokenizer.encode(prompt, bos=True, eos=False)
 
     def apply_chat_template(self,
                             conversation: List["ConversationMessage"],
@@ -111,7 +114,8 @@ class MistralTokenizer:
         encoded = self.mistral.encode_chat_completion(request)
 
         # encode-decode to get clean prompt
-        prompt = self.decode(self.encode(encoded.text))
+        prompt_encoded = self.tokenizer.encode(prompt, bos=False, eos=False)
+        prompt = self.decode(prompt_encoded)
 
         return Encoding(input_ids=encoded.tokens, prompt=prompt)
 
