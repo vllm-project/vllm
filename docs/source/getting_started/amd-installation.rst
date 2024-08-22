@@ -25,6 +25,20 @@ Option 1: Build from source with docker (recommended)
 
 You can build and install vLLM from source.
 
+.. note::
+    It is important that the user kicks off the ``docker build`` using buildkit. 
+    Either the user put ``DOCKER_BUILDKIT=1`` as environment variable when calling ``docker build`` command, or the user needs to setup buildkit
+    in the docker daemon configuration ``/etc/docker/daemon.json`` as follows and restart the daemon:
+
+    .. code-block:: console
+
+        {
+        "features": {
+            "buildkit": true
+        }
+        }
+
+
 First, build a docker image from `Dockerfile.rocm <https://github.com/vllm-project/vllm/blob/main/Dockerfile.rocm>`_ and launch a docker container from the image.
 
 `Dockerfile.rocm <https://github.com/vllm-project/vllm/blob/main/Dockerfile.rocm>`_ uses ROCm 6.0 by default, but also supports ROCm 5.7.
@@ -43,19 +57,19 @@ To build vllm on ROCm 6.0 for MI200 and MI300 series, you can use the default:
 
 .. code-block:: console
 
-    $ docker build -f Dockerfile.rocm -t vllm-rocm .
+    $ DOCKER_BUILDKIT=1 docker build -f Dockerfile.rocm -t vllm-rocm .
 
 To build vllm on ROCm 6.0 for Radeon RX7900 series (gfx1100), you should specify ``BUILD_FA`` as below:
 
 .. code-block:: console
 
-    $ docker build --build-arg BUILD_FA="0" -f Dockerfile.rocm -t vllm-rocm .
+    $ DOCKER_BUILDKIT=1 docker build --build-arg BUILD_FA="0" -f Dockerfile.rocm -t vllm-rocm .
 
 To build docker image for vllm on ROCm 5.7, you can specify ``BASE_IMAGE`` as below:
 
 .. code-block:: console
 
-    $ docker build --build-arg BASE_IMAGE="rocm/pytorch:rocm5.7_ubuntu22.04_py3.10_pytorch_2.0.1" \
+    $ DOCKER_BUILDKIT=1 docker build --build-arg BASE_IMAGE="rocm/pytorch:rocm5.7_ubuntu22.04_py3.10_pytorch_2.0.1" \
        -f Dockerfile.rocm -t vllm-rocm . 
 
 To run the above docker image ``vllm-rocm``, use the below command:
