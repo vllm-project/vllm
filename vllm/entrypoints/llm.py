@@ -388,17 +388,17 @@ class LLM:
         conversations, _ = parse_chat_messages(messages, model_config,
                                                tokenizer)
 
-        prompts, prompt_token_ids = apply_chat_template(
+        prompt = apply_chat_template(
             tokenizer,
             conversations,
             chat_template=chat_template,
             add_generation_prompt=add_generation_prompt)
 
         inputs: PromptInputs
-        if prompt_token_ids is not None:
-            inputs = TokensPrompt(prompt_token_ids=prompt_token_ids)
+        if isinstance(prompt, list) and isinstance(prompt[0], int):
+            inputs = TokensPrompt(prompt_token_ids=prompt)
         else:
-            inputs = TextPrompt(prompt=prompts)
+            inputs = TextPrompt(prompt=prompt)
 
         return self.generate(
             inputs,

@@ -72,7 +72,7 @@ class OpenAIServingTokenization(OpenAIServing):
                 logger.warning(
                     "Multi-modal inputs are ignored during tokenization")
 
-            prompt, _ = apply_chat_template(
+            prompt = apply_chat_template(
                 tokenizer,
                 conversation=conversation,
                 chat_template=self.chat_template,

@@ -101,7 +101,7 @@ class OpenAIServingChat(OpenAIServing):
                 tool.model_dump() for tool in request.tools
             ]
 
-            prompt, prompt_token_ids = apply_chat_template(
+            prompt = apply_chat_template(
                 tokenizer,
                 conversation=conversation,
                 chat_template=request.chat_template or self.chat_template,
@@ -131,7 +131,7 @@ class OpenAIServingChat(OpenAIServing):
             guided_decode_logits_processor = (
                 await self._guided_decode_logits_processor(request, tokenizer))
 
-            if prompt_token_ids is None:
+            if 
                 assert prompt is not None
                 prompt_inputs = self._tokenize_prompt_input(
                     request,
@@ -140,9 +140,12 @@ class OpenAIServingChat(OpenAIServing):
                     truncate_prompt_tokens=request.truncate_prompt_tokens,
                     add_special_tokens=request.add_special_tokens,
                 )
+
+
             else:
+                assert isinstance(prompt, list) and isinstance(prompt[0], int), f"Prompt has to be either a string or a list of token ids"
                 prompt_inputs = TextTokensPrompt(
-                    prompt=prompt, prompt_token_ids=prompt_token_ids)
+                    prompt=tokenizer.decode(prompt), prompt_token_ids=prompt)
 
             assert prompt_inputs is not None
 
