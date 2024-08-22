@@ -110,7 +110,7 @@ class MistralTokenizer:
             messages=conversation)  # type: ignore[type-var]
         encoded = self.mistral.encode_chat_completion(request)
 
-        return Encoding(input_ids=encoded.tokens, prompt=encoded.txt)
+        return Encoding(input_ids=encoded.tokens, prompt=encoded.text)
 
     def convert_tokens_to_string(self, tokens: List[str]) -> str:
         if self._is_tekken:
