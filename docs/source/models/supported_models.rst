@@ -229,6 +229,7 @@ Multimodal Language Models
     -
   * - :code:`LlavaNextVideoForConditionalGeneration`
     - LLaVA-NeXT-Video
+    - Video
     - :code:`llava-hf/LLaVA-NeXT-Video-7B-hf`, etc.
     -
   * - :code:`MiniCPMV`
