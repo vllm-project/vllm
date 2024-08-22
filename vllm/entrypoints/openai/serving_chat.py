@@ -120,6 +120,7 @@ class OpenAIServingChat(OpenAIServing):
                 tool.model_dump() for tool in request.tools
             ]
 
+            print('CONVERSATION\n', conversation)
             prompt = apply_chat_template(
                 tokenizer,
                 conversation=conversation,

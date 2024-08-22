@@ -231,7 +231,7 @@ def _parse_chat_message_content(
     role = cast(str, message["role"])  # can be iterable in some cases, so cast
     content = message.get("content")
     tool_call_id = message.get("tool_call_id")
-    tool_calls = message.get("tool_calls", [])
+    tool_calls = message.get("tool_calls", None)
     # no longer used by OpenAI, but some models still use it for tool calls.
     name = message.get("name", "")
 
