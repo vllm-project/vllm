@@ -5,7 +5,6 @@ from typing import Sequence as GenericSequence
 from typing import Union
 
 from fastapi import Request
-from torch import isin
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import AsyncEngineClient
