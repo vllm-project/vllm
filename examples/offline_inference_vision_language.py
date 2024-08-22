@@ -18,7 +18,7 @@ def run_llava(question):
 
     prompt = f"USER: <image>\n{question}\nASSISTANT:"
 
-    llm = LLM(model="llava-hf/LLaVA-NeXT-Video-7B-hf")
+    llm = LLM(model="llava-hf/llava-1.5-7b-hf")
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
@@ -35,10 +35,8 @@ def run_llava_next(question):
 # LlaVA-NeXT-Video
 # Currently only support for video input
 def run_llava_next_video(question):
-    # prompt = f"[INST] <video>\n{question} [/INST]"
     prompt = f"USER: <video>\n{question} ASSISTANT:"
-    print(prompt)
-    llm = LLM(model="llava-hf/llava-next-video-7b-hf", max_model_len=8192)
+    llm = LLM(model="llava-hf/LLaVA-NeXT-Video-7B-hf", max_model_len=8192)
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
@@ -244,7 +242,7 @@ def main(args):
     # We set temperature to 0.2 so that outputs can be different
     # even when all prompts are identical when running batch inference.
     sampling_params = SamplingParams(temperature=0.2,
-                                     max_tokens=1024,
+                                     max_tokens=64,
                                      stop_token_ids=stop_token_ids)
 
     assert args.num_prompts > 0

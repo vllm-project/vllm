@@ -21,6 +21,7 @@ cached_get_tokenizer = lru_cache(get_tokenizer)
 VideoInput = Union[
     "np.ndarray",  # single video input
     List["np.ndarray"],
+    # TODO: support more types
     # List[Image.Image], List[List[Image.Image]],
     # "torch.Tensor",
     # List["torch.Tensor"],

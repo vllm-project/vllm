@@ -257,12 +257,6 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal):
             config.text_config, cache_config, quant_config)
         self.vision_resampler = LlavaNextVideoPooler(config)
 
-        # # For processing image inputs
-        # embed_std = 1 / math.sqrt(config.text_config.hidden_size)
-        # self.image_newline = nn.Parameter(
-        #     torch.randn(config.text_config.hidden_size,
-        #                 dtype=self.dtype) * embed_std)
-
     def _validate_video_pixel_values(
         self, data: Union[torch.Tensor, List[torch.Tensor]]
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
@@ -400,6 +394,21 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         return hidden_states
 
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
+        return self.language_model.compute_logits(hidden_states,
+                                                  sampling_metadata)
+
+    def sample(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[SamplerOutput]:
+        return self.language_model.sample(logits, sampling_metadata)
+    
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         # prepare weight iterators
         vit_weights, mlp_weights, newline_weights, llm_weights = itertools.tee(
@@ -418,30 +427,7 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal):
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
 
-        # # load newline
-        # newline_weights = filter_weights(newline_weights, "image_newline")
-        # for name, loaded_weight in newline_weights:
-        #     assert name == ""
-        #     param = self.image_newline
-        #     weight_loader = getattr(param, "weight_loader",
-        #                             default_weight_loader)
-        #     weight_loader(param, loaded_weight)
-
         # load llm backbone
         llm_weights = filter_weights(llm_weights, "language_model")
         self.language_model.load_weights(llm_weights)
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        return self.language_model.sample(logits, sampling_metadata)
