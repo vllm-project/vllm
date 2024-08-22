@@ -18,8 +18,8 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import (cached_get_tokenizer,
-                                   repeat_and_pad_image_tokens)
+from vllm.multimodal.utils import (cached_get_tokenizer,
+                                   repeat_and_pad_placeholder_tokens)
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.utils import is_list_of
 
@@ -153,11 +153,11 @@ def input_processor_for_llava_next_video(ctx: InputContext,
 
         tokenizer = cached_get_tokenizer(model_config.tokenizer)
 
-        new_prompt, new_token_ids = repeat_and_pad_image_tokens(
+        new_prompt, new_token_ids = repeat_and_pad_placeholder_tokens(
             tokenizer,
             llm_inputs.get("prompt"),
             llm_inputs["prompt_token_ids"],
-            image_token_id=hf_config.video_token_index,
+            placeholder_token_id=hf_config.video_token_index,
             repeat_count=video_feature_size,
         )
 
