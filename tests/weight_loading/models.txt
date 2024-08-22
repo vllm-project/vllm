@@ -15,3 +15,4 @@ compressed-tensors, nm-testing/Phi-3-mini-128k-instruct-FP8, main
 compressed-tensors, neuralmagic/Phi-3-medium-128k-instruct-quantized.w4a16, main
 awq, casperhansen/mixtral-instruct-awq, main
 awq_marlin, casperhansen/mixtral-instruct-awq, main
+fp8, neuralmagic/Meta-Llama-3-8B-Instruct-FP8-KV, main
