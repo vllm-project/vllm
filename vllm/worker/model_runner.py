@@ -1351,6 +1351,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         if self.model_config.is_encoder_decoder_model:
                             # Add the other attention metadata params needed for
                             # encoder-decoder specific models.
+                            assert self.attn_backend.get_name() == "xformers", \
+                                f"Encoder Decoder models only work with xformers backend. " \
+                                "The current backend is set to '{self.attn_backend.get_name()}'"
                             self._update_captured_attn_metadata_for_enc_dec_model(
                                 batch_size, attn_metadata,
                                 self.attn_backend.get_name())
@@ -1431,6 +1434,20 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
     def _update_inputs_to_capture_for_enc_dec_model(self,
                                                     capture_inputs: Dict[str,
                                                                          Any]):
+        """
+        Updates the set of input tensors needed for CUDA graph capture in an
+        encoder-decoder model.
+
+        This method modifies the provided `capture_inputs` dictionary by adding
+        tensors specific to encoder-decoder specific models that need to be captured
+        for CUDA Graph replay.
+
+        Args:
+            capture_inputs (Dict[str, Any]): A dictionary where input tensors are stored
+            for CUDA Graph capture.
+        """
+        # During the decode phase encoder_input_ids and encoder_positions are unset.
+        # Do the same thing for graph capture.
         capture_inputs["encoder_input_ids"] = torch.tensor(
             [], dtype=torch.long).cuda()
         capture_inputs["encoder_positions"] = torch.tensor(
@@ -1454,9 +1471,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             attn_metadata (AttentionMetadata): The AttentionMetadata object to
             be updated with encoder-decoder specific parameters.
         """
-        # Ensure that attn_metadata is of type XFormersMetadata
-        assert (attn_backend_name == ''), \
-            f"Expected attn_metadata to be of type XFormersMetadata, but got {type(attn_metadata).__name__}"
         # During decode phase the cross_slot_mapping will be empty. Hence set
         # an empty tensor for CUDA Graph capture.
         attn_metadata.cross_slot_mapping = torch.tensor(
@@ -1467,10 +1481,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 dtype=np.int32)).cuda()
         attn_metadata.cross_block_tables = cross_block_tables[:batch_size]
         attn_metadata.encoder_seq_lens = torch.full(
-            (batch_size, ), self.max_seq_len_to_capture,
+            (batch_size, ), 1,
             dtype=torch.int).cuda()
         attn_metadata.encoder_seq_lens_tensor = torch.full(
-            (batch_size, ), self.max_seq_len_to_capture,
+            (batch_size, ), 1,
             dtype=torch.int).cuda()
         attn_metadata.max_encoder_seq_len = self.max_seq_len_to_capture
 
@@ -1782,7 +1796,7 @@ class CUDAGraphRunner:
             self.input_buffers.update(intermediate_inputs.tensors)
 
         if self._is_encoder_decoder_model:
-            self._update_input_buffers_for_enc_dec_model(attn_metadata)
+            self._save_extra_input_buffers_for_enc_dec_model(attn_metadata)
 
         if get_pp_group().is_last_rank:
             self.output_buffers = {
@@ -1835,8 +1849,21 @@ class CUDAGraphRunner:
 
         return self.output_buffers
 
-    def _update_input_buffers_for_enc_dec_model(
+    def _save_extra_input_buffers_for_enc_dec_model(
             self, attn_metadata: AttentionMetadata):
+        """
+        Saves additional input buffers specific to the encoder-decoder model
+        from the attention metadata.
+
+        This method extracts and stores encoder-decoder related input buffers
+        from the `attn_metadata` into the `input_buffers` dictionary. The buffers include
+        encoder sequence lengths, cross-slot mappings, and cross-block tables, which are
+        essential for the encoder-decoder model during CUDA graph replay.
+
+        Args:
+            attn_metadata (AttentionMetadata): The attention metadata object from which the 
+            encoder-decoder-specific input buffers are extracted and saved.
+        """
         self.input_buffers["encoder_seq_lens_tensor"] = (
             attn_metadata.decode_metadata.encoder_seq_lens_tensor)
         self.input_buffers["cross_slot_mapping"] = (
@@ -1846,75 +1873,38 @@ class CUDAGraphRunner:
 
     def _populate_input_buffers_from_enc_dec_model_input(
             self, attn_metadata: AttentionMetadata, **kwargs):
+        """
+        Populates input buffers with data from the encoder-decoder model's
+        input and attention metadata.
+
+        This method fills the input buffers with encoder-decoder specific
+        tensors. It copies data from the `attn_metadata` and keyword arguments
+        (`kwargs`) into corresponding buffers in the `input_buffers` dictionary.
+        The copied data includes attention-related metadata as well as input 
+        IDs and positional information for the encoder.
+
+        Args:
+            attn_metadata (AttentionMetadata): The attention metadata object
+            containing encoder-decoder-specific tensors (such as 
+            `encoder_seq_lens_tensor`, `cross_slot_mapping`, and
+            `cross_block_tables`) that are copied into the input buffers.
+
+            **kwargs: Additional keyword arguments containing encoder
+            specific input.
+        """
         self.input_buffers["encoder_seq_lens_tensor"].copy_(
-            attn_metadata.encoder_seq_lens_tensor, non_blocking=True)
+            attn_metadata.decode_metadata.encoder_seq_lens_tensor,
+            non_blocking=True)
         self.input_buffers["cross_slot_mapping"].copy_(
-            attn_metadata.cross_slot_mapping, non_blocking=True)
+            attn_metadata.decode_metadata.cross_slot_mapping,
+            non_blocking=True)
         self.input_buffers["cross_block_tables"].copy_(
-            attn_metadata.cross_block_tables, non_blocking=True)
+            attn_metadata.decode_metadata.cross_block_tables,
+            non_blocking=True)
         self.input_buffers["encoder_input_ids"].copy_(
             kwargs['encoder_input_ids'], non_blocking=True)
         self.input_buffers["encoder_positions"].copy_(
             kwargs['encoder_positions'], non_blocking=True)
-
-    def _save_input_buffers(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        intermediate_inputs: Optional[IntermediateTensors],
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-        **kwargs,
-    ):
-        # Save the input and output buffers.
-        if self.backend_name == "flashinfer":
-            self.input_buffers = {
-                "input_ids": input_ids,
-                "positions": positions,
-                "kv_caches": kv_caches,
-                "slot_mapping": attn_metadata.slot_mapping,
-                **kwargs,
-            }
-        else:
-            self.input_buffers = {
-                "input_ids": input_ids,
-                "positions": positions,
-                "kv_caches": kv_caches,
-                "slot_mapping": attn_metadata.slot_mapping,
-                "seq_lens_tensor":
-                attn_metadata.decode_metadata.seq_lens_tensor,
-                "block_tables": attn_metadata.decode_metadata.block_tables,
-                **kwargs,
-            }
-        if intermediate_inputs is not None:
-            self.input_buffers.update(intermediate_inputs.tensors)
-
-    def _populate_input_buffers_from_model_input(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        attn_metadata: AttentionMetadata,
-        intermediate_tensors: Optional[IntermediateTensors],
-        **kwargs,
-    ):
-        self.input_buffers["input_ids"].copy_(input_ids, non_blocking=True)
-        self.input_buffers["positions"].copy_(positions, non_blocking=True)
-        self.input_buffers["slot_mapping"].copy_(attn_metadata.slot_mapping,
-                                                 non_blocking=True)
-        if self.backend_name != "flashinfer":
-            self.input_buffers["seq_lens_tensor"].copy_(
-                attn_metadata.decode_metadata.seq_lens_tensor,
-                non_blocking=True)
-            self.input_buffers["block_tables"].copy_(
-                attn_metadata.decode_metadata.block_tables, non_blocking=True)
-        if "seqlen_agnostic_capture_inputs" in self.input_buffers:
-            self.model.copy_inputs_before_cuda_graphs(self.input_buffers,
-                                                      **kwargs)
-        if intermediate_tensors is not None:
-            for key in intermediate_tensors.tensors:
-                if key != "model_execute_time":
-                    self.input_buffers[key].copy_(intermediate_tensors[key],
-                                                  non_blocking=True)
 
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
