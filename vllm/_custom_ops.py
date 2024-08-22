@@ -300,20 +300,6 @@ def awq_marlin_repack(b_q_weight: torch.Tensor, size_k: int, size_n: int,
     return torch.ops._C.awq_marlin_repack(b_q_weight, size_k, size_n, num_bits)
 
 
-def gptq_marlin_moe_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
-                           size_k: int, size_n: int,
-                           num_bits: int) -> torch.Tensor:
-    num_experts = b_q_weight.shape[0]
-    assert size_k % 16 == 0
-    output = torch.empty((num_experts, size_k // 16, size_n * 2),
-                         device=b_q_weight.device,
-                         dtype=b_q_weight.dtype)
-    for e in range(num_experts):
-        output[e] = torch.ops._C.gptq_marlin_repack(b_q_weight[e], perm[e],
-                                                    size_k, size_n, num_bits)
-    return output
-
-
 def gptq_marlin_gemm(a: torch.Tensor,
                      b_q_weight: torch.Tensor,
                      b_scales: torch.Tensor,
