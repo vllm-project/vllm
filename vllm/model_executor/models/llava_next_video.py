@@ -408,7 +408,7 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal):
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
         return self.language_model.sample(logits, sampling_metadata)
-    
+
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         # prepare weight iterators
         vit_weights, mlp_weights, newline_weights, llm_weights = itertools.tee(
@@ -430,4 +430,3 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal):
         # load llm backbone
         llm_weights = filter_weights(llm_weights, "language_model")
         self.language_model.load_weights(llm_weights)
-
