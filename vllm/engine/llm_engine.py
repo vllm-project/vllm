@@ -1345,8 +1345,7 @@ class LLMEngine:
         if not self.log_stats:
             raise RuntimeError(
                 "Stat logging is disabled. Set `disable_log_stats=False` "
-                "argument to enable."
-            )
+                "argument to enable.")
         if logger_name in self.stat_loggers:
             raise KeyError(f"Logger with name {logger_name} already exists.")
         self.stat_loggers[logger_name] = logger
@@ -1355,8 +1354,7 @@ class LLMEngine:
         if not self.log_stats:
             raise RuntimeError(
                 "Stat logging is disabled. Set `disable_log_stats=False` "
-                "argument to enable."
-            )
+                "argument to enable.")
         if logger_name not in self.stat_loggers:
             raise KeyError(f"Logger with name {logger_name} does not exist.")
         del self.stat_loggers[logger_name]
