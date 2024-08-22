@@ -277,7 +277,7 @@ class GroupCoordinator:
             return False
 
         # Should run custom ar
-        if not self.should_use_ca_comm(input_):
+        if self.should_use_ca_comm(input_):
             return False
 
         # Otherwise, return True
