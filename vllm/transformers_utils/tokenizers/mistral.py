@@ -19,7 +19,6 @@ if TYPE_CHECKING:
 @dataclass
 class Encoding:
     input_ids: List[int]
-    prompt: Optional[str] = None
 
 
 class MistralTokenizer:
@@ -106,7 +105,7 @@ class MistralTokenizer:
     def apply_chat_template(self,
                             conversation: List["ConversationMessage"],
                             tools: Optional[Dict[str, Any]] = None,
-                            **kwargs) -> Encoding:
+                            **kwargs) -> List[int]:
         assert tools is None, "`tools` are not yet supported."
 
         request = ChatCompletionRequest(
@@ -114,12 +113,7 @@ class MistralTokenizer:
         encoded = self.mistral.encode_chat_completion(request)
 
         # encode-decode to get clean prompt
-        prompt_encoded = self.tokenizer.encode(encoded.text,
-                                               bos=False,
-                                               eos=False)
-        prompt = self.decode(prompt_encoded)
-
-        return Encoding(input_ids=encoded.tokens, prompt=prompt)
+        return encoded.tokens
 
     def convert_tokens_to_string(self, tokens: List[str]) -> str:
         if self._is_tekken:
