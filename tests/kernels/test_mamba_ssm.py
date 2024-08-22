@@ -1,9 +1,10 @@
-from einops import rearrange, repeat
+import pytest
 import torch
 import torch.nn.functional as F
-import pytest
+from einops import rearrange, repeat
 
-from vllm.model_executor.layers.mamba.ops.mamba_ssm import selective_scan_fn, selective_state_update
+from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
+    selective_scan_fn, selective_state_update)
 
 
 def selective_state_update_ref(state,
@@ -120,16 +121,8 @@ def selective_scan_ref(u,
     batch, dim, dstate = u.shape[0], A.shape[0], A.shape[1]
     is_variable_B = B.dim() >= 3
     is_variable_C = C.dim() >= 3
-    if A.is_complex():
-        if is_variable_B:
-            B = torch.view_as_complex(
-                rearrange(B.float(), "... (L two) -> ... L two", two=2))
-        if is_variable_C:
-            C = torch.view_as_complex(
-                rearrange(C.float(), "... (L two) -> ... L two", two=2))
-    else:
-        B = B.float()
-        C = C.float()
+    B = B.float()
+    C = C.float()
     x = A.new_zeros((batch, dim, dstate)) if prev_state is None else prev_state
     ys = []
     deltaA = torch.exp(torch.einsum('bdl,dn->bdln', delta, A))
@@ -158,8 +151,6 @@ def selective_scan_ref(u,
                 y = torch.einsum('bdn,bdn->bd', x, C[:, :, :, i])
         if i == u.shape[2] - 1:
             last_state = x
-        if y.is_complex():
-            y = y.real * 2
         ys.append(y)
     y = torch.stack(ys, dim=2)  # (batch dim L)
     out = y if D is None else y + u * rearrange(D, "d -> d 1")
@@ -199,43 +190,30 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D,
     batch_size = 2
     dim = 4
     dstate = 8
-    is_complex = wtype == torch.complex64
     A = (-0.5 * torch.rand(dim, dstate, device=device, dtype=wtype))
     if not is_variable_B:
-        B_shape = (dim, dstate)
+        B_shape = [dim, dstate]
     elif varBC_groups == 1:
-        B_shape = (batch_size, dstate,
-                   seqlen if not is_complex else seqlen * 2)
+        B_shape = [batch_size, dstate, seqlen]
     else:
-        B_shape = (batch_size, varBC_groups, dstate,
-                   seqlen if not is_complex else seqlen * 2)
+        B_shape = [batch_size, varBC_groups, dstate, seqlen]
     B = torch.randn(*B_shape,
                     device=device,
                     dtype=wtype if not is_variable_B else itype)
     if not is_variable_C:
-        C_shape = (dim, dstate)
+        C_shape = [dim, dstate]
     elif varBC_groups == 1:
-        C_shape = (batch_size, dstate,
-                   seqlen if not is_complex else seqlen * 2)
+        C_shape = [batch_size, dstate, seqlen]
     else:
-        C_shape = (batch_size, varBC_groups, dstate,
-                   seqlen if not is_complex else seqlen * 2)
+        C_shape = [batch_size, varBC_groups, dstate, seqlen]
     C = torch.randn(*C_shape,
                     device=device,
                     dtype=wtype if not is_variable_C else itype)
-    if has_D:
-        D = torch.randn(dim, device=device, dtype=torch.float32)
-    else:
-        D = None
-    if has_z:
-        z = torch.randn(batch_size, dim, seqlen, device=device, dtype=itype)
-    else:
-        z = None
-    if has_delta_bias:
-        delta_bias = (0.5 *
-                      torch.rand(dim, device=device, dtype=torch.float32))
-    else:
-        delta_bias = None
+    D = torch.randn(dim, device=device, dtype=torch.float32) if has_D else None
+    z = torch.randn(batch_size, dim, seqlen, device=device,
+                    dtype=itype) if has_z else None
+    delta_bias = (0.5 * torch.rand(dim, device=device, dtype=torch.float32)
+                  ) if has_delta_bias else None
     u = torch.randn(batch_size, dim, seqlen, device=device, dtype=itype)
     delta = (0.5 *
              torch.rand(batch_size, dim, seqlen, device=device, dtype=itype))
@@ -290,12 +268,9 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D,
         state_ref = rest[0]
 
     assert out is not None and out_ref is not None
-    print(f'Output max diff: {(out - out_ref).abs().max().item()}')
-    print(f'Output mean diff: {(out - out_ref).abs().mean().item()}')
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
     if return_last_state:
         assert state is not None and state_ref is not None
-        print(f'State max diff: {(state - state_ref).abs().max().item()}')
         assert torch.allclose(state, state_ref, rtol=rtol, atol=atol)
 
 
@@ -322,10 +297,7 @@ def test_selective_state_update(dim, dstate, has_z, itype):
     B = torch.randn(batch_size, dstate, device=device)
     C = torch.randn(batch_size, dstate, device=device)
     D = torch.randn(dim, device=device)
-    if has_z:
-        z = torch.randn_like(x)
-    else:
-        z = None
+    z = torch.randn_like(x) if has_z else None
     state_ref = state.detach().clone()
     out = selective_state_update(state,
                                  x,
@@ -348,7 +320,5 @@ def test_selective_state_update(dim, dstate, has_z, itype):
                                          dt_bias=dt_bias,
                                          dt_softplus=True)
 
-    print(f"Output max diff: {(out - out_ref).abs().max().item()}")
-    print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
     assert torch.allclose(state, state_ref, rtol=rtol, atol=atol)
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)

@@ -1,10 +1,12 @@
 from typing import Optional
-from einops import rearrange, repeat
+
+import pytest
 import torch
 import torch.nn.functional as F
-import pytest
+from einops import rearrange
 
-from vllm.model_executor.layers.mamba.ops.casual_conv1d import causal_conv1d_fn, causal_conv1d_update
+from vllm.model_executor.layers.mamba.ops.casual_conv1d import (
+    causal_conv1d_fn, causal_conv1d_update)
 
 
 def causal_conv1d_ref(
@@ -14,7 +16,7 @@ def causal_conv1d_ref(
     initial_states: Optional[torch.Tensor] = None,
     return_final_states: bool = False,
     final_states_out=None,
-    activation: str = "silu",
+    activation: Optional[str] = "silu",
 ):
     """
     x: (batch, dim, seqlen)
@@ -90,8 +92,10 @@ def causal_conv1d_update_ref(x,
 @pytest.mark.parametrize("width", [4])
 @pytest.mark.parametrize("seqlen", [128, 512, 4096])
 @pytest.mark.parametrize('dim', [64, 4096 + 32])
-def test_causal_conv1d(dim, seqlen, width, has_bias, silu_activation, itype,
-                       channel_last, has_initial_states, return_final_states):
+@pytest.mark.parametrize('batch', [1, 2])
+def test_causal_conv1d(batch, dim, seqlen, width, has_bias, silu_activation,
+                       itype, channel_last, has_initial_states,
+                       return_final_states):
     if not channel_last and (has_initial_states or return_final_states):
         pytest.skip(
             "Only channel_last support initial_states or return_final_states")
@@ -99,11 +103,8 @@ def test_causal_conv1d(dim, seqlen, width, has_bias, silu_activation, itype,
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (3e-3, 5e-3)
     if itype == torch.bfloat16:
         rtol, atol = 1e-2, 5e-2
-    rtolw, atolw = (1e-3, 1e-3)
     # set seed
     torch.random.manual_seed(0)
-    batch = 2
-    # batch = 1
     if not channel_last:
         x = torch.randn(batch,
                         4096 + dim + 64,
@@ -151,19 +152,11 @@ def test_causal_conv1d(dim, seqlen, width, has_bias, silu_activation, itype,
     if return_final_states:
         out, final_states = out
         out_ref, final_states_ref = out_ref
-        print(
-            f"Final states max diff: {(final_states - final_states_ref).abs().max().item()}"
-        )
-        print(
-            f"Final states mean diff: {(final_states - final_states_ref).abs().mean().item()}"
-        )
         assert torch.allclose(final_states,
                               final_states_ref,
                               rtol=rtol,
                               atol=atol)
 
-    print(f"Output max diff: {(out - out_ref).abs().max().item()}")
-    print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
 
     if return_final_states:
@@ -176,17 +169,16 @@ def test_causal_conv1d(dim, seqlen, width, has_bias, silu_activation, itype,
 @pytest.mark.parametrize("has_bias", [False, True])
 @pytest.mark.parametrize("width", [2, 3, 4])
 @pytest.mark.parametrize("dim", [2048, 2048 + 16, 4096])
-def test_causal_conv1d_update(dim, width, has_bias, silu_activation, itype):
+@pytest.mark.parametrize("batch", [1, 2])
+def test_causal_conv1d_update(batch, dim, width, has_bias, silu_activation,
+                              itype):
     device = "cuda"
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (3e-3, 5e-3)
     if itype == torch.bfloat16:
         rtol, atol = 1e-2, 5e-2
-    rtolw, atolw = (1e-3, 1e-3)
     # set seed
     torch.random.manual_seed(0)
     batch = 2
-    # batch = 1
-    # dim = 64
     x = torch.randn(batch, dim, device=device, dtype=itype)
     conv_state = torch.randn(batch, dim, width, device=device, dtype=itype)
     weight = torch.randn(dim,
@@ -214,7 +206,5 @@ def test_causal_conv1d_update(dim, width, has_bias, silu_activation, itype):
                                        bias,
                                        activation=activation)
 
-    print(f"Output max diff: {(out - out_ref).abs().max().item()}")
-    print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
     assert torch.equal(conv_state, conv_state_ref)
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
