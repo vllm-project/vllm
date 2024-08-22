@@ -13,7 +13,9 @@ from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import current_platform
 from vllm.tracing import is_otel_available, otel_import_error_traceback
-from vllm.transformers_utils.config import get_config, get_hf_text_config
+from vllm.transformers_utils.config import (get_config,
+                                            get_hf_image_processor_config,
+                                            get_hf_text_config)
 from vllm.utils import (STR_NOT_IMPL_ENC_DEC_CUDAGRAPH, GiB_bytes,
                         cuda_device_count_stateless, get_cpu_memory, is_cpu,
                         is_hip, is_neuron, is_openvino, is_xpu,
@@ -127,6 +129,7 @@ class ModelConfig:
         rope_theta: Optional[float] = None,
         tokenizer_revision: Optional[str] = None,
         max_model_len: Optional[int] = None,
+        spec_target_max_model_len: Optional[int] = None,
         quantization: Optional[str] = None,
         quantization_param_path: Optional[str] = None,
         enforce_eager: Optional[bool] = None,
@@ -166,6 +169,8 @@ class ModelConfig:
         self.hf_config = get_config(self.model, trust_remote_code, revision,
                                     code_revision, rope_scaling, rope_theta)
         self.hf_text_config = get_hf_text_config(self.hf_config)
+        self.hf_image_processor_config = get_hf_image_processor_config(
+            self.model, revision)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
 
         # Choose a default enforce_eager value if the user did not specify
@@ -210,7 +215,8 @@ class ModelConfig:
             hf_config=self.hf_text_config,
             max_model_len=max_model_len,
             disable_sliding_window=self.disable_sliding_window,
-            sliding_window_len=self.get_hf_config_sliding_window())
+            sliding_window_len=self.get_hf_config_sliding_window(),
+            spec_target_max_model_len=spec_target_max_model_len)
         self.served_model_name = get_served_model_name(model,
                                                        served_model_name)
         self.multimodal_config = self._init_multimodal_config(
@@ -1134,6 +1140,7 @@ class SpeculativeConfig:
                 code_revision=draft_code_revision,
                 tokenizer_revision=target_model_config.tokenizer_revision,
                 max_model_len=None,
+                spec_target_max_model_len=target_model_config.max_model_len,
                 quantization=draft_quantization,
                 enforce_eager=target_model_config.enforce_eager,
                 max_seq_len_to_capture=target_model_config.
@@ -1563,6 +1570,7 @@ def _get_and_verify_max_len(
     max_model_len: Optional[int],
     disable_sliding_window: bool,
     sliding_window_len: Optional[int],
+    spec_target_max_model_len: Optional[int] = None,
 ) -> int:
     """Get and verify the model's maximum length."""
     derived_max_model_len = float("inf")
@@ -1604,6 +1612,11 @@ def _get_and_verify_max_len(
         if max_model_len is not None:
             # If max_model_len is specified, we use it.
             return max_model_len
+
+        if spec_target_max_model_len is not None:
+            # If this is a speculative draft model, we use the max model len
+            # from the target model.
+            return spec_target_max_model_len
 
         default_max_len = 2048
         logger.warning(
