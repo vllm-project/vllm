@@ -163,7 +163,6 @@ class OpenAIServingChat(OpenAIServing):
 
         request_id = f"chat-{random_uuid()}"
         try:
-
             guided_decode_logits_processor = (
                 await self._guided_decode_logits_processor(request, tokenizer))
 
