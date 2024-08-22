@@ -4,8 +4,8 @@ tasks:
 - name: "gsm8k"
   metrics:
   - name: "exact_match,strict-match"
-    value: 0.409
+    value: 0.419
   - name: "exact_match,flexible-extract"
-    value: 0.406
+    value: 0.416
 limit: 1000
 num_fewshot: 5

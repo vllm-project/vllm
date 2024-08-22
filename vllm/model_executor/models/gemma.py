@@ -331,6 +331,8 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA):
         super().__init__()
 
         self.config = config
+        # currently all existing Gemma models have `tie_word_embeddings` enabled
+        assert config.tie_word_embeddings
         self.lora_config = lora_config
 
         self.quant_config = quant_config
