@@ -101,7 +101,7 @@ class MistralTokenizer:
         return self.tokenizer.encode(prompt, bos=False, eos=False)
 
     def apply_chat_template(self,
-                            conversation: List[ConversationMessage],
+                            conversation: List["ConversationMessage"],
                             tools: Optional[Dict[str, Any]] = None,
                             **kwargs) -> Encoding:
         assert tools is None, "`tools` are not yet supported."
