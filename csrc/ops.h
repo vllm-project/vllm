@@ -185,6 +185,20 @@ std::vector<torch::Tensor> selective_scan_fwd(
     const c10::optional<torch::Tensor>& index_,
     const c10::optional<torch::Tensor>& x);
 
+at::Tensor causal_conv1d_update(const at::Tensor& x,
+                                const at::Tensor& conv_state,
+                                const at::Tensor& weight,
+                                const c10::optional<at::Tensor>& bias_,
+                                bool silu_activation);
+
+at::Tensor causal_conv1d_fwd(const at::Tensor& x, const at::Tensor& weight,
+                             const c10::optional<at::Tensor>& bias_,
+                             const c10::optional<at::Tensor>& seq_idx_,
+                             const c10::optional<at::Tensor>& seq_pos_idx_,
+                             const c10::optional<at::Tensor>& initial_states_,
+                             const c10::optional<at::Tensor>& final_states_out_,
+                             bool silu_activation);
+
 #ifndef USE_ROCM
 using fptr_t = int64_t;
 fptr_t init_custom_ar(torch::Tensor& meta, torch::Tensor& rank_data,

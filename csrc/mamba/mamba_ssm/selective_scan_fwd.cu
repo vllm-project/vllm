@@ -410,7 +410,6 @@ void selective_scan_fwd_launch(SSMParamsBase& params, cudaStream_t stream) {
             constexpr int kSmemSize =
                 Ktraits::kSmemSize +
                 kNRows * MAX_DSTATE * sizeof(typename Ktraits::scan_t);
-            // printf("smem_size = %d\n", kSmemSize);
             dim3 grid(params.batch, params.dim / kNRows);
             auto kernel = &selective_scan_fwd_kernel<Ktraits>;
             if (kSmemSize >= 48 * 1024) {

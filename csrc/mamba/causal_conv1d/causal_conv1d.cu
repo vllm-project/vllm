@@ -94,7 +94,7 @@ at::Tensor causal_conv1d_fwd(const at::Tensor& x, const at::Tensor& weight,
                              const c10::optional<at::Tensor>& seq_idx_,
                              const c10::optional<at::Tensor>& seq_pos_idx_,
                              const c10::optional<at::Tensor>& initial_states_,
-                             c10::optional<at::Tensor>& final_states_out_,
+                             const c10::optional<at::Tensor>& final_states_out_,
                              bool silu_activation) {
   auto input_type = x.scalar_type();
   auto weight_type = weight.scalar_type();
