@@ -375,36 +375,40 @@ class _AsyncLLMEngine(LLMEngine):
                 or not seq_group_metadata_list):
             return False
 
+        # Get the remaining steps of the last sequence. This is motivated,
+        # by a few assumptions that are generally true.
+        # 1. The sequences in seq_group_metadata_list is always sorted by
+        #    "prefills-then-decodes".
+        # 2. All the prefill sequences have the same number of num_steps.
+        # 3. All the decode sequences have the same number of num_steps.
+        # 4. The num_steps of the decode_sequences >= num_steps of the
+        #    prefill sequences.
+
+        remaining_steps = seq_group_metadata_list[-1].state.remaining_steps 
+
         if self.scheduler_config.chunked_prefill_enabled:
             # When chunked prefill is enabled, the prompt and decode sequences
-            # may be scheduled together. In this case, return the maximum of
-            # the remaining steps of all sequences. Leveraging the fact that
-            # prefills are always scheduled before decodes and that decodes
-            # can be multi-stepped, simply grab the remaining_step of the last
-            # sequence. Note that the last sequence can be a prompt sequence in
-            # the case where all the scheduled sequences are prompt sequences.
-            remaining_steps = seq_group_metadata_list[-1].state.remaining_steps 
-
+            # may be scheduled together.
+            #
             # The decode sequences should have `remaining_steps` steps to go.
             # The prefill sequences's remaining_step is 1 when they are
             # scheduled initially. After the first step their remaining_step
             # becomes 0.
-            assert all([sgml.state.remaining_steps in [0, 1, remaining_steps] \
-                            for sgml in seq_group_metadata_list])
-            return remaining_steps
+            if any([sgml.state.remaining_steps not in [0, 1, remaining_steps] \
+                            for sgml in seq_group_metadata_list]):
+                raise AssertionError("Running sequence violate assumptions about remaining_step counts.")
         else:
-            # TODO(will) this is a sanity check for nowto make sure that all the
-            # seqs are on the same steps. Eventually we will want to do some sort of
-            # dynamic scheduling when doing multi-step decoding.
-            ref_remaining_steps = seq_group_metadata_list[0].state.remaining_steps
+            # In the normal case, the sequences in seq_group_metadata_list are
+            # either all prefills or all decodes and there for all sequences
+            # must have the same number of remaining_steps.
             if any([
-                    seq_group.state.remaining_steps != ref_remaining_steps
+                    seq_group.state.remaining_steps != remaining_steps
                     for seq_group in seq_group_metadata_list[1:]
             ]):
                 raise AssertionError(("All running sequence groups should "
                                       "have the same remaining steps."))
 
-            return ref_remaining_steps > 0
+            return remaining_steps > 0
 
     def _cache_scheduler_outputs_for_multi_step(
             self, virtual_engine: int,
