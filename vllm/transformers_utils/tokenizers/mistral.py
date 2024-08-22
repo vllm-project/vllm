@@ -1,6 +1,6 @@
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from huggingface_hub import HfApi, hf_hub_download
 # yapf: disable
@@ -13,12 +13,13 @@ from mistral_common.tokens.tokenizers.sentencepiece import (
 from mistral_common.tokens.tokenizers.tekken import Tekkenizer
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+    from vllm.entrypoints.chat_utils import ConversationMessage
 
 
 @dataclass
 class Encoding:
     input_ids: List[int]
+    prompt: Optional[str] = None
 
 
 class MistralTokenizer:
@@ -38,6 +39,9 @@ class MistralTokenizer:
         # the following attributes are set to fit VLLM's design
         self.is_fast = True
         self.chat_template = True
+        self.all_special_ids: List[Any] = []
+        self.all_special_tokens: List[Any] = []
+        self.all_special_tokens_extended: List[Any] = []
 
     @classmethod
     def from_pretrained(cls,
@@ -97,22 +101,27 @@ class MistralTokenizer:
         return self.tokenizer.encode(prompt, bos=False, eos=False)
 
     def apply_chat_template(self,
-                            conversation: List["ChatCompletionMessageParam"],
+                            conversation: List[ConversationMessage],
                             tools: Optional[Dict[str, Any]] = None,
-                            **kwargs) -> Dict[str, List[int] | str]:
+                            **kwargs) -> Encoding:
         assert tools is None, "`tools` are not yet supported."
 
         request = ChatCompletionRequest(
             messages=conversation)  # type: ignore[type-var]
         encoded = self.mistral.encode_chat_completion(request)
 
-        return {"prompt_token_ids": encoded.tokens, "prompt": encoded.text}
+        return Encoding(input_ids=encoded.tokens, prompt=encoded.txt)
 
-    def convert_tokens_to_string(self, ids: List[str]) -> str:
+    def convert_tokens_to_string(self, tokens: List[str]) -> str:
         if self._is_tekken:
-            return "".join(ids)
+            return "".join(tokens)
         else:
-            return self.tokenizer.decode(ids)  # type: ignore[arg-type]
+            return self.tokenizer.decode(tokens)  # type: ignore[arg-type]
+
+    def decode(self, ids: Union[List[int], int]) -> str:
+        if isinstance(ids, int):
+            ids = [ids]
+        return self.tokenizer.decode(ids)
 
     @property
     def eos_token_id(self):
