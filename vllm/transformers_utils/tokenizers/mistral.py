@@ -34,13 +34,15 @@ class MistralTokenizer:
         self.tokenizer = tokenizer.instruct_tokenizer.tokenizer
 
         self.vocab_size = len(self.tokenizer.vocab())
-        # set to True to better fit VLLM Transformers' design
-        self.is_fast = True
 
         assert isinstance(self.tokenizer,
                           (Tekkenizer, SentencePieceTokenizer)), type(
                               self.tokenizer)
         self._is_tekken = isinstance(self.tokenizer, Tekkenizer)
+
+        # the following attributes are set to fit VLLM's design
+        self.is_fast = True
+        self.chat_template = True
 
     @classmethod
     def from_pretrained(cls,
@@ -99,10 +101,10 @@ class MistralTokenizer:
     def encode(self, prompt: str) -> List[int]:
         return self.tokenizer.encode(prompt, bos=False, eos=False)
 
-    def encode_messages(
-            self, messages: List["ChatCompletionMessageParam"]) -> List[int]:
+    def apply_chat_template(
+            self, conversation: List["ChatCompletionMessageParam"], **kwargs) -> List[int]:
         request = ChatCompletionRequest(
-            messages=messages)  # type: ignore[type-var]
+            messages=conversation)  # type: ignore[type-var]
         encoded = self.mistral.encode_chat_completion(request)
         return encoded.tokens
 

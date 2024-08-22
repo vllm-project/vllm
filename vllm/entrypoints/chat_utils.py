@@ -265,7 +265,7 @@ def apply_chat_template(
     *,
     tokenize: bool = False,  # Different from HF's default
     **kwargs: Any,
-) -> str:
+) -> Tuple[str, List[int]]:
     if chat_template is None and tokenizer.chat_template is None:
         raise ValueError(
             "As of transformers v4.44, default chat template is no longer "
@@ -278,6 +278,10 @@ def apply_chat_template(
         tokenize=tokenize,
         **kwargs,
     )
-    assert isinstance(prompt, str)
+    if isinstance(prompt, list) and isinstance(prompt[0], int):
+        prompt_token_ids = prompt
+        prompt = None
+    else:
+        prompt_token_ids = None
 
-    return prompt
+    return prompt, prompt_token_ids

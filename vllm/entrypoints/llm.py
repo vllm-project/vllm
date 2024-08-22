@@ -383,26 +383,19 @@ class LLM:
         """
 
         tokenizer = self.get_tokenizer()
+        model_config = self.llm_engine.get_model_config()
 
-        if isinstance(tokenizer, MistralTokenizer):
-            prompt_token_ids = tokenizer.encode_messages(messages)
-            prompts = None
-        else:
-            model_config = self.llm_engine.get_model_config()
+        conversations, _ = parse_chat_messages(messages, model_config,
+                                               tokenizer)
 
-            conversations, _ = parse_chat_messages(messages, model_config,
-                                                   tokenizer)
-
-            prompts = apply_chat_template(
-                tokenizer,
-                conversations,
-                chat_template=chat_template,
-                add_generation_prompt=add_generation_prompt)
-
-            prompt_token_ids = None
+        prompts, prompt_token_ids = apply_chat_template(
+            tokenizer,
+            conversations,
+            chat_template=chat_template,
+            add_generation_prompt=add_generation_prompt)
 
         return self.generate(
-            prompts,  # type: ignore[arg-type]
+            prompts,
             sampling_params,
             prompt_token_ids=prompt_token_ids,
             use_tqdm=use_tqdm,

@@ -1,7 +1,6 @@
 import asyncio
 import time
-from typing import (AsyncGenerator, AsyncIterator, Awaitable, Dict, Final,
-                    List, Optional)
+from typing import AsyncGenerator, AsyncIterator, Dict, Final, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Union
 
@@ -23,8 +22,7 @@ from vllm.entrypoints.openai.protocol import (
     FunctionCall, ToolCall, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing,
-                                                    PromptAdapterPath,
-                                                    TextTokensPrompt)
+                                                    PromptAdapterPath)
 from vllm.inputs import TokensPrompt
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalDataDict
@@ -33,7 +31,6 @@ from vllm.sequence import Logprob
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 from vllm.utils import iterate_with_cancellation, random_uuid
 
 logger = init_logger(__name__)
@@ -86,49 +83,35 @@ class OpenAIServingChat(OpenAIServing):
         if error_check_ret is not None:
             return error_check_ret
 
-        (
-            lora_request,
-            prompt_adapter_request,
-        ) = self._maybe_get_adapters(request)
+        try:
+            (
+                lora_request,
+                prompt_adapter_request,
+            ) = self._maybe_get_adapters(request)
 
-        tokenizer = await self.async_engine_client.get_tokenizer(lora_request)
+            model_config = self.model_config
+            tokenizer = await self.async_engine_client.get_tokenizer(
+                lora_request)
 
-        if isinstance(tokenizer, MistralTokenizer):
-            encoded = tokenizer.encode_chat_completion(request)
-            conversation = [
-                ConversationMessage(role=m.role, content=m.content)
-                for m in encoded.pop("messages")
+            conversation, mm_futures = parse_chat_messages(
+                request.messages, model_config, tokenizer)
+
+            tool_dicts = None if request.tools is None else [
+                tool.model_dump() for tool in request.tools
             ]
-            prompt_inputs = TextTokensPrompt(
-                prompt=encoded["prompt"],
-                prompt_token_ids=encoded["prompt_token_ids"],
+
+            prompt = apply_chat_template(
+                tokenizer,
+                conversation=conversation,
+                chat_template=request.chat_template or self.chat_template,
+                add_generation_prompt=request.add_generation_prompt,
+                tools=tool_dicts,
+                documents=request.documents,
+                **(request.chat_template_kwargs or {}),
             )
-
-            # multi-modal is not yet supported
-            mm_futures: List[Awaitable[MultiModalDataDict]] = []
-        else:
-            try:
-                model_config = self.model_config
-                conversation, mm_futures = parse_chat_messages(
-                    request.messages, model_config, tokenizer)
-
-                tool_dicts = (None if request.tools is None else
-                              [tool.model_dump() for tool in request.tools])
-
-                prompt = apply_chat_template(
-                    tokenizer,
-                    conversation=conversation,
-                    chat_template=request.chat_template or self.chat_template,
-                    add_generation_prompt=request.add_generation_prompt,
-                    tools=tool_dicts,
-                    documents=request.documents,
-                    **(request.chat_template_kwargs or {}),
-                )
-                prompt_inputs = None
-            except Exception as e:
-                logger.error(
-                    "Error in applying chat template from request: %s", e)
-                return self.create_error_response(str(e))
+        except Exception as e:
+            logger.error("Error in applying chat template from request: %s", e)
+            return self.create_error_response(str(e))
 
         mm_data: Optional[MultiModalDataDict] = None
         try:
@@ -147,14 +130,13 @@ class OpenAIServingChat(OpenAIServing):
             guided_decode_logits_processor = (
                 await self._guided_decode_logits_processor(request, tokenizer))
 
-            if prompt_inputs is None:
-                prompt_inputs = self._tokenize_prompt_input(
-                    request,
-                    tokenizer,
-                    prompt,
-                    truncate_prompt_tokens=request.truncate_prompt_tokens,
-                    add_special_tokens=request.add_special_tokens,
-                )
+            prompt_inputs = self._tokenize_prompt_input(
+                request,
+                tokenizer,
+                prompt,
+                truncate_prompt_tokens=request.truncate_prompt_tokens,
+                add_special_tokens=request.add_special_tokens,
+            )
 
             sampling_params = request.to_sampling_params(
                 tokenizer,
