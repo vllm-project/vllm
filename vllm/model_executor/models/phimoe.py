@@ -206,11 +206,26 @@ def sparsemixer(scores, top_k, jitter_eps=0.01):
     multiplier = torch.concat((multiplier, multiplier_top2), dim=-1)
     selected_experts = torch.concat((selected_experts, selected_experts_top2),
                                     dim=-1)
-
+    
     return (
         multiplier,
         selected_experts,
     )
+
+def phimoe_routing_function(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+):
+    assert hidden_states.shape[0] == gating_output.shape[0], (
+        "Number of tokens mismatch")
+
+    topk_weights, topk_ids = sparsemixer(gating_output, topk)
+    if renormalize:
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+
+    return topk_weights, topk_ids
 
 
 class PhiMoE(nn.Module):
@@ -254,7 +269,7 @@ class PhiMoE(nn.Module):
             renormalize=False,
             quant_config=quant_config,
             tp_size=tp_size,
-            routing_func=sparsemixer,
+            custom_routing_function=phimoe_routing_function
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
