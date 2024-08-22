@@ -262,6 +262,27 @@ class GroupCoordinator:
             with maybe_pynccl_context:
                 yield graph_capture_context
 
+    def should_use_tpu_comm(self):
+        tpu_comm = self.tpu_communicator
+        return tpu_comm and not tpu_comm.disabled
+
+    def should_use_ca_comm(self, input_):
+        ca_comm = self.ca_comm
+        return (ca_comm is not None and not ca_comm.disabled
+                and ca_comm.should_custom_ar(input_))
+
+    def should_run_in_place_ar(self, input_):
+        # Should run on TPU
+        if self.should_use_tpu_comm():
+            return False
+
+        # Should run custom ar
+        if not self.should_use_ca_comm(input_):
+            return False
+
+        # Otherwise, return True
+        return True
+
     def in_place_ar(self, input_: torch.Tensor):
         if self.world_size == 1:
             return
@@ -277,32 +298,20 @@ class GroupCoordinator:
     def out_of_place_ar(self, input_: torch.Tensor) -> torch.Tensor:
         if self.world_size == 1:
             return input_
-        ca_comm = self.ca_comm
-        tpu_comm = self.tpu_communicator
-        if tpu_comm and not tpu_comm.disabled:
+
+        # Use TPU for all_reduce
+        if self.should_use_tpu_comm():
+            tpu_comm = self.tpu_communicator
+            assert tpu_comm is not None
             return tpu_comm.all_reduce(input_).clone()
 
-        assert ca_comm is not None and not ca_comm.disabled and ca_comm.should_custom_ar(
-            input_)
+        # Otherwise, use the custom kernel
+        assert self.should_use_ca_comm(input_)
+        ca_comm = self.ca_comm
+        assert ca_comm is not None
         out = ca_comm.custom_all_reduce(input_)
         assert out is not None
         return out.clone()
-
-    def should_run_in_place_ar(self, input_):
-        # Should run on TPU
-        tpu_comm = self.tpu_communicator
-        if tpu_comm and not tpu_comm.disabled:
-            return False
-
-        # Should run custom ar
-        ca_comm = self.ca_comm
-        use_ca = ca_comm is not None and not ca_comm.disabled and ca_comm.should_custom_ar(
-            input_)
-        if use_ca:
-            return False
-
-        # Otherwise, return True
-        return True
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         if self.world_size == 1:

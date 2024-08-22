@@ -230,10 +230,13 @@ class CustomAllreduce:
 
     def should_custom_ar(self, inp: torch.Tensor):
         inp_size = inp.numel() * inp.element_size()
+        # custom allreduce requires input byte size to be multiples of 16
         if inp_size % 16 != 0:
             return False
         if not self.is_weak_contiguous(inp):
             return False
+        # for 4 or more non NVLink-capable GPUs, custom allreduce provides
+        # little performance improvement over NCCL.
         if self.world_size == 2 or self.full_nvlink:
             return inp_size < self.max_size
         return False
