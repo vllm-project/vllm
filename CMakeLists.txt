@@ -10,6 +10,9 @@ message(STATUS "Target device: ${VLLM_TARGET_DEVICE}")
 
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/utils.cmake)
 
+# Suppress potential warnings about unused manually-specified variables
+set(ignoreMe "${VLLM_PYTHON_PATH}")
+
 #
 # Supported python versions.  These versions will be searched in order, the
 # first match will be selected.  These should be kept in sync with setup.py.
