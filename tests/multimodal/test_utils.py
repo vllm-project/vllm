@@ -3,12 +3,13 @@ import mimetypes
 from tempfile import NamedTemporaryFile
 from typing import Dict, Tuple
 
-from transformers import AutoConfig, AutoTokenizer
 import numpy as np
 import pytest
 from PIL import Image
+from transformers import AutoConfig, AutoTokenizer
 
-from vllm.multimodal.utils import (async_fetch_image, fetch_image, repeat_and_pad_placeholder_tokens)
+from vllm.multimodal.utils import (async_fetch_image, fetch_image,
+                                   repeat_and_pad_placeholder_tokens)
 
 # Test different image extensions (JPG/PNG) and formats (gray/RGB/RGBA)
 TEST_IMAGE_URLS = [
@@ -81,6 +82,7 @@ async def test_fetch_image_base64(url_images: Dict[str, Image.Image],
 
         data_image_async = await async_fetch_image(data_url)
         assert _image_equals(data_image_sync, data_image_async)
+
 
 @pytest.mark.parametrize("model", ["llava-hf/llava-v1.6-mistral-7b-hf"])
 def test_repeat_and_pad_placeholder_tokens(model):
