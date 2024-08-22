@@ -84,7 +84,6 @@ def selective_state_update_ref(state,
     return out
 
 
-
 def selective_scan_ref(u,
                        delta,
                        A,
@@ -181,9 +180,10 @@ def selective_scan_ref(u,
 @pytest.mark.parametrize("varBC_groups", [1, 2])
 @pytest.mark.parametrize("is_variable_C", [True])
 @pytest.mark.parametrize("is_variable_B", [True])
-@pytest.mark.parametrize("scan_chunks", [1,2,3])
-def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_z, has_delta_bias,
-                        delta_softplus, return_last_state, seqlen, itype, wtype, scan_chunks):
+@pytest.mark.parametrize("scan_chunks", [1, 2, 3])
+def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D,
+                        has_z, has_delta_bias, delta_softplus,
+                        return_last_state, seqlen, itype, wtype, scan_chunks):
     if varBC_groups > 1 and (not is_variable_B or not is_variable_C):
         pytest.skip()  # This config is not applicable
     device = 'cuda'
@@ -204,17 +204,25 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_z
     if not is_variable_B:
         B_shape = (dim, dstate)
     elif varBC_groups == 1:
-        B_shape = (batch_size, dstate, seqlen if not is_complex else seqlen * 2)
+        B_shape = (batch_size, dstate,
+                   seqlen if not is_complex else seqlen * 2)
     else:
-        B_shape = (batch_size, varBC_groups, dstate, seqlen if not is_complex else seqlen * 2)
-    B = torch.randn(*B_shape, device=device, dtype=wtype if not is_variable_B else itype)
+        B_shape = (batch_size, varBC_groups, dstate,
+                   seqlen if not is_complex else seqlen * 2)
+    B = torch.randn(*B_shape,
+                    device=device,
+                    dtype=wtype if not is_variable_B else itype)
     if not is_variable_C:
         C_shape = (dim, dstate)
     elif varBC_groups == 1:
-        C_shape = (batch_size, dstate, seqlen if not is_complex else seqlen * 2)
+        C_shape = (batch_size, dstate,
+                   seqlen if not is_complex else seqlen * 2)
     else:
-        C_shape = (batch_size, varBC_groups, dstate, seqlen if not is_complex else seqlen * 2)
-    C = torch.randn(*C_shape, device=device, dtype=wtype if not is_variable_C else itype)
+        C_shape = (batch_size, varBC_groups, dstate,
+                   seqlen if not is_complex else seqlen * 2)
+    C = torch.randn(*C_shape,
+                    device=device,
+                    dtype=wtype if not is_variable_C else itype)
     if has_D:
         D = torch.randn(dim, device=device, dtype=torch.float32)
     else:
@@ -224,11 +232,13 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_z
     else:
         z = None
     if has_delta_bias:
-        delta_bias = (0.5 * torch.rand(dim, device=device, dtype=torch.float32))
+        delta_bias = (0.5 *
+                      torch.rand(dim, device=device, dtype=torch.float32))
     else:
         delta_bias = None
     u = torch.randn(batch_size, dim, seqlen, device=device, dtype=itype)
-    delta = (0.5 * torch.rand(batch_size, dim, seqlen, device=device, dtype=itype))
+    delta = (0.5 *
+             torch.rand(batch_size, dim, seqlen, device=device, dtype=itype))
     state = None
     state_ref = None
     out = None
@@ -242,29 +252,40 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_z
             chunk_end = seqlen
         _B = B
         if is_variable_B:
-            _B = B[...,chunk_start:chunk_end]
+            _B = B[..., chunk_start:chunk_end]
         _C = C
         if is_variable_B:
-            _C = C[...,chunk_start:chunk_end]
+            _C = C[..., chunk_start:chunk_end]
         _z = z
         if has_z:
             assert z is not None
-            _z = z[...,chunk_start:chunk_end]
-        out, *rest = selective_scan_fn(
-            u[...,chunk_start:chunk_end], delta[...,chunk_start:chunk_end], A, _B, _C, D, z=_z,
-            delta_bias=delta_bias, delta_softplus=delta_softplus,
-            return_last_state=return_last_state,prev_state=state if c > 0 else None
-        )
+            _z = z[..., chunk_start:chunk_end]
+        out, *rest = selective_scan_fn(u[..., chunk_start:chunk_end],
+                                       delta[..., chunk_start:chunk_end],
+                                       A,
+                                       _B,
+                                       _C,
+                                       D,
+                                       z=_z,
+                                       delta_bias=delta_bias,
+                                       delta_softplus=delta_softplus,
+                                       return_last_state=return_last_state,
+                                       prev_state=state if c > 0 else None)
         outs.append(out)
         if return_last_state:
             state = rest[0]
     if len(outs) > 1:
-        out = torch.cat(outs,dim=-1)
-    out_ref, *rest = selective_scan_ref(
-        u, delta, A, B, C, D, z=z,
-        delta_bias=delta_bias, delta_softplus=delta_softplus,
-        return_last_state=return_last_state
-    )
+        out = torch.cat(outs, dim=-1)
+    out_ref, *rest = selective_scan_ref(u,
+                                        delta,
+                                        A,
+                                        B,
+                                        C,
+                                        D,
+                                        z=z,
+                                        delta_bias=delta_bias,
+                                        delta_softplus=delta_softplus,
+                                        return_last_state=return_last_state)
     if return_last_state:
         state_ref = rest[0]
 
@@ -278,8 +299,8 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_z
         assert torch.allclose(state, state_ref, rtol=rtol, atol=atol)
 
 
-
-@pytest.mark.parametrize("itype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("itype",
+                         [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("has_z", [False, True])
 @pytest.mark.parametrize("dstate", [16, 32, 64])
 @pytest.mark.parametrize("dim", [2048, 2048 + 16, 4096])
@@ -306,11 +327,28 @@ def test_selective_state_update(dim, dstate, has_z, itype):
     else:
         z = None
     state_ref = state.detach().clone()
-    out = selective_state_update(state, x, dt, A, B, C, D=D, z=z, dt_bias=dt_bias, dt_softplus=True)
-    out_ref = selective_state_update_ref(state_ref, x, dt, A, B, C, D=D, z=z, dt_bias=dt_bias, dt_softplus=True)
+    out = selective_state_update(state,
+                                 x,
+                                 dt,
+                                 A,
+                                 B,
+                                 C,
+                                 D=D,
+                                 z=z,
+                                 dt_bias=dt_bias,
+                                 dt_softplus=True)
+    out_ref = selective_state_update_ref(state_ref,
+                                         x,
+                                         dt,
+                                         A,
+                                         B,
+                                         C,
+                                         D=D,
+                                         z=z,
+                                         dt_bias=dt_bias,
+                                         dt_softplus=True)
 
     print(f"Output max diff: {(out - out_ref).abs().max().item()}")
     print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
     assert torch.allclose(state, state_ref, rtol=rtol, atol=atol)
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
-

@@ -81,7 +81,6 @@ def causal_conv1d_update_ref(x,
     return (out if activation is None else F.silu(out)).to(dtype=dtype_in)
 
 
-
 @pytest.mark.parametrize("return_final_states", [False, True])
 @pytest.mark.parametrize("has_initial_states", [False, True])
 @pytest.mark.parametrize("channel_last", [False, True])
@@ -89,13 +88,13 @@ def causal_conv1d_update_ref(x,
 @pytest.mark.parametrize("silu_activation", [False, True])
 @pytest.mark.parametrize("has_bias", [False, True])
 @pytest.mark.parametrize("width", [4])
-@pytest.mark.parametrize(
-    "seqlen", [128, 512, 4096]
-)
+@pytest.mark.parametrize("seqlen", [128, 512, 4096])
 @pytest.mark.parametrize('dim', [64, 4096 + 32])
-def test_causal_conv1d(dim, seqlen, width, has_bias, silu_activation, itype, channel_last, has_initial_states, return_final_states):
+def test_causal_conv1d(dim, seqlen, width, has_bias, silu_activation, itype,
+                       channel_last, has_initial_states, return_final_states):
     if not channel_last and (has_initial_states or return_final_states):
-        pytest.skip("Only channel_last support initial_states or return_final_states")
+        pytest.skip(
+            "Only channel_last support initial_states or return_final_states")
     device = "cuda"
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (3e-3, 5e-3)
     if itype == torch.bfloat16:
@@ -106,34 +105,62 @@ def test_causal_conv1d(dim, seqlen, width, has_bias, silu_activation, itype, cha
     batch = 2
     # batch = 1
     if not channel_last:
-        x = torch.randn(batch, 4096 + dim + 64, seqlen, device=device, dtype=itype)[:, 4096:4096 + dim, :]
+        x = torch.randn(batch,
+                        4096 + dim + 64,
+                        seqlen,
+                        device=device,
+                        dtype=itype)[:, 4096:4096 + dim, :]
     else:
         x = rearrange(
-            torch.randn(batch, seqlen, 4096 + dim + 64, device=device, dtype=itype)[:, :, 4096:4096 + dim], "b s d -> b d s"
-        )
+            torch.randn(batch,
+                        seqlen,
+                        4096 + dim + 64,
+                        device=device,
+                        dtype=itype)[:, :, 4096:4096 + dim], "b s d -> b d s")
     weight = torch.randn(dim, width, device=device, dtype=torch.float32)
     if has_bias:
         bias = torch.randn(dim, device=device, dtype=torch.float32)
     else:
         bias = None
     if has_initial_states:
-        initial_states = torch.randn(batch, width - 1, dim, device=device, dtype=itype).transpose(1, 2)
+        initial_states = torch.randn(batch,
+                                     width - 1,
+                                     dim,
+                                     device=device,
+                                     dtype=itype).transpose(1, 2)
     else:
         initial_states = None
     x_ref = x.detach().clone()
     weight_ref = weight.detach().clone()
     bias_ref = bias.detach().clone() if bias is not None else None
-    initial_states_ref = initial_states.detach().clone() if initial_states is not None else None
+    initial_states_ref = initial_states.detach().clone(
+    ) if initial_states is not None else None
     activation = None if not silu_activation else "silu"
-    out, _ = causal_conv1d_fn(x, weight, bias, initial_states=initial_states, return_final_states=return_final_states,
-                           activation=activation)
-    out_ref, _ = causal_conv1d_ref(x_ref, weight_ref, bias_ref, initial_states=initial_states_ref, return_final_states=return_final_states, activation=activation)
+    out, _ = causal_conv1d_fn(x,
+                              weight,
+                              bias,
+                              initial_states=initial_states,
+                              return_final_states=return_final_states,
+                              activation=activation)
+    out_ref, _ = causal_conv1d_ref(x_ref,
+                                   weight_ref,
+                                   bias_ref,
+                                   initial_states=initial_states_ref,
+                                   return_final_states=return_final_states,
+                                   activation=activation)
     if return_final_states:
         out, final_states = out
         out_ref, final_states_ref = out_ref
-        print(f"Final states max diff: {(final_states - final_states_ref).abs().max().item()}")
-        print(f"Final states mean diff: {(final_states - final_states_ref).abs().mean().item()}")
-        assert torch.allclose(final_states, final_states_ref, rtol=rtol, atol=atol)
+        print(
+            f"Final states max diff: {(final_states - final_states_ref).abs().max().item()}"
+        )
+        print(
+            f"Final states mean diff: {(final_states - final_states_ref).abs().mean().item()}"
+        )
+        assert torch.allclose(final_states,
+                              final_states_ref,
+                              rtol=rtol,
+                              atol=atol)
 
     print(f"Output max diff: {(out - out_ref).abs().max().item()}")
     print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
@@ -162,18 +189,32 @@ def test_causal_conv1d_update(dim, width, has_bias, silu_activation, itype):
     # dim = 64
     x = torch.randn(batch, dim, device=device, dtype=itype)
     conv_state = torch.randn(batch, dim, width, device=device, dtype=itype)
-    weight = torch.randn(dim, width, device=device, dtype=torch.float32, requires_grad=True)
+    weight = torch.randn(dim,
+                         width,
+                         device=device,
+                         dtype=torch.float32,
+                         requires_grad=True)
     if has_bias:
-        bias = torch.randn(dim, device=device, dtype=torch.float32, requires_grad=True)
+        bias = torch.randn(dim,
+                           device=device,
+                           dtype=torch.float32,
+                           requires_grad=True)
     else:
         bias = None
     conv_state_ref = conv_state.detach().clone()
     activation = None if not silu_activation else "silu"
-    out = causal_conv1d_update(x, conv_state, weight, bias, activation=activation)
-    out_ref = causal_conv1d_update_ref(x, conv_state_ref, weight, bias, activation=activation)
+    out = causal_conv1d_update(x,
+                               conv_state,
+                               weight,
+                               bias,
+                               activation=activation)
+    out_ref = causal_conv1d_update_ref(x,
+                                       conv_state_ref,
+                                       weight,
+                                       bias,
+                                       activation=activation)
 
     print(f"Output max diff: {(out - out_ref).abs().max().item()}")
     print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
     assert torch.equal(conv_state, conv_state_ref)
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
-
