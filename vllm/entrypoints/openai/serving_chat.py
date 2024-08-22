@@ -140,7 +140,9 @@ class OpenAIServingChat(OpenAIServing):
                     add_special_tokens=request.add_special_tokens,
                 )
             else:
-                assert isinstance(prompt, list) and isinstance(prompt[0], int), f"Prompt has to be either a string or a list of token ids"
+                assert isinstance(prompt, list) and isinstance(
+                    prompt[0], int
+                ), "Prompt has to be either a string or a list of token ids"
                 prompt_inputs = TextTokensPrompt(
                     prompt=tokenizer.decode(prompt), prompt_token_ids=prompt)
 
