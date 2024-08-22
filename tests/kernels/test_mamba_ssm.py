@@ -1,7 +1,9 @@
-from typing import Optional
 from einops import rearrange, repeat
 import torch
 import torch.nn.functional as F
+import pytest
+
+from vllm.model_executor.layers.mamba.ops.mamba_ssm import selective_scan_fn
 
 
 def selective_state_update_ref(state,
@@ -166,3 +168,114 @@ def selective_scan_ref(u,
         out = out * F.silu(z)
     out = out.to(dtype=dtype_in)
     return out if not return_last_state else (out, last_state)
+
+
+@pytest.mark.parametrize('wtype', [torch.float32])
+@pytest.mark.parametrize('itype', [torch.float32])
+@pytest.mark.parametrize('seqlen', [128, 256, 512, 1024, 2048, 4096])
+@pytest.mark.parametrize("return_last_state", [True])
+@pytest.mark.parametrize('has_delta_bias', [True])
+@pytest.mark.parametrize('delta_softplus', [True])
+@pytest.mark.parametrize('has_z', [True])
+@pytest.mark.parametrize('has_D', [True])
+@pytest.mark.parametrize("varBC_groups", [1, 2])
+@pytest.mark.parametrize("is_variable_C", [True])
+@pytest.mark.parametrize("is_variable_B", [True])
+@pytest.mark.parametrize("scan_chunks", [1,2,3])
+def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_z, has_delta_bias,
+                        delta_softplus, return_last_state, seqlen, itype, wtype, scan_chunks):
+    if varBC_groups > 1 and (not is_variable_B or not is_variable_C):
+        pytest.skip()  # This config is not applicable
+    device = 'cuda'
+    rtol, atol = (6e-4, 2e-3) if itype == torch.float32 else (3e-3, 5e-3)
+    if itype == torch.bfloat16:
+        rtol, atol = 3e-2, 5e-2
+    rtolw, atolw = (1e-3, 1e-3)
+    if has_z:  # If we have z, the errors on the weights seem higher
+        rtolw = max(rtolw, rtol)
+        atolw = max(atolw, atol)
+    # set seed
+    torch.random.manual_seed(0)
+    batch_size = 2
+    dim = 4
+    dstate = 8
+    is_complex = wtype == torch.complex64
+    A = (-0.5 * torch.rand(dim, dstate, device=device, dtype=wtype))
+    if not is_variable_B:
+        B_shape = (dim, dstate)
+    elif varBC_groups == 1:
+        B_shape = (batch_size, dstate, seqlen if not is_complex else seqlen * 2)
+    else:
+        B_shape = (batch_size, varBC_groups, dstate, seqlen if not is_complex else seqlen * 2)
+    B = torch.randn(*B_shape, device=device, dtype=wtype if not is_variable_B else itype)
+    if not is_variable_C:
+        C_shape = (dim, dstate)
+    elif varBC_groups == 1:
+        C_shape = (batch_size, dstate, seqlen if not is_complex else seqlen * 2)
+    else:
+        C_shape = (batch_size, varBC_groups, dstate, seqlen if not is_complex else seqlen * 2)
+    C = torch.randn(*C_shape, device=device, dtype=wtype if not is_variable_C else itype)
+    if has_D:
+        D = torch.randn(dim, device=device, dtype=torch.float32)
+    else:
+        D = None
+    if has_z:
+        z = torch.randn(batch_size, dim, seqlen, device=device, dtype=itype)
+    else:
+        z = None
+    if has_delta_bias:
+        delta_bias = (0.5 * torch.rand(dim, device=device, dtype=torch.float32))
+    else:
+        delta_bias = None
+    u = torch.randn(batch_size, dim, seqlen, device=device, dtype=itype)
+    delta = (0.5 * torch.rand(batch_size, dim, seqlen, device=device, dtype=itype))
+    A_ref = A.detach().clone()
+    B_ref = B.detach().clone()
+    C_ref = C.detach().clone()
+    D_ref = D.detach().clone() if D is not None else None
+    z_ref = z.detach().clone() if z is not None else None
+    u_ref = u.detach().clone()
+    delta_ref = delta.detach().clone()
+    delta_bias_ref = delta_bias.detach().clone() if delta_bias is not None else None
+    state = None
+    state_ref = None
+    outs = []
+    for c in range(scan_chunks):
+        chunked_prompt_len = seqlen // scan_chunks
+        chunk_start = chunked_prompt_len * c
+        chunk_end = chunked_prompt_len * (c + 1)
+        if c == scan_chunks - 1:
+            chunk_end = seqlen
+        _B = B
+        if is_variable_B:
+            _B = B[...,chunk_start:chunk_end]
+        _C = C
+        if is_variable_B:
+            _C = C[...,chunk_start:chunk_end]
+        _z = z
+        if has_z:
+            _z = z[...,chunk_start:chunk_end]
+        out, *rest = selective_scan_fn(
+            u[...,chunk_start:chunk_end], delta[...,chunk_start:chunk_end], A, _B, _C, D, z=_z,
+            delta_bias=delta_bias, delta_softplus=delta_softplus,
+            return_last_state=return_last_state,prev_state=state if c > 0 else None
+        )
+        outs.append(out)
+        if return_last_state:
+            state = rest[0]
+    if len(outs) > 1:
+        out = torch.cat(outs,dim=-1)
+    out_ref, *rest = selective_scan_ref(
+        u_ref, delta_ref, A_ref, B_ref, C_ref, D_ref, z=z_ref,
+        delta_bias=delta_bias_ref, delta_softplus=delta_softplus,
+        return_last_state=return_last_state
+    )
+    if return_last_state:
+        state_ref = rest[0]
+
+    print(f'Output max diff: {(out - out_ref).abs().max().item()}')
+    print(f'Output mean diff: {(out - out_ref).abs().mean().item()}')
+    assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
+    if return_last_state:
+        print(f'State max diff: {(state - state_ref).abs().max().item()}')
+        assert torch.allclose(state, state_ref, rtol=rtol, atol=atol)

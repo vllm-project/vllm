@@ -247,10 +247,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Mamba selective scan kerenl
   ops.def(
       "selective_scan_fwd(Tensor! u, Tensor! delta,"
-      "Tensor! A, Tensor! B, Tensor C,"
-      "Tensor! D_, Tensor! z_, Tensor! delta_bias_,"
+      "Tensor! A, Tensor! B, Tensor! C,"
+      "Tensor? D_, Tensor? z_, Tensor? delta_bias_,"
       "bool delta_softplus,"
-      "Tensor! index_, Tensor! &x) -> ()");
+      "Tensor? index_, Tensor? x) -> Tensor[]");
   ops.impl("selective_scan_fwd", torch::kCUDA, &selective_scan_fwd);
 }
 
