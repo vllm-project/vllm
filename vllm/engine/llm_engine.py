@@ -900,10 +900,8 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest],
     ) -> LLMInputs:
         prompt, prompt_token_ids, multi_modal_data = prompt_comps
-
         prompt_token_ids = self._apply_prompt_adapter(
             prompt_token_ids, prompt_adapter_request=prompt_adapter_request)
-
         return LLMInputs(prompt_token_ids=prompt_token_ids,
                          prompt=prompt,
                          multi_modal_data=multi_modal_data)
@@ -957,7 +955,6 @@ class LLMEngine:
                 inputs,
                 request_id=request_id,
             )
-            self._validate_enc_dec_inputs(model_inputs)
         else:
             if is_explicit_encoder_decoder_prompt(inputs):
                 raise ValueError("Cannot pass encoder-decoder prompt "
@@ -970,7 +967,6 @@ class LLMEngine:
                 lora_request=lora_request,
                 prompt_adapter_request=prompt_adapter_request,
             )
-            self._validate_dec_only_inputs(model_inputs)
 
         return self.input_processor(model_inputs)
 
@@ -1038,6 +1034,7 @@ class LLMEngine:
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
         )
+        self._validate_model_inputs(processed_inputs)
 
         self._add_processed_request(
             request_id=request_id,
@@ -1650,12 +1647,13 @@ class LLMEngine:
     def is_embedding_model(self):
         return self.model_config.is_embedding_model
 
-    def _validate_dec_only_inputs(self, inputs: LLMInputs):
-        if "prompt_token_ids" not in inputs or len(
-                inputs["prompt_token_ids"]) == 0:
-            raise ValueError("Empty prompt")
-
-    def _validate_enc_dec_inputs(self, inputs: EncoderDecoderLLMInputs):
-        if "encoder_prompt_token_ids" not in inputs or\
-              len(inputs["encoder_prompt_token_ids"]) == 0:
-            raise ValueError("Empty prompt")
+    def _validate_model_inputs(self, inputs: Union[LLMInputs,
+                                                   EncoderDecoderLLMInputs]):
+        if self.is_encoder_decoder_model():
+            if "encoder_prompt_token_ids" not in inputs or\
+                len(inputs["encoder_prompt_token_ids"]) == 0:
+                raise ValueError("Empty prompt")
+        else:
+            if "prompt_token_ids" not in inputs or len(
+                    inputs["prompt_token_ids"]) == 0:
+                raise ValueError("Empty prompt")

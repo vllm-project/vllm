@@ -543,7 +543,6 @@ class _AsyncLLMEngine(LLMEngine):
                 inputs,
                 request_id=request_id,
             )
-            self._validate_enc_dec_inputs(model_inputs)
         else:
             if is_explicit_encoder_decoder_prompt(inputs):
                 raise ValueError("Cannot pass encoder-decoder prompt "
@@ -556,7 +555,6 @@ class _AsyncLLMEngine(LLMEngine):
                 lora_request=lora_request,
                 prompt_adapter_request=prompt_adapter_request,
             )
-            self._validate_dec_only_inputs(model_inputs)
 
         return self.input_processor(model_inputs)
 
@@ -583,6 +581,7 @@ class _AsyncLLMEngine(LLMEngine):
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
         )
+        self._validate_model_inputs(processed_inputs)
 
         self._add_processed_request(
             request_id=request_id,

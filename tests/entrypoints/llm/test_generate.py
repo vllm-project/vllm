@@ -142,6 +142,12 @@ def test_multiple_sampling_params(llm: LLM):
     assert len(PROMPTS) == len(outputs)
 
 
+def test_empty_prompt():
+    llm = LLM(model="gpt2")
+    with pytest.raises(ValueError, match='Empty prompt'):
+        llm.generate([""])
+
+
 def test_chat():
 
     llm = LLM(model="meta-llama/Meta-Llama-3-8B-Instruct")
