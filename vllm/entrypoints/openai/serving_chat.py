@@ -53,7 +53,7 @@ class OpenAIServingChat(OpenAIServing):
                  request_logger: Optional[RequestLogger],
                  chat_template: Optional[str],
                  return_tokens_as_token_ids: bool = False,
-                 enable_auto_tools: Optional[bool] = False,
+                 enable_auto_tools: bool = False,
                  tool_parser: Optional[str] = None):
         super().__init__(async_engine_client=async_engine_client,
                          model_config=model_config,
@@ -68,7 +68,7 @@ class OpenAIServingChat(OpenAIServing):
         self.chat_template = load_chat_template(chat_template)
 
         # set up tool use
-        self.enable_auto_tools: bool = enable_auto_tools or False
+        self.enable_auto_tools: bool = enable_auto_tools
         if self.enable_auto_tools:
             logger.info(
                 "\"auto\" tool choice has been enabled please note that while"
