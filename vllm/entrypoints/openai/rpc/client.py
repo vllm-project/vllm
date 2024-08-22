@@ -335,7 +335,10 @@ class AsyncEngineRPCClient:
 
     async def abort(self, request_id: str):
         """Send an ABORT_REQUEST signal to the RPC Server"""
-        with suppress(RPCClientClosedError):
+
+        # Suppress timeouts as well- if the server is busy and does not ack in
+        # time we assume it got the message.
+        with suppress(RPCClientClosedError, TimeoutError):
             await self._send_one_way_rpc_request(
                 request=RPCAbortRequest(request_id),
                 error_message=f"RPCAbortRequest {request_id} failed")
