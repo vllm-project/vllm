@@ -21,7 +21,7 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "<|user|>\n<|image_1|>\nWhat is the season?<|end|>\n<|assistant|>\n",
 })
 
-models = ["microsoft/Phi-3-vision-128k-instruct"]
+models = ["microsoft/Phi-3.5-vision-instruct"]
 
 
 def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
