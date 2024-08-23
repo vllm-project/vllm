@@ -41,7 +41,8 @@ def _init_attn_metadata_from_tensor_dict(
     for field in dataclasses.fields(attn_backend.get_metadata_cls()):
         val = tensor_dict.pop(field.name, None)
         # Even if a value is None, we will also add this field.
-        valid_attn_kwargs[field.name] = val
+        if val is not None:
+            valid_attn_kwargs[field.name] = val
 
     attn_metadata = attn_backend.make_metadata(**valid_attn_kwargs)
     tensor_dict["attn_metadata"] = attn_metadata
