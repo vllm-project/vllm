@@ -312,7 +312,6 @@ if __name__ == "__main__":
     parser.add_argument('--trust-remote-code',
                         action='store_true',
                         help='trust remote code from huggingface')
-    parser.add_argument('--disable-async-output-proc', action='store_true')
     parser.add_argument(
         '--max-model-len',
         type=int,
@@ -426,7 +425,7 @@ if __name__ == "__main__":
         "--disable-async-output-proc",
         action='store_true',
         default=False,
-        help="disable async output processor for vLLM backend.")
+        help="Disable async output processor for vLLM backend.")
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model

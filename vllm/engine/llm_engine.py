@@ -1713,7 +1713,7 @@ class LLMEngine:
                 # the same metadata more than once per request, we standardize
                 # on logging request level information for finished requests,
                 # which can only happen once.
-                if (seq_group.is_finished()):
+                if seq_group.is_finished():
                     # Latency timings
                     time_e2e_requests.append(now -
                                              seq_group.metrics.arrival_time)
