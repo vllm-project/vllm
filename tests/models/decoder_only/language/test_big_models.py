@@ -7,7 +7,7 @@ Run `pytest tests/models/test_big_models.py`.
 import pytest
 import torch
 
-from .utils import check_outputs_equal
+from ...utils import check_outputs_equal
 
 MODELS = [
     "meta-llama/Llama-2-7b-hf",

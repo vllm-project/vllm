@@ -2,8 +2,8 @@ from typing import Type
 
 import pytest
 
-from ..conftest import HfRunner, VllmRunner
-from .utils import check_logprobs_close
+from ....conftest import HfRunner, VllmRunner
+from ...utils import check_logprobs_close
 
 models = ["qwen/qwen-vl"]
 

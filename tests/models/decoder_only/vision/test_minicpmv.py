@@ -8,8 +8,8 @@ from transformers import BatchEncoding
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
 
-from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
-from .utils import check_logprobs_close
+from ....conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
+from ...utils import check_logprobs_close
 
 pytestmark = pytest.mark.vlm
 

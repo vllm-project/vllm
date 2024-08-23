@@ -9,8 +9,8 @@ from vllm.assets.audio import AudioAsset
 from vllm.sequence import SampleLogprobs
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 
-from ..conftest import HfRunner, VllmRunner
-from .utils import check_logprobs_close
+from ....conftest import HfRunner, VllmRunner
+from ...utils import check_logprobs_close
 
 pytestmark = pytest.mark.vlm
 

@@ -1,25 +1,32 @@
+import os
 from typing import List, Optional, Tuple, Type
 
 import pytest
 from transformers import AutoConfig, AutoModelForVision2Seq, AutoTokenizer
 
+from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
+from vllm.utils import is_hip
 
-from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
-from .utils import check_logprobs_close
+from ....conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
+from ...utils import check_logprobs_close
 
 pytestmark = pytest.mark.vlm
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "stop_sign":
-    "USER: <image>\nWhat's the content of the image?\nASSISTANT:",
+    "caption es",
     "cherry_blossom":
-    "USER: <image>\nWhat is the season?\nASSISTANT:",
+    "What is in the picture?",
 })
 
-models = [
-    "llava-hf/llava-1.5-7b-hf",
-]
+models = ["google/paligemma-3b-mix-224"]
+
+# ROCm Triton FA can run into compilation issues with these models due to,
+# excessive use of shared memory. Use other backends in the meantime.
+# FIXME (mattwong, gshtrasb, hongxiayan)
+if is_hip():
+    os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "0"
 
 
 def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
@@ -39,8 +46,8 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
         if token_id != image_token_id or output_ids[idx - 1] != image_token_id
     ]
 
-    assert output_str[0] == " "
-    hf_output_str = output_str[1:]
+    hf_output_str = output_str
+
     if hf_output_ids[-1] == eos_token_id:
         hf_output_str = hf_output_str + tokenizer.decode(eos_token_id)
 
@@ -65,26 +72,16 @@ def run_test(
     All the image fixtures for the test is under tests/images.
     For huggingface runner, we provide the PIL images as input.
     For vllm runner, we provide MultiModalDataDict objects 
-    and corresponding vision language config as input.
+    and corresponding MultiModalConfig as input.
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """
+    images = [asset.pil_image for asset in image_assets]
 
-    # vLLM to load from image embeddings
-    vllm_images = [asset.image_embeds for asset in image_assets]
-
-    # transformers to load from PIL images
-    hf_images = [asset.pil_image for asset in image_assets]
-
-    vllm_inputs_per_image = [(
+    inputs_per_image = [(
         [prompt for _ in size_factors],
-        [image for _ in size_factors],
-    ) for image, prompt in zip(vllm_images, HF_IMAGE_PROMPTS)]
-
-    hf_inputs_per_image = [(
-        [prompt for _ in size_factors],
-        [image for _ in size_factors],
-    ) for image, prompt in zip(hf_images, HF_IMAGE_PROMPTS)]
+        [rescale_image_size(image, factor) for factor in size_factors],
+    ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
 
     # NOTE: take care of the order. run vLLM first, and then run HF.
     # vLLM needs a fresh new process without cuda initialization.
@@ -102,7 +99,7 @@ def run_test(
                                                 max_tokens,
                                                 num_logprobs=num_logprobs,
                                                 images=images)
-            for prompts, images in vllm_inputs_per_image
+            for prompts, images in inputs_per_image
         ]
 
     with hf_runner(model, dtype=dtype,
@@ -112,13 +109,12 @@ def run_test(
                                                     max_tokens,
                                                     num_logprobs=num_logprobs,
                                                     images=images)
-            for prompts, images in hf_inputs_per_image
+            for prompts, images in inputs_per_image
         ]
 
     for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
                                         vllm_outputs_per_image):
-        # TODO: Check whether using original CLIPVisionModel can improve
-        # consistency against HF
+
         check_logprobs_close(
             outputs_0_lst=hf_outputs,
             outputs_1_lst=[
@@ -140,9 +136,19 @@ def run_test(
         [1.0],
         # Single-scale, batched
         [1.0, 1.0, 1.0],
+        # Multi-scale
+        [0.25, 0.5, 1.0],
     ],
 )
-@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("dtype", [
+    pytest.param(
+        "float",
+        marks=pytest.mark.skipif(
+            is_hip(),
+            reason=
+            "ROCm FA does not yet fully support 32-bit precision on PaliGemma")
+    ), "half"
+])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,

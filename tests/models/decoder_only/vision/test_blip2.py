@@ -6,8 +6,8 @@ from transformers import AutoModelForVision2Seq, AutoTokenizer
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
 
-from ..conftest import IMAGE_ASSETS
-from .utils import check_logprobs_close
+from ....conftest import IMAGE_ASSETS
+from ...utils import check_logprobs_close
 
 pytestmark = pytest.mark.vlm
 

@@ -8,7 +8,7 @@ from transformers import AutoConfig, AutoModel, CLIPImageProcessor
 
 from vllm.model_executor.models.intern_vit import InternVisionModel
 
-from ..conftest import _ImageAssets, cleanup
+from ....conftest import _ImageAssets, cleanup
 
 pytestmark = pytest.mark.vlm
 

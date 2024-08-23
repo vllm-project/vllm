@@ -16,8 +16,8 @@ if not is_cpu():
 
     from vllm.sequence import SampleLogprobs
 
-    from ..conftest import DecoderPromptType
-    from .utils import check_logprobs_close
+    from ....conftest import DecoderPromptType
+    from ...utils import check_logprobs_close
 
     MODELS = ["facebook/bart-base", "facebook/bart-large-cnn"]
 

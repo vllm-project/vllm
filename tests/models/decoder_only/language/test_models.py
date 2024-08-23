@@ -7,7 +7,7 @@ Run `pytest tests/models/test_models.py`.
 """
 import pytest
 
-from .utils import check_outputs_equal
+from ...utils import check_outputs_equal
 
 MODELS = [
     "facebook/opt-125m",

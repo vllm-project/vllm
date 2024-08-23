@@ -10,8 +10,9 @@ from dataclasses import dataclass
 
 import pytest
 
-from tests.models.utils import check_logprobs_close
 from tests.quantization.utils import is_quant_method_supported
+
+from ...utils import check_logprobs_close
 
 
 @dataclass

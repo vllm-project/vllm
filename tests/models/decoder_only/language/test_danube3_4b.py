@@ -6,7 +6,7 @@ Run `pytest tests/models/test_danube3_4b.py`.
 """
 import pytest
 
-from .utils import check_outputs_equal
+from ...utils import check_outputs_equal
 
 MODELS = ["h2oai/h2o-danube3-4b-base"]
 

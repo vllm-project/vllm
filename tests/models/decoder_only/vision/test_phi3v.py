@@ -1,34 +1,58 @@
+import os
+import re
 from typing import List, Optional, Tuple, Type
 
 import pytest
+from transformers import AutoTokenizer
 
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
-from vllm.utils import is_cpu
+from vllm.utils import is_cpu, is_hip
 
-from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
-from .utils import check_logprobs_close
+from ....conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
+from ...utils import check_logprobs_close
 
 pytestmark = pytest.mark.vlm
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "stop_sign":
-    "What's the content of the image?\n",
+    "<|user|>\n<|image_1|>\nWhat's the content of the image?<|end|>\n<|assistant|>\n",  # noqa: E501
     "cherry_blossom":
-    "What is the season?\n",
+    "<|user|>\n<|image_1|>\nWhat is the season?<|end|>\n<|assistant|>\n",
 })
 
-models = ["adept/fuyu-8b"]
+models = ["microsoft/Phi-3.5-vision-instruct"]
 
 
 def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
-                                         Optional[SampleLogprobs]]):
+                                         Optional[SampleLogprobs]],
+                      model: str):
     """Sanitize vllm output to be comparable with hf output."""
-    output_ids, output_str, out_logprobs = vllm_output
+    _, output_str, out_logprobs = vllm_output
 
-    hf_output_str = output_str.lstrip() + "|ENDOFTEXT|"
+    output_str_without_image = re.sub(r"(<\|image_\d+\|>)+", "", output_str)
+    assert output_str_without_image[0] == " "
+    output_str_without_image = output_str_without_image[1:]
 
-    return output_ids, hf_output_str, out_logprobs
+    hf_output_str = output_str_without_image + "<|end|><|endoftext|>"
+
+    tokenizer = AutoTokenizer.from_pretrained(model)
+    hf_output_ids = tokenizer.encode(output_str_without_image)
+    assert hf_output_ids[0] == 1
+    hf_output_ids = hf_output_ids[1:]
+
+    return hf_output_ids, hf_output_str, out_logprobs
+
+
+target_dtype = "half"
+if is_cpu():
+    target_dtype = "bfloat16"
+
+# ROCm Triton FA can run into shared memory issues with these models,
+# use other backends in the meantime
+# FIXME (mattwong, gshtrasb, hongxiayan)
+if is_hip():
+    os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "0"
 
 
 def run_test(
@@ -57,7 +81,10 @@ def run_test(
 
     inputs_per_image = [(
         [prompt for _ in size_factors],
-        [rescale_image_size(image, factor) for factor in size_factors],
+        [
+            rescale_image_size(image, factor, transpose=idx)
+            for idx, factor in enumerate(size_factors)
+        ],
     ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
 
     # NOTE: take care of the order. run vLLM first, and then run HF.
@@ -67,7 +94,7 @@ def run_test(
 
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model,
-                     max_model_len=2560,
+                     max_model_len=4096,
                      max_num_seqs=1,
                      dtype=dtype,
                      tensor_parallel_size=tensor_parallel_size,
@@ -81,9 +108,10 @@ def run_test(
             for prompts, images in inputs_per_image
         ]
 
-    with hf_runner(model, dtype=dtype) as hf_model:
-        hf_model.model.get_output_embeddings = lambda: \
-            hf_model.model.language_model.get_output_embeddings()
+    # use eager mode for hf runner, since phi3_v didn't work with flash_attn
+    hf_model_kwargs = {"_attn_implementation": "eager"}
+    with hf_runner(model, dtype=dtype,
+                   model_kwargs=hf_model_kwargs) as hf_model:
         eos_token_id = hf_model.processor.tokenizer.eos_token_id
         hf_outputs_per_image = [
             hf_model.generate_greedy_logprobs_limit(prompts,
@@ -99,18 +127,16 @@ def run_test(
         check_logprobs_close(
             outputs_0_lst=hf_outputs,
             outputs_1_lst=[
-                vllm_to_hf_output(vllm_output) for vllm_output in vllm_outputs
+                vllm_to_hf_output(vllm_output, model)
+                for vllm_output in vllm_outputs
             ],
             name_0="hf",
             name_1="vllm",
         )
 
 
-target_dtype = "half"
-if is_cpu():
-    target_dtype = "bfloat16"
-
-
+# Since we use _attn_implementation="eager" for hf_runner, there is more
+# significant numerical difference. The basic `logprobs=5` fails to pass.
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
     "size_factors",
@@ -118,11 +144,11 @@ if is_cpu():
         # No image
         [],
         # Single-scale
-        [0.25],
+        [1.0],
         # Single-scale, batched
-        [0.25, 0.25, 0.25],
+        [1.0, 1.0, 1.0],
         # Multi-scale
-        [0.25, 0.2, 0.15],
+        [0.25, 0.5, 1.0],
     ],
 )
 @pytest.mark.parametrize("dtype", [target_dtype])

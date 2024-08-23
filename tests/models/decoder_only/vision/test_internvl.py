@@ -13,8 +13,8 @@ from vllm.model_executor.models.internvl import (IMG_CONTEXT, IMG_END,
 from vllm.multimodal.utils import rescale_image_size
 from vllm.utils import is_cpu
 
-from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
-from .utils import check_logprobs_close
+from ....conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
+from ...utils import check_logprobs_close
 
 pytestmark = pytest.mark.vlm
 

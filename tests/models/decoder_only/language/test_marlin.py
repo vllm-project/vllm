@@ -16,7 +16,7 @@ import pytest
 
 from tests.quantization.utils import is_quant_method_supported
 
-from .utils import check_logprobs_close
+from ...utils import check_logprobs_close
 
 
 @dataclass

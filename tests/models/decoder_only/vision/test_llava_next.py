@@ -1,30 +1,29 @@
-from typing import List, Optional, Tuple, Type
+from typing import List, Optional, Tuple, Type, overload
 
 import pytest
-from transformers import (AutoConfig, AutoModelForVision2Seq, AutoTokenizer,
-                          BatchEncoding)
+from transformers import AutoConfig, AutoModelForVision2Seq, AutoTokenizer
 
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 
-from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
-from .utils import check_logprobs_close
+from ....conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
+from ...utils import check_logprobs_close
 
 pytestmark = pytest.mark.vlm
 
+_PREFACE = (
+    "A chat between a curious human and an artificial intelligence assistant. "
+    "The assistant gives helpful, detailed, and polite answers to the human's "
+    "questions.")
+
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "stop_sign":
-    "USER: <image>\nWhat's the content of the image?\nASSISTANT:",
+    f"{_PREFACE} USER: <image>\nWhat's the content of the image? ASSISTANT:",
     "cherry_blossom":
-    "USER: <image>\nWhat is the season?\nASSISTANT:",
+    f"{_PREFACE} USER: <image>\nWhat is the season? ASSISTANT:",
 })
 
-models = [
-    "llava-hf/llava-1.5-7b-hf",
-    # TODO: Get this model to produce meaningful output in vLLM
-    # "TIGER-Lab/Mantis-8B-siglip-llama3",
-]
+models = ["llava-hf/llava-v1.6-vicuna-7b-hf"]
 
 
 def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
@@ -52,6 +51,7 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
     return hf_output_ids, hf_output_str, out_logprobs
 
 
+@overload
 def run_test(
     hf_runner: Type[HfRunner],
     vllm_runner: Type[VllmRunner],
@@ -65,41 +65,59 @@ def run_test(
     tensor_parallel_size: int,
     distributed_executor_backend: Optional[str] = None,
 ):
-    """Inference result should be the same between hf and vllm.
+    ...
 
-    All the image fixtures for the test is under tests/images.
-    For huggingface runner, we provide the PIL images as input.
-    For vllm runner, we provide MultiModalDataDict objects 
-    and corresponding MultiModalConfig as input.
-    Note, the text input is also adjusted to abide by vllm contract.
-    The text output is sanitized to be able to compare with hf.
-    """
-    # NOTE: For local use; this isn't tested in CI yet (see TODO above)
-    if model.startswith("TIGER-Lab/Mantis"):
-        from mantis.models.mllava import MLlavaProcessor
 
-        torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
-        mantis_processor = MLlavaProcessor.from_pretrained(
-            model, torch_dtype=torch_dtype)
-        assert isinstance(mantis_processor, MLlavaProcessor)
-    else:
-        mantis_processor = None
+@overload
+def run_test(
+    hf_runner: Type[HfRunner],
+    vllm_runner: Type[VllmRunner],
+    image_assets: _ImageAssets,
+    model: str,
+    *,
+    sizes: List[Tuple[int, int]],
+    dtype: str,
+    max_tokens: int,
+    num_logprobs: int,
+    tensor_parallel_size: int,
+    distributed_executor_backend: Optional[str] = None,
+):
+    ...
 
+
+def run_test(
+    hf_runner: Type[HfRunner],
+    vllm_runner: Type[VllmRunner],
+    image_assets: _ImageAssets,
+    model: str,
+    *,
+    size_factors: Optional[List[float]] = None,
+    sizes: Optional[List[Tuple[int, int]]] = None,
+    dtype: str,
+    max_tokens: int,
+    num_logprobs: int,
+    tensor_parallel_size: int,
+    distributed_executor_backend: Optional[str] = None,
+):
     images = [asset.pil_image for asset in image_assets]
 
-    inputs_per_image = [(
-        [prompt for _ in size_factors],
-        [rescale_image_size(image, factor) for factor in size_factors],
-    ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
-
-    # NOTE: take care of the order. run vLLM first, and then run HF.
-    # vLLM needs a fresh new process without cuda initialization.
-    # if we run HF first, the cuda initialization will be done and it
-    # will hurt multiprocessing backend with fork method (the default method).
+    if size_factors is not None:
+        inputs_per_image = [(
+            [prompt for _ in size_factors],
+            [rescale_image_size(image, factor) for factor in size_factors],
+        ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
+    elif sizes is not None:
+        inputs_per_image = [(
+            [prompt for _ in sizes],
+            [image.resize(size) for size in sizes],
+        ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
+    else:
+        raise ValueError("You must provide either `size_factors` or `sizes`")
 
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model,
                      dtype=dtype,
+                     max_model_len=4096,
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
                      enforce_eager=True) as vllm_model:
@@ -111,20 +129,7 @@ def run_test(
             for prompts, images in inputs_per_image
         ]
 
-    if mantis_processor is not None:
-
-        def process(hf_inputs: BatchEncoding):
-            hf_inputs["pixel_values"] = hf_inputs["pixel_values"] \
-                .to(torch_dtype)  # type: ignore
-            return hf_inputs
-    else:
-
-        def process(hf_inputs: BatchEncoding):
-            return hf_inputs
-
-    with hf_runner(model,
-                   dtype=dtype,
-                   postprocess_inputs=process,
+    with hf_runner(model, dtype=dtype,
                    auto_cls=AutoModelForVision2Seq) as hf_model:
         hf_outputs_per_image = [
             hf_model.generate_greedy_logprobs_limit(prompts,
@@ -167,13 +172,45 @@ def run_test(
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
-                dtype: str, max_tokens: int, num_logprobs: int) -> None:
+                dtype, max_tokens, num_logprobs) -> None:
+    """Inference result should be the same between hf and vllm.
+
+    All the image fixtures for the test is under tests/images.
+    For huggingface runner, we provide the PIL images as input.
+    For vllm runner, we provide MultiModalDataDict objects 
+    and corresponding MultiModalConfig as input.
+    Note, the text input is also adjusted to abide by vllm contract.
+    The text output is sanitized to be able to compare with hf.
+    """
     run_test(
         hf_runner,
         vllm_runner,
         image_assets,
         model,
         size_factors=size_factors,
+        dtype=dtype,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        tensor_parallel_size=1,
+    )
+
+
+@pytest.mark.parametrize("model", models)
+@pytest.mark.parametrize(
+    "sizes",
+    [[(1669, 2560), (2560, 1669), (183, 488), (488, 183)]],
+)
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("num_logprobs", [5])
+def test_models_fixed_sizes(hf_runner, vllm_runner, image_assets, model, sizes,
+                            dtype, max_tokens, num_logprobs) -> None:
+    run_test(
+        hf_runner,
+        vllm_runner,
+        image_assets,
+        model,
+        sizes=sizes,
         dtype=dtype,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,

@@ -158,28 +158,11 @@ steps:
     - python3 tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
     - python3 offline_inference_encoder_decoder.py
 
-- label: Models Test # 1hr10min
-  source_file_dependencies:
-  - vllm/
-  - tests/models
-  commands:
-    - pip install -e ./plugins/vllm_add_dummy_model
-    - pytest -v -s models/test_oot_registration.py # it needs a clean process
-    - pytest -v -s models -m \"not vlm\" --ignore=models/test_oot_registration.py
-
 - label: torch compile integration test
   source_file_dependencies:
   - vllm/
   commands:
     - pytest -v -s ./compile/test_full_graph.py
-
-
-- label: Vision Language Models Test # 42min
-  #mirror_hardwares: [amd]
-  source_file_dependencies:
-  - vllm/
-  commands:
-    - pytest -v -s models -m vlm
 
 - label: Prefix Caching Test # 7min
   #mirror_hardwares: [amd]
@@ -266,6 +249,51 @@ steps:
   - pip install lm-eval
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - bash ./run-tests.sh -c configs/models-small.txt -t 1
+
+#####  models test  #####
+
+- label: Basic Models Test # TODOmin
+  source_file_dependencies:
+  - vllm/
+  - tests/models
+  commands:
+    - pip install -e ./plugins/vllm_add_dummy_model
+    - pytest -v -s models/test_oot_registration.py # it needs a clean process
+    - pytest -v -s models/*.py --ignore=models/test_oot_registration.py
+
+- label: Decoder-only Language Models Test # TODOmin
+  #mirror_hardwares: [amd]
+  source_file_dependencies:
+  - vllm/
+  - tests/models/decoder_only/language
+  commands:
+    - pytest -v -s models/decoder_only/language
+
+- label: Decoder-only Multimodal Models Test # TODOmin
+  #mirror_hardwares: [amd]
+  source_file_dependencies:
+  - vllm/
+  - tests/models/decoder_only/audio
+  - tests/models/decoder_only/vision
+  commands:
+    - pytest -v -s models/decoder_only/audio
+    - pytest -v -s models/decoder_only/vision
+
+- label: Embedding Language Models Test # TODOmin
+  #mirror_hardwares: [amd]
+  source_file_dependencies:
+  - vllm/
+  - tests/models/embedding/language
+  commands:
+    - pytest -v -s models/embedding/language
+
+- label: Encoder-Decoder Language Models Test # TODOmin
+  #mirror_hardwares: [amd]
+  source_file_dependencies:
+  - vllm/
+  - tests/models/encoder_decoder/language
+  commands:
+    - pytest -v -s models/encoder_decoder/language
 
 #####  1 GPU test  #####
 #####  multi gpus test  #####
