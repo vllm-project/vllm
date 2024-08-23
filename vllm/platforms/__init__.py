@@ -48,7 +48,7 @@ try:
     import torch
     if hasattr(torch, 'xpu') and torch.xpu.is_available():
         is_xpu = True
-except:
+except AttributeError:
     pass
 
 if is_tpu:
