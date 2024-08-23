@@ -127,7 +127,9 @@ class SamplingParams(
     top_p: float = 1.0
     top_k: int = -1
     min_p: float = 0.0
-    seed: Optional[int] = None
+    ppl_measurement: bool = False
+    future_context: Optional[int] = None
+    seed: Optional[List[int]] = None
     use_beam_search: bool = False
     length_penalty: float = 1.0
     early_stopping: Union[bool, str] = False
@@ -200,6 +202,8 @@ class SamplingParams(
             top_p=1.0 if top_p is None else top_p,
             top_k=top_k,
             min_p=min_p,
+            ppl_measurement=ppl_measurement,
+            future_context=future_context,
             seed=seed,
             use_beam_search=use_beam_search,
             length_penalty=length_penalty,
@@ -227,8 +231,6 @@ class SamplingParams(
                 "errors nan or inf in tensors. We have maxed it out to %s.",
                 self.temperature, _MAX_TEMP, _MAX_TEMP)
             self.temperature = max(self.temperature, _MAX_TEMP)
-        self.ppl_measurement = ppl_measurement
-        self.future_context = future_context
         if self.seed == -1:
             self.seed = None
         else:

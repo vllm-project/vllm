@@ -678,7 +678,8 @@ def _sample_with_torch(
                 continue
             #(seq_group_id, seq_groups) = sample_metadata[sampling_type]
             #if sampling_type == SamplingType.GREEDY:
-            seq_group_id, seq_groups, is_prompts, sample_indices = sample_metadata[sampling_type]
+            seq_group_id, seq_groups, is_prompts, sample_indices = \
+                sample_metadata[sampling_type]
             if sampling_type == SamplingType.FORCED:
                 #pdb.set_trace()
                 sample_results = _forced_sample(seq_groups, forced_samples)
