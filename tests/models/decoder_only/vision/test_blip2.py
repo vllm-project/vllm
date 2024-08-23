@@ -9,8 +9,6 @@ from vllm.sequence import SampleLogprobs
 from ....conftest import IMAGE_ASSETS
 from ...utils import check_logprobs_close
 
-pytestmark = pytest.mark.vlm
-
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "stop_sign":
     "Question: What's the content of the image? Answer:",

@@ -12,8 +12,6 @@ from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from ....conftest import HfRunner, VllmRunner
 from ...utils import check_logprobs_close
 
-pytestmark = pytest.mark.vlm
-
 MODEL_NAME = "fixie-ai/ultravox-v0_3"
 
 AudioTuple = Tuple[np.ndarray, int]

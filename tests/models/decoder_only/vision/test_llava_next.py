@@ -9,8 +9,6 @@ from vllm.sequence import SampleLogprobs
 from ....conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
 from ...utils import check_logprobs_close
 
-pytestmark = pytest.mark.vlm
-
 _PREFACE = (
     "A chat between a curious human and an artificial intelligence assistant. "
     "The assistant gives helpful, detailed, and polite answers to the human's "

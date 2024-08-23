@@ -84,5 +84,4 @@ skip_gitignore = true
 [tool.pytest.ini_options]
 markers = [
     "skip_global_cleanup",
-    "vlm: run tests for vision language models only",
 ]

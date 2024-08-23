@@ -11,8 +11,6 @@ from vllm.utils import is_hip
 from ....conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
 from ...utils import check_logprobs_close
 
-pytestmark = pytest.mark.vlm
-
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "stop_sign":
     "caption es",

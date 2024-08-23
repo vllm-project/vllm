@@ -11,8 +11,6 @@ from vllm.sequence import SampleLogprobs
 from ....conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
 from ...utils import check_logprobs_close
 
-pytestmark = pytest.mark.vlm
-
 # The image token is placed before "user" on purpose so that the test can pass
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "stop_sign":
