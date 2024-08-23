@@ -320,7 +320,6 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
             f"{arg_schema_type(inp, True)}" for inp in inputs.values()
         ]
         logger.debug("fused op argument types: %s", arg_types)
-        print(f"fused op argument types: {str(arg_types)}")
         for i, name in enumerate(inputs.keys()):
             # Don't use const refs here so inputs can be deleted when no
             # longer needed.
@@ -370,6 +369,11 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
 
         for n, fn in zip(nodes, fn_names):
             return_type = extract_node_type(n)
+
+            # Total hack
+            if n.op == 'call_method':
+                return_type = "Size"
+
             input_types = [argument_type_str(inp) for inp in n.args]
             comment_str = f"  // ({', '.join(input_types)}) -> {return_type}"
 
@@ -388,7 +392,10 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
                                 f"{self.sanitize(n.args[0].name, '::')}.")
                     first_arg = 1
 
-                if node_function_target(n).startswith("torch.ops._C"):
+                # First check is total hack here
+                if fn == 'size':
+                    call_str = call_str + "sizes("
+                elif node_function_target(n).startswith("torch.ops._C"):
                     call_str = call_str + f"{self.sanitize(fn, '::')}.call("
                 else:
                     call_str = call_str + f"{self.sanitize(fn, '::')}("

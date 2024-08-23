@@ -103,6 +103,7 @@ def register_defaults():
     logger.debug("REGISTER DEFAULTS")
     # Note: methods need to be supported via function object and not name.
     register_fusable(torch.Tensor.to)
+    register_fusable(torch.Tensor.size, is_trivial=True)
     register_fusable(torch.Tensor.transpose, is_trivial=True)
     register_fusable(torch.Tensor.numel, is_trivial=True)
     register_fusable('_operator.add')
