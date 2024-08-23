@@ -7,9 +7,9 @@ body:
 - type: markdown
   attributes:
     value: >
-      This is a placeholder template to guide users to the chatbot.
+      This is a placeholder template to guide users to the chatbot. Please use the chatbot living at the bottom right corner of the documentation page https://docs.vllm.ai/en/latest/ first, before you open an issue. It can answer many frequently asked questions.
 - type: textarea
   attributes:
     label: placeholder
     description: >
-      This is a placeholder template to guide users to the chatbot.
+      This is a placeholder template to guide users to the chatbot. Please use the chatbot living at the bottom right corner of the documentation page https://docs.vllm.ai/en/latest/ first, before you open an issue. It can answer many frequently asked questions.
