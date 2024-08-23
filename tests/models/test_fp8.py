@@ -81,6 +81,7 @@ EXPECTED_STRS_MAP = {
                     reason="fp8 is not supported on this GPU type.")
 @pytest.mark.parametrize("model_name", MODELS)
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+@pytest.mark.parametrize("backend", ["FLASH_ATTN", "XFORMERS", "FLASHINFER"])
 def test_models(example_prompts, model_name, kv_cache_dtype) -> None:
     model = LLM(model=model_name,
                 max_model_len=MAX_MODEL_LEN,

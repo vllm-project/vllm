@@ -677,9 +677,7 @@ class FlashInferImpl(AttentionImpl):
             )
             # The FlashInfer api requires data to be in fp8_e4m3 or fp8_e5m2
             # to process the cache in fp8
-            if (self.kv_cache_dtype == 'fp8'
-                    or self.kv_cache_dtype == 'fp8_e4m3'
-                    or self.kv_cache_dtype == 'fp8_e5m2'):
+            if self.kv_cache_dtype in ['fp8', 'fp8_e4m3', 'fp8_e5m2']:
                 kv_cache = kv_cache.view(
                     get_kv_cache_torch_dtype(self.kv_cache_dtype))
 
