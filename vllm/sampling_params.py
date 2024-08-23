@@ -128,8 +128,9 @@ class SamplingParams(
     top_k: int = -1
     min_p: float = 0.0
     ppl_measurement: bool = False
-    future_context: Optional[int] = None
-    seed: Optional[List[int]] = None
+    future_context: Optional[List[int]] = None
+    cntr: Optional[int] = None
+    seed: Optional[int] = None
     use_beam_search: bool = False
     length_penalty: float = 1.0
     early_stopping: Union[bool, str] = False
@@ -170,6 +171,7 @@ class SamplingParams(
         min_p: float = 0.0,
         ppl_measurement: bool = False,
         future_context: Optional[List[int]] = None,
+        cntr: Optional[int] = None,
         seed: Optional[int] = None,
         use_beam_search: bool = False,
         length_penalty: float = 1.0,
@@ -204,6 +206,7 @@ class SamplingParams(
             min_p=min_p,
             ppl_measurement=ppl_measurement,
             future_context=future_context,
+            cntr=cntr,
             seed=seed,
             use_beam_search=use_beam_search,
             length_penalty=length_penalty,

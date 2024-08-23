@@ -602,14 +602,13 @@ def _sample_with_torch(
 
         seq_group_id = categorized_seq_group_ids[sampling_type]
         seq_groups = [sampling_metadata.seq_groups[i] for i in seq_group_id]
-        #sample_metadata[sampling_type] = (seq_group_id, seq_groups)
         is_prompts = [i < sampling_metadata.num_prompts for i in seq_group_id]
+        #sample_metadata[sampling_type] = (seq_group_id, seq_groups)
         sample_metadata[sampling_type] = (seq_group_id, seq_groups, is_prompts,
                                           sample_indices)
         long_sample_indices = sample_indices.long()
         if sampling_type == SamplingType.FORCED:
             if (seq_groups[0].sampling_params.future_context is not None):
-                #pdb.set_trace()
                 forced_samples = torch.tensor([
                 seq_groups[0].sampling_params.future_context[0][len(
                 sampling_metadata.seq_groups[0].seq_data[
@@ -681,7 +680,6 @@ def _sample_with_torch(
             seq_group_id, seq_groups, is_prompts, sample_indices = \
                 sample_metadata[sampling_type]
             if sampling_type == SamplingType.FORCED:
-                #pdb.set_trace()
                 sample_results = _forced_sample(seq_groups, forced_samples)
             elif sampling_type == SamplingType.GREEDY:
                 sample_results = _greedy_sample(seq_groups, greedy_samples)
