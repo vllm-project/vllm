@@ -82,6 +82,8 @@ def run_vllm(
     max_num_batched_tokens: int,
     distributed_executor_backend: Optional[str],
     gpu_memory_utilization: float = 0.9,
+    num_scheduler_steps: int = 1,
+    use_v2_block_manager: bool = False,
     download_dir: Optional[str] = None,
     load_format: str = EngineArgs.load_format,
 ) -> float:
@@ -106,6 +108,8 @@ def run_vllm(
         max_num_batched_tokens=max_num_batched_tokens,
         distributed_executor_backend=distributed_executor_backend,
         load_format=load_format,
+        num_scheduler_steps=num_scheduler_steps,
+        use_v2_block_manager=use_v2_block_manager,
     )
 
     # Add the requests to the engine.
@@ -232,7 +236,8 @@ def main(args: argparse.Namespace):
             args.quantization_param_path, args.device,
             args.enable_prefix_caching, args.enable_chunked_prefill,
             args.max_num_batched_tokens, args.distributed_executor_backend,
-            args.gpu_memory_utilization, args.download_dir, args.load_format)
+            args.gpu_memory_utilization, args.num_scheduler_steps,
+            args.use_v2_block_manager, args.download_dir, args.load_format)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
@@ -354,9 +359,17 @@ if __name__ == "__main__":
         help='device type for vLLM execution, supporting CUDA, OpenVINO and '
         'CPU.')
     parser.add_argument(
+        "--num-scheduler-steps",
+        type=int,
+        default=1,
+        help="Maximum number of forward steps per scheduler call.")
+    parser.add_argument("--use-v2-block-manager",
+                        action='store_true',
+                        help="Enable block manager v2.")
+    parser.add_argument(
         "--enable-prefix-caching",
         action='store_true',
-        help="enable automatic prefix caching for vLLM backend.")
+        help="Enable automatic prefix caching for vLLM backend.")
     parser.add_argument("--enable-chunked-prefill",
                         action='store_true',
                         help="enable chunked prefill for vLLM backend.")

@@ -335,7 +335,8 @@ steps:
   - vllm/engine
   - tests/multi_step
   commands:
-  - pytest -v -s multi_step/test_correctness.py
+  - pytest -v -s multi_step/test_correctness_async_llm.py
+  - pytest -v -s multi_step/test_correctness_llm.py
 
 - label: Pipeline Parallelism Test # 23min
   working_dir: "/vllm-workspace/tests"
