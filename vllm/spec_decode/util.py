@@ -64,23 +64,25 @@ def create_sequence_group_output(
         token_id_logprob_rank (int): The logprob rank of the sampled token.
         token_id_logprob (float): The logprob value of the sampled token.
         seq_id (int): The sequence id.
-        topk_token_ids (List[int]): The list of top-k token ids.
-        topk_logprobs (List[float]): The list of top-k logprobs.
+        topk_token_ids (List[Optional[int]]): The list of top-k token ids.
+        topk_logprobs (List[Optional[float]]): The list of top-k logprobs.
     """
     # vLLM logprobs always include the sampled token. In addition, the user may
     # request topk-logprobs (where top-k varies per user up to max_logprobs).
-    logprobs: Dict[Optional[int], Logprob] = {
+    logprobs: Dict[int, Logprob] = {
         token_id: Logprob(
             logprob=token_id_logprob,
             rank=token_id_logprob_rank,
         ),
     }
     logprobs.update({
-        topk_token_ids[topk_logprob_index]: Logprob(
-            logprob=topk_logprobs[topk_logprob_index],
-            rank=topk_logprob_index + 1,
+        topk_token_id: Logprob(
+            logprob=topk_logprob if topk_logprob is not None else 0.0,
+            rank=topk_index + 1,
         )
-        for topk_logprob_index, _ in enumerate(topk_token_ids)
+        for topk_index, (topk_token_id, topk_logprob) \
+            in enumerate(zip(topk_token_ids, topk_logprobs)) \
+        if topk_token_id is not None
     })
 
     return CompletionSequenceGroupOutput(
@@ -123,7 +125,7 @@ def split_batch_by_proposal_len(
 
 def sampler_output_to_torch(
     sampler_output_list: List[SamplerOutput], sampler_transposed: bool
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """Utility function which converts a list of SamplerOutput to tensors.
 
         sampler_transposed here is used as the indicator for whether
@@ -169,7 +171,23 @@ def sampler_output_to_torch(
     if sampler_transposed:
         sampled_token_ids = sampled_token_ids.transpose(0, 1)
 
-    return sampled_token_ids, sampled_token_probs, sampled_token_logprobs
+    if sampler_output_list[0].hidden_states is not None:
+        # shape: [batch_size, num_sampler_output, hidden_dim]
+        sampled_hidden_states = torch.stack(
+            [
+                sampler_output.hidden_states
+                for sampler_output in sampler_output_list
+            ],
+            dim=0,
+        )
+
+        if sampler_transposed:
+            sampled_hidden_states = sampled_hidden_states.transpose(0, 1)
+    else:
+        sampled_hidden_states = None
+
+    return (sampled_token_ids, sampled_token_probs, sampled_token_logprobs,
+            sampled_hidden_states)
 
 
 def maybe_mock_device_tensors(sampler_output: SamplerOutput, batch_size: int,

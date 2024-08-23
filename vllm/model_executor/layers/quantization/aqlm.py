@@ -95,7 +95,7 @@ def generic_dequantize_gemm(
     codebooks: torch.
     Tensor,  #  [num_codebooks, codebook_size, out_group_size, in_group_size]
     scales: torch.Tensor,  #  [num_out_groups, 1, 1, 1]
-    output_partition_sizes: torch.IntTensor,
+    output_partition_sizes: List[int],
     bias: Optional[torch.Tensor],
 ) -> torch.Tensor:
     output_shape = input.shape[:-1] + (scales.shape[0], )
@@ -133,7 +133,7 @@ def optimized_dequantize_gemm(
     codebooks: torch.
     Tensor,  #  [num_codebooks, codebook_size, out_group_size, in_group_size]
     scales: torch.Tensor,  #  [num_out_groups, 1, 1, 1]
-    output_partition_sizes: torch.IntTensor,
+    output_partition_sizes: List[int],
     bias: Optional[torch.Tensor],
 ) -> torch.Tensor:
     weights = ops.aqlm_dequant(codes, codebooks, output_partition_sizes)
@@ -288,10 +288,8 @@ class AQLMLinearMethod(LinearMethodBase):
             codebooks,
             {
                 # metadata indicates fixed size concatenated along dim 0
-                "is_metadata":
-                True,
-                "output_partition_sizes":
-                torch.tensor(output_partition_sizes, device='cpu'),
+                "is_metadata": True,
+                "output_partition_sizes": output_partition_sizes
             },
         )
 
@@ -334,7 +332,7 @@ class AQLMLinearMethod(LinearMethodBase):
         codes = layer.codes
         scales = layer.scales
         output_partition_sizes = getattr(codebooks, "output_partition_sizes",
-                                         None)
+                                         [])
 
         nbooks = codes.shape[2]
         ingroups = codebooks.shape[3]
