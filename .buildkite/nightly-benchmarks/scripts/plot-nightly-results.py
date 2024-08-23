@@ -78,6 +78,19 @@ def main(args):
     for test_file in results_folder.glob("*_nightly_results.json"):
         with open(test_file, "r") as f:
             results = results + json.loads(f.read())
+            
+    with open("vllm2_nightly_results.json", "r") as f:
+        results2 = json.loads(f.read())
+
+    for i in results:
+        if i['Engine'] == "vllm":
+            i['Engine'] = "vllm_step10"
+            i['Mean ITL (ms)'] = i['Mean ITL (ms)'] / 10
+            i['Std ITL (ms)'] = i['Std ITL (ms)'] / 10
+
+    for i in results2:
+        i['Engine'] = "vllm_single"
+    results = results + results2
 
     # generate markdown table
     df = pd.DataFrame.from_dict(results)
@@ -90,7 +103,7 @@ def main(args):
     # plot results
     fig, axes = plt.subplots(3, 3, figsize=(16, 14))
     fig.subplots_adjust(hspace=1)
-    methods = ["vllm", "trt", "sglang", "lmdeploy"]
+    methods = ["vllm_step10", "vllm_single", "sglang", "lmdeploy"]
     for i, model in enumerate(["llama8B", "llama70B", "mixtral8x7B"]):
         for j, metric in enumerate(["TTFT", "ITL", "Tput"]):
             ax = axes[i, j]
@@ -105,9 +118,12 @@ def main(args):
             print(model, metric)
             for k, method in enumerate(methods):
                 mean, std = get_perf_w_std(df, method, model, metric)
-                if method == "vllm" and metric == "ITL" and std is not None:
-                    mean, std = [i / 10 for i in mean], [i / 10 for i in std]
                 print(method, mean, std)
+                if method == "vllm_step10" and metric == "TTFT" and std is not None:
+                    mean = [i - 4 * j for i, j in zip(
+                        mean,
+                        get_perf(df, method, model, "Mean ITL (ms)").tolist()
+                    )]
                 ax.errorbar(range(len(mean)),
                             mean, 
                             yerr=std, 
@@ -116,8 +132,8 @@ def main(args):
                             label=method,
                             lw=4,)
             ax.set_ylim(bottom=0)
-            # if metric == "TTFT":
-            #     ax.set_ylim(0, 500)
+            if metric == "TTFT":
+                ax.set_ylim(0, 200)
             ax.set_xticks(range(len(mean)))
             ax.set_xticklabels(["2", "4", "8", "16", "inf"])
 
