@@ -408,7 +408,7 @@ class _AsyncLLMEngine(LLMEngine):
                 raise AssertionError(("All running sequence groups should "
                                       "have the same remaining steps."))
 
-            return remaining_steps > 0
+        return remaining_steps > 0
 
     def _cache_scheduler_outputs_for_multi_step(
             self, virtual_engine: int,
