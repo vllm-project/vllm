@@ -127,13 +127,9 @@ uvicorn-log-level: "info"
 $ vllm serve SOME_MODEL --config config.yaml
 ```
 
----
-**NOTE** 
+.. note::
 
-In case an argument is supplied using CLI and the config file, the value from the CLI will take precedence.
-
----
-
+   In case an argument is supplied using CLI and the config file, the value from the CLI will take precedence.
 ## Tool calling in the chat completion API
 vLLM supports only named function calling in the chat completion API. The `tool_choice` options `auto` and `required` are **not yet supported** but on the roadmap.
 
