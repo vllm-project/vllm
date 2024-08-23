@@ -363,12 +363,14 @@ class BartCrossAttention(nn.Module):
             qkv_enc, _ = self.qkv_proj(encoder_hidden_states)
             _, k, v = qkv_enc.split([self.q_size, self.kv_size, self.kv_size],
                                     dim=-1)
+
         attn_output = self.attn(q,
                                 k,
                                 v,
                                 kv_cache,
                                 attn_metadata,
                                 attn_type=AttentionType.ENCODER_DECODER)
+
         output, _ = self.out_proj(attn_output)
         return output
 
@@ -526,6 +528,7 @@ class BartDecoderLayer(nn.Module):
             Decoder layer output torch.Tensor
         """
         residual = decoder_hidden_states
+
         # Self Attention
         hidden_states = self.self_attn(hidden_states=decoder_hidden_states,
                                        kv_cache=kv_cache,
@@ -709,6 +712,7 @@ class BartDecoder(nn.Module):
         Returns:
             Decoder output torch.Tensor
         """
+
         inputs_embeds = self.embed_tokens(decoder_input_ids)
 
         # embed positions
@@ -730,6 +734,7 @@ class BartDecoder(nn.Module):
                 attn_metadata=attn_metadata,
                 encoder_hidden_states=encoder_hidden_states,
             )
+
         return hidden_states
 
 
