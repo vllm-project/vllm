@@ -18,3 +18,5 @@ awq_marlin, casperhansen/mixtral-instruct-awq, main
 fp8, neuralmagic/Meta-Llama-3-8B-Instruct-FP8-KV, main
 marlin, nm-testing/zephyr-beta-7b-marlin-g128, main
 marlin, robertgshaw2/zephyr-7b-beta-channelwise-marlin, main
+qqq, HandH1998/QQQ-Llama-3-8b-g128, main
+qqq, HandH1998/QQQ-Llama-3-8b, main
