@@ -14,7 +14,9 @@ class ServerConfig(TypedDict):
 
 # universal args for all models go here. also good if you need to test locally
 # and change type or KV cache quantization or something.
-ARGS: List[str] = ["--enable-auto-tool-choice", "--max-model-len", "8096"]
+ARGS: List[str] = [
+    "--enable-auto-tool-choice", "--max-model-len", "8096", "--dtype", "half"
+]
 
 CONFIGS: Dict[str, ServerConfig] = {
     "hermes": {
