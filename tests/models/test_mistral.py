@@ -4,7 +4,7 @@ Run `pytest tests/models/test_mistral.py`.
 """
 import pytest
 
-from .utils import check_logprobs_close
+from .utils import check_tokenstexts_match_or_in_top_logprobs
 
 MODELS = [
     "mistralai/Mistral-7B-Instruct-v0.1",
@@ -33,7 +33,7 @@ def test_models(
     with vllm_runner(model, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
-    check_logprobs_close(
+    check_tokenstexts_match_or_in_top_logprobs(
         outputs_0_lst=hf_outputs,
         outputs_1_lst=vllm_outputs,
         name_0="hf",

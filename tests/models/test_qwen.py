@@ -3,7 +3,7 @@ from typing import Type
 import pytest
 
 from ..conftest import HfRunner, VllmRunner
-from .utils import check_logprobs_close
+from .utils import check_tokenstexts_match_or_in_top_logprobs
 
 models = ["qwen/qwen-vl"]
 
@@ -40,7 +40,7 @@ def test_text_only_qwen_model(
             num_logprobs=num_logprobs,
         )
 
-    check_logprobs_close(
+    check_tokenstexts_match_or_in_top_logprobs(
         outputs_0_lst=hf_outputs,
         outputs_1_lst=vllm_outputs,
         name_0="hf",

@@ -7,7 +7,7 @@ from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
 
 from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
-from .utils import check_logprobs_close
+from .utils import check_tokenstexts_match_or_in_top_logprobs
 
 pytestmark = pytest.mark.vlm
 
@@ -143,7 +143,7 @@ def run_test(
                                         vllm_outputs_per_image):
         # TODO: Check whether using original CLIPVisionModel can improve
         # consistency against HF
-        check_logprobs_close(
+        check_tokenstexts_match_or_in_top_logprobs(
             outputs_0_lst=hf_outputs,
             outputs_1_lst=[
                 vllm_to_hf_output(vllm_output, model)
