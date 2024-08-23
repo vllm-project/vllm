@@ -732,7 +732,7 @@ class EngineArgs:
             " set. If set, it will collect detailed traces for the specified "
             "modules. This involves use of possibly costly and or blocking "
             "operations and hence might have a performance impact.")
-        parser.add_argument('--cpu_draft_worker',
+        parser.add_argument('--cpu-draft-worker',
                             type=bool,
                             default=EngineArgs.cpu_draft_worker,
                             help='Run draft model on CPU.')
