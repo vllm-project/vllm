@@ -216,7 +216,8 @@ if not is_cpu():
                     **hf_kwargs,
                 ))
 
-        with vllm_runner(model, dtype=dtype, enforce_eager=False) as vllm_model:
+        with vllm_runner(model, dtype=dtype,
+                         enforce_eager=False) as vllm_model:
             vllm_outputs = vllm_model.generate_encoder_decoder_greedy_logprobs(
                 test_case_prompts, max_tokens, num_logprobs)
 
