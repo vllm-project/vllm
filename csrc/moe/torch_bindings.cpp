@@ -8,6 +8,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "topk_softmax(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
       "token_expert_indices, Tensor gating_output) -> ()");
   m.impl("topk_softmax", torch::kCUDA, &topk_softmax);
+
+  #ifndef USE_ROCM
   m.def(
       "marlin_gemm_moe(Tensor! a, Tensor! b_q_weights, Tensor! sorted_ids, "
       "Tensor! topk_weights, Tensor! topk_ids, Tensor! b_scales, Tensor! "
@@ -16,6 +18,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "bool replicate_input, bool apply_weights) -> Tensor");
 
   m.impl("marlin_gemm_moe", torch::kCUDA, &marlin_gemm_moe);
+  #endif
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
