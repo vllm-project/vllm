@@ -20,7 +20,7 @@ Quick correctness validation tips:
 
 Running llama-2-7b model 
 ( 
-    ./vllm/benchmarks/measure_ppl2_MC.py 
+    ./vllm/examples/measure_ppl2_MC.py 
     --model=/data/models/llama-2-7b-chat-hf 
     --data=./vllm/tests/prompts/wiki.test.raw 
     --context-size=1024 
@@ -30,7 +30,7 @@ should result in PPL ~ 6.524227946419175
 
 Running llama-2-7b model 
 ( 
-    ./vllm/benchmarks/measure_ppl2_MC.py 
+    ./vllm/examples/measure_ppl2_MC.py 
     --model=/data/models/llama-2-7b-chat-hf 
     --data=./vllm/tests/prompts/wiki.test.raw 
     --context-size=1024 
@@ -70,8 +70,6 @@ def vllm_init(args):
         trust_remote_code=args.trust_remote_code,
         dtype=args.dtype,
         kv_cache_dtype=args.kv_cache_dtype,
-        #scales_path=args.kv_cache_scales_path
-        #   if args.kv_cache_scales_path!='' else None,
         quantization_param_path=args.kv_cache_scales_path
         if args.kv_cache_scales_path != '' else None,
         enforce_eager=args.enforce_eager)
