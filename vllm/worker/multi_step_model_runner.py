@@ -297,15 +297,16 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
             # and attempting to reuse/slice the existing tensors is non-trivial.
 
             # Sampling metadata is only required for the final pp group
-            assert (get_pp_group().is_last_rank)
-            generators = self.get_generators(finished_requests_ids)
-            if num_prompts != 0:
-                sampling_metadata_decodes = SamplingMetadata.prepare(
-                    seq_group_metadata_list[num_prompts:],
-                    frozen_model_input.seq_lens[num_prompts:],
-                    frozen_model_input.query_lens[num_prompts:], self.device,
-                    self.pin_memory, generators, self.sampling_metadata_cache)
-                sampling_metadata_decodes.skip_sampler_cpu_output = (True)
+            if get_pp_group().is_last_rank:
+                generators = self.get_generators(finished_requests_ids)
+                if num_prompts != 0:
+                    sampling_metadata_decodes = SamplingMetadata.prepare(
+                        seq_group_metadata_list[num_prompts:],
+                        frozen_model_input.seq_lens[num_prompts:],
+                        frozen_model_input.query_lens[num_prompts:],
+                        self.device, self.pin_memory, generators,
+                        self.sampling_metadata_cache)
+                    sampling_metadata_decodes.skip_sampler_cpu_output = (True)
 
         model_input = StatefulModelInput(
             frozen_model_input=frozen_model_input,
