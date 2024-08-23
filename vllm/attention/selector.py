@@ -10,8 +10,8 @@ import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import (STR_BACKEND_ENV_VAR, is_cpu, is_hip, is_openvino,
-                        is_xpu, is_flashinfer)
+from vllm.utils import (STR_BACKEND_ENV_VAR, is_cpu, is_flashinfer, is_hip,
+                        is_openvino, is_xpu)
 
 logger = init_logger(__name__)
 
@@ -245,6 +245,7 @@ def which_attn_to_use(
     if selected_backend == _Backend.FLASH_ATTN:
         try:
             import vllm_flash_attn  # noqa: F401
+
             from vllm.attention.backends.flash_attn import (  # noqa: F401
                 FlashAttentionBackend)
 

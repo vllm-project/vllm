@@ -339,7 +339,8 @@ class FlashInferMetadata(AttentionMetadata):
                 self.head_dim,
                 self.page_size,
                 # Disable flashinfer's pos encoding and use vllm's rope.
-                pos_encoding_mode="NONE")
+                pos_encoding_mode="NONE",
+                data_type=self.data_type)
 
     def asdict_zerocopy(self,
                         skip_fields: Optional[Set[str]] = None
@@ -365,7 +366,8 @@ class FlashInferMetadata(AttentionMetadata):
     def decode_metadata(self) -> Optional["FlashInferMetadata"]:
         # Currently chunked prefill is not supported
         if self.num_prefills > 0:
-            assert self.num_decode_tokens == 0
+            assert self.num_decode_tokens == 0, (
+                "Chunked prefill is not supported with flashinfer yet.")
             return None
 
         return self
@@ -673,10 +675,11 @@ class FlashInferImpl(AttentionImpl):
                 k_scale,
                 v_scale,
             )
-            # The FlashInfer api requires data to be in fp8_e4m3 or fp8_e5m2 
+            # The FlashInfer api requires data to be in fp8_e4m3 or fp8_e5m2
             # to process the cache in fp8
-            if(self.kv_cache_dtype == 'fp8' or self.kv_cache_dtype == 'fp8_e4m3'
-                                  or self.kv_cache_dtype == 'fp8_e5m2'):
+            if (self.kv_cache_dtype == 'fp8'
+                    or self.kv_cache_dtype == 'fp8_e4m3'
+                    or self.kv_cache_dtype == 'fp8_e5m2'):
                 kv_cache = kv_cache.view(
                     get_kv_cache_torch_dtype(self.kv_cache_dtype))
 
