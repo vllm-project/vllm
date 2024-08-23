@@ -55,6 +55,13 @@ def test_rms_norm(
     else:
         torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)
 
+    if residual is not None:
+        opcheck(torch.ops._C.fused_add_rms_norm,
+                (x, residual, layer.weight.data, layer.variance_epsilon))
+    else:
+        opcheck(torch.ops._C.rms_norm,
+                (out, x, layer.weight.data, layer.variance_epsilon))
+
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
@@ -119,6 +126,15 @@ def test_rms_norm_quant(
     if add_residual:
         assert torch.allclose(residual1, residual2, atol=1e-3)
 
+    if add_residual:
+        opcheck(torch.ops._C.add_residual_rms_norm_quant,
+                (out2, x_, residual2, tmp, layer.weight.data, scale2,
+                 layer.variance_epsilon))
+    else:
+        opcheck(
+            torch.ops._C.rms_norm_quant,
+            (out2, x_, tmp, layer.weight.data, scale2, layer.variance_epsilon))
+
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
@@ -180,3 +196,12 @@ def test_rms_norm_quant2(
     assert torch.allclose(out1, out2, atol=2.0)
     if add_residual:
         assert torch.allclose(residual1, residual2, atol=1e-3)
+
+    if add_residual:
+        opcheck(torch.ops._C.add_residual_rms_norm_quant,
+                (out2, x_, residual2, tmp, layer.weight.data, scale1,
+                 layer.variance_epsilon))
+    else:
+        opcheck(
+            torch.ops._C.rms_norm_quant,
+            (out2, x_, tmp, layer.weight.data, scale1, layer.variance_epsilon))

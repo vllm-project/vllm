@@ -68,26 +68,25 @@ def arg_schema_type(n: torch.fx.node.Argument,
     """
     Get the schema or C++ type for a fused op argument.
     """
-    if isinstance(n, float):
-        return "float"
-    elif isinstance(n, int):
-        return "int"
+    if n.type is not None:
+        ty = n.type.__name__
+    elif n.meta.get('type') and n.meta.get('type').__name__ != 'FakeTensor':
+        ty = n.meta.get('type').__name__
+        print(f"meta type {ty}")
+        if ty == 'Size':
+            return 'std::vector<int64_t>' if add_prefix else 'int[]'
     else:
-        if n.type is not None:
-            ty = n.type.__name__
-        elif n.meta.get(
-                'type') and n.meta.get('type').__name__ != 'FakeTensor':
-            ty = n.meta.get('type').__name__
-            if ty == 'Size':
-                return 'std::vector<int64_t> const' if add_prefix else 'int[]'
-        else:
-            # this default is a bit sketchy
-            ty = "Tensor"
+        # this default is a bit sketchy
+        ty = "Tensor"
 
     builtin_types = {"int": "int64_t", "float": "double"}
 
     if add_prefix and ty in builtin_types:
         return builtin_types[ty]
+
+    print(f"arg_schema_type {ty}")
+    if ty == "SymInt" and add_prefix:
+        return "int64_t"
 
     return ty if not add_prefix else f"torch::{ty}"
 

@@ -320,6 +320,7 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
             f"{arg_schema_type(inp, True)}" for inp in inputs.values()
         ]
         logger.debug("fused op argument types: %s", arg_types)
+        print(f"fused op argument types: {str(arg_types)}")
         for i, name in enumerate(inputs.keys()):
             # Don't use const refs here so inputs can be deleted when no
             # longer needed.
