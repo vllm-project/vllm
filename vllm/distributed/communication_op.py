@@ -5,11 +5,10 @@ import torch.distributed
 
 from .parallel_state import get_tp_group
 
-torch.library.define("vllm::tp_out_of_place_ar",
-                     ("(Tensor(a!) input_ ) -> Tensor"))
 
-
-@torch.library.register_kernel("vllm::tp_out_of_place_ar", ("cuda", "cpu"))
+@torch.library.custom_op("vllm::tp_out_of_place_ar",
+                         mutates_args=["input_"],
+                         device_types=("cuda", "cpu"))
 def _tp_out_of_place_ar(input_: torch.Tensor) -> torch.Tensor:
     """All-reduce the input tensor across model parallel group."""
     return get_tp_group().out_of_place_ar(input_)
@@ -20,17 +19,16 @@ def _tp_out_of_place_ar_fake(input_: torch.Tensor) -> torch.Tensor:
     return input_
 
 
-torch.library.define("vllm::tp_in_place_ar", ("(Tensor! input_ ) -> ()"))
-
-
-@torch.library.register_kernel("vllm::tp_in_place_ar", ("cuda", "cpu"))
-def _tp_in_place_ar(input_: torch.Tensor):
+@torch.library.custom_op("vllm::tp_in_place_ar",
+                         mutates_args=["input_"],
+                         device_types=("cuda", "cpu"))
+def _tp_in_place_ar(input_: torch.Tensor) -> None:
     """All-reduce the input tensor across model parallel group."""
     get_tp_group().in_place_ar(input_)
 
 
 @torch.library.register_fake("vllm::tp_in_place_ar")
-def _tp_in_place_ar_fake(input_: torch.Tensor):
+def _tp_in_place_ar_fake(input_: torch.Tensor) -> None:
     return
 
 
