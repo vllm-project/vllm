@@ -25,6 +25,7 @@ from vllm.model_executor.layers.quantization.marlin import MarlinConfig
 from vllm.model_executor.layers.quantization.qqq import QQQConfig
 from vllm.model_executor.layers.quantization.squeezellm import SqueezeLLMConfig
 from vllm.model_executor.layers.quantization.tpu_int8 import Int8TpuConfig
+from vllm.model_executor.layers.quantization.phimoe_fp8 import PhiMoEFp8Config
 
 QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "aqlm": AQLMConfig,
@@ -46,6 +47,7 @@ QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "bitsandbytes": BitsAndBytesConfig,
     "qqq": QQQConfig,
     "experts_int8": ExpertsInt8Config,
+    "phimoe_fp8" : PhiMoEFp8Config,
 }
 
 
