@@ -195,8 +195,8 @@ class QQQLinearMethod(LinearMethodBase):
             device="cuda",
             dtype=torch.float,
         ),
-            weight_loader=weight_loader,
-            output_dim=1)
+                                               weight_loader=weight_loader,
+                                               output_dim=1)
 
         if self.quant_config.group_size == -1:
             s_group_data = torch.tensor(
