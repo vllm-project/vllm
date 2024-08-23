@@ -111,6 +111,11 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
             self.kv_cache_dtype,
             self.block_size,
         )
+        print("@"*30)
+        print(self.attn_backend)
+        print("@"*30)
+        from vllm.attention.backends.torch_sdpa import TorchSDPABackend
+        self.attn_backend = TorchSDPABackend 
 
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
