@@ -4,7 +4,6 @@ from typing import List
 
 import pytest
 
-from ..models.utils import check_outputs_equal
 from ..utils import RemoteOpenAIServer
 
 MODELS = [
