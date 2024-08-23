@@ -272,7 +272,6 @@ async def create_chat_completion(request: ChatCompletionRequest,
     generator = await openai_serving_chat.create_chat_completion(
         request, raw_request)
 
-    # if there's an error, return it
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
