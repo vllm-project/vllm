@@ -32,13 +32,20 @@
         "trt_client_parameters": {
             "endpoint": "/v2/models/ensemble/generate_stream"
         },
-        "vllm_server_parameters": {
+        "vllm_053post1_server_parameters": {
             "disable_log_stats": "",
             "disable_log_requests": "",
-            "num_scheduler_steps": "1",
             "max_model_len": "20000"
         },
-        "vllm_client_parameters": {
+        "vllm_053post1_client_parameters": {
+        },
+        "vllm_055_server_parameters": {
+            "disable_log_stats": "",
+            "disable_log_requests": "",
+            "num_scheduler_steps": "5",
+            "max_model_len": "20000"
+        },
+        "vllm_055_client_parameters": {
         },
         "sglang_server_parameters": {
             "disable_radix_cache": ""
@@ -82,13 +89,20 @@
         "trt_client_parameters": {
             "endpoint": "/v2/models/ensemble/generate_stream"
         },
-        "vllm_server_parameters": {
+        "vllm_053post1_server_parameters": {
             "disable_log_stats": "",
             "disable_log_requests": "",
-            "num_scheduler_steps": "1",
             "max_model_len": "20000"
         },
-        "vllm_client_parameters": {
+        "vllm_053post1_client_parameters": {
+        },
+        "vllm_055_server_parameters": {
+            "disable_log_stats": "",
+            "disable_log_requests": "",
+            "num_scheduler_steps": "5",
+            "max_model_len": "20000"
+        },
+        "vllm_055_client_parameters": {
         },
         "sglang_server_parameters": {
             "disable_radix_cache": ""
@@ -132,13 +146,20 @@
         "trt_client_parameters": {
             "endpoint": "/v2/models/ensemble/generate_stream"
         },
-        "vllm_server_parameters": {
+        "vllm_053post1_server_parameters": {
             "disable_log_stats": "",
             "disable_log_requests": "",
-            "num_scheduler_steps": "1",
             "max_model_len": "20000"
         },
-        "vllm_client_parameters": {
+        "vllm_053post1_client_parameters": {
+        },
+        "vllm_055_server_parameters": {
+            "disable_log_stats": "",
+            "disable_log_requests": "",
+            "num_scheduler_steps": "5",
+            "max_model_len": "20000"
+        },
+        "vllm_055_client_parameters": {
         },
         "sglang_server_parameters": {
             "disable_radix_cache": ""
