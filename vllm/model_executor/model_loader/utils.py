@@ -26,8 +26,8 @@ def get_model_architecture(
     # FIXME(woosuk): This is a temporary hack.
     # Fused Mixtral is currently disabled on ROCm
     mixtral_supported = ["fp8", "compressed-tensors"]
-    if (model_config.quantization is not None
-            and (model_config.quantization not in mixtral_supported or is_hip())
+    if (model_config.quantization is not None and
+        (model_config.quantization not in mixtral_supported or is_hip())
             and "MixtralForCausalLM" in architectures):
         architectures = ["QuantMixtralForCausalLM"]
     return ModelRegistry.resolve_model_cls(architectures)
