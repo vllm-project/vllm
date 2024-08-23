@@ -11,6 +11,7 @@ import triton.language as tl
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -287,7 +288,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
 
 
 def get_config_file_name(E: int, N: int, dtype: Optional[str]) -> str:
-    device_name = torch.cuda.get_device_name().replace(" ", "_")
+    device_name = current_platform.get_device_name().replace(" ", "_")
     dtype_selector = "" if not dtype else f",dtype={dtype}"
     return f"E={E},N={N},device_name={device_name}{dtype_selector}.json"
 

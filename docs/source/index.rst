@@ -107,6 +107,7 @@ Documentation
    quantization/supported_hardware
    quantization/auto_awq
    quantization/bnb
+   quantization/int8
    quantization/fp8
    quantization/fp8_e5m2_kvcache
    quantization/fp8_e4m3_kvcache
@@ -135,6 +136,7 @@ Documentation
    dev/input_processing/model_inputs_index
    dev/multimodal/multimodal_index
    dev/dockerfile/dockerfile
+   dev/profiling/profiling_index
 
 .. toctree::
    :maxdepth: 1

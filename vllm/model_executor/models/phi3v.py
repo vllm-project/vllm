@@ -15,8 +15,8 @@
 # limitations under the License.
 import re
 from functools import lru_cache
-from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
-                    TypedDict, Union)
+from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional,
+                    Tuple, TypedDict, Union)
 
 import numpy as np
 import torch
@@ -37,7 +37,7 @@ from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import cached_get_tokenizer
+from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
@@ -324,12 +324,12 @@ def _calc_hd_transform_size(*, width: int, height: int, hd_num: int = 16):
 
 # Based on https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py#L181
 def get_phi3v_image_feature_size(
-    hf_config: PretrainedConfig,
+    hf_config: Dict[str, Any],
     *,
     input_height: int,
     input_width: int,
 ) -> int:
-    num_crops = getattr(hf_config, "num_crops", 16)
+    num_crops = hf_config.get("num_crops", 16)
     new_width, new_height = _calc_hd_transform_size(width=input_width,
                                                     height=input_height,
                                                     hd_num=num_crops)
@@ -341,7 +341,7 @@ def get_phi3v_image_feature_size(
 def get_max_phi3v_image_tokens(ctx: InputContext):
 
     return get_phi3v_image_feature_size(
-        ctx.get_hf_config(),
+        ctx.get_hf_image_processor_config(),
         input_height=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
         input_width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
     )
@@ -395,7 +395,7 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
         return llm_inputs
 
     model_config = ctx.model_config
-    hf_config = ctx.get_hf_config()
+    hf_config = ctx.get_hf_image_processor_config()
 
     image_data = multi_modal_data["image"]
     if isinstance(image_data, Image.Image):
@@ -477,6 +477,8 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal):
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
                                       quant_config=quant_config)
+        if self.config.tie_word_embeddings:
+            self.lm_head.weight = self.model.embed_tokens.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
