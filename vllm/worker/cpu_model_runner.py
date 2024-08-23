@@ -206,6 +206,7 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
                                     device=self.device)  # type: ignore
 
         attn_metadata = self.attn_backend.make_metadata(
+            is_prompt=True,
             seq_lens=seq_lens,
             seq_lens_tensor=torch.tensor([]),
             max_decode_seq_len=0,
@@ -286,6 +287,7 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
         )
 
         attn_metadata = self.attn_backend.make_metadata(
+            is_prompt=False,
             slot_mapping=slot_mapping,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
