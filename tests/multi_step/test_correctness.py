@@ -3,7 +3,6 @@
 from typing import List
 
 import pytest
-import ray
 
 from ..models.utils import check_outputs_equal
 from ..utils import RemoteOpenAIServer
@@ -117,7 +116,6 @@ def test_multi_step_llm(hf_runner, vllm_runner, example_prompts, model: str,
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy(prompts, max_tokens)
 
-    
     check_outputs_equal(
         outputs_0_lst=hf_outputs,
         outputs_1_lst=vllm_outputs,
