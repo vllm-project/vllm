@@ -1,11 +1,9 @@
 import json
 import re
-from typing import Dict, List, Optional, Sequence, Union
+from typing import Dict, List, Sequence, Union
 
 import partial_json_parser
 from partial_json_parser.core.options import Allow
-from transformers import (AutoTokenizer, PreTrainedTokenizer,
-                          PreTrainedTokenizerFast)
 
 from vllm.entrypoints.openai.protocol import (DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
@@ -17,6 +15,7 @@ from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
 from vllm.entrypoints.openai.tool_parsers.utils import (
     extract_intermediate_diff)
 from vllm.logger import init_logger
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 logger = init_logger(__name__)
 
@@ -29,11 +28,7 @@ class MistralToolParser(ToolParser):
     Used when --enable-auto-tool-choice --tool-call-parser gmistral are all set
     """
 
-    def __init__(self,
-                 tokenizer: Optional[Union[PreTrainedTokenizer,
-                                           PreTrainedTokenizerFast,
-                                           PreTrainedTokenizerFast,
-                                           AutoTokenizer]] = None):
+    def __init__(self, tokenizer: AnyTokenizer):
         super().__init__(tokenizer)
 
         # initialize properties used for state when parsing tool calls in

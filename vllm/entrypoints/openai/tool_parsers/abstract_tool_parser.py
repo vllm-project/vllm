@@ -1,11 +1,9 @@
 from typing import Dict, List, Sequence, Union
 
-from transformers import (AutoTokenizer, PreTrainedTokenizer,
-                          PreTrainedTokenizerFast)
-
 from vllm.entrypoints.openai.protocol import (DeltaMessage,
                                               ExtractedToolCallInformation)
 from vllm.logger import init_logger
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 logger = init_logger(__name__)
 
@@ -17,9 +15,7 @@ class ToolParser:
     derived classes.
     """
 
-    def __init__(self,
-                 tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast,
-                                  PreTrainedTokenizerFast, AutoTokenizer]):
+    def __init__(self, tokenizer: AnyTokenizer):
         self.prev_tool_call_arr: List[Dict] = []
         # the index of the tool call that is currently being parsed
         self.current_tool_id: int = -1
