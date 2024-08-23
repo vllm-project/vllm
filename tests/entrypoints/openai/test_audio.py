@@ -11,17 +11,15 @@ from ...utils import RemoteOpenAIServer
 MODEL_NAME = "fixie-ai/ultravox-v0_3"
 TEST_AUDIO_URLS = [
     AudioAsset("winning_call").url,
+    AudioAsset("mary_had_lamb").url
 ]
 
 
 @pytest.fixture(scope="module")
 def server():
     args = [
-        "--dtype",
-        "bfloat16",
-        "--max-model-len",
-        "4096",
-        "--enforce-eager",
+        "--dtype", "bfloat16", "--max-model-len", "4096", "--enforce-eager",
+        "--limit-mm-per-prompt", f"audio={len(TEST_AUDIO_URLS)}"
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
@@ -73,8 +71,7 @@ async def test_single_chat_session_audio(client: openai.AsyncOpenAI,
 
     choice = chat_completion.choices[0]
     assert choice.finish_reason == "length"
-    assert chat_completion.usage == openai.types.CompletionUsage(
-        completion_tokens=10, prompt_tokens=202, total_tokens=212)
+    assert chat_completion.usage.completion_tokens == 10
 
     message = choice.message
     message = chat_completion.choices[0].message
@@ -128,8 +125,7 @@ async def test_single_chat_session_audio_base64encoded(
 
     choice = chat_completion.choices[0]
     assert choice.finish_reason == "length"
-    assert chat_completion.usage == openai.types.CompletionUsage(
-        completion_tokens=10, prompt_tokens=202, total_tokens=212)
+    assert chat_completion.usage.completion_tokens == 10
 
     message = choice.message
     message = chat_completion.choices[0].message
@@ -204,50 +200,52 @@ async def test_chat_streaming_audio(client: openai.AsyncOpenAI,
     assert delta.content
     assert "".join(chunks) == output
 
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("audio_url", TEST_AUDIO_URLS)
-async def test_multi_audio_input(client: openai.AsyncOpenAI, model_name: str,
-                                 audio_url: str):
-
+async def test_multiple_audio_urls(client: openai.AsyncOpenAI,
+                                   model_name: str):
     messages = [{
         "role":
         "user",
         "content": [
-            {
+            *({
                 "type": "audio_url",
                 "audio_url": {
                     "url": audio_url
                 }
-            },
-            {
-                "type": "audio_url",
-                "audio_url": {
-                    "url": audio_url
-                }
-            },
+            } for audio_url in TEST_AUDIO_URLS),
             {
                 "type": "text",
-                "text": "What's happening in this audio?"
+                "text": "What sport and what nursery rhyme are referenced?"
             },
         ],
     }]
 
-    with pytest.raises(openai.BadRequestError):  # test multi-audio input
-        await client.chat.completions.create(
-            model=model_name,
-            messages=messages,
-            max_tokens=10,
-            temperature=0.0,
-        )
+    # test single completion
+    chat_completion = await client.chat.completions.create(model=model_name,
+                                                           messages=messages,
+                                                           max_tokens=10,
+                                                           logprobs=True,
+                                                           temperature=0.0,
+                                                           top_logprobs=5)
+    assert len(chat_completion.choices) == 1
 
-    # the server should still work afterwards
-    completion = await client.completions.create(
+    choice = chat_completion.choices[0]
+    assert choice.finish_reason == "length"
+    assert chat_completion.usage.completion_tokens == 10
+
+    message = choice.message
+    message = chat_completion.choices[0].message
+    assert message.content is not None and len(message.content) >= 10
+    assert message.role == "assistant"
+    messages.append({"role": "assistant", "content": message.content})
+
+    # test multi-turn dialogue
+    messages.append({"role": "user", "content": "express your result in json"})
+    chat_completion = await client.chat.completions.create(
         model=model_name,
-        prompt=[0, 0, 0, 0, 0],
-        max_tokens=5,
-        temperature=0.0,
+        messages=messages,
+        max_tokens=10,
     )
-    completion = completion.choices[0].text
-    assert completion is not None and len(completion) >= 0
+    message = chat_completion.choices[0].message
+    assert message.content is not None and len(message.content) >= 0

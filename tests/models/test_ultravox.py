@@ -18,36 +18,38 @@ MODEL_NAME = "fixie-ai/ultravox-v0_3"
 
 AudioTuple = Tuple[np.ndarray, int]
 
-
-@pytest.fixture(scope="session")
-def audio_and_sample_rate():
-    return AudioAsset("mary_had_lamb").audio_and_sample_rate
+AUDIO_ASSETS = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
 
 
-@pytest.fixture
-def prompts_and_audios(audio_and_sample_rate):
+@pytest.fixture(params=[1, 2])
+def prompts_and_audios(request):
+    audio_count = request.param
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
-    vllm_placeholder = "<|reserved_special_token_0|>"
-    hf_placeholder = "<|audio|>"
+    vllm_placeholder = "<|reserved_special_token_0|>\n" * audio_count
+    hf_placeholder = "<|audio|>\n" * audio_count
 
-    question = "What's in the audio?"
+    question = ("What's in the audio?" if audio_count == 1 else
+                "What sport and what nursery rhyme are referenced?")
     vllm_prompt = tokenizer.apply_chat_template(
         [{
             'role': 'user',
-            'content': f"{vllm_placeholder}\n{question}"
+            'content': f"{vllm_placeholder}{question}"
         }],
         tokenize=False,
         add_generation_prompt=True)
     hf_prompt = tokenizer.apply_chat_template(
         [{
             'role': 'user',
-            'content': f"{hf_placeholder}\n{question}"
+            'content': f"{hf_placeholder}{question}"
         }],
         tokenize=False,
         add_generation_prompt=True)
 
-    return [(vllm_prompt, hf_prompt, audio_and_sample_rate)]
+    return [
+        (vllm_prompt, hf_prompt,
+         [asset.audio_and_sample_rate for asset in AUDIO_ASSETS[:audio_count]])
+    ]
 
 
 def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
@@ -70,7 +72,7 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
 def run_test(
     hf_runner: Type[HfRunner],
     vllm_runner: Type[VllmRunner],
-    prompts_and_audios: List[Tuple[str, str, AudioTuple]],
+    prompts_and_audios: List[Tuple[str, str, List[AudioTuple]]],
     model: str,
     *,
     dtype: str,
@@ -91,38 +93,40 @@ def run_test(
                      dtype=dtype,
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
-                     enforce_eager=True) as vllm_model:
-        vllm_outputs_per_audio = [
-            vllm_model.generate_greedy_logprobs([vllm_prompt],
-                                                max_tokens,
-                                                num_logprobs=num_logprobs,
-                                                audios=[audio])
-            for vllm_prompt, _, audio in prompts_and_audios
-        ]
+                     enforce_eager=True,
+                     limit_mm_per_prompt={"audio":
+                                          len(AUDIO_ASSETS)}) as vllm_model:
+        vllm_outputs = vllm_model.generate_greedy_logprobs(
+            [vllm_prompt for vllm_prompt, *_ in prompts_and_audios],
+            max_tokens,
+            num_logprobs=num_logprobs,
+            audios=[audios for *_, audios in prompts_and_audios])
 
     def process(hf_inputs: BatchEncoding):
         hf_inputs["audio_values"] = hf_inputs["audio_values"] \
             .to(torch_dtype)  # type: ignore
         return hf_inputs
 
-    with hf_runner(model,
-                   dtype=dtype,
-                   postprocess_inputs=process,
-                   auto_cls=AutoModel) as hf_model:
+    def resample(audio: AudioTuple) -> AudioTuple:
+        return (librosa.resample(audio[0], orig_sr=audio[1],
+                                 target_sr=16000), 16000)
 
-        hf_outputs_per_audio = [
-            hf_model.generate_greedy_logprobs_limit(
-                [hf_prompt],
+    # The HuggingFace model doesn't support multiple audios yet.
+    if all(len(audios) <= 1 for *_, audios in prompts_and_audios):
+        with hf_runner(model,
+                       dtype=dtype,
+                       postprocess_inputs=process,
+                       auto_cls=AutoModel) as hf_model:
+
+            hf_outputs = hf_model.generate_greedy_logprobs_limit(
+                [hf_prompt for _, hf_prompt, *_ in prompts_and_audios],
                 max_tokens,
                 num_logprobs=num_logprobs,
-                audios=[(librosa.resample(audio[0],
-                                          orig_sr=audio[1],
-                                          target_sr=16000), 16000)])
-            for _, hf_prompt, audio in prompts_and_audios
-        ]
+                audios=[
+                    resample(audios[0]) if audios else None
+                    for *_, audios in prompts_and_audios
+                ])
 
-    for hf_outputs, vllm_outputs in zip(hf_outputs_per_audio,
-                                        vllm_outputs_per_audio):
         check_logprobs_close(
             outputs_0_lst=hf_outputs,
             outputs_1_lst=[
@@ -132,6 +136,10 @@ def run_test(
             name_0="hf",
             name_1="vllm",
         )
+    else:
+        # We don't have anything to compare it to, but we can assert that
+        # some tokens were generated.
+        assert all(tokens for tokens, *_ in vllm_outputs)
 
 
 @pytest.mark.parametrize("dtype", ["half"])

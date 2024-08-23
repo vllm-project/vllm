@@ -1,9 +1,8 @@
 import sys
 from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
-from typing import Callable, Dict, List, Mapping, Optional
-from typing import Sequence as GenericSequence
-from typing import Tuple, Type, TypedDict, TypeVar, Union, cast, final
+from typing import (Callable, Dict, List, Mapping, Optional, Tuple, Type,
+                    TypedDict, TypeVar, Union, cast, final)
 
 import numpy as np
 import torch
@@ -19,10 +18,9 @@ from vllm.utils import JSONTree, json_map_leaves
 
 logger = init_logger(__name__)
 
-NestedTensors = Union[GenericSequence[torch.Tensor], torch.Tensor]
+NestedTensors = Union[List["NestedTensors"], torch.Tensor]
 """
-Use a list instead of a tensor if the dimensions of each element do not match.
-Currently only supports up to singly nested list of tensors.
+Uses a list instead of a tensor if the dimensions of each element do not match.
 """
 
 BatchedTensors: TypeAlias = JSONTree[torch.Tensor]
@@ -54,26 +52,32 @@ class MultiModalInputs(_MultiModalInputsBase):
     """
 
     @staticmethod
-    def _try_concat(tensors: List[NestedTensors]) -> BatchedTensors:
+    def _try_concat(nested_tensors: NestedTensors,
+                    is_nested: bool = False) -> NestedTensors:
         """
         If each input tensor in the batch has the same shape, return a single
         batched tensor; otherwise, return a list of :class:`NestedTensors` with
         one element per item in the batch.
         """
-        # may be list rather than tensors
-        if isinstance(tensors[0], list):
-            return [[t for t in tensor[0]]
-                    for tensor in cast(List[List[torch.Tensor]], tensors)]
+        if isinstance(nested_tensors, torch.Tensor):
+            # The input tensors already have a batch dimension; this will
+            # be re-stacked as long as there's a containing list that
+            # represents the batch dimension.
+            if is_nested:
+                return nested_tensors.squeeze(0)
+            else:
+                return nested_tensors
 
-        tensors_ = cast(List[torch.Tensor], tensors)
+        concatenated = [
+            MultiModalInputs._try_concat(t, is_nested=True)
+            for t in nested_tensors
+        ]
+        if any(isinstance(t, list) for t in concatenated):
+            return concatenated
 
-        unbatched_shape = tensors_[0].shape[1:]
-
-        for tensor in tensors_:
-            if tensor.shape[1:] != unbatched_shape:
-                return [tensor.squeeze(0) for tensor in tensors_]
-
-        return torch.cat(tensors_, dim=0)
+        tensors_ = cast(List[torch.Tensor], concatenated)
+        return torch.stack(tensors_) if all(t.shape == tensors_[0].shape
+                                            for t in tensors_) else tensors_
 
     @staticmethod
     def batch(inputs_list: List["MultiModalInputs"]) -> BatchedTensorInputs:

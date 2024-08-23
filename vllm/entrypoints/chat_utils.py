@@ -1,5 +1,5 @@
+import asyncio
 import codecs
-from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import (Any, Awaitable, Iterable, List, Literal, Optional, Tuple,
@@ -80,10 +80,61 @@ class ConversationMessage(TypedDict):
     content: str
 
 
-@dataclass(frozen=True)
-class ChatMessageParseResult:
-    messages: List[ConversationMessage]
-    mm_futures: List[Awaitable[MultiModalDataDict]]
+class MultiModalItemTracker:
+    """
+    Tracks multi-model items in a given request and ensures that the number
+    of multi-modal items in a given request does not exceed the configured
+    maximum per prompt.
+    """
+
+    def __init__(self, model_config: ModelConfig):
+        self._allowed_items = (model_config.multimodal_config.limit_per_prompt
+                               if model_config.multimodal_config else {})
+        self._consumed_items = {k: 0 for k in self._allowed_items}
+        self._futures: List[Awaitable[MultiModalDataDict]] = []
+
+    def add(self, modality: Literal["image", "audio"],
+            mm_future: Awaitable[MultiModalDataDict]):
+        allowed_count = self._allowed_items.get(modality, 1)
+        existing_count = self._consumed_items.get(modality, 0)
+        if existing_count >= allowed_count:
+            raise ValueError(
+                f"At most {allowed_count} {modality}s may be provided in one "
+                "request.")
+
+        self._consumed_items[modality] = existing_count + 1
+        self._futures.append(mm_future)
+
+    def all_mm_data(self) -> Optional[Awaitable[MultiModalDataDict]]:
+
+        async def _combine(futures: List[Awaitable[MultiModalDataDict]]):
+            mm_data: MultiModalDataDict = {}
+
+            # Merge all the multi-modal items
+            for single_mm_data in (await asyncio.gather(*futures)):
+                for mm_key, mm_item in single_mm_data.items():
+                    existing_item = mm_data.get(mm_key)
+                    if not existing_item:
+                        # Clone it if it's already a list so we can freely
+                        # mutate it later.
+                        item_to_insert = mm_item[:] if isinstance(
+                            mm_item, list) else mm_item
+                        mm_data[mm_key] = item_to_insert  # type: ignore
+                    else:
+                        if isinstance(existing_item, list):
+                            result_list = existing_item
+                        else:
+                            result_list = [existing_item]
+                            mm_data[mm_key] = result_list  # type: ignore
+
+                        if isinstance(mm_item, list):
+                            result_list.extend(mm_item)
+                        else:
+                            result_list.append(mm_item)
+
+            return mm_data
+
+        return _combine(self._futures) if self._futures else None
 
 
 def load_chat_template(
@@ -143,13 +194,37 @@ def _mm_token_str(model_config: ModelConfig, tokenizer: AnyTokenizer,
 
 # TODO: Let user specify how to insert multimodal tokens into prompt
 # (similar to chat template)
-def _get_full_multimodal_text_prompt(placeholder_token_str: str,
+def _get_full_multimodal_text_prompt(placeholders: List[str],
                                      text_prompt: str) -> str:
     """Combine multimodal prompts for a multimodal language model"""
 
+    # Look through the text prompt so that we don't add placeholders for
+    # items that already have them.
+    prompt_fragments = [text_prompt]
+    missing_placeholders: List[str] = []
+    for placeholder in placeholders:
+        for fragment_index, fragment in enumerate(prompt_fragments):
+            index = fragment.find(placeholder)
+            if index >= 0:
+                # This part of the text prompt already has a placeholder.
+                # Remove it from the text prompt fragments so that we don't
+                # consider it for later placeholders.
+                prompt_fragments.pop(fragment_index)
+                before = fragment[:index]
+                after = fragment[index + len(placeholder):]
+                if before:
+                    prompt_fragments.insert(fragment_index, before)
+                if after:
+                    prompt_fragments.insert(fragment_index + 1, after)
+                break
+        else:
+            # The placeholder wasn't in any of the text prompts; we need
+            # to include it.
+            missing_placeholders.append(placeholder)
+
     # NOTE: For now we assume all model architectures use the same
     # placeholder + text prompt format. This may change in the future.
-    return f"{placeholder_token_str}\n{text_prompt}"
+    return "\n".join(missing_placeholders + [text_prompt])
 
 
 _TextParser = TypeAdapter(ChatCompletionContentPartTextParam)
@@ -162,10 +237,10 @@ def _parse_chat_message_content_parts(
     parts: Iterable[ChatCompletionContentPartParam],
     model_config: ModelConfig,
     tokenizer: AnyTokenizer,
-) -> ChatMessageParseResult:
+    mm_tracker: MultiModalItemTracker,
+) -> List[ConversationMessage]:
     texts: List[str] = []
-    mm_futures: List[Awaitable[MultiModalDataDict]] = []
-    modality: Literal["image", "audio"] = "image"
+    mm_placeholders: List[str] = []
 
     for part in parts:
         part_type = part["type"]
@@ -173,11 +248,6 @@ def _parse_chat_message_content_parts(
             text = _TextParser.validate_python(part)["text"]
             texts.append(text)
         elif part_type == "image_url":
-            modality = "image"
-            if len(mm_futures) > 0:
-                raise NotImplementedError(
-                    "Multiple multimodal inputs is currently not supported.")
-
             image_url = _ImageParser.validate_python(part)["image_url"]
 
             if image_url.get("detail", "auto") != "auto":
@@ -185,60 +255,49 @@ def _parse_chat_message_content_parts(
                     "'image_url.detail' is currently not supported and "
                     "will be ignored.")
 
-            image_future = async_get_and_parse_image(image_url["url"])
-            mm_futures.append(image_future)
-        elif part_type == "audio_url":
-            modality = "audio"
-            if len(mm_futures) > 0:
-                raise NotImplementedError(
-                    "Multiple multimodal inputs is currently not supported.")
+            mm_tracker.add("image",
+                           async_get_and_parse_image(image_url["url"]))
 
+            placeholder = _mm_token_str(model_config, tokenizer, "image")
+            if placeholder:
+                mm_placeholders.append(placeholder)
+        elif part_type == "audio_url":
             audio_url = _AudioParser.validate_python(part)["audio_url"]
-            audio_future = async_get_and_parse_audio(audio_url["url"])
-            mm_futures.append(audio_future)
+            mm_tracker.add("audio",
+                           async_get_and_parse_audio(audio_url["url"]))
+
+            placeholder = _mm_token_str(model_config, tokenizer, "audio")
+            if placeholder:
+                mm_placeholders.append(placeholder)
         else:
             raise NotImplementedError(f"Unknown part type: {part_type}")
 
     text_prompt = "\n".join(texts)
+    if mm_placeholders:
+        text_prompt = _get_full_multimodal_text_prompt(mm_placeholders,
+                                                       text_prompt)
 
-    if mm_futures:
-        placeholder_token_str = _mm_token_str(model_config, tokenizer,
-                                              modality)
-        if placeholder_token_str is not None:
-            if placeholder_token_str in text_prompt:
-                logger.warning(
-                    "Detected multi-modal token string in the text prompt. "
-                    "Skipping prompt formatting.")
-            else:
-                text_prompt = _get_full_multimodal_text_prompt(
-                    placeholder_token_str=placeholder_token_str,
-                    text_prompt=text_prompt,
-                )
-
-    messages = [ConversationMessage(role=role, content=text_prompt)]
-
-    return ChatMessageParseResult(messages=messages, mm_futures=mm_futures)
+    return [ConversationMessage(role=role, content=text_prompt)]
 
 
 def _parse_chat_message_content(
-    message: ChatCompletionMessageParam,
-    model_config: ModelConfig,
-    tokenizer: AnyTokenizer,
-) -> ChatMessageParseResult:
+        message: ChatCompletionMessageParam, model_config: ModelConfig,
+        tokenizer: AnyTokenizer,
+        mm_tracker: MultiModalItemTracker) -> List[ConversationMessage]:
     role = message["role"]
     content = message.get("content")
 
     if content is None:
-        return ChatMessageParseResult(messages=[], mm_futures=[])
+        return []
     if isinstance(content, str):
-        messages = [ConversationMessage(role=role, content=content)]
-        return ChatMessageParseResult(messages=messages, mm_futures=[])
+        return [ConversationMessage(role=role, content=content)]
 
     return _parse_chat_message_content_parts(
         role,
         content,  # type: ignore
         model_config,
         tokenizer,
+        mm_tracker,
     )
 
 
@@ -246,18 +305,17 @@ def parse_chat_messages(
     messages: List[ChatCompletionMessageParam],
     model_config: ModelConfig,
     tokenizer: AnyTokenizer,
-) -> Tuple[List[ConversationMessage], List[Awaitable[MultiModalDataDict]]]:
+) -> Tuple[List[ConversationMessage], Optional[Awaitable[MultiModalDataDict]]]:
     conversation: List[ConversationMessage] = []
-    mm_futures: List[Awaitable[MultiModalDataDict]] = []
+    mm_tracker = MultiModalItemTracker(model_config)
 
     for msg in messages:
-        parse_result = _parse_chat_message_content(msg, model_config,
-                                                   tokenizer)
+        sub_messages = _parse_chat_message_content(msg, model_config,
+                                                   tokenizer, mm_tracker)
 
-        conversation.extend(parse_result.messages)
-        mm_futures.extend(parse_result.mm_futures)
+        conversation.extend(sub_messages)
 
-    return conversation, mm_futures
+    return conversation, mm_tracker.all_mm_data()
 
 
 def apply_chat_template(

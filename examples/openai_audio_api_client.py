@@ -23,9 +23,6 @@ client = OpenAI(
 models = client.models.list()
 model = models.data[0].id
 
-# Any format supported by librosa is supported
-audio_url = AudioAsset("winning_call").url
-
 # Use audio url in the payload
 chat_completion_from_url = client.chat.completions.create(
     messages=[{
@@ -39,7 +36,8 @@ chat_completion_from_url = client.chat.completions.create(
             {
                 "type": "audio_url",
                 "audio_url": {
-                    "url": audio_url
+                    # Any format supported by librosa is supported
+                    "url": AudioAsset("winning_call").url
                 },
             },
         ],
@@ -63,7 +61,8 @@ def encode_audio_base64_from_url(audio_url: str) -> str:
     return result
 
 
-audio_base64 = encode_audio_base64_from_url(audio_url=audio_url)
+audio_base64 = encode_audio_base64_from_url(
+    audio_url=AudioAsset("winning_call").url)
 chat_completion_from_base64 = client.chat.completions.create(
     messages=[{
         "role":
@@ -84,6 +83,39 @@ chat_completion_from_base64 = client.chat.completions.create(
     }],
     model=model,
     max_tokens=64,
+)
+
+result = chat_completion_from_base64.choices[0].message.content
+print(f"Chat completion output:{result}")
+
+chat_completion_from_base64 = client.chat.completions.create(
+    messages=[{
+        "role":
+        "user",
+        "content": [
+            {
+                "type": "text",
+                "text": "What sport and what nursery rhyme are referenced?"
+            },
+            {
+                "type": "audio_url",
+                "audio_url": {
+                    # Any format supported by librosa is supported
+                    "url": AudioAsset("mary_had_lamb").url
+                },
+            },
+            {
+                "type": "audio_url",
+                "audio_url": {
+                    # Any format supported by librosa is supported
+                    "url": AudioAsset("winning_call").url
+                },
+            },
+        ],
+    }],
+    model=model,
+    max_tokens=64,
+    temperature=0.0,
 )
 
 result = chat_completion_from_base64.choices[0].message.content
