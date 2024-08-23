@@ -8,3 +8,8 @@ body:
   attributes:
     value: >
       This is a placeholder template to guide users to the chatbot.
+- type: textarea
+  attributes:
+    label: placeholder
+    description: >
+      This is a placeholder template to guide users to the chatbot.
