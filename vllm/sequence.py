@@ -669,16 +669,16 @@ class SequenceGroup:
         # There are either 0 or 1 negative sequences
         # We use the prompt of an arbitrary sequence.
         assert self.is_single_seq is True
-        return (self.negative_seqs[0].prompt
-                if self.negative_seqs is not None else None)
+        return (self.negative_seq.prompt
+                if self.negative_seq is not None else None)
 
     @property
     def negative_prompt_token_ids(self) -> List[int]:
         # All sequences in the group should have the same prompt.
         # We use the prompt of an arbitrary sequence.
         assert self.is_single_seq is True
-        return (self.negative_seqs[0].prompt_token_ids
-                if self.negative_seqs is not None else None)
+        return (self.negative_seq.prompt_token_ids
+                if self.negative_seq is not None else None)
 
     @property
     def multi_modal_data(self) -> "MultiModalDataDict":
