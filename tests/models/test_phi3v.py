@@ -21,7 +21,7 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "cherry_blossom":
     "<|user|>\n<|image_1|>\nWhat is the season?<|end|>\n<|assistant|>\n",
 })
-HF_MULTIIMAGE_IMAGE_PROMPT = "<|user|>\n<|image_1|>\n<|image_2|>\nWhat's the content of the image?<|end|>\n<|assistant|>\n" # noqa: E501
+HF_MULTIIMAGE_IMAGE_PROMPT = "<|user|>\n<|image_1|>\n<|image_2|>\nDescribe these images.<|end|>\n<|assistant|>\n"  # noqa: E501
 
 models = ["microsoft/Phi-3.5-vision-instruct"]
 
