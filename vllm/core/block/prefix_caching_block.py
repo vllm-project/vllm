@@ -1,6 +1,6 @@
 """Token blocks."""
 from os.path import commonprefix
-from typing import Dict, FrozenSet, Iterable, List, Optional, Tuple
+from typing import Dict, FrozenSet, Iterable, List, Optional, Set, Tuple
 
 from vllm.core.block.common import (CacheMetricData, CopyOnWriteTracker,
                                     get_all_blocks_recursively)
@@ -76,7 +76,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # A list of immutable block IDs that have been touched by scheduler
         # and should be marked as computed after an entire batch of sequences
         # are scheduled.
-        self._touched_blocks: List[BlockId] = []
+        self._touched_blocks: Set[BlockId] = set()
 
         # Used to track status of each physical block id
         self._block_tracker: Dict[BlockId, BlockTracker] = {}
@@ -450,7 +450,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             self._cached_blocks[block.content_hash] = block.block_id
             # Mark this block as touched so that it can be marked as
             # computed after the entire batch of sequences are scheduled.
-            self._touched_blocks.append(block.block_id)
+            self._touched_blocks.add(block.block_id)
             return block.block_id
 
         # Reuse the cached content hash
@@ -519,7 +519,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # Mark all touched blocks as computed.
         for block_id in self._touched_blocks:
             self._block_tracker[block_id].computed = True
-        self._touched_blocks = []
+        self._touched_blocks.clear()
 
     def _track_block_id(self, block_id: Optional[BlockId],
                         computed: bool) -> None:
