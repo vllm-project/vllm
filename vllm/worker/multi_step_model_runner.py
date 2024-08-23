@@ -52,7 +52,9 @@ class ModelOutput:
     sampled_token_ids: Optional[torch.Tensor] = None
     pythonized: bool = False
 
-    # metadata required to run the pythonization
+    # Metadata required to run the pythonization.
+    # This information is passed on from the model_input during ModelOutput creation.
+    # Please look at the comments in StatefulModelInput.
     sampling_metadata: SamplingMetadata = None
     num_empty_prefill_step_outputs: int = None
 
