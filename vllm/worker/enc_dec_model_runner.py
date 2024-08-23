@@ -182,13 +182,11 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         if (model_input.attn_metadata is not None
                 and model_input.attn_metadata.prefill_metadata is None
                 and model_input.attn_metadata.decode_metadata.use_cuda_graph):
-            print('Executing as cuda graph')
             assert model_input.input_tokens is not None
             graph_batch_size = model_input.input_tokens.shape[0]
             model_executable = self.graph_runners[
                 model_input.virtual_engine][graph_batch_size]
         else:
-            print('Executing without cuda graph')
             model_executable = self.model
 
         seqlen_agnostic_kwargs = {

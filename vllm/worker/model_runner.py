@@ -993,6 +993,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
     def get_max_block_per_batch(self) -> int:
         block_size = self.block_size
+        print('block_size  ' + str(block_size))
+        print('max_seq_len_to_capture  ' + str(self.max_seq_len_to_capture))
         return (self.max_seq_len_to_capture + block_size - 1) // block_size
 
     def _prepare_model_input_tensors(

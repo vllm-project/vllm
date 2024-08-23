@@ -324,7 +324,6 @@ class CommonAttentionState(AttentionState):
             use_cuda_graph=True,
         )
         if is_encoder_decoder_model:
-            print('Here !!!')
             # The encoder decoder model works only with XFormers backend.
             # Assert the same.
             assert self.runner.attn_backend.get_name() == "xformers", \

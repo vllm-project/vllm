@@ -187,8 +187,8 @@ if not is_cpu():
         '''
         Test the vLLM BART model for a variety of encoder/decoder input prompts,
         by validating it against HuggingFace (HF) BART.
-        This test is same as test_models above except that for this test we enable
-        CUDA Graph capture and replay.
+        This test is same as test_models above except that for this test we
+        enable CUDA Graph capture and replay.
         '''
 
         test_case_prompts = example_encoder_decoder_prompts[
@@ -216,8 +216,7 @@ if not is_cpu():
                     **hf_kwargs,
                 ))
 
-        with vllm_runner(model, dtype=dtype,
-                         enforce_eager=False) as vllm_model:
+        with vllm_runner(model, dtype=dtype, enforce_eager=True) as vllm_model:
             vllm_outputs = vllm_model.generate_encoder_decoder_greedy_logprobs(
                 test_case_prompts, max_tokens, num_logprobs)
 
