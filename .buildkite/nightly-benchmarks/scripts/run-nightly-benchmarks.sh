@@ -71,7 +71,8 @@ get_current_llm_serving_engine() {
 
   if [ -e /vllm-workspace ]; then
     echo "Container: vllm"
-    export CURRENT_LLM_SERVING_ENGINE=vllm
+    export CURRENT_LLM_SERVING_ENGINE=vllm_$(python3 -c "import vllm; print(vllm.__version__.replace('.', ''))")
+    
     return
   fi
 }
