@@ -425,20 +425,23 @@ class EngineArgs:
                             help='Always use eager-mode PyTorch. If False, '
                             'will use eager mode and CUDA graph in hybrid '
                             'for maximal performance and flexibility.')
-        parser.add_argument('--max-context-len-to-capture',
-                            type=int,
-                            default=EngineArgs.max_context_len_to_capture,
-                            help='Maximum context length covered by CUDA '
-                            'graphs. When a sequence has context length '
-                            'larger than this, we fall back to eager mode. '
-                            '(DEPRECATED. Use --max-seq-len-to-capture instead'
-                            ')')
+        parser.add_argument(
+            '--max-context-len-to-capture',
+            type=int,
+            default=EngineArgs.max_context_len_to_capture,
+            help='Maximum context length covered by CUDA '
+            'graphs. When a sequence has context length '
+            'larger than this, we fall back to eager mode. '
+            '(DEPRECATED. Use --max-seq-len-to-capture instead)')
         parser.add_argument('--max-seq-len-to-capture',
                             type=int,
                             default=EngineArgs.max_seq_len_to_capture,
                             help='Maximum sequence length covered by CUDA '
                             'graphs. When a sequence has context length '
-                            'larger than this, we fall back to eager mode.')
+                            'larger than this, we fall back to eager mode. '
+                            'Additionally for encoder-decoder models, if the '
+                            'sequence length of the encoder input is larger '
+                            'than this, we fall back to the eager mode.')
         parser.add_argument('--disable-custom-all-reduce',
                             action='store_true',
                             default=EngineArgs.disable_custom_all_reduce,

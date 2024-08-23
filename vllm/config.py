@@ -99,7 +99,9 @@ class ModelConfig:
             to eager mode (DEPRECATED. Use max_seq_len_to_capture instead).
         max_seq_len_to_capture: Maximum sequence len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
-            to eager mode
+            to eager mode. Additionally for encoder-decoder models, if the
+            sequence length of the encoder input is larger than this, we fall
+            back to the eager mode.
         disable_sliding_window: Whether to disable sliding window. If True,
             we will disable the sliding window functionality of the model.
             If the model does not support sliding window, this argument is
