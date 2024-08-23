@@ -431,6 +431,7 @@ class Scheduler:
                     self.free_seq(seq)
 
                 self._free_seq_group_cross_attn_blocks(aborted_group)
+                self._free_seq_group_negative_blocks(aborted_group)
 
     def _free_seq_group_cross_attn_blocks(
         self,
@@ -442,6 +443,13 @@ class Scheduler:
         """
         if seq_group.is_encoder_decoder():
             self.block_manager.free_cross(seq_group)
+
+    def _free_seq_group_negative_blocks(
+        self,
+        seq_group: SequenceGroup,
+    ) -> None:
+        if seq_group.has_negative_prompt():
+            self.block_manager.free_negative(seq_group)
 
     def has_unfinished_seqs(self) -> bool:
         return len(self.waiting) != 0 or len(self.running) != 0 or len(
@@ -1066,6 +1074,15 @@ class Scheduler:
                 encoder_seq_data = None
                 cross_block_table = None
 
+            if seq_group.has_negative_prompt():
+                negative_seq_data = seq_group.get_negative_seq().data
+                negative_block_table = self.block_manager.get_negative_block_table(
+                    seq_group
+                )
+            else:
+                negative_seq_data = None
+                negative_block_table = None
+
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 seq_id = seq.seq_id
                 seq_data[seq_id] = seq.data
@@ -1113,6 +1130,8 @@ class Scheduler:
                     computed_block_nums=common_computed_block_nums,
                     encoder_seq_data=encoder_seq_data,
                     cross_block_table=cross_block_table,
+                    negative_seq_data=negative_seq_data,
+                    negative_block_table=negative_block_table,
                     state=seq_group.state,
                     # `multi_modal_data` will only be present for the 1st comm
                     # between engine and worker.
@@ -1206,7 +1225,8 @@ class Scheduler:
         seq_group.init_multi_step(num_scheduler_steps=num_lookahead_slots + 1)
 
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-            cows = self.block_manager.append_slots(seq, num_lookahead_slots)
+            cows = self.block_manager.append_slots(seq, num_lookahead_slots, seq_group)
+            assert len(cows) == 0
             if len(cows) > 0:
                 blocks_to_copy.extend(cows)
 
@@ -1327,15 +1347,6 @@ class Scheduler:
         if is_prefill:
             return 0
 
-        num_lookahead_slots = 0
-        if seq_group is not None:
-            for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-                if len(seq.get_negative_token_ids()) > len(seq.get_token_ids()):
-                    addtional_length = len(seq.get_negative_token_ids()) - len(seq.get_token_ids())
-                    num_lookahead_slots = max(num_lookahead_slots, addtional_length)
-
-        if num_lookahead_slots > 0:
-            return num_lookahead_slots
 
         return self.scheduler_config.num_lookahead_slots
 

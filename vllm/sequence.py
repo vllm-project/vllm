@@ -152,12 +152,6 @@ class SequenceData(msgspec.Struct,
     _output_token_ids: array = msgspec.field(
         default_factory=lambda: array(VLLM_TOKEN_ID_ARRAY_TYPE, []))
 
-    _negative_prompt_token_ids: array = msgspec.field(
-        default_factory=lambda: array(VLLM_TOKEN_ID_ARRAY_TYPE, []))
-    _negative_prompt_token_ids_tuple: Tuple[int,
-                                            ...] = msgspec.field(default_factory=tuple)
-    _cached_all_negative_token_ids: List[int] = msgspec.field(default_factory=list)
-
     ### The below fields should not be passed as an argument ###
     _cumulative_logprob: float = 0.0
     _prompt_token_ids_tuple: Tuple[int,
@@ -176,11 +170,7 @@ class SequenceData(msgspec.Struct,
         assert self._output_token_ids.typecode == "l"
         self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(
             self._prompt_token_ids)
-        assert self._negative_prompt_token_ids.typecode == "l"
-        self._negative_prompt_token_ids_tuple: Tuple[int, ...] = tuple(
-            self._negative_prompt_token_ids)
         self._update_cached_all_tokens()
-        self._update_cached_all_negative_tokens()
 
     def _update_cached_all_tokens(self):
         assert isinstance(self._prompt_token_ids, array)
@@ -191,12 +181,6 @@ class SequenceData(msgspec.Struct,
     @property
     def cumulative_logprob(self) -> float:
         return self._cumulative_logprob
-
-    def _update_cached_all_negative_tokens(self):
-        assert isinstance(self._negative_prompt_token_ids, array)
-        assert isinstance(self._output_token_ids, array)
-        self._cached_all_negative_token_ids: List[int] = list(self._negative_prompt_token_ids +
-                                                              self._output_token_ids)
 
     @property
     def prompt_token_ids(self) -> Tuple[int, ...]:
@@ -216,23 +200,6 @@ class SequenceData(msgspec.Struct,
         return self._prompt_token_ids
 
     @property
-    def negative_prompt_token_ids(self) -> Tuple[int, ...]:
-        return self._negative_prompt_token_ids_tuple
-
-    @negative_prompt_token_ids.setter
-    def negative_prompt_token_ids(self, new_negative_prompt_token_ids) -> None:
-        raise NotImplementedError
-
-    @property
-    def negative_prompt_token_ids_array(self) -> array:
-        """Return the prompt token ids in array type.
-
-        Note that the array is in "I" type, and it is not compatible
-        with torch.long (2 bytes vs 4 bytes). So beware of the usage.
-        """
-        return self._negative_prompt_token_ids
-
-    @property
     def output_token_ids(self) -> Tuple[int, ...]:
         return tuple(self._output_token_ids)
 
@@ -241,7 +208,6 @@ class SequenceData(msgspec.Struct,
         self._output_token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
                                        new_output_token_ids)
         self._update_cached_all_tokens()
-        self._update_cached_all_negative_tokens()
 
     @property
     def output_token_ids_array(self) -> array:
@@ -257,7 +223,6 @@ class SequenceData(msgspec.Struct,
         self._output_token_ids.append(token_id)
         self._new_appended_tokens.append(token_id)
         self._cached_all_token_ids.append(token_id)
-        self._cached_all_negative_token_ids.append(token_id)
         self._cumulative_logprob += logprob
 
     def get_len(self) -> int:
@@ -271,9 +236,6 @@ class SequenceData(msgspec.Struct,
 
     def get_token_ids(self) -> List[int]:
         return self._cached_all_token_ids
-
-    def get_negative_token_ids(self) -> List[int]:
-        return self._cached_all_negative_token_ids
 
     def get_prefix_token_ids(
             self, num_tokens: int
@@ -348,7 +310,6 @@ class SequenceData(msgspec.Struct,
     def __repr__(self) -> str:
         return (f"SequenceData("
                 f"prompt_token_ids={self._prompt_token_ids}, "
-                f"negative_prompt_token_ids={self.negative_prompt_token_ids}, "
                 f"output_token_ids={self.output_token_ids}, "
                 f"cumulative_logprob={self.cumulative_logprob}, "
                 f"get_num_computed_tokens={self.get_num_computed_tokens()}")
@@ -389,6 +350,7 @@ class Sequence:
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         from_decoder_prompt: bool = True,
+        from_negative_prompt: bool = False,
     ) -> None:
         self.seq_id = seq_id
         self.inputs = inputs
@@ -397,10 +359,9 @@ class Sequence:
         self.lora_request = lora_request
         self.prompt_adapter_request = prompt_adapter_request
         self.from_decoder_prompt = from_decoder_prompt
+        self.from_negative_prompt = from_negative_prompt
         self._prompt: Optional[str] = None
         self._prompt_token_ids: Optional[List[int]] = None
-        self._negative_prompt: Optional[str] = None
-        self._negative_prompt_token_ids: Optional[List[int]] = None
 
         # For decoder-only models, a Sequence is constructed
         # from an LLMInputs instance (the `inputs` arg.)
@@ -430,8 +391,7 @@ class Sequence:
                              "encoder input prompt fields?")
 
         self.data = SequenceData(
-            array(VLLM_TOKEN_ID_ARRAY_TYPE, self.prompt_token_ids),
-            _negative_prompt_token_ids=array(VLLM_TOKEN_ID_ARRAY_TYPE, self.negative_prompt_token_ids))
+            array(VLLM_TOKEN_ID_ARRAY_TYPE, self.prompt_token_ids))
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
 
@@ -456,8 +416,12 @@ class Sequence:
 
         # Select decoder or encoder input prompt str,
         # as appropriate
-        prompt_key: str = ("prompt"
-                           if self.from_decoder_prompt else "encoder_prompt")
+        prompt_key: str = "prompt"
+        if not self.from_decoder_prompt:
+            prompt_key = "encoder_prompt"
+        if self.from_negative_prompt:
+            assert self.from_decoder_prompt is True
+            prompt_key = "negative_prompt"
 
         # Cache prompt
         self._prompt = cast(Optional[str], self.inputs.get(prompt_key))
@@ -471,9 +435,12 @@ class Sequence:
 
         # Select decoder or encoder input prompt
         # token ids, as appropriate
-        prompt_token_ids_key: str = ("prompt_token_ids"
-                                     if self.from_decoder_prompt else
-                                     "encoder_prompt_token_ids")
+        prompt_token_ids_key: str = "prompt_token_ids"
+        if not self.from_decoder_prompt:
+            "encoder_prompt_token_ids"
+        if self.from_negative_prompt:
+            assert self.from_decoder_prompt is True
+            prompt_token_ids_key = "negative_prompt_token_ids"
 
         # Cache computed prompt token ids
         self._prompt_token_ids = cast(List[int],
@@ -483,35 +450,6 @@ class Sequence:
     @property
     def multi_modal_data(self) -> "MultiModalDataDict":
         return self.inputs.get("multi_modal_data") or {}
-
-    @property
-    def negative_prompt(self) -> Optional[str]:
-        if self._negative_prompt is not None:
-            # Reuse precomputed prompt string
-            return self._negative_prompt
-
-        # Select decoder or encoder input prompt str,
-        # as appropriate
-        assert self.from_decoder_prompt is True
-        negative_prompt_key: str = "negative_prompt"
-
-        # Cache prompt
-        self._negative_prompt = cast(Optional[str], self.inputs.get(negative_prompt_key))
-        return self._negative_prompt
-
-    @property
-    def negative_prompt_token_ids(self) -> List[int]:
-        if self._negative_prompt_token_ids is not None:
-            # Reuse precomputed negative prompt token ids
-            return self._negative_prompt_token_ids
-        
-        # Select decoder or encoder input prompt
-        # token ids, as appropriate
-        assert self.from_decoder_prompt is True
-        negative_prompt_token_ids_key: str = "negative_prompt_token_ids"
-        self._negative_prompt_token_ids = cast(List[int],
-                                               self.inputs.get(negative_prompt_token_ids_key))
-        return self._negative_prompt_token_ids
 
     @property
     def lora_int_id(self) -> int:
@@ -671,6 +609,7 @@ class SequenceGroup:
         embeddings: Optional[List[float]] = None,
         pooling_params: Optional[PoolingParams] = None,
         encoder_seq: Optional[Sequence] = None,
+        negative_seq: Optional[Sequence] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> None:
@@ -693,6 +632,9 @@ class SequenceGroup:
         self.prompt_adapter_request = prompt_adapter_request
         self.encoder_seq = encoder_seq
         self.trace_headers = trace_headers
+
+        assert self.is_single_seq is True
+        self.negative_seq = negative_seq
 
     @property
     def prompt(self) -> Optional[str]:
@@ -723,22 +665,26 @@ class SequenceGroup:
                 if self.encoder_seq is not None else None)
 
     @property
-    def multi_modal_data(self) -> "MultiModalDataDict":
-        # All sequences in the group should have the same multi-modal data.
-        # We use the multi-modal data of an arbitrary sequence.
-        return self.seqs[0].multi_modal_data
-
-    @property
     def negative_prompt(self) -> Optional[str]:
-        # All sequences in the group should have the same prompt.
+        # There are either 0 or 1 negative sequences
         # We use the prompt of an arbitrary sequence.
-        return self.seqs[0].negative_prompt
+        assert self.is_single_seq is True
+        return (self.negative_seqs[0].prompt
+                if self.negative_seqs is not None else None)
 
     @property
     def negative_prompt_token_ids(self) -> List[int]:
         # All sequences in the group should have the same prompt.
         # We use the prompt of an arbitrary sequence.
-        return self.seqs[0].negative_prompt_token_ids
+        assert self.is_single_seq is True
+        return (self.negative_seqs[0].prompt_token_ids
+                if self.negative_seqs is not None else None)
+
+    @property
+    def multi_modal_data(self) -> "MultiModalDataDict":
+        # All sequences in the group should have the same multi-modal data.
+        # We use the multi-modal data of an arbitrary sequence.
+        return self.seqs[0].multi_modal_data
 
     @property
     def lora_int_id(self) -> int:
@@ -832,6 +778,12 @@ class SequenceGroup:
 
     def get_encoder_seq(self) -> Optional[Sequence]:
         return self.encoder_seq
+
+    def has_negative_prompt(self) -> bool:
+        return self.negative_seq is not None
+
+    def get_negative_seq(self) -> Optional[Sequence]:
+        return self.negative_seq
 
     def get_unfinished_seqs(self) -> List[Sequence]:
         if self.is_single_seq:
@@ -986,6 +938,8 @@ class SequenceGroupMetadata(
     multi_modal_data: Optional[Any] = None
     encoder_seq_data: Optional[SequenceData] = None
     cross_block_table: Optional[List[int]] = None
+    negative_seq_data: Optional[SequenceData] = None
+    negative_block_table: Optional[List[int]] = None
     prompt_adapter_request: Optional[PromptAdapterRequest] = None
     token_chunk_size: Optional[int] = None
 

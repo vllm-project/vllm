@@ -95,6 +95,10 @@ class CFGWorker(LoraNotSupportedWorkerBase):
         execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> List[SamplerOutput]:
 
+        # print("==> request positive :")
+        # for seq_group_metadata in execute_model_req.seq_group_metadata_list:
+        #     print("seq_group_metadata:", seq_group_metadata)
+
         # prepare negative request with shallow copy
         if execute_model_req is not None:
             negative_seq_group_metadata_list: List[SequenceGroupMetadata] = []
@@ -102,26 +106,37 @@ class CFGWorker(LoraNotSupportedWorkerBase):
             for seq_group_metadata in execute_model_req.seq_group_metadata_list:
                 negative_seq_group_metadata = copy.copy(seq_group_metadata)
                 negative_seq_data: Dict[int, SequenceData] = {}
-                for seq_id, seq_data in seq_group_metadata.seq_data.items():
-                    negative_seq_data[seq_id] = SequenceData(
-                        seq_data._negative_prompt_token_ids,
-                        _output_token_ids=seq_data._output_token_ids,
-                        _cumulative_logprob=seq_data._cumulative_logprob,
-                        _prompt_token_ids_tuple=seq_data._negative_prompt_token_ids,
-                        _num_computed_tokens=seq_data._num_computed_tokens,
-                        _stage=seq_data.stage,
-                        _cached_all_token_ids=seq_data._cached_all_token_ids,
-                        _new_appended_tokens=seq_data._new_appended_tokens,
-                    )
+                negative_block_tables: Dict[int, List[int]] = {}
+                assert len(seq_group_metadata.seq_data) == 1
+                for seq_id in seq_group_metadata.seq_data.keys():
+                    negative_seq_data[seq_id] = seq_group_metadata.negative_seq_data
+                    # negative_seq_data[seq_id] = SequenceData(
+                    #     _prompt_token_ids=seq_group_metadata.negative_seq_data.prompt_token_ids_array,
+                    #     _output_token_ids=seq_data._output_token_ids,
+                    #     _cumulative_logprob=seq_data._cumulative_logprob,
+                    #     _prompt_token_ids_tuple=seq_group_metadata.negative_seq_data.prompt_token_ids,
+                    #     _num_computed_tokens=seq_data._num_computed_tokens,
+                    #     _stage=seq_data.stage,
+                    #     _cached_all_token_ids=seq_data._cached_all_token_ids,
+                    #     _new_appended_tokens=seq_data._new_appended_tokens,
+                    # )
+                    negative_block_tables[seq_id] = seq_group_metadata.negative_block_table
 
                 if negative_seq_group_metadata.is_prompt:
                     negative_seq_group_metadata.token_chunk_size = list(negative_seq_data.values())[0].get_len()
 
                 negative_seq_group_metadata.seq_data = negative_seq_data
+                negative_seq_group_metadata.block_tables = negative_block_tables
+                negative_seq_group_metadata.negative_seq_data = None
+                negative_seq_group_metadata.negative_block_table = None
                 negative_seq_group_metadata_list.append(negative_seq_group_metadata)
             negative_excute_model_req.seq_group_metadata_list = negative_seq_group_metadata_list
         else:
             negative_excute_model_req = None
+
+        # print("==> request negative:")
+        # for seq_group_metadata in negative_excute_model_req.seq_group_metadata_list:
+        #     print("seq_group_metadata:", seq_group_metadata)
 
         inputs = self.root_worker.prepare_input(execute_model_req)
         negative_inputs = self.guidance_worker.prepare_input(negative_excute_model_req)
