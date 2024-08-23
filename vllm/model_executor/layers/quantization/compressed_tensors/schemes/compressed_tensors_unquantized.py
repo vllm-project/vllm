@@ -1,4 +1,4 @@
-from typing import Callable, List, Optional
+from typing import List, Optional
 
 import torch
 import torch.nn.functional as F
@@ -28,11 +28,12 @@ class CompressedTensorsUnquantized(CompressedTensorsScheme):
                                           requires_grad=False)
 
     def create_weights(self, layer: torch.nn.Module,
-                       output_partition_sizes: List[int],
                        input_size_per_partition: int,
-                       params_dtype: torch.dtype, weight_loader: Callable,
-                       **kwargs):
+                       output_partition_sizes: List[int], input_size: int,
+                       output_size: int, params_dtype: torch.dtype,
+                       **extra_weight_attrs):
 
+        weight_loader = extra_weight_attrs.get("weight_loader")
         weight = ModelWeightParameter(data=torch.empty(
             sum(output_partition_sizes),
             input_size_per_partition,

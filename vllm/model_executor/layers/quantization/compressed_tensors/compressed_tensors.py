@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 from pydantic import BaseModel
@@ -52,15 +52,20 @@ class CompressedTensorsConfig(QuantizationConfig):
     def get_name(self) -> str:
         return "compressed_tensors"
 
-    # TODO (@robertgshaw2-neuralmagic): do layer skipping though here
-    # rather than though create_weights to match other methods
-    def get_quant_method(
+    def get_quant_method(  #type: ignore
         self,
         layer: torch.nn.Module,
         prefix: str,
-    ) -> Optional["QuantizeMethodBase"]:
+    ) -> Optional[Union["CompressedTensorsUnquantized", "QuantizeMethodBase"]]:
         from vllm.attention.layer import Attention  # Avoid circular import
+
+        # Check if the layer is skipped for quantization.
+        # TODO (@robertgshaw2): support module names
+        if should_ignore_layer(prefix, ignore=self.ignore):
+            return CompressedTensorsUnquantized()
         if isinstance(layer, LinearBase):
+            scheme = self.get_scheme(layer=layer, layer_name=prefix)
+            layer.scheme = scheme
             return CompressedTensorsLinearMethod(self)
         if isinstance(layer, Attention):
             return CompressedTensorsKVCacheMethod(self)
@@ -281,15 +286,11 @@ class CompressedTensorsConfig(QuantizationConfig):
         to select the CompressedTensorsScheme used for infernece.
         """
 
-        # Check if the layer is skipped for quantization.
-        # TODO (@robertgshaw2): support module names
-        if should_ignore_layer(layer_name, ignore=self.ignore):
-            return CompressedTensorsUnquantized()
-
         # Find the "target" in the compressed-tensors config
         # that our layer conforms to.
         # TODO (@robertgshaw): add compressed-tensors as dep
         # so we do not have to re-write these functions
+        # need to make accelerate optional in ct to do this
         matched_target = find_matched_target(
             layer_name=layer_name,
             module=layer,
@@ -327,10 +328,7 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
         details
         """
         weight_loader = extra_weight_attrs.get("weight_loader")
-        layer_name = extra_weight_attrs.get("prefix")
-
-        scheme = self.quantization_config.get_scheme(layer, layer_name)
-        scheme.create_weights(
+        layer.scheme.create_weights(
             layer=layer,
             input_size=input_size,
             input_size_per_partition=input_size_per_partition,
@@ -338,8 +336,6 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
             output_size=output_size,
             params_dtype=params_dtype,
             weight_loader=weight_loader)
-
-        layer.scheme = scheme
 
     def apply(self,
               layer: torch.nn.Module,
