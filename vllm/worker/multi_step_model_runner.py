@@ -221,7 +221,6 @@ class StatefulModelInput(BroadcastableModelInput):
                            sampler_output: SamplerOutput,
                            sampled_token_ids: Optional[torch.Tensor] = None):
         assert self.frozen_model_input is not None
-        assert self.frozen_model_input.sampling_metadata is not None
         self.cached_outputs.append(
             ModelOutput(
                 sampler_output=sampler_output,
@@ -381,7 +380,6 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
             ) == 1, "MultiStepModelRunner requires single-step base_models"
 
             assert model_input.frozen_model_input is not None
-            assert model_input.frozen_model_input.sampling_metadata is not None
 
             # event for the pythonization so that we only pythonize if the
             # tensors are ready. May be able to be combined with the step event
