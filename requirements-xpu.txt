@@ -1,7 +1,7 @@
 # Common dependencies
 -r requirements-common.txt
 
-setuptools < 70.0.0 # IPEX's torch have some dependency. to be removed.
+setuptools == 69.5.1 # IPEX XPU dependency
 
 torch
 intel_extension_for_pytorch
