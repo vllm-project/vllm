@@ -603,9 +603,7 @@ def _sample_with_torch(
         seq_group_id = categorized_seq_group_ids[sampling_type]
         seq_groups = [sampling_metadata.seq_groups[i] for i in seq_group_id]
         is_prompts = [i < sampling_metadata.num_prompts for i in seq_group_id]
-        #sample_metadata[sampling_type] = (seq_group_id, seq_groups)
-        sample_metadata[sampling_type] = (seq_group_id, seq_groups, is_prompts,
-                                          sample_indices)
+        sample_metadata[sampling_type] = (seq_group_id, seq_groups)
         long_sample_indices = sample_indices.long()
         if sampling_type == SamplingType.FORCED:
             if (seq_groups[0].sampling_params.future_context is not None):
@@ -675,10 +673,8 @@ def _sample_with_torch(
         for sampling_type in SamplingType:
             if sampling_type not in sample_metadata:
                 continue
-            #(seq_group_id, seq_groups) = sample_metadata[sampling_type]
-            #if sampling_type == SamplingType.GREEDY:
-            seq_group_id, seq_groups, is_prompts, sample_indices = \
-                sample_metadata[sampling_type]
+            (seq_group_id, seq_groups) = sample_metadata[sampling_type]
+
             if sampling_type == SamplingType.FORCED:
                 sample_results = _forced_sample(seq_groups, forced_samples)
             elif sampling_type == SamplingType.GREEDY:
