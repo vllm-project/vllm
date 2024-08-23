@@ -225,7 +225,6 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
         seqlen_q = torch.cumsum(seqlen, dim=0).to(device=self.device)
 
         attn_metadata = self.attn_backend.make_metadata(
-            is_prompt=True,
             slot_mapping=slot_mapping,
             seq_lens=seq_lens,
             seqlen_q=seqlen_q,
@@ -308,7 +307,6 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
         )
 
         attn_metadata = self.attn_backend.make_metadata(
-            is_prompt=False,
             slot_mapping=slot_mapping,
             seq_lens=seq_lens,
             seqlen_q=torch.tensor([]),
