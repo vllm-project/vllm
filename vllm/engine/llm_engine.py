@@ -1402,6 +1402,8 @@ class LLMEngine:
         cached_outputs = self.cached_scheduler_outputs[0]
         seq_group_metadata_list = cached_outputs.seq_group_metadata_list
         scheduler_outputs = cached_outputs.scheduler_outputs
+        scheduled_ids = cached_outputs.scheduled_ids
+        allow_async_output_proc = cached_outputs.allow_async_output_proc
 
         # Skip the scheduler if there are any remaining steps in the seq groups.
         # This ensures that the scheduler is only called again when the current
@@ -1423,6 +1425,10 @@ class LLMEngine:
 
         assert seq_group_metadata_list is not None
         assert scheduler_outputs is not None
+        assert scheduled_ids is not None
+
+        if self.scheduler_config.is_multi_step:
+            assert not allow_async_output_proc
 
         if not scheduler_outputs.is_empty():
             finished_requests_ids = self.scheduler[
@@ -1460,6 +1466,7 @@ class LLMEngine:
                 self._update_cached_scheduler_output(0, output)
         else:
             if len(self.output_queue) > 0:
+                assert not self.scheduler_config.is_multi_step
                 self._process_model_outputs(is_async=True)
             output = []
 
@@ -1500,6 +1507,7 @@ class LLMEngine:
         if not self.has_unfinished_requests():
             # Drain async postprocessor
             if len(self.output_queue) > 0:
+                assert not self.scheduler_config.is_multi_step
                 self._process_model_outputs(is_async=True, clear_outputs=False)
             assert len(self.output_queue) == 0
 
