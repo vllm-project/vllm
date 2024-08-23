@@ -4,8 +4,8 @@ from typing import Dict, List, Optional
 import openai
 import pytest
 
-from .util import (MESSAGES_ASKING_FOR_TOOLS, MESSAGES_WITH_TOOL_RESPONSE,
-                   SEARCH_TOOL, WEATHER_TOOL)
+from .utils import (MESSAGES_ASKING_FOR_TOOLS, MESSAGES_WITH_TOOL_RESPONSE,
+                    SEARCH_TOOL, WEATHER_TOOL)
 
 
 # test: request a chat completion that should return tool calls, so we know they

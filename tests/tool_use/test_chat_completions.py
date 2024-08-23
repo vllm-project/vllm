@@ -3,7 +3,7 @@ from typing import List
 import openai
 import pytest
 
-from .util import MESSAGES_WITHOUT_TOOLS, WEATHER_TOOL
+from .utils import MESSAGES_WITHOUT_TOOLS, WEATHER_TOOL
 
 
 # test: make sure chat completions without tools provided work even when tools

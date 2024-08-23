@@ -3,7 +3,7 @@ from huggingface_hub import snapshot_download
 
 from tests.utils import RemoteOpenAIServer
 
-from .util import ARGS, CONFIGS, ServerConfig
+from .utils import ARGS, CONFIGS, ServerConfig
 
 
 # for each server config, download the model and return the config

@@ -4,9 +4,9 @@ from typing import Dict, List, Optional
 import openai
 import pytest
 
-from .util import (MESSAGES_ASKING_FOR_PARALLEL_TOOLS,
-                   MESSAGES_WITH_PARALLEL_TOOL_RESPONSE, SEARCH_TOOL,
-                   WEATHER_TOOL)
+from .utils import (MESSAGES_ASKING_FOR_PARALLEL_TOOLS,
+                    MESSAGES_WITH_PARALLEL_TOOL_RESPONSE, SEARCH_TOOL,
+                    WEATHER_TOOL)
 
 
 # test: getting the model to generate parallel tool calls (streaming/not)
