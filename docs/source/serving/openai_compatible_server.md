@@ -113,7 +113,10 @@ directory [here](https://github.com/vllm-project/vllm/tree/main/examples/)
 
 ### Config file
 
-You may also supply these CLI args using a config file. For example:
+The `serve` module can also accept arguments from a config file using the 
+[configargparse](https://pypi.org/project/ConfigArgParse/) module.
+
+For example:
 
 ```yaml
 # config.yaml
@@ -126,10 +129,13 @@ uvicorn-log-level: "info"
 ```bash
 $ vllm serve SOME_MODEL --config config.yaml
 ```
+---
+**NOTE**  
+In case an argument is supplied using commandline and the config file, the value from the commandline will take precedence.
+The order of priorities is `command line > config file values > defaults`.
 
-.. note::
+---
 
-   In case an argument is supplied using CLI and the config file, the value from the CLI will take precedence.
 ## Tool calling in the chat completion API
 vLLM supports only named function calling in the chat completion API. The `tool_choice` options `auto` and `required` are **not yet supported** but on the roadmap.
 

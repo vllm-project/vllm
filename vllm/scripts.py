@@ -1,12 +1,11 @@
 # The CLI entrypoint to vLLM.
-import argparse
 import asyncio
 import os
 import signal
 import sys
-from typing import Dict, List, Optional, Union
+from typing import List, Optional
 
-import yaml
+import configargparse
 from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam
 
@@ -28,48 +27,7 @@ def register_signal_handlers():
     signal.signal(signal.SIGTSTP, signal_handler)
 
 
-def _merge_args_and_config(args: argparse.Namespace):
-    """
-        merge args from cli and config file supplied in the cli. 
-        If an argument is present in cli and args then choose args value
-        over config file.
-
-        example:
-        # config.yaml
-        port: 1231
-
-        # invoke server
-        $ vllm serve --config ../config.yaml --port 3122
-
-        # selected port = 3122
-    """
-    assert args.config, 'No config file specified.'
-
-    # only expecting a flat dictionary of atomic types
-    config: Dict[str, Union[int, str]] = {}
-
-    try:
-        with open(args.config, 'r') as config_file:
-            config = yaml.safe_load(config_file)
-    except Exception as ex:
-        logger.error("Unable to read the config file at %s", args.config)
-        logger.error(ex)
-
-    for key, value in config.items():
-        if hasattr(args, key):
-            logger.info("Argument %s is specified via config and commandline.",
-                        key)
-            logger.info("Selecting the %s=%s from commandline.", key,
-                        getattr(args, key))
-            continue
-
-        setattr(args, key, value)
-
-
-def serve(args: argparse.Namespace) -> None:
-
-    if args.config:
-        _merge_args_and_config(args)
+def serve(args: configargparse.Namespace) -> None:
 
     # The default value of `--model`
     if args.model != EngineArgs.model:
@@ -83,7 +41,7 @@ def serve(args: argparse.Namespace) -> None:
     asyncio.run(run_server(args))
 
 
-def interactive_cli(args: argparse.Namespace) -> None:
+def interactive_cli(args: configargparse.Namespace) -> None:
     register_signal_handlers()
 
     base_url = args.url
@@ -174,8 +132,8 @@ def main():
     serve_parser.add_argument(
         "--config",
         type=str,
+        is_config_file=True,
         required=False,
-        default='',
         help="Read CLI options from a config file."
         "Must be a YAML with the following options:"
         "https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html#command-line-arguments-for-the-server"

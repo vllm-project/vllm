@@ -1,4 +1,3 @@
-import argparse
 import asyncio
 import contextlib
 import datetime
@@ -20,6 +19,7 @@ from typing import (Any, AsyncGenerator, Awaitable, Callable, Dict, Generic,
                     Type, TypeVar, Union, overload)
 from uuid import uuid4
 
+import configargparse
 import numpy as np
 import numpy.typing as npt
 import psutil
@@ -1085,7 +1085,7 @@ def run_once(f: Callable[P, None]) -> Callable[P, None]:
     return wrapper
 
 
-class FlexibleArgumentParser(argparse.ArgumentParser):
+class FlexibleArgumentParser(configargparse.ArgumentParser):
     """ArgumentParser that allows both underscore and dash in names."""
 
     def parse_args(self, args=None, namespace=None):
