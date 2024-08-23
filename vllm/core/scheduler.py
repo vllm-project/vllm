@@ -1358,12 +1358,14 @@ class Scheduler:
                 # the number of new tokens that is dividable by the block size
                 # to avoid partial block matching.
                 block_size = self.cache_config.block_size
-                if budget.token_budget % block_size != 0:
+                reminder = budget.token_budget % block_size
+                if reminder != 0:
                     raise ValueError("When enabling chunked prefill and "
                                      "prefix caching, max_num_batched_tokens "
                                      "(chunk size) must be dividable by "
-                                     "block size, but got "
-                                     f"{budget.token_budget % block_size = }")
+                                     "block size, but got chunk_size "
+                                     f"({budget.token_budget}) % block_size "
+                                     f"({block_size}) = {reminder}")
                 if remaining_token_budget < num_new_tokens:
                     num_new_tokens = (remaining_token_budget //
                                       block_size) * block_size

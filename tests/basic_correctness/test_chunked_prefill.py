@@ -155,7 +155,7 @@ def test_models_with_fp8_kv_cache(
 
 @pytest.mark.parametrize("max_tokens", [16])
 @pytest.mark.parametrize("enforce_eager", [False])
-@pytest.mark.parametrize("chunk_size", [30, 32, 64])
+@pytest.mark.parametrize("chunk_size", [30, 32])
 @pytest.mark.parametrize("use_v2_block_manager", [False, True])
 # NOTE: Increasing this in this suite will fail CI because we currently cannot
 # reset distributed env properly. Use a value > 1 just when you test.

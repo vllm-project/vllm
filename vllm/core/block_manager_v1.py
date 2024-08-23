@@ -693,7 +693,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         block_table = self.block_tables[seq.seq_id]
         if computed_full_blocks == 0:
             return
-        for i in reversed(range(computed_full_blocks - 1)):
+        for i in reversed(range(computed_full_blocks)):
             if block_table[i].computed:
                 break
             block_table[i].computed = True
