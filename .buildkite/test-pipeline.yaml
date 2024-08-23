@@ -252,7 +252,7 @@ steps:
 
 #####  models test  #####
 
-- label: Basic Models Test # TODOmin
+- label: Basic Models Test # 6min
   source_file_dependencies:
   - vllm/
   - tests/models
@@ -279,7 +279,7 @@ steps:
     - pytest -v -s models/decoder_only/audio
     - pytest -v -s models/decoder_only/vision
 
-- label: Embedding Language Models Test # TODOmin
+- label: Embedding Language Models Test # 6min
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
@@ -287,7 +287,7 @@ steps:
   commands:
     - pytest -v -s models/embedding/language
 
-- label: Encoder-Decoder Language Models Test # TODOmin
+- label: Encoder-Decoder Language Models Test # 6min
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
