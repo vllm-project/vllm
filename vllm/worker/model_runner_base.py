@@ -51,7 +51,8 @@ def _init_attn_metadata_from_tensor_dict(
 def _init_sampling_metadata_from_tensor_dict(  # type: ignore
         tensor_dict: Dict[str, Any],
         sampling_metadata_key: str = "sampling_metadata",
-        selected_token_ids_key: str = "selected_token_indices") -> Dict[str, Any]:
+        selected_token_ids_key: str = "selected_token_indices") -> Dict[str,
+                                                                        Any]:
     """
     Helper method to initialize SamplingMetadata based on broadcastable
     SamplingMetadata fields.
