@@ -4,7 +4,7 @@ import os
 import signal
 import sys
 from typing import List, Optional
-
+import argparse
 import configargparse
 from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam
@@ -41,7 +41,7 @@ def serve(args: configargparse.Namespace) -> None:
     asyncio.run(run_server(args))
 
 
-def interactive_cli(args: configargparse.Namespace) -> None:
+def interactive_cli(args: argparse.Namespace) -> None:
     register_signal_handlers()
 
     base_url = args.url
