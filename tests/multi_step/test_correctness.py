@@ -85,9 +85,10 @@ async def completions_with_server_args(prompts: List[str],
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize(("tp_size, pp_size"), [
+    (1, 1),
     (2, 2),
 ])
-@pytest.mark.parametrize("eager_mode", [False])
+@pytest.mark.parametrize("eager_mode", [False, True])
 @pytest.mark.parametrize("num_scheduler_steps", NUM_SCHEDULER_STEPS)
 @pytest.mark.parametrize("num_prompts", NUM_PROMPTS)
 @pytest.mark.parametrize("chunked_prefill", CHUNKED_PREFILL_ARGS)
@@ -117,8 +118,6 @@ async def test_multi_step(example_prompts, model: str, tp_size: int,
             MultiStepChunkedPrefillPolicy.FORCE_SINGLE_STEP:
             test_env[
                 'VLLM_MULTI_STEP_CHUNKED_PREFILL_SINGLE_STEP_POLICY'] = '1'
-
-    print(f"TEST ENV : {test_env}")
 
     distributed_args = [
         "--tensor-parallel-size",
