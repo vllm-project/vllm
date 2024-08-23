@@ -75,11 +75,12 @@ async def test_client_aborts_use_timeouts(monkeypatch, dummy_server,
         m.setattr(dummy_server, "abort", lambda x: None)
         m.setattr(client, "_data_timeout", 10)
 
-        # Ensure the client doesn't hang
+        # The client should suppress timeouts on `abort`s
+        # and return normally, assuming the server will eventually
+        # abort the request.
         client_task = asyncio.get_running_loop().create_task(
             client.abort("test request id"))
-        with pytest.raises(TimeoutError, match="Server didn't reply within"):
-            await asyncio.wait_for(client_task, timeout=0.05)
+        await asyncio.wait_for(client_task, timeout=0.05)
 
 
 @pytest.mark.asyncio
