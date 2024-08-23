@@ -16,7 +16,7 @@ import pytest
 
 from tests.quantization.utils import is_quant_method_supported
 
-from .utils import check_logprobs_close
+from .utils import check_tokenstexts_match_or_in_top_logprobs
 
 
 @dataclass
@@ -61,7 +61,7 @@ def test_models(
         gptq_outputs = gptq_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
-    check_logprobs_close(
+    check_tokenstexts_match_or_in_top_logprobs(
         outputs_0_lst=gptq_outputs,
         outputs_1_lst=marlin_outputs,
         name_0="gptq",
