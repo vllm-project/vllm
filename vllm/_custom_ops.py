@@ -107,18 +107,18 @@ def paged_attention_v1(
 ) -> None:
     if query.device.type == "cuda":
         torch.ops._C.paged_attention_v1(
-            out, query, key_cache, value_cache, num_kv_heads, scale, block_tables,
-            seq_lens, block_size, max_seq_len, alibi_slopes, kv_cache_dtype,
-            k_scale, v_scale, tp_rank, blocksparse_local_blocks,
-            blocksparse_vert_stride, blocksparse_block_size,
-            blocksparse_head_sliding_step)
+            out, query, key_cache, value_cache, num_kv_heads, scale,
+            block_tables, seq_lens, block_size, max_seq_len, alibi_slopes,
+            kv_cache_dtype, k_scale, v_scale, tp_rank,
+            blocksparse_local_blocks, blocksparse_vert_stride,
+            blocksparse_block_size, blocksparse_head_sliding_step)
     elif query.device.type == "cpu":
         torch.ops._C_cpu.paged_attention_v1(
-            out, query, key_cache, value_cache, num_kv_heads, scale, block_tables,
-            seq_lens, block_size, max_seq_len, alibi_slopes, kv_cache_dtype,
-            k_scale, v_scale, tp_rank, blocksparse_local_blocks,
-            blocksparse_vert_stride, blocksparse_block_size,
-            blocksparse_head_sliding_step)
+            out, query, key_cache, value_cache, num_kv_heads, scale,
+            block_tables, seq_lens, block_size, max_seq_len, alibi_slopes,
+            kv_cache_dtype, k_scale, v_scale, tp_rank,
+            blocksparse_local_blocks, blocksparse_vert_stride,
+            blocksparse_block_size, blocksparse_head_sliding_step)
 
 
 def paged_attention_v2(
@@ -148,16 +148,16 @@ def paged_attention_v2(
     if query.device.type == "cuda":
         torch.ops._C.paged_attention_v2(
             out, exp_sum, max_logits, tmp_out, query, key_cache, value_cache,
-            num_kv_heads, scale, block_tables, seq_lens, block_size, max_seq_len,
-            alibi_slopes, kv_cache_dtype, k_scale, v_scale, tp_rank,
-            blocksparse_local_blocks, blocksparse_vert_stride,
+            num_kv_heads, scale, block_tables, seq_lens, block_size,
+            max_seq_len, alibi_slopes, kv_cache_dtype, k_scale, v_scale,
+            tp_rank, blocksparse_local_blocks, blocksparse_vert_stride,
             blocksparse_block_size, blocksparse_head_sliding_step)
     elif query.device.type == "cpu":
         torch.ops._C_cpu.paged_attention_v2(
             out, exp_sum, max_logits, tmp_out, query, key_cache, value_cache,
-            num_kv_heads, scale, block_tables, seq_lens, block_size, max_seq_len,
-            alibi_slopes, kv_cache_dtype, k_scale, v_scale, tp_rank,
-            blocksparse_local_blocks, blocksparse_vert_stride,
+            num_kv_heads, scale, block_tables, seq_lens, block_size,
+            max_seq_len, alibi_slopes, kv_cache_dtype, k_scale, v_scale,
+            tp_rank, blocksparse_local_blocks, blocksparse_vert_stride,
             blocksparse_block_size, blocksparse_head_sliding_step)
 
 
@@ -540,11 +540,13 @@ def reshape_and_cache(
     if key.device.type == "cuda":
         torch.ops._C_cache_ops.reshape_and_cache(key, value, key_cache,
                                                  value_cache, slot_mapping,
-                                                 kv_cache_dtype, k_scale, v_scale)
+                                                 kv_cache_dtype, k_scale,
+                                                 v_scale)
     elif key.device.type == "cpu":
         torch.ops._C_cpu_cache_ops.reshape_and_cache(key, value, key_cache,
                                                      value_cache, slot_mapping,
-                                                     kv_cache_dtype, k_scale, v_scale)
+                                                     kv_cache_dtype, k_scale,
+                                                     v_scale)
 
 
 def reshape_and_cache_flash(
@@ -559,14 +561,14 @@ def reshape_and_cache_flash(
 ) -> None:
     if key.device.type == "cuda":
         torch.ops._C_cache_ops.reshape_and_cache_flash(key, value, key_cache,
-                                                   value_cache, slot_mapping,
-                                                   kv_cache_dtype, k_scale,
-                                                   v_scale)
+                                                       value_cache,
+                                                       slot_mapping,
+                                                       kv_cache_dtype, k_scale,
+                                                       v_scale)
     elif key.device.type == "cpu":
-        torch.ops._C_cpu_cache_ops.reshape_and_cache_flash(key, value, key_cache,
-                                                   value_cache, slot_mapping,
-                                                   kv_cache_dtype, k_scale,
-                                                   v_scale)
+        torch.ops._C_cpu_cache_ops.reshape_and_cache_flash(
+            key, value, key_cache, value_cache, slot_mapping, kv_cache_dtype,
+            k_scale, v_scale)
 
 
 def copy_blocks(key_caches: List[torch.Tensor],
