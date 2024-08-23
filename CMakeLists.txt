@@ -306,6 +306,26 @@ define_gpu_extension_target(
   USE_SABI 3
   WITH_SOABI)
 
+#
+# _hip_C extension
+#
+
+if(VLLM_GPU_LANG STREQUAL "HIP")
+  set(VLLM_HIP_EXT_SRC
+    "csrc/hip/torch_bindings.cpp"
+    "csrc/hip/attention.hip")
+
+  define_gpu_extension_target(
+    _hip_C
+    DESTINATION vllm
+    LANGUAGE ${VLLM_GPU_LANG}
+    SOURCES ${VLLM_HIP_EXT_SRC}
+    COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+    ARCHITECTURES ${VLLM_GPU_ARCHES}
+    USE_SABI 3
+    WITH_SOABI)
+
+endif()
 
 
 if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
