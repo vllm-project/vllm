@@ -77,7 +77,7 @@ steps:
   #               <<: *common_container_settings
   
 
-  - label: "A100 vllm benchmark"
+  - label: "A100 vllm 0.5.3.post1 benchmark"
     priority: 100
     agents:
       queue: A100
@@ -86,8 +86,22 @@ steps:
           podSpec:
             <<: *common_pod_spec
             containers:
-              - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:9b73a2f498e8bf8e18305a8afea84536e9330088
+              - image: vllm/vllm-openai:v0.5.3.post1
                 <<: *common_container_settings
+
+  - label: "A100 vllm 0.5.5 benchmark"
+    priority: 100
+    agents:
+      queue: A100
+    plugins:
+      - kubernetes:
+          podSpec:
+            <<: *common_pod_spec
+            containers:
+              - image: vllm/vllm-openai:v0.5.5
+                <<: *common_container_settings
+
+        
 
   # - label: "A100 tgi benchmark"
   #   priority: 100
