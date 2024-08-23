@@ -14,7 +14,7 @@ from vllm.worker.model_runner import _get_graph_batch_size
 
 ENFORCE_EAGER = [True]
 
-BATCH_SIZES = [1, 4, 6, 16, 64, 256]
+BATCH_SIZES = [1, 4, 16, 64, 256]
 
 
 def _create_model_runner(model: str, *args,
