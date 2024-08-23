@@ -161,6 +161,24 @@ def paged_attention_v2(
             blocksparse_block_size, blocksparse_head_sliding_step)
 
 
+def advance_step(num_seqs: int, num_queries: int, block_size: int,
+                 input_tokens: torch.Tensor, sampled_token_ids: torch.Tensor,
+                 input_positions: torch.Tensor, seq_lens: torch.Tensor,
+                 slot_mapping: torch.Tensor,
+                 block_tables: torch.Tensor) -> None:
+    """Advance a step on GPU for existing inputs for a multi-step runner"""
+    if input_tokens.device.type == "cuda":
+        return torch.ops._C.advance_step(num_seqs, num_queries, block_size,
+                                         input_tokens, sampled_token_ids,
+                                         input_positions, seq_lens,
+                                         slot_mapping, block_tables)
+    elif input_tokens.device.type == "cpu":
+        return torch.ops._C_cpu.advance_step(num_seqs, num_queries, block_size,
+                                             input_tokens, sampled_token_ids,
+                                             input_positions, seq_lens,
+                                             slot_mapping, block_tables)
+
+
 # pos encoding ops
 def rotary_embedding(
     positions: torch.Tensor,
