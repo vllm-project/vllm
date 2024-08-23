@@ -888,10 +888,9 @@ class EngineArgs:
             disable_logprobs=self.disable_logprobs_during_spec_decoding,
         )
 
-        if self.num_scheduler_steps > 1:
-            if speculative_config is not None:
-                raise ValueError("Speculative decoding is not supported with "
-                                 "multi-step (--num-scheduler-steps > 1)")
+        if self.num_scheduler_steps > 1 and speculative_config is not None:
+            raise ValueError("Speculative decoding is not supported with "
+                             "multi-step (--num-scheduler-steps > 1)")
 
         # make sure num_lookahead_slots is set the higher value depending on
         # if we are using speculative decoding or multi-step

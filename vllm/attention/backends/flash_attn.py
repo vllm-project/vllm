@@ -304,13 +304,14 @@ class FlashAttentionMetadata(AttentionMetadata):
 
         return self._cached_decode_metadata
 
-    # TODO (varun) : Try using decode_metadata here. We hit some asserts in advance_step
-    # but that seems resolvable.
+    # TODO (varun) : Try using decode_metadata here. We hit some asserts in
+    # advance_step - but that seems resolvable.
     @staticmethod
     def without_prefills(m: "FlashAttentionMetadata") \
         -> "FlashAttentionMetadata":
         """
-        Extract all information related to decodes from the given attention metadata.
+        Extract all information related to decodes from the given attention
+        metadata.
         """
 
         num_prefills = m.num_prefills
@@ -322,7 +323,7 @@ class FlashAttentionMetadata(AttentionMetadata):
         # Slice into GPU tensors to remove prefill related information
         query_start_loc = None
         seq_start_loc = None
-        if m.query_start_loc is not None:
+        if m.query_start_loc is not None and m.seq_start_loc is not None:
             query_start_loc = m.query_start_loc[num_prefills:]
             seq_start_loc = m.seq_start_loc[num_prefills:]
             # query_start_loc and seq_start_loc store indices for
@@ -335,19 +336,23 @@ class FlashAttentionMetadata(AttentionMetadata):
 
         # All the other tensors can be sliced in-place
         return FlashAttentionMetadata(
-            num_prefills = 0,
-            num_prefill_tokens= 0,
-            num_decode_tokens = m.num_decode_tokens,
-            slot_mapping = m.slot_mapping[num_prefill_tokens:],
-            seq_lens = m.seq_lens[num_prefills:],
-            seq_lens_tensor=m.seq_lens_tensor[num_prefills:],
+            num_prefills=0,
+            num_prefill_tokens=0,
+            num_decode_tokens=m.num_decode_tokens,
+            slot_mapping=m.slot_mapping[num_prefill_tokens:],
+            seq_lens=m.seq_lens[num_prefills:]
+            if m.seq_lens is not None else None,
+            seq_lens_tensor=m.seq_lens_tensor[num_prefills:]
+            if m.seq_lens_tensor is not None else None,
             max_query_len=1,
             max_prefill_seq_len=0,
             max_decode_seq_len=m.max_decode_seq_len,
             query_start_loc=query_start_loc,
             seq_start_loc=seq_start_loc,
-            context_lens_tensor=m.context_lens_tensor[num_prefills:],
-            block_tables=m.block_tables[num_prefills:],
+            context_lens_tensor=m.context_lens_tensor[num_prefills:]
+            if m.context_lens_tensor is not None else None,
+            block_tables=m.block_tables[num_prefills:]
+            if m.block_tables is not None else None,
             use_cuda_graph=False)
 
     def advance_step(self, num_seqs: int, num_queries: int):

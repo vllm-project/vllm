@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
     VLLM_MULTI_STEP_CHUNKED_PREFILL_SINGLE_STEP_POLICY: bool = False
 
+
 def get_default_cache_root():
     return os.getenv(
         "XDG_CACHE_HOME",
@@ -408,7 +409,9 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # run the both the prefill and decode sequence for the first step and run
     # only the decode sequences for the rest of the steps.
     "VLLM_MULTI_STEP_CHUNKED_PREFILL_SINGLE_STEP_POLICY":
-    lambda: os.environ.get("VLLM_MULTI_STEP_CHUNKED_PREFILL_SINGLE_STEP_POLICY", "False").lower() in ("true", "1"),
+    lambda: os.environ.get(
+        "VLLM_MULTI_STEP_CHUNKED_PREFILL_SINGLE_STEP_POLICY", "False").lower(
+        ) in ("true", "1"),
 }
 
 # end-env-vars-definition
