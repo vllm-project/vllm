@@ -31,13 +31,6 @@ mp_method = envs.VLLM_WORKER_MULTIPROC_METHOD
 mp = multiprocessing.get_context(mp_method)
 
 
-def force_spawn():
-    global mp, mp_method
-    if mp_method != "spawn":
-        mp = multiprocessing.get_context("spawn")
-        mp_method = "spawn"
-
-
 @dataclass
 class Result(Generic[T]):
     """Result of task dispatched to worker"""

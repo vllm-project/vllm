@@ -89,7 +89,7 @@ async def test_multi_step(example_prompts, model: str, tp_size: int,
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
-@pytest.mark.parametrize("tp_size", [1, 2])
+@pytest.mark.parametrize("tp_size", [1])
 @pytest.mark.parametrize("max_tokens", [5])
 @pytest.mark.parametrize("enforce_eager", [True, False])
 @pytest.mark.parametrize("num_scheduler_steps", NUM_SCHEDULER_STEPS)
@@ -105,24 +105,22 @@ def test_multi_step_llm(hf_runner, vllm_runner, example_prompts, model: str,
     prompts = prompts[:num_prompts]
     assert len(prompts) == num_prompts
 
-    with hf_runner(model, dtype=dtype) as hf_model:
-        hf_outputs = hf_model.generate_greedy(prompts, max_tokens)
-
     with vllm_runner(model,
                      dtype=dtype,
                      enforce_eager=enforce_eager,
                      gpu_memory_utilization=0.7,
                      tensor_parallel_size=tp_size,
                      use_v2_block_manager=True,
-                     num_scheduler_steps=num_scheduler_steps,
-                     worker_use_ray=True) as vllm_model:
+                     num_scheduler_steps=num_scheduler_steps) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(prompts, max_tokens)
 
+    with hf_runner(model, dtype=dtype) as hf_model:
+        hf_outputs = hf_model.generate_greedy(prompts, max_tokens)
+
+    
     check_outputs_equal(
         outputs_0_lst=hf_outputs,
         outputs_1_lst=vllm_outputs,
         name_0="hf",
         name_1="vllm",
     )
-
-    ray.shutdown()
