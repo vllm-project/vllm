@@ -23,6 +23,7 @@ class SamplingType(IntEnum):
     BEAM = 3
     FORCED = 4
 
+
 LogitsProcessor = Union[Callable[[List[int], torch.Tensor], torch.Tensor],
                         Callable[[List[int], List[int], torch.Tensor],
                                  torch.Tensor]]

@@ -52,6 +52,7 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+
 def get_wikitext2_text(tokenizer):
     with open(args.data) as f:
         test_text = "\n".join(line.strip() for line in f)

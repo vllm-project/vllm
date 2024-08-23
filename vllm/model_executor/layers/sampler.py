@@ -365,6 +365,7 @@ def _greedy_sample(
         sample_idx += num_parent_seqs
     return results
 
+
 def _forced_sample(
     selected_seq_groups: List[SequenceGroupToSample],
     samples: torch.Tensor,
@@ -607,13 +608,14 @@ def _sample_with_torch(
         if sampling_type == SamplingType.FORCED:
             if (seq_groups[0].sampling_params.future_context is not None):
                 forced_samples = torch.tensor([
-                seq_groups[0].sampling_params.future_context[0][len(
-                sampling_metadata.seq_groups[0].seq_data[
-                sampling_params.cntr].output_token_ids)]
-                ], device='cuda:0')  #
+                    seq_groups[0].sampling_params.future_context[0][len(
+                        sampling_metadata.seq_groups[0].seq_data[
+                            sampling_params.cntr].output_token_ids)]
+                ],
+                                              device='cuda:0')  #
             else:
                 forced_samples = torch.argmax(logprobs[long_sample_indices],
-                                          dim=-1)
+                                              dim=-1)
         elif sampling_type == SamplingType.GREEDY:
             greedy_samples = torch.argmax(logprobs[long_sample_indices],
                                           dim=-1)
