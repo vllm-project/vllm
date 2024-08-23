@@ -6,8 +6,8 @@ from transformers import AutoModelForVision2Seq, BatchEncoding
 from vllm.multimodal.utils import rescale_image_size
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 
-from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
-from .utils import check_outputs_equal
+from ....conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
+from ...utils import check_outputs_equal
 
 pytestmark = pytest.mark.vlm
 
