@@ -4,8 +4,6 @@ Run `pytest tests/models/test_bart.py`.
 """
 from typing import List, Optional, Tuple
 
-from transformers import TransfoXLForSequenceClassification
-
 from vllm.utils import is_cpu
 
 if not is_cpu():
@@ -153,8 +151,7 @@ if not is_cpu():
         # decoder-only unit tests expect), so when testing an encoder/decoder
         # model we must explicitly specify enforce_eager=True in the VllmRunner
         # constructor.
-        with vllm_runner(model, dtype=dtype,
-                         enforce_eager=True) as vllm_model:
+        with vllm_runner(model, dtype=dtype, enforce_eager=True) as vllm_model:
             vllm_outputs = vllm_model.generate_encoder_decoder_greedy_logprobs(
                 test_case_prompts, max_tokens, num_logprobs)
 
@@ -171,7 +168,6 @@ if not is_cpu():
             name_1="vllm",
             num_outputs_0_skip_tokens=hf_skip_tokens,
         )
-
 
     @pytest.mark.parametrize("model", ["facebook/bart-large-cnn"])
     @pytest.mark.parametrize("dtype", ["bfloat16"])
@@ -271,7 +267,7 @@ if not is_cpu():
         }
 
         with hf_runner(model, dtype=dtype,
-                       is_encoder_decoder_model=True) as hf_model:
+                       auto_cls=AutoModelForSeq2SeqLM) as hf_model:
             hf_outputs = (
                 hf_model.generate_encoder_decoder_greedy_logprobs_limit(
                     test_case_prompts,

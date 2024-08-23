@@ -3,20 +3,18 @@ from typing import List
 
 import pytest
 import torch
+import itertools
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, SamplingParams,
                            SequenceData, SequenceGroupMetadata)
 from vllm.utils import is_cpu
+from vllm.worker.model_runner import _get_graph_batch_size
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 
-# CUDA graph scenarios to test
-#
-# Currently CUDA graph is not supported
-ENFORCE_EAGER = [True, False]
+ENFORCE_EAGER = [True]
 
-#BATCH_SIZES = [1, 4, 6, 16, 64, 256]
-BATCH_SIZES = [6]
+BATCH_SIZES = [1, 4, 6, 16, 64, 256]
 
 
 def _create_model_runner(model: str, *args,
@@ -356,13 +354,6 @@ def test_prepare_decode(
     encoder_input_tokens = model_input.encoder_input_tokens
     encoder_input_positions = model_input.encoder_input_positions
     cross_slot_mapping = attn_metadata.cross_slot_mapping
-
-    # If CUDA Graph is enabled then tensors will be padded
-    # to fix length. Fix the expected tensors.
-    if enforce_eager is False:
-        
-
-
     assert return_seq_lens == seq_lens
     assert len(slot_mapping) == len(input_tokens)
     assert len(cross_slot_mapping) == len(encoder_input_tokens)
@@ -436,10 +427,8 @@ def test_prepare_decode(
         expected,
     )
 
-    # Verify CUDA Graph related setting
-    assert attn_metadata.use_cuda_graph is not enforce_eager
-    
-    
+    # Cuda graph should is currently not supported for encoder/decoer.
+    assert attn_metadata.use_cuda_graph is False
 
     # Verify the lengths of input tokens & positions
     # - Decoder

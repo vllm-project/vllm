@@ -640,10 +640,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                             batch_size: int,
                             max_decode_seq_len: int,
                             max_encoder_seq_len: int = 0) -> bool:
-        print('batch_size ' + str(batch_size))
-        print('max_decode_seq_len ' + str(max_decode_seq_len))
-        print('max_seq_len_to_capture ' +
-              str(self.runner.max_seq_len_to_capture))
         return (self.decode_only and not self.runner.model_config.enforce_eager
                 and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
                 and max_decode_seq_len <= self.runner.max_seq_len_to_capture
@@ -707,8 +703,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             cuda_graph_pad_size = graph_batch_size - batch_size
             batch_size = graph_batch_size
 
-        #print('cuda_graph_pad_size ' + str(cuda_graph_pad_size))
-        #print('use_captured_graph ' + str(use_captured_graph))
         # Tokens and positions.
         if cuda_graph_pad_size:
             input_tokens.extend(itertools.repeat(0, cuda_graph_pad_size))
@@ -1242,10 +1236,30 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             for virtual_engine in range(
                     self.parallel_config.pipeline_parallel_size):
                 for batch_size in reversed(batch_size_capture_list):
+                    attn_metadata = (
+                        self.attn_state.graph_capture_get_metadata_for_batch(
+                            batch_size,
+                            is_encoder_decoder_model=self.model_config.
+                            is_encoder_decoder_model))
 
+                    if self.lora_config:
+                        lora_mapping = LoRAMapping(
+                            **dict(index_mapping=[0] * batch_size,
+                                   prompt_mapping=[0] * batch_size,
+                                   is_prefill=False))
+                        self.set_active_loras(set(), lora_mapping)
+
+                    if self.prompt_adapter_config:
+                        prompt_adapter_mapping = PromptAdapterMapping(
+                            [-1] * batch_size,
+                            [-1] * batch_size,
+                        )
+                        self.set_active_prompt_adapters(
+                            set(), prompt_adapter_mapping)
                     graph_runner = CUDAGraphRunner(
                         self.model, self.attn_backend.get_name(),
-                        self.attn_state.graph_clone(batch_size))
+                        self.attn_state.graph_clone(batch_size),
+                        self.model_config.is_encoder_decoder_model)
 
                     capture_inputs = {
                         "input_ids":
@@ -1278,7 +1292,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                                 batch_size)
                         })
                     if self.model_config.is_encoder_decoder_model:
-                        # add the additional inputs to capture for encoder-decoder models.
+                        # add the additional inputs to capture for
+                        # encoder-decoder models.
                         self._update_inputs_to_capture_for_enc_dec_model(
                             capture_inputs)
 
@@ -1299,55 +1314,16 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         Updates the set of input tensors needed for CUDA graph capture in an
         encoder-decoder model.
 
-        This method modifies the provided `capture_inputs` dictionary by adding
-        tensors specific to encoder-decoder specific models that need to be captured
-        for CUDA Graph replay.
-
-        Args:
-            capture_inputs (Dict[str, Any]): A dictionary where input tensors are stored
-            for CUDA Graph capture.
+        This method modifies the provided `capture_inputs` dictionary by
+        adding tensors specific to encoder-decoder specific models that
+        need to be captured for CUDA Graph replay.
         """
-        # During the decode phase encoder_input_ids and encoder_positions are unset.
-        # Do the same thing for graph capture.
+        # During the decode phase encoder_input_ids and encoder_positions are
+        # unset. Do the same thing for graph capture.
         capture_inputs["encoder_input_ids"] = torch.tensor(
             [], dtype=torch.long).cuda()
         capture_inputs["encoder_positions"] = torch.tensor(
             [], dtype=torch.long).cuda()
-
-    def _update_captured_attn_metadata_for_enc_dec_model(
-            self, batch_size: int, attn_metadata: AttentionMetadata,
-            attn_backend_name: str):
-        """
-        Updates the attention metadata parameters for CUDA graph capture in an
-        encoder-decoder model.
-
-        This method modifies attention-related tensors and metadata required
-        for CUDA graph capture in encoder-decoder models. Specifically, it
-        updates the cross-attention and encoder sequence tensors in the 
-        AttentionMetadata object.
-
-        Args:
-            batch_size (int): The size of the batch for which CUDA graph 
-            capture is being performed.
-            attn_metadata (AttentionMetadata): The AttentionMetadata object to
-            be updated with encoder-decoder specific parameters.
-        """
-        # During decode phase the cross_slot_mapping will be empty. Hence set
-        # an empty tensor for CUDA Graph capture.
-        attn_metadata.cross_slot_mapping = torch.tensor(
-            [], dtype=torch.int).cuda()
-        cross_block_tables = torch.from_numpy(
-            np.zeros(
-                (max(_BATCH_SIZES_TO_CAPTURE), self.get_max_block_per_batch()),
-                dtype=np.int32)).cuda()
-        attn_metadata.cross_block_tables = cross_block_tables[:batch_size]
-        attn_metadata.encoder_seq_lens = torch.full(
-            (batch_size, ), 1,
-            dtype=torch.int).cuda()
-        attn_metadata.encoder_seq_lens_tensor = torch.full(
-            (batch_size, ), 1,
-            dtype=torch.int).cuda()
-        attn_metadata.max_encoder_seq_len = self.max_seq_len_to_capture
 
     @property
     def vocab_size(self) -> int:
@@ -1543,7 +1519,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 class CUDAGraphRunner:
 
     def __init__(self, model: nn.Module, backend_name: str,
-                 attn_state: AttentionState):
+                 attn_state: AttentionState, is_encoder_decoder_model: bool):
         self.model = model
         self.backend_name = backend_name
         self.attn_state = attn_state
@@ -1552,6 +1528,7 @@ class CUDAGraphRunner:
         self.output_buffers: Dict[str, torch.Tensor] = {}
 
         self._graph: Optional[torch.cuda.CUDAGraph] = None
+        self._is_encoder_decoder_model = is_encoder_decoder_model
 
     @property
     def graph(self):
@@ -1576,7 +1553,7 @@ class CUDAGraphRunner:
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
         # Note one iteration is not enough for torch.jit.script
-        for i in range(_NUM_WARMUP_ITERS):
+        for _ in range(_NUM_WARMUP_ITERS):
             self.model(
                 input_ids,
                 positions,
@@ -1616,17 +1593,18 @@ class CUDAGraphRunner:
 
         # Save the input and output buffers.
         self.input_buffers = {
-            "input_ids": input_ids,
-            "positions": positions,
-            "kv_caches": kv_caches,
-            **self.attn_state.get_graph_input_buffers(attn_metadata),
+            "input_ids":
+            input_ids,
+            "positions":
+            positions,
+            "kv_caches":
+            kv_caches,
+            **self.attn_state.get_graph_input_buffers(
+                attn_metadata, self._is_encoder_decoder_model),
             **kwargs,
         }
         if intermediate_inputs is not None:
             self.input_buffers.update(intermediate_inputs.tensors)
-
-        if self._is_encoder_decoder_model:
-            self._save_extra_input_buffers_for_enc_dec_model(attn_metadata)
 
         if get_pp_group().is_last_rank:
             self.output_buffers = {
@@ -1653,8 +1631,8 @@ class CUDAGraphRunner:
         self.input_buffers["positions"].copy_(positions, non_blocking=True)
         self.input_buffers["slot_mapping"].copy_(attn_metadata.slot_mapping,
                                                  non_blocking=True)
-        self.attn_state.prepare_graph_input_buffers(self.input_buffers,
-                                                    attn_metadata)
+        self.attn_state.prepare_graph_input_buffers(
+            self.input_buffers, attn_metadata, self._is_encoder_decoder_model)
         if "seqlen_agnostic_capture_inputs" in self.input_buffers:
             self.model.copy_inputs_before_cuda_graphs(self.input_buffers,
                                                       **kwargs)
@@ -1664,8 +1642,11 @@ class CUDAGraphRunner:
                     self.input_buffers[key].copy_(intermediate_tensors[key],
                                                   non_blocking=True)
         if self._is_encoder_decoder_model:
-            self._populate_input_buffers_from_enc_dec_model_input(
-                attn_metadata, **kwargs)
+            self.input_buffers["encoder_input_ids"].copy_(
+                kwargs['encoder_input_ids'], non_blocking=True)
+            self.input_buffers["encoder_positions"].copy_(
+                kwargs['encoder_positions'], non_blocking=True)
+
         # Run the graph.
         self.graph.replay()
         # Return the output tensor.
@@ -1673,63 +1654,6 @@ class CUDAGraphRunner:
             return self.output_buffers["hidden_states"]
 
         return self.output_buffers
-
-    def _save_extra_input_buffers_for_enc_dec_model(
-            self, attn_metadata: AttentionMetadata):
-        """
-        Saves additional input buffers specific to the encoder-decoder model
-        from the attention metadata.
-
-        This method extracts and stores encoder-decoder related input buffers
-        from the `attn_metadata` into the `input_buffers` dictionary. The buffers include
-        encoder sequence lengths, cross-slot mappings, and cross-block tables, which are
-        essential for the encoder-decoder model during CUDA graph replay.
-
-        Args:
-            attn_metadata (AttentionMetadata): The attention metadata object from which the 
-            encoder-decoder-specific input buffers are extracted and saved.
-        """
-        self.input_buffers["encoder_seq_lens_tensor"] = (
-            attn_metadata.decode_metadata.encoder_seq_lens_tensor)
-        self.input_buffers["cross_slot_mapping"] = (
-            attn_metadata.decode_metadata.cross_slot_mapping)
-        self.input_buffers["cross_block_tables"] = (
-            attn_metadata.decode_metadata.cross_block_tables)
-
-    def _populate_input_buffers_from_enc_dec_model_input(
-            self, attn_metadata: AttentionMetadata, **kwargs):
-        """
-        Populates input buffers with data from the encoder-decoder model's
-        input and attention metadata.
-
-        This method fills the input buffers with encoder-decoder specific
-        tensors. It copies data from the `attn_metadata` and keyword arguments
-        (`kwargs`) into corresponding buffers in the `input_buffers` dictionary.
-        The copied data includes attention-related metadata as well as input 
-        IDs and positional information for the encoder.
-
-        Args:
-            attn_metadata (AttentionMetadata): The attention metadata object
-            containing encoder-decoder-specific tensors (such as 
-            `encoder_seq_lens_tensor`, `cross_slot_mapping`, and
-            `cross_block_tables`) that are copied into the input buffers.
-
-            **kwargs: Additional keyword arguments containing encoder
-            specific input.
-        """
-        self.input_buffers["encoder_seq_lens_tensor"].copy_(
-            attn_metadata.decode_metadata.encoder_seq_lens_tensor,
-            non_blocking=True)
-        self.input_buffers["cross_slot_mapping"].copy_(
-            attn_metadata.decode_metadata.cross_slot_mapping,
-            non_blocking=True)
-        self.input_buffers["cross_block_tables"].copy_(
-            attn_metadata.decode_metadata.cross_block_tables,
-            non_blocking=True)
-        self.input_buffers["encoder_input_ids"].copy_(
-            kwargs['encoder_input_ids'], non_blocking=True)
-        self.input_buffers["encoder_positions"].copy_(
-            kwargs['encoder_positions'], non_blocking=True)
 
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)

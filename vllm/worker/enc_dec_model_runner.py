@@ -1,9 +1,9 @@
 import dataclasses
-from typing import Any, Dict, List, Optional, Tuple, Type, cast
 import itertools
+from typing import Any, Dict, List, Optional, Tuple, Type, cast
+
 import torch
 import torch.distributed
-import torch.nn as nn
 
 from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata)
@@ -28,8 +28,7 @@ from vllm.worker.model_runner import (GPUModelRunnerBase,
                                       _get_graph_batch_size)
 from vllm.worker.model_runner_base import (
     _add_attn_metadata_broadcastable_dict,
-    _add_sampling_metadata_broadcastable_dict,
-)
+    _add_sampling_metadata_broadcastable_dict)
 from vllm.worker.utils import assert_enc_dec_mr_supported_scenario
 
 logger = init_logger(__name__)
@@ -243,16 +242,12 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         """
         model_input = self._prepare_model_input_tensors(
             seq_group_metadata_list, finished_requests_ids)
-
         (
             attn_metadata,
             encoder_input_tokens_tensor,
             encoder_input_positions_tensor,
         ) = (self._prepare_encoder_model_input_tensors(seq_group_metadata_list,
                                                        model_input))
-        print('attn_metadata.max_encoder_seq_len 1 ' +
-              str(attn_metadata.max_encoder_seq_len))
-
         # Inject attn_metadata encoder/cross-attention fields &
         # encoder input tokens/positions into model_input.
         # Frozen dataclass fields cannot be modified, so use
