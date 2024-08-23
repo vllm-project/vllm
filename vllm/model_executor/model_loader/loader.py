@@ -38,10 +38,10 @@ from vllm.model_executor.model_loader.weight_utils import (
     safetensors_weights_iterator)
 from vllm.model_executor.models.interfaces import (has_inner_state,
                                                    supports_lora,
-                                                   supports_vision)
+                                                   supports_multimodal)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils import is_pin_memory_available, is_tpu
+from vllm.utils import is_pin_memory_available
 
 
 @contextmanager
@@ -94,14 +94,15 @@ def _get_quantization_config(
     """Get the quantization config."""
     if model_config.quantization is not None:
         quant_config = get_quant_config(model_config, load_config)
-        capability = current_platform.get_device_capability()
-        capability = capability[0] * 10 + capability[1]
-        if capability < quant_config.get_min_capability():
-            raise ValueError(
-                f"The quantization method {model_config.quantization} is not "
-                "supported for the current GPU. "
-                f"Minimum capability: {quant_config.get_min_capability()}. "
-                f"Current capability: {capability}.")
+        if not current_platform.is_tpu():
+            capability = current_platform.get_device_capability()
+            capability = capability[0] * 10 + capability[1]
+            if capability < quant_config.get_min_capability():
+                raise ValueError(
+                    f"The quantization method {model_config.quantization} "
+                    "is not supported for the current GPU. "
+                    f"Minimum capability: {quant_config.get_min_capability()}. "
+                    f"Current capability: {capability}.")
         supported_dtypes = quant_config.get_supported_act_dtypes()
         if model_config.dtype not in supported_dtypes:
             raise ValueError(
@@ -130,10 +131,8 @@ def _get_model_initialization_kwargs(
             "be added in the future. If this is important to you, "
             "please open an issue on github.")
 
-    if supports_vision(model_class):
-        if multimodal_config is None:
-            raise ValueError("Provide vision related configurations "
-                             "through LLM entrypoint or engine arguments.")
+    if supports_multimodal(model_class):
+        assert multimodal_config is not None
 
         extra_kwargs["multimodal_config"] = multimodal_config
 
@@ -163,7 +162,6 @@ def _initialize_model(
         model_config: ModelConfig,
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
-        multimodal_config: Optional[MultiModalConfig],
         cache_config: CacheConfig,
         scheduler_config: Optional[SchedulerConfig] = None) -> nn.Module:
     """Initialize a model with the given configurations."""
@@ -172,10 +170,10 @@ def _initialize_model(
     return build_model(
         model_class,
         model_config.hf_config,
+        cache_config=cache_config,
         quant_config=_get_quantization_config(model_config, load_config),
         lora_config=lora_config,
-        multimodal_config=multimodal_config,
-        cache_config=cache_config,
+        multimodal_config=model_config.multimodal_config,
         scheduler_config=scheduler_config,
     )
 
@@ -190,7 +188,6 @@ class BaseModelLoader(ABC):
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
                    lora_config: Optional[LoRAConfig],
-                   multimodal_config: Optional[MultiModalConfig],
                    parallel_config: ParallelConfig,
                    scheduler_config: SchedulerConfig,
                    cache_config: CacheConfig) -> nn.Module:
@@ -319,7 +316,7 @@ class DefaultModelLoader(BaseModelLoader):
         else:
             weights_iterator = pt_weights_iterator(hf_weights_files)
 
-        if is_tpu():
+        if current_platform.is_tpu():
             # In PyTorch XLA, we should call `xm.mark_step` frequently so that
             # not too many ops are accumulated in the XLA program.
             import torch_xla.core.xla_model as xm
@@ -335,7 +332,6 @@ class DefaultModelLoader(BaseModelLoader):
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
                    lora_config: Optional[LoRAConfig],
-                   multimodal_config: Optional[MultiModalConfig],
                    parallel_config: ParallelConfig,
                    scheduler_config: SchedulerConfig,
                    cache_config: CacheConfig) -> nn.Module:
@@ -343,8 +339,8 @@ class DefaultModelLoader(BaseModelLoader):
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
                 model = _initialize_model(model_config, self.load_config,
-                                          lora_config, multimodal_config,
-                                          cache_config, scheduler_config)
+                                          lora_config, cache_config,
+                                          scheduler_config)
             model.load_weights(
                 self._get_weights_iterator(model_config.model,
                                            model_config.revision,
@@ -378,15 +374,14 @@ class DummyModelLoader(BaseModelLoader):
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
                    lora_config: Optional[LoRAConfig],
-                   multimodal_config: Optional[MultiModalConfig],
                    parallel_config: ParallelConfig,
                    scheduler_config: SchedulerConfig,
                    cache_config: CacheConfig) -> nn.Module:
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
                 model = _initialize_model(model_config, self.load_config,
-                                          lora_config, multimodal_config,
-                                          cache_config, scheduler_config)
+                                          lora_config, cache_config,
+                                          scheduler_config)
             # NOTE(woosuk): For accurate performance evaluation, we assign
             # random values to the weights.
             initialize_dummy_weights(model)
@@ -419,7 +414,6 @@ class TensorizerLoader(BaseModelLoader):
         model_config: ModelConfig,
         device_config: DeviceConfig,
         lora_config: Optional[LoRAConfig],
-        multimodal_config: Optional[MultiModalConfig],
         cache_config: CacheConfig,
     ) -> nn.Module:
         """Load a serialized model with tensorizer to the CPU.
@@ -432,8 +426,7 @@ class TensorizerLoader(BaseModelLoader):
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
                 model = _initialize_model(model_config, self.load_config,
-                                          lora_config, multimodal_config,
-                                          cache_config)
+                                          lora_config, cache_config)
 
             model.load_weights(self._get_weights_iterator())
         return model.eval()
@@ -443,7 +436,6 @@ class TensorizerLoader(BaseModelLoader):
         model_config: ModelConfig,
         device_config: DeviceConfig,
         lora_config: Optional[LoRAConfig],
-        multimodal_config: Optional[MultiModalConfig],
         cache_config: CacheConfig,
     ) -> nn.Module:
         """Load a serialized model with tensorizer.
@@ -457,7 +449,7 @@ class TensorizerLoader(BaseModelLoader):
                 quant_config = _get_quantization_config(
                     model_config, self.load_config)
                 extra_kwargs = _get_model_initialization_kwargs(
-                    model_class, lora_config, multimodal_config)
+                    model_class, lora_config, model_config.multimodal_config)
                 extra_kwargs["quant_config"] = quant_config
                 extra_kwargs["cache_config"] = cache_config
 
@@ -472,7 +464,6 @@ class TensorizerLoader(BaseModelLoader):
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
                    lora_config: Optional[LoRAConfig],
-                   multimodal_config: Optional[MultiModalConfig],
                    parallel_config: ParallelConfig,
                    scheduler_config: SchedulerConfig,
                    cache_config: CacheConfig) -> nn.Module:
@@ -486,11 +477,9 @@ class TensorizerLoader(BaseModelLoader):
 
         if is_vllm_tensorized(self.tensorizer_config):
             return self._load_model_serialized(model_config, device_config,
-                                               lora_config, multimodal_config,
-                                               cache_config)
+                                               lora_config, cache_config)
         return self._load_model_serialized_cpu(model_config, device_config,
-                                               lora_config, multimodal_config,
-                                               cache_config)
+                                               lora_config, cache_config)
 
     @staticmethod
     def save_model(
@@ -576,7 +565,6 @@ class ShardedStateLoader(BaseModelLoader):
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
                    lora_config: Optional[LoRAConfig],
-                   multimodal_config: Optional[MultiModalConfig],
                    parallel_config: ParallelConfig,
                    scheduler_config: SchedulerConfig,
                    cache_config: CacheConfig) -> nn.Module:
@@ -590,8 +578,11 @@ class ShardedStateLoader(BaseModelLoader):
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
                 model = _initialize_model(model_config, self.load_config,
-                                          lora_config, multimodal_config,
-                                          cache_config)
+                                          lora_config, cache_config)
+                for _, module in model.named_modules():
+                    quant_method = getattr(module, "quant_method", None)
+                    if quant_method is not None:
+                        quant_method.process_weights_after_loading(module)
             rank = get_tensor_model_parallel_rank()
             pattern = os.path.join(
                 local_model_path,
@@ -882,11 +873,11 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         if not hasattr(model, 'load_weights'):
             raise AttributeError(
                 "The required method 'load_weights' is not defined in class"
-                f" {type(self).__name__}.")
+                f" {type(model).__name__}.")
 
         if not hasattr(model, 'bitsandbytes_stacked_params_mapping'):
             raise AttributeError(
-                f"Model {type(self).__name__} does not support BitsAndBytes "
+                f"Model {type(model).__name__} does not support BitsAndBytes "
                 "quantization yet.")
 
         logger.info("Loading weights with BitsAndBytes quantization. "
@@ -954,15 +945,13 @@ class BitsAndBytesModelLoader(BaseModelLoader):
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
                    lora_config: Optional[LoRAConfig],
-                   multimodal_config: Optional[MultiModalConfig],
                    parallel_config: ParallelConfig,
                    scheduler_config: SchedulerConfig,
                    cache_config: CacheConfig) -> nn.Module:
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
                 model = _initialize_model(model_config, self.load_config,
-                                          lora_config, multimodal_config,
-                                          cache_config)
+                                          lora_config, cache_config)
 
                 self._load_weights(model_config, model)
 
@@ -1031,7 +1020,6 @@ class GGUFModelLoader(BaseModelLoader):
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
                    lora_config: Optional[LoRAConfig],
-                   multimodal_config: Optional[MultiModalConfig],
                    parallel_config: ParallelConfig,
                    scheduler_config: SchedulerConfig,
                    cache_config: CacheConfig) -> nn.Module:
@@ -1046,8 +1034,7 @@ class GGUFModelLoader(BaseModelLoader):
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
                 model = _initialize_model(model_config, self.load_config,
-                                          lora_config, multimodal_config,
-                                          cache_config)
+                                          lora_config, cache_config)
             model.load_weights(
                 self._get_weights_iterator(local_model_path, gguf_weights_map))
         return model

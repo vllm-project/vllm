@@ -1,77 +1,73 @@
 import asyncio
 import signal
-from typing import Any, Coroutine
+from typing import Any, Coroutine, Union
 
 import cloudpickle
+import uvloop
 import zmq
 import zmq.asyncio
 from typing_extensions import Never
 
 from vllm import AsyncEngineArgs, AsyncLLMEngine
-from vllm.entrypoints.openai.rpc import (VLLM_RPC_HEALTHY_STR,
-                                         VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
+from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig)
+from vllm.entrypoints.openai.rpc import (VLLM_RPC_SUCCESS_STR,
+                                         VLLM_RPC_ZMQ_HWM, RPCAbortRequest,
                                          RPCGenerateRequest, RPCUtilityRequest)
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 
 logger = init_logger(__name__)
 
+CONFIG_TYPE = Union[ModelConfig, DecodingConfig, ParallelConfig,
+                    SchedulerConfig, LoRAConfig]
+
 
 class AsyncEngineRPCServer:
 
     def __init__(self, async_engine_args: AsyncEngineArgs,
-                 usage_context: UsageContext, port: int):
+                 usage_context: UsageContext, rpc_path: str):
         # Initialize engine first.
-        self.engine = AsyncLLMEngine.from_engine_args(async_engine_args,
-                                                      usage_context)
+        self.engine = AsyncLLMEngine.from_engine_args(
+            async_engine_args, usage_context=usage_context)
 
         # Initialize context.
         self.context = zmq.asyncio.Context()
 
-        # Init socket for readiness state.
-        self.socket = self.context.socket(zmq.constants.ROUTER)
-        # Note numeric form of localhost should be used for zmq bind(),
-        # see https://stackoverflow.com/a/8958414
-        self.socket.bind(f"tcp://127.0.0.1:{port}")
+        # Init socket.
+        self.socket = self.context.socket(zmq.constants.DEALER)
+        self.socket.set_hwm(VLLM_RPC_ZMQ_HWM)
+        self.socket.connect(rpc_path)
 
     def cleanup(self):
         """Cleanup all resources."""
         self.socket.close()
         self.context.destroy()
+        self.engine.shutdown_background_loop()
+        # Clear the engine reference so that it can be GC'ed.
+        del self.engine
 
-    async def get_model_config(self, identity):
-        """Send the ModelConfig"""
-        model_config = await self.engine.get_model_config()
+    async def get_config(self, identity, request):
+        try:
+            config: CONFIG_TYPE
+            if request == RPCUtilityRequest.GET_MODEL_CONFIG:
+                config = await self.engine.get_model_config()
+            elif request == RPCUtilityRequest.GET_DECODING_CONFIG:
+                config = await self.engine.get_decoding_config()
+            elif request == RPCUtilityRequest.GET_LORA_CONFIG:
+                config = await self.engine.get_lora_config()
+            elif request == RPCUtilityRequest.GET_SCHEDULER_CONFIG:
+                config = await self.engine.get_scheduler_config()
+            elif request == RPCUtilityRequest.GET_PARALLEL_CONFIG:
+                config = await self.engine.get_parallel_config()
+            else:
+                raise ValueError("Unknown Config Request: %s", request)
 
-        await self.socket.send_multipart(
-            [identity, cloudpickle.dumps(model_config)])
+            await self.socket.send_multipart(
+                [identity, cloudpickle.dumps(config)])
 
-    async def get_decoding_config(self, identity):
-        """Send the DecodingConfig"""
-        decoding_config = await self.engine.get_decoding_config()
-
-        await self.socket.send_multipart(
-            [identity, cloudpickle.dumps(decoding_config)])
-
-    async def get_lora_config(self, identity):
-        lora_config = await self.engine.get_lora_config()
-
-        await self.socket.send_multipart(
-            [identity, cloudpickle.dumps(lora_config)])
-
-    async def get_scheduler_config(self, identity):
-        """Send the SchedulerConfig"""
-        parallel_config = await self.engine.get_scheduler_config()
-
-        await self.socket.send_multipart(
-            [identity, cloudpickle.dumps(parallel_config)])
-
-    async def get_parallel_config(self, identity):
-        """Send the ParallelConfig"""
-        parallel_config = await self.engine.get_parallel_config()
-
-        await self.socket.send_multipart(
-            [identity, cloudpickle.dumps(parallel_config)])
+        except Exception as e:
+            await self.socket.send_multipart([identity, cloudpickle.dumps(e)])
 
     async def is_tracing_enabled(self, identity):
         """Send the is_tracing_enabled flag"""
@@ -84,28 +80,23 @@ class AsyncEngineRPCServer:
         """Log stats and confirm success."""
         await self.engine.do_log_stats()
 
-        await self.socket.send_multipart([
-            identity,
-            cloudpickle.dumps(VLLM_RPC_SUCCESS_STR),
-        ])
+        await self.socket.send_multipart(
+            [identity, cloudpickle.dumps(VLLM_RPC_SUCCESS_STR)])
 
     async def is_server_ready(self, identity):
         """Notify the client that we are ready."""
-        await self.socket.send_multipart([
-            identity,
-            cloudpickle.dumps(VLLM_RPC_SUCCESS_STR),
-        ])
+        await self.socket.send_multipart(
+            [identity, cloudpickle.dumps(VLLM_RPC_SUCCESS_STR)])
 
     async def abort(self, identity, request: RPCAbortRequest):
         """Abort request and notify the client of success."""
-        # Abort the request in the llm engine.
-        await self.engine.abort(request.request_id)
-
-        # Send confirmation to the client.
-        await self.socket.send_multipart([
-            identity,
-            cloudpickle.dumps(VLLM_RPC_SUCCESS_STR),
-        ])
+        try:
+            # Abort the request in the llm engine.
+            await self.engine.abort(request.request_id)
+            result: Union[str, Exception] = VLLM_RPC_SUCCESS_STR
+        except Exception as e:
+            result = e
+        await self.socket.send_multipart([identity, cloudpickle.dumps(result)])
 
     async def generate(self, identity, generate_request: RPCGenerateRequest):
         try:
@@ -122,16 +113,36 @@ class AsyncEngineRPCServer:
                     [identity, cloudpickle.dumps(request_output)])
 
         except Exception as e:
-            ### Notify client of all failures
             await self.socket.send_multipart([identity, cloudpickle.dumps(e)])
 
     async def check_health(self, identity):
         try:
             await self.engine.check_health()
             await self.socket.send_multipart(
-                [identity, cloudpickle.dumps(VLLM_RPC_HEALTHY_STR)])
+                [identity, cloudpickle.dumps(VLLM_RPC_SUCCESS_STR)])
+
         except Exception as e:
             await self.socket.send_multipart([identity, cloudpickle.dumps(e)])
+
+    async def start_profile(self, identity):
+        logger.info("Starting profiler...")
+        await self.engine.start_profile()
+        logger.info("Profiler started.")
+
+        await self.socket.send_multipart([
+            identity,
+            cloudpickle.dumps(VLLM_RPC_SUCCESS_STR),
+        ])
+
+    async def stop_profile(self, identity):
+        logger.info("Stopping profiler...")
+        await self.engine.stop_profile()
+        logger.info("Profiler stopped.")
+
+        await self.socket.send_multipart([
+            identity,
+            cloudpickle.dumps(VLLM_RPC_SUCCESS_STR),
+        ])
 
     def _make_handler_coro(self, identity,
                            message) -> Coroutine[Any, Any, Never]:
@@ -146,24 +157,26 @@ class AsyncEngineRPCServer:
             return self.abort(identity, request)
 
         elif isinstance(request, RPCUtilityRequest):
-            if request == RPCUtilityRequest.GET_MODEL_CONFIG:
-                return self.get_model_config(identity)
-            elif request == RPCUtilityRequest.GET_PARALLEL_CONFIG:
-                return self.get_parallel_config(identity)
-            elif request == RPCUtilityRequest.GET_DECODING_CONFIG:
-                return self.get_decoding_config(identity)
-            elif request == RPCUtilityRequest.GET_SCHEDULER_CONFIG:
-                return self.get_scheduler_config(identity)
-            elif request == RPCUtilityRequest.GET_LORA_CONFIG:
-                return self.get_lora_config(identity)
+            if request in [
+                    RPCUtilityRequest.GET_MODEL_CONFIG,
+                    RPCUtilityRequest.GET_PARALLEL_CONFIG,
+                    RPCUtilityRequest.GET_DECODING_CONFIG,
+                    RPCUtilityRequest.GET_SCHEDULER_CONFIG,
+                    RPCUtilityRequest.GET_LORA_CONFIG
+            ]:
+                return self.get_config(identity, request)
             elif request == RPCUtilityRequest.DO_LOG_STATS:
                 return self.do_log_stats(identity)
             elif request == RPCUtilityRequest.IS_SERVER_READY:
                 return self.is_server_ready(identity)
-            elif request == RPCUtilityRequest.CHECK_HEALTH:
+            elif request == RPCUtilityRequest.IS_SERVER_HEALTHY:
                 return self.check_health(identity)
             elif request == RPCUtilityRequest.IS_TRACING_ENABLED:
                 return self.is_tracing_enabled(identity)
+            elif request == RPCUtilityRequest.START_PROFILE:
+                return self.start_profile(identity)
+            elif request == RPCUtilityRequest.STOP_PROFILE:
+                return self.stop_profile(identity)
             else:
                 raise ValueError(f"Unknown RPCUtilityRequest type: {request}")
 
@@ -213,6 +226,6 @@ async def run_server(server: AsyncEngineRPCServer):
 
 
 def run_rpc_server(async_engine_args: AsyncEngineArgs,
-                   usage_context: UsageContext, port: int):
-    server = AsyncEngineRPCServer(async_engine_args, usage_context, port)
-    asyncio.run(run_server(server))
+                   usage_context: UsageContext, rpc_path: str):
+    server = AsyncEngineRPCServer(async_engine_args, usage_context, rpc_path)
+    uvloop.run(run_server(server))

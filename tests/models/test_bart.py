@@ -2,6 +2,8 @@
 
 Run `pytest tests/models/test_bart.py`.
 """
+from typing import List, Optional, Tuple
+
 from vllm.utils import is_cpu
 
 if not is_cpu():
@@ -10,23 +12,33 @@ if not is_cpu():
     # (xFormers, etc.)
 
     import pytest
+    from transformers import AutoModelForSeq2SeqLM
 
-    from tests.models.utils import DecoderPromptType
+    from vllm.sequence import SampleLogprobs
 
+    from ..conftest import DecoderPromptType
     from .utils import check_logprobs_close
 
     MODELS = ["facebook/bart-base", "facebook/bart-large-cnn"]
 
-    DECODER_PROMPT_TYPES = ([
-        DecoderPromptType.CUSTOM, DecoderPromptType.EMPTY_STR,
-        DecoderPromptType.NONE
-    ])
+    def vllm_to_hf_output(
+        vllm_output: Tuple[List[int], str, Optional[SampleLogprobs]],
+        decoder_prompt_type: DecoderPromptType,
+    ):
+        """Sanitize vllm output to be comparable with hf output."""
+        output_ids, output_str, out_logprobs = vllm_output
+
+        hf_output_str = output_str + "</s>"
+        if decoder_prompt_type == DecoderPromptType.NONE:
+            hf_output_str = "<s>" + hf_output_str
+
+        return output_ids, hf_output_str, out_logprobs
 
     @pytest.mark.parametrize("model", MODELS)
     @pytest.mark.parametrize("dtype", ["float", "bfloat16"])
     @pytest.mark.parametrize("max_tokens", [64])
     @pytest.mark.parametrize("num_logprobs", [5])
-    @pytest.mark.parametrize("decoder_prompt_type", DECODER_PROMPT_TYPES)
+    @pytest.mark.parametrize("decoder_prompt_type", list(DecoderPromptType))
     def test_models(
         hf_runner,
         vllm_runner,
@@ -120,7 +132,7 @@ if not is_cpu():
         }
 
         with hf_runner(model, dtype=dtype,
-                       is_encoder_decoder_model=True) as hf_model:
+                       auto_cls=AutoModelForSeq2SeqLM) as hf_model:
             hf_outputs = (
                 hf_model.generate_encoder_decoder_greedy_logprobs_limit(
                     test_case_prompts,
@@ -146,8 +158,13 @@ if not is_cpu():
         hf_skip_tokens = (1 if decoder_prompt_type == DecoderPromptType.NONE
                           else 0)
 
-        check_logprobs_close(outputs_0_lst=hf_outputs,
-                             outputs_1_lst=vllm_outputs,
-                             name_0="hf",
-                             name_1="vllm",
-                             num_outputs_0_skip_tokens=hf_skip_tokens)
+        check_logprobs_close(
+            outputs_0_lst=hf_outputs,
+            outputs_1_lst=[
+                vllm_to_hf_output(vllm_output, decoder_prompt_type)
+                for vllm_output in vllm_outputs
+            ],
+            name_0="hf",
+            name_1="vllm",
+            num_outputs_0_skip_tokens=hf_skip_tokens,
+        )

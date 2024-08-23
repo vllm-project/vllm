@@ -177,52 +177,67 @@ Decoder-only Language Models
 
 .. _supported_vlms:
 
-Vision Language Models
-^^^^^^^^^^^^^^^^^^^^^^^
+Multimodal Language Models
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 .. list-table::
-  :widths: 25 25 50 5
+  :widths: 25 25 25 25 5
   :header-rows: 1
 
   * - Architecture
     - Models
+    - Supported Modalities
     - Example HuggingFace Models
     - :ref:`LoRA <lora>`
   * - :code:`Blip2ForConditionalGeneration`
     - BLIP-2
+    - Image
     - :code:`Salesforce/blip2-opt-2.7b`, :code:`Salesforce/blip2-opt-6.7b`, etc.
     -
   * - :code:`ChameleonForConditionalGeneration`
     - Chameleon
+    - Image
     - :code:`facebook/chameleon-7b` etc.
     - 
   * - :code:`FuyuForCausalLM`
     - Fuyu
+    - Image
     - :code:`adept/fuyu-8b` etc.
     - 
   * - :code:`InternVLChatModel`
     - InternVL2
+    - Image
     - :code:`OpenGVLab/InternVL2-4B`, :code:`OpenGVLab/InternVL2-8B`, etc.
     - 
   * - :code:`LlavaForConditionalGeneration`
     - LLaVA-1.5
+    - Image
     - :code:`llava-hf/llava-1.5-7b-hf`, :code:`llava-hf/llava-1.5-13b-hf`, etc.
     -
   * - :code:`LlavaNextForConditionalGeneration`
     - LLaVA-NeXT
+    - Image
     - :code:`llava-hf/llava-v1.6-mistral-7b-hf`, :code:`llava-hf/llava-v1.6-vicuna-7b-hf`, etc.
     -
   * - :code:`PaliGemmaForConditionalGeneration`
     - PaliGemma
+    - Image
     - :code:`google/paligemma-3b-pt-224`, :code:`google/paligemma-3b-mix-224`, etc.
     - 
   * - :code:`Phi3VForCausalLM`
-    - Phi-3-Vision
-    - :code:`microsoft/Phi-3-vision-128k-instruct`, etc.
+    - Phi-3-Vision, Phi-3.5-Vision
+    - Image
+    - :code:`microsoft/Phi-3-vision-128k-instruct`, :code:`microsoft/Phi-3.5-vision-instruct` etc.
     -
   * - :code:`MiniCPMV`
     - MiniCPM-V
-    - :code:`openbmb/MiniCPM-V-2` (see note), :code:`openbmb/MiniCPM-Llama3-V-2_5`, etc.
+    - Image
+    - :code:`openbmb/MiniCPM-V-2` (see note), :code:`openbmb/MiniCPM-Llama3-V-2_5`, :code:`openbmb/MiniCPM-V-2_6`, etc.
+    -
+  * - :code:`UltravoxModel`
+    - Ultravox
+    - Audio
+    - :code:`fixie-ai/ultravox-v0_3`
     -
 
 .. note::

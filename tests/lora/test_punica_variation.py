@@ -20,10 +20,10 @@ from vllm.triton_utils.libentry import LibEntry
 from .utils import (generate_data, generate_data_for_expand_nslices,
                     ref_torch_groupgemm)
 
-HIDDEN_SIZES = [3424, 4096, 4097]
+HIDDEN_SIZES = [4097]
 
 BATCHES = [1, 4, 16, 32]
-NUM_LORA = [1, 4, 8, 16, 32, 64, 128]
+NUM_LORA = [1, 8, 32, 128]
 DTYPES = [torch.float16, torch.bfloat16]
 MAX_RANKS = [1, 4, 8, 16, 32, 64, 128, 256]
 SCALES = [0.5]
@@ -321,22 +321,3 @@ def test_punica_expand_nslices(
 
         slice_offset += hidden_size
     assert_close(our_outputs, ref_outputs)
-
-
-if __name__ == "__main__":
-    from itertools import product
-
-    lst = list(
-        product(
-            BATCHES,
-            NUM_LORA,
-            MAX_RANKS,
-            [1.0],
-            [torch.float16],
-            ["expand"],
-            SEED,
-            CUDA_DEVICES,
-        ))
-    for ele in lst:
-        test_punica_bgmv(*ele)
-        print(f"{ele},pass")

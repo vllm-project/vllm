@@ -9,28 +9,23 @@ ARG CUDA_VERSION=12.4.1
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04 AS base
-
 ARG CUDA_VERSION=12.4.1
 ARG PYTHON_VERSION=3.10
-
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Install Python and other dependencies
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
     && apt-get update -y \
-    && apt-get install -y ccache software-properties-common \
+    && apt-get install -y ccache software-properties-common git curl sudo \
     && add-apt-repository ppa:deadsnakes/ppa \
     && apt-get update -y \
     && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
-    && if [ "${PYTHON_VERSION}" != "3" ]; then update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1; fi \
-    && python3 --version
-
-RUN apt-get update -y \
-    && apt-get install -y git curl sudo
-
-# Install pip s.t. it will be compatible with our PYTHON_VERSION
-RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION}
-RUN python3 -m pip --version
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
+    && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
+    && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
+    && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
+    && python3 --version && python3 -m pip --version
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
@@ -62,16 +57,11 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 #################### WHEEL BUILD IMAGE ####################
 FROM base AS build
 
-ARG PYTHON_VERSION=3.10
-
 # install build dependencies
 COPY requirements-build.txt requirements-build.txt
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install -r requirements-build.txt
-
-# install compiler cache to speed up compilation leveraging local or remote caching
-RUN apt-get update -y && apt-get install -y ccache
 
 # files and directories related to build wheels
 COPY csrc csrc
@@ -95,6 +85,8 @@ ARG buildkite_commit
 ENV BUILDKITE_COMMIT=${buildkite_commit}
 
 ARG USE_SCCACHE
+ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
+ARG SCCACHE_REGION_NAME=us-west-2
 # if USE_SCCACHE is set, use sccache to speed up compilation
 RUN --mount=type=cache,target=/root/.cache/pip \
     if [ "$USE_SCCACHE" = "1" ]; then \
@@ -103,12 +95,9 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         && tar -xzf sccache.tar.gz \
         && sudo mv sccache-v0.8.1-x86_64-unknown-linux-musl/sccache /usr/bin/sccache \
         && rm -rf sccache.tar.gz sccache-v0.8.1-x86_64-unknown-linux-musl \
-        && if [ "$CUDA_VERSION" = "11.8.0" ]; then \
-            export SCCACHE_BUCKET=vllm-build-sccache-2; \
-           else \
-            export SCCACHE_BUCKET=vllm-build-sccache; \
-           fi \
-        && export SCCACHE_REGION=us-west-2 \
+        && export SCCACHE_BUCKET=${SCCACHE_BUCKET_NAME} \
+        && export SCCACHE_REGION=${SCCACHE_REGION_NAME} \
+        && export SCCACHE_IDLE_TIMEOUT=0 \
         && export CMAKE_BUILD_TYPE=Release \
         && sccache --show-stats \
         && python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 \
@@ -160,23 +149,24 @@ FROM nvidia/cuda:${CUDA_VERSION}-base-ubuntu20.04 AS vllm-base
 ARG CUDA_VERSION=12.4.1
 ARG PYTHON_VERSION=3.10
 WORKDIR /vllm-workspace
+ENV DEBIAN_FRONTEND=noninteractive
 
+RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
+    echo "export PYTHON_VERSION_STR=${PYTHON_VERSION_STR}" >> /etc/environment
+
+# Install Python and other dependencies
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
     && apt-get update -y \
-    && apt-get install -y ccache software-properties-common \
+    && apt-get install -y ccache software-properties-common git curl sudo vim python3-pip \
     && add-apt-repository ppa:deadsnakes/ppa \
     && apt-get update -y \
-    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
-    && if [ "${PYTHON_VERSION}" != "3" ]; then update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1; fi \
-    && python3 --version
-
-RUN apt-get update -y \
-    && apt-get install -y python3-pip git vim curl libibverbs-dev
-
-# Install pip s.t. it will be compatible with our PYTHON_VERSION
-RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION}
-RUN python3 -m pip --version
+    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv libibverbs-dev \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
+    && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
+    && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
+    && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
+    && python3 --version && python3 -m pip --version
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
@@ -194,7 +184,8 @@ RUN --mount=type=bind,from=mamba-builder,src=/usr/src/mamba,target=/usr/src/mamb
     python3 -m pip install /usr/src/mamba/*.whl --no-cache-dir
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.1.2/flashinfer-0.1.2+cu121torch2.4-cp310-cp310-linux_x86_64.whl
+    . /etc/environment && \
+    python3 -m pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.1.4/flashinfer-0.1.4+cu121torch2.4-cp${PYTHON_VERSION_STR}-cp${PYTHON_VERSION_STR}-linux_x86_64.whl
 #################### vLLM installation IMAGE ####################
 
 
