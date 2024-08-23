@@ -2,7 +2,7 @@ import time
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, ClassVar, Dict, Deque, Iterable, List,
+from typing import (TYPE_CHECKING, Any, ClassVar, Deque, Dict, Iterable, List,
                     Mapping, Optional)
 from typing import Sequence as GenericSequence
 from typing import Set, Tuple, Type, Union
@@ -82,9 +82,12 @@ DecoderPromptComponents = Tuple[Optional[str], Optional[List[int]],
 @dataclass
 class SchedulerOutputState:
     """Caches the scheduler outputs for a virtual engine. Used for Multi-Step"""
-    last_output: Optional[SamplerOutput] = None
     seq_group_metadata_list: Optional[List[SequenceGroupMetadata]] = None
     scheduler_outputs: Optional[SchedulerOutputs] = None
+    scheduled_ids: Optional[List[Tuple[ScheduledSequenceGroup,
+                                       SequenceGroupMetadata]]] = None
+    allow_async_output_proc: bool = False
+    last_output: Optional[SamplerOutput] = None
 
 
 class LLMEngine:
@@ -402,7 +405,7 @@ class LLMEngine:
             SchedulerOutputState()
             for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
-        
+
         # Async output processing pointers
         self.output_queue: Deque[Tuple[List[SamplerOutput],
                                        List[Tuple[ScheduledSequenceGroup,
@@ -1404,11 +1407,10 @@ class LLMEngine:
         # This ensures that the scheduler is only called again when the current
         # batch has completed.
         if not self._has_remaining_steps(seq_group_metadata_list):
-            (seq_group_metadata_list, scheduler_outputs, scheduled_ids, allow_async_output_proc) = self.scheduler[
-                0].schedule()
+            (seq_group_metadata_list, scheduler_outputs, scheduled_ids,
+             allow_async_output_proc) = self.scheduler[0].schedule()
 
             if not allow_async_output_proc and len(self.output_queue) > 0:
-                assert not self.scheduler_config.is_multi_step
                 self._process_model_outputs(is_async=True)
 
             if (self.scheduler_config.is_multi_step
@@ -1416,7 +1418,8 @@ class LLMEngine:
                 # cache the scheduler outputs for the next iteration if we have
                 # lookahead slots
                 self._cache_scheduler_outputs_for_multi_step(
-                    0, seq_group_metadata_list, scheduler_outputs)
+                    0, seq_group_metadata_list, scheduler_outputs,
+                    scheduled_ids, allow_async_output_proc)
 
         assert seq_group_metadata_list is not None
         assert scheduler_outputs is not None
@@ -1445,10 +1448,9 @@ class LLMEngine:
                 last_sampled_token_ids=last_sampled_token_ids)
 
             if allow_async_output_proc:
-                assert not self.scheduler_config.is_multi_step
                 execute_model_req.output_proc_callback_fn = \
                     self._process_model_outputs
-                
+
             output = self.model_executor.execute_model(
                 execute_model_req=execute_model_req)
 
@@ -1473,15 +1475,16 @@ class LLMEngine:
 
             # Add results to the output_queue
             # (for async or non-async postprocessing)
-            self.output_queue.append((output, scheduled_ids, scheduler_outputs))
+            self.output_queue.append(
+                (output, scheduled_ids, scheduler_outputs))
 
             if (len(output) > 0) and allow_async_output_proc:
-                assert not self.scheduler_config.is_multi_step
                 assert len(output) == 1, ("Multi step decoding does not work "
-                                        "with async output processing.")
+                                          "with async output processing.")
 
-                self._advance_to_next_step(output[0], seq_group_metadata_list,
-                                        scheduler_outputs.scheduled_seq_groups)
+                self._advance_to_next_step(
+                    output[0], seq_group_metadata_list,
+                    scheduler_outputs.scheduled_seq_groups)
 
             if not allow_async_output_proc:
                 self._process_model_outputs(is_async=False)
@@ -1493,11 +1496,10 @@ class LLMEngine:
                 self.do_tracing(scheduler_outputs)
         else:
             self.request_outputs = []
-        
+
         if not self.has_unfinished_requests():
             # Drain async postprocessor
             if len(self.output_queue) > 0:
-                assert not self.scheduler_config.is_multi_step
                 self._process_model_outputs(is_async=True, clear_outputs=False)
             assert len(self.output_queue) == 0
 
@@ -1533,12 +1535,17 @@ class LLMEngine:
     def _cache_scheduler_outputs_for_multi_step(
             self, virtual_engine: int,
             seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-            scheduler_outputs: SchedulerOutputs) -> None:
-        self.cached_scheduler_outputs[
-            virtual_engine].seq_group_metadata_list = seq_group_metadata_list
-        self.cached_scheduler_outputs[virtual_engine].scheduler_outputs = \
-            scheduler_outputs
-        self.cached_scheduler_outputs[virtual_engine].last_output = None
+            scheduler_outputs: SchedulerOutputs,
+            scheduled_ids: Optional[List[Tuple[ScheduledSequenceGroup,
+                                               SequenceGroupMetadata]]],
+            allow_async_output_proc: bool) -> None:
+        co = self.cached_scheduler_outputs[virtual_engine]
+
+        co.seq_group_metadata_list = seq_group_metadata_list
+        co.scheduler_outputs = scheduler_outputs
+        co.scheduled_ids = scheduled_ids
+        co.allow_async_output_proc = allow_async_output_proc
+        co.last_output = None
 
     def _update_cached_scheduler_output(
             self, virtual_engine: int,

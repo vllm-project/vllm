@@ -9,7 +9,7 @@ from typing_extensions import assert_never
 import vllm.envs as envs
 from vllm.config import (DecodingConfig, EngineConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
-from vllm.core.scheduler import ScheduledSequenceGroup, SchedulerOutputs
+from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_timeout import asyncio_timeout
 from vllm.engine.llm_engine import (DecoderPromptComponents, LLMEngine,
@@ -277,8 +277,7 @@ class _AsyncLLMEngine(LLMEngine):
         cached_outputs = self.cached_scheduler_outputs[virtual_engine]
         seq_group_metadata_list = cached_outputs.seq_group_metadata_list
         scheduler_outputs = cached_outputs.scheduler_outputs
-        scheduled_ids = cached_outputs.scheduled_ids
-        allow_async_output_proc = cached_outputs.allow_async_output_proc
+
         # skip the scheduler if there are any remaining steps in the seq groups.
         # This ensures that the scheduler is only called again when the current
         # batch has completed.
@@ -303,7 +302,6 @@ class _AsyncLLMEngine(LLMEngine):
 
         assert seq_group_metadata_list is not None
         assert scheduler_outputs is not None
-        assert scheduled_ids is not None
 
         if not scheduler_outputs.is_empty():
             finished_requests_ids = self.scheduler[
