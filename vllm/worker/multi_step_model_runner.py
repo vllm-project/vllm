@@ -10,6 +10,7 @@ except ModuleNotFoundError:
 
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
@@ -148,10 +149,9 @@ class StatefulModelInput(BroadcastableModelInput):
         ## Update state to forget prefills
         num_prefills = self.frozen_model_input.attn_metadata.num_prefills
         if num_prefills == 0:
-            return self
+            return
         self.num_seqs -= num_prefills
         self.num_queries -= num_prefills
-
 
         if get_pp_group().is_last_rank:
             # Sampling metadata is only required for the final pp group
@@ -259,20 +259,36 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         frozen_model_input = self._base_model_runner.prepare_model_input(
             seq_group_metadata_list, virtual_engine, finished_requests_ids)
 
+        num_prompts = len([None for sg in seq_group_metadata_list if sg.is_prompt])
+        num_decodes = len(seq_group_metadata_list) - num_prompts
+        is_prompts_scheduled_with_decodes = num_prompts > 0 and num_decodes > 0
+
         sampling_metadata_decodes = None 
-        if get_pp_group().is_last_rank: # Sampling metadata is only required for the final pp group
-            generators = self.get_generators(finished_requests_ids)
-            num_prompts = len([None for sg in seq_group_metadata_list if sg.is_prompt])
-            if num_prompts != 0:
-                sampling_metadata_decodes = SamplingMetadata.prepare(
-                    seq_group_metadata_list[num_prompts:],
-                    frozen_model_input.seq_lens[num_prompts:],
-                    frozen_model_input.query_lens[num_prompts:],
-                    self.device,
-                    self.pin_memory,
-                    generators,
-                    self.sampling_metadata_cache)
-                sampling_metadata_decodes.skip_sampler_cpu_output = (True)
+        if is_prompts_scheduled_with_decodes and \
+           not envs.VLLM_MULTI_STEP_CHUNKED_PREFILL_SINGLE_STEP_POLICY:
+            # Prompt sequences and decode sequences are scheduled together and
+            # we are forcing single-step model execution. In this case,
+            # we run both the prompt and the decode sequences togther in the
+            # first step and run only the decode sequences in rest of the
+            # steps. 
+            # Construct a sampling_metadata with just the decode sequences that
+            # can be used for decode-exclusive steps.
+            # Note that this creates a new set of sampling GPU tensors that are
+            # potentially redundant. However, the tensor sizes are manageable and
+            # attempting to re-use/slice the existing tensors is non-trivial.
+            if get_pp_group().is_last_rank:
+                # Sampling metadata is only required for the final pp group
+                generators = self.get_generators(finished_requests_ids)
+                if num_prompts != 0:
+                    sampling_metadata_decodes = SamplingMetadata.prepare(
+                        seq_group_metadata_list[num_prompts:],
+                        frozen_model_input.seq_lens[num_prompts:],
+                        frozen_model_input.query_lens[num_prompts:],
+                        self.device,
+                        self.pin_memory,
+                        generators,
+                        self.sampling_metadata_cache)
+                    sampling_metadata_decodes.skip_sampler_cpu_output = (True)
 
         model_input = StatefulModelInput(
             frozen_model_input=frozen_model_input,

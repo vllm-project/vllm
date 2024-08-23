@@ -279,6 +279,7 @@ class _AsyncLLMEngine(LLMEngine):
     async def step_async(
         self, virtual_engine: int
     ) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
+
         """Performs one decoding iteration and returns newly generated results.
         The workers are ran asynchronously if possible.
 
@@ -300,10 +301,11 @@ class _AsyncLLMEngine(LLMEngine):
             seq_group_metadata_list, scheduler_outputs = self.scheduler[
                 virtual_engine].schedule()
 
-            if (self.scheduler_config.is_multi_step
-                    and scheduler_outputs.num_lookahead_slots > 0):
+            remaining_steps = self._remaining_steps(seq_group_metadata_list)
+            if self.scheduler_config.is_multi_step and \
+                remaining_steps is not None and remaining_steps > 1:
                 # cache the scheduler outputs for the next iteration if we have
-                # lookahead slots
+                # one.
                 self._cache_scheduler_outputs_for_multi_step(
                     virtual_engine, seq_group_metadata_list, scheduler_outputs)
 
@@ -368,12 +370,10 @@ class _AsyncLLMEngine(LLMEngine):
 
         return request_outputs
 
-    def _has_remaining_steps(
-        self, seq_group_metadata_list: Optional[List[SequenceGroupMetadata]]
-    ) -> bool:
+    def _remaining_steps(self, seq_group_metadata_list: Optional[List[SequenceGroupMetadata]]) -> Optional[int]:
         if (not self.scheduler_config.is_multi_step
                 or not seq_group_metadata_list):
-            return False
+            return None
 
         # Get the remaining steps of the last sequence. This is motivated,
         # by a few assumptions that are generally true.
@@ -407,6 +407,15 @@ class _AsyncLLMEngine(LLMEngine):
             ]):
                 raise AssertionError(("All running sequence groups should "
                                       "have the same remaining steps."))
+
+        return remaining_steps
+
+    def _has_remaining_steps(
+        self, seq_group_metadata_list: Optional[List[SequenceGroupMetadata]]
+    ) -> bool:
+        remaining_steps: Optional[int] = self._remaining_steps(seq_group_metadata_list)
+        if remaining_steps is None:
+            return False
 
         return remaining_steps > 0
 

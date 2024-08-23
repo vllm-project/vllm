@@ -60,7 +60,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_ENGINE_USE_RAY: bool = False
     VLLM_PLUGINS: Optional[List[str]] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
-
+    VLLM_MULTI_STEP_CHUNKED_PREFILL_SINGLE_STEP_POLICY: bool = False
 
 def get_default_cache_root():
     return os.getenv(
@@ -400,6 +400,15 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_TORCH_PROFILER_DIR":
     lambda: (None if os.getenv("VLLM_TORCH_PROFILER_DIR", None) is None else os
              .path.expanduser(os.getenv("VLLM_TORCH_PROFILER_DIR", "."))),
+
+    # Applicable when multi-decodes (--num-scheduler-steps) and chunked-prefill
+    # (--enable-chunked-prefill) are both enabled. When prefills are scheduled
+    # together with decode sequences, this flag forces the engine to single-step
+    # the model execution for all the sequences. The default behaviour is to,
+    # run the both the prefill and decode sequence for the first step and run
+    # only the decode sequences for the rest of the steps.
+    "VLLM_MULTI_STEP_CHUNKED_PREFILL_SINGLE_STEP_POLICY":
+    lambda: os.environ.get("VLLM_MULTI_STEP_CHUNKED_PREFILL_SINGLE_STEP_POLICY", "False").lower() in ("true", "1"),
 }
 
 # end-env-vars-definition
