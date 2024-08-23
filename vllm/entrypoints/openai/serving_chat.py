@@ -1,9 +1,10 @@
 import asyncio
 import json
 import time
-from typing import AsyncGenerator, AsyncIterator, Dict, Final, List, Optional
+from typing import (AsyncGenerator, AsyncIterator, Callable, Dict, Final, List,
+                    Optional)
 from typing import Sequence as GenericSequence
-from typing import Type, Union
+from typing import Union
 
 from fastapi import Request
 
@@ -75,7 +76,7 @@ class OpenAIServingChat(OpenAIServing):
                 " the parallel_tool_calls client option is preset for "
                 "compatibility reasons, it will be ignored.")
 
-        self.tool_parser: Optional[Type[ToolParser]] = None
+        self.tool_parser: Optional[Callable[[AnyTokenizer], ToolParser]] = None
         if self.enable_auto_tools:
             if tool_parser == "mistral":
                 self.tool_parser = MistralToolParser
