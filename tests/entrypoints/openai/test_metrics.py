@@ -1,13 +1,13 @@
-from http import HTTPStatus
-
-import openai
-from prometheus_client.parser import text_string_to_metric_families
-import pytest
-import requests
 import subprocess
 import sys
 import tempfile
 import time
+from http import HTTPStatus
+
+import openai
+import pytest
+import requests
+from prometheus_client.parser import text_string_to_metric_families
 from transformers import AutoTokenizer
 
 from ...utils import RemoteOpenAIServer
@@ -184,35 +184,33 @@ async def test_metrics_exist(client: openai.AsyncOpenAI):
 
 
 def test_metrics_exist_run_batch():
-    input_batch = """{"custom_id": "request-0", "method": "POST", "url": "/v1/embeddings", "body": {"model": "intfloat/e5-mistral-7b-instruct", "input": "You are a helpful assistant."}}"""
+    input_batch = """{"custom_id": "request-0", "method": "POST", "url": "/v1/embeddings", "body": {"model": "intfloat/e5-mistral-7b-instruct", "input": "You are a helpful assistant."}}"""  # noqa: E501
 
     base_url = "0.0.0.0"
     port = "8001"
     server_url = f"http://{base_url}:{port}"
 
-    with tempfile.NamedTemporaryFile("w") as input_file, tempfile.NamedTemporaryFile(
-        "r"
-    ) as output_file:
+    with tempfile.NamedTemporaryFile(
+            "w") as input_file, tempfile.NamedTemporaryFile(
+                "r") as output_file:
         input_file.write(input_batch)
         input_file.flush()
-        proc = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "vllm.entrypoints.openai.run_batch",
-                "-i",
-                input_file.name,
-                "-o",
-                output_file.name,
-                "--model",
-                "intfloat/e5-mistral-7b-instruct",
-                "--enable-metrics",
-                "--url",
-                base_url,
-                "--port",
-                port,
-            ],
-        )
+        proc = subprocess.Popen([
+            sys.executable,
+            "-m",
+            "vllm.entrypoints.openai.run_batch",
+            "-i",
+            input_file.name,
+            "-o",
+            output_file.name,
+            "--model",
+            "intfloat/e5-mistral-7b-instruct",
+            "--enable-metrics",
+            "--url",
+            base_url,
+            "--port",
+            port,
+        ], )
 
         def is_server_up(url):
             try:

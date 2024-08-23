@@ -60,9 +60,9 @@ def parse_args():
                         'ID numbers being printed in log.'
                         '\n\nDefault: Unlimited')
 
-    parser.add_argument(
-        "--enable-metrics", action="store_true", help="Enable Prometheus metrics"
-    )
+    parser.add_argument("--enable-metrics",
+                        action="store_true",
+                        help="Enable Prometheus metrics")
     parser.add_argument(
         "--url",
         type=str,
