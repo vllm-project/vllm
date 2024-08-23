@@ -49,18 +49,20 @@ def _init_attn_metadata_from_tensor_dict(
 
 
 def _init_sampling_metadata_from_tensor_dict(  # type: ignore
-        tensor_dict: Dict[str, Any]) -> Dict[str, Any]:
+        tensor_dict: Dict[str, Any],
+        sampling_metadata_key: str = "sampling_metadata",
+        selected_token_ids_key: str = "selected_token_indices") -> Dict[str, Any]:
     """
     Helper method to initialize SamplingMetadata based on broadcastable
     SamplingMetadata fields.
     """
     from vllm.model_executor import SamplingMetadata
 
-    selected_token_indices = tensor_dict.pop("selected_token_indices", None)
+    selected_token_indices = tensor_dict.pop(selected_token_ids_key, None)
     # An empty SamplingMetadata to signal that the worker should skip
     # sampling.
     if selected_token_indices is not None:
-        tensor_dict["sampling_metadata"] = SamplingMetadata(
+        tensor_dict[sampling_metadata_key] = SamplingMetadata(
             seq_groups=None,
             selected_token_indices=selected_token_indices,
             categorized_sample_indices=None,
@@ -71,13 +73,14 @@ def _init_sampling_metadata_from_tensor_dict(  # type: ignore
 
 def _add_sampling_metadata_broadcastable_dict(
         tensor_dict: Dict[str, Any],
-        sampling_metadata: Optional["SamplingMetadata"]) -> None:
+        sampling_metadata: Optional["SamplingMetadata"],
+        selected_token_ids_key: str = "selected_token_indices") -> None:
     """
     Helper method to update tensor_dict with broadcastable
     SamplingMetadata fields.
     """
     if sampling_metadata is not None:
-        tensor_dict["selected_token_indices"] = (
+        tensor_dict[selected_token_ids_key] = (
             sampling_metadata.selected_token_indices)
 
 

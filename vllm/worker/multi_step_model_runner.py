@@ -23,6 +23,7 @@ from vllm.worker.model_runner import (GPUModelRunnerBase,
                                       ModelInputForGPUWithSamplingMetadata)
 from vllm.worker.model_runner_base import (
     BroadcastableModelInput, _init_attn_metadata_from_tensor_dict,
+    _add_sampling_metadata_broadcastable_dict,
     _init_frozen_model_input_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
 
@@ -140,9 +141,6 @@ class StatefulModelInput(BroadcastableModelInput):
     # Step 2-n: execute_model only processes sequences {S4, S5, S6} and the
     #  corresponding pythonize_sampler_output will produce results
     #  {[], [], R4, R5, R6}
-    #
-    # These members dont need to be broadcasted as the sampling and
-    #  pythonization is exclusive to the last_rank GPU
 
     # Use sampling_metadata_decodes for decode-exclusive iterations.
     sampling_metadata_decodes: Optional[SamplingMetadata] = None
@@ -170,6 +168,9 @@ class StatefulModelInput(BroadcastableModelInput):
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         assert self.frozen_model_input is not None
         tensor_dict = self.frozen_model_input.as_broadcastable_tensor_dict()
+        _add_sampling_metadata_broadcastable_dict(tensor_dict,
+                                                  self.sampling_metadata_decodes,
+                                                  selected_token_ids_key="selected_token_indices_decodes")
         new_tensor_dict = {
             'last_sampled_token_ids': self.last_sampled_token_ids,
             'current_step': self.current_step,
@@ -178,6 +179,7 @@ class StatefulModelInput(BroadcastableModelInput):
             'is_first_multi_step': self.is_first_multi_step,
             'num_seqs': self.num_seqs,
             'num_queries': self.num_queries,
+            'num_empty_prefill_step_outputs': self.num_empty_prefill_step_outputs,
         }
         tensor_dict.update(new_tensor_dict)
         return tensor_dict
@@ -188,7 +190,12 @@ class StatefulModelInput(BroadcastableModelInput):
         tensor_dict: Dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None,
     ) -> "StatefulModelInput":
+        # base model runner's sampling_metadata
         tensor_dict = _init_sampling_metadata_from_tensor_dict(tensor_dict)
+        # SatefulModelInput's sampling_metadata_decodes 
+        tensor_dict = _init_sampling_metadata_from_tensor_dict(tensor_dict,
+                                                               "sampling_metadata_decodes",
+                                                               "selected_token_indices_decodes" )
         if attn_backend is not None:
             tensor_dict = _init_attn_metadata_from_tensor_dict(
                 attn_backend, tensor_dict)
@@ -286,17 +293,18 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
             # Note that this creates a new set of sampling GPU tensors that are
             # potentially redundant. However, the tensor sizes are manageable
             # and attempting to reuse/slice the existing tensors is non-trivial.
-            if get_pp_group().is_last_rank:
-                # Sampling metadata is only required for the final pp group
-                generators = self.get_generators(finished_requests_ids)
-                if num_prompts != 0:
-                    sampling_metadata_decodes = SamplingMetadata.prepare(
-                        seq_group_metadata_list[num_prompts:],
-                        frozen_model_input.seq_lens[num_prompts:],
-                        frozen_model_input.query_lens[num_prompts:],
-                        self.device, self.pin_memory, generators,
-                        self.sampling_metadata_cache)
-                    sampling_metadata_decodes.skip_sampler_cpu_output = (True)
+
+            # Sampling metadata is only required for the final pp group
+            assert (get_pp_group().is_last_rank)
+            generators = self.get_generators(finished_requests_ids)
+            if num_prompts != 0:
+                sampling_metadata_decodes = SamplingMetadata.prepare(
+                    seq_group_metadata_list[num_prompts:],
+                    frozen_model_input.seq_lens[num_prompts:],
+                    frozen_model_input.query_lens[num_prompts:],
+                    self.device, self.pin_memory, generators,
+                    self.sampling_metadata_cache)
+                sampling_metadata_decodes.skip_sampler_cpu_output = (True)
 
         model_input = StatefulModelInput(
             frozen_model_input=frozen_model_input,
