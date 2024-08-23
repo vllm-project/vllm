@@ -3,13 +3,11 @@ from typing import List
 
 import pytest
 import torch
-import itertools
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, SamplingParams,
                            SequenceData, SequenceGroupMetadata)
 from vllm.utils import is_cpu
-from vllm.worker.model_runner import _get_graph_batch_size
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 
 ENFORCE_EAGER = [True]
