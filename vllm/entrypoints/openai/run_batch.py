@@ -67,13 +67,15 @@ def parse_args():
         "--url",
         type=str,
         default="0.0.0.0",
-        help="URL to the Prometheus metrics server",
+        help="URL to the Prometheus metrics server "
+        "(only needed if enable-metrics is set).",
     )
     parser.add_argument(
         "--port",
         type=int,
         default=8000,
-        help="Port number for the Prometheus metrics server",
+        help="Port number for the Prometheus metrics server "
+        "(only needed if enable-metrics is set).",
     )
 
     return parser.parse_args()
