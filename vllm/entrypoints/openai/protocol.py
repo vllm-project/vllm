@@ -5,8 +5,6 @@ from argparse import Namespace
 from typing import Any, Dict, List, Literal, Optional, Union
 
 import torch
-# yapf conflicts with isort for this block
-# yapf: disable
 from openai.types.chat import ChatCompletionContentPartParam
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Annotated, Required, TypedDict
@@ -18,8 +16,6 @@ from vllm.sampling_params import LogitsProcessor, SamplingParams
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
-
-# yapf: enable
 
 # torch is mocked during docs generation,
 # so we have to provide the values as literals
