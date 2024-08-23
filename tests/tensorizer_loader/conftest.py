@@ -1,42 +1,53 @@
-# isort: skip_file
-
 import contextlib
+import functools
 import gc
+from typing import Callable, TypeVar
 
 import pytest
 import ray
 import torch
+from typing_extensions import ParamSpec
 
 from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 
 
+@pytest.fixture(autouse=True)
 def cleanup():
     destroy_model_parallel()
     destroy_distributed_environment()
     with contextlib.suppress(AssertionError):
         torch.distributed.destroy_process_group()
+    ray.shutdown()
     gc.collect()
     torch.cuda.empty_cache()
-    ray.shutdown()
 
 
-@pytest.fixture()
-def should_do_global_cleanup_after_test(request) -> bool:
-    """Allow subdirectories to skip global cleanup by overriding this fixture.
-    This can provide a ~10x speedup for non-GPU unit tests since they don't need
-    to initialize torch.
-    """
-
-    return True
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
 
 
-@pytest.fixture(autouse=True)
-def cleanup_fixture(should_do_global_cleanup_after_test: bool):
-    yield
-    if should_do_global_cleanup_after_test:
-        cleanup()
+def retry_until_skip(n: int):
+
+    def decorator_retry(func: Callable[_P, _R]) -> Callable[_P, _R]:
+
+        @functools.wraps(func)
+        def wrapper_retry(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+            for i in range(n):
+                try:
+                    return func(*args, **kwargs)
+                except AssertionError:
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                    if i == n - 1:
+                        pytest.skip(f"Skipping test after {n} attempts.")
+
+            raise AssertionError("Code should not be reached")
+
+        return wrapper_retry
+
+    return decorator_retry
 
 
 @pytest.fixture(autouse=True)

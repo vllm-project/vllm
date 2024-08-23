@@ -1,11 +1,13 @@
-import re
 from typing import List, Optional, Type
 
 import pytest
+from transformers import AutoModelForVision2Seq, BatchEncoding
 
 from vllm.multimodal.utils import rescale_image_size
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 
-from ..conftest import IMAGE_ASSETS, VllmRunner, _ImageAssets
+from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
+from .utils import check_outputs_equal
 
 pytestmark = pytest.mark.vlm
 
@@ -19,9 +21,8 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
 models = ["facebook/chameleon-7b"]
 
 
-#TODO (ywang96): Add correctness test when chameleon is
-# available on transformers.
 def run_test(
+    hf_runner: Type[HfRunner],
     vllm_runner: Type[VllmRunner],
     image_assets: _ImageAssets,
     model: str,
@@ -29,13 +30,20 @@ def run_test(
     size_factors: List[float],
     dtype: str,
     max_tokens: int,
+    num_logprobs: int,
     tensor_parallel_size: int,
     distributed_executor_backend: Optional[str] = None,
 ):
-    """Test if the model can generate text given 
-    a batch of images and prompts.
+    """Inference result should be the same between hf and vllm.
 
+    All the image fixtures for the test is under tests/images.
+    For huggingface runner, we provide the PIL images as input.
+    For vllm runner, we provide MultiModalDataDict objects 
+    and corresponding vision language config as input.
+    Note, the text input is also adjusted to abide by vllm contract.
+    The text output is sanitized to be able to compare with hf.
     """
+    torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
     images = [asset.pil_image for asset in image_assets]
 
     inputs_per_image = [(
@@ -50,35 +58,49 @@ def run_test(
                      distributed_executor_backend=distributed_executor_backend,
                      enforce_eager=True) as vllm_model:
 
-        for prompts, images in inputs_per_image:
-            vllm_outputs = vllm_model.generate_greedy(prompts,
-                                                      max_tokens,
-                                                      images=images)
-            for i in range(len(vllm_outputs)):
+        vllm_outputs_per_image = [
+            vllm_model.generate_greedy_logprobs(prompts,
+                                                max_tokens,
+                                                num_logprobs=num_logprobs,
+                                                images=images)
+            for prompts, images in inputs_per_image
+        ]
 
-                # format prompt back to original
-                replacements = {
-                    "<racm3:break>": "",
-                    "<eoss>": "",
-                    "<reserved08706>": ""
-                }
-                pattern = '|'.join(replacements.keys())
-                vllm_result = re.sub(
-                    pattern,
-                    lambda match: replacements[match.group(0)],  #noqa B023
-                    vllm_outputs[i][1])
-                vllm_result = vllm_result.replace("<image>", "", 1023)
-                assert vllm_result[:len(prompts[i])] == prompts[i]
+    def process(hf_inputs: BatchEncoding):
+        hf_inputs["pixel_values"] = hf_inputs["pixel_values"] \
+            .to(torch_dtype)  # type: ignore
+        return hf_inputs
 
-                # assert at least 10 new characters are generated
-                # (to take stop token into account)
-                assert len(vllm_outputs[i][1]) - len(prompts[i]) > 10
+    with hf_runner(model,
+                   dtype=dtype,
+                   postprocess_inputs=process,
+                   auto_cls=AutoModelForVision2Seq) as hf_model:
+        hf_outputs_per_image = [
+            hf_model.generate_greedy_logprobs_limit(prompts,
+                                                    max_tokens,
+                                                    num_logprobs=num_logprobs,
+                                                    images=images)
+            for prompts, images in inputs_per_image
+        ]
+
+    for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
+                                        vllm_outputs_per_image):
+        # HF Logprobs include image tokens, unlike vLLM, so we don't directly
+        # compare them
+        check_outputs_equal(
+            outputs_0_lst=[outputs[:2] for outputs in hf_outputs],
+            outputs_1_lst=[outputs[:2] for outputs in vllm_outputs],
+            name_0="hf",
+            name_1="vllm",
+        )
 
 
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
     "size_factors",
     [
+        # No image
+        [],
         # Single-scale
         [1.0],
         # Single-scale, batched
@@ -88,15 +110,18 @@ def run_test(
     ],
 )
 @pytest.mark.parametrize("dtype", ["bfloat16"])
-@pytest.mark.parametrize("max_tokens", [128])
-def test_models(vllm_runner, image_assets, model, size_factors, dtype: str,
-                max_tokens: int) -> None:
+@pytest.mark.parametrize("max_tokens", [8])
+@pytest.mark.parametrize("num_logprobs", [5])
+def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
+                dtype, max_tokens, num_logprobs) -> None:
     run_test(
+        hf_runner,
         vllm_runner,
         image_assets,
         model,
         size_factors=size_factors,
         dtype=dtype,
         max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
         tensor_parallel_size=1,
     )

@@ -1,11 +1,12 @@
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Tuple, Type
 
 import openvino as ov
 import torch
 
 from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata)
+from vllm.attention.backends.utils import CommonAttentionState
 
 
 class OpenVINOAttentionBackend(AttentionBackend):
@@ -23,6 +24,10 @@ class OpenVINOAttentionBackend(AttentionBackend):
     @staticmethod
     def make_metadata(*args, **kwargs) -> "AttentionMetadata":
         raise NotImplementedError
+
+    @staticmethod
+    def get_state_cls() -> Type["CommonAttentionState"]:
+        return CommonAttentionState
 
     @staticmethod
     def make_openvino_metadata(*args, **kwargs) -> "OpenVINOAttentionMetadata":

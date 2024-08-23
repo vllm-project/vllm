@@ -134,7 +134,6 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         rank: int,
         distributed_init_method: str,
         lora_config: Optional[LoRAConfig] = None,
-        multimodal_config: Optional[MultiModalConfig] = None,
         kv_cache_dtype: Optional[str] = "auto",
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         speculative_config: Optional[SpeculativeConfig] = None,
@@ -177,7 +176,6 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             cache_config,
             load_config=self.load_config,
             lora_config=self.lora_config,
-            multimodal_config=self.multimodal_config,
             kv_cache_dtype=kv_cache_dtype,
             prompt_adapter_config=self.prompt_adapter_config,
             is_driver_worker=is_driver_worker)

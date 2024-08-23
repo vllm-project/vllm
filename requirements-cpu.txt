@@ -2,5 +2,5 @@
 -r requirements-common.txt
 
 # Dependencies for x86_64 CPUs
-torch == 2.4.0; platform_machine != "ppc64le"
+torch == 2.4.0+cpu; platform_machine != "ppc64le"
 torchvision; platform_machine != "ppc64le"   # required for the image processor of phi3v, this must be updated alongside torch

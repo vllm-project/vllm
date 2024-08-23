@@ -1,23 +1,26 @@
+import functools
 import os
+import signal
 import subprocess
 import sys
 import time
 import warnings
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 import openai
-import ray
 import requests
 from transformers import AutoTokenizer
+from typing_extensions import ParamSpec
 
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.entrypoints.openai.cli_args import make_arg_parser
+from vllm.platforms import current_platform
 from vllm.utils import FlexibleArgumentParser, get_open_port, is_hip
 
-if is_hip():
+if current_platform.is_rocm():
     from amdsmi import (amdsmi_get_gpu_vram_usage,
                         amdsmi_get_processor_handles, amdsmi_init,
                         amdsmi_shut_down)
@@ -29,7 +32,7 @@ if is_hip():
             yield
         finally:
             amdsmi_shut_down()
-else:
+elif current_platform.is_cuda():
     from pynvml import (nvmlDeviceGetHandleByIndex, nvmlDeviceGetMemoryInfo,
                         nvmlInit, nvmlShutdown)
 
@@ -40,6 +43,11 @@ else:
             yield
         finally:
             nvmlShutdown()
+else:
+
+    @contextmanager
+    def _nvml():
+        yield
 
 
 VLLM_PATH = Path(__file__).parent.parent
@@ -48,15 +56,14 @@ VLLM_PATH = Path(__file__).parent.parent
 
 class RemoteOpenAIServer:
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
-    MAX_SERVER_START_WAIT_S = 600  # wait for server to start for 60 seconds
 
-    def __init__(
-        self,
-        model: str,
-        cli_args: List[str],
-        *,
-        auto_port: bool = True,
-    ) -> None:
+    def __init__(self,
+                 model: str,
+                 cli_args: List[str],
+                 *,
+                 env_dict: Optional[Dict[str, str]] = None,
+                 auto_port: bool = True,
+                 max_wait_seconds: Optional[float] = None) -> None:
         if auto_port:
             if "-p" in cli_args or "--port" in cli_args:
                 raise ValueError("You have manually specified the port"
@@ -75,18 +82,26 @@ class RemoteOpenAIServer:
         # the current process might initialize cuda,
         # to be safe, we should use spawn method
         env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
+        if env_dict is not None:
+            env.update(env_dict)
         self.proc = subprocess.Popen(["vllm", "serve"] + [model] + cli_args,
                                      env=env,
                                      stdout=sys.stdout,
                                      stderr=sys.stderr)
+        max_wait_seconds = max_wait_seconds or 240
         self._wait_for_server(url=self.url_for("health"),
-                              timeout=self.MAX_SERVER_START_WAIT_S)
+                              timeout=max_wait_seconds)
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
         self.proc.terminate()
+        try:
+            self.proc.wait(3)
+        except subprocess.TimeoutExpired:
+            # force kill if needed
+            self.proc.kill()
 
     def _wait_for_server(self, *, url: str, timeout: float):
         # run health check
@@ -125,10 +140,22 @@ class RemoteOpenAIServer:
         )
 
 
-def compare_two_settings(model: str, arg1: List[str], arg2: List[str]):
+def compare_two_settings(model: str,
+                         arg1: List[str],
+                         arg2: List[str],
+                         env1: Optional[Dict[str, str]] = None,
+                         env2: Optional[Dict[str, str]] = None,
+                         max_wait_seconds: Optional[float] = None) -> None:
     """
-    Launch API server with two different sets of arguments and compare the
-    results of the API calls. The arguments are after the model name.
+    Launch API server with two different sets of arguments/environments
+    and compare the results of the API calls.
+
+    Args:
+        model: The model to test.
+        arg1: The first set of arguments to pass to the API server.
+        arg2: The second set of arguments to pass to the API server.
+        env1: The first set of environment variables to pass to the API server.
+        env2: The second set of environment variables to pass to the API server.
     """
 
     tokenizer = AutoTokenizer.from_pretrained(model)
@@ -136,8 +163,11 @@ def compare_two_settings(model: str, arg1: List[str], arg2: List[str]):
     prompt = "Hello, my name is"
     token_ids = tokenizer(prompt)["input_ids"]
     results = []
-    for args in (arg1, arg2):
-        with RemoteOpenAIServer(model, args) as server:
+    for args, env in ((arg1, env1), (arg2, env2)):
+        with RemoteOpenAIServer(model,
+                                args,
+                                env_dict=env,
+                                max_wait_seconds=max_wait_seconds) as server:
             client = server.get_client()
 
             # test models list
@@ -178,6 +208,37 @@ def compare_two_settings(model: str, arg1: List[str], arg2: List[str]):
                 "usage": completion.usage,
             })
 
+            # test seeded random sampling
+            completion = client.completions.create(model=model,
+                                                   prompt=prompt,
+                                                   max_tokens=5,
+                                                   seed=33,
+                                                   temperature=1.0)
+
+            results.append({
+                "test": "seeded_sampling",
+                "text": completion.choices[0].text,
+                "finish_reason": completion.choices[0].finish_reason,
+                "usage": completion.usage,
+            })
+
+            # test seeded random sampling with multiple prompts
+            completion = client.completions.create(model=model,
+                                                   prompt=[prompt, prompt],
+                                                   max_tokens=5,
+                                                   seed=33,
+                                                   temperature=1.0)
+
+            results.append({
+                "test":
+                "seeded_sampling",
+                "text": [choice.text for choice in completion.choices],
+                "finish_reason":
+                [choice.finish_reason for choice in completion.choices],
+                "usage":
+                completion.usage,
+            })
+
             # test simple list
             batch = client.completions.create(
                 model=model,
@@ -214,8 +275,9 @@ def compare_two_settings(model: str, arg1: List[str], arg2: List[str]):
     arg1_results = results[:n]
     arg2_results = results[n:]
     for arg1_result, arg2_result in zip(arg1_results, arg2_results):
-        assert arg1_result == arg2_result, \
-            f"Results for {model=} are not the same with {arg1=} and {arg2=}"
+        assert arg1_result == arg2_result, (
+            f"Results for {model=} are not the same with {arg1=} and {arg2=}. "
+            f"{arg1_result=} != {arg2_result=}")
 
 
 def init_test_distributed_environment(
@@ -239,6 +301,8 @@ def multi_process_parallel(
     pp_size: int,
     test_target: Any,
 ) -> None:
+    import ray
+
     # Using ray helps debugging the error when it failed
     # as compared to multiprocessing.
     # NOTE: We need to set working_dir for distributed tests,
@@ -305,3 +369,48 @@ def wait_for_gpu_memory_to_clear(devices: List[int],
                              f'{dur_s=:.02f} ({threshold_bytes/2**30=})')
 
         time.sleep(5)
+
+
+_P = ParamSpec("_P")
+
+
+def fork_new_process_for_each_test(
+        f: Callable[_P, None]) -> Callable[_P, None]:
+    """Decorator to fork a new process for each test function.
+    See https://github.com/vllm-project/vllm/issues/7053 for more details.
+    """
+
+    @functools.wraps(f)
+    def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> None:
+        # Make the process the leader of its own process group
+        # to avoid sending SIGTERM to the parent process
+        os.setpgrp()
+        from _pytest.outcomes import Skipped
+        pid = os.fork()
+        print(f"Fork a new process to run a test {pid}")
+        if pid == 0:
+            try:
+                f(*args, **kwargs)
+            except Skipped as e:
+                # convert Skipped to exit code 0
+                print(str(e))
+                os._exit(0)
+            except Exception:
+                import traceback
+                traceback.print_exc()
+                os._exit(1)
+            else:
+                os._exit(0)
+        else:
+            pgid = os.getpgid(pid)
+            _pid, _exitcode = os.waitpid(pid, 0)
+            # ignore SIGTERM signal itself
+            old_signal_handler = signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            # kill all child processes
+            os.killpg(pgid, signal.SIGTERM)
+            # restore the signal handler
+            signal.signal(signal.SIGTERM, old_signal_handler)
+            assert _exitcode == 0, (f"function {f} failed when called with"
+                                    f" args {args} and kwargs {kwargs}")
+
+    return wrapper
