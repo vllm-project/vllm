@@ -1,8 +1,9 @@
-FROM intel/oneapi-basekit:2024.1.0-devel-ubuntu20.04 AS vllm-base
+FROM intel/oneapi-basekit:2024.1.0-devel-ubuntu22.04 AS vllm-base
 
 RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/intel-oneapi-archive-keyring.gpg > /dev/null && \
     echo "deb [signed-by=/usr/share/keyrings/intel-oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main " | tee /etc/apt/sources.list.d/oneAPI.list && \
     chmod 644 /usr/share/keyrings/intel-oneapi-archive-keyring.gpg && \
+    rm /etc/apt/sources.list.d/intel-graphics.list && \
     wget -O- https://repositories.intel.com/graphics/intel-graphics.key | gpg --dearmor | tee /usr/share/keyrings/intel-graphics.gpg > /dev/null && \
     echo "deb [arch=amd64,i386 signed-by=/usr/share/keyrings/intel-graphics.gpg] https://repositories.intel.com/graphics/ubuntu jammy arc" | tee /etc/apt/sources.list.d/intel.gpu.jammy.list && \
     chmod 644 /usr/share/keyrings/intel-graphics.gpg
@@ -37,6 +38,7 @@ FROM vllm-base AS vllm-openai
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install accelerate hf_transfer 'modelscope!=1.15.0'
 
-ENV VLLM_USAGE_SOURCE production-docker-image
+ENV VLLM_USAGE_SOURCE production-docker-image \
+    TRITON_XPU_PROFILE 1
 
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
