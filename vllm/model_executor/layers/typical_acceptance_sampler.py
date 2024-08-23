@@ -138,7 +138,7 @@ class TypicalAcceptanceSampler(SpecDecodeDeterministicBaseSampler):
         device = target_probs.device
         candidates_prob = torch.gather(
             target_probs, dim=-1,
-            index=draft_token_ids.unsqueeze(-1)).squeeze(-1)
+            index=draft_token_ids.unsqueeze(-1).to(device)).squeeze(-1)
         # A small constant added to prevent computing the logarithm of zero,
         # which can lead to undefined values.
         epsilon = 1e-5

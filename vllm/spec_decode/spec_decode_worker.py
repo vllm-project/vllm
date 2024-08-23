@@ -159,6 +159,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 cpu_draft_worker_kwargs["device_config"].device = torch.device(
                     "cpu")
                 cpu_draft_worker_kwargs["device_config"].device_type = "cpu"
+                cpu_draft_worker_kwargs.pop("observability_config")
                 proposer_worker = CPUMultiStepWorker(**cpu_draft_worker_kwargs)
             elif draft_worker_kwargs[
                     "model_config"].hf_config.model_type == "medusa":
