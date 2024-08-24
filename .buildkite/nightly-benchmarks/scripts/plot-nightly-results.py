@@ -115,7 +115,7 @@ def main(args):
                             yerr=std, 
                             capsize=10, 
                             capthick=4,
-                            label=method,
+                            label="v0.5.5" if method == "vllm_055" else "v0.5.3.post1",
                             lw=4,)
                 inf_qps_results.append(mean[-2])
             print((inf_qps_results[0] - inf_qps_results[1]) / inf_qps_results[1])
