@@ -1665,11 +1665,13 @@ class LLMEngine:
         n_requests: List[int] = []
         finished_reason_requests: List[str] = []
 
-        actual_num_batched_tokens = scheduler_outputs.num_batched_tokens  # type: ignore
-
         # NOTE: This loop assumes prefill seq_groups are before
         # decode seq_groups in scheduled_seq_groups.
         if scheduler_outputs is not None:
+            # For async postprocessor, already finished sequences need to be
+            # not counted (to avoid double counting)
+            actual_num_batched_tokens = scheduler_outputs.num_batched_tokens  # type: ignore
+
             num_generation_tokens_from_prefill_groups = 0.
             # NOTE: if scheduler_outputs.num_prefill_groups > 0 and
             # the len of scheduler_outputs.scheduled_seq_groups is !=
