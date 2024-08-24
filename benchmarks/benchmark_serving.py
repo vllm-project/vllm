@@ -417,6 +417,20 @@ async def benchmark(
         selected_percentiles=selected_percentiles,
     )
 
+    print("{s:{c}^{n}}".format(s=' Serving Benchmark Result ', n=50, c='='))
+    print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
+    print("{:<40} {:<10.2f}".format("Benchmark duration (s):",
+                                    benchmark_duration))
+    print("{:<40} {:<10}".format("Total input tokens:", metrics.total_input))
+    print("{:<40} {:<10}".format("Total generated tokens:",
+                                 metrics.total_output))
+    print("{:<40} {:<10.2f}".format("Request throughput (req/s):",
+                                    metrics.request_throughput))
+    print("{:<40} {:<10.2f}".format("Input token throughput (tok/s):",
+                                    metrics.input_throughput))
+    print("{:<40} {:<10.2f}".format("Output token throughput (tok/s):",
+                                    metrics.output_throughput))
+
     result = {
         "duration": benchmark_duration,
         "completed": metrics.completed,
@@ -433,76 +447,40 @@ async def benchmark(
         "errors": [output.error for output in outputs],
     }
 
-    print("{s:{c}^{n}}".format(s=' Serving Benchmark Result ', n=50, c='='))
-    print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
-    print("{:<40} {:<10.2f}".format("Benchmark duration (s):",
-                                    benchmark_duration))
-    print("{:<40} {:<10}".format("Total input tokens:", metrics.total_input))
-    print("{:<40} {:<10}".format("Total generated tokens:",
-                                 metrics.total_output))
-    print("{:<40} {:<10.2f}".format("Request throughput (req/s):",
-                                    metrics.request_throughput))
-    print("{:<40} {:<10.2f}".format("Input token throughput (tok/s):",
-                                    metrics.input_throughput))
-    print("{:<40} {:<10.2f}".format("Output token throughput (tok/s):",
-                                    metrics.output_throughput))
-
-    if "ttft" in selected_percentile_metrics:
-        print("{s:{c}^{n}}".format(s='Time to First Token', n=50, c='-'))
-        print("{:<40} {:<10.2f}".format("Mean TTFT (ms):",
-                                        metrics.mean_ttft_ms))
-        print("{:<40} {:<10.2f}".format("Median TTFT (ms):",
-                                        metrics.median_ttft_ms))
-        result["mean_ttft_ms"] = metrics.mean_ttft_ms
-        result["median_ttft_ms"] = metrics.median_ttft_ms
-        result["std_ttft_ms"] = metrics.std_ttft_ms
-        for p, value in metrics.percentiles_ttft_ms:
+    def process_one_metric(
+        # E.g., "ttft"
+        metric_attribute_name: str,
+        # E.g., "TTFT"
+        metric_name: str,
+        # E.g., "Time to First Token"
+        metric_header: str,
+    ):
+        if metric_attribute_name not in selected_percentile_metrics:
+            return
+        print("{s:{c}^{n}}".format(s=metric_header, n=50, c='-'))
+        print("{:<40} {:<10.2f}".format(
+            f"Mean {metric_name} (ms):",
+            getattr(metrics, f"mean_{metric_attribute_name}_ms")))
+        print("{:<40} {:<10.2f}".format(
+            f"Median {metric_name} (ms):",
+            getattr(metrics, f"median_{metric_attribute_name}_ms")))
+        result[f"mean_{metric_attribute_name}_ms"] = getattr(
+            metrics, f"mean_{metric_attribute_name}_ms")
+        result[f"median_{metric_attribute_name}_ms"] = getattr(
+            metrics, f"median_{metric_attribute_name}_ms")
+        result[f"std_{metric_attribute_name}_ms"] = getattr(
+            metrics, f"std_{metric_attribute_name}_ms")
+        for p, value in getattr(metrics, f"percentiles_{metric_attribute_name}_ms"):
             p_word = str(int(p)) if int(p) == p else str(p)
-            print("{:<40} {:<10.2f}".format(f"P{p_word} TTFT (ms):", value))
-            result[f"p{p_word}_ttft_ms"] = value
+            print("{:<40} {:<10.2f}".format(f"P{p_word} {metric_name} (ms):",
+                                            value))
+            result[f"p{p_word}_{metric_attribute_name}_ms"] = value
 
-    if "tpot" in selected_percentile_metrics:
-        print("{s:{c}^{n}}".format(s='Time per Output Token (excl. 1st token)',
-                                   n=50,
-                                   c='-'))
-        print("{:<40} {:<10.2f}".format("Median TPOT (ms):",
-                                        metrics.median_tpot_ms))
-        print("{:<40} {:<10.2f}".format("Mean TPOT (ms):",
-                                        metrics.mean_tpot_ms))
-        result["mean_tpot_ms"] = metrics.mean_tpot_ms
-        result["median_tpot_m"] = metrics.median_tpot_ms
-        result["std_tpot_ms"] = metrics.std_tpot_ms
-        for p, value in metrics.percentiles_tpot_ms:
-            p_word = str(int(p)) if int(p) == p else str(p)
-            print("{:<40} {:<10.2f}".format(f"P{p_word} TPOT (ms):", value))
-            result[f"p{p_word}_tpot_ms"] = value
-
-    if "itl" in selected_percentile_metrics:
-        print("{s:{c}^{n}}".format(s='Inter-token Latency', n=50, c='-'))
-        print("{:<40} {:<10.2f}".format("Mean ITL (ms):", metrics.mean_itl_ms))
-        print("{:<40} {:<10.2f}".format("Median ITL (ms):",
-                                        metrics.median_itl_ms))
-        result["mean_itl_ms"] = metrics.mean_itl_ms,
-        result["median_itl_ms"] = metrics.median_itl_ms,
-        result["std_itl_ms"] = metrics.std_itl_ms,
-        for p, value in metrics.percentiles_itl_ms:
-            p_word = str(int(p)) if int(p) == p else str(p)
-            print("{:<40} {:<10.2f}".format(f"P{p_word} ITL (ms):", value))
-            result[f"p{p_word}_itl_ms"] = value
-
-    if "etel" in selected_percentile_metrics:
-        print("{s:{c}^{n}}".format(s='End-to-end Latency', n=50, c='-'))
-        print("{:<40} {:<10.2f}".format("Mean ETEL (ms):",
-                                        metrics.mean_etel_ms))
-        print("{:<40} {:<10.2f}".format("Median ETEL (ms):",
-                                        metrics.median_etel_ms))
-        result["mean_etel_ms"] = metrics.mean_etel_ms,
-        result["median_etel_ms"] = metrics.median_etel_ms,
-        result["std_etel_ms"] = metrics.std_etel_ms,
-        for p, value in metrics.percentiles_etel_ms:
-            p_word = str(int(p)) if int(p) == p else str(p)
-            print("{:<40} {:<10.2f}".format(f"P{p_word} ETEL (ms):", value))
-            result[f"p{p_word}_etel_ms"] = value
+    process_one_metric("ttft", "TTFT", "Time to First Token")
+    process_one_metric("tpot", "TPOT",
+                       "Time per Output Token (excl. 1st token)")
+    process_one_metric("itl", "ITL", "Inter-token Latency")
+    process_one_metric("etel", "ETEL", "End-to-end Latency")
 
     print("=" * 50)
 
