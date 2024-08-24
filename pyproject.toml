@@ -84,4 +84,5 @@ skip_gitignore = true
 [tool.pytest.ini_options]
 markers = [
     "skip_global_cleanup",
+    "core_model: run this model test in each PR instead of just daily",
 ]
