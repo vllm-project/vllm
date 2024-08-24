@@ -68,7 +68,7 @@ class RemoteOpenAIServer:
         if not model.startswith("/"):
             # download the model if it's not a local path
             # to exclude the model download time from the server start time
-            model = snapshot_download(model)
+            snapshot_download(model)
         if auto_port:
             if "-p" in cli_args or "--port" in cli_args:
                 raise ValueError("You have manually specified the port"
