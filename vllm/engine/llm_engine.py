@@ -1666,7 +1666,7 @@ class LLMEngine:
         finished_reason_requests: List[str] = []
 
         # NOTE: This loop assumes prefill seq_groups are before
-        # decode seq_groups in scheduled_seq_groups.
+        # decode seq_groups in scheduled_seq_groups
         if scheduler_outputs is not None:
             # For async postprocessor, already finished sequences need to be
             # not counted. (to avoid double counting)
