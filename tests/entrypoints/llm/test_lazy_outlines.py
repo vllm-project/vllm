@@ -14,7 +14,9 @@ def test_lazy_outlines(sample_regex):
     ]
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
-    llm = LLM(model="facebook/opt-125m", enforce_eager=True)
+    llm = LLM(model="facebook/opt-125m",
+              enforce_eager=True,
+              gpu_memory_utilization=0.3)
     outputs = llm.generate(prompts, sampling_params)
     for output in outputs:
         prompt = output.prompt
@@ -26,7 +28,8 @@ def test_lazy_outlines(sample_regex):
 
     llm = LLM(model="facebook/opt-125m",
               enforce_eager=True,
-              guided_decoding_backend="lm-format-enforcer")
+              guided_decoding_backend="lm-format-enforcer",
+              gpu_memory_utilization=0.3)
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
     outputs = llm.generate(
         prompts=[
