@@ -26,7 +26,6 @@ def get_model_architecture(
     if (model_config.quantization is not None
             and model_config.quantization != "fp8"
             and "MixtralForCausalLM" in architectures):
-        breakpoint()
         architectures = ["QuantMixtralForCausalLM"]
 
     return ModelRegistry.resolve_model_cls(architectures)
