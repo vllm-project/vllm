@@ -75,19 +75,7 @@ steps:
             containers:
               - image: openmmlab/lmdeploy:v0.5.3-cu11
                 <<: *common_container_settings
-  
 
-  - label: "A100 vllm 0.5.3.post1 benchmark"
-    priority: 100
-    agents:
-      queue: A100
-    plugins:
-      - kubernetes:
-          podSpec:
-            <<: *common_pod_spec
-            containers:
-              - image: vllm/vllm-openai:v0.5.3.post1
-                <<: *common_container_settings
 
   - label: "A100 vllm 0.5.5 benchmark"
     priority: 100
