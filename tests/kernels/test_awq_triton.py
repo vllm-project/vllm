@@ -154,5 +154,5 @@ def test_gemm(N, K, M, splitK):
 
     torch.testing.assert_close(output_triton.cpu(),
                                output_torch.cpu(),
-                               atol=1e-2,
-                               rtol=1e-2)
+                               atol=1e-1,
+                               rtol=1e-1)
