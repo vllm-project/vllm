@@ -229,7 +229,7 @@ run_serving_tests() {
       if [[ "$dataset_name" = "sharegpt" ]]; then
 
         client_command="python3 benchmark_serving.py \
-          --backend $CURRENT_LLM_SERVING_ENGINE \
+          --backend $backend \
           --tokenizer /tokenizer_cache \
           --model $model \
           --dataset-name $dataset_name \
