@@ -132,7 +132,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
 
 class W8A8QuantizedFusedMoEMethod(FusedMoEMethodBase):
-    """MoE method W8A8 quantization."""
+    """MoE method W8A8 quantization. This class is for compressed-tensors format loading"""
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size: int,
