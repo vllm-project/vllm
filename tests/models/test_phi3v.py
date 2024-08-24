@@ -3,13 +3,14 @@ import re
 from typing import List, Optional, Tuple, Type
 
 import pytest
+from PIL import Image
 from transformers import AutoTokenizer
 
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
 from vllm.utils import is_cpu, is_hip
 
-from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
+from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner
 from .utils import check_logprobs_close
 
 pytestmark = pytest.mark.vlm
@@ -58,7 +59,7 @@ if is_hip():
 def run_test(
     hf_runner: Type[HfRunner],
     vllm_runner: Type[VllmRunner],
-    image_assets: _ImageAssets,
+    images: List[Image.Image],
     model: str,
     *,
     size_factors: List[float],
@@ -77,8 +78,6 @@ def run_test(
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """
-    images = [asset.pil_image for asset in image_assets]
-
     inputs_per_image = [(
         [prompt for _ in size_factors],
         [
@@ -159,11 +158,29 @@ def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
     run_test(
         hf_runner,
         vllm_runner,
-        image_assets,
+        [asset.pil_image for asset in image_assets],
         model,
         size_factors=size_factors,
         dtype=dtype,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,
+        tensor_parallel_size=1,
+    )
+
+
+@pytest.mark.parametrize("model", models)
+@pytest.mark.parametrize("dtype", [target_dtype])
+def test_regression_7840(hf_runner, vllm_runner, image_assets, model,
+                         dtype) -> None:
+    # Regression test for #7840.
+    run_test(
+        hf_runner,
+        vllm_runner,
+        [image_assets[0].pil_image.resize((465, 226))],
+        model,
+        size_factors=[1.0],
+        dtype=dtype,
+        max_tokens=128,
+        num_logprobs=10,
         tensor_parallel_size=1,
     )
