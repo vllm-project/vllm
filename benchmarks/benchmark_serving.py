@@ -61,31 +61,22 @@ class BenchmarkMetrics:
     mean_ttft_ms: float
     median_ttft_ms: float
     std_ttft_ms: float
-    p25_ttft_ms: float
-    p75_ttft_ms: float
-    p95_ttft_ms: float
-    p99_ttft_ms: float
+    percentiles_ttft_ms: List[Tuple[float,float]]
     mean_tpot_ms: float
     median_tpot_ms: float
     std_tpot_ms: float
-    p25_tpot_ms: float
-    p75_tpot_ms: float
-    p95_tpot_ms: float
-    p99_tpot_ms: float
+    percentiles_tpot_ms: List[Tuple[float,float]]
     mean_itl_ms: float
     median_itl_ms: float
     std_itl_ms: float
-    p25_itl_ms: float
-    p75_itl_ms: float
-    p95_itl_ms: float
-    p99_itl_ms: float
-    mean_latency_ms: float
-    median_latency_ms: float
-    std_latency_ms: float
-    p25_latency_ms: float
-    p75_latency_ms: float
-    p95_latency_ms: float
-    p99_latency_ms: float
+    percentiles_itl_ms: List[Tuple[float,float]]
+    # ETEL stands for end-to-end latency per request.
+    # It is the time taken on the client side from sending
+    # a request to receiving a complete response.
+    mean_etel_ms: float
+    median_etel_ms: float
+    std_etel_ms: float
+    percentiles_etel_ms: List[Tuple[float, float]]
 
 
 def sample_sharegpt_requests(
@@ -251,6 +242,8 @@ def calculate_metrics(
     outputs: List[RequestFuncOutput],
     dur_s: float,
     tokenizer: PreTrainedTokenizerBase,
+    selected_percentile_metrics: List[str],
+    selected_percentiles: List[float],
 ) -> Tuple[BenchmarkMetrics, List[int]]:
     actual_output_lens: List[int] = []
     total_input = 0
@@ -258,7 +251,7 @@ def calculate_metrics(
     itls: List[float] = []
     tpots: List[float] = []
     ttfts: List[float] = []
-    latencies: List[float] = []
+    etels: List[float] = []
     for i in range(len(outputs)):
         if outputs[i].success:
             # We use the tokenizer to count the number of output tokens for all
@@ -275,7 +268,7 @@ def calculate_metrics(
                     (outputs[i].latency - outputs[i].ttft) / (output_len - 1))
             itls += outputs[i].itl
             ttfts.append(outputs[i].ttft)
-            latencies.append(outputs[i].latency)
+            etels.append(outputs[i].latency)
             completed += 1
         else:
             actual_output_lens.append(0)
@@ -295,32 +288,20 @@ def calculate_metrics(
         mean_ttft_ms=np.mean(ttfts or 0) *
         1000,  # ttfts is empty if streaming is not supported by backend
         std_ttft_ms=np.std(ttfts or 0) * 1000,
-        p25_ttft_ms=np.percentile(ttfts or 0, 25) * 1000,
         median_ttft_ms=np.median(ttfts or 0) * 1000,
-        p75_ttft_ms=np.percentile(ttfts or 0, 75) * 1000,
-        p95_ttft_ms=np.percentile(ttfts or 0, 95) * 1000,
-        p99_ttft_ms=np.percentile(ttfts or 0, 99) * 1000,
+        percentiles_ttft_ms=[(p, np.percentile(ttfts or 0, p) * 1000) for p in selected_percentiles],
         mean_tpot_ms=np.mean(tpots or 0) * 1000,
         std_tpot_ms=np.std(tpots or 0) * 1000,
-        p25_tpot_ms=np.percentile(tpots or 0, 25) * 1000,
         median_tpot_ms=np.median(tpots or 0) * 1000,
-        p75_tpot_ms=np.percentile(tpots or 0, 75) * 1000,
-        p95_tpot_ms=np.percentile(tpots or 0, 95) * 1000,
-        p99_tpot_ms=np.percentile(tpots or 0, 99) * 1000,
+        percentiles_tpot_ms=[(p, np.percentile(tpots or 0, p) * 1000) for p in selected_percentiles],
         mean_itl_ms=np.mean(itls or 0) * 1000,
         std_itl_ms=np.std(itls or 0) * 1000,
-        p25_itl_ms=np.percentile(itls or 0, 25) * 1000,
         median_itl_ms=np.median(itls or 0) * 1000,
-        p75_itl_ms=np.percentile(itls or 0, 75) * 1000,
-        p95_itl_ms=np.percentile(itls or 0, 95) * 1000,
-        p99_itl_ms=np.percentile(itls or 0, 99) * 1000,
-        mean_latency_ms=np.median(latencies or 0) * 1000,
-        std_latency_ms=np.std(latencies or 0) * 1000,
-        p25_latency_ms=np.percentile(latencies or 0, 25) * 1000,
-        median_latency_ms=np.mean(latencies or 0) * 1000,
-        p75_latency_ms=np.percentile(latencies or 0, 75) * 1000,
-        p95_latency_ms=np.percentile(latencies or 0, 95) * 1000,
-        p99_latency_ms=np.percentile(latencies or 0, 99) * 1000,
+        percentiles_itl_ms=[(p, np.percentile(itls or 0, p) * 1000) for p in selected_percentiles],
+        mean_etel_ms=np.median(etels or 0) * 1000,
+        std_etel_ms=np.std(etels or 0) * 1000,
+        median_etel_ms=np.mean(etels or 0) * 1000,
+        percentiles_etel_ms=[(p, np.percentile(etels or 0, p) * 1000) for p in selected_percentiles],
     )
 
     return metrics, actual_output_lens
@@ -338,6 +319,8 @@ async def benchmark(
     request_rate: float,
     disable_tqdm: bool,
     profile: bool,
+    selected_percentile_metrics: List[str],
+    selected_percentiles: List[str],
 ):
     if backend in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[backend]
@@ -426,7 +409,25 @@ async def benchmark(
         outputs=outputs,
         dur_s=benchmark_duration,
         tokenizer=tokenizer,
+        selected_percentile_metrics=selected_percentile_metrics,
+        selected_percentiles=selected_percentiles,
     )
+
+    result = {
+        "duration": benchmark_duration,
+        "completed": metrics.completed,
+        "total_input_tokens": metrics.total_input,
+        "total_output_tokens": metrics.total_output,
+        "request_throughput": metrics.request_throughput,
+        "input_throughput": metrics.input_throughput,
+        "output_throughput": metrics.output_throughput,
+        "input_lens": [output.prompt_len for output in outputs],
+        "output_lens": actual_output_lens,
+        "ttfts": [output.ttft for output in outputs],
+        "itls": [output.itl for output in outputs],
+        "generated_texts": [output.generated_text for output in outputs],
+        "errors": [output.error for output in outputs],
+    }
 
     print("{s:{c}^{n}}".format(s=' Serving Benchmark Result ', n=50, c='='))
     print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
@@ -441,68 +442,60 @@ async def benchmark(
                                     metrics.input_throughput))
     print("{:<40} {:<10.2f}".format("Output token throughput (tok/s):",
                                     metrics.output_throughput))
-    print("{s:{c}^{n}}".format(s='Time to First Token', n=50, c='-'))
-    print("{:<40} {:<10.2f}".format("Mean TTFT (ms):", metrics.mean_ttft_ms))
-    print("{:<40} {:<10.2f}".format("P25 TTFT (ms):", metrics.p25_ttft_ms))
-    print("{:<40} {:<10.2f}".format("P75 TTFT (ms):", metrics.p75_ttft_ms))
-    print("{:<40} {:<10.2f}".format("p50 TTFT (ms):", metrics.median_ttft_ms))
-    print("{:<40} {:<10.2f}".format("P95 TTFT (ms):", metrics.p95_ttft_ms))
-    print("{:<40} {:<10.2f}".format("P99 TTFT (ms):", metrics.p99_ttft_ms))
-    print("{s:{c}^{n}}".format(s='Time per Output Token (excl. 1st token)',
-                               n=50,
-                               c='-'))
-    print("{:<40} {:<10.2f}".format("Mean TPOT (ms):", metrics.mean_tpot_ms))
-    print("{:<40} {:<10.2f}".format("P25 TPOT (ms):", metrics.p25_tpot_ms))
-    print("{:<40} {:<10.2f}".format("P50 TPOT (ms):", metrics.median_tpot_ms))
-    print("{:<40} {:<10.2f}".format("P75 TPOT (ms):", metrics.p75_tpot_ms))
-    print("{:<40} {:<10.2f}".format("P95 TPOT (ms):", metrics.p95_tpot_ms))
-    print("{:<40} {:<10.2f}".format("P99 TPOT (ms):", metrics.p99_tpot_ms))
 
-    print("{s:{c}^{n}}".format(s='Inter-token Latency', n=50, c='-'))
-    print("{:<40} {:<10.2f}".format("Mean ITL (ms):", metrics.mean_itl_ms))
-    print("{:<40} {:<10.2f}".format("P25 ITL (ms):", metrics.p25_itl_ms))
-    print("{:<40} {:<10.2f}".format("P50 ITL (ms):", metrics.median_itl_ms))
-    print("{:<40} {:<10.2f}".format("P75 ITL (ms):", metrics.p75_itl_ms))
-    print("{:<40} {:<10.2f}".format("P95 ITL (ms):", metrics.p95_itl_ms))
-    print("{:<40} {:<10.2f}".format("P99 ITL (ms):", metrics.p99_itl_ms))
+    if "ttft" in selected_percentile_metrics:
+        print("{s:{c}^{n}}".format(s='Time to First Token', n=50, c='-'))
+        print("{:<40} {:<10.2f}".format("Mean TTFT (ms):", metrics.mean_ttft_ms))
+        print("{:<40} {:<10.2f}".format("Median TTFT (ms):", metrics.median_ttft_ms))
+        result["mean_ttft_ms"] = metrics.mean_ttft_ms
+        result["median_ttft_ms"] = metrics.median_ttft_ms
+        result["std_ttft_ms"] = metrics.std_ttft_ms
+        for p, value in metrics.percentiles_ttft_ms:
+            p_word = str(int(p)) if int(p) == p else str(p)
+            print("{:<40} {:<10.2f}".format(f"P{p_word} TTFT (ms):", value))
+            result[f"p{p_word}_ttft_ms"] = value
 
-    print("{s:{c}^{n}}".format(s='End-to-end Latency', n=50, c='-'))
-    print("{:<40} {:<10.2f}".format("Mean EEL (ms):", metrics.mean_latency_ms))
-    print("{:<40} {:<10.2f}".format("P25 EEL (ms):", metrics.p25_latency_ms))
-    print("{:<40} {:<10.2f}".format("P50 EEL (ms):",
-                                    metrics.median_latency_ms))
-    print("{:<40} {:<10.2f}".format("P75 EEL (ms):", metrics.p75_latency_ms))
-    print("{:<40} {:<10.2f}".format("P95 EEL (ms):", metrics.p95_latency_ms))
-    print("{:<40} {:<10.2f}".format("P99 EEL (ms):", metrics.p99_latency_ms))
+    if "tpot" in selected_percentile_metrics:
+        print("{s:{c}^{n}}".format(s='Time per Output Token (excl. 1st token)',
+                                  n=50,
+                                  c='-'))
+        print("{:<40} {:<10.2f}".format("Median TPOT (ms):", metrics.median_tpot_ms))
+        print("{:<40} {:<10.2f}".format("Mean TPOT (ms):", metrics.mean_tpot_ms))
+        result["mean_tpot_ms"] = metrics.mean_tpot_ms
+        result["median_tpot_m"] = metrics.median_tpot_ms
+        result["std_tpot_ms"] = metrics.std_tpot_ms
+        for p, value in metrics.percentiles_tpot_ms:
+            p_word = str(int(p)) if int(p) == p else str(p)
+            print("{:<40} {:<10.2f}".format(f"P{p_word} TPOT (ms):", value))
+            result[f"p{p_word}_tpot_ms"] = value
+
+    if "itl" in selected_percentile_metrics:
+        print("{s:{c}^{n}}".format(s='Inter-token Latency', n=50, c='-'))
+        print("{:<40} {:<10.2f}".format("Mean ITL (ms):", metrics.mean_itl_ms))
+        print("{:<40} {:<10.2f}".format("Median ITL (ms):", metrics.median_itl_ms))
+        result["mean_itl_ms"] = metrics.mean_itl_ms,
+        result["median_itl_ms"] = metrics.median_itl_ms,
+        result["std_itl_ms"] = metrics.std_itl_ms,
+        for p, value in metrics.percentiles_itl_ms:
+            p_word = str(int(p)) if int(p) == p else str(p)
+            print("{:<40} {:<10.2f}".format(f"P{p_word} ITL (ms):", value))
+            result[f"p{p_word}_itl_ms"] = value
+
+    if "etel" in selected_percentile_metrics:
+        print("{s:{c}^{n}}".format(s='End-to-end Latency', n=50, c='-'))
+        print("{:<40} {:<10.2f}".format("Mean ETEL (ms):", metrics.mean_etel_ms))
+        print("{:<40} {:<10.2f}".format("Median ETEL (ms):",
+                                        metrics.median_etel_ms))
+        result["mean_etel_ms"] = metrics.mean_etel_ms,
+        result["median_etel_ms"] = metrics.median_etel_ms,
+        result["std_etel_ms"] = metrics.std_etel_ms,
+        for p, value in metrics.percentiles_etel_ms:
+            p_word = str(int(p)) if int(p) == p else str(p)
+            print("{:<40} {:<10.2f}".format(f"P{p_word} ETEL (ms):", value))
+            result[f"p{p_word}_etel_ms"] = value
+
     print("=" * 50)
 
-    result = {
-        "duration": benchmark_duration,
-        "completed": metrics.completed,
-        "total_input_tokens": metrics.total_input,
-        "total_output_tokens": metrics.total_output,
-        "request_throughput": metrics.request_throughput,
-        "input_throughput": metrics.input_throughput,
-        "output_throughput": metrics.output_throughput,
-        "mean_ttft_ms": metrics.mean_ttft_ms,
-        "median_ttft_ms": metrics.median_ttft_ms,
-        "std_ttft_ms": metrics.std_ttft_ms,
-        "p99_ttft_ms": metrics.p99_ttft_ms,
-        "mean_tpot_ms": metrics.mean_tpot_ms,
-        "median_tpot_ms": metrics.median_tpot_ms,
-        "std_tpot_ms": metrics.std_tpot_ms,
-        "p99_tpot_ms": metrics.p99_tpot_ms,
-        "mean_itl_ms": metrics.mean_itl_ms,
-        "median_itl_ms": metrics.median_itl_ms,
-        "std_itl_ms": metrics.std_itl_ms,
-        "p99_itl_ms": metrics.p99_itl_ms,
-        "input_lens": [output.prompt_len for output in outputs],
-        "output_lens": actual_output_lens,
-        "ttfts": [output.ttft for output in outputs],
-        "itls": [output.itl for output in outputs],
-        "generated_texts": [output.generated_text for output in outputs],
-        "errors": [output.error for output in outputs],
-    }
     return result
 
 
@@ -601,6 +594,8 @@ def main(args: argparse.Namespace):
             request_rate=args.request_rate,
             disable_tqdm=args.disable_tqdm,
             profile=args.profile,
+            selected_percentile_metrics=args.percentile_metrics.split(","),
+            selected_percentiles=[float(p) for p in args.metric_percentiles.split(",")],
         ))
 
     # Save config and results to json
@@ -815,6 +810,24 @@ if __name__ == "__main__":
         "If not specified, results will be saved in "
         "{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"
         " format.",
+    )
+    parser.add_argument(
+        "--percentile-metrics",
+        type=str,
+        default="ttft,tpot,itl",
+        help="Comma-seperated list of selected metrics to report percentils. "
+        "This argument specifies the metrics to report percentiles. "
+        "Allowed metric names are \"ttft\", \"tpot\", \"itl\", \"etel\". "
+        "Default value is \"ttft,tpot,itl\"."
+    )
+    parser.add_argument(
+        "--metric-percentiles",
+        type=str,
+        default="99",
+        help="Comma-seperated list of percentiles for selected metrics. "
+        "To report 25-th, 50-th, and 75-th percentiles, use \"25,50,75\". "
+        "Default value is \"99\". "
+        "Use \"--percentile-metrics\" to select metrics.",
     )
 
     args = parser.parse_args()
