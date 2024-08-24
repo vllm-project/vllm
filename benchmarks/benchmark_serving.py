@@ -70,13 +70,13 @@ class BenchmarkMetrics:
     median_itl_ms: float
     std_itl_ms: float
     percentiles_itl_ms: List[Tuple[float, float]]
-    # ETEL stands for end-to-end latency per request.
+    # E2EL stands for end-to-end latency per request.
     # It is the time taken on the client side from sending
     # a request to receiving a complete response.
-    mean_etel_ms: float
-    median_etel_ms: float
-    std_etel_ms: float
-    percentiles_etel_ms: List[Tuple[float, float]]
+    mean_e2el_ms: float
+    median_e2el_ms: float
+    std_e2el_ms: float
+    percentiles_e2el_ms: List[Tuple[float, float]]
 
 
 def sample_sharegpt_requests(
@@ -251,7 +251,7 @@ def calculate_metrics(
     itls: List[float] = []
     tpots: List[float] = []
     ttfts: List[float] = []
-    etels: List[float] = []
+    e2els: List[float] = []
     for i in range(len(outputs)):
         if outputs[i].success:
             # We use the tokenizer to count the number of output tokens for all
@@ -268,7 +268,7 @@ def calculate_metrics(
                     (outputs[i].latency - outputs[i].ttft) / (output_len - 1))
             itls += outputs[i].itl
             ttfts.append(outputs[i].ttft)
-            etels.append(outputs[i].latency)
+            e2els.append(outputs[i].latency)
             completed += 1
         else:
             actual_output_lens.append(0)
@@ -301,10 +301,10 @@ def calculate_metrics(
         median_itl_ms=np.median(itls or 0) * 1000,
         percentiles_itl_ms=[(p, np.percentile(itls or 0, p) * 1000)
                             for p in selected_percentiles],
-        mean_etel_ms=np.median(etels or 0) * 1000,
-        std_etel_ms=np.std(etels or 0) * 1000,
-        median_etel_ms=np.mean(etels or 0) * 1000,
-        percentiles_etel_ms=[(p, np.percentile(etels or 0, p) * 1000)
+        mean_e2el_ms=np.median(e2els or 0) * 1000,
+        std_e2el_ms=np.std(e2els or 0) * 1000,
+        median_e2el_ms=np.mean(e2els or 0) * 1000,
+        percentiles_e2el_ms=[(p, np.percentile(e2els or 0, p) * 1000)
                              for p in selected_percentiles],
     )
 
@@ -483,7 +483,7 @@ async def benchmark(
     process_one_metric("tpot", "TPOT",
                        "Time per Output Token (excl. 1st token)")
     process_one_metric("itl", "ITL", "Inter-token Latency")
-    process_one_metric("etel", "ETEL", "End-to-end Latency")
+    process_one_metric("e2el", "E2EL", "End-to-end Latency")
 
     print("=" * 50)
 
@@ -810,7 +810,7 @@ if __name__ == "__main__":
         default="ttft,tpot,itl",
         help="Comma-seperated list of selected metrics to report percentils. "
         "This argument specifies the metrics to report percentiles. "
-        "Allowed metric names are \"ttft\", \"tpot\", \"itl\", \"etel\". "
+        "Allowed metric names are \"ttft\", \"tpot\", \"itl\", \"e2el\". "
         "Default value is \"ttft,tpot,itl\".")
     parser.add_argument(
         "--metric-percentiles",
