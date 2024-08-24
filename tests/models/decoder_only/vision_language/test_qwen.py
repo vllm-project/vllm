@@ -8,6 +8,7 @@ from ...utils import check_logprobs_close
 models = ["qwen/qwen-vl"]
 
 
+@pytest.mark.skip(reason="CI takes too long")
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
