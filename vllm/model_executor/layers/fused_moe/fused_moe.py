@@ -118,7 +118,7 @@ def fused_moe_kernel(
     b_ptrs = b_ptr + off_experts * stride_be + (offs_k[:, None] * stride_bk +
                                                 offs_bn[None, :] * stride_bn)
 
-    if use_int8_w8a8:
+    if use_int8_w8a8:  # only support static per expert input activation whole tensor quantization now
         a_scale = tl.load(a_scale_ptr + off_experts)
         b_scale_ptrs = b_scale_ptr + off_experts * stride_bse + offs_bn[
             None, :] * stride_bsn
@@ -168,7 +168,6 @@ def fused_moe_kernel(
                              mask=token_mask,
                              other=0)
         accumulator = accumulator * moe_weight[:, None]
-
     if use_int8_w8a16:
         accumulator = (accumulator * b_scale).to(compute_type)
     elif use_int8_w8a8:
@@ -292,8 +291,8 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
         B.stride(1),
         C.stride(1),
         C.stride(2),
-        B_scale.stride(0) if B_scale is not None and use_int8_w8a16 or use_int8_w8a8 else 0,
-        B_scale.stride(1) if B_scale is not None and use_int8_w8a16 or use_int8_w8a8 else 0,
+        B_scale.stride(0) if B_scale is not None and (use_int8_w8a16 or use_int8_w8a8) else 0,
+        B_scale.stride(1) if B_scale is not None and (use_int8_w8a16 or use_int8_w8a8) else 0,
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         top_k=top_k,
         compute_type=compute_type,

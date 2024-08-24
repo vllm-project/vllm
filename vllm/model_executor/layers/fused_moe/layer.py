@@ -132,17 +132,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
 
 class W8A8QuantizedFusedMoEMethod(FusedMoEMethodBase):
-    """MoE method without quantization."""
-
-
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        pass
+    """MoE method W8A8 quantization."""
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
         self.strategy = extra_weight_attrs['quant_config'].target_scheme_map['Linear']['weights'].strategy
         self.is_static_input_scheme = not extra_weight_attrs['quant_config'].target_scheme_map['Linear']['input_activations'].dynamic
+        assert self.is_static_input_scheme, "W8A8 int quantization only support static input activation for now"
 
         self.quant_config = extra_weight_attrs["quant_config"]
         self.weight_loader = extra_weight_attrs["weight_loader"]
@@ -156,8 +153,6 @@ class W8A8QuantizedFusedMoEMethod(FusedMoEMethodBase):
                                                     dtype=torch.int8),
                                         requires_grad=False)
         layer.register_parameter("w13_weight", w13_weight)
-        # set_weight_attrs(w13_weight, extra_weight_attrs)
-
         set_weight_attrs(w13_weight, {
             "input_dim": 1,
             "output_dim": 0,
@@ -194,7 +189,6 @@ class W8A8QuantizedFusedMoEMethod(FusedMoEMethodBase):
 
 
         # down_proj (row parallel)
-        # Fused gate_up_proj (column parallel)
         w2_weight = torch.nn.Parameter(torch.empty(num_experts,
                                                    hidden_size,
                                                    intermediate_size,
