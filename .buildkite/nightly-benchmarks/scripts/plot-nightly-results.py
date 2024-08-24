@@ -36,7 +36,8 @@ def get_perf(df, method, model, metric):
     
     for qps in [2,4,8,16,"inf"]:
         target = df['Test name'].str.contains(model)
-        target = target & df['Engine'].str.contains(method)
+        # target = target & df['Engine'].str.contains(method)
+        target = target & (df['step'] == method)
         target = target & df['Test name'].str.contains("qps_" + str(qps))
         filtered_df = df[target]
 
@@ -75,14 +76,27 @@ def main(args):
     results = []
 
     # collect results
-    for test_file in results_folder.glob("*_nightly_results.json"):
-        with open(test_file, "r") as f:
-            results = results + json.loads(f.read())
+    # for test_file in results_folder.glob("*_nightly_results.json"):
+    #     with open(test_file, "r") as f:
+    #         results = results + json.loads(f.read())
+    
+    results = []
+    for step in [1,4,7,10]:
+        
+        with open(results_folder / f"step{step}.txt", "r") as f:
+            temp_results = json.loads(f.read())
+            # print(len(temp_results))
+            for i in temp_results:
+                i['step'] = step
+            results = results + temp_results
+        print(len(results))
             
     # generate markdown table
     df = pd.DataFrame.from_dict(results)
+    # print(df)
     df = df[df["Test name"].str.contains(args.dataset)]
-
+    
+    (df['step'] == 4).mean()
 
     plt.rcParams.update({'font.size': 18})
     plt.set_cmap("cividis")
@@ -90,7 +104,7 @@ def main(args):
     # plot results
     fig, axes = plt.subplots(3, 3, figsize=(16, 14))
     fig.subplots_adjust(hspace=1)
-    methods = ["vllm_055", "vllm_053post1"]
+    methods = [1,4,7,10]
     for i, model in enumerate(["llama8B", "llama70B", "mixtral8x7B"]):
         for j, metric in enumerate(["Tput", "TPOT", "TTFT"]):
             
@@ -115,10 +129,10 @@ def main(args):
                             yerr=std, 
                             capsize=10, 
                             capthick=4,
-                            label="v0.5.5" if method == "vllm_055" else "v0.5.3.post1",
+                            label=str(method),
                             lw=4,)
-                inf_qps_results.append(mean[-2])
-            print((inf_qps_results[0] - inf_qps_results[1]) / inf_qps_results[1])
+            #     inf_qps_results.append(mean[-2])
+            # print((inf_qps_results[0] - inf_qps_results[1]) / inf_qps_results[1])
             ax.set_ylim(bottom=0)
             if metric == "TTFT":
                 ax.set_ylim(0, 500)
