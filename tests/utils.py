@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import openai
 import requests
+from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
 from typing_extensions import ParamSpec
 
@@ -64,6 +65,10 @@ class RemoteOpenAIServer:
                  env_dict: Optional[Dict[str, str]] = None,
                  auto_port: bool = True,
                  max_wait_seconds: Optional[float] = None) -> None:
+        if not model.startswith("/"):
+            # download the model if it's not a local path
+            # to exclude the model download time from the server start time
+            model = snapshot_download(model)
         if auto_port:
             if "-p" in cli_args or "--port" in cli_args:
                 raise ValueError("You have manually specified the port"
