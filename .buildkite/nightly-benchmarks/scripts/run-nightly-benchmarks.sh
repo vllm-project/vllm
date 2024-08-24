@@ -222,6 +222,10 @@ run_serving_tests() {
         backend="tensorrt-llm"
       fi
 
+      if [[ "$backend" == *"vllm"* ]]; then
+        backend="vllm"
+      fi
+
       if [[ "$dataset_name" = "sharegpt" ]]; then
 
         client_command="python3 benchmark_serving.py \
