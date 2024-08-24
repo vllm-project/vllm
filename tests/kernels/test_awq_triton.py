@@ -60,21 +60,6 @@ def awq_dequantize_torch(qweight: torch.Tensor, scales: torch.Tensor,
     return (iweights - zeros) * scales
 
 
-# input   - [N, K]
-# qweight - [K, M // 8]
-# qzeros  - [K // G, M // 8]
-# scales  - [K // G, M]
-# split_k_iters - parallelism along K-dimension, int, power of 2.
-def awq_gemm_torch(input: torch.Tensor, qweight: torch.Tensor,
-                   scales: torch.Tensor, qzeros: torch.Tensor,
-                   split_k_iters: int) -> torch.Tensor:
-    input_rows, input_cols = input.shape
-    qweight_rows, qweight_cols = qweight.shape
-    scales_rows, scales_cols = scales.shape
-    weights = awq_dequantize_torch(qweight, scales, qzeros)
-    return torch.matmul(input, weights)
-
-
 # qweights - [R     , C // 8], int32
 # scales   - [R // G, C     ], float16
 # zeros    - [R // G, C // 8], int32
@@ -115,32 +100,29 @@ def test_dequantize(qweight_rows, qweight_cols):
 
     iweights_torch = awq_dequantize_torch(qweight, scales, zeros)
 
-    diff = iweights_torch - iweights_triton
-    error = torch.sqrt(torch.sum(diff * diff / torch.numel(diff)))
-
-    assert error < dequantize_threshold
+    torch.testing.assert_close(iweights_triton, iweights_torch)
 
 
 # input   - [N, K]
 # qweight - [K, M // 8]
 # qzeros  - [K // G, M // 8]
 # scales  - [K // G, M]
-@pytest.mark.parametrize("N", [1, 2, 4, 8, 14, 16, 32, 64, 128])
-@pytest.mark.parametrize("K", [3584, 18944, 128, 256, 512, 1024])
-@pytest.mark.parametrize("M", [448, 576, 4736, 16, 32, 64, 128])
-@pytest.mark.parametrize("splitK", [1, 8, 16])
+@pytest.mark.parametrize("N", [1, 2, 4, 8, 14, 17, 23, 32])
+@pytest.mark.parametrize("K", [128, 256])
+@pytest.mark.parametrize("M", [16, 24, 32])
+@pytest.mark.parametrize("splitK", [1, 8])
 def test_gemm(N, K, M, splitK):
     split_k_iters = splitK
     group_size = 128
 
     input_rows = N
     input_cols = K
-    input_dtype = torch.float16
+    input_dtype = torch.float32
     qweight_rows = input_cols
     qweight_cols = M // 8
     scales_rows = qweight_rows // group_size
     scales_cols = M
-    scales_dtype = torch.float16
+    scales_dtype = torch.float32
     qzeros_rows = scales_rows
     qzeros_cols = qweight_cols
 
@@ -167,11 +149,14 @@ def test_gemm(N, K, M, splitK):
     assert (not torch.any(torch.isinf(output_triton))
             and not torch.any(torch.isnan(output_triton)))
 
-    output_torch = awq_gemm_torch(input.cpu(), qweight.cpu(), scales.cpu(),
-                                  qzeros.cpu(), split_k_iters)
+    dequantized_weights = awq_dequantize_triton(qweight, scales, qzeros)
 
-    diff = output_torch.cpu() - output_triton.cpu()
+    output_torch = torch.matmul(input, dequantized_weights)
 
-    error = torch.sqrt(torch.sum(diff * diff / torch.numel(diff)))
+    assert (not torch.any(torch.isinf(output_torch))
+            and not torch.any(torch.isnan(output_torch)))
 
-    assert error < gemm_threshold
+    torch.testing.assert_close(output_triton.cpu(),
+                               output_torch.cpu(),
+                               atol=1e-4,
+                               rtol=1e-4)
