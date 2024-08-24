@@ -13,6 +13,7 @@ from mistral_common.tokens.tokenizers.mistral import (
 from mistral_common.tokens.tokenizers.sentencepiece import (
     SentencePieceTokenizer)
 from mistral_common.tokens.tokenizers.tekken import Tekkenizer
+from mistral_common.tokens.tokenizers.tekken import SpecialTokenPolicy
 
 if TYPE_CHECKING:
     from vllm.entrypoints.chat_utils import ConversationMessage
@@ -52,6 +53,10 @@ class MistralTokenizer:
                           (Tekkenizer, SentencePieceTokenizer)), type(
                               self.tokenizer)
         self._is_tekken = isinstance(self.tokenizer, Tekkenizer)
+
+        if self._is_tekken:
+            # Make sure special tokens will not raise
+            self.tokenizer.special_token_policy = SpecialTokenPolicy.IGNORE
 
         # the following attributes are set to fit VLLM's design
         self.is_fast = True
