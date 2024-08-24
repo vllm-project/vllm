@@ -269,15 +269,21 @@ steps:
   commands:
     - pytest -v -s models/decoder_only/language
 
-- label: Decoder-only Multimodal Models Test # 1h8min
+- label: Decoder-only Audio-Language Models Test # TBDmin
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
-  - tests/models/decoder_only/audio
-  - tests/models/decoder_only/vision
+  - tests/models/decoder_only/audio_language
   commands:
-    - pytest -v -s models/decoder_only/audio
-    - pytest -v -s models/decoder_only/vision
+    - pytest -v -s models/decoder_only/audio_language
+
+- label: Decoder-only Vision-Language Models Test # TBDmin
+  #mirror_hardwares: [amd]
+  source_file_dependencies:
+  - vllm/
+  - tests/models/decoder_only/vision_language
+  commands:
+    - pytest -v -s models/decoder_only/vision_language
 
 - label: Embedding Language Models Test # 6min
   #mirror_hardwares: [amd]
