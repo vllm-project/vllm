@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """
+Patch-Perplexity (PPPL)
+
 This is a script that produces a realistic PPL measurement 
 for the quantized KV cache system by processing a sequence of 
 non-overlapping patches of the reference text. Generation of the 
@@ -108,10 +110,22 @@ def main(args: argparse.Namespace):
     logger.info(my_sampl_par)
     logger.info("Initialized the engine.")
 
+    my_n_samples = args.sample_size
+
+    if (args.context_size+my_n_samples) > \
+        my_llm.llm_engine.model_config.max_model_len:
+        MESSAGE = ("" \
+            "Error! The total number of tokens:\n" \
+            f" prefix ({args.context_size}) + " \
+            f"to be generated ({my_n_samples})" \
+            f" can't be bigger than the model limit " \
+            f"({my_llm.llm_engine.model_config.max_model_len}).")
+        logger.info(MESSAGE)
+        print(MESSAGE)
+        return
+
     my_test_enc, my_test_text = get_wikitext2_text(my_tokenizer)
     logger.info("Loaded the test data.")
-
-    my_n_samples = args.sample_size
 
     my_n_patches = math.ceil(
         (len(my_test_enc['input_ids']) - args.context_size - 1) / my_n_samples)
@@ -120,10 +134,10 @@ def main(args: argparse.Namespace):
 
     num_tokens_generated = 0
     starting_time = datetime.datetime.now()
-    MESSAGE = f"Starting generation @ {starting_time} \
-will try to process {my_n_patches} patche(s), \
-generating {my_n_samples} tokens in each patch \
-from the initial context of {args.context_size} tokens."
+    MESSAGE = (f"Starting generation @ {starting_time}" \
+                f" will try to process {my_n_patches} patche(s)," \
+                f" generating {my_n_samples} tokens in each patch" \
+                f" from the initial context of {args.context_size} tokens.")
 
     logger.info(MESSAGE)
     print(MESSAGE)
@@ -142,25 +156,36 @@ from the initial context of {args.context_size} tokens."
         my_sampl_par.cntr = c
         LOGPROBS = vllm_predict(CONTEXT, my_llm, my_sampl_par)
         num_tokens_generated += len(LOGPROBS[0].outputs[0].token_ids)
+        if(num_tokens_generated<my_n_samples):
+            MESSAGE = (f"Warning: The number of generated tokens is" \
+                        f"less than requested ({num_tokens_generated}" \
+                        f" < {my_n_samples}).")
+            logger.info(MESSAGE)
+            print(MESSAGE)            
         my_ppl -= LOGPROBS[0].outputs[0].cumulative_logprob
-        MESSAGE = f"Iteration {c+1} of {my_n_patches} Intermediate \
-Estimates:\n\
-\tCross-entropy_intermediate={my_ppl/num_tokens_generated}\n\
-\tPerplexity_intermediate={math.exp(my_ppl/num_tokens_generated)}"
+        MESSAGE = (f"Iteration {c+1} of {my_n_patches} Intermediate" \
+            "Estimates:\n" \
+            f"\tCross-entropy_intermediate={my_ppl/num_tokens_generated}\n" \
+            f"\tPerplexity_intermediate=" \
+            f"{math.exp(my_ppl/num_tokens_generated)}")
 
         logger.info(MESSAGE)
         print(MESSAGE)
     ending_time = datetime.datetime.now()
-    MESSAGE = f"Done @ {ending_time} after processing for \
-{ending_time-starting_time} generated {num_tokens_generated} tokens."
-
-    logger.info(MESSAGE)
-
-    MESSAGE = f"Integral Cross-Entropy={my_ppl} Average Cross-Entropy=\
-{my_ppl/num_tokens_generated} PPL={math.exp(my_ppl/num_tokens_generated)}"
+    MESSAGE = (f"Done @ {ending_time} after processing for" \
+                f"{ending_time-starting_time}" \
+                f" generated {num_tokens_generated} tokens.")
 
     logger.info(MESSAGE)
     print(MESSAGE)
+
+    MESSAGE = (f"\tIntegral Cross-Entropy={my_ppl}\n\tAverage Cross-Entropy=" \
+                f"{my_ppl/num_tokens_generated}" \
+                f"\n\tPPL={math.exp(my_ppl/num_tokens_generated)}")
+
+    logger.info(MESSAGE)
+    print(MESSAGE)
+    return
 
 
 if __name__ == "__main__":

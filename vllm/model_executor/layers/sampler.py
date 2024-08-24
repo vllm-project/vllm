@@ -370,6 +370,21 @@ def _forced_sample(
     selected_seq_groups: List[SequenceGroupToSample],
     samples: torch.Tensor,
 ) -> List[Tuple[List[int], List[int]]]:
+    """Run forced sampling on a given samples.
+
+    Args:
+        selected_seq_groups: A list of sequence groups batched.
+        samples: (num_selected_samples,) A tensor of samples. The length of
+            samples could be smaller than selected_seq_groups if
+            seq_group.do_sample is False.
+    Returns:
+        Tuple of (next_token_ids, parent_ids). The length of returned list is
+        same as the length of selected_seq_groups. If the corresponding
+        seq_group has do_sample=False, tuple contains ([], [])
+        
+        The next_token_ids is guided (forced) by the id containing in the 
+        sampling_parameters.future_context property.
+    """
     samples = samples.tolist()
     sample_idx = 0
     results = []
