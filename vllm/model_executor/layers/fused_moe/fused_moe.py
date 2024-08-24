@@ -577,7 +577,7 @@ def fused_experts(hidden_states: torch.Tensor,
                                 config,
                                 compute_type=compute_type,
                                 use_fp8_w8a8=use_fp8_w8a8,
-                                use_int8_w8a8=use_int8_w8a8
+                                use_int8_w8a8=use_int8_w8a8,
                                 use_int8_w8a16=use_int8_w8a16)
 
         ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))

@@ -415,7 +415,6 @@ class FusedMoE(torch.nn.Module):
                                                 renormalize=renormalize)
 
         return topk_weights, topk_ids
->>>>>>> upstream/main
 
     def forward(self, hidden_states: torch.Tensor,
                 router_logits: torch.Tensor):
