@@ -117,6 +117,13 @@ def fused_moe_kernel(
     off_experts = tl.load(expert_ids_ptr + pid_m)
     b_ptrs = b_ptr + off_experts * stride_be + (offs_k[:, None] * stride_bk +
                                                 offs_bn[None, :] * stride_bn)
+
+    if use_int8_w8a8:
+        a_scale = tl.load(a_scale_ptr + off_experts)
+        b_scale_ptrs = b_scale_ptr + off_experts * stride_bse + offs_bn[
+            None, :] * stride_bsn
+        b_scale = tl.load(b_scale_ptrs)
+
     if use_int8_w8a16:
         b_scale_ptrs = b_scale_ptr + off_experts * stride_bse + offs_bn[
             None, :] * stride_bsn
@@ -126,16 +133,12 @@ def fused_moe_kernel(
         a_scale = tl.load(a_scale_ptr)
         b_scale = tl.load(b_scale_ptr + off_experts)
 
-    if use_int8:
-        a_scale = tl.load(a_scale_ptr + off_experts)
-        b_scale = tl.load(b_scale_ptr + off_experts * stride_cm + offs_bn)
-
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
     # We accumulate into a `[BLOCK_SIZE_M, BLOCK_SIZE_N]` block
     # of fp32 values for higher accuracy.
     # `accumulator` will be converted back to fp16 after the loop.
-    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.int32 if use_int8 else tl.float32)
+    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.int32 if use_int8_w8a8 else tl.float32)
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         # Load the next block of A and B, generate a mask by checking the
         # K dimension.
@@ -149,11 +152,11 @@ def fused_moe_kernel(
         # We accumulate along the K dimension.
         if use_int8_w8a16:
             accumulator = tl.dot(a, b.to(compute_type), acc=accumulator)
-        elif use_fp8_w8a8:
-            accumulator = tl.dot(a, b, acc=accumulator)
-        elif use_int8:
+        elif use_int8_w8a8:
             a = tl.math.llrint((a / a_scale)).to(tl.int8)
             accumulator = tl.dot(a, b, acc=accumulator, out_dtype=accumulator.dtype)
+        elif use_fp8_w8a8:
+            accumulator = tl.dot(a, b, acc=accumulator)
         else:
             accumulator += tl.dot(a, b)
         # Advance the ptrs to the next K block.
@@ -168,7 +171,10 @@ def fused_moe_kernel(
 
     if use_int8_w8a16:
         accumulator = (accumulator * b_scale).to(compute_type)
-    elif use_fp8_w8a8 or use_int8:
+    elif use_int8_w8a8:
+        accumulator = accumulator.to(tl.float32)
+        accumulator = (accumulator * a_scale * b_scale).to(compute_type)
+    elif use_fp8_w8a8:
         accumulator = (accumulator * a_scale * b_scale).to(compute_type)
     else:
         accumulator = accumulator.to(compute_type)
@@ -286,8 +292,8 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
         B.stride(1),
         C.stride(1),
         C.stride(2),
-        B_scale.stride(0) if B_scale is not None and use_int8_w8a16 else 0,
-        B_scale.stride(1) if B_scale is not None and use_int8_w8a16 else 0,
+        B_scale.stride(0) if B_scale is not None and use_int8_w8a16 or use_int8_w8a8 else 0,
+        B_scale.stride(1) if B_scale is not None and use_int8_w8a16 or use_int8_w8a8 else 0,
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         top_k=top_k,
         compute_type=compute_type,
@@ -457,6 +463,8 @@ def get_config_dtype_str(dtype: torch.dtype,
                          use_fp8_w8a8: Optional[bool] = False):
     if use_fp8_w8a8:
         return "fp8_w8a8"
+    elif use_int8_w8a8:
+        return "int8_w8a8"
     elif use_int8_w8a16:
         return "int8_w8a16"
     elif dtype == torch.float:
@@ -497,15 +505,9 @@ def fused_experts(hidden_states: torch.Tensor,
     CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
     M = min(num_tokens, CHUNK_SIZE)
     config_dtype = get_config_dtype_str(use_fp8_w8a8=use_fp8_w8a8,
+                                        use_int8_w8a8=use_int8_w8a8,
                                         use_int8_w8a16=use_int8_w8a16,
                                         dtype=hidden_states.dtype)
-
-    if use_fp8:
-        dtype = "float8"
-    elif use_int8:
-        dtype = "int8"
-    else:
-        dtype = None
 
     get_config_func = functools.partial(
         try_get_optimal_moe_config,
