@@ -10,10 +10,6 @@ from vllm.model_executor.layers.quantization.awq_triton import (
 
 device = "cuda"
 
-dequantize_threshold = 0.5
-# This seems large, but this is using float16 with splitK and large sizes.
-gemm_threshold = 20
-
 
 def reverse_awq_order(t: torch.Tensor):
     bits = 4
