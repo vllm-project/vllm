@@ -233,7 +233,7 @@ main() {
     launch_sglang_server
   fi
 
-  if [[ $CURRENT_LLM_SERVING_ENGINE == "vllm" ]]; then
+  if [[ "$CURRENT_LLM_SERVING_ENGINE" == *"vllm"* ]]; then
     launch_vllm_server
   fi
 }
