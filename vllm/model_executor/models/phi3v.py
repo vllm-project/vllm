@@ -425,21 +425,21 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
 
     prompt = llm_inputs.get("prompt")
     if prompt is None:
+        image_idx = []
         new_prompt = None
     else:
+        image_idx = sorted(
+            list(map(int, re.findall(r"<\|image_(\d+)\|>+", prompt))))
         if prompt.count("<|image|>") > 0:
             logger.warning("Please follow the prompt format that is "
                            "documented on HuggingFace which does not involve "
                            "repeating <|image|> tokens.")
-        elif (num_image_tags := len(re.findall(r"(<\|image_\d+\|>)+",
-                                               prompt))) > 1:
+        elif (num_image_tags := len(image_idx)) > 1:
             assert num_image_tags == len(
                 image_data), "The count of image_placeholder not match image's"
         new_prompt = prompt
 
     prompt_token_ids = llm_inputs["prompt_token_ids"]
-    image_idx = sorted(
-        list(map(int, re.findall(r"<\|image_(\d+)\|>+", prompt))))
 
     # masked place_holder with image token id
     for idx in image_idx:
@@ -450,6 +450,7 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
                 prompt_token_ids[i:i + len(image_token_ids)] = [
                     _IMAGE_TOKEN_ID
                 ] * len(image_token_ids)
+                break
 
     # merge consecutive tag ids
     merged_token_ids: List[int] = []
