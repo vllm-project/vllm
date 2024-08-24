@@ -11,13 +11,14 @@ from typing import Any, Callable, Dict, List, Optional
 
 import openai
 import requests
-from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
 from typing_extensions import ParamSpec
 
+from vllm.config import LoadConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.entrypoints.openai.cli_args import make_arg_parser
+from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
 from vllm.utils import FlexibleArgumentParser, get_open_port, is_hip
 
@@ -65,10 +66,13 @@ class RemoteOpenAIServer:
                  env_dict: Optional[Dict[str, str]] = None,
                  auto_port: bool = True,
                  max_wait_seconds: Optional[float] = None) -> None:
-        if not model.startswith("/"):
-            # download the model if it's not a local path
-            # to exclude the model download time from the server start time
-            snapshot_download(model)
+
+        # Prepare weights so if the model is not local, it will be downloaded.
+        # We do this in the constructor to exclude the model download time
+        # from the server start time.
+        loader = get_model_loader(LoadConfig())
+        loader._prepare_weights(model)
+
         if auto_port:
             if "-p" in cli_args or "--port" in cli_args:
                 raise ValueError("You have manually specified the port"
