@@ -86,7 +86,16 @@ steps:
             <<: *common_pod_spec
             containers:
               - image: vllm/vllm-openai:v0.5.5
-                <<: *common_container_settings
+                command:
+                  - bash .buildkite/nightly-benchmarks/scripts/run-nightly-benchmarks.sh
+                resources:
+                  limits:
+                    nvidia.com/gpu: 8
+                volumeMounts:
+                  - name: devshm
+                    mountPath: /dev/shm
+                  - name: hf-cache
+                    mountPath: /root/.cache/huggingface
                 env:
                   - name: VLLM_USAGE_SOURCE
                     value: ci-test
@@ -102,6 +111,7 @@ steps:
                   - name: NUM_SCHEDULER_STEP
                     value: "1"
 
+
   - label: "A100 vllm 0.5.5 benchmark step 4"
     priority: 100
     agents:
@@ -112,7 +122,16 @@ steps:
             <<: *common_pod_spec
             containers:
               - image: vllm/vllm-openai:v0.5.5
-                <<: *common_container_settings
+                command:
+                  - bash .buildkite/nightly-benchmarks/scripts/run-nightly-benchmarks.sh
+                resources:
+                  limits:
+                    nvidia.com/gpu: 8
+                volumeMounts:
+                  - name: devshm
+                    mountPath: /dev/shm
+                  - name: hf-cache
+                    mountPath: /root/.cache/huggingface
                 env:
                   - name: VLLM_USAGE_SOURCE
                     value: ci-test
@@ -138,7 +157,16 @@ steps:
             <<: *common_pod_spec
             containers:
               - image: vllm/vllm-openai:v0.5.5
-                <<: *common_container_settings
+                command:
+                  - bash .buildkite/nightly-benchmarks/scripts/run-nightly-benchmarks.sh
+                resources:
+                  limits:
+                    nvidia.com/gpu: 8
+                volumeMounts:
+                  - name: devshm
+                    mountPath: /dev/shm
+                  - name: hf-cache
+                    mountPath: /root/.cache/huggingface
                 env:
                   - name: VLLM_USAGE_SOURCE
                     value: ci-test
@@ -153,6 +181,7 @@ steps:
                         key: token
                   - name: NUM_SCHEDULER_STEP
                     value: "7"
+                  
 
   - label: "A100 vllm 0.5.5 benchmark step 10"
     priority: 100
@@ -164,7 +193,16 @@ steps:
             <<: *common_pod_spec
             containers:
               - image: vllm/vllm-openai:v0.5.5
-                <<: *common_container_settings
+                command:
+                  - bash .buildkite/nightly-benchmarks/scripts/run-nightly-benchmarks.sh
+                resources:
+                  limits:
+                    nvidia.com/gpu: 8
+                volumeMounts:
+                  - name: devshm
+                    mountPath: /dev/shm
+                  - name: hf-cache
+                    mountPath: /root/.cache/huggingface
                 env:
                   - name: VLLM_USAGE_SOURCE
                     value: ci-test
@@ -179,6 +217,7 @@ steps:
                         key: token
                   - name: NUM_SCHEDULER_STEP
                     value: "10"
+                  
         
 
   # - label: "A100 tgi benchmark"
