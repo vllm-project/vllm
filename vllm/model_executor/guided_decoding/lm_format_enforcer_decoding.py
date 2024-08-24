@@ -49,6 +49,13 @@ async def get_lm_format_enforcer_guided_decoding_logits_processor(
           and request.response_format.type == "json_object"):
         character_level_parser = JsonSchemaParser(
             None)  # None means any json object
+    elif (request.response_format is not None
+          and request.response_format.type == "json_schema"
+          and request.response_format.json_schema is not None
+          and request.response_format.json_schema.json_schema is not None):
+        schema = _normalize_json_schema_object(
+            request.response_format.json_schema.json_schema)
+        character_level_parser = JsonSchemaParser(schema)
     else:
         return None
 
