@@ -1,3 +1,7 @@
+import subprocess
+import sys
+import tempfile
+import time
 from http import HTTPStatus
 
 import openai
@@ -177,3 +181,48 @@ async def test_metrics_exist(client: openai.AsyncOpenAI):
 
     for metric in EXPECTED_METRICS:
         assert metric in response.text
+
+
+def test_metrics_exist_run_batch():
+    input_batch = """{"custom_id": "request-0", "method": "POST", "url": "/v1/embeddings", "body": {"model": "intfloat/e5-mistral-7b-instruct", "input": "You are a helpful assistant."}}"""  # noqa: E501
+
+    base_url = "0.0.0.0"
+    port = "8001"
+    server_url = f"http://{base_url}:{port}"
+
+    with tempfile.NamedTemporaryFile(
+            "w") as input_file, tempfile.NamedTemporaryFile(
+                "r") as output_file:
+        input_file.write(input_batch)
+        input_file.flush()
+        proc = subprocess.Popen([
+            sys.executable,
+            "-m",
+            "vllm.entrypoints.openai.run_batch",
+            "-i",
+            input_file.name,
+            "-o",
+            output_file.name,
+            "--model",
+            "intfloat/e5-mistral-7b-instruct",
+            "--enable-metrics",
+            "--url",
+            base_url,
+            "--port",
+            port,
+        ], )
+
+        def is_server_up(url):
+            try:
+                response = requests.get(url)
+                return response.status_code == 200
+            except requests.ConnectionError:
+                return False
+
+        while not is_server_up(server_url):
+            time.sleep(1)
+
+        response = requests.get(server_url + "/metrics")
+        assert response.status_code == HTTPStatus.OK
+
+        proc.wait()
