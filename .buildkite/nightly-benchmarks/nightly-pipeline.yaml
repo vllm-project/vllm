@@ -76,6 +76,7 @@ steps:
   #             - image: openmmlab/lmdeploy:v0.5.3-cu11
   #               <<: *common_container_settings
 
+
   - label: "A100 vllm 0.5.5 benchmark step 1"
     priority: 100
     agents:
@@ -86,16 +87,7 @@ steps:
             <<: *common_pod_spec
             containers:
               - image: vllm/vllm-openai:v0.5.5
-                command:
-                  - bash .buildkite/nightly-benchmarks/scripts/run-nightly-benchmarks.sh
-                resources:
-                  limits:
-                    nvidia.com/gpu: 8
-                volumeMounts:
-                  - name: devshm
-                    mountPath: /dev/shm
-                  - name: hf-cache
-                    mountPath: /root/.cache/huggingface
+                <<: *common_container_settings
                 env:
                   - name: VLLM_USAGE_SOURCE
                     value: ci-test
@@ -108,9 +100,9 @@ steps:
                       secretKeyRef:
                         name: hf-token-secret
                         key: token
-                  - name: NUM_SCHEDULER_STEP
+                  - name: NUM_SCHEDULER_STEPS
                     value: "1"
-
+                  
 
   - label: "A100 vllm 0.5.5 benchmark step 4"
     priority: 100
@@ -122,16 +114,7 @@ steps:
             <<: *common_pod_spec
             containers:
               - image: vllm/vllm-openai:v0.5.5
-                command:
-                  - bash .buildkite/nightly-benchmarks/scripts/run-nightly-benchmarks.sh
-                resources:
-                  limits:
-                    nvidia.com/gpu: 8
-                volumeMounts:
-                  - name: devshm
-                    mountPath: /dev/shm
-                  - name: hf-cache
-                    mountPath: /root/.cache/huggingface
+                <<: *common_container_settings
                 env:
                   - name: VLLM_USAGE_SOURCE
                     value: ci-test
@@ -144,7 +127,7 @@ steps:
                       secretKeyRef:
                         name: hf-token-secret
                         key: token
-                  - name: NUM_SCHEDULER_STEP
+                  - name: NUM_SCHEDULER_STEPS
                     value: "4"
 
   - label: "A100 vllm 0.5.5 benchmark step 7"
@@ -157,16 +140,7 @@ steps:
             <<: *common_pod_spec
             containers:
               - image: vllm/vllm-openai:v0.5.5
-                command:
-                  - bash .buildkite/nightly-benchmarks/scripts/run-nightly-benchmarks.sh
-                resources:
-                  limits:
-                    nvidia.com/gpu: 8
-                volumeMounts:
-                  - name: devshm
-                    mountPath: /dev/shm
-                  - name: hf-cache
-                    mountPath: /root/.cache/huggingface
+                <<: *common_container_settings
                 env:
                   - name: VLLM_USAGE_SOURCE
                     value: ci-test
@@ -179,9 +153,8 @@ steps:
                       secretKeyRef:
                         name: hf-token-secret
                         key: token
-                  - name: NUM_SCHEDULER_STEP
+                  - name: NUM_SCHEDULER_STEPS
                     value: "7"
-                  
 
   - label: "A100 vllm 0.5.5 benchmark step 10"
     priority: 100
@@ -193,16 +166,7 @@ steps:
             <<: *common_pod_spec
             containers:
               - image: vllm/vllm-openai:v0.5.5
-                command:
-                  - bash .buildkite/nightly-benchmarks/scripts/run-nightly-benchmarks.sh
-                resources:
-                  limits:
-                    nvidia.com/gpu: 8
-                volumeMounts:
-                  - name: devshm
-                    mountPath: /dev/shm
-                  - name: hf-cache
-                    mountPath: /root/.cache/huggingface
+                <<: *common_container_settings
                 env:
                   - name: VLLM_USAGE_SOURCE
                     value: ci-test
@@ -215,9 +179,8 @@ steps:
                       secretKeyRef:
                         name: hf-token-secret
                         key: token
-                  - name: NUM_SCHEDULER_STEP
+                  - name: NUM_SCHEDULER_STEPS
                     value: "10"
-                  
         
 
   # - label: "A100 tgi benchmark"
