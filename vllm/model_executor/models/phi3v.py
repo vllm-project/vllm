@@ -428,8 +428,7 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
         image_idx = []
         new_prompt = None
     else:
-        image_idx = sorted(
-            list(map(int, re.findall(r"<\|image_(\d+)\|>+", prompt))))
+        image_idx = sorted(map(int, re.findall(r"<\|image_(\d+)\|>+", prompt)))
         if prompt.count("<|image|>") > 0:
             logger.warning("Please follow the prompt format that is "
                            "documented on HuggingFace which does not involve "
@@ -439,7 +438,7 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
                 image_data), "The count of image_placeholder not match image's"
         new_prompt = prompt
 
-    prompt_token_ids = llm_inputs["prompt_token_ids"]
+    prompt_token_ids = llm_inputs["prompt_token_ids"].copy()
 
     # masked place_holder with image token id
     for idx in image_idx:
