@@ -40,6 +40,8 @@ async def get_lm_format_enforcer_guided_decoding_logits_processor(
         character_level_parser = RegexParser(request.guided_regex)
     elif request.guided_grammar:
         # CFG grammar not supported by LMFE, revert to outlines
+
+        # NOTE: lazy import outlines to avoid https://github.com/vllm-project/vllm/issues/4193
         from vllm.model_executor.guided_decoding.outlines_decoding import (
             get_outlines_guided_decoding_logits_processor)
         return await get_outlines_guided_decoding_logits_processor(
@@ -79,6 +81,8 @@ def get_local_lm_format_enforcer_guided_decoding_logits_processor(
         character_level_parser = RegexParser(guided_options.guided_regex)
     elif guided_options.guided_grammar:
         # CFG grammar not supported by LMFE, revert to outlines
+
+        # NOTE: lazy import outlines to avoid https://github.com/vllm-project/vllm/issues/4193
         from vllm.model_executor.guided_decoding.outlines_decoding import (
             get_local_outlines_guided_decoding_logits_processor)
         return get_local_outlines_guided_decoding_logits_processor(
