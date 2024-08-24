@@ -6,7 +6,7 @@ import aiohttp
 
 from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.logger import RequestLogger, logger
 # yapf: disable
 from vllm.entrypoints.openai.protocol import (BatchRequestInput,
                                               BatchRequestOutput,
@@ -16,12 +16,9 @@ from vllm.entrypoints.openai.protocol import (BatchRequestInput,
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
-from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, random_uuid
 from vllm.version import __version__ as VLLM_VERSION
-
-logger = init_logger(__name__)
 
 
 def parse_args():
@@ -184,7 +181,7 @@ async def main(args):
 if __name__ == "__main__":
     args = parse_args()
 
-    logger.info("vLLM API server version %s", VLLM_VERSION)
+    logger.info("vLLM batch processing API version %s", VLLM_VERSION)
     logger.info("args: %s", args)
 
     asyncio.run(main(args))
