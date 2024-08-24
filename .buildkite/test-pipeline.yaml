@@ -87,7 +87,8 @@ steps:
   commands:
   - pip install -e ./plugins/vllm_add_dummy_model
   - pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git@a4987bba6e9e9b3f22bd3a6c1ecf0abd04fd5622#egg=lm_eval[api]
-  - pytest -v -s entrypoints/llm
+  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py
+  - pytest -v -s entrypoints/llm/test_lazy_outlines.py # it needs a clean process
   - pytest -v -s entrypoints/openai
 
 - label: Distributed Tests (4 GPUs) # 10min

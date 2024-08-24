@@ -13,7 +13,6 @@ from vllm.model_executor.guided_decoding.outlines_decoding import (
     get_local_outlines_guided_decoding_logits_processor,
     get_outlines_guided_decoding_logits_processor)
 
-
 async def get_guided_decoding_logits_processor(
         guided_decoding_backend: str, request: Union[CompletionRequest,
                                                      ChatCompletionRequest],
@@ -21,6 +20,9 @@ async def get_guided_decoding_logits_processor(
     request = _adapt_request_for_tool_use(request)
 
     if guided_decoding_backend == 'outlines':
+        # NOTE: lazy import outlines to avoid https://github.com/vllm-project/vllm/issues/4193
+        from vllm.model_executor.guided_decoding.outlines_decoding import (  # noqa
+            get_outlines_guided_decoding_logits_processor)
         return await get_outlines_guided_decoding_logits_processor(
             request, tokenizer)
     if guided_decoding_backend == 'lm-format-enforcer':
@@ -40,6 +42,9 @@ def get_local_guided_decoding_logits_processor(
     # request = _adapt_request_for_tool_use(request)
 
     if guided_decoding_backend == 'outlines':
+        # NOTE: lazy import outlines to avoid https://github.com/vllm-project/vllm/issues/4193
+        from vllm.model_executor.guided_decoding.outlines_decoding import (  # noqa
+            get_local_outlines_guided_decoding_logits_processor)
         return get_local_outlines_guided_decoding_logits_processor(
             guided_options, tokenizer)
     if guided_decoding_backend == 'lm-format-enforcer':
