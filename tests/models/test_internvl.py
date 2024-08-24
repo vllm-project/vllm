@@ -24,7 +24,6 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "<|im_start|>User\n<image>\nWhat is the season?<|im_end|>\n<|im_start|>Assistant\n",  # noqa: E501
 })
 
-
 models = [
     "OpenGVLab/InternVL2-1B",
     "OpenGVLab/InternVL2-2B",
