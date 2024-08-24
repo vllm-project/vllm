@@ -22,7 +22,7 @@ Quick correctness validation tips:
 
 Running llama-2-7b model 
 ( 
-    ./vllm/examples/measure_ppl2_MC.py 
+    ./vllm/examples/measure_pppl_llama2.py 
     --model=/data/models/llama-2-7b-chat-hf 
     --data=./vllm/tests/prompts/wiki.test.raw 
     --context-size=1024 
@@ -32,7 +32,7 @@ should result in PPL ~ 6.524227946419175
 
 Running llama-2-7b model 
 ( 
-    ./vllm/examples/measure_ppl2_MC.py 
+    ./vllm/examples/measure_pppl_llama2.py 
     --model=/data/models/llama-2-7b-chat-hf 
     --data=./vllm/tests/prompts/wiki.test.raw 
     --context-size=1024 
