@@ -15,7 +15,7 @@ async def get_guided_decoding_logits_processor(
     request = _adapt_request_for_tool_use(request)
 
     if guided_decoding_backend == 'outlines':
-        # lazy import outlines
+        # NOTE: lazy import outlines to avoid https://github.com/vllm-project/vllm/issues/4193
         from vllm.model_executor.guided_decoding.outlines_decoding import (  # noqa
             get_outlines_guided_decoding_logits_processor)
         return await get_outlines_guided_decoding_logits_processor(
@@ -37,7 +37,7 @@ def get_local_guided_decoding_logits_processor(
     # request = _adapt_request_for_tool_use(request)
 
     if guided_decoding_backend == 'outlines':
-        # lazy import outlines
+        # NOTE: lazy import outlines to avoid https://github.com/vllm-project/vllm/issues/4193
         from vllm.model_executor.guided_decoding.outlines_decoding import (  # noqa
             get_local_outlines_guided_decoding_logits_processor)
         return get_local_outlines_guided_decoding_logits_processor(
