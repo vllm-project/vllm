@@ -12,8 +12,8 @@ from mistral_common.tokens.tokenizers.mistral import (
 # yapf: enable
 from mistral_common.tokens.tokenizers.sentencepiece import (
     SentencePieceTokenizer)
-from mistral_common.tokens.tokenizers.tekken import Tekkenizer
-from mistral_common.tokens.tokenizers.tekken import SpecialTokenPolicy
+from mistral_common.tokens.tokenizers.tekken import (SpecialTokenPolicy,
+                                                     Tekkenizer)
 
 if TYPE_CHECKING:
     from vllm.entrypoints.chat_utils import ConversationMessage
