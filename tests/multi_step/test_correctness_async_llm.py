@@ -62,7 +62,7 @@ async def test_multi_step(example_prompts, model: str, tp_size: int,
     ms_server_args = DEFAULT_SERVER_ARGS + \
         ["--num-scheduler-steps", f"{num_scheduler_steps}"]
 
-    # disable output proc callback as its not supported
+    # Disable output proc callback as its not supported
     # with multi-step right now
     ms_server_args += ["--disable-async-output-proc"]
     if eager_mode:
