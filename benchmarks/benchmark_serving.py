@@ -61,15 +61,15 @@ class BenchmarkMetrics:
     mean_ttft_ms: float
     median_ttft_ms: float
     std_ttft_ms: float
-    percentiles_ttft_ms: List[Tuple[float,float]]
+    percentiles_ttft_ms: List[Tuple[float, float]]
     mean_tpot_ms: float
     median_tpot_ms: float
     std_tpot_ms: float
-    percentiles_tpot_ms: List[Tuple[float,float]]
+    percentiles_tpot_ms: List[Tuple[float, float]]
     mean_itl_ms: float
     median_itl_ms: float
     std_itl_ms: float
-    percentiles_itl_ms: List[Tuple[float,float]]
+    percentiles_itl_ms: List[Tuple[float, float]]
     # ETEL stands for end-to-end latency per request.
     # It is the time taken on the client side from sending
     # a request to receiving a complete response.
@@ -289,19 +289,23 @@ def calculate_metrics(
         1000,  # ttfts is empty if streaming is not supported by backend
         std_ttft_ms=np.std(ttfts or 0) * 1000,
         median_ttft_ms=np.median(ttfts or 0) * 1000,
-        percentiles_ttft_ms=[(p, np.percentile(ttfts or 0, p) * 1000) for p in selected_percentiles],
+        percentiles_ttft_ms=[(p, np.percentile(ttfts or 0, p) * 1000)
+                             for p in selected_percentiles],
         mean_tpot_ms=np.mean(tpots or 0) * 1000,
         std_tpot_ms=np.std(tpots or 0) * 1000,
         median_tpot_ms=np.median(tpots or 0) * 1000,
-        percentiles_tpot_ms=[(p, np.percentile(tpots or 0, p) * 1000) for p in selected_percentiles],
+        percentiles_tpot_ms=[(p, np.percentile(tpots or 0, p) * 1000)
+                             for p in selected_percentiles],
         mean_itl_ms=np.mean(itls or 0) * 1000,
         std_itl_ms=np.std(itls or 0) * 1000,
         median_itl_ms=np.median(itls or 0) * 1000,
-        percentiles_itl_ms=[(p, np.percentile(itls or 0, p) * 1000) for p in selected_percentiles],
+        percentiles_itl_ms=[(p, np.percentile(itls or 0, p) * 1000)
+                            for p in selected_percentiles],
         mean_etel_ms=np.median(etels or 0) * 1000,
         std_etel_ms=np.std(etels or 0) * 1000,
         median_etel_ms=np.mean(etels or 0) * 1000,
-        percentiles_etel_ms=[(p, np.percentile(etels or 0, p) * 1000) for p in selected_percentiles],
+        percentiles_etel_ms=[(p, np.percentile(etels or 0, p) * 1000)
+                             for p in selected_percentiles],
     )
 
     return metrics, actual_output_lens
@@ -445,8 +449,10 @@ async def benchmark(
 
     if "ttft" in selected_percentile_metrics:
         print("{s:{c}^{n}}".format(s='Time to First Token', n=50, c='-'))
-        print("{:<40} {:<10.2f}".format("Mean TTFT (ms):", metrics.mean_ttft_ms))
-        print("{:<40} {:<10.2f}".format("Median TTFT (ms):", metrics.median_ttft_ms))
+        print("{:<40} {:<10.2f}".format("Mean TTFT (ms):",
+                                        metrics.mean_ttft_ms))
+        print("{:<40} {:<10.2f}".format("Median TTFT (ms):",
+                                        metrics.median_ttft_ms))
         result["mean_ttft_ms"] = metrics.mean_ttft_ms
         result["median_ttft_ms"] = metrics.median_ttft_ms
         result["std_ttft_ms"] = metrics.std_ttft_ms
@@ -457,10 +463,12 @@ async def benchmark(
 
     if "tpot" in selected_percentile_metrics:
         print("{s:{c}^{n}}".format(s='Time per Output Token (excl. 1st token)',
-                                  n=50,
-                                  c='-'))
-        print("{:<40} {:<10.2f}".format("Median TPOT (ms):", metrics.median_tpot_ms))
-        print("{:<40} {:<10.2f}".format("Mean TPOT (ms):", metrics.mean_tpot_ms))
+                                   n=50,
+                                   c='-'))
+        print("{:<40} {:<10.2f}".format("Median TPOT (ms):",
+                                        metrics.median_tpot_ms))
+        print("{:<40} {:<10.2f}".format("Mean TPOT (ms):",
+                                        metrics.mean_tpot_ms))
         result["mean_tpot_ms"] = metrics.mean_tpot_ms
         result["median_tpot_m"] = metrics.median_tpot_ms
         result["std_tpot_ms"] = metrics.std_tpot_ms
@@ -472,7 +480,8 @@ async def benchmark(
     if "itl" in selected_percentile_metrics:
         print("{s:{c}^{n}}".format(s='Inter-token Latency', n=50, c='-'))
         print("{:<40} {:<10.2f}".format("Mean ITL (ms):", metrics.mean_itl_ms))
-        print("{:<40} {:<10.2f}".format("Median ITL (ms):", metrics.median_itl_ms))
+        print("{:<40} {:<10.2f}".format("Median ITL (ms):",
+                                        metrics.median_itl_ms))
         result["mean_itl_ms"] = metrics.mean_itl_ms,
         result["median_itl_ms"] = metrics.median_itl_ms,
         result["std_itl_ms"] = metrics.std_itl_ms,
@@ -483,7 +492,8 @@ async def benchmark(
 
     if "etel" in selected_percentile_metrics:
         print("{s:{c}^{n}}".format(s='End-to-end Latency', n=50, c='-'))
-        print("{:<40} {:<10.2f}".format("Mean ETEL (ms):", metrics.mean_etel_ms))
+        print("{:<40} {:<10.2f}".format("Mean ETEL (ms):",
+                                        metrics.mean_etel_ms))
         print("{:<40} {:<10.2f}".format("Median ETEL (ms):",
                                         metrics.median_etel_ms))
         result["mean_etel_ms"] = metrics.mean_etel_ms,
@@ -595,7 +605,9 @@ def main(args: argparse.Namespace):
             disable_tqdm=args.disable_tqdm,
             profile=args.profile,
             selected_percentile_metrics=args.percentile_metrics.split(","),
-            selected_percentiles=[float(p) for p in args.metric_percentiles.split(",")],
+            selected_percentiles=[
+                float(p) for p in args.metric_percentiles.split(",")
+            ],
         ))
 
     # Save config and results to json
@@ -818,8 +830,7 @@ if __name__ == "__main__":
         help="Comma-seperated list of selected metrics to report percentils. "
         "This argument specifies the metrics to report percentiles. "
         "Allowed metric names are \"ttft\", \"tpot\", \"itl\", \"etel\". "
-        "Default value is \"ttft,tpot,itl\"."
-    )
+        "Default value is \"ttft,tpot,itl\".")
     parser.add_argument(
         "--metric-percentiles",
         type=str,
