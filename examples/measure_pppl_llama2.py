@@ -65,16 +65,15 @@ def get_wikitext2_text(tokenizer):
 
 def vllm_init(args):
 
-    llm = LLM(
-        model=args.model,
-        tokenizer=None,
-        tensor_parallel_size=args.tensor_parallel_size,
-        trust_remote_code=args.trust_remote_code,
-        dtype=args.dtype,
-        kv_cache_dtype=args.kv_cache_dtype,
-        quantization_param_path=args.kv_cache_scales_path
-        if args.kv_cache_scales_path != '' else None,
-        enforce_eager=args.enforce_eager)
+    llm = LLM(model=args.model,
+              tokenizer=None,
+              tensor_parallel_size=args.tensor_parallel_size,
+              trust_remote_code=args.trust_remote_code,
+              dtype=args.dtype,
+              kv_cache_dtype=args.kv_cache_dtype,
+              quantization_param_path=args.kv_cache_scales_path
+              if args.kv_cache_scales_path != '' else None,
+              enforce_eager=args.enforce_eager)
 
     sampling_params = SamplingParams(n=1,
                                      temperature=0.0,
@@ -156,12 +155,12 @@ def main(args: argparse.Namespace):
         my_sampl_par.cntr = c
         LOGPROBS = vllm_predict(CONTEXT, my_llm, my_sampl_par)
         num_tokens_generated += len(LOGPROBS[0].outputs[0].token_ids)
-        if(num_tokens_generated<my_n_samples):
+        if (num_tokens_generated < my_n_samples):
             MESSAGE = (f"Warning: The number of generated tokens is" \
                         f"less than requested ({num_tokens_generated}" \
                         f" < {my_n_samples}).")
             logger.info(MESSAGE)
-            print(MESSAGE)            
+            print(MESSAGE)
         my_ppl -= LOGPROBS[0].outputs[0].cumulative_logprob
         MESSAGE = (f"Iteration {c+1} of {my_n_patches} Intermediate" \
             "Estimates:\n" \

@@ -625,7 +625,8 @@ def _sample_with_torch(
                 forced_samples = torch.tensor([
                     seq_groups[0].sampling_params.future_context[0][len(
                         sampling_metadata.seq_groups[0].seq_data[
-                            sampling_params.cntr].output_token_ids)]])
+                            sampling_params.cntr].output_token_ids)]
+                ])
             else:
                 forced_samples = torch.argmax(logprobs[long_sample_indices],
                                               dim=-1)
