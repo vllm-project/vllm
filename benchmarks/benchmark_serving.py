@@ -455,6 +455,8 @@ async def benchmark(
         # E.g., "Time to First Token"
         metric_header: str,
     ):
+        # This function print and add statistics of the specified
+        # metric.
         if metric_attribute_name not in selected_percentile_metrics:
             return
         print("{s:{c}^{n}}".format(s=metric_header, n=50, c='-'))
@@ -470,7 +472,8 @@ async def benchmark(
             metrics, f"median_{metric_attribute_name}_ms")
         result[f"std_{metric_attribute_name}_ms"] = getattr(
             metrics, f"std_{metric_attribute_name}_ms")
-        for p, value in getattr(metrics, f"percentiles_{metric_attribute_name}_ms"):
+        for p, value in getattr(metrics,
+                                f"percentiles_{metric_attribute_name}_ms"):
             p_word = str(int(p)) if int(p) == p else str(p)
             print("{:<40} {:<10.2f}".format(f"P{p_word} {metric_name} (ms):",
                                             value))
