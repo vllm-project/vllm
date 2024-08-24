@@ -49,7 +49,7 @@ def get_perf(df, method, model, metric):
 
 def get_perf_w_std(df, method, model, metric):
     
-    if metric in ["TTFT", "ITL"]:
+    if metric in ["TTFT", "TPOT"]:
         mean = get_perf(df, method, model, "Mean " + metric + " (ms)")
         mean = mean.tolist()
         std = get_perf(df, method, model, "Std " + metric + " (ms)")
@@ -79,19 +79,6 @@ def main(args):
         with open(test_file, "r") as f:
             results = results + json.loads(f.read())
             
-    with open("vllm2_nightly_results.json", "r") as f:
-        results2 = json.loads(f.read())
-
-    for i in results:
-        if i['Engine'] == "vllm":
-            i['Engine'] = "vllm_step10"
-            i['Mean ITL (ms)'] = i['Mean ITL (ms)'] / 10
-            i['Std ITL (ms)'] = i['Std ITL (ms)'] / 10
-
-    for i in results2:
-        i['Engine'] = "vllm_single"
-    results = results + results2
-
     # generate markdown table
     df = pd.DataFrame.from_dict(results)
     df = df[df["Test name"].str.contains(args.dataset)]
@@ -103,27 +90,26 @@ def main(args):
     # plot results
     fig, axes = plt.subplots(3, 3, figsize=(16, 14))
     fig.subplots_adjust(hspace=1)
-    methods = ["vllm_step10", "vllm_single", "sglang", "lmdeploy"]
+    methods = ["vllm_055", "vllm_053post1"]
     for i, model in enumerate(["llama8B", "llama70B", "mixtral8x7B"]):
-        for j, metric in enumerate(["TTFT", "ITL", "Tput"]):
+        for j, metric in enumerate(["Tput", "TPOT", "TTFT"]):
+            
             ax = axes[i, j]
-            if metric in ["TTFT", "ITL"]:
+            if metric in ["TTFT", "TPOT"]:
                 ax.set_ylabel(f"{metric} (ms)")
             else:
-                ax.set_ylabel(f"{metric} (tok/s)")
+                ax.set_ylabel(f"Thoughput (tokens/s)")
             ax.set_xlabel("QPS")
-            ax.set_title(f"{model} {args.dataset} {metric}")
+            if metric == "Tput":
+                ax.set_title(f"{model} {args.dataset} Thoughput")
+            else:
+                ax.set_title(f"{model} {args.dataset} {metric}")
             ax.grid(axis='y')
-            print("New line")
             print(model, metric)
+            
+            inf_qps_results = []
             for k, method in enumerate(methods):
                 mean, std = get_perf_w_std(df, method, model, metric)
-                print(method, mean, std)
-                if method == "vllm_step10" and metric == "TTFT" and std is not None:
-                    mean = [i - 4 * j for i, j in zip(
-                        mean,
-                        get_perf(df, method, model, "Mean ITL (ms)").tolist()
-                    )]
                 ax.errorbar(range(len(mean)),
                             mean, 
                             yerr=std, 
@@ -131,9 +117,11 @@ def main(args):
                             capthick=4,
                             label=method,
                             lw=4,)
+                inf_qps_results.append(mean[-2])
+            print((inf_qps_results[0] - inf_qps_results[1]) / inf_qps_results[1])
             ax.set_ylim(bottom=0)
             if metric == "TTFT":
-                ax.set_ylim(0, 200)
+                ax.set_ylim(0, 500)
             ax.set_xticks(range(len(mean)))
             ax.set_xticklabels(["2", "4", "8", "16", "inf"])
 
