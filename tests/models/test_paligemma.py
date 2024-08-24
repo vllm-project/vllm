@@ -2,7 +2,7 @@ import os
 from typing import List, Optional, Tuple, Type
 
 import pytest
-from transformers import AutoTokenizer
+from transformers import AutoConfig, AutoModelForVision2Seq, AutoTokenizer
 
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
@@ -20,8 +20,6 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "What is in the picture?",
 })
 
-IMAGE_TOKEN_ID = 257152
-
 models = ["google/paligemma-3b-mix-224"]
 
 # ROCm Triton FA can run into compilation issues with these models due to,
@@ -37,12 +35,15 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
     """Sanitize vllm output to be comparable with hf output."""
     output_ids, output_str, out_logprobs = vllm_output
 
+    config = AutoConfig.from_pretrained(model)
+    image_token_id = config.image_token_index
+
     tokenizer = AutoTokenizer.from_pretrained(model)
     eos_token_id = tokenizer.eos_token_id
 
     hf_output_ids = [
         token_id for idx, token_id in enumerate(output_ids)
-        if token_id != IMAGE_TOKEN_ID or output_ids[idx - 1] != IMAGE_TOKEN_ID
+        if token_id != image_token_id or output_ids[idx - 1] != image_token_id
     ]
 
     hf_output_str = output_str
@@ -71,7 +72,7 @@ def run_test(
     All the image fixtures for the test is under tests/images.
     For huggingface runner, we provide the PIL images as input.
     For vllm runner, we provide MultiModalDataDict objects 
-    and corresponding vision language config as input.
+    and corresponding MultiModalConfig as input.
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """
@@ -101,7 +102,8 @@ def run_test(
             for prompts, images in inputs_per_image
         ]
 
-    with hf_runner(model, dtype=dtype, is_vision_model=True) as hf_model:
+    with hf_runner(model, dtype=dtype,
+                   auto_cls=AutoModelForVision2Seq) as hf_model:
         hf_outputs_per_image = [
             hf_model.generate_greedy_logprobs_limit(prompts,
                                                     max_tokens,

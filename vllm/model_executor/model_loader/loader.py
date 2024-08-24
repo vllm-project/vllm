@@ -7,13 +7,16 @@ import json
 import math
 import os
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from typing import Any, Dict, Generator, List, Optional, Tuple, Type
 
+import gguf
 import huggingface_hub
 import numpy as np
 import torch
 from huggingface_hub import HfApi, hf_hub_download
 from torch import nn
+from transformers import AutoModelForCausalLM, PretrainedConfig
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoadFormat,
                          LoRAConfig, ModelConfig, MultiModalConfig,
@@ -30,14 +33,57 @@ from vllm.model_executor.model_loader.utils import (get_model_architecture,
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
     filter_duplicate_safetensors_files, filter_files_not_needed_for_inference,
-    get_quant_config, initialize_dummy_weights, np_cache_weights_iterator,
-    pt_weights_iterator, safetensors_weights_iterator)
+    get_gguf_extra_tensor_names, get_quant_config, gguf_quant_weights_iterator,
+    initialize_dummy_weights, np_cache_weights_iterator, pt_weights_iterator,
+    safetensors_weights_iterator)
 from vllm.model_executor.models.interfaces import (has_inner_state,
                                                    supports_lora,
-                                                   supports_vision)
+                                                   supports_multimodal)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils import is_tpu
+from vllm.utils import is_pin_memory_available
+
+
+@contextmanager
+def device_loading_context(module: torch.nn.Module,
+                           target_device: torch.device):
+    if target_device.type == "cpu":
+        # If target is CPU, no need to move anything
+        yield module
+        return
+
+    original_device_states: Dict[str, torch.device] = {}
+
+    # Store original device states and move parameters to GPU if they're on CPU
+    for name, p in module.named_parameters():
+        if p.device.type == "cpu":
+            original_device_states[name] = p.device
+            p.data = p.data.to(target_device)
+        # Parameters already on target device are not touched
+
+    try:
+        yield module
+
+    finally:
+        # Restore parameters to their original devices, ignoring new parameters
+        pin_memory = is_pin_memory_available()
+        for name, p in module.named_parameters():
+            if name in original_device_states:
+                original_device: torch.device = original_device_states[name]
+                if original_device.type == "cpu":
+                    # `torch.empty_like` does not support `pin_memory` argument
+                    cpu_data = torch.empty_strided(size=p.data.size(),
+                                                   stride=p.data.stride(),
+                                                   dtype=p.data.dtype,
+                                                   layout=p.data.layout,
+                                                   device="cpu",
+                                                   pin_memory=pin_memory)
+                    cpu_data.copy_(p.data)
+                    p.data = cpu_data
+                else:
+                    p.data = p.data.to(original_device)
+        # New parameters or parameters already on target device are untouched
+
 
 logger = init_logger(__name__)
 
@@ -48,14 +94,15 @@ def _get_quantization_config(
     """Get the quantization config."""
     if model_config.quantization is not None:
         quant_config = get_quant_config(model_config, load_config)
-        capability = current_platform.get_device_capability()
-        capability = capability[0] * 10 + capability[1]
-        if capability < quant_config.get_min_capability():
-            raise ValueError(
-                f"The quantization method {model_config.quantization} is not "
-                "supported for the current GPU. "
-                f"Minimum capability: {quant_config.get_min_capability()}. "
-                f"Current capability: {capability}.")
+        if not current_platform.is_tpu():
+            capability = current_platform.get_device_capability()
+            capability = capability[0] * 10 + capability[1]
+            if capability < quant_config.get_min_capability():
+                raise ValueError(
+                    f"The quantization method {model_config.quantization} "
+                    "is not supported for the current GPU. "
+                    f"Minimum capability: {quant_config.get_min_capability()}. "
+                    f"Current capability: {capability}.")
         supported_dtypes = quant_config.get_supported_act_dtypes()
         if model_config.dtype not in supported_dtypes:
             raise ValueError(
@@ -84,10 +131,8 @@ def _get_model_initialization_kwargs(
             "be added in the future. If this is important to you, "
             "please open an issue on github.")
 
-    if supports_vision(model_class):
-        if multimodal_config is None:
-            raise ValueError("Provide vision related configurations "
-                             "through LLM entrypoint or engine arguments.")
+    if supports_multimodal(model_class):
+        assert multimodal_config is not None
 
         extra_kwargs["multimodal_config"] = multimodal_config
 
@@ -97,23 +142,40 @@ def _get_model_initialization_kwargs(
     return extra_kwargs
 
 
+def build_model(model_class: Type[nn.Module], hf_config: PretrainedConfig,
+                cache_config: Optional[CacheConfig],
+                quant_config: Optional[QuantizationConfig], *,
+                lora_config: Optional[LoRAConfig],
+                multimodal_config: Optional[MultiModalConfig],
+                scheduler_config: Optional[SchedulerConfig]) -> nn.Module:
+    extra_kwargs = _get_model_initialization_kwargs(model_class, lora_config,
+                                                    multimodal_config,
+                                                    scheduler_config)
+
+    return model_class(config=hf_config,
+                       cache_config=cache_config,
+                       quant_config=quant_config,
+                       **extra_kwargs)
+
+
 def _initialize_model(
         model_config: ModelConfig,
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
-        multimodal_config: Optional[MultiModalConfig],
         cache_config: CacheConfig,
         scheduler_config: Optional[SchedulerConfig] = None) -> nn.Module:
     """Initialize a model with the given configurations."""
-    model_class = get_model_architecture(model_config)[0]
-    quant_config = _get_quantization_config(model_config, load_config)
+    model_class, _ = get_model_architecture(model_config)
 
-    return model_class(config=model_config.hf_config,
-                       cache_config=cache_config,
-                       quant_config=quant_config,
-                       **_get_model_initialization_kwargs(
-                           model_class, lora_config, multimodal_config,
-                           scheduler_config))
+    return build_model(
+        model_class,
+        model_config.hf_config,
+        cache_config=cache_config,
+        quant_config=_get_quantization_config(model_config, load_config),
+        lora_config=lora_config,
+        multimodal_config=model_config.multimodal_config,
+        scheduler_config=scheduler_config,
+    )
 
 
 class BaseModelLoader(ABC):
@@ -126,7 +188,6 @@ class BaseModelLoader(ABC):
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
                    lora_config: Optional[LoRAConfig],
-                   multimodal_config: Optional[MultiModalConfig],
                    parallel_config: ParallelConfig,
                    scheduler_config: SchedulerConfig,
                    cache_config: CacheConfig) -> nn.Module:
@@ -255,7 +316,7 @@ class DefaultModelLoader(BaseModelLoader):
         else:
             weights_iterator = pt_weights_iterator(hf_weights_files)
 
-        if is_tpu():
+        if current_platform.is_tpu():
             # In PyTorch XLA, we should call `xm.mark_step` frequently so that
             # not too many ops are accumulated in the XLA program.
             import torch_xla.core.xla_model as xm
@@ -271,15 +332,15 @@ class DefaultModelLoader(BaseModelLoader):
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
                    lora_config: Optional[LoRAConfig],
-                   multimodal_config: Optional[MultiModalConfig],
                    parallel_config: ParallelConfig,
                    scheduler_config: SchedulerConfig,
                    cache_config: CacheConfig) -> nn.Module:
+        target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):
-            with torch.device(device_config.device):
+            with target_device:
                 model = _initialize_model(model_config, self.load_config,
-                                          lora_config, multimodal_config,
-                                          cache_config, scheduler_config)
+                                          lora_config, cache_config,
+                                          scheduler_config)
             model.load_weights(
                 self._get_weights_iterator(model_config.model,
                                            model_config.revision,
@@ -291,7 +352,13 @@ class DefaultModelLoader(BaseModelLoader):
             for _, module in model.named_modules():
                 quant_method = getattr(module, "quant_method", None)
                 if quant_method is not None:
-                    quant_method.process_weights_after_loading(module)
+                    # When quant methods need to process weights after loading
+                    # (for repacking, quantizing, etc), they expect parameters
+                    # to be on the global target device. This scope is for the
+                    # case where cpu offloading is used, where we will move the
+                    # parameters onto device for processing and back off after.
+                    with device_loading_context(module, target_device):
+                        quant_method.process_weights_after_loading(module)
         return model.eval()
 
 
@@ -307,15 +374,14 @@ class DummyModelLoader(BaseModelLoader):
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
                    lora_config: Optional[LoRAConfig],
-                   multimodal_config: Optional[MultiModalConfig],
                    parallel_config: ParallelConfig,
                    scheduler_config: SchedulerConfig,
                    cache_config: CacheConfig) -> nn.Module:
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
                 model = _initialize_model(model_config, self.load_config,
-                                          lora_config, multimodal_config,
-                                          cache_config, scheduler_config)
+                                          lora_config, cache_config,
+                                          scheduler_config)
             # NOTE(woosuk): For accurate performance evaluation, we assign
             # random values to the weights.
             initialize_dummy_weights(model)
@@ -348,7 +414,6 @@ class TensorizerLoader(BaseModelLoader):
         model_config: ModelConfig,
         device_config: DeviceConfig,
         lora_config: Optional[LoRAConfig],
-        multimodal_config: Optional[MultiModalConfig],
         cache_config: CacheConfig,
     ) -> nn.Module:
         """Load a serialized model with tensorizer to the CPU.
@@ -361,8 +426,7 @@ class TensorizerLoader(BaseModelLoader):
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
                 model = _initialize_model(model_config, self.load_config,
-                                          lora_config, multimodal_config,
-                                          cache_config)
+                                          lora_config, cache_config)
 
             model.load_weights(self._get_weights_iterator())
         return model.eval()
@@ -372,7 +436,6 @@ class TensorizerLoader(BaseModelLoader):
         model_config: ModelConfig,
         device_config: DeviceConfig,
         lora_config: Optional[LoRAConfig],
-        multimodal_config: Optional[MultiModalConfig],
         cache_config: CacheConfig,
     ) -> nn.Module:
         """Load a serialized model with tensorizer.
@@ -386,7 +449,7 @@ class TensorizerLoader(BaseModelLoader):
                 quant_config = _get_quantization_config(
                     model_config, self.load_config)
                 extra_kwargs = _get_model_initialization_kwargs(
-                    model_class, lora_config, multimodal_config)
+                    model_class, lora_config, model_config.multimodal_config)
                 extra_kwargs["quant_config"] = quant_config
                 extra_kwargs["cache_config"] = cache_config
 
@@ -401,7 +464,6 @@ class TensorizerLoader(BaseModelLoader):
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
                    lora_config: Optional[LoRAConfig],
-                   multimodal_config: Optional[MultiModalConfig],
                    parallel_config: ParallelConfig,
                    scheduler_config: SchedulerConfig,
                    cache_config: CacheConfig) -> nn.Module:
@@ -415,11 +477,9 @@ class TensorizerLoader(BaseModelLoader):
 
         if is_vllm_tensorized(self.tensorizer_config):
             return self._load_model_serialized(model_config, device_config,
-                                               lora_config, multimodal_config,
-                                               cache_config)
+                                               lora_config, cache_config)
         return self._load_model_serialized_cpu(model_config, device_config,
-                                               lora_config, multimodal_config,
-                                               cache_config)
+                                               lora_config, cache_config)
 
     @staticmethod
     def save_model(
@@ -505,7 +565,6 @@ class ShardedStateLoader(BaseModelLoader):
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
                    lora_config: Optional[LoRAConfig],
-                   multimodal_config: Optional[MultiModalConfig],
                    parallel_config: ParallelConfig,
                    scheduler_config: SchedulerConfig,
                    cache_config: CacheConfig) -> nn.Module:
@@ -519,8 +578,11 @@ class ShardedStateLoader(BaseModelLoader):
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
                 model = _initialize_model(model_config, self.load_config,
-                                          lora_config, multimodal_config,
-                                          cache_config)
+                                          lora_config, cache_config)
+                for _, module in model.named_modules():
+                    quant_method = getattr(module, "quant_method", None)
+                    if quant_method is not None:
+                        quant_method.process_weights_after_loading(module)
             rank = get_tensor_model_parallel_rank()
             pattern = os.path.join(
                 local_model_path,
@@ -811,11 +873,11 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         if not hasattr(model, 'load_weights'):
             raise AttributeError(
                 "The required method 'load_weights' is not defined in class"
-                f" {type(self).__name__}.")
+                f" {type(model).__name__}.")
 
         if not hasattr(model, 'bitsandbytes_stacked_params_mapping'):
             raise AttributeError(
-                f"Model {type(self).__name__} does not support BitsAndBytes "
+                f"Model {type(model).__name__} does not support BitsAndBytes "
                 "quantization yet.")
 
         logger.info("Loading weights with BitsAndBytes quantization. "
@@ -883,19 +945,99 @@ class BitsAndBytesModelLoader(BaseModelLoader):
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
                    lora_config: Optional[LoRAConfig],
-                   multimodal_config: Optional[MultiModalConfig],
                    parallel_config: ParallelConfig,
                    scheduler_config: SchedulerConfig,
                    cache_config: CacheConfig) -> nn.Module:
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
                 model = _initialize_model(model_config, self.load_config,
-                                          lora_config, multimodal_config,
-                                          cache_config)
+                                          lora_config, cache_config)
 
                 self._load_weights(model_config, model)
 
         return model.eval()
+
+
+class GGUFModelLoader(BaseModelLoader):
+    """
+    Model loader that can load GGUF files. This is useful for loading models
+    that are quantized with GGUF and saved in the GGUF format. This loader
+    supports loading both full models and sharded models.
+    """
+
+    def __init__(self, load_config: LoadConfig):
+        super().__init__(load_config)
+        if load_config.model_loader_extra_config:
+            raise ValueError(f"Model loader extra config is not supported for "
+                             f"load format {load_config.load_format}")
+
+    def _prepare_weights(self, model_name_or_path: str):
+        if os.path.isfile(model_name_or_path):
+            return model_name_or_path
+        else:
+            raise ValueError(f"{model_name_or_path} is not a file.")
+
+    def _get_gguf_weights_map(self, model_config: ModelConfig):
+        """
+        GGUF uses this naming convention for their tensors from HF checkpoint:
+        `blk.N.BB.weight` and `blk.N.BB.bias`
+        where N signifies the block number of a layer, and BB signifies the
+        attention/mlp layer components.
+        See "Standardized tensor names" in
+        https://github.com/ggerganov/ggml/blob/master/docs/gguf.md for details.
+        """
+        config = model_config.hf_config
+        model_type = config.model_type
+        # hack: ggufs have a different name than transformers
+        if model_type == "cohere":
+            model_type = "command-r"
+        arch = None
+        for key, value in gguf.MODEL_ARCH_NAMES.items():
+            if value == model_type:
+                arch = key
+                break
+        if arch is None:
+            raise RuntimeError(f"Unknown gguf model_type: {model_type}")
+        num_layers = config.num_hidden_layers
+        name_map = gguf.get_tensor_name_map(arch, num_layers)
+        with torch.device("meta"):
+            dummy_model = AutoModelForCausalLM.from_config(config)
+        state_dict = dummy_model.state_dict()
+
+        gguf_to_hf_name_map = {}
+        for hf_name in state_dict:
+            name, suffix = hf_name.rsplit(".", 1)
+            gguf_name = name_map.get_name(name)
+            gguf_to_hf_name_map[f"{gguf_name}.{suffix}"] = hf_name
+        return gguf_to_hf_name_map
+
+    def _get_weights_iterator(
+        self, model_name_or_path: str, gguf_to_hf_name_map: Dict[str, str]
+    ) -> Generator[Tuple[str, torch.Tensor], None, None]:
+        return gguf_quant_weights_iterator(model_name_or_path,
+                                           gguf_to_hf_name_map)
+
+    def load_model(self, *, model_config: ModelConfig,
+                   device_config: DeviceConfig,
+                   lora_config: Optional[LoRAConfig],
+                   parallel_config: ParallelConfig,
+                   scheduler_config: SchedulerConfig,
+                   cache_config: CacheConfig) -> nn.Module:
+
+        local_model_path = self._prepare_weights(model_config.model)
+        gguf_weights_map = self._get_gguf_weights_map(model_config)
+        # we can only know if tie word embeddings after mapping weights
+        if "lm_head.weight" in get_gguf_extra_tensor_names(
+                local_model_path, gguf_weights_map):
+            model_config.hf_config.update({"tie_word_embeddings": True})
+
+        with set_default_torch_dtype(model_config.dtype):
+            with torch.device(device_config.device):
+                model = _initialize_model(model_config, self.load_config,
+                                          lora_config, cache_config)
+            model.load_weights(
+                self._get_weights_iterator(local_model_path, gguf_weights_map))
+        return model
 
 
 def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
@@ -915,5 +1057,8 @@ def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
 
     if load_config.load_format == LoadFormat.BITSANDBYTES:
         return BitsAndBytesModelLoader(load_config)
+
+    if load_config.load_format == LoadFormat.GGUF:
+        return GGUFModelLoader(load_config)
 
     return DefaultModelLoader(load_config)

@@ -1,16 +1,32 @@
 from typing import Optional, Type
 
-from vllm.config import TokenizerPoolConfig
+from vllm.config import (ModelConfig, ParallelConfig, SchedulerConfig,
+                         TokenizerPoolConfig)
 from vllm.executor.ray_utils import ray
 
 from .base_tokenizer_group import AnyTokenizer, BaseTokenizerGroup
 from .tokenizer_group import TokenizerGroup
 
 if ray:
-    from vllm.transformers_utils.tokenizer_group.ray_tokenizer_group import (
-        RayTokenizerGroupPool)
+    from .ray_tokenizer_group import RayTokenizerGroupPool
 else:
     RayTokenizerGroupPool = None  # type: ignore
+
+
+def init_tokenizer_from_configs(model_config: ModelConfig,
+                                scheduler_config: SchedulerConfig,
+                                parallel_config: ParallelConfig,
+                                enable_lora: bool):
+    init_kwargs = dict(tokenizer_id=model_config.tokenizer,
+                       enable_lora=enable_lora,
+                       max_num_seqs=scheduler_config.max_num_seqs,
+                       max_input_length=None,
+                       tokenizer_mode=model_config.tokenizer_mode,
+                       trust_remote_code=model_config.trust_remote_code,
+                       revision=model_config.tokenizer_revision)
+
+    return get_tokenizer_group(parallel_config.tokenizer_pool_config,
+                               **init_kwargs)
 
 
 def get_tokenizer_group(tokenizer_pool_config: Optional[TokenizerPoolConfig],

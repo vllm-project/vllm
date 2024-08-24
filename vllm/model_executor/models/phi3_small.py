@@ -368,6 +368,8 @@ class Phi3SmallForCausalLM(nn.Module):
             padding_size=DEFAULT_VOCAB_PADDING_SIZE,
             quant_config=quant_config,
         )
+        if self.config.tie_word_embeddings:
+            self.lm_head.weight = self.model.embed_tokens.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
@@ -399,8 +401,11 @@ class Phi3SmallForCausalLM(nn.Module):
     def get_decoder(self):
         return self.model
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         if self.dummy_token_indices is not None and logits is not None:
@@ -446,4 +451,3 @@ class Phi3SmallForCausalLM(nn.Module):
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
-        self.lm_head.weight.data.copy_(self.model.embed_tokens.weight.data)

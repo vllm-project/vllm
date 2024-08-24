@@ -3,7 +3,7 @@ import json
 import re
 import shutil
 from tempfile import TemporaryDirectory
-from typing import List
+from typing import Dict, List, Optional
 
 import jsonschema
 import openai  # use the official client for correctness check
@@ -87,15 +87,13 @@ def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files,
     ]
 
 
-@pytest.fixture(scope="module")
-def server(default_server_args):
+@pytest.fixture(scope="module",
+                params=["", "--disable-frontend-multiprocessing"])
+def client(default_server_args, request):
+    if request.param:
+        default_server_args.append(request.param)
     with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
-        yield remote_server
-
-
-@pytest.fixture(scope="module")
-def client(server):
-    return server.get_async_client()
+        yield remote_server.get_async_client()
 
 
 @pytest.mark.asyncio
@@ -132,6 +130,7 @@ async def test_single_completion(client: openai.AsyncOpenAI, model_name: str,
         temperature=0.0,
     )
     assert len(completion.choices[0].text) >= 1
+    assert completion.choices[0].prompt_logprobs is None
 
 
 @pytest.mark.asyncio
@@ -267,6 +266,37 @@ async def test_too_many_completion_logprobs(client: openai.AsyncOpenAI,
         temperature=0.0,
     )
     assert len(completion.choices[0].text) >= 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name, prompt_logprobs", [(MODEL_NAME, -1),
+                                                         (MODEL_NAME, 0),
+                                                         (MODEL_NAME, 1),
+                                                         (MODEL_NAME, None)])
+async def test_prompt_logprobs_completion(client: openai.AsyncOpenAI,
+                                          model_name: str,
+                                          prompt_logprobs: Optional[int]):
+    params: Dict = {
+        "prompt": ["A robot may not injure another robot", "My name is"],
+        "model": model_name,
+    }
+    if prompt_logprobs is not None:
+        params["extra_body"] = {"prompt_logprobs": prompt_logprobs}
+
+    if prompt_logprobs is not None and prompt_logprobs < 0:
+        with pytest.raises(BadRequestError):
+            await client.completions.create(**params)
+    else:
+        completion = await client.completions.create(**params)
+        if prompt_logprobs is not None:
+            assert completion.choices[0].prompt_logprobs is not None
+            assert len(completion.choices[0].prompt_logprobs) > 0
+
+            assert completion.choices[1].prompt_logprobs is not None
+            assert len(completion.choices[1].prompt_logprobs) > 0
+
+        else:
+            assert completion.choices[0].prompt_logprobs is None
 
 
 @pytest.mark.asyncio
