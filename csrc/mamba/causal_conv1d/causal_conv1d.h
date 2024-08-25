@@ -2,7 +2,7 @@
  * Copyright (c) 2024, Tri Dao.
  ******************************************************************************/
 // clang-format off
-// adapted from 
+// adapted from https://github.com/Dao-AILab/causal-conv1d/blob/main/csrc/causal_conv1d.h
 #pragma once
 
 #include <cuda_bf16.h>

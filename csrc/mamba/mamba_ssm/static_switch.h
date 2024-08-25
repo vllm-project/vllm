@@ -3,6 +3,7 @@
 // and https://github.com/pytorch/pytorch/blob/master/aten/src/ATen/Dispatch.h
 
 // clang-format off
+// adapted from https://github.com/state-spaces/mamba/blob/main/csrc/selective_scan/static_switch.h
 #pragma once
 
 /// @param COND       - a boolean expression to switch by

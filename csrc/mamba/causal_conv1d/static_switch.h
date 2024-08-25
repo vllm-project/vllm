@@ -2,6 +2,7 @@
 // https://github.com/NVIDIA/DALI/blob/main/include/dali/core/static_switch.h
 // and https://github.com/pytorch/pytorch/blob/master/aten/src/ATen/Dispatch.h
 // clang-format off
+// adapted from https://github.com/Dao-AILab/causal-conv1d/blob/main/csrc/static_switch.h
 
 #pragma once
 
