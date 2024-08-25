@@ -1393,8 +1393,11 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             # Sampling metadata is only required for the final pp group
             generators = self.get_generators(finished_requests_ids)
             sampling_metadata = SamplingMetadata.prepare(
-                seq_group_metadata_list, model_input.seq_lens,
-                model_input.query_lens, self.device, self.pin_memory,
+                seq_group_metadata_list,
+                model_input.seq_lens,
+                model_input.query_lens,
+                self.device,
+                self.pin_memory,
                 generators,
                 # TODO(varun) : Fix sampling metadata cache impl.
                 None)
