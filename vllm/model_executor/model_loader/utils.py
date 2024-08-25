@@ -17,14 +17,14 @@ def set_default_torch_dtype(dtype: torch.dtype):
     yield
     torch.set_default_dtype(old_dtype)
 
-
+mixtral_supported = ["fp8", "compressed-tensors"]
 def get_model_architecture(
         model_config: ModelConfig) -> Tuple[Type[nn.Module], str]:
     architectures = getattr(model_config.hf_config, "architectures", [])
     # Special handling for quantized Mixtral.
     # FIXME(woosuk): This is a temporary hack.
     if (model_config.quantization is not None
-            and model_config.quantization != "fp8"
+            and model_config.quantization not in mixtral_supported
             and "MixtralForCausalLM" in architectures):
         architectures = ["QuantMixtralForCausalLM"]
 
