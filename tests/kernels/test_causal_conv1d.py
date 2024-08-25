@@ -119,10 +119,7 @@ def test_causal_conv1d(batch, dim, seqlen, width, has_bias, silu_activation,
                         device=device,
                         dtype=itype)[:, :, 4096:4096 + dim], "b s d -> b d s")
     weight = torch.randn(dim, width, device=device, dtype=itype)
-    if has_bias:
-        bias = torch.randn(dim, device=device, dtype=itype)
-    else:
-        bias = None
+    bias = torch.randn(dim, device=device, dtype=itype) if has_bias else None
     if has_initial_states:
         initial_states = torch.randn(batch,
                                      width - 1,
@@ -188,10 +185,7 @@ def test_causal_conv1d_update(batch, dim, width, has_bias, silu_activation,
                          dtype=itype,
                          requires_grad=True)
     if has_bias:
-        bias = torch.randn(dim,
-                           device=device,
-                           dtype=itype,
-                           requires_grad=True)
+        bias = torch.randn(dim, device=device, dtype=itype, requires_grad=True)
     else:
         bias = None
     conv_state_ref = conv_state.detach().clone()
