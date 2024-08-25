@@ -374,6 +374,16 @@ steps:
   commands:
     - bash weight_loading/run_model_weight_loading_test.sh
 
+- label: FP8 Tests 
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 1
+  source_file_dependencies:
+  - vllm/
+  - tests/fp8_quant
+  commands:
+    - pytest fp8_quant/test_fp8.py
+
+
 
 ##### multi gpus test #####
 ##### A100 test #####
