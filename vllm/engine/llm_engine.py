@@ -1476,7 +1476,7 @@ class LLMEngine:
                 seq_group.finish_step()
 
         if not self._has_remaining_steps(seq_group_metadata_list):
-            # clear the cache if we have finished all the steps
+            # clear the cache if we have finished all the steps.
             if self.scheduler_config.is_multi_step:
                 self.cached_scheduler_outputs[0] = SchedulerOutputState()
 
