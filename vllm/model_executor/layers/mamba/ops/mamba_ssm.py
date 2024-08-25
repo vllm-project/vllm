@@ -3,7 +3,6 @@
 import torch
 import triton
 import triton.language as tl
-from einops import rearrange
 from packaging import version
 
 from vllm import _custom_ops as ops
@@ -321,9 +320,9 @@ def selective_scan_fn(u,
     if z is not None and z.stride(-1) != 1:
         z = z.contiguous()
     if B.dim() == 3:
-        B = rearrange(B, "b dstate l -> b 1 dstate l")
+        B = B.unsqueeze(1)
     if C.dim() == 3:
-        C = rearrange(C, "b dstate l -> b 1 dstate l")
+        C = B.unsqueeze(1)
     n_chunks = int((u.shape[-1] + 2048 - 1) / 2048)
     x = torch.zeros((
         u.shape[0],
