@@ -3,7 +3,6 @@ from typing import List, Optional, Tuple, Type
 
 import pytest
 import torch
-from huggingface_hub import snapshot_download
 from PIL.Image import Image
 from transformers import AutoConfig
 
@@ -25,17 +24,12 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "<|im_start|>User\n<image>\nWhat is the season?<|im_end|>\n<|im_start|>Assistant\n",  # noqa: E501
 })
 
-# we use snapshot_download to prevent conflicts between
-# dynamic_module and trust_remote_code for hf_runner
-DOWNLOAD_PATTERN = ["*.json", "*.py", "*.safetensors", "*.txt", "*.model"]
 models = [
-    snapshot_download("OpenGVLab/InternVL2-1B",
-                      allow_patterns=DOWNLOAD_PATTERN),
-    snapshot_download("OpenGVLab/InternVL2-2B",
-                      allow_patterns=DOWNLOAD_PATTERN),
+    "OpenGVLab/InternVL2-1B",
+    "OpenGVLab/InternVL2-2B",
     # Broken due to outdated implementation of Phi-3
     # See: https://huggingface.co/OpenGVLab/InternVL2-4B/discussions/3
-    # snapshot_download("OpenGVLab/InternVL2-4B"),
+    # "OpenGVLab/InternVL2-4B",
 ]
 
 
