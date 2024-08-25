@@ -21,7 +21,9 @@ _R = TypeVar("_R")
 if pynvml.__file__.endswith("__init__.py"):
     logger.warning(
         "You are using a deprecated `pynvml` package. Please install"
-        " `nvidia-ml-py` instead. See https://pypi.org/project/pynvml "
+        " `nvidia-ml-py` instead, and make sure to uninstall `pynvml`."
+        " When both of them are installed, `pynvml` will take precedence"
+        " and cause errors. See https://pypi.org/project/pynvml "
         "for more information.")
 
 # NVML utils
