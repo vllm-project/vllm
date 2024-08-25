@@ -401,8 +401,6 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
     image_data = multi_modal_data["image"]
     if isinstance(image_data, Image.Image):
         w, h = image_data.size
-        w, h = _calc_hd_transform_size(width=w, height=h)
-
         image_feature_size = [
             get_phi3v_image_feature_size(hf_config,
                                          input_width=w,
@@ -413,7 +411,6 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
         image_feature_size = []
         for image in image_data:
             w, h = image.size
-            w, h = _calc_hd_transform_size(width=w, height=h)
             image_feature_size.append(
                 get_phi3v_image_feature_size(hf_config,
                                              input_width=w,
