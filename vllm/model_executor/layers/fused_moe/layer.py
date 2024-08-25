@@ -10,6 +10,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import CompressedTensorsConfig
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import CompressionFormat, QuantizationStrategy
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import create_per_channel_scale_param
 from vllm.model_executor.utils import set_weight_attrs
@@ -323,7 +324,10 @@ class FusedMoE(torch.nn.Module):
         if quant_config is None:
             self.quant_method: Optional[QuantizeMethodBase] = (
                 UnquantizedFusedMoEMethod())
-        elif quant_config.quant_format == CompressionFormat.int_quantized.value:
+        elif (isinstance(quant_config, CompressedTensorsConfig)
+         and quant_config.quant_format == CompressionFormat.int_quantized.value
+         and quant_config.target_scheme_map['Linear']['input_activations'].num_bits == 8
+         and quant_config.target_scheme_map['Linear']['weights'].num_bits == 8):
             self.quant_method: Optional[QuantizeMethodBase] = (
                     W8A8QuantizedFusedMoEMethod())
         else:
