@@ -305,7 +305,8 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
                         frozen_model_input.seq_lens[num_prompts:],
                         frozen_model_input.query_lens[num_prompts:],
                         self.device, self.pin_memory, generators,
-                        self.sampling_metadata_cache)
+                        # TODO (varun) : Fix sampling metadata cache impl
+                        None)
                     sampling_metadata_decodes.skip_sampler_cpu_output = (True)
 
         model_input = StatefulModelInput(
