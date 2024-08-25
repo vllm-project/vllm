@@ -249,7 +249,7 @@ class W8A8QuantizedFusedMoEMethod(FusedMoEMethodBase):
                          use_grouped_topk=use_grouped_topk,
                          num_expert_group=num_expert_group,
                          topk_group=topk_group,
-                         use_int8=True,
+                         use_int8_w8a8=True,
                          w1_scale=layer.w13_scale,
                          w2_scale=layer.w2_scale,
                          a1_scale=layer.a13_scale,

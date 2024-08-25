@@ -153,7 +153,7 @@ def fused_moe_kernel(
         if use_int8_w8a16:
             accumulator = tl.dot(a, b.to(compute_type), acc=accumulator)
         elif use_int8_w8a8:
-            a = tl.math.llrint((a / a_scale)).to(tl.int8)
+            a = triton.language.extra.libdevice.llrint((a / a_scale)).to(tl.int8)
             accumulator = tl.dot(a, b, acc=accumulator, out_dtype=accumulator.dtype)
         elif use_fp8_w8a8:
             accumulator = tl.dot(a, b, acc=accumulator)
@@ -458,6 +458,7 @@ def grouped_topk(hidden_states: torch.Tensor,
 
 
 def get_config_dtype_str(dtype: torch.dtype,
+                         use_int8_w8a8: Optional[bool] = False,
                          use_int8_w8a16: Optional[bool] = False,
                          use_fp8_w8a8: Optional[bool] = False):
     if use_fp8_w8a8:
@@ -649,7 +650,9 @@ def fused_moe(
         note: Deepseekv2 model uses grouped_topk
     - use_fp8_w8a8 (bool): If True, use fp8 arithmetic to compute the inner
         products for w1 and w2. Defaults to False.
-    - use_int8_w8a16 (bool): If True, use fp8 arithmetic to compute the inner
+    - use_int8_w8a8 (bool): If True, use weight int8, activation int8 arithmetic to compute the inner
+        products for w1 and w2. Defaults to False.
+    - use_int8_w8a16 (bool): If True, use weight int8, activation int16 arithmetic to compute the inner
         products for w1 and w2. Defaults to False.
     - w1_scale (Optional[torch.Tensor]): Optional scale to be used for
         w1.
