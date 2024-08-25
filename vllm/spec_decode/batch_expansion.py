@@ -10,7 +10,7 @@ from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, ExecuteModelRequest,
                            get_all_seq_ids)
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
-from vllm.spec_decode.util import (nvtx_range, split_batch_by_proposal_len)
+from vllm.spec_decode.util import nvtx_range, split_batch_by_proposal_len
 from vllm.worker.worker_base import WorkerBase
 
 SeqId = int

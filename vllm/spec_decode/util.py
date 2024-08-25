@@ -1,6 +1,6 @@
 import time
 from contextlib import contextmanager
-from typing import Dict, List, Optional, Tuple, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import torch
 
