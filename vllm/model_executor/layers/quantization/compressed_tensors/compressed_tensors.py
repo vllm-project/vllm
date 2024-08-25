@@ -3,15 +3,15 @@ from typing import Any, Dict, List, Optional, Union
 import torch
 from pydantic import BaseModel
 
-from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
+                                               UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     W4A16SPARSE24_SUPPORTED_BITS, WNA16_SUPPORTED_BITS,
-    CompressedTensorsScheme, CompressedTensorsUnquantized,
-    CompressedTensorsW4A16Sparse24, CompressedTensorsW8A8Fp8,
-    CompressedTensorsW8A8Int8, CompressedTensorsW8A16Fp8,
-    CompressedTensorsWNA16)
+    CompressedTensorsScheme, CompressedTensorsW4A16Sparse24,
+    CompressedTensorsW8A8Fp8, CompressedTensorsW8A8Int8,
+    CompressedTensorsW8A16Fp8, CompressedTensorsWNA16)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     CompressionFormat, QuantizationArgs, QuantizationStrategy,
     QuantizationType, find_matched_target, is_activation_quantization_format,
@@ -52,17 +52,17 @@ class CompressedTensorsConfig(QuantizationConfig):
     def get_name(self) -> str:
         return "compressed_tensors"
 
-    def get_quant_method(  #type: ignore
+    def get_quant_method(
         self,
         layer: torch.nn.Module,
         prefix: str,
-    ) -> Optional[Union["CompressedTensorsUnquantized", "QuantizeMethodBase"]]:
+    ) -> Optional[Union["QuantizeMethodBase"]]:
         from vllm.attention.layer import Attention  # Avoid circular import
 
         # Check if the layer is skipped for quantization.
         # TODO (@robertgshaw2): support module names
         if should_ignore_layer(prefix, ignore=self.ignore):
-            return CompressedTensorsUnquantized()
+            return UnquantizedLinearMethod()
         if isinstance(layer, LinearBase):
             scheme = self.get_scheme(layer=layer, layer_name=prefix)
             layer.scheme = scheme
@@ -351,7 +351,7 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
         scheme = layer.scheme
         if scheme is None:
             raise ValueError("A scheme must be defined for each layer")
-        return scheme.apply_weights(layer, x, bias=bias)
+        return scheme.apply(layer, x, bias=bias)
 
 
 class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
