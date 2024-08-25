@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange
 
-from vllm.model_executor.layers.mamba.ops.casual_conv1d import (
+from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_update)
 
 
