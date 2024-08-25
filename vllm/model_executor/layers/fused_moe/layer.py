@@ -380,33 +380,22 @@ class FusedMoE(torch.nn.Module):
         else:
             offset = shard_size * tp_rank
 
-        try:
-            loaded_weight = loaded_weight.narrow(shard_dim, offset, shard_size)
-            # Narrow parameter and load.
-            # w1, gate_proj: Load into first logical weight of w13.
-            if shard_id == "w1":
-                expert_data = expert_data.narrow(shard_dim, 0, shard_size)
-                expert_data.copy_(loaded_weight)
-            # w3, up_proj: Load into second logical weight of w13.
-            elif shard_id == "w3":
-                expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
-                expert_data.copy_(loaded_weight)
-            # w2, down_proj: Load into only logical weight of w2.
-            elif shard_id == "w2":                    
-                expert_data.copy_(loaded_weight)
-            else:
-                raise ValueError(
-                    f"Expected shard_id w1,w2 or w3 but got {shard_id}")
-        except:
-            print("QQ loaded_weight", loaded_weight)
-            print("QQ shard_dim", shard_dim)
-            print("QQ tp_rank", tp_rank)
-            print("QQ offset", offset)
-            print("QQ shard_size", shard_size)
-            print("QQ expert_data.shape", expert_data.shape)
-            print("QQ shard_size", shard_size)
-            print("QQ weight_name", weight_name)
-            breakpoint()
+        loaded_weight = loaded_weight.narrow(shard_dim, offset, shard_size)
+        # Narrow parameter and load.
+        # w1, gate_proj: Load into first logical weight of w13.
+        if shard_id == "w1":
+            expert_data = expert_data.narrow(shard_dim, 0, shard_size)
+            expert_data.copy_(loaded_weight)
+        # w3, up_proj: Load into second logical weight of w13.
+        elif shard_id == "w3":
+            expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
+            expert_data.copy_(loaded_weight)
+        # w2, down_proj: Load into only logical weight of w2.
+        elif shard_id == "w2":                    
+            expert_data.copy_(loaded_weight)
+        else:
+            raise ValueError(
+                f"Expected shard_id w1,w2 or w3 but got {shard_id}")
 
     @staticmethod
     def select_experts(hidden_states: torch.Tensor,

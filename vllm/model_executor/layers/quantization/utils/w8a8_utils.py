@@ -54,13 +54,13 @@ def create_per_tensor_scale_param(
 
 
 def create_per_channel_scale_param(output_partition_sizes: List[int],
-                                    **extra_weight_attrs) -> Parameter:
-     scale = Parameter(torch.empty((sum(output_partition_sizes), 1),
-                                   dtype=torch.float32),
-                       requires_grad=False)
-     scale[:] = torch.finfo(torch.float32).min
-     set_weight_attrs(scale, {"output_dim": 0, **extra_weight_attrs})
-     return scale
+                                   **extra_weight_attrs) -> Parameter:
+    scale = Parameter(torch.empty((sum(output_partition_sizes), 1),
+                                  dtype=torch.float32),
+                      requires_grad=False)
+    scale[:] = torch.finfo(torch.float32).min
+    set_weight_attrs(scale, {"output_dim": 0, **extra_weight_attrs})
+    return scale
 
 
 def convert_to_channelwise(
