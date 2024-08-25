@@ -359,8 +359,6 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
             if not lora_config else lora_config.lora_vocab_padding_size,
             quant_config=quant_config,
         )
-        if self.config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
         self.sampler = Sampler()
@@ -377,11 +375,8 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                                    attn_metadata, intermediate_tensors)
         return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[torch.Tensor]:
+    def compute_logits(self, hidden_states: torch.Tensor,
+                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
@@ -447,7 +442,7 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
             else:
                 for mapping in expert_params_mapping:
                     param_name, weight_name, expert_id, shard_id = mapping
-                    if weight_name not in name:
+                    if weight_name not in name and param_name not in name:  # need extra loading if input_scales are expert specific
                         continue
                     name = name.replace(weight_name, param_name)
                     # Skip layers on other devices.
@@ -456,11 +451,10 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                     param = params_dict[name]
                     weight_loader = param.weight_loader
                     weight_loader(param,
-                                  loaded_weight,
-                                  name,
-                                  shard_id=shard_id,
-                                  expert_id=expert_id)
-                    break
+                                loaded_weight,
+                                weight_name,
+                                shard_id=shard_id,
+                                expert_id=expert_id)
                 else:
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict:
