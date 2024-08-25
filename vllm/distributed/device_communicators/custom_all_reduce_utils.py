@@ -18,6 +18,8 @@ from vllm.utils import (cuda_device_count_stateless,
 
 logger = init_logger(__name__)
 
+__start_end_magic_marker__ = b"64e8dffc68216343941d770622f9e31e"
+
 
 def producer(batch_src: Sequence[int],
              producer_queue,
@@ -224,7 +226,14 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
                 f"Error happened when batch testing "
                 f"peer-to-peer access from {batch_src} to {batch_tgt}:\n"
                 f"{returned.stderr.decode()}") from e
-        result = pickle.loads(returned.stdout)
+        assert returned.stdout.count(__start_end_magic_marker__) == 2, (
+            "The subprocess should return exactly one result, "
+            "which is wrapped by the magic marker. However, we get:\n"
+            f"{returned.stdout!r}")
+        start = returned.stdout.find(__start_end_magic_marker__) + len(
+            __start_end_magic_marker__)
+        end = returned.stdout.rfind(__start_end_magic_marker__)
+        result = pickle.loads(returned.stdout[start:end])
         for _i, _j, r in zip(batch_src, batch_tgt, result):
             cache[f"{_i}->{_j}"] = r
         with open(path, "w") as f:
@@ -243,4 +252,5 @@ __all__ = ["gpu_p2p_access_check"]
 if __name__ == "__main__":
     batch_src, batch_tgt = pickle.loads(sys.stdin.buffer.read())
     result = can_actually_p2p(batch_src, batch_tgt)
-    sys.stdout.buffer.write(pickle.dumps(result))
+    sys.stdout.buffer.write(__start_end_magic_marker__ + pickle.dumps(result) +
+                            __start_end_magic_marker__)
