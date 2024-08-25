@@ -159,10 +159,13 @@ class W8A8QuantizedFusedMoEMethod(FusedMoEMethodBase):
             "weight_loader": self.weight_loader,
         })
         # WEIGHT SCALE
-        layer_kwargs = {"weight_loader": self.weight_loader, "num_experts": num_experts}
+        layer_kwargs = {"weight_loader": self.weight_loader}
         if self.strategy == QuantizationStrategy.CHANNEL:
-            scale = create_per_channel_scale_param([intermediate_size * 2],
-                                                   **layer_kwargs)
+            scale = torch.nn.Parameter(torch.empty((num_experts, intermediate_size * 2, 1),
+                                        dtype=torch.float32),
+                            requires_grad=False)
+            scale[:] = torch.finfo(torch.float32).min
+            set_weight_attrs(scale, {"input_dim": 1, "output_dim": 0, **layer_kwargs})
         else:
             assert self.strategy == QuantizationStrategy.TENSOR
             scale = torch.nn.Parameter(torch.empty((num_experts, 2), dtype=torch.float32),
@@ -170,9 +173,9 @@ class W8A8QuantizedFusedMoEMethod(FusedMoEMethodBase):
             scale[:] = torch.finfo(torch.float32).min
             set_weight_attrs(scale, {
                 "needs_scalar_to_array": True,
-                "is_int8_weight_scale": True,
                 **layer_kwargs
             })
+        set_weight_attrs(scale, {"is_int8_weight_scale": True})
         layer.register_parameter("w13_weight_scale", scale)
 
 
@@ -183,9 +186,9 @@ class W8A8QuantizedFusedMoEMethod(FusedMoEMethodBase):
                                        requires_grad=False)
             set_weight_attrs(scale, {
                 "needs_scalar_to_array": True,
-                "is_int8_input_scale": True,
                 **layer_kwargs
             })
+            set_weight_attrs(scale, {"is_int8_input_scale": True})
             layer.register_parameter("w13_input_scale", scale)
 
 
@@ -205,8 +208,11 @@ class W8A8QuantizedFusedMoEMethod(FusedMoEMethodBase):
 
         # WEIGHT SCALE
         if self.strategy == QuantizationStrategy.CHANNEL:
-            scale = create_per_channel_scale_param([hidden_size],
-                                                   **layer_kwargs)
+            scale = torch.nn.Parameter(torch.empty((num_experts, hidden_size, 1),
+                                        dtype=torch.float32),
+                            requires_grad=False)
+            scale[:] = torch.finfo(torch.float32).min
+            set_weight_attrs(scale, {"input_dim": 0, "output_dim": 1, **layer_kwargs})
 
         else:
             assert self.strategy == QuantizationStrategy.TENSOR
@@ -215,9 +221,9 @@ class W8A8QuantizedFusedMoEMethod(FusedMoEMethodBase):
                                        requires_grad=False)
             set_weight_attrs(scale, {
                 "needs_scalar_to_array": True,
-                "is_int8_weight_scale": True,
                 **layer_kwargs
             })
+        set_weight_attrs(scale, {"is_int8_weight_scale": True})
         layer.register_parameter("w2_weight_scale", scale)
 
         # INPUT SCALE
@@ -227,9 +233,9 @@ class W8A8QuantizedFusedMoEMethod(FusedMoEMethodBase):
                                        requires_grad=False)
             set_weight_attrs(scale, {
                 "needs_scalar_to_array": True,
-                "is_int8_input_scale": True,
                 **layer_kwargs
             })
+            set_weight_attrs(scale, {"is_int8_input_scale": True})
             layer.register_parameter("w2_input_scale", scale)
 
     def apply(self,
@@ -253,10 +259,10 @@ class W8A8QuantizedFusedMoEMethod(FusedMoEMethodBase):
                          num_expert_group=num_expert_group,
                          topk_group=topk_group,
                          use_int8_w8a8=True,
-                         w1_scale=layer.w13_scale,
-                         w2_scale=layer.w2_scale,
-                         a1_scale=layer.a13_scale,
-                         a2_scale=layer.a2_scale)
+                         w1_scale=layer.w13_weight_scale,
+                         w2_scale=layer.w2_weight_scale,
+                         a1_scale=layer.w13_input_scale,
+                         a2_scale=layer.w2_input_scale)
 
 
 
@@ -344,11 +350,9 @@ class FusedMoE(torch.nn.Module):
         if getattr(param, "is_fp8_scale", False):
             self._load_fp8_scale(param.data, loaded_weight, weight_name,
                                  shard_id, expert_id)
-        elif getattr(param, "is_int8_weight_scale", False):
-            self._load_int8_scale(param.data, loaded_weight, "weight_scale",
-                                 shard_id, expert_id)
+            return
         elif getattr(param, "is_int8_input_scale", False):
-            self._load_int8_scale(param.data, loaded_weight, "input_scale",
+            self._load_int8_input_scale(param.data, loaded_weight,
                                  shard_id, expert_id)
             return
 
@@ -370,24 +374,39 @@ class FusedMoE(torch.nn.Module):
         elif shard_id in ("w1", "w3"):
             shard_dim = output_dim
             shard_size = expert_data.shape[output_dim] // 2
-        offset = shard_size * tp_rank
-        loaded_weight = loaded_weight.narrow(shard_dim, offset, shard_size)
-
-        # Narrow parameter and load.
-        # w1, gate_proj: Load into first logical weight of w13.
-        if shard_id == "w1":
-            expert_data = expert_data.narrow(shard_dim, 0, shard_size)
-            expert_data.copy_(loaded_weight)
-        # w3, up_proj: Load into second logical weight of w13.
-        elif shard_id == "w3":
-            expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
-            expert_data.copy_(loaded_weight)
-        # w2, down_proj: Load into only logical weight of w2.
-        elif shard_id == "w2":
-            expert_data.copy_(loaded_weight)
+        
+        if  getattr(param, "is_int8_weight_scale", False) and shard_id == "w2":
+            offset = 0
         else:
-            raise ValueError(
-                f"Expected shard_id w1,w2 or w3 but got {shard_id}")
+            offset = shard_size * tp_rank
+
+        try:
+            loaded_weight = loaded_weight.narrow(shard_dim, offset, shard_size)
+            # Narrow parameter and load.
+            # w1, gate_proj: Load into first logical weight of w13.
+            if shard_id == "w1":
+                expert_data = expert_data.narrow(shard_dim, 0, shard_size)
+                expert_data.copy_(loaded_weight)
+            # w3, up_proj: Load into second logical weight of w13.
+            elif shard_id == "w3":
+                expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
+                expert_data.copy_(loaded_weight)
+            # w2, down_proj: Load into only logical weight of w2.
+            elif shard_id == "w2":                    
+                expert_data.copy_(loaded_weight)
+            else:
+                raise ValueError(
+                    f"Expected shard_id w1,w2 or w3 but got {shard_id}")
+        except:
+            print("QQ loaded_weight", loaded_weight)
+            print("QQ shard_dim", shard_dim)
+            print("QQ tp_rank", tp_rank)
+            print("QQ offset", offset)
+            print("QQ shard_size", shard_size)
+            print("QQ expert_data.shape", expert_data.shape)
+            print("QQ shard_size", shard_size)
+            print("QQ weight_name", weight_name)
+            breakpoint()
 
     @staticmethod
     def select_experts(hidden_states: torch.Tensor,
@@ -485,27 +504,15 @@ class FusedMoE(torch.nn.Module):
                 param_data[expert_id] = loaded_weight
 
 
-    def _load_int8_scale(self, param: torch.nn.Parameter,
-                        loaded_weight: torch.Tensor, weight_name: str,
-                        shard_id: str, expert_id: int) -> None:
+    def _load_int8_input_scale(self, param: torch.nn.Parameter,
+                               loaded_weight: torch.Tensor,
+                               shard_id: str, expert_id: int) -> None:
         param_data = param.data
         # Input scales can be loaded directly and should be equal.
-        if "input_scale" in weight_name:
-            if param_data[expert_id] != 1 and (param_data[expert_id].to(loaded_weight.device) -
-                                               loaded_weight).abs() > 1e-5:
-                raise ValueError(
-                    "input_scales of w1 and w3 of a layer "
-                    f"must be equal. But got {param_data[expert_id]} "
-                    f"vs. {loaded_weight}")
-            param_data[expert_id] = loaded_weight
-        # Weight scales
-        elif "weight_scale" in weight_name:
-            # If we are in merged column case (gate_up_proj)
-            if shard_id in ("w1", "w3"):
-                # We have to keep the weight scales of w1 and w3 because
-                # we need to re-quantize w1/w3 weights after weight loading.
-                idx = 0 if shard_id == "w1" else 1
-                param_data[expert_id][idx] = loaded_weight
-            # If we are in the row parallel case (down_proj)
-            else:
-                param_data[expert_id] = loaded_weight
+        if param_data[expert_id] != 1 and (param_data[expert_id].to(loaded_weight.device) -
+                                            loaded_weight).abs() > 1e-5:
+            raise ValueError(
+                "input_scales of w1 and w3 of a layer "
+                f"must be equal. But got {param_data[expert_id]} "
+                f"vs. {loaded_weight}")
+        param_data[expert_id] = loaded_weight

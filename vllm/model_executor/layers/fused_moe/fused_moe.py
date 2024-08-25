@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 import triton
 import triton.language as tl
+from triton.language.extra import libdevice
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -153,7 +154,7 @@ def fused_moe_kernel(
         if use_int8_w8a16:
             accumulator = tl.dot(a, b.to(compute_type), acc=accumulator)
         elif use_int8_w8a8:
-            a = triton.language.extra.libdevice.llrint((a / a_scale)).to(tl.int8)
+            a = libdevice.llrint((a / a_scale)).to(tl.int8)
             accumulator = tl.dot(a, b, acc=accumulator, out_dtype=accumulator.dtype)
         elif use_fp8_w8a8:
             accumulator = tl.dot(a, b, acc=accumulator)
@@ -304,7 +305,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
 
 
 def get_config_file_name(E: int, N: int, dtype: Optional[str]) -> str:
-    device_name = current_platform.get_device_name().replace(" ", "_")
+    device_name = torch.cuda.get_device_name().replace(" ", "_")
     dtype_selector = "" if not dtype else f",dtype={dtype}"
     return f"E={E},N={N},device_name={device_name}{dtype_selector}.json"
 

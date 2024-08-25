@@ -442,7 +442,7 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
             else:
                 for mapping in expert_params_mapping:
                     param_name, weight_name, expert_id, shard_id = mapping
-                    if weight_name not in name and param_name not in name:  # need extra loading if input_scales are expert specific
+                    if weight_name not in name:
                         continue
                     name = name.replace(weight_name, param_name)
                     # Skip layers on other devices.
@@ -455,6 +455,7 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                                 weight_name,
                                 shard_id=shard_id,
                                 expert_id=expert_id)
+                    break
                 else:
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict:
