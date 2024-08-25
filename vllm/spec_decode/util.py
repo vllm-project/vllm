@@ -1,6 +1,6 @@
 import time
 from contextlib import contextmanager
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import torch
 
@@ -98,33 +98,26 @@ def create_sequence_group_output(
 
 def split_batch_by_proposal_len(
     seq_group_metadata_list: List[SequenceGroupMetadata],
-    proposal_lens: List[int], select_proposal_len_zero: bool
-) -> Tuple[List[SequenceGroupMetadata], List[int]]:
+    proposal_lens: List[int],
+) -> Tuple[Tuple[List[SequenceGroupMetadata], List[int]], Tuple[
+        List[SequenceGroupMetadata], List[int]]]:
     """Utility function that splits a batch based on whether the proposal len is
     zero or not. We should remove this once vLLM supports per-sequence proposal
     lens in a batch.
     """
 
-    if select_proposal_len_zero:
-        predicate = lambda proposal_len: proposal_len == 0
-    else:
-        predicate = lambda proposal_len: proposal_len != 0
-
-    indices = [
-        i for i, (_, proposal_len
-                  ) in enumerate(zip(seq_group_metadata_list, proposal_lens))
-        if predicate(proposal_len)
-    ]
-    seq_groups = [
-        seq_group for seq_group, proposal_len in zip(
-            seq_group_metadata_list, proposal_lens) if predicate(proposal_len)
-    ]
-
-    return seq_groups, indices
+    nonzero_lists: Tuple[List[SequenceGroupMetadata], List[int]] = ([], [])
+    zero_lists: Tuple[List[SequenceGroupMetadata], List[int]] = ([], [])
+    for i, (seq_group, proposal_len) in enumerate(
+            zip(seq_group_metadata_list, proposal_lens)):
+        seq_groups, indices = nonzero_lists if proposal_len else zero_lists
+        seq_groups.append(seq_group)
+        indices.append(i)
+    return nonzero_lists, zero_lists
 
 
 def sampler_output_to_torch(
-    sampler_output_list: List[SamplerOutput], sampler_transposed: bool
+    sampler_output_list: Sequence[SamplerOutput], sampler_transposed: bool
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """Utility function which converts a list of SamplerOutput to tensors.
 
@@ -148,17 +141,11 @@ def sampler_output_to_torch(
         dim=0,
     )
 
-    if sampler_transposed:
-        sampled_token_probs = sampled_token_probs.transpose(0, 1)
-
     # shape: [batch_size, num_sampler_output, vocab_size]
     sampled_token_logprobs = torch.stack(
         [sampler_output.logprobs for sampler_output in sampler_output_list],
         dim=0,
     )
-
-    if sampler_transposed:
-        sampled_token_logprobs = sampled_token_logprobs.transpose(0, 1)
 
     # shape: [batch_size, num_sampler_output]
     sampled_token_ids = torch.stack(
@@ -168,7 +155,10 @@ def sampler_output_to_torch(
         ],
         dim=0,
     )
+
     if sampler_transposed:
+        sampled_token_probs = sampled_token_probs.transpose(0, 1)
+        sampled_token_logprobs = sampled_token_logprobs.transpose(0, 1)
         sampled_token_ids = sampled_token_ids.transpose(0, 1)
 
     if sampler_output_list[0].hidden_states is not None:
