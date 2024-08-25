@@ -322,7 +322,7 @@ def selective_scan_fn(u,
     if B.dim() == 3:
         B = B.unsqueeze(1)
     if C.dim() == 3:
-        C = B.unsqueeze(1)
+        C = C.unsqueeze(1)
     n_chunks = int((u.shape[-1] + 2048 - 1) / 2048)
     x = torch.zeros((
         u.shape[0],

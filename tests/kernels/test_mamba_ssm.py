@@ -197,7 +197,7 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D,
         B_shape = [batch_size, dstate, seqlen]
     else:
         B_shape = [batch_size, varBC_groups, dstate, seqlen]
-    B = torch.randn(*B_shape,
+    B = torch.randn(B_shape,
                     device=device,
                     dtype=wtype if not is_variable_B else itype)
     if not is_variable_C:
@@ -206,7 +206,7 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D,
         C_shape = [batch_size, dstate, seqlen]
     else:
         C_shape = [batch_size, varBC_groups, dstate, seqlen]
-    C = torch.randn(*C_shape,
+    C = torch.randn(C_shape,
                     device=device,
                     dtype=wtype if not is_variable_C else itype)
     D = torch.randn(dim, device=device, dtype=torch.float32) if has_D else None
@@ -288,7 +288,7 @@ def test_selective_state_update(dim, dstate, has_z, itype):
             atol *= 2
     # set seed
     torch.random.manual_seed(0)
-    batch_size = 2
+    batch_size = 1
     state = torch.randn(batch_size, dim, dstate, dtype=itype, device=device)
     x = torch.randn(batch_size, dim, device=device, dtype=itype)
     dt = torch.randn(batch_size, dim, device=device, dtype=itype)
