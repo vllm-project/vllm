@@ -81,7 +81,7 @@ def main(args):
     #         results = results + json.loads(f.read())
     
     results = []
-    for step in [1,4,7,10]:
+    for step in [0,1,10]:
         
         with open(results_folder / f"step{step}.txt", "r") as f:
             temp_results = json.loads(f.read())
@@ -102,9 +102,9 @@ def main(args):
     plt.set_cmap("cividis")
 
     # plot results
-    fig, axes = plt.subplots(3, 3, figsize=(16, 14))
+    fig, axes = plt.subplots(3, 3, figsize=(20, 16))
     fig.subplots_adjust(hspace=1)
-    methods = [1,4,7,10]
+    methods = [0,1,10]
     for i, model in enumerate(["llama8B", "llama70B", "mixtral8x7B"]):
         for j, metric in enumerate(["Tput", "TPOT", "TTFT"]):
             
@@ -129,7 +129,7 @@ def main(args):
                             yerr=std, 
                             capsize=10, 
                             capthick=4,
-                            label=str(method),
+                            label="1 month ago" if method == 0 else f"now {method}-step",
                             lw=4,)
             #     inf_qps_results.append(mean[-2])
             # print((inf_qps_results[0] - inf_qps_results[1]) / inf_qps_results[1])
