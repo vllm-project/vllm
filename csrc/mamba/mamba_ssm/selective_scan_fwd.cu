@@ -383,20 +383,6 @@ template void selective_scan_fwd_cuda<float, float>(SSMParamsBase &params, cudaS
         AT_ERROR(#NAME, " not implemented for input type '", toString(ITYPE), "'"); \
     }
 
-#define DISPATCH_WTYPE_FLOAT_AND_HALF_AND_BF16(WTYPE, NAME, ...)                     \
-    if (WTYPE == at::ScalarType::Half) {                                             \
-        using weight_t = at::Half;                                                   \
-        __VA_ARGS__();                                                               \
-    } else if (WTYPE == at::ScalarType::BFloat16) {                                  \
-        using weight_t = at::BFloat16;                                               \
-        __VA_ARGS__();                                                               \
-    } else if (WTYPE == at::ScalarType::Float)  {                                    \
-        using weight_t = float;                                                      \
-        __VA_ARGS__();                                                               \
-    } else {                                                                         \
-        AT_ERROR(#NAME, " not implemented for weight type '", toString(WTYPE), "'"); \
-    }
-
 #define DISPATCH_WTYPE_FLOAT(WTYPE, NAME, ...)                           \
     if (WTYPE == at::ScalarType::Float) {                                            \
        using weight_t = float;                                                       \
