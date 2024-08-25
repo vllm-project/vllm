@@ -41,7 +41,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         w13_weight = torch.nn.Parameter(torch.empty(num_experts,
                                                     2 * intermediate_size,
                                                     hidden_size,
-                                                    dtype=params_dtype),
+                                                    dtype=params_dtype,
+                                                    device='cpu'),
                                         requires_grad=False)
         layer.register_parameter("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
@@ -50,7 +51,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         w2_weight = torch.nn.Parameter(torch.empty(num_experts,
                                                    hidden_size,
                                                    intermediate_size,
-                                                   dtype=params_dtype),
+                                                   dtype=params_dtype,
+                                                   device='cpu'),
                                        requires_grad=False)
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
@@ -64,8 +66,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
               use_grouped_topk: bool,
               topk_group: Optional[int] = None,
               num_expert_group: Optional[int] = None) -> torch.Tensor:
+        w13_weight = torch.nn.Parameter(layer.w13_weight.to('cuda'))
+        w2_weight = torch.nn.Parameter(layer.w2_weight.to('cuda'))
 
         return self.forward(x=x,
+                            w13_weight,
+                            w2_weight,
                             layer=layer,
                             router_logits=router_logits,
                             top_k=top_k,
