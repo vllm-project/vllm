@@ -13,7 +13,8 @@ from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_timeout import asyncio_timeout
 from vllm.engine.llm_engine import (DecoderPromptComponents, LLMEngine,
-                                    PromptComponents, QueueOverflowError, SchedulerOutputState)
+                                    PromptComponents, QueueOverflowError,
+                                    SchedulerOutputState)
 from vllm.engine.metrics_types import StatLoggerBase
 from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.ray_utils import initialize_ray_cluster, ray

@@ -1,7 +1,7 @@
 import time
 from contextlib import contextmanager
-from http import HTTPStatus
 from dataclasses import dataclass
+from http import HTTPStatus
 from typing import (TYPE_CHECKING, Any, ClassVar, Dict, Iterable, List,
                     Mapping, Optional)
 from typing import Sequence as GenericSequence
@@ -80,12 +80,13 @@ DecoderPromptComponents = Tuple[Optional[str], Optional[List[int]],
                                 Optional[MultiModalDataDict]]
 
 
-
 class QueueOverflowError(ValueError):
+
     def __init__(self,
                  message="Current request would exceed the max queue length.",
                  status_code=503):
         super().__init__(message, status_code)
+
 
 @dataclass
 class SchedulerOutputState:
@@ -666,11 +667,13 @@ class LLMEngine:
         min_cost_scheduler = self.scheduler[costs.index(min(costs))]
 
         # Check if request would exceed max queue length of min_cost_scheduler
-        curr_queue_len = len(min_cost_scheduler.running) + len(min_cost_scheduler.waiting)
+        curr_queue_len = len(min_cost_scheduler.running) + len(
+            min_cost_scheduler.waiting)
         max_queue_len = min_cost_scheduler.scheduler_config.max_queue_length
         max_num_seqs = min_cost_scheduler.scheduler_config.max_num_seqs
-        
-        if max_queue_len > -1 and curr_queue_len >= max_num_seqs + max_queue_len:
+
+        if max_queue_len > -1 and \
+            curr_queue_len >= max_num_seqs + max_queue_len:
             raise QueueOverflowError(
                 f"Request {request_id} would exceed the indicated maximum "
                 f"queue length of {max_queue_len}",
