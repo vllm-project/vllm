@@ -511,7 +511,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             last_page_len = self.block_size
         self.paged_kv_last_page_len.append(last_page_len)
 
-    def build(self, seq_lens: List[int], query_lens: List[int],
+    def build(self, seq_lens: List[int], query_lens: List[int], num_orig_input_tokens_list: List[int],
               cuda_graph_pad_size: int, batch_size: int):
         """Build attention metadata with on-device tensors.
 

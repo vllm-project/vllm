@@ -189,7 +189,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
                                  seq_len, context_len, start_idx,
                                  self.block_size, inter_data.block_tables)
 
-    def build(self, seq_lens: List[int], query_lens: List[int],
+    def build(self, seq_lens: List[int], query_lens: List[int], num_orig_input_tokens_list: List[int],
               cuda_graph_pad_size: int, batch_size: int):
         """Build attention metadata with on-device tensors.
 
@@ -258,6 +258,8 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
                      dtype=query_start_loc.dtype,
                      out=query_start_loc[1:])
 
+        num_orig_input_tokens_tensor = torch.tensor(num_orig_input_tokens_list, dtype=torch.long, device=device)
+
         return self._metadata_cls(  # type: ignore
             num_prefills=self.num_prefills,
             slot_mapping=slot_mapping_tensor,
@@ -265,6 +267,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
             num_decode_tokens=num_decode_tokens,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
+            num_orig_input_tokens_tensor=num_orig_input_tokens_tensor,
             max_query_len=max_query_len,
             max_prefill_seq_len=max_prefill_seq_len,
             max_decode_seq_len=max_decode_seq_len,
@@ -294,11 +297,15 @@ class CommonAttentionState(AttentionState):
                                           device=self.runner.device)
         self._graph_block_tables = torch.from_numpy(
             self.runner.graph_block_tables).to(device=self.runner.device)
+
+        self._num_orig_input_tokens_tensor = torch.zeros(max_batch_size, dtype=torch.int32, device=self.runner.device)
+
         yield
         self._is_graph_capturing = False
         del self._graph_slot_mapping
         del self._graph_seq_lens
         del self._graph_block_tables
+        del self._num_orig_input_tokens_tensor
 
     def graph_clone(self, batch_size: int) -> "CommonAttentionState":
         assert self._is_graph_capturing
@@ -313,6 +320,7 @@ class CommonAttentionState(AttentionState):
             slot_mapping=self._graph_slot_mapping[:batch_size],
             seq_lens=None,
             seq_lens_tensor=self._graph_seq_lens[:batch_size],
+            num_orig_input_tokens_tensor=self._num_orig_input_tokens_tensor[:batch_size],
             max_query_len=None,
             max_prefill_seq_len=0,
             max_decode_seq_len=self.runner.max_seq_len_to_capture,
@@ -329,6 +337,7 @@ class CommonAttentionState(AttentionState):
             "slot_mapping": attn_metadata.slot_mapping,
             "seq_lens_tensor": attn_metadata.decode_metadata.seq_lens_tensor,
             "block_tables": attn_metadata.decode_metadata.block_tables,
+            "num_orig_input_tokens_tensor": attn_metadata.num_orig_input_tokens_tensor,
         }
 
     def prepare_graph_input_buffers(self, input_buffers,
@@ -337,6 +346,8 @@ class CommonAttentionState(AttentionState):
             attn_metadata.decode_metadata.seq_lens_tensor, non_blocking=True)
         input_buffers["block_tables"].copy_(
             attn_metadata.decode_metadata.block_tables, non_blocking=True)
+        input_buffers["num_orig_input_tokens_tensor"].copy_(
+                attn_metadata.num_orig_input_tokens_tensor, non_blocking=True)
 
     def begin_forward(self, model_input) -> None:
         return
