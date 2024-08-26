@@ -139,7 +139,7 @@ steps:
   - tests/tokenization
   commands:
   - pip install -e ./plugins/vllm_switch_executor
-  - export VLLM_PLUGINS=""
+  - export VLLM_PLUGINS='' # use single quote to avoid conflict!
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py
   # OOM in the CI unless we run this separately
   - pytest -v -s tokenization
