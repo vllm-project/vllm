@@ -708,6 +708,37 @@ class TestPrefixCachingBlockAllocator:
                                                token_ids=token_ids)
         assert allocator.get_prefix_cache_hit_rate() > 0.99
 
+    # Test case for marking cache hit blocks as computed right after
+    # a batch of prefill sequences are scheduled.
+    @staticmethod
+    def test_touch_block():
+        block_size = 16
+        common_blocks = 4
+        allocator = PrefixCachingBlockAllocator(num_blocks=8,
+                                                block_size=block_size)
+
+        common_token_ids = list(range(block_size * common_blocks))
+
+        # Mimic the behavior of allocating the same block chain
+        # (i.e., common prefix) for a batch of 3 different prefill sequences.
+        for _ in range(3):
+            blocks = TestPrefixCachingBlockAllocator.create_immutable_chain(
+                block_size=block_size,
+                token_ids=common_token_ids,
+                allocator=allocator,
+            )
+            block_ids = [block.block_id for block in blocks]
+            # The allocated blocks should  be marked as touched
+            # but not computed.
+            computed_block_ids = allocator.get_computed_block_ids(
+                [], block_ids, skip_last_block_id=False)
+            assert len(computed_block_ids) == 0
+
+        allocator.mark_blocks_as_computed([])
+        computed_block_ids = allocator.get_computed_block_ids(
+            [], block_ids, skip_last_block_id=False)
+        assert len(computed_block_ids) == common_blocks
+
     @staticmethod
     def create_immutable_chain(
         block_size: int,
