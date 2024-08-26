@@ -274,17 +274,11 @@ class GroupCoordinator:
     def should_run_out_of_place_ar(self, input_):
         # Both the TPU backend and the custom all reduce kernel return their
         # output. All other all reduce backends modify the input in place
-        return self.should_use_ca_comm(input_)
+        return self.should_use_tpu_comm() or self.should_use_ca_comm(input_)
 
     def in_place_ar(self, input_: torch.Tensor):
         if self.world_size == 1:
             return
-
-        # Use TPU for all_reduce
-        if self.should_use_tpu_comm():
-            tpu_comm = self.tpu_communicator
-            assert tpu_comm is not None
-            tpu_comm.all_reduce(input_)
 
         pynccl_comm = self.pynccl_comm
         if (pynccl_comm is not None and not pynccl_comm.disabled):
@@ -298,6 +292,12 @@ class GroupCoordinator:
     def out_of_place_ar(self, input_: torch.Tensor) -> torch.Tensor:
         if self.world_size == 1:
             return input_.clone()
+
+        # Use TPU for all_reduce
+        if self.should_use_tpu_comm():
+            tpu_comm = self.tpu_communicator
+            assert tpu_comm is not None
+            return tpu_comm.all_reduce(input_)
 
         # Otherwise, use the custom kernel
         assert self.should_use_ca_comm(input_)
