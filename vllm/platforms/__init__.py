@@ -8,8 +8,10 @@ current_platform: Platform
 
 is_tpu = False
 try:
-    import torch_xla.core.xla_model as xm
-    xm.xla_device(devkind="TPU")
+    # While it's technically possible to install libtpu on a non-TPU machine,
+    # this is a very uncommon scenario. Therefore, we assume that libtpu is
+    # installed if and only if the machine has TPUs.
+    import libtpu  # noqa: F401
     is_tpu = True
 except Exception:
     pass
