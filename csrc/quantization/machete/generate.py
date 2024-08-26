@@ -34,10 +34,9 @@ DISPATCH_TEMPLATE = """
 namespace machete {
 
 {% for impl_config in impl_configs %}
-{% set schs = impl_config.schedules -%}
 {% set type_sig = gen_type_sig(impl_config.types) -%}
-{%- for s in schs %}extern torch::Tensor 
-impl_{{type_sig}}_sch_{{ gen_sch_sig(s) }}(PyTorchArguments args);
+{% for s in impl_config.schedules %}
+extern torch::Tensor impl_{{type_sig}}_sch_{{gen_sch_sig(s)}}(PyTorchArguments);
 {%- endfor %}
 
 torch::Tensor gemm_dispatch_{{type_sig}}(PyTorchArguments args) {
@@ -46,14 +45,14 @@ torch::Tensor gemm_dispatch_{{type_sig}}(PyTorchArguments args) {
   [[maybe_unused]] auto K = args.A.size(1);
     
   if (!args.schedule) {
-    {%- for cond, s in heuristic %}
+    {%- for cond, s in impl_config.heuristic %}
     {%if cond is not none%}if ({{cond}})
     {%- else %}else
     {%- endif %}
         return impl_{{type_sig}}_sch_{{ gen_sch_sig(s) }}(args);{% endfor %}
   }
 
-  {%- for s in schedules %}
+  {%- for s in impl_config.schedules %}
   if (*args.schedule == "{{ gen_sch_sig(s) }}")
     return impl_{{type_sig}}_sch_{{ gen_sch_sig(s) }}(args);
   {%- endfor %}
@@ -64,13 +63,14 @@ torch::Tensor gemm_dispatch_{{type_sig}}(PyTorchArguments args) {
 
 torch::Tensor gemm_dispatch(PyTorchArguments args) {
   auto out_type = args.out_type.value_or(args.A.scalar_type());
+  auto a_type = args.A.scalar_type();
 
   {% for impl_config in impl_configs %}
   {% set t = impl_config.types -%}
   {% set type_sig = gen_type_sig(t) -%}
   {% set with_scales = t.b_scale != void -%}
   {% set with_zeropoints = t.b_zeropoint != void -%}
-  if (args.A.scalar_type() == {{TorchTypeTag[t.a]}}
+  if (a_type == {{TorchTypeTag[t.a]}}
       && args.btype == {{VLLMScalarTypeTag[t.b]}}
       && out_type == {{TorchTypeTag[t.d]}}
       && {%if with_scales%}args.scales && args.scales->scalar_type() == {{TorchTypeTag[t.b_scale]}}
@@ -83,12 +83,26 @@ torch::Tensor gemm_dispatch(PyTorchArguments args) {
   {%- endfor %}
   
   TORCH_CHECK_NOT_IMPLEMENTED(
-    false, "machete_mm(..) is  not implemented for "
-    "a_type= ", args.A.scalar_type(),
+    false, "machete_mm(..) is not implemented for "
+    "a_type=", args.A.scalar_type(),
     ", b_type=", args.btype.str(),
     ", out_type=", out_type,
     ", with_scales=", args.scales.has_value() ? toString(args.scales->scalar_type()) : "None",
-    ", with_zeropoints=", args.zeros.has_value() ? toString(args.zeros->scalar_type()) : "None");
+    ", with_zeropoints=", args.zeros.has_value() ? toString(args.zeros->scalar_type()) : "None"
+    "; implemented types are: \\n",
+    {%- for impl_config in impl_configs %}
+    {% set t = impl_config.types -%}
+    {% set with_scales = t.b_scale != void -%}
+    {% set with_zeropoints = t.b_zeropoint != void -%}
+    "\\ta_type=", {{TorchTypeTag[t.a]}}, 
+    ", b_type=", {{VLLMScalarTypeTag[t.b]}}.str(), 
+    ", out_type=", {{TorchTypeTag[t.d]}},
+    ", with_scales=", {%if with_scales%}{{TorchTypeTag[t.b_scale]}}
+                      {%-else%}"None"{%endif%},
+    ", with_zeropoints=", {%if with_zeropoints%}{{TorchTypeTag[t.b_zeropoint]}}
+                          {%-else%}"None"{%endif%},
+    "\\n",{%- endfor %}
+    "");
 }
 
 }; // namespace machete
@@ -158,6 +172,7 @@ torch::Tensor prepack_B_dispatch(torch::Tensor B, at::ScalarType const& atype,
       PrepackedLayoutBTemplate<
         {{DataTypeTag[t.a]}}, // ElementA
         {{DataTypeTag[btype]}}, // ElementB
+        {{DataTypeTag[t.convert]}}, // ElementConvert
         {{DataTypeTag[t.accumulator]}}, // Accumulator
         cutlass::layout::ColumnMajor,
         cutlass::gemm::KernelTmaWarpSpecializedCooperativeMixedInput>
@@ -200,6 +215,7 @@ class TypeConfig:
 class PrepackTypeConfig:
     a: DataType
     b_num_bits: int
+    convert: DataType
     accumulator: DataType
 
 @dataclass
@@ -323,7 +339,7 @@ mm_impl_template = create_template(IMPL_TEMPLATE)
 prepack_dispatch_template = create_template(PREPACK_TEMPLATE)
 
 
-def create_sources(impl_configs: List[ImplConfig], num_impl_files=4):
+def create_sources(impl_configs: List[ImplConfig], num_impl_files=16):
     sources = []
 
     sources.append((
@@ -331,24 +347,30 @@ def create_sources(impl_configs: List[ImplConfig], num_impl_files=4):
         mm_dispatch_template.render(impl_configs=impl_configs),
     ))
     
-    prepack_typess = [
+    prepack_types = [
         PrepackTypeConfig(
             a=impl_config.types.a, 
             b_num_bits=VLLMDataTypeSize[impl_config.types.b],
+            convert=impl_config.types.b_scale 
+            if impl_config.types.b_scale == DataType.void 
+            else impl_config.types.b_scale,
             accumulator=impl_config.types.accumulator,
         ) for impl_config in impl_configs
     ]
 
+    def prepacked_type_key(prepack_type: PrepackTypeConfig):
+        # For now we we can just use the first accumulator type seen since
+        # the tensor core shapes/layouts don't vary based on accumulator
+        # type so we can generate less code this way
+        return (prepack_type.a, prepack_type.b_num_bits, prepack_type.convert)
+
     unique_prepack_types = []
     prepack_types_seen = set()
-    for prepack_types in prepack_typess:
-        if prepack_types not in prepack_types_seen:
-            unique_prepack_types.append(prepack_types)
-            # For now we we can just use the first accumulator type seen since
-            # the tensor core shapes/layouts don't vary based on accumulator
-            # type so we can generate less code this way
-            prepack_types_seen.add(
-                (prepack_types.a, prepack_types.b_num_bits))
+    for prepack_type in prepack_types:
+        key = prepacked_type_key(prepack_type)
+        if key not in prepack_types_seen:
+            unique_prepack_types.append(prepack_type)
+            prepack_types_seen.add(key)
 
     sources.append((
         f"machete_prepack",
@@ -540,10 +562,10 @@ def generate():
 
     impl_configs = []
 
-    GPTQ_kernel_typess = list(
+    GPTQ_kernel_types = list(
         (TypeConfig(
             a=a, b=b,
-            b_scale=DataType.void,
+            b_scale=a,
             b_zeropoint=DataType.void,
             d=a, accumulator=DataType.f32,
         ) for b in (VLLMDataType.u4b8, VLLMDataType.u8b128)
@@ -551,12 +573,12 @@ def generate():
 
     impl_configs += [
         ImplConfig(x[0], x[1], x[2])
-        for x in zip(GPTQ_kernel_typess, 
+        for x in zip(GPTQ_kernel_types, 
                      itertools.repeat(schedules),
                      itertools.repeat(default_heuristic))
     ]
 
-    AWQ_kernel_typess = list(
+    AWQ_kernel_types = list(
         (TypeConfig(
             a=a, b=b, 
             b_scale=a, 
@@ -565,26 +587,35 @@ def generate():
         ) for b in (DataType.u4, DataType.u8)
          for a in (DataType.f16, DataType.bf16)))
 
-    impl_configs += [
-        ImplConfig(x[0], x[1], x[2])
-        for x in zip(AWQ_kernel_typess, 
-                     itertools.repeat(schedules),
-                     itertools.repeat(default_heuristic))
-    ]
+    # impl_configs += [
+    #     ImplConfig(x[0], x[1], x[2])
+    #     for x in zip(AWQ_kernel_types, 
+    #                  itertools.repeat(schedules),
+    #                  itertools.repeat(default_heuristic))
+    # ]
     
-    QQQ_kernel_typess = list(
-        (TypeConfig(
-            a=a, b=b,
+    QQQ_kernel_types = [
+        *(TypeConfig(
+            a=DataType.s8, 
+            b=VLLMDataType.u4b8,
             b_scale=DataType.f16,
-            b_zeropoint=DataType.f16,
-            d=DataType.s32,
+            b_zeropoint=DataType.void,
+            d=d,
             accumulator=DataType.s32,
-        ) for b in (VLLMDataType.u4b8,)
-         for a in (DataType.s8,)))
+        ) for d in (DataType.s32, DataType.f16)),
+        *(TypeConfig(
+            a=DataType.e4m3, 
+            b=VLLMDataType.u4b8,
+            b_scale=DataType.f16,
+            b_zeropoint=DataType.void,
+            d=d,
+            accumulator=DataType.f32,
+        ) for d in (DataType.f32, DataType.f16)),
+    ]
 
     impl_configs += [
         ImplConfig(x[0], x[1], x[2])
-        for x in zip(QQQ_kernel_typess, itertools.repeat(schedules),
+        for x in zip(QQQ_kernel_types, itertools.repeat(schedules),
                      itertools.repeat(default_heuristic))
     ]
 

@@ -442,6 +442,7 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
 
     @torch.library.register_fake("_C::machete_prepack_B")
     def machete_prepack_B_fake(b_q_weight: torch.Tensor,
+                               a_type: torch.dtype,
                                b_type: ScalarType) -> torch.Tensor:
         return torch.empty_like(b_q_weight,
                                 memory_format=torch.contiguous_format)
@@ -637,12 +638,13 @@ def machete_gemm(
     b_scales: Optional[torch.Tensor] = None,
     b_zeros: Optional[torch.Tensor] = None,
     b_group_size: Optional[int] = None,
+    out_type: Optional[torch.dtype] = None,
     c: Optional[torch.Tensor] = None,
     alpha: Optional[float] = None,
     beta: Optional[float] = None,
     schedule: Optional[str] = None,
 ) -> torch.Tensor:
-    return torch.ops._C.machete_gemm(a, b_q, b_type, b_scales, b_zeros,
+    return torch.ops._C.machete_gemm(a, b_q, b_type, out_type, b_scales, b_zeros,
                                      b_group_size, c, alpha, beta, schedule)
 
 

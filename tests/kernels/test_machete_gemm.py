@@ -4,7 +4,7 @@ Run `pytest tests/kernels/test_machete_gemm.py`.
 """
 
 import math
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 import pytest
 import torch
@@ -35,16 +35,21 @@ MNK_SHAPES = [
     (1024, 8192, 4096),
 ]
 
-ACT_TYPES = [torch.int8] # torch.float16, torch.bfloat16, 
-ATYPE_WTYPE_ZEROPOINTS = [
+# (Act Type, Weight Type, Output Type, Scale Type, ZeroPoints)
+# NOTE: None "Scale Type" means the act type is floating point
+#       None "Output Type" means the output type is the same as the act type
+TestTypeTuple = Tuple[
+    List[torch.dtype], ScalarType, 
+    Optional[torch.dtype], Optional[torch.dtype], bool]
+TEST_TYPE_TUPLES = [
     # GPTQ style
-    ([torch.float16, torch.bfloat16], scalar_types.uint4b8, False),
-    ([torch.float16, torch.bfloat16], scalar_types.uint8b128, False),
+    ([torch.float16, torch.bfloat16], scalar_types.uint4b8, None, None, False),
+    ([torch.float16, torch.bfloat16], scalar_types.uint8b128, None, None, False),
     # AWQ style
-    ([torch.float16, torch.bfloat16], scalar_types.uint4, True),
-    ([torch.float16, torch.bfloat16], scalar_types.uint8, True),
+    ([torch.float16, torch.bfloat16], scalar_types.uint4, None, None, True),
+    ([torch.float16, torch.bfloat16], scalar_types.uint8, None, None, True),
     # QQQ style
-    ([torch.int8], scalar_types.uint4, True),
+    ([torch.int8], scalar_types.uint4b8, torch.int, torch.float16, False),
 ]
 
 # TODO: in future PR refactor this and `is_quant_method_supported` in the kernel
@@ -56,7 +61,10 @@ IS_SUPPORTED_BY_GPU = current_platform.has_device_capability(90)
 
 
 def rand_data(shape, dtype=torch.float16):
-    return 10 * (torch.rand(shape, device="cuda") - 0.3).to(dtype)
+    if dtype.is_floating_point:
+        return 8 * (torch.rand(shape, device="cuda") - 0.3).to(dtype)
+    else:
+        return torch.randint(-15, 15, shape, dtype=dtype, device="cuda")
 
 
 def maybe_convert_zeropoints(zps: Optional[torch.Tensor], s: torch.Tensor):
@@ -64,37 +72,45 @@ def maybe_convert_zeropoints(zps: Optional[torch.Tensor], s: torch.Tensor):
 
 
 def machete_quantize_and_pack(w: torch.Tensor,
+                              atype: torch.dtype,
                               wtype: ScalarType,
-                              group_size: int,
+                              group_size: Optional[int],
                               zero_points: bool = False):
     assert wtype.is_integer(), "TODO: support floating point weights"
 
     w_ref, w_q, w_s, w_zp = quantize_weights(
-        w.to(torch.float32),
+        w,
         wtype,
-        group_size,
+        group_size=group_size,
         zero_points=zero_points,
         # to match how the kernel applies zps
         ref_zero_points_after_scales=True)
 
     w_q = pack_rows(w_q, wtype.size_bits, *w_q.shape)
     w_q = w_q.t().contiguous().t()  # convert to col major
-    w_q_machete = ops.machete_prepack_B(w_q, w.dtype, wtype)
-    opcheck(torch.ops._C.machete_prepack_B, (w_q, wtype))
+    w_q_machete = ops.machete_prepack_B(w_q, atype, wtype)
+    opcheck(torch.ops._C.machete_prepack_B, (w_q, atype, wtype))
 
-    return w_ref.to(w.dtype), w_q_machete, w_s, w_zp
+    return w_ref, w_q_machete, w_s, w_zp
 
-
-def machete_gemm_test_helper(a: torch.Tensor, b: torch.Tensor,
-                             wtype: ScalarType, group_size: int,
+# None stype means scales use the same dtype as a
+def machete_gemm_test_helper(a: torch.Tensor, w: torch.Tensor,
+                             wtype: ScalarType, 
+                             outtype: Optional[torch.dtype],
+                             stype: Optional[torch.dtype],
+                             group_size: Optional[int],
                              zero_points: bool):
+    if stype is not None:
+        w = w.to(stype)
+
     w_ref, w_q_packed, w_s, w_zp = machete_quantize_and_pack(
-        b, wtype, group_size, zero_points)
+        w, a.dtype, wtype, group_size, zero_points)
 
     a_ref = a
     if not a.dtype.is_floating_point:
         a_ref = a.to(torch.float32)
-        w_ref = w_ref.to(torch.float32)
+        aiinfo = torch.iinfo(a.dtype)
+        w_ref = w_ref.round().clamp(aiinfo.min, aiinfo.max).to(torch.float32)
 
     output_ref = torch.matmul(a_ref, w_ref)
 
@@ -105,13 +121,15 @@ def machete_gemm_test_helper(a: torch.Tensor, b: torch.Tensor,
         b_scales=w_s,
         b_zeros=maybe_convert_zeropoints(w_zp, w_s),
         b_group_size=group_size,
+        out_type=outtype,
     )
 
     # Relax atol as our reduction dim becomes larger (more rounding error)
     # Relax atol when we have zeropoints since the way machete applies
     #  zeropoints (after scales) causes noise around 0
     atol = 1 if zero_points else min(5e-2 * math.sqrt(a.shape[1]), 1)
-    torch.testing.assert_close(output, output_ref, rtol=1e-1, atol=atol)
+    torch.testing.assert_close(output.to(output_ref.dtype), output_ref, 
+                               rtol=1e-1, atol=atol)
 
 
 @pytest.mark.skipif(not IS_SUPPORTED_BY_GPU,
@@ -119,60 +137,61 @@ def machete_gemm_test_helper(a: torch.Tensor, b: torch.Tensor,
 @pytest.mark.parametrize("shape",
                          MNK_SHAPES,
                          ids=lambda x: "x".join(str(v) for v in x))
-@pytest.mark.parametrize("atype", ACT_TYPES, ids=lambda x: str(x))
-@pytest.mark.parametrize("wtype_zeropoints", WTYPE_ZEROPOINTS)
+@pytest.mark.parametrize("type_tuple", TEST_TYPE_TUPLES)
 @pytest.mark.parametrize("group_size", [128, None])
-def test_machete_all_schedules(shape, atype: torch.dtype,
-                               wtype_zeropoints: Tuple[ScalarType, bool],
+def test_machete_all_schedules(shape,
+                               type_tuple: TestTypeTuple,
                                group_size: Optional[int]):
     m, n, k = shape
-    wtype, zero_points = wtype_zeropoints
+    atypes, wtype, outtype, stype, zero_points = type_tuple
+    for atype in atypes:
+        if group_size is not None and k % group_size != 0:
+            return
 
-    if group_size is not None and k % group_size != 0:
-        return
+        print(f"MNK = {m} {n} {k}")
 
-    print(f"MNK = {m} {n} {k}")
+        # Normalize group_size
+        if group_size is None:
+            group_size = k
+        assert group_size <= k
 
-    # Normalize group_size
-    if group_size is None:
-        group_size = k
-    assert group_size <= k
+        a = rand_data((m, k), atype)
+        w = rand_data((k, n), atype)
+        
+        if stype is not None:
+            w = w.to(stype)
 
-    a = rand_data((m, k), atype)
-    w = rand_data((k, n), atype)
+        w_ref, w_q_machete, w_s, w_zp = machete_quantize_and_pack(
+            w, atype, wtype, group_size, zero_points)
 
-    w_ref, w_q_machete, w_s, w_zp = machete_quantize_and_pack(
-        w, wtype, group_size, zero_points)
+        a_ref = a
+        if not atype.is_floating_point:
+            a_ref = a.to(torch.float32)
+            w_ref = w_ref.to(atype).to(torch.float32)
 
-    a_ref = a
-    if not atype.is_floating_point:
-        a_ref = a.to(torch.float32)
-        w_ref = w_ref.to(torch.float32)
+        output_ref = torch.matmul(a_ref, w_ref)
 
-    output_ref = torch.matmul(a_ref, w_ref)
+        for schedule in ops.machete_supported_schedules(wtype):
+            args = dict(
+                a=a,
+                b_q=w_q_machete,
+                b_type=wtype,
+                b_scales=w_s,
+                b_zeros=maybe_convert_zeropoints(w_zp, w_s),
+                b_group_size=group_size,
+                out_type=outtype,
+                schedule=schedule
+            )
+            output = ops.machete_gemm(**args)
+            opcheck(torch.ops._C.machete_gemm, tuple(), kwargs=args)
 
-    for schedule in ops.machete_supported_schedules(wtype):
-        print(f"Testing schedule {schedule}")
-        output = ops.machete_gemm(
-            a,
-            b_q=w_q_machete,
-            b_type=wtype,
-            b_scales=w_s,
-            b_zeros=maybe_convert_zeropoints(w_zp, w_s),
-            b_group_size=group_size,
-            schedule=schedule,
-        )
-
-        opcheck(torch.ops._C.machete_gemm,
-                (a, w_q_machete, wtype, w_s, maybe_convert_zeropoints(
-                    w_zp, w_s), group_size, None, None, None, schedule))
-
-        # Relax atol as our reduction dim becomes larger (more rounding error)
-        # Relax atol when we have zeropoints since the way machete applies
-        #  zeropoints (after scales) causes noise around 0
-        atol = 1 if zero_points else min(5e-2 * math.sqrt(k), 1)
-        torch.testing.assert_close(output, output_ref, rtol=1e-1, atol=atol),\
-               f"Schedule failed {schedule}"
+            # Relax atol as our reduction dim becomes larger (more rounding error)
+            # Relax atol when we have zeropoints since the way machete applies
+            #  zeropoints (after scales) causes noise around 0
+            atol = 1 if zero_points else min(5e-2 * math.sqrt(k), 1)
+            torch.testing.assert_close(
+                output, output_ref, rtol=1e-1, atol=atol),\
+                f"Schedule failed {schedule}"
 
 
 @pytest.mark.skipif(not IS_SUPPORTED_BY_GPU,
@@ -180,27 +199,27 @@ def test_machete_all_schedules(shape, atype: torch.dtype,
 @pytest.mark.parametrize("shape",
                          MNK_SHAPES,
                          ids=lambda x: "x".join(str(v) for v in x))
-@pytest.mark.parametrize("atype", ACT_TYPES, ids=lambda x: str(x))
-@pytest.mark.parametrize("wtype_zeropoints", WTYPE_ZEROPOINTS)
+@pytest.mark.parametrize("type_tuple", TEST_TYPE_TUPLES)
 @pytest.mark.parametrize("group_size", [128, None])
-def test_machete_heuristic(shape, atype: torch.dtype,
-                           wtype_zeropoints: Tuple[ScalarType, bool],
+def test_machete_heuristic(shape,
+                           type_tuple: TestTypeTuple,
                            group_size: Optional[int]):
     m, n, k = shape
-    wtype, zero_points = wtype_zeropoints
+    atypes, wtype, outtype, stype, zero_points = type_tuple
+    for atype in atypes:
+        if group_size is not None and k % group_size != 0:
+            return
 
-    if group_size is not None and k % group_size != 0:
-        return
+        # Normalize group_size
+        if group_size is None:
+            group_size = k
+        assert group_size <= k
+        
+        a = rand_data((m, k), atype)
+        b = rand_data((k, n), stype if stype else atype)
 
-    # Normalize group_size
-    if group_size is None:
-        group_size = k
-    assert group_size <= k
-
-    a = rand_data((m, k), atype)
-    b = rand_data((k, n), atype)
-
-    machete_gemm_test_helper(a, b, wtype, group_size, zero_points)
+        machete_gemm_test_helper(
+            a, b, wtype, outtype, stype, group_size, zero_points)
 
 
 # Test working on other devices
@@ -218,7 +237,7 @@ def test_machete_devices(device: str):
     a = rand_data((m, k), torch.float16).to(device)
     b = rand_data((k, n), torch.float16).to(device)
 
-    machete_gemm_test_helper(a, b, wtype, group_size, zero_points)
+    machete_gemm_test_helper(a, b, wtype, None, group_size, zero_points)
 
 
 # Test working with a subset of A and B
@@ -259,11 +278,12 @@ def test_machete_cuda_graph():
     a = rand_data((m, k), torch.float16)
     b = rand_data((k, n), torch.float16)
     wtype = scalar_types.uint4b8
+    atype = torch.float16
     group_size = 128
     zero_points = False
 
     w_ref, w_q_packed, w_s, w_zp = machete_quantize_and_pack(
-        b, wtype, group_size, zero_points)
+        b, atype, wtype, group_size, zero_points)
 
     # Construct a trivial model with a single layer that calls a machete kernel
     model = MacheteLayer(

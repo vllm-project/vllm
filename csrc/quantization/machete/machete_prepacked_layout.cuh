@@ -41,8 +41,8 @@ struct IlvBlkLayoutAuto {};
 // The contract here is that the `TiledMma` determined below matches the one
 // ultimately used in the kernel. (this is also why the other element types are
 // required along with the kernel schedule)
-template <typename ElementA_, typename ElementB_, typename AccumulatorT,
-          class LayoutB, class KernelSchedule,
+template <typename ElementA_, typename ElementB_, typename ElementConvert_,
+          typename AccumulatorT, class LayoutB, class KernelSchedule,
           typename IlvBlkLayout_ = IlvBlkLayoutAuto>
 // clang-format on
 struct PrepackedLayoutBTemplate {
@@ -58,10 +58,11 @@ struct PrepackedLayoutBTemplate {
   // iterleaved layouts
   using IlvdBlkLayout = std::conditional_t<
       std::is_same_v<IlvBlkLayout_, IlvBlkLayoutAuto>,
-      std::conditional_t<sizeof_bits_v<ElementB> <= 4,
-                         decltype(get_interleaved_blk_layout<
-                                  ElementB, sizeof_bits_v<ElementA>, 32>()),
-                         void>,
+      std::conditional_t<
+          sizeof_bits_v<ElementB> <= 4,
+          decltype(get_interleaved_blk_layout<
+                   ElementB, sizeof_bits_v<ElementConvert_>, 32>()),
+          void>,
       IlvBlkLayout_>;
 
   // TODO (LucasWilkinson): compare the performance for other sizes
@@ -134,7 +135,8 @@ struct PrepackedLayoutBTemplate {
       //   then ((IlvBlk), FrgB) is {A, C, B, D, C, G, D, H}
       auto frgV = get<1, 0>(layout_no_interleave);
       auto ilvdBlk = IlvdBlkLayout{};
-      static_assert(size(frgV) % 4 == 0, "FrgV must be divisible by 4");
+      static_assert(size(frgV) % size(ilvdBlk) == 0,
+                    "FrgV must be divisible by size(ilvdBlk)");
       auto ilvd_FrgV = make_layout(
           make_shape(shape(ilvdBlk), Int<size(frgV) / size(ilvdBlk)>{}),
           make_stride(stride(ilvdBlk), size(ilvdBlk)));
@@ -203,6 +205,19 @@ struct PrepackedLayoutBTemplate {
     // ((athrid, val), (BlocksN, BlocksK, L)) => ((athrid, val), (BlocksN,
     // BlocksK), L)
     return group<1, 3>(result(_, repeat<rank<1>(result)>(_)));
+  }
+
+  // (BlocksN, BlocksK, L) -> (storage_idx)
+  template <typename Shape_NKL>
+  CUTE_HOST_DEVICE static constexpr auto bNbKL_to_offset(Shape_NKL shape_mkl) {
+    // (BlocksN, BlocksK, L)
+    auto blocks_shape =
+        cute::transform(shape_mkl, append(PPBlockShape_NK{}, _1{}),
+                        [](auto x, auto y) { return x / y; });
+    auto stride = size(PPBlockShape_NK{});
+
+    // (BlocksN, BlocksK, L) -> (storage_idx)
+    return make_layout(blocks_shape, compact_col_major(blocks_shape, stride));
   }
 
   // ((athrid, val), (BlocksN, BlocksK, L)) -> (N, K, L)

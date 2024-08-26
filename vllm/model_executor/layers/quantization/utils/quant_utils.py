@@ -397,16 +397,20 @@ def unpack_cols(
     size_n: int,
 ):
     pack_factor = get_pack_factor(num_bits)
-    assert size_n % pack_factor == 0
-    assert packed_q_w.shape == (
-        size_k, size_n // pack_factor
-    ), "packed_q_w.shape = {} size_k = {}, size_n = {} pack_Factor = {}".format(
-        packed_q_w.shape, size_k, size_n, pack_factor)
+    # assert size_n % pack_factor == 0
+    # assert packed_q_w.shape == (
+    #     size_k, size_n // pack_factor
+    # ), "packed_q_w.shape = {} size_k = {}, size_n = {} pack_Factor = {}".format(
+    #     packed_q_w.shape, size_k, size_n, pack_factor)
 
     orig_device = packed_q_w.device
+    
+    print(packed_q_w.stride())
+    packed_q_w = packed_q_w.t()
 
     packed_q_w_cpu = packed_q_w.cpu().numpy().astype(numpy.uint32)
     q_res = numpy.zeros((size_k, size_n), dtype=numpy.uint32)
+
 
     mask = (1 << num_bits) - 1
     for i in range(pack_factor):

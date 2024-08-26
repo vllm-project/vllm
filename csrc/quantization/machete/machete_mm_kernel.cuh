@@ -54,6 +54,7 @@ struct MacheteKernelTemplate {
   using ElementZ = cute::conditional_t<with_zeropoints, ZeroT, MmaType>;
   using ElementS = cute::conditional_t<with_scales, ScaleT, MmaType>;
 
+  using ElementConvert = cute::conditional_t<with_scales, ScaleT, MmaType>;
   using ElementAccumulator =
       AccumulatorT;  // Element type for internal accumulation
   using ElementCompute = AccumulatorT;  // For Epilogue
@@ -90,8 +91,8 @@ struct MacheteKernelTemplate {
   using OperatorClass = cutlass::arch::OpClassTensorOp;
 
   using PrepackedLayoutB =
-      PrepackedLayoutBTemplate<ElementA_, ElementB_, AccumulatorT,
-                               LayoutA_Transpose, KernelSchedule>;
+      PrepackedLayoutBTemplate<ElementA_, ElementB_, ElementConvert,
+                               AccumulatorT, LayoutA_Transpose, KernelSchedule>;
 
   static int constexpr TileShapeK =
       128 * 8 / cutlass::sizeof_bits<MmaType>::value;
