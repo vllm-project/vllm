@@ -1,4 +1,4 @@
-from vllm.executor.gpu_executor import GPUExecutor
+from vllm.executor.gpu_executor import GPUExecutor, GPUExecutorAsync
 
 
 class CustomGPUExecutor(GPUExecutor):
@@ -10,6 +10,15 @@ class CustomGPUExecutor(GPUExecutor):
         return super().execute_model(*args, **kwargs)
 
 
+class CustomGPUExecutorAsync(GPUExecutorAsync):
+
+    async def execute_model_async(self, *args, **kwargs):
+        with open(".marker", "w"):
+            ...
+        return await super().execute_model_async(*args, **kwargs)
+
+
 def switch_executor():
-    from vllm.plugins import set_executor_cls
+    from vllm.plugins import set_async_executor_cls, set_executor_cls
     set_executor_cls(CustomGPUExecutor)
+    set_async_executor_cls(CustomGPUExecutorAsync)
