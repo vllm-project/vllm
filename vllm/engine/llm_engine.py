@@ -193,7 +193,7 @@ class LLMEngine:
         input_registry: InputRegistry = INPUT_REGISTRY,
         # To improve performance, only final requests outputs may be required.
         # If this set to true, then no intermediate outputs will be returned.
-        step_return_finished_only=False,
+        step_return_finished_only: bool = False,
     ) -> None:
         logger.info(
             "Initializing an LLM engine (v%s) with config: "
@@ -1251,7 +1251,6 @@ class LLMEngine:
         else:
             outputs_by_sequence_group = outputs
 
-        output = [None]
         finished_before: List[int] = []
         for i, seq_group_meta in enumerate(seq_group_metadata_list):
             scheduled_seq_group = scheduler_outputs.scheduled_seq_groups[i]
@@ -1265,7 +1264,7 @@ class LLMEngine:
             if len(outputs) > 1:
                 output = outputs_by_sequence_group[i]
             else:
-                output[0] = outputs_by_sequence_group[0][i]
+                output = [outputs_by_sequence_group[0][i]]
 
             if not is_async:
                 seq_group.update_num_computed_tokens(

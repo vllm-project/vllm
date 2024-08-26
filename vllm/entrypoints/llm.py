@@ -129,7 +129,7 @@ class LLM:
         max_context_len_to_capture: Optional[int] = None,
         max_seq_len_to_capture: int = 8192,
         disable_custom_all_reduce: bool = False,
-        disable_async_output_proc: Optional[bool] = False,
+        disable_async_output_proc: bool = False,
         **kwargs,
     ) -> None:
         '''

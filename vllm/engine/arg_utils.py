@@ -147,7 +147,7 @@ class EngineArgs:
 
     otlp_traces_endpoint: Optional[str] = None
     collect_detailed_traces: Optional[str] = None
-    disable_async_output_proc: Optional[bool] = False
+    disable_async_output_proc: bool = False
 
     def __post_init__(self):
         if self.tokenizer is None:
