@@ -1,28 +1,35 @@
 """A GPU worker class."""
 import gc
 import os
-from typing import List, Optional, Set, Tuple, Type
+from typing import Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
 import torch.distributed
 
+import vllm.envs as envs
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, MultiModalConfig, ParallelConfig,
+                         ModelConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sequence import ExecuteModelRequest
+from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
+                           SamplerOutput, SequenceGroupMetadata,
+                           SequenceGroupMetadataDelta)
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
+from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
 from vllm.worker.worker_base import LocalOrDistributedWorkerBase, WorkerInput
+
+logger = init_logger(__name__)
 
 
 class Worker(LocalOrDistributedWorkerBase):
@@ -45,11 +52,11 @@ class Worker(LocalOrDistributedWorkerBase):
         rank: int,
         distributed_init_method: str,
         lora_config: Optional[LoRAConfig] = None,
-        multimodal_config: Optional[MultiModalConfig] = None,
         speculative_config: Optional[SpeculativeConfig] = None,
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         is_driver_worker: bool = False,
         model_runner_cls: Optional[Type[GPUModelRunnerBase]] = None,
+        observability_config: Optional[ObservabilityConfig] = None,
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -71,7 +78,7 @@ class Worker(LocalOrDistributedWorkerBase):
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
-        self.multimodal_config = multimodal_config
+        self.observability_config = observability_config
 
         # Return hidden states from target model if the draft model is an
         # mlp_speculator
@@ -79,14 +86,16 @@ class Worker(LocalOrDistributedWorkerBase):
             or (speculative_config.draft_model_config.model ==
                 model_config.model) \
             or (speculative_config.draft_model_config.hf_config.model_type
-                not in ["medusa", "mlp_speculator"]) \
+                not in ["medusa", "mlp_speculator", "eagle"]) \
                     else {"return_hidden_states": True}
 
         ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
         if model_runner_cls is not None:
             ModelRunnerClass = model_runner_cls
-        elif self.model_config.embedding_mode:
+        elif self._is_embedding_model():
             ModelRunnerClass = EmbeddingModelRunner
+        elif self._is_encoder_decoder_model():
+            ModelRunnerClass = EncoderDecoderModelRunner
         self.model_runner: GPUModelRunnerBase = ModelRunnerClass(
             model_config,
             parallel_config,
@@ -98,7 +107,7 @@ class Worker(LocalOrDistributedWorkerBase):
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=is_driver_worker,
             prompt_adapter_config=prompt_adapter_config,
-            multimodal_config=multimodal_config,
+            observability_config=observability_config,
             **speculative_args,
         )
         # Uninitialized cache engine. Will be initialized by
@@ -106,6 +115,40 @@ class Worker(LocalOrDistributedWorkerBase):
         self.cache_engine: List[CacheEngine]
         # Initialize gpu_cache as embedding models don't initialize kv_caches
         self.gpu_cache: Optional[List[List[torch.Tensor]]] = None
+        self._seq_group_metadata_cache: Dict[str, SequenceGroupMetadata] = {}
+
+        # Torch profiler. Enabled and configured through env vars:
+        # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
+        if envs.VLLM_TORCH_PROFILER_DIR:
+            torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
+            logger.info("Profiling enabled. Traces will be saved to: %s",
+                        torch_profiler_trace_dir)
+            self.profiler = torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ],
+                with_stack=True,
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(
+                    torch_profiler_trace_dir, use_gzip=True))
+        else:
+            self.profiler = None
+
+    def start_profile(self):
+        if self.profiler is None:
+            raise RuntimeError("Profiler is not enabled.")
+        self.profiler.start()
+
+    def stop_profile(self):
+        if self.profiler is None:
+            raise RuntimeError("Profiler is not enabled.")
+        self.profiler.stop()
+
+    def _is_encoder_decoder_model(self):
+        return self.model_config.is_encoder_decoder_model
+
+    def _is_embedding_model(self):
+        return self.model_config.is_embedding_model
 
     def init_device(self) -> None:
         if self.device_config.device.type == "cuda":
@@ -252,6 +295,7 @@ class Worker(LocalOrDistributedWorkerBase):
     def prepare_worker_input(
             self, execute_model_req: ExecuteModelRequest) -> WorkerInput:
         virtual_engine = execute_model_req.virtual_engine
+        num_steps = execute_model_req.num_steps
         num_seq_groups = len(execute_model_req.seq_group_metadata_list)
         # `blocks_to_swap_in` and `blocks_to_swap_out` are cpu tensors.
         # they contain parameters to launch cudamemcpyasync.
@@ -274,6 +318,7 @@ class Worker(LocalOrDistributedWorkerBase):
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
             virtual_engine=virtual_engine,
+            num_steps=num_steps,
         )
 
     @torch.inference_mode()
@@ -291,6 +336,63 @@ class Worker(LocalOrDistributedWorkerBase):
         if (worker_input.blocks_to_copy is not None
                 and worker_input.blocks_to_copy.numel() > 0):
             self.cache_engine[virtual_engine].copy(worker_input.blocks_to_copy)
+
+    def _get_cached_seq_group_metadata(
+            self,
+            seq_group_metadata_list: List[Union[SequenceGroupMetadata,
+                                                SequenceGroupMetadataDelta]],
+            finished_request_ids: List[str]) -> List[SequenceGroupMetadata]:
+        """Return a list of cached Sequence Group Metadata after updating its
+        state.
+
+        It is used because scheduler only sends delta to workers to reduce
+        the data payload size. The function also cleans up cache based on
+        a given `finished_request_ids`.
+        """
+        new_seq_group_metadata_list = []
+        for metadata_or_delta in seq_group_metadata_list:
+            request_id = metadata_or_delta.request_id
+            if request_id not in self._seq_group_metadata_cache:
+                # The first prefill.
+                assert isinstance(metadata_or_delta, SequenceGroupMetadata)
+                self._seq_group_metadata_cache[request_id] = metadata_or_delta
+            else:
+                # The first prefill is already cached.
+                if isinstance(metadata_or_delta, SequenceGroupMetadataDelta):
+                    self._seq_group_metadata_cache[request_id].apply_delta(
+                        metadata_or_delta)
+                else:
+                    # If metadata snapshot is sent again, it is
+                    # preempted. Reset the cache because we need to start
+                    # from scratch.
+                    assert isinstance(metadata_or_delta, SequenceGroupMetadata)
+                    self._seq_group_metadata_cache[
+                        request_id] = metadata_or_delta
+
+            new_seq_group_metadata_list.append(
+                self._seq_group_metadata_cache[request_id])
+
+        # Clean up finished ids
+        for finished_id in finished_request_ids:
+            del self._seq_group_metadata_cache[finished_id]
+
+        return new_seq_group_metadata_list
+
+    def _execute_model_spmd(
+        self,
+        execute_model_req: ExecuteModelRequest,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+    ) -> Optional[List[SamplerOutput]]:
+        if execute_model_req is not None:
+            new_seq_group_metadata_list = self._get_cached_seq_group_metadata(
+                execute_model_req.seq_group_metadata_list,
+                execute_model_req.finished_requests_ids)
+
+            execute_model_req.seq_group_metadata_list = (
+                new_seq_group_metadata_list)
+        output = super()._execute_model_spmd(execute_model_req,
+                                             intermediate_tensors)
+        return output
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
@@ -354,7 +456,7 @@ def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
     if torch_dtype == torch.bfloat16:
         compute_capability = current_platform.get_device_capability()
         if compute_capability[0] < 8:
-            gpu_name = torch.cuda.get_device_name()
+            gpu_name = current_platform.get_device_name()
             raise ValueError(
                 "Bfloat16 is only supported on GPUs with compute capability "
                 f"of at least 8.0. Your {gpu_name} GPU has compute capability "

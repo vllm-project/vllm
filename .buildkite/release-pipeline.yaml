@@ -1,9 +1,9 @@
 steps:
-  - label: "Build wheel - CUDA {{matrix.cuda_version}}"
+  - label: "Build wheel - CUDA 12.1"
     agents:
       queue: cpu_queue
     commands:
-      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg USE_SCCACHE=1 --build-arg CUDA_VERSION={{matrix.cuda_version}} --tag vllm-ci:build-image --target build --progress plain ."
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg USE_SCCACHE=1 --build-arg CUDA_VERSION=12.1.0 --tag vllm-ci:build-image --target build --progress plain ."
       - "mkdir artifacts"
       - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
       # rename the files to change linux -> manylinux1
@@ -12,8 +12,21 @@ steps:
       - "aws s3 cp --recursive artifacts/dist s3://vllm-wheels/nightly/"
     env:
       DOCKER_BUILDKIT: "1"
-    matrix:
-      setup:
-        cuda_version:
-          - "11.8.0"
-          - "12.1.0"
+
+  - block: "Build CUDA 11.8 wheel"
+    key: block-build-cu118-wheel
+  
+  - label: "Build wheel - CUDA 11.8"
+    depends_on: block-build-cu118-wheel
+    agents:
+      queue: cpu_queue
+    commands:
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg USE_SCCACHE=1 --build-arg CUDA_VERSION=11.8.0 --tag vllm-ci:build-image --target build --progress plain ."
+      - "mkdir artifacts"
+      - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
+      # rename the files to change linux -> manylinux1
+      - "for f in artifacts/dist/*.whl; do mv -- \"$$f\" \"$${f/linux/manylinux1}\"; done"
+      - "aws s3 cp --recursive artifacts/dist s3://vllm-wheels/$BUILDKITE_COMMIT/"
+      - "aws s3 cp --recursive artifacts/dist s3://vllm-wheels/nightly/"
+    env:
+      DOCKER_BUILDKIT: "1"

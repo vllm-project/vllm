@@ -1,11 +1,13 @@
 import dataclasses
 import importlib
 import os
+import time
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
 
+from vllm.config import ObservabilityConfig
 from vllm.distributed import broadcast_tensor_dict, get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -14,7 +16,9 @@ from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SamplerOutput)
 from vllm.utils import (enable_trace_function_call_for_thread,
                         update_environment_variables)
-from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
+from vllm.worker.model_runner_base import (BroadcastableModelInput,
+                                           ModelRunnerBase,
+                                           ModelRunnerInputBase)
 
 logger = init_logger(__name__)
 
@@ -127,6 +131,7 @@ class WorkerInput:
     blocks_to_swap_out: Optional[torch.Tensor] = None
     blocks_to_copy: Optional[torch.Tensor] = None
     virtual_engine: int = 0
+    num_steps: int = 1
 
     @classmethod
     def from_broadcasted_tensor_dict(
@@ -143,6 +148,7 @@ class WorkerInput:
             blocks_to_swap_out=tensor_dict.pop("blocks_to_swap_out"),
             blocks_to_copy=tensor_dict.pop("blocks_to_copy"),
             virtual_engine=tensor_dict["virtual_engine"],
+            num_steps=tensor_dict.pop("num_steps"),
         )
 
     def as_broadcastable_tensor_dict(
@@ -156,6 +162,7 @@ class WorkerInput:
             "blocks_to_swap_out": self.blocks_to_swap_out,
             "blocks_to_copy": self.blocks_to_copy,
             "virtual_engine": self.virtual_engine,
+            "num_steps": self.num_steps,
         }
 
         return tensor_dict
@@ -172,6 +179,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
     """
     is_driver_worker: bool
     model_runner: ModelRunnerBase
+    observability_config: Optional[ObservabilityConfig] = None
 
     @property
     @abstractmethod
@@ -213,12 +221,58 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         """
         raise NotImplementedError
 
-    def execute_model(
+    def _get_worker_input_from_broadcast(
+        self
+    ) -> Optional[Tuple[BroadcastableModelInput, WorkerInput, Dict[
+            str, torch.Tensor]]]:
+        """ Get the worker input from the broadcasted tensor dict. """
+        assert self.do_metadata_broadcast
+        assert not self.is_driver_worker
+        broadcast_data = broadcast_tensor_dict(src=0)
+        if not broadcast_data:
+            return None
+
+        worker_input = WorkerInput.from_broadcasted_tensor_dict(broadcast_data)
+        model_input = (
+            self.model_runner.make_model_input_from_broadcasted_tensor_dict(
+                broadcast_data))
+
+        kwargs = extract_previous_hidden_states(broadcast_data)
+
+        return model_input, worker_input, kwargs
+
+    def _get_driver_input_and_broadcast(
+        self, execute_model_req: ExecuteModelRequest
+    ) -> Tuple[BroadcastableModelInput, WorkerInput, Dict[str, torch.Tensor]]:
+        """ Get the driver input and broadcast it to other workers.  """
+        assert self.is_driver_worker
+
+        worker_input: WorkerInput = self.prepare_worker_input(
+            execute_model_req=execute_model_req)
+        model_input: ModelRunnerInputBase = (
+            self.model_runner.prepare_model_input(
+                execute_model_req.seq_group_metadata_list,
+                execute_model_req.virtual_engine,
+                execute_model_req.finished_requests_ids))
+
+        kwargs = extract_previous_hidden_states(execute_model_req)
+
+        if self.do_metadata_broadcast:
+            broadcast_data = worker_input.as_broadcastable_tensor_dict()
+            broadcast_data.update(model_input.as_broadcastable_tensor_dict())
+            broadcast_data.update(kwargs)
+            broadcast_tensor_dict(broadcast_data, src=0)
+
+        return model_input, worker_input, kwargs
+
+    def prepare_input(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> Optional[List[SamplerOutput]]:
-        """Executes at least one model step on the given sequences, unless no
-        sequences are provided."""
+    ) -> Optional[Tuple[BroadcastableModelInput, WorkerInput, Dict[
+            str, torch.Tensor]]]:
+        """
+        Prepare the inputs to ModelRunner and workers.
+        """
         if self.is_driver_worker:
             if execute_model_req is None:
                 if self.do_metadata_broadcast:
@@ -229,34 +283,24 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                     # notify all other workers to stop their execution loop.
                     broadcast_tensor_dict({}, src=0)
                 return None
-
-            worker_input: WorkerInput = self.prepare_worker_input(
-                execute_model_req=execute_model_req)
-            model_input: ModelRunnerInputBase = (
-                self.model_runner.prepare_model_input(
-                    execute_model_req.seq_group_metadata_list,
-                    execute_model_req.virtual_engine,
-                    execute_model_req.finished_requests_ids))
-            num_steps = execute_model_req.num_steps
-
-            if self.do_metadata_broadcast:
-                broadcast_data = worker_input.as_broadcastable_tensor_dict()
-                broadcast_data.update(
-                    model_input.as_broadcastable_tensor_dict())
-                broadcast_data["num_steps"] = num_steps
-                broadcast_tensor_dict(broadcast_data, src=0)
+            return self._get_driver_input_and_broadcast(execute_model_req)
         else:
-            assert self.do_metadata_broadcast
-            broadcast_data = broadcast_tensor_dict(src=0)
-            if not broadcast_data:
-                return None
+            return self._get_worker_input_from_broadcast()
 
-            num_steps = broadcast_data.pop("num_steps")
-            worker_input = WorkerInput.from_broadcasted_tensor_dict(
-                broadcast_data)
-            model_input = (
-                self.model_runner.
-                make_model_input_from_broadcasted_tensor_dict(broadcast_data))
+    def execute_model(
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> Optional[List[SamplerOutput]]:
+        """Executes at least one model step on the given sequences, unless no
+        sequences are provided."""
+        start_time = time.perf_counter()
+
+        inputs = self.prepare_input(execute_model_req)
+        if inputs is None:
+            return None
+
+        model_input, worker_input, kwargs = inputs
+        num_steps = worker_input.num_steps
 
         self.execute_worker(worker_input)
 
@@ -265,21 +309,41 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             return []
 
         intermediate_tensors = None
+        orig_model_execute_time = 0.0
         if not get_pp_group().is_first_rank:
             intermediate_tensors = IntermediateTensors(
                 get_pp_group().recv_tensor_dict(
                     all_gather_group=get_tp_group()))
+            if (self.observability_config is not None
+                    and self.observability_config.collect_model_execute_time):
+                orig_model_execute_time = intermediate_tensors.tensors.get(
+                    "model_execute_time", torch.tensor(0)).item()
 
         output = self.model_runner.execute_model(
-            model_input, self.kv_cache[worker_input.virtual_engine]
-            if self.kv_cache is not None else None, intermediate_tensors,
-            num_steps)
+            model_input=model_input,
+            kv_caches=self.kv_cache[worker_input.virtual_engine]
+            if self.kv_cache is not None else None,
+            intermediate_tensors=intermediate_tensors,
+            num_steps=num_steps,
+            **kwargs,
+        )
 
+        model_execute_time = time.perf_counter() - start_time
         if not get_pp_group().is_last_rank:
             # output is IntermediateTensors
+            if (self.observability_config is not None
+                    and self.observability_config.collect_model_execute_time):
+                output.tensors["model_execute_time"] = torch.tensor(
+                    model_execute_time + orig_model_execute_time)
             get_pp_group().send_tensor_dict(output.tensors,
                                             all_gather_group=get_tp_group())
             return [None]
+        if (self.observability_config is not None
+                and self.observability_config.collect_model_execute_time
+                and output is not None):
+            for o in output:
+                o.model_execute_time = (orig_model_execute_time +
+                                        model_execute_time)
 
         # output is List[SamplerOutput]
         return output
@@ -309,9 +373,15 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         if worker_input.num_seq_groups == 0:
             return []
 
+        kwargs = extract_previous_hidden_states(execute_model_req)
+
         return self.model_runner.execute_model(
-            model_input, self.kv_cache[worker_input.virtual_engine]
-            if self.kv_cache is not None else None, intermediate_tensors)
+            model_input=model_input,
+            kv_caches=self.kv_cache[worker_input.virtual_engine]
+            if self.kv_cache is not None else None,
+            intermediate_tensors=intermediate_tensors,
+            **kwargs,
+        )
 
 
 class WorkerWrapperBase:
@@ -362,6 +432,9 @@ class WorkerWrapperBase:
         # see https://github.com/NVIDIA/nccl/issues/1234
         os.environ['NCCL_CUMEM_ENABLE'] = '0'
 
+        from vllm.plugins import load_general_plugins
+        load_general_plugins()
+
         if self.worker_class_fn:
             worker_class = self.worker_class_fn()
         else:
@@ -385,3 +458,23 @@ class WorkerWrapperBase:
                    "This might cause deadlock in distributed execution.")
             logger.exception(msg)
             raise e
+
+
+def extract_previous_hidden_states(
+        data: Union[ExecuteModelRequest, Dict[str, torch.Tensor]]) -> \
+            Dict[str, torch.Tensor]:
+    """If data contains previous_hidden_states, extract it. This returns a dict
+    which can be used directly as additional kwargs in any following 
+    execute_model calls. This is used in draft models like EAGLE."""
+    output = {}
+
+    # When called from non-driver worker, data is dict but when called from
+    # driver worker, data is ExecuteModelRequest.
+    if isinstance(data, dict):
+        if "previous_hidden_states" in data:
+            output["previous_hidden_states"] = data["previous_hidden_states"]
+    elif data.previous_hidden_states is not None:
+        output["previous_hidden_states"] = data.previous_hidden_states\
+            .hidden_states
+
+    return output

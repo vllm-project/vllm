@@ -23,9 +23,10 @@
 """Inference-only MiniCPM-V model compatible with HuggingFace weights."""
 import math
 import re
+from array import array
 from functools import partial
-from typing import (Any, Callable, Iterable, List, Optional, Tuple, TypedDict,
-                    Union)
+from typing import (Any, Callable, Iterable, List, Mapping, Optional, Tuple,
+                    TypedDict, Union)
 
 import numpy as np
 import torch
@@ -34,7 +35,7 @@ import torch.types
 from PIL import Image
 from torch import nn
 from torch.nn.init import trunc_normal_
-from transformers.configuration_utils import PretrainedConfig
+from transformers import PretrainedConfig
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
@@ -42,21 +43,21 @@ from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import SupportsVision
+from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.models.minicpm import MiniCPMModel
 from vllm.model_executor.models.qwen2 import Qwen2Model
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import (cached_get_image_processor,
-                                   cached_get_tokenizer)
-from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
+from vllm.multimodal.image import cached_get_image_processor
+from vllm.multimodal.utils import cached_get_tokenizer
+from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
+                           SamplerOutput, SequenceData)
 
 from .idefics2_vision_model import Idefics2VisionTransformer
 
@@ -216,7 +217,6 @@ class BaseResampler(nn.Module):
 
         self.query = nn.Parameter(torch.zeros(self.num_queries, embed_dim))
         trunc_normal_(self.query, std=0.02)
-
         if kv_dim is not None and kv_dim != embed_dim:
             self.kv_proj = ReplicatedLinear(kv_dim, embed_dim, bias=False)
         else:
@@ -225,7 +225,6 @@ class BaseResampler(nn.Module):
                 nn.Identity()(*args, **kwargs),
                 None,
             )
-
         self.attn = nn.MultiheadAttention(embed_dim, num_heads)
         self.ln_q = norm_layer(embed_dim)
         self.ln_kv = norm_layer(embed_dim)
@@ -261,7 +260,6 @@ class Resampler2(BaseResampler):
                          norm_layer)
 
         self.adaptive = adaptive
-
         pos_embed_arr = get_2d_sincos_pos_embed(embed_dim,
                                                 grid_size,
                                                 version=(2, 0))
@@ -407,26 +405,28 @@ def get_version_by_config(config: PretrainedConfig) -> Tuple[int, ...]:
 
 
 def get_max_minicpmv_image_tokens(ctx: InputContext):
-    hf_config = ctx.get_hf_config(PretrainedConfig)
+    hf_config = ctx.get_hf_config()
     return getattr(hf_config, "query_num", 64)
 
 
-def dummy_seq_data_for_minicpmv(seq_len: int):
-    token_ids = [0] * seq_len
+def dummy_seq_data_for_minicpmv(seq_len: int, num_images: int):
+    token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE, [0]) * seq_len
     return SequenceData(token_ids)
 
 
-def dummy_image_for_minicpmv(hf_config: PretrainedConfig):
+def dummy_image_for_minicpmv(hf_config: PretrainedConfig, num_images: int):
     width = height = hf_config.image_size
     image = Image.new("RGB", (width, height), color=0)
-    return {"image": image}
+    return {"image": image if num_images == 1 else [image] * num_images}
 
 
-def dummy_data_for_minicpmv(ctx: InputContext, seq_len: int):
-    hf_config = ctx.get_hf_config(PretrainedConfig)
+def dummy_data_for_minicpmv(ctx: InputContext, seq_len: int,
+                            mm_counts: Mapping[str, int]):
+    hf_config = ctx.get_hf_config()
+    num_images = mm_counts["image"]
 
-    seq_data = dummy_seq_data_for_minicpmv(seq_len)
-    mm_data = dummy_image_for_minicpmv(hf_config)
+    seq_data = dummy_seq_data_for_minicpmv(seq_len, num_images)
+    mm_data = dummy_image_for_minicpmv(hf_config, num_images)
 
     return seq_data, mm_data
 
@@ -482,7 +482,7 @@ def input_processor_for_minicpmv(ctx: InputContext, llm_inputs: LLMInputs):
     return llm_inputs
 
 
-class MiniCPMVBaseModel(nn.Module, SupportsVision):
+class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
     """
     The abstract class of MiniCPMV can only be inherited, but cannot be
     instantiated.
@@ -496,6 +496,10 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
+        # All MiniCPM-V models disable `tie_word_embeddings` but
+        # `PretrainedConfig.tie_word_embeddings` defaults to True; we cannot
+        # check `tie_word_embeddings` until vLLM integrate MiniCPM-V model
+        # and config class
         self.config = config
         self.multimodal_config = multimodal_config
 
@@ -633,8 +637,11 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
         )
         return output
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
@@ -717,7 +724,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsVision):
         raise NotImplementedError
 
 
-class MiniCPMV2(MiniCPMVBaseModel):
+class MiniCPMV2_0(MiniCPMVBaseModel):
 
     def __init__(
         self,
@@ -890,10 +897,7 @@ class MiniCPMV2_5(MiniCPMVBaseModel):
         return "resampler" in name
 
 
-# NOTE: Currently, information about this model is unavailable. We are
-# temporarily using `MiniCPMVQwen2` as it's name. The name may need
-# to be modified in the future.
-class MiniCPMVQwen2(MiniCPMVBaseModel):
+class MiniCPMV2_6(MiniCPMVBaseModel):
 
     def __init__(
         self,
@@ -903,6 +907,7 @@ class MiniCPMVQwen2(MiniCPMVBaseModel):
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__(config, multimodal_config, cache_config, quant_config)
+        assert self.version == (2, 6)
 
     def init_llm(
         self,
@@ -930,6 +935,7 @@ class MiniCPMVQwen2(MiniCPMVBaseModel):
 
     def init_resampler(self, embed_dim: int, vision_dim: int) -> nn.Module:
         with set_default_torch_dtype(torch.float16):
+            # The resampler in 2.6 remains consistent with the one in 2.5.
             resampler = Resampler2_5(
                 num_queries=self.config.query_num,
                 embed_dim=embed_dim,
@@ -989,6 +995,13 @@ class MiniCPMVQwen2(MiniCPMVBaseModel):
         return "resampler" in name or "vpm" in name
 
 
+_SUPPORT_VERSION = {
+    (2, 0): MiniCPMV2_0,
+    (2, 5): MiniCPMV2_5,
+    (2, 6): MiniCPMV2_6
+}
+
+
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_minicpmv_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_minicpmv)
@@ -1016,11 +1029,9 @@ class MiniCPMV(MiniCPMVBaseModel):
             version = str(config.version).split(".")
             version = tuple([int(x) for x in version])
         # Dispatch class based on version
-        if version == (2, 0):
-            instance_class = MiniCPMV2
-        elif version == (2, 5):
-            instance_class = MiniCPMV2_5
-        else:
-            instance_class = MiniCPMVQwen2
+        instance_class = _SUPPORT_VERSION.get(version, None)
+        if instance_class is None:
+            raise ValueError(
+                "Currently, MiniCPMV only supports versions 2.0, 2.5, and 2.6")
         return instance_class(config, multimodal_config, cache_config,
                               quant_config)

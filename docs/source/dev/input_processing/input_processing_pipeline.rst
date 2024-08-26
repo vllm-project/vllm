@@ -17,4 +17,4 @@ Input Processing Pipeline
 
 6. If the data contains multi-modal data, convert it into keyword arguments using :meth:`MULTIMODAL_REGISTRY.map_input <vllm.multimodal.MultiModalRegistry.map_input>`.
 
-   - For example, convert a :class:`PIL.Image.Image` input to its pixel values for a vision language model.
+   - For example, convert a :class:`PIL.Image.Image` input to its pixel values for a vision model.

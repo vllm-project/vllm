@@ -63,12 +63,12 @@ void advance_step(int64_t num_seqs, int64_t num_queries, int64_t block_size,
 torch::Tensor aqlm_gemm(const torch::Tensor& input, const torch::Tensor& codes,
                         const torch::Tensor& codebooks,
                         const torch::Tensor& scales,
-                        const torch::Tensor& codebook_partition_sizes,
+                        const std::vector<int64_t>& codebook_partition_sizes,
                         const std::optional<torch::Tensor>& bias);
 
-torch::Tensor aqlm_dequant(const torch::Tensor& codes,
-                           const torch::Tensor& codebooks,
-                           const torch::Tensor& codebook_partition_sizes);
+torch::Tensor aqlm_dequant(
+    const torch::Tensor& codes, const torch::Tensor& codebooks,
+    const std::vector<int64_t>& codebook_partition_sizes);
 
 torch::Tensor awq_gemm(torch::Tensor _in_feats, torch::Tensor _kernel,
                        torch::Tensor _scaling_factors, torch::Tensor _zeros,
@@ -82,6 +82,25 @@ torch::Tensor awq_dequantize(torch::Tensor _kernel,
 torch::Tensor marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                           torch::Tensor& b_scales, torch::Tensor& workspace,
                           int64_t size_m, int64_t size_n, int64_t size_k);
+
+namespace machete {
+
+std::vector<std::string> supported_schedules(
+    vllm::ScalarTypeTorchPtr const& btype);
+
+torch::Tensor gemm(torch::Tensor const& A, torch::Tensor const& B,
+                   vllm::ScalarTypeTorchPtr const& btype,
+                   c10::optional<torch::Tensor> const& scales,
+                   c10::optional<torch::Tensor> const& zeros,
+                   c10::optional<int64_t> group_size,
+                   c10::optional<torch::Tensor> const& C,
+                   c10::optional<double> alpha, c10::optional<double> beta,
+                   c10::optional<std::string> schedule);
+
+torch::Tensor prepack_B(torch::Tensor const& B,
+                        vllm::ScalarTypeTorchPtr const& btype);
+
+};  // namespace machete
 
 torch::Tensor gptq_marlin_24_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                                   torch::Tensor& b_meta,
@@ -107,13 +126,13 @@ torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
 torch::Tensor awq_marlin_repack(torch::Tensor& b_q_weight, int64_t size_k,
                                 int64_t size_n, int64_t num_bits);
 
-torch::Tensor ggml_dequantize(torch::Tensor W, int8_t type, int64_t m,
+torch::Tensor ggml_dequantize(torch::Tensor W, int64_t type, int64_t m,
                               int64_t n);
 
-torch::Tensor ggml_mul_mat_vec_a8(torch::Tensor W, torch::Tensor X, int8_t type,
-                                  int64_t row);
+torch::Tensor ggml_mul_mat_vec_a8(torch::Tensor W, torch::Tensor X,
+                                  int64_t type, int64_t row);
 
-torch::Tensor ggml_mul_mat_a8(torch::Tensor W, torch::Tensor X, int8_t type,
+torch::Tensor ggml_mul_mat_a8(torch::Tensor W, torch::Tensor X, int64_t type,
                               int64_t row);
 
 torch::Tensor fp8_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
@@ -127,6 +146,14 @@ void cutlass_scaled_mm(torch::Tensor& out, torch::Tensor const& a,
                        torch::Tensor const& b, torch::Tensor const& a_scales,
                        torch::Tensor const& b_scales,
                        c10::optional<torch::Tensor> const& bias);
+
+void cutlass_scaled_mm_azp(torch::Tensor& out, torch::Tensor const& a,
+                           torch::Tensor const& b,
+                           torch::Tensor const& a_scales,
+                           torch::Tensor const& b_scales,
+                           torch::Tensor const& azp_adj,
+                           c10::optional<torch::Tensor> const& azp,
+                           c10::optional<torch::Tensor> const& bias);
 
 torch::Tensor marlin_qqq_gemm(torch::Tensor const& a,
                               torch::Tensor const& b_q_weight,

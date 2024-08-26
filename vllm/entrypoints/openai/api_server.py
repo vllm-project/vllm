@@ -1,19 +1,21 @@
 import asyncio
 import importlib
 import inspect
+import multiprocessing
+import os
 import re
+import tempfile
 from argparse import Namespace
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from multiprocessing import Process
-from typing import AsyncIterator, Set
+from typing import AsyncIterator, Optional, Set
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from prometheus_client import make_asgi_app
 from starlette.routing import Mount
+from typing_extensions import assert_never
 
 import vllm.envs as envs
 from vllm.config import ModelConfig
@@ -28,14 +30,16 @@ from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ChatCompletionResponse,
                                               CompletionRequest,
+                                              CompletionResponse,
                                               DetokenizeRequest,
                                               DetokenizeResponse,
-                                              EmbeddingRequest, ErrorResponse,
+                                              EmbeddingRequest,
+                                              EmbeddingResponse, ErrorResponse,
                                               TokenizeRequest,
                                               TokenizeResponse)
+# yapf: enable
 from vllm.entrypoints.openai.rpc.client import AsyncEngineRPCClient
 from vllm.entrypoints.openai.rpc.server import run_rpc_server
-# yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
@@ -43,7 +47,7 @@ from vllm.entrypoints.openai.serving_tokenization import (
     OpenAIServingTokenization)
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser, get_open_port
+from vllm.utils import FlexibleArgumentParser, get_open_zmq_ipc_path
 from vllm.version import __version__ as VLLM_VERSION
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
@@ -54,19 +58,23 @@ openai_serving_chat: OpenAIServingChat
 openai_serving_completion: OpenAIServingCompletion
 openai_serving_embedding: OpenAIServingEmbedding
 openai_serving_tokenization: OpenAIServingTokenization
+prometheus_multiproc_dir: tempfile.TemporaryDirectory
 
+# Cannot use __name__ (https://github.com/vllm-project/vllm/pull/4765)
 logger = init_logger('vllm.entrypoints.openai.api_server')
 
 _running_tasks: Set[asyncio.Task] = set()
 
 
-def model_is_embedding(model_name: str, trust_remote_code: bool) -> bool:
+def model_is_embedding(model_name: str, trust_remote_code: bool,
+                       quantization: str) -> bool:
     return ModelConfig(model=model_name,
                        tokenizer=model_name,
                        tokenizer_mode="auto",
                        trust_remote_code=trust_remote_code,
+                       quantization=quantization,
                        seed=0,
-                       dtype="float16").embedding_mode
+                       dtype="auto").embedding_mode
 
 
 @asynccontextmanager
@@ -86,7 +94,16 @@ async def lifespan(app: FastAPI):
 
 
 @asynccontextmanager
-async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
+async def build_async_engine_client(
+        args: Namespace) -> AsyncIterator[Optional[AsyncEngineClient]]:
+    """
+    Create AsyncEngineClient, either:
+        - in-process using the AsyncLLMEngine Directly
+        - multiprocess using AsyncLLMEngine RPC
+
+    Returns the Client or None if the creation failed.
+    """
+
     # Context manager to handle async_engine_client lifecycle
     # Ensures everything is shutdown and cleaned up on error/exit
     global engine_args
@@ -97,7 +114,8 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
 
     # If manually triggered or embedding model, use AsyncLLMEngine in process.
     # TODO: support embedding model via RPC.
-    if (model_is_embedding(args.model, args.trust_remote_code)
+    if (model_is_embedding(args.model, args.trust_remote_code,
+                           args.quantization)
             or args.disable_frontend_multiprocessing):
         async_engine_client = AsyncLLMEngine.from_engine_args(
             engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
@@ -106,37 +124,99 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
 
     # Otherwise, use the multiprocessing AsyncLLMEngine.
     else:
-        # Start RPCServer in separate process (holds the AsyncLLMEngine).
-        port = get_open_port(envs.VLLM_RPC_PORT)
-        rpc_server_process = Process(target=run_rpc_server,
-                                     args=(engine_args,
-                                           UsageContext.OPENAI_API_SERVER,
-                                           port))
-        rpc_server_process.start()
+        if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
+            # Make TemporaryDirectory for prometheus multiprocessing
+            # Note: global TemporaryDirectory will be automatically
+            #   cleaned up upon exit.
+            global prometheus_multiproc_dir
+            prometheus_multiproc_dir = tempfile.TemporaryDirectory()
+            os.environ[
+                "PROMETHEUS_MULTIPROC_DIR"] = prometheus_multiproc_dir.name
+        else:
+            logger.warning(
+                "Found PROMETHEUS_MULTIPROC_DIR was set by user. "
+                "This directory must be wiped between vLLM runs or "
+                "you will find inaccurate metrics. Unset the variable "
+                "and vLLM will properly handle cleanup.")
+
+        # Select random path for IPC.
+        rpc_path = get_open_zmq_ipc_path()
+        logger.info("Multiprocessing frontend to use %s for RPC Path.",
+                    rpc_path)
 
         # Build RPCClient, which conforms to AsyncEngineClient Protocol.
-        async_engine_client = AsyncEngineRPCClient(port)
-        await async_engine_client.setup()
+        # NOTE: Actually, this is not true yet. We still need to support
+        # embedding models via RPC (see TODO above)
+        rpc_client = AsyncEngineRPCClient(rpc_path)
+        async_engine_client = rpc_client  # type: ignore
+
+        # Start RPCServer in separate process (holds the AsyncLLMEngine).
+        context = multiprocessing.get_context("spawn")
+        # the current process might have CUDA context,
+        # so we need to spawn a new process
+        rpc_server_process = context.Process(
+            target=run_rpc_server,
+            args=(engine_args, UsageContext.OPENAI_API_SERVER, rpc_path))
+        rpc_server_process.start()
+        logger.info("Started engine process with PID %d",
+                    rpc_server_process.pid)
 
         try:
+            while True:
+                try:
+                    await rpc_client.setup()
+                    break
+                except TimeoutError:
+                    if not rpc_server_process.is_alive():
+                        logger.error(
+                            "RPCServer process died before responding "
+                            "to readiness probe")
+                        yield None
+                        return
+
             yield async_engine_client
         finally:
             # Ensure rpc server process was terminated
             rpc_server_process.terminate()
 
             # Close all open connections to the backend
-            async_engine_client.close()
+            rpc_client.close()
 
             # Wait for server process to join
             rpc_server_process.join()
+
+            # Lazy import for prometheus multiprocessing.
+            # We need to set PROMETHEUS_MULTIPROC_DIR environment variable
+            # before prometheus_client is imported.
+            # See https://prometheus.github.io/client_python/multiprocess/
+            from prometheus_client import multiprocess
+            multiprocess.mark_process_dead(rpc_server_process.pid)
 
 
 router = APIRouter()
 
 
 def mount_metrics(app: FastAPI):
-    # Add prometheus asgi middleware to route /metrics requests
-    metrics_route = Mount("/metrics", make_asgi_app())
+    # Lazy import for prometheus multiprocessing.
+    # We need to set PROMETHEUS_MULTIPROC_DIR environment variable
+    # before prometheus_client is imported.
+    # See https://prometheus.github.io/client_python/multiprocess/
+    from prometheus_client import (CollectorRegistry, make_asgi_app,
+                                   multiprocess)
+
+    prometheus_multiproc_dir_path = os.getenv("PROMETHEUS_MULTIPROC_DIR", None)
+    if prometheus_multiproc_dir_path is not None:
+        logger.info("vLLM to use %s as PROMETHEUS_MULTIPROC_DIR",
+                    prometheus_multiproc_dir_path)
+        registry = CollectorRegistry()
+        multiprocess.MultiProcessCollector(registry)
+
+        # Add prometheus asgi middleware to route /metrics requests
+        metrics_route = Mount("/metrics", make_asgi_app(registry=registry))
+    else:
+        # Add prometheus asgi middleware to route /metrics requests
+        metrics_route = Mount("/metrics", make_asgi_app())
+
     # Workaround for 307 Redirect for /metrics
     metrics_route.path_regex = re.compile('^/metrics(?P<path>.*)$')
     app.routes.append(metrics_route)
@@ -155,9 +235,10 @@ async def tokenize(request: TokenizeRequest):
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
-    else:
-        assert isinstance(generator, TokenizeResponse)
+    elif isinstance(generator, TokenizeResponse):
         return JSONResponse(content=generator.model_dump())
+
+    assert_never(generator)
 
 
 @router.post("/detokenize")
@@ -166,9 +247,10 @@ async def detokenize(request: DetokenizeRequest):
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
-    else:
-        assert isinstance(generator, DetokenizeResponse)
+    elif isinstance(generator, DetokenizeResponse):
         return JSONResponse(content=generator.model_dump())
+
+    assert_never(generator)
 
 
 @router.get("/v1/models")
@@ -191,12 +273,10 @@ async def create_chat_completion(request: ChatCompletionRequest,
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
-    if request.stream:
-        return StreamingResponse(content=generator,
-                                 media_type="text/event-stream")
-    else:
-        assert isinstance(generator, ChatCompletionResponse)
+    elif isinstance(generator, ChatCompletionResponse):
         return JSONResponse(content=generator.model_dump())
+
+    return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
 @router.post("/v1/completions")
@@ -206,11 +286,10 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
-    if request.stream:
-        return StreamingResponse(content=generator,
-                                 media_type="text/event-stream")
-    else:
+    elif isinstance(generator, CompletionResponse):
         return JSONResponse(content=generator.model_dump())
+
+    return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
 @router.post("/v1/embeddings")
@@ -220,8 +299,30 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
-    else:
+    elif isinstance(generator, EmbeddingResponse):
         return JSONResponse(content=generator.model_dump())
+
+    assert_never(generator)
+
+
+if envs.VLLM_TORCH_PROFILER_DIR:
+    logger.warning(
+        "Torch Profiler is enabled in the API server. This should ONLY be "
+        "used for local development!")
+
+    @router.post("/start_profile")
+    async def start_profile():
+        logger.info("Starting profiler...")
+        await async_engine_client.start_profile()
+        logger.info("Profiler started.")
+        return Response(status_code=200)
+
+    @router.post("/stop_profile")
+    async def stop_profile():
+        logger.info("Stopping profiler...")
+        await async_engine_client.stop_profile()
+        logger.info("Profiler stopped.")
+        return Response(status_code=200)
 
 
 def build_app(args: Namespace) -> FastAPI:
@@ -340,10 +441,15 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     logger.info("args: %s", args)
 
     async with build_async_engine_client(args) as async_engine_client:
+        # If None, creation of the client failed and we exit.
+        if async_engine_client is None:
+            return
+
         app = await init_app(async_engine_client, args)
 
         shutdown_task = await serve_http(
             app,
+            engine=async_engine_client,
             host=args.host,
             port=args.port,
             log_level=args.uvicorn_log_level,
