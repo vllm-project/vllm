@@ -7,7 +7,6 @@ from torch import nn
 
 from vllm.config import ModelConfig
 from vllm.model_executor.models import ModelRegistry
-from vllm.utils import is_hip
 
 
 @contextlib.contextmanager
@@ -24,10 +23,9 @@ def get_model_architecture(
     architectures = getattr(model_config.hf_config, "architectures", [])
     # Special handling for quantized Mixtral.
     # FIXME(woosuk): This is a temporary hack.
-    # Fused Mixtral is currently disabled on ROCm
     mixtral_supported = ["fp8", "compressed-tensors"]
-    if (model_config.quantization is not None and
-        (model_config.quantization not in mixtral_supported or is_hip())
+    if (model_config.quantization is not None
+            and model_config.quantization not in mixtral_supported
             and "MixtralForCausalLM" in architectures):
         architectures = ["QuantMixtralForCausalLM"]
     return ModelRegistry.resolve_model_cls(architectures)
