@@ -457,6 +457,10 @@ if _is_cuda() or _is_hip():
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
 
+if _is_cuda():
+    if torch.cuda.get_device_capability(torch.cuda.current_device()) == (8, 0):
+        ext_modules.append(CMakeExtension(name="vllm._phi_C"))
+
 package_data = {
     "vllm": ["py.typed", "model_executor/layers/fused_moe/configs/*.json"]
 }

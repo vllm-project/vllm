@@ -89,9 +89,9 @@ class PhiFp8MoEMethod(FusedMoEMethodBase):
         try:
             import vllm._phi_C
         except ImportError:
-            raise ImportError("Phi FP8 fused MoE requires the Phi C++ extension. ")
+            raise ImportError("Phi FP8 fused MoE requires the Phi C extension. ")
 
-        from vllm.model_executor.layers.phi_ops.moe.vllm_moe.ampere_fp8_fused_moe import fused_moe
+        from vllm.model_executor.layers.phi_ops.moe.tensorrt_llm_moe.ampere_fp8_fused_moe import fused_moe
         self.phi_fused_moe_forward = fused_moe
 
     def is_sm80(self, device_id=0):
