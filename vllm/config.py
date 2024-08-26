@@ -404,9 +404,8 @@ class ModelConfig:
             self.enforce_eager = True
 
         if pipeline_parallel_size > 1 and self.use_async_output_proc:
-            logger.warning(
-                "Async output processor is not supported with "
-                "pipeline parallelism currently. Disabling it")
+            logger.warning("Async output processor is not supported with "
+                           "pipeline parallelism currently. Disabling it")
             self.use_async_output_proc = False
 
     def get_hf_config_sliding_window(self) -> Optional[int]:
