@@ -424,20 +424,11 @@ class LLMEngine:
         distributed_executor_backend = (
             engine_config.parallel_config.distributed_executor_backend)
         # Initialize the cluster and specify the executor class.
-        if isinstance(distributed_executor_backend, type):
-            if not issubclass(distributed_executor_backend, ExecutorBase):
-                raise TypeError(
-                    "distributed_executor_backend must be a subclass of "
-                    f"ExecutorBase. Got {distributed_executor_backend}.")
-            if distributed_executor_backend.uses_ray:  # type: ignore
-                initialize_ray_cluster(engine_config.parallel_config)
-            executor_class = distributed_executor_backend
-        elif engine_config.device_config.device_type == "neuron":
+        if engine_config.device_config.device_type == "neuron":
             from vllm.executor.neuron_executor import NeuronExecutor
             executor_class = NeuronExecutor
         elif engine_config.device_config.device_type == "tpu":
             if distributed_executor_backend == "ray":
-                initialize_ray_cluster(engine_config.parallel_config)
                 from vllm.executor.ray_tpu_executor import RayTPUExecutor
                 executor_class = RayTPUExecutor
             else:
@@ -452,14 +443,12 @@ class LLMEngine:
             executor_class = OpenVINOExecutor
         elif engine_config.device_config.device_type == "xpu":
             if distributed_executor_backend == "ray":
-                initialize_ray_cluster(engine_config.parallel_config)
                 from vllm.executor.ray_xpu_executor import RayXPUExecutor
                 executor_class = RayXPUExecutor
             else:
                 from vllm.executor.xpu_executor import XPUExecutor
                 executor_class = XPUExecutor
         elif distributed_executor_backend == "ray":
-            initialize_ray_cluster(engine_config.parallel_config)
             from vllm.executor.ray_gpu_executor import RayGPUExecutor
             executor_class = RayGPUExecutor
         elif distributed_executor_backend == "mp":
@@ -472,6 +461,19 @@ class LLMEngine:
         else:
             from vllm.executor.gpu_executor import GPUExecutor
             executor_class = GPUExecutor
+
+        from vllm.plugins import get_executor_cls
+        plugin_executor_class = get_executor_cls()
+        if plugin_executor_class is not None:
+            assert issubclass(plugin_executor_class, ExecutorBase), (
+                f"Plugin executor class {plugin_executor_class} must be a "
+                "subclass of ExecutorBase.")
+            logger.info("Using plugin executor class: %s",
+                        plugin_executor_class)
+            executor_class = plugin_executor_class
+
+        if executor_class.uses_ray:
+            initialize_ray_cluster(engine_config.parallel_config)
         return executor_class
 
     @classmethod
