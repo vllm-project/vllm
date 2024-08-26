@@ -304,14 +304,6 @@ def is_hip() -> bool:
     return torch.version.hip is not None
 
 
-def is_flashinfer() -> bool:
-    try:
-        import flashinfer
-    except ImportError:
-        flashinfer = None
-    return flashinfer is not None
-
-
 @lru_cache(maxsize=None)
 def is_cpu() -> bool:
     from importlib.metadata import PackageNotFoundError, version
@@ -361,6 +353,12 @@ def is_xpu() -> bool:
         return False
     return hasattr(torch, "xpu") and torch.xpu.is_available()
 
+def is_flashinfer() -> bool:
+    try:
+        import flashinfer
+    except ImportError:
+        flashinfer = None
+    return flashinfer is not None
 
 @lru_cache(maxsize=None)
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
@@ -618,10 +616,8 @@ def get_kv_cache_torch_dtype(
                 raise ValueError(f"Invalid model dtype: {model_dtype}")
         elif cache_dtype in ["half", "bfloat16", "float"]:
             torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype]
-        elif cache_dtype in ("fp8", "fp8_e4m3"):
-            torch_dtype = torch.float8_e4m3fn
-        elif cache_dtype == "fp8_e5m2":
-            torch_dtype = torch.float8_e5m2
+        elif cache_dtype == "fp8":
+            torch_dtype = torch.uint8
         else:
             raise ValueError(f"Invalid kv cache dtype: {cache_dtype}")
     elif isinstance(cache_dtype, torch.dtype):
