@@ -17,6 +17,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
+from vllm.block import PhysicalTokenBlock
 
 if TYPE_CHECKING:
     from vllm.inputs import LLMInputs
@@ -1272,11 +1273,13 @@ class ExecuteModelRequest(
     seq_group_metadata_list: List[Union[SequenceGroupMetadata,
                                         SequenceGroupMetadataDelta]]
     # Blocks to swap in. List of CPU -> GPU block number.
-    blocks_to_swap_in: List[Tuple[int,
-                                  int]] = msgspec.field(default_factory=list)
+    blocks_to_swap_in: List[Tuple[PhysicalTokenBlock,
+                                  PhysicalTokenBlock]] = msgspec.field(
+                                      default_factory=list)
     # Blocks to swap out. List of GPU -> CPU block number.
-    blocks_to_swap_out: List[Tuple[int,
-                                   int]] = msgspec.field(default_factory=list)
+    blocks_to_swap_out: List[Tuple[PhysicalTokenBlock,
+                                   PhysicalTokenBlock]] = msgspec.field(
+                                       default_factory=list)
     # Blocks to copy. Source to dest block.
     blocks_to_copy: List[Tuple[int, int]] = msgspec.field(default_factory=list)
     # Virtual engine ID for pipeline parallel.

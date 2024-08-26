@@ -66,10 +66,18 @@ class ExecutorBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def determine_num_external_available_blocks(self) -> int:
+        raise NotImplementedError
+
+    @abstractmethod
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
         """Initialize the KV cache with the given size in blocks.
         """
+        raise NotImplementedError
+
+    @abstractmethod
+    def initialize_external_cache(self, num_external_blocks: int) -> None:
         raise NotImplementedError
 
     @abstractmethod

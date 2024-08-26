@@ -454,10 +454,18 @@ class LLMEngine:
                 num_gpu_blocks_override)
             num_gpu_blocks = num_gpu_blocks_override
 
+        if self.enable_external_swapper:
+            self._initialize_external_caches()
+
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
         self.model_executor.initialize_cache(num_gpu_blocks, num_cpu_blocks)
+
+    def _initialize_external_caches(self) -> None:
+        blocks = self.model_executor.determine_num_external_available_blocks()
+        self.cache_config.num_external_blocks = blocks
+        self.model_executor.initialize_external_cache(blocks)
 
     @classmethod
     def _get_executor_cls(cls,

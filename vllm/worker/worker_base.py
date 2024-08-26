@@ -15,7 +15,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SamplerOutput)
 from vllm.utils import (enable_trace_function_call_for_thread,
-                        update_environment_variables)
+                        update_environment_variables, Device)
 from vllm.worker.model_runner_base import (BroadcastableModelInput,
                                            ModelRunnerBase,
                                            ModelRunnerInputBase)
@@ -49,6 +49,14 @@ class WorkerBase(ABC):
         num_cpu_blocks refers to "swapped" blocks in CPU memory and cannot be
         appended to.
         """
+        raise NotImplementedError
+
+    @abstractmethod
+    def determine_num_external_available_blocks(self) -> int:
+        raise NotImplementedError
+
+    @abstractmethod
+    def initialize_external_cache(self, num_external_blocks: int) -> None:
         raise NotImplementedError
 
     @abstractmethod
@@ -128,7 +136,11 @@ class WorkerInput:
 
     num_seq_groups: Optional[int] = None
     blocks_to_swap_in: Optional[torch.Tensor] = None
+    blocks_to_swap_in_external: Optional[torch.Tensor] = None
+    blocks_to_swap_in_external_device: Optional[Device] = None
     blocks_to_swap_out: Optional[torch.Tensor] = None
+    blocks_to_swap_out_external: Optional[torch.Tensor] = None
+    blocks_to_swap_out_external_device: Optional[Device] = None
     blocks_to_copy: Optional[torch.Tensor] = None
     virtual_engine: int = 0
     num_steps: int = 1

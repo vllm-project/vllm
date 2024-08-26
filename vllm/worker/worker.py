@@ -28,6 +28,7 @@ from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
 from vllm.worker.worker_base import LocalOrDistributedWorkerBase, WorkerInput
+from vllm.utils import Device
 
 logger = init_logger(__name__)
 
@@ -248,6 +249,22 @@ class Worker(LocalOrDistributedWorkerBase):
         torch.cuda.empty_cache()
         return num_gpu_blocks, num_cpu_blocks
 
+    def determine_num_external_available_blocks(self) -> int:
+        cache_block_size = self.get_cache_block_size_bytes()
+        num_external_blocks = int(
+            self.cache_config.external_swapper_space_bytes // cache_block_size)
+        num_external_blocks = max(num_external_blocks, 0)
+        return num_external_blocks
+
+    def initialize_external_cache(self, num_external_blocks: int) -> None:
+        """This function only sets the number of external blocks in the cache config. The actual cache allocate is in the initialize_cache function.
+        """
+        raise_if_cache_size_invalid(num_external_blocks,
+                                    self.cache_config.block_size,
+                                    self.model_config.max_model_len)
+
+        self.cache_config.num_external_blocks = num_external_blocks
+
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
         """Allocate GPU and CPU KV cache with the specified number of blocks.
@@ -267,9 +284,13 @@ class Worker(LocalOrDistributedWorkerBase):
     def _init_cache_engine(self):
         assert self.cache_config.num_gpu_blocks is not None
         self.cache_engine = [
+
+            # When using external storage media,
+            # different cache engines need to be distinguished,
+            # so rank id and pipeline parallel id are used to distinguish them.
             CacheEngine(self.cache_config, self.model_config,
-                        self.parallel_config, self.device_config)
-            for _ in range(self.parallel_config.pipeline_parallel_size)
+                        self.parallel_config, self.device_config, self.rank, i)
+            for i in range(self.parallel_config.pipeline_parallel_size)
         ]
         self.gpu_cache = [
             self.cache_engine[ve].gpu_cache
@@ -297,14 +318,41 @@ class Worker(LocalOrDistributedWorkerBase):
         virtual_engine = execute_model_req.virtual_engine
         num_steps = execute_model_req.num_steps
         num_seq_groups = len(execute_model_req.seq_group_metadata_list)
-        # `blocks_to_swap_in` and `blocks_to_swap_out` are cpu tensors.
-        # they contain parameters to launch cudamemcpyasync.
-        blocks_to_swap_in = torch.tensor(execute_model_req.blocks_to_swap_in,
-                                         device="cpu",
-                                         dtype=torch.int64).view(-1, 2)
-        blocks_to_swap_out = torch.tensor(execute_model_req.blocks_to_swap_out,
-                                          device="cpu",
-                                          dtype=torch.int64).view(-1, 2)
+        block_to_swap_in_cpu_list = []
+        block_to_swap_in_external_list = []
+        block_to_swap_out_cpu_list = []
+        block_to_swap_out_external_list = []
+
+        for tuple_item in execute_model_req.blocks_to_swap_in:
+            first_block = tuple_item[0]
+            if first_block.device == Device.CPU:
+                block_to_swap_in_cpu_list.append(
+                    (tuple_item[0].block_number, tuple_item[1].block_number))
+            else:
+                block_to_swap_in_external_list.append(
+                    (tuple_item[0].block_number, tuple_item[1].block_number))
+
+        for tuple_item in execute_model_req.blocks_to_swap_out:
+            second_block = tuple_item[1]
+            if second_block.device == Device.CPU:
+                block_to_swap_out_cpu_list.append(
+                    (tuple_item[0].block_number, tuple_item[1].block_number))
+            else:
+                block_to_swap_out_external_list.append(
+                    (tuple_item[0].block_number, tuple_item[1].block_number))
+
+        blocks_to_swap_in_cpu = torch.tensor(block_to_swap_in_cpu_list,
+                                             device="cpu",
+                                             dtype=torch.int64).view(-1, 2)
+        blocks_to_swap_out_cpu = torch.tensor(block_to_swap_out_cpu_list,
+                                              device="cpu",
+                                              dtype=torch.int64).view(-1, 2)
+        blocks_to_swap_in_external = torch.tensor(
+            block_to_swap_in_external_list, device="cpu",
+            dtype=torch.int64).view(-1, 2)
+        blocks_to_swap_out_external = torch.tensor(
+            block_to_swap_out_external_list, device="cpu",
+            dtype=torch.int64).view(-1, 2)
         # `blocks_to_copy` is a gpu tensor. The src and tgt of
         # blocks to copy are in the same device, and `blocks_to_copy`
         # can be used directly within cuda kernels.
@@ -314,8 +362,10 @@ class Worker(LocalOrDistributedWorkerBase):
 
         return WorkerInput(
             num_seq_groups=num_seq_groups,
-            blocks_to_swap_in=blocks_to_swap_in,
-            blocks_to_swap_out=blocks_to_swap_out,
+            blocks_to_swap_in=blocks_to_swap_in_cpu,
+            blocks_to_swap_in_external=blocks_to_swap_in_external,
+            blocks_to_swap_out=blocks_to_swap_out_cpu,
+            blocks_to_swap_out_external=blocks_to_swap_out_external,
             blocks_to_copy=blocks_to_copy,
             virtual_engine=virtual_engine,
             num_steps=num_steps,
@@ -333,6 +383,14 @@ class Worker(LocalOrDistributedWorkerBase):
                 and worker_input.blocks_to_swap_out.numel() > 0):
             self.cache_engine[virtual_engine].swap_out(
                 worker_input.blocks_to_swap_out)
+        if (worker_input.blocks_to_swap_in_external is not None
+                and worker_input.blocks_to_swap_in_external.numel() > 0):
+            self.cache_engine[virtual_engine].swap_in_from_external(
+                worker_input.blocks_to_swap_in_external)
+        if (worker_input.blocks_to_swap_out_external is not None
+                and worker_input.blocks_to_swap_out_external.numel() > 0):
+            self.cache_engine[virtual_engine].swap_out_to_external(
+                worker_input.blocks_to_swap_out_external)
         if (worker_input.blocks_to_copy is not None
                 and worker_input.blocks_to_copy.numel() > 0):
             self.cache_engine[virtual_engine].copy(worker_input.blocks_to_copy)

@@ -45,6 +45,17 @@ class DistributedGPUExecutor(GPUExecutor):
 
         return num_gpu_blocks, num_cpu_blocks
 
+    def determine_num_external_available_blocks(self) -> int:
+        # Get the maximum number of blocks that can be allocated on external swapper.
+        num_blocks = self._run_workers(
+            "determine_num_external_available_blocks", )
+        # Since we use a shared centralized controller, we take the minimum
+        # number of blocks across all workers to make sure all the memory
+        # operators can be applied to all workers.
+        num_external_blocks = min(b for b in num_blocks)
+
+        return num_external_blocks
+
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
         """Initialize the KV cache in all workers.
@@ -62,6 +73,13 @@ class DistributedGPUExecutor(GPUExecutor):
         self._run_workers("initialize_cache",
                           num_gpu_blocks=num_gpu_blocks,
                           num_cpu_blocks=num_cpu_blocks)
+
+    def initialize_external_cache(self, num_external_blocks: int) -> None:
+        logger.info("# External blocks: %d", num_external_blocks)
+
+        self.cache_config.num_gpu_blocks = num_external_blocks
+        self._run_workers("initialize_external_cache",
+                          num_external_blocks=num_external_blocks)
 
     def execute_model(
         self,
