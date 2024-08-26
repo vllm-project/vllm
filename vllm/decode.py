@@ -1,3 +1,3 @@
 def init():
-    global is_decode 
-    is_decode = False
+    global mask
+    mask = None

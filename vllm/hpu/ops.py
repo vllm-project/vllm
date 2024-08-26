@@ -223,21 +223,15 @@ def dispatch_bgmv_linear(
     max_loras = wa_t_all.size(0)
     # Wrap-around for negative indices
     indices = indices % max_loras
-    if decode.is_decode:
-        wa = wa_t_all[:, 0, :, :].transpose(0, 2)
-        wb = wb_t_all[:, 0, :, :].transpose(1, 2)
+    if decode.mask is not None:
+        wa = wa_t_all[:, 0, :, :]
+        wb = wb_t_all[:, 0, :, :].transpose(0, 1)
         wa_shape = wa.shape
         wb_shape = wb.shape
-        wa = wa.reshape(wa_shape[0], wa_shape[1] * wa_shape[2])
-        wb = wb.reshape(wb_shape[0] * wb_shape[1], wb_shape[2])
+        wa = wa.reshape(wa_shape[0] * wa_shape[1], wa_shape[2]).transpose(0, 1)
+        wb = wb.reshape(wb_shape[0], wb_shape[1] * wb_shape[2]).transpose(0, 1)
         out = x @ wa
-        mask = torch.zeros(out.shape[0], out.shape[1], dtype=out.dtype)
-        for i in range(out.shape[0]):
-            if indices[i] < 0:
-                continue
-            start_pos = indices[i] * wa_shape[1]
-            mask[i, start_pos : start_pos : start_pos + wa_shape[1]] = 1
-        out = out * mask.to('hpu')
+        out = out * decode.mask
         out = out@wb
     else:
         wa = torch.index_select(wa_t_all, 0, indices)[:, 0, :, :].transpose(-1, -2)
