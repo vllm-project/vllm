@@ -4,7 +4,8 @@ import os
 import pytest
 
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
-from vllm.engine.llm_engine import AsyncLLMEngine, LLMEngine
+from vllm.engine.llm_engine import LLMEngine
+from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.sampling_params import SamplingParams
 
 
