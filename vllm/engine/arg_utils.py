@@ -5,9 +5,12 @@ from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Dict, List, Mapping, Optional, Tuple, Type,
                     Union)
 
+import torch
+
+import vllm.envs as envs
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
-                         EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
-                         MultiModalConfig, ObservabilityConfig, ParallelConfig,
+                         EngineConfig, LoadConfig, LoadFormat, LoRAConfig,
+                         ModelConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig, TokenizerPoolConfig)
 from vllm.executor.executor_base import ExecutorBase
@@ -112,7 +115,7 @@ class EngineArgs:
     fully_sharded_loras: bool = False
     lora_extra_vocab_size: int = 256
     long_lora_scaling_factors: Optional[Tuple[float]] = None
-    lora_dtype: str = 'auto'
+    lora_dtype: Optional[Union[str, torch.dtype]] = 'auto'
     max_cpu_loras: Optional[int] = None
     device: str = 'auto'
     num_scheduler_steps: int = 1
@@ -129,6 +132,7 @@ class EngineArgs:
     guided_decoding_backend: str = 'outlines'
     # Speculative decoding configuration.
     speculative_model: Optional[str] = None
+    speculative_model_quantization: Optional[str] = None
     speculative_draft_tensor_parallel_size: Optional[int] = None
     num_speculative_tokens: Optional[int] = None
     speculative_max_model_len: Optional[int] = None
@@ -210,10 +214,7 @@ class EngineArgs:
             '--load-format',
             type=str,
             default=EngineArgs.load_format,
-            choices=[
-                'auto', 'pt', 'safetensors', 'npcache', 'dummy', 'tensorizer',
-                'bitsandbytes'
-            ],
+            choices=[f.value for f in LoadFormat],
             help='The format of the model weights to load.\n\n'
             '* "auto" will try to load the weights in the safetensors format '
             'and fall back to the pytorch bin format if safetensors format '
@@ -572,6 +573,18 @@ class EngineArgs:
             default=EngineArgs.speculative_model,
             help=
             'The name of the draft model to be used in speculative decoding.')
+        # Quantization settings for speculative model.
+        parser.add_argument(
+            '--speculative-model-quantization',
+            type=nullable_str,
+            choices=[*QUANTIZATION_METHODS, None],
+            default=EngineArgs.speculative_model_quantization,
+            help='Method used to quantize the weights of speculative model.'
+            'If None, we first check the `quantization_config` '
+            'attribute in the model config file. If that is '
+            'None, we assume the model weights are not '
+            'quantized and use `dtype` to determine the data '
+            'type of the weights.')
         parser.add_argument(
             '--num-speculative-tokens',
             type=int,
@@ -649,8 +662,10 @@ class EngineArgs:
 
         parser.add_argument(
             '--disable-logprobs-during-spec-decoding',
-            type=bool,
+            action=StoreBoolean,
             default=EngineArgs.disable_logprobs_during_spec_decoding,
+            nargs="?",
+            const="True",
             help='If set to True, token log probabilities are not returned '
             'during speculative decoding. If set to False, log probabilities '
             'are returned according to the settings in SamplingParams. If '
@@ -728,7 +743,7 @@ class EngineArgs:
         engine_args = cls(**{attr: getattr(args, attr) for attr in attrs})
         return engine_args
 
-    def create_engine_config(self, ) -> EngineConfig:
+    def create_engine_config(self) -> EngineConfig:
         # gguf file needs a specific model loader and doesn't use hf_repo
         if self.model.endswith(".gguf"):
             self.quantization = self.load_format = "gguf"
@@ -753,9 +768,6 @@ class EngineArgs:
             "CPU offload space must be non-negative"
             f", but got {self.cpu_offload_gb}")
 
-        multimodal_config = MultiModalConfig(
-            limit_per_prompt=self.limit_mm_per_prompt or {})
-
         device_config = DeviceConfig(device=self.device)
         model_config = ModelConfig(
             model=self.model,
@@ -779,7 +791,8 @@ class EngineArgs:
             disable_sliding_window=self.disable_sliding_window,
             skip_tokenizer_init=self.skip_tokenizer_init,
             served_model_name=self.served_model_name,
-            multimodal_config=multimodal_config)
+            limit_mm_per_prompt=self.limit_mm_per_prompt,
+        )
         cache_config = CacheConfig(
             block_size=self.block_size if self.device != "neuron" else
             self.max_model_len,  # neuron needs block_size = max_model_len
@@ -841,11 +854,19 @@ class EngineArgs:
                 "in low performance due to small KV cache space. Consider "
                 "setting --max-model-len to a smaller value.", max_model_len)
 
+        if self.num_scheduler_steps > 1 and not self.use_v2_block_manager:
+            self.use_v2_block_manager = True
+            logger.warning(
+                "Enabled BlockSpaceManagerV2 because it is "
+                "required for multi-step (--num-scheduler-steps > 1)")
+
         speculative_config = SpeculativeConfig.maybe_create_spec_config(
             target_model_config=model_config,
             target_parallel_config=parallel_config,
             target_dtype=self.dtype,
             speculative_model=self.speculative_model,
+            speculative_model_quantization = \
+                self.speculative_model_quantization,
             speculative_draft_tensor_parallel_size = \
                 self.speculative_draft_tensor_parallel_size,
             num_speculative_tokens=self.num_speculative_tokens,
@@ -867,7 +888,6 @@ class EngineArgs:
         )
 
         if self.num_scheduler_steps > 1:
-            raise NotImplementedError("Multi-step is not yet supported.")
             if speculative_config is not None:
                 raise ValueError("Speculative decoding is not supported with "
                                  "multi-step (--num-scheduler-steps > 1)")
@@ -894,6 +914,8 @@ class EngineArgs:
             embedding_mode=model_config.embedding_mode,
             preemption_mode=self.preemption_mode,
             num_scheduler_steps=self.num_scheduler_steps,
+            send_delta_data=(envs.VLLM_USE_RAY_SPMD_WORKER
+                             and parallel_config.use_ray),
         )
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
@@ -935,11 +957,6 @@ class EngineArgs:
                 raise ValueError(
                     f"Invalid module {m} in collect_detailed_traces. "
                     f"Valid modules are {ALLOWED_DETAILED_TRACE_MODULES}")
-            if (m == "model"
-                    or m == "all") and self.pipeline_parallel_size > 1:
-                raise ValueError(
-                    "Collection of detailed traces for the 'model' module is "
-                    "not yet supported with pipeline parallelism.")
         observability_config = ObservabilityConfig(
             otlp_traces_endpoint=self.otlp_traces_endpoint,
             collect_model_forward_time="model" in detailed_trace_modules
@@ -962,7 +979,6 @@ class EngineArgs:
             scheduler_config=scheduler_config,
             device_config=device_config,
             lora_config=lora_config,
-            multimodal_config=multimodal_config,
             speculative_config=speculative_config,
             load_config=load_config,
             decoding_config=decoding_config,

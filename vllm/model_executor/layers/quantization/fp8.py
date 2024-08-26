@@ -19,11 +19,13 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d, apply_fp8_linear, convert_to_channelwise,
-    create_per_tensor_scale_param, cutlass_fp8_supported,
-    per_tensor_dequantize, requantize_with_max_scale)
+    cutlass_fp8_supported, normalize_e4m3fn_to_e4m3fnuz, per_tensor_dequantize,
+    requantize_with_max_scale)
+from vllm.model_executor.parameter import (ModelWeightParameter,
+                                           PerTensorScaleParameter)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils import print_warning_once
+from vllm.utils import is_hip, print_warning_once
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
@@ -120,6 +122,9 @@ class Fp8LinearMethod(LinearMethodBase):
         capability = current_platform.get_device_capability()
         capability = capability[0] * 10 + capability[1]
         self.use_marlin = capability < 89 or envs.VLLM_TEST_FORCE_FP8_MARLIN
+        # Disable marlin for rocm
+        if is_hip():
+            self.use_marlin = False
 
     def create_weights(
         self,
@@ -133,6 +138,7 @@ class Fp8LinearMethod(LinearMethodBase):
     ):
         del input_size, output_size
         output_size_per_partition = sum(output_partition_sizes)
+        weight_loader = extra_weight_attrs.get("weight_loader")
 
         layer.logical_widths = output_partition_sizes
 
@@ -144,32 +150,41 @@ class Fp8LinearMethod(LinearMethodBase):
         weight_dtype = (torch.float8_e4m3fn
                         if self.quant_config.is_checkpoint_fp8_serialized else
                         params_dtype)
-        weight = Parameter(torch.empty(output_size_per_partition,
-                                       input_size_per_partition,
-                                       dtype=weight_dtype),
-                           requires_grad=False)
+
+        weight = ModelWeightParameter(data=torch.empty(
+            output_size_per_partition,
+            input_size_per_partition,
+            dtype=weight_dtype),
+                                      input_dim=1,
+                                      output_dim=0,
+                                      weight_loader=weight_loader)
         layer.register_parameter("weight", weight)
-        set_weight_attrs(weight, {
-            **extra_weight_attrs,
-            "input_dim": 1,
-            "output_dim": 0,
-        })
 
         # If checkpoint is serialized fp8, load them.
         # Otherwise, wait until process_weights_after_loading.
         if self.quant_config.is_checkpoint_fp8_serialized:
             # WEIGHT SCALE
-            scale = create_per_tensor_scale_param(output_partition_sizes,
-                                                  **extra_weight_attrs)
+            scale = PerTensorScaleParameter(data=torch.empty(
+                len(output_partition_sizes), dtype=torch.float32),
+                                            weight_loader=weight_loader)
+
+            scale[:] = torch.finfo(torch.float32).min
             layer.register_parameter("weight_scale", scale)
 
             # INPUT ACTIVATION SCALE
             if self.quant_config.activation_scheme == "static":
-                scale = create_per_tensor_scale_param(output_partition_sizes,
-                                                      **extra_weight_attrs)
+                scale = PerTensorScaleParameter(data=torch.empty(
+                    len(output_partition_sizes), dtype=torch.float32),
+                                                weight_loader=weight_loader)
+
+                scale[:] = torch.finfo(torch.float32).min
                 layer.register_parameter("input_scale", scale)
+            else:
+                layer.register_parameter("input_scale", None)
 
     def process_weights_after_loading(self, layer: Module) -> None:
+        layer.weight = torch.nn.Parameter(layer.weight.data,
+                                          requires_grad=False)
         # If checkpoint not serialized fp8, quantize the weights.
         if not self.quant_config.is_checkpoint_fp8_serialized:
             qweight, weight_scale = ops.scaled_fp8_quant(layer.weight,
@@ -191,6 +206,11 @@ class Fp8LinearMethod(LinearMethodBase):
         # If checkpoint is fp8, handle that there are N scales for N
         # shards in a fused module
         else:
+            layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data,
+                                                    requires_grad=False)
+            if self.quant_config.activation_scheme == "static":
+                layer.input_scale = torch.nn.Parameter(layer.input_scale.data,
+                                                       requires_grad=False)
             # If using marlin (w8a16), kernel uses channelwise weights,
             # so extend the weight scales to be channelwise.
             if self.use_marlin:
@@ -202,9 +222,23 @@ class Fp8LinearMethod(LinearMethodBase):
             # requantize the logical shards as a single weight.
             else:
                 # Dequant -> Quant with max scale so we can run per tensor.
+                weight = layer.weight
+                weight_scale = layer.weight_scale
+
+                # If rocm, use float8_e4m3fnuz.
+                if is_hip():
+                    weight, weight_scale, input_scale = \
+                        normalize_e4m3fn_to_e4m3fnuz(
+                            weight=weight,
+                            weight_scale=weight_scale,
+                            input_scale=layer.input_scale)
+                    if input_scale is not None:
+                        layer.input_scale = Parameter(input_scale,
+                                                      requires_grad=False)
+
                 weight_scale, weight = requantize_with_max_scale(
-                    weight=layer.weight,
-                    weight_scale=layer.weight_scale,
+                    weight=weight,
+                    weight_scale=weight_scale,
                     logical_widths=layer.logical_widths,
                 )
 
@@ -214,8 +248,6 @@ class Fp8LinearMethod(LinearMethodBase):
             if self.quant_config.activation_scheme == "static":
                 layer.input_scale = Parameter(layer.input_scale.max(),
                                               requires_grad=False)
-            else:
-                layer.input_scale = None
 
         if self.use_marlin:
             prepare_fp8_layer_for_marlin(layer)
@@ -346,10 +378,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
         # If checkpoint is fp16, quantize in place.
         if not self.quant_config.is_checkpoint_fp8_serialized:
+            # If rocm, use float8_e4m3fnuz as dtype
+            fp8_dtype = torch.float8_e4m3fnuz \
+                        if is_hip() else torch.float8_e4m3fn
             w13_weight = torch.empty_like(layer.w13_weight.data,
-                                          dtype=torch.float8_e4m3fn)
-            w2_weight = torch.empty_like(layer.w2_weight.data,
-                                         dtype=torch.float8_e4m3fn)
+                                          dtype=fp8_dtype)
+            w2_weight = torch.empty_like(layer.w2_weight.data, dtype=fp8_dtype)
 
             # Re-initialize w13_scale because we directly quantize
             # merged w13 weights and generate a single scaling factor.
@@ -393,6 +427,32 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     layer.w13_input_scale.max(), requires_grad=False)
                 layer.w2_input_scale = torch.nn.Parameter(
                     layer.w2_input_scale.max(), requires_grad=False)
+            # If rocm, normalize the weights and scales to e4m3fnuz
+            if is_hip():
+                # Normalize the weights and scales
+                w13_weight, w13_weight_scale, w13_input_scale = \
+                    normalize_e4m3fn_to_e4m3fnuz(
+                        layer.w13_weight, layer.w13_weight_scale,
+                        layer.w13_input_scale)
+                w2_weight, w2_weight_scale, w2_input_scale = \
+                    normalize_e4m3fn_to_e4m3fnuz(
+                        layer.w2_weight, layer.w2_weight_scale,
+                        layer.w2_input_scale)
+                # Reset the parameter
+                layer.w13_weight = torch.nn.Parameter(w13_weight,
+                                                      requires_grad=False)
+                layer.w13_weight_scale = torch.nn.Parameter(
+                    w13_weight_scale, requires_grad=False)
+                if w13_input_scale is not None:
+                    layer.w13_input_scale = torch.nn.Parameter(
+                        w13_input_scale, requires_grad=False)
+                layer.w2_weight = torch.nn.Parameter(w2_weight,
+                                                     requires_grad=False)
+                layer.w2_weight_scale = torch.nn.Parameter(w2_weight_scale,
+                                                           requires_grad=False)
+                if w2_input_scale is not None:
+                    layer.w2_input_scale = torch.nn.Parameter(
+                        w2_input_scale, requires_grad=False)
 
             # Fp8 moe kernel needs single weight scale for w13 per expert.
             # We take the max then dequant and requant each expert.
@@ -442,7 +502,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                              topk_weights=topk_weights,
                              topk_ids=topk_ids,
                              inplace=True,
-                             use_fp8=True,
+                             use_fp8_w8a8=True,
                              w1_scale=layer.w13_weight_scale,
                              w2_scale=layer.w2_weight_scale,
                              a1_scale=layer.w13_input_scale,
