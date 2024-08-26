@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import contextlib
 import datetime
@@ -19,12 +20,12 @@ from typing import (Any, AsyncGenerator, Awaitable, Callable, Dict, Generic,
                     Type, TypeVar, Union, overload)
 from uuid import uuid4
 
-import configargparse
 import numpy as np
 import numpy.typing as npt
 import psutil
 import torch
 import torch.types
+import yaml
 from typing_extensions import ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
@@ -1085,12 +1086,15 @@ def run_once(f: Callable[P, None]) -> Callable[P, None]:
     return wrapper
 
 
-class FlexibleArgumentParser(configargparse.ArgumentParser):
+class FlexibleArgumentParser(argparse.ArgumentParser):
     """ArgumentParser that allows both underscore and dash in names."""
 
     def parse_args(self, args=None, namespace=None):
         if args is None:
             args = sys.argv[1:]
+
+        if '--config' in args:
+            args = FlexibleArgumentParser._pull_args_from_config(args)
 
         # Convert underscores to dashes and vice versa in argument names
         processed_args = []
@@ -1098,15 +1102,101 @@ class FlexibleArgumentParser(configargparse.ArgumentParser):
             if arg.startswith('--'):
                 if '=' in arg:
                     key, value = arg.split('=', 1)
-                    key = '--' + key[len('--'):].replace('_', '-')
+                    key = key[len('--'):].replace('_', '-')
+                    key = '--' + key
+
                     processed_args.append(f'{key}={value}')
                 else:
-                    processed_args.append('--' +
-                                          arg[len('--'):].replace('_', '-'))
+                    key = arg[len('--'):].replace('_', '-')
+                    processed_args.append('--' + key)
             else:
                 processed_args.append(arg)
 
         return super().parse_args(processed_args, namespace)
+
+    @staticmethod
+    def _pull_args_from_config(args: List[str]) -> List[str]:
+        """
+            method to pull arguments specified in the config file
+            into the commandline args variable.
+            
+            The arguments in config file will be inserted between 
+            the argument list.
+            
+            example:
+            ```yaml
+                port: 12323
+                tensor-parallel-size: 4
+            ```
+            ```python
+            $: args = [
+                "facebook/opt-12B", 
+                '--config', 'config.yaml', 
+                '-tp', '2'
+            ]
+            $: args = [
+                "facebook/opt-12B", 
+                '--port', '12323', 
+                '--tensor-parallel-size', '4', 
+                '-tp', '2'
+                ]
+            ```
+
+        """
+
+        index = args.index('--config')
+
+        if index == len(args) - 1:
+            raise ValueError("No config file specified! \
+                             Please check your commandline arguments.")
+
+        file_path = args[index + 1]
+        extension: str = file_path.split('.')[-1]
+        if extension not in {'yaml', 'yml'}:
+            raise ValueError(
+                "Config file must be of a yaml/yml type.\
+                              %s supplied", extension)
+
+        config_args = FlexibleArgumentParser._load_config_file(file_path)
+        args = args[:index] + config_args + args[index + 2:]
+
+        return args
+
+    @staticmethod
+    def _load_config_file(file_path: str) -> List[str]:
+        """
+            loads a yaml file and returns the key value pairs as a 
+            flattened list with argparse like pattern
+            ```yaml
+                port: 12323
+                tensor-parallel-size: 4
+            ```
+            returns:
+                processed_args: list[str] = [
+                    '--port': '12323',
+                    '--tensor-parallel-size': '4'
+                ]
+            
+        """
+        # only expecting a flat dictionary of atomic types
+
+        processed_args: List[str] = []
+
+        config: Dict[str, Union[int, str]] = {}
+        try:
+            with open(file_path, 'r') as config_file:
+                config = yaml.safe_load(config_file)
+        except Exception as ex:
+            logger.error(
+                "Unable to read the config file at %s. \
+                Make sure path is correct", file_path)
+            raise ex
+
+        for key, value in config.items():
+            processed_args.append('--' + key)
+            processed_args.append(str(value))
+
+        return processed_args
 
 
 async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,

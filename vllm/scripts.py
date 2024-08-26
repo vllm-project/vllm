@@ -6,7 +6,6 @@ import signal
 import sys
 from typing import List, Optional
 
-import configargparse
 from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam
 
@@ -28,7 +27,7 @@ def register_signal_handlers():
     signal.signal(signal.SIGTSTP, signal_handler)
 
 
-def serve(args: configargparse.Namespace) -> None:
+def serve(args: argparse.Namespace) -> None:
 
     # The default value of `--model`
     if args.model != EngineArgs.model:
@@ -133,7 +132,7 @@ def main():
     serve_parser.add_argument(
         "--config",
         type=str,
-        is_config_file=True,
+        default='',
         required=False,
         help="Read CLI options from a config file."
         "Must be a YAML with the following options:"
