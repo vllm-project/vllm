@@ -387,6 +387,10 @@ class Scheduler:
             self._scheduled_seq_group_cache.append(
                 PyObjectCache(scheduled_seq_group_builder))
 
+        # For async postprocessor, the extra decode run cannot be done
+        # when the request reaches max_model_len. In this case, the request
+        # will be stopped during schedule() call and added to this stop list
+        # for processing and deallocation by the free_finished_seq_groups()
         self._async_stopped: List[SequenceGroup] = []
 
     @property
@@ -1088,9 +1092,8 @@ class Scheduler:
         return no_beam_search
 
     def schedule(
-        self
-    ) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs, List[Tuple[
-            ScheduledSequenceGroup, SequenceGroupMetadata]], bool]:
+            self
+    ) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs, bool]:
         # Schedule sequence groups.
         # This function call changes the internal states of the scheduler
         # such as self.running, self.swapped, and self.waiting.
@@ -1107,9 +1110,6 @@ class Scheduler:
             self.use_async_output_proc
             and not self.scheduler_config.is_multi_step)
 
-        # Create list of scheduled request ids
-        scheduled_ids: List[Tuple[ScheduledSequenceGroup,
-                                  SequenceGroupMetadata]] = []
         # Create input data structures.
         seq_group_metadata_list: List[SequenceGroupMetadata] = []
         for i, scheduled_seq_group in enumerate(
@@ -1216,7 +1216,6 @@ class Scheduler:
                 allow_async_output_proc = self._allow_async_output_proc(
                     seq_group)
 
-            scheduled_ids.append((scheduled_seq_group, seq_group_metadata))
         # Now that the batch has been created, we can assume all blocks in the
         # batch will have been computed before the next scheduling invocation.
         # This is because the engine assumes that a failure in model execution
@@ -1242,7 +1241,7 @@ class Scheduler:
         self.cache_id = self.next_cache_id
 
         # Return results
-        return (seq_group_metadata_list, scheduler_outputs, scheduled_ids,
+        return (seq_group_metadata_list, scheduler_outputs,
                 allow_async_output_proc)
 
     def fork_seq(self, parent_seq: Sequence, child_seq: Sequence) -> None:

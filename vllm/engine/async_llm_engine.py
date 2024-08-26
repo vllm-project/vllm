@@ -277,14 +277,13 @@ class _AsyncLLMEngine(LLMEngine):
         cached_outputs = self.cached_scheduler_outputs[virtual_engine]
         seq_group_metadata_list = cached_outputs.seq_group_metadata_list
         scheduler_outputs = cached_outputs.scheduler_outputs
-        scheduled_ids = cached_outputs.scheduled_ids
         allow_async_output_proc = cached_outputs.allow_async_output_proc
 
         # skip the scheduler if there are any remaining steps in the seq groups.
         # This ensures that the scheduler is only called again when the current
         # batch has completed.
         if not self._has_remaining_steps(seq_group_metadata_list):
-            (seq_group_metadata_list, scheduler_outputs, scheduled_ids,
+            (seq_group_metadata_list, scheduler_outputs,
              allow_async_output_proc
              ) = self.scheduler[virtual_engine].schedule()
 
@@ -300,11 +299,10 @@ class _AsyncLLMEngine(LLMEngine):
                 # lookahead slots
                 self._cache_scheduler_outputs_for_multi_step(
                     virtual_engine, seq_group_metadata_list, scheduler_outputs,
-                    scheduled_ids, allow_async_output_proc)
+                    allow_async_output_proc)
 
         assert seq_group_metadata_list is not None
         assert scheduler_outputs is not None
-        assert scheduled_ids is not None
 
         if self.scheduler_config.is_multi_step:
             assert not allow_async_output_proc
@@ -363,7 +361,7 @@ class _AsyncLLMEngine(LLMEngine):
 
             # Cache results in engine
             self.output_queue.append(
-                (output, scheduled_ids, scheduler_outputs))
+                (output, seq_group_metadata_list, scheduler_outputs))
 
             if (len(output) > 0) and allow_async_output_proc:
                 assert len(

@@ -84,8 +84,6 @@ class SchedulerOutputState:
     """Caches the scheduler outputs for a virtual engine. Used for Multi-Step"""
     seq_group_metadata_list: Optional[List[SequenceGroupMetadata]] = None
     scheduler_outputs: Optional[SchedulerOutputs] = None
-    scheduled_ids: Optional[List[Tuple[ScheduledSequenceGroup,
-                                       SequenceGroupMetadata]]] = None
     allow_async_output_proc: bool = False
     last_output: Optional[SamplerOutput] = None
 
@@ -193,6 +191,8 @@ class LLMEngine:
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
+        # To improve performance, only final requests outputs may be required.
+        # If this set to true, then no intermediate outputs will be returned.
         step_return_finished_only=False,
     ) -> None:
         logger.info(
@@ -408,8 +408,7 @@ class LLMEngine:
 
         # Async output processing pointers
         self.output_queue: Deque[Tuple[List[SamplerOutput],
-                                       List[Tuple[ScheduledSequenceGroup,
-                                                  SequenceGroupMetadata]],
+                                       List[SequenceGroupMetadata],
                                        SchedulerOutputs]] = deque()
         self.request_outputs: List[Union[RequestOutput,
                                          EmbeddingRequestOutput]] = []
@@ -1218,6 +1217,15 @@ class LLMEngine:
     def _process_model_outputs(self, is_async, clear_outputs=True) -> None:
         """Apply the model output to the sequences in the scheduled seq groups.
 
+        is_async: Indicates whether this postprocessor runs in 
+            parallel with the GPU forward pass and is processing 
+            tokens from the previous step. If this is true, then
+            no tokens need to be appended since it is already done
+            externally (before the next schedule() call)
+        clear_outputs: Sometimes existing outputs need to be combined 
+            with outputs of this call. This happens for postprocessor
+            draining at the final stage (like when sequences are finished)
+        
         Returns RequestOutputs that can be returned to the client.
         """
         now = time.time()
@@ -1228,20 +1236,26 @@ class LLMEngine:
         if len(self.output_queue) == 0:
             return None
 
-        (outputs, scheduled_ids,
+        (outputs, seq_group_metadata_list,
          scheduler_outputs) = self.output_queue.popleft()
+
+        # Sanity check
+        assert len(seq_group_metadata_list) == len(
+            scheduler_outputs.scheduled_seq_groups)
+
         # Organize outputs by [step][sequence group] instead of
         # [sequence group][step].
         if len(outputs) > 1:
             outputs_by_sequence_group = create_output_by_sequence_group(
-                outputs, num_seq_groups=len(scheduled_ids))
+                outputs, num_seq_groups=len(seq_group_metadata_list))
         else:
             outputs_by_sequence_group = outputs
 
         output = [None]
         finished_before: List[int] = []
-        for i, (scheduled_seq_group,
-                seq_group_meta) in enumerate(scheduled_ids):
+        for i, seq_group_meta in enumerate(seq_group_metadata_list):
+            scheduled_seq_group = scheduler_outputs.scheduled_seq_groups[i]
+
             seq_group = scheduled_seq_group.seq_group
 
             if seq_group.is_finished():
@@ -1288,7 +1302,9 @@ class LLMEngine:
             scheduler.free_finished_seq_groups()
 
         # Create the outputs.
-        for i, (scheduled_seq_group, _) in enumerate(scheduled_ids):
+        for i, _ in enumerate(seq_group_metadata_list):
+            scheduled_seq_group = scheduler_outputs.scheduled_seq_groups[i]
+
             if i in finished_before:
                 continue  # Avoids double processing
 
@@ -1402,14 +1418,13 @@ class LLMEngine:
         cached_outputs = self.cached_scheduler_outputs[0]
         seq_group_metadata_list = cached_outputs.seq_group_metadata_list
         scheduler_outputs = cached_outputs.scheduler_outputs
-        scheduled_ids = cached_outputs.scheduled_ids
         allow_async_output_proc = cached_outputs.allow_async_output_proc
 
         # Skip the scheduler if there are any remaining steps in the seq groups.
         # This ensures that the scheduler is only called again when the current
         # batch has completed.
         if not self._has_remaining_steps(seq_group_metadata_list):
-            (seq_group_metadata_list, scheduler_outputs, scheduled_ids,
+            (seq_group_metadata_list, scheduler_outputs,
              allow_async_output_proc) = self.scheduler[0].schedule()
 
             if not allow_async_output_proc and len(self.output_queue) > 0:
@@ -1421,11 +1436,10 @@ class LLMEngine:
                 # lookahead slots
                 self._cache_scheduler_outputs_for_multi_step(
                     0, seq_group_metadata_list, scheduler_outputs,
-                    scheduled_ids, allow_async_output_proc)
+                    allow_async_output_proc)
 
         assert seq_group_metadata_list is not None
         assert scheduler_outputs is not None
-        assert scheduled_ids is not None
 
         if self.scheduler_config.is_multi_step:
             assert not allow_async_output_proc
@@ -1483,7 +1497,7 @@ class LLMEngine:
             # Add results to the output_queue
             # (for async or non-async postprocessing)
             self.output_queue.append(
-                (output, scheduled_ids, scheduler_outputs))
+                (output, seq_group_metadata_list, scheduler_outputs))
 
             if (len(output) > 0) and allow_async_output_proc:
                 assert len(output) == 1, ("Multi step decoding does not work "
@@ -1544,14 +1558,11 @@ class LLMEngine:
             self, virtual_engine: int,
             seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
             scheduler_outputs: SchedulerOutputs,
-            scheduled_ids: Optional[List[Tuple[ScheduledSequenceGroup,
-                                               SequenceGroupMetadata]]],
             allow_async_output_proc: bool) -> None:
         co = self.cached_scheduler_outputs[virtual_engine]
 
         co.seq_group_metadata_list = seq_group_metadata_list
         co.scheduler_outputs = scheduler_outputs
-        co.scheduled_ids = scheduled_ids
         co.allow_async_output_proc = allow_async_output_proc
         co.last_output = None
 
