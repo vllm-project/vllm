@@ -328,19 +328,31 @@ class ModelConfig:
         self.max_seq_len_to_capture = min(self.max_seq_len_to_capture,
                                           self.max_model_len)
 
-    def verify_async_output_proc(self, speculative_config,
+    def verify_async_output_proc(self, parallel_config, speculative_config,
                                  device_config) -> None:
+        if not self.use_async_output_proc:
+            # Nothing to check
+            return
+
+        if parallel_config.pipeline_parallel_size > 1:
+            logger.warning("Async output processing can not be enabled "
+                           "with pipeline parallel")
+            self.use_async_output_proc = False
+            return
+
         if device_config.device_type != "cuda":
             logger.warning(
                 "Async output processing is only supported for CUDA."
                 " Disabling it for other platforms.")
             self.use_async_output_proc = False
             return
+
         if envs.VLLM_USE_RAY_SPMD_WORKER:
             logger.warning(
                 "Async output processing can not be enabled with ray spmd")
             self.use_async_output_proc = False
             return
+
         if self.enforce_eager:
             logger.warning(
                 "To see benefits of async output processing, enable CUDA "
@@ -348,6 +360,7 @@ class ModelConfig:
                 "processor cannot be used")
             self.use_async_output_proc = not self.enforce_eager
             return
+
         # Async postprocessor is not necessary with embedding mode
         # since there is no token generation
         if self.embedding_mode:
@@ -1807,7 +1820,8 @@ class EngineConfig:
     def __post_init__(self):
         """Verify configs are valid & consistent with each other.
         """
-        self.model_config.verify_async_output_proc(self.speculative_config,
+        self.model_config.verify_async_output_proc(self.parallel_config,
+                                                   self.speculative_config,
                                                    self.device_config)
         self.model_config.verify_with_parallel_config(self.parallel_config)
         self.cache_config.verify_with_parallel_config(self.parallel_config)
