@@ -12,10 +12,7 @@ from openai.types.chat import ChatCompletionMessageParam
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.openai.api_server import run_server
 from vllm.entrypoints.openai.cli_args import make_arg_parser
-from vllm.logger import init_logger
 from vllm.utils import FlexibleArgumentParser
-
-logger = init_logger(__name__)
 
 
 def register_signal_handlers():
