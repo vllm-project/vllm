@@ -80,13 +80,13 @@ find_package(Torch REQUIRED)
 # cmake --build . --target default
 #
 add_custom_target(default)
-message(STATUS "Enabling core extension.")
 
 # Define _core_C extension
 #  built for (almost) every target platform, (excludes TPU and Neuron)
 # Note: _core_C requires PyTorch 2.4.0 or greater to compile.
 if (Torch_VERSION VERSION_GREATER_EQUAL "2.4.0")
-  set(VLLM_EXT_SRC
+   message(STATUS "Enabling core extension.")
+   set(VLLM_EXT_SRC
     "csrc/core/torch_bindings.cpp")
 
   define_gpu_extension_target(
@@ -99,6 +99,8 @@ if (Torch_VERSION VERSION_GREATER_EQUAL "2.4.0")
     WITH_SOABI)
 
   add_dependencies(default _core_C)
+else()
+   message(STATUS "Not enabling core extension for Pytorch ${Torch_VERSION} < 2.4.0.")
 endif()
 
 #
