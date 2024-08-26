@@ -84,20 +84,22 @@ message(STATUS "Enabling core extension.")
 
 # Define _core_C extension
 #  built for (almost) every target platform, (excludes TPU and Neuron)
+# Note: _core_C requires PyTorch 2.4.0 or greater to compile.
+if (Torch_VERSION VERSION_GREATER_EQUAL "2.4.0")
+  set(VLLM_EXT_SRC
+    "csrc/core/torch_bindings.cpp")
 
-set(VLLM_EXT_SRC
-  "csrc/core/torch_bindings.cpp")
+  define_gpu_extension_target(
+    _core_C
+    DESTINATION vllm
+    LANGUAGE CXX
+    SOURCES ${VLLM_EXT_SRC}
+    COMPILE_FLAGS ${CXX_COMPILE_FLAGS}
+    USE_SABI 3
+    WITH_SOABI)
 
-define_gpu_extension_target(
-  _core_C
-  DESTINATION vllm
-  LANGUAGE CXX
-  SOURCES ${VLLM_EXT_SRC}
-  COMPILE_FLAGS ${CXX_COMPILE_FLAGS}
-  USE_SABI 3
-  WITH_SOABI)
-
-add_dependencies(default _core_C)
+  add_dependencies(default _core_C)
+endif()
 
 #
 # Forward the non-CUDA device extensions to external CMake scripts.
