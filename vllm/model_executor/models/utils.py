@@ -1,4 +1,4 @@
-from typing import Dict, Iterable, List, Optional, Protocol, Tuple, Callable
+from typing import Callable, Dict, Iterable, List, Optional, Protocol, Tuple
 
 import torch
 import torch.nn as nn
@@ -11,8 +11,8 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.loader import build_model
 from vllm.model_executor.models import ModelRegistry
 from vllm.multimodal import BatchedTensors
-from vllm.utils import is_pin_memory_available
 from vllm.sequence import IntermediateTensors
+from vllm.utils import is_pin_memory_available
 
 
 def filter_weights(weights: Iterable[Tuple[str, torch.Tensor]], prefix: str):
