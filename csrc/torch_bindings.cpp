@@ -202,6 +202,32 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("cutlass_scaled_mm_supports_fp8", &cutlass_scaled_mm_supports_fp8);
   ops.impl("cutlass_scaled_mm_supports_fp8", torch::kCUDA,
            &cutlass_scaled_mm_supports_fp8);
+  // Mamba selective scan kernel
+  ops.def(
+      "selective_scan_fwd(Tensor! u, Tensor! delta,"
+      "Tensor! A, Tensor! B, Tensor! C,"
+      "Tensor? D_, Tensor? z_, Tensor? delta_bias_,"
+      "bool delta_softplus,"
+      "Tensor? index_, Tensor? x) -> Tensor[]");
+  ops.impl("selective_scan_fwd", torch::kCUDA, &selective_scan_fwd);
+
+  ops.def(
+      "causal_conv1d_update(Tensor! x,"
+      "Tensor! conv_state,"
+      "Tensor! weight,"
+      "Tensor? bias_,"
+      "bool silu_activation) -> Tensor");
+  ops.impl("causal_conv1d_update", torch::kCUDA, &causal_conv1d_update);
+
+  ops.def(
+      "causal_conv1d_fwd(Tensor! x, Tensor! weight,"
+      "Tensor? bias_,"
+      "Tensor? seq_idx_,"
+      "Tensor? seq_pos_idx_,"
+      "Tensor? initial_states_,"
+      "Tensor? final_states_out_,"
+      "bool silu_activation) -> Tensor");
+  ops.impl("causal_conv1d_fwd", torch::kCUDA, &causal_conv1d_fwd);
 #endif
 
   // Quantized GEMM for GPTQ.
@@ -259,32 +285,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("dynamic_scaled_int8_quant", torch::kCUDA,
            &dynamic_scaled_int8_quant);
 
-  // Mamba selective scan kernel
-  ops.def(
-      "selective_scan_fwd(Tensor! u, Tensor! delta,"
-      "Tensor! A, Tensor! B, Tensor! C,"
-      "Tensor? D_, Tensor? z_, Tensor? delta_bias_,"
-      "bool delta_softplus,"
-      "Tensor? index_, Tensor? x) -> Tensor[]");
-  ops.impl("selective_scan_fwd", torch::kCUDA, &selective_scan_fwd);
 
-  ops.def(
-      "causal_conv1d_update(Tensor! x,"
-      "Tensor! conv_state,"
-      "Tensor! weight,"
-      "Tensor? bias_,"
-      "bool silu_activation) -> Tensor");
-  ops.impl("causal_conv1d_update", torch::kCUDA, &causal_conv1d_update);
-
-  ops.def(
-      "causal_conv1d_fwd(Tensor! x, Tensor! weight,"
-      "Tensor? bias_,"
-      "Tensor? seq_idx_,"
-      "Tensor? seq_pos_idx_,"
-      "Tensor? initial_states_,"
-      "Tensor? final_states_out_,"
-      "bool silu_activation) -> Tensor");
-  ops.impl("causal_conv1d_fwd", torch::kCUDA, &causal_conv1d_fwd);
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
