@@ -531,18 +531,16 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             inter_data.query_lens[
                 seq_idx] = inter_data.seq_lens[seq_idx] - context_len
         elif seq_len <= prefix_cache_len:
-            # Full hit. Only compute the last block to avoid
+            # Full hit. Only compute the last token to avoid
             # erroneous behavior. FIXME: Ideally we should directly
             # mark all tokens as computed in the scheduler and do not
             # schedule this sequence, so this case should not happen.
-            block_size = self.block_size
             inter_data.input_tokens[seq_idx] = inter_data.input_tokens[
-                seq_idx][-block_size:]
+                seq_idx][-1:]
             inter_data.input_positions[seq_idx] = inter_data.input_positions[
-                seq_idx][-block_size:]
-            inter_data.query_lens[seq_idx] = block_size
-            inter_data.context_lens[seq_idx] = inter_data.seq_lens[
-                seq_idx] - inter_data.query_lens[seq_idx]
+                seq_idx][-1:]
+            inter_data.query_lens[seq_idx] = 1
+            inter_data.context_lens[seq_idx] = inter_data.seq_lens[seq_idx] - 1
 
     def _compute_for_sliding_window(self, inter_data: InterDataForSeqGroup,
                                     seq_idx: int,
