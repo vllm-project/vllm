@@ -188,14 +188,20 @@ def test_missing_required_argument(parser):
 
 
 def test_cli_override_to_config(parser_with_config):
-    args = parser.parse_args(
+    args = parser_with_config.parse_args(
         ['--config', './data/test_config.yaml', '--tensor-parallel-size', 3])
     assert args.tensor_parallel_size == 3
-    args = parser.parse_args(
+    args = parser_with_config.parse_args(
         ['--tensor-parallel-size', 3, '--config', './data/test_config.yaml'])
     assert args.tensor_parallel_size == 3
 
 
 def test_config_args(parser_with_config):
-    args = parser.parse_args(['--config', './data/test_config.yaml'])
-    assert args.tensor_parallel_size == 3
+    args = parser_with_config.parse_args(
+        ['--config', './data/test_config.yaml'])
+    assert args.tensor_parallel_size == 4
+
+
+def test_config_file(parser_with_config):
+    with pytest.raises(SystemExit):
+        parser_with_config.parse_args(['--config', './data/test_config.json'])
