@@ -351,7 +351,7 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
         scheme = layer.scheme
         if scheme is None:
             raise ValueError("A scheme must be defined for each layer")
-        return scheme.apply(layer, x, bias=bias)
+        return scheme.apply_weights(layer, x, bias=bias)
 
 
 class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
