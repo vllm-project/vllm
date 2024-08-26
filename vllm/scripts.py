@@ -25,7 +25,6 @@ def register_signal_handlers():
 
 
 def serve(args: argparse.Namespace) -> None:
-
     # The default value of `--model`
     if args.model != EngineArgs.model:
         raise ValueError(
