@@ -66,9 +66,6 @@ async def completions_with_server_args(prompts: List[str],
                                        model_name: str,
                                        server_cli_args: List[str],
                                        with_env: dict = {}):  # noqa: B006
-    # env setup
-    os.environ.update(with_env)
-
     outputs = None
     with EnvContextManager(with_env) as _:  # noqa: SIM117
         with RemoteOpenAIServer(model_name, server_cli_args) as server:
