@@ -162,26 +162,25 @@ class PhiFp8MoEMethod(FusedMoEMethodBase):
                 expert] = ops.scaled_fp8_quant(
                     layer.w2_weight.data[expert, :, :].cuda())
 
-        if self.fast_a100_fp8:
-            print_warning_once("Preprocessing weights for A100 FP8 fused MoE")
-            w13_weight =  torch.ops._phi_C.preprocess_weights_for_mixed_gemm(
-                w13_weight.view(torch.int8).transpose(1,2).contiguous().cpu()).to(w13_weight.device)
-            w2_weight =  torch.ops._phi_C.preprocess_weights_for_mixed_gemm(
-                w2_weight.view(torch.int8).transpose(1,2).contiguous().cpu()).to(w2_weight.device)
-            layer.w13_weight_scale = torch.nn.Parameter(
-                layer.w13_weight_scale.to(dtype=torch.bfloat16)
-                .unsqueeze(1)
-                .expand(-1, w13_weight.size(-1))
-                .contiguous(),
-                requires_grad=False,
-            )
-            layer.w2_weight_scale = torch.nn.Parameter(
-                layer.w2_weight_scale.to(dtype=torch.bfloat16)
-                .unsqueeze(1)
-                .expand(-1, w2_weight.size(-1))
-                .contiguous(),
-                requires_grad=False,
-            )
+        print_warning_once("Preprocessing weights for A100 FP8 fused MoE")
+        w13_weight =  torch.ops._phi_C.preprocess_weights_for_mixed_gemm(
+            w13_weight.view(torch.int8).transpose(1,2).contiguous().cpu()).to(w13_weight.device)
+        w2_weight =  torch.ops._phi_C.preprocess_weights_for_mixed_gemm(
+            w2_weight.view(torch.int8).transpose(1,2).contiguous().cpu()).to(w2_weight.device)
+        layer.w13_weight_scale = torch.nn.Parameter(
+            layer.w13_weight_scale.to(dtype=torch.bfloat16)
+            .unsqueeze(1)
+            .expand(-1, w13_weight.size(-1))
+            .contiguous(),
+            requires_grad=False,
+        )
+        layer.w2_weight_scale = torch.nn.Parameter(
+            layer.w2_weight_scale.to(dtype=torch.bfloat16)
+            .unsqueeze(1)
+            .expand(-1, w2_weight.size(-1))
+            .contiguous(),
+            requires_grad=False,
+        )
 
         # This is to skip the move to cpu 
         layer.register_parameter("w13_weight_fp8", torch.nn.Parameter(w13_weight, requires_grad=False))
@@ -202,7 +201,7 @@ class PhiFp8MoEMethod(FusedMoEMethodBase):
               use_grouped_topk: bool,
               topk_group: Optional[int] = None,
               num_expert_group: Optional[int] = None,
-              routing_func: Optional[Callable] = None) -> torch.Tensor:
+              custom_routing_function: Optional[Callable] = None) -> torch.Tensor:
         
         return self.phi_fused_moe_forward(x,
                                         layer.w13_weight_fp8,
@@ -219,5 +218,5 @@ class PhiFp8MoEMethod(FusedMoEMethodBase):
                                         use_grouped_topk=use_grouped_topk,
                                         num_expert_group=num_expert_group,
                                         topk_group=topk_group,
-                                        routing_func=routing_func,
+                                        custom_routing_function=custom_routing_function,
                                         )

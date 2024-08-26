@@ -113,7 +113,7 @@ def fused_moe(
     w2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
-    routing_func: Callable = torch.topk,
+    custom_routing_function: Optional[Callable] = None,
     use_grouped_topk=False,
     num_expert_group=0,
     topk_group=0,
@@ -132,7 +132,7 @@ def fused_moe(
     if cfg_id_0 < 1 or cfg_id_1 < 1:
         cfg_id_0, cfg_id_1, _ = moe_gg_kernel_config[min(moe_gg_kernel_config.keys(), key=lambda x: abs(x - M))]
 
-    topk_weights, topk_ids = routing_func(gating_output, topk)
+    topk_weights, topk_ids = custom_routing_function(hidden_states, gating_output, topk, renormalize)
 
     sorted_token_ids, expert_ids, num_tokens_post_padded, expert_off, expert_length = (
         moe_align_block_size(topk_ids, block_m, E)
