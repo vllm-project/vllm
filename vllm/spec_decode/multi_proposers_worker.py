@@ -1,10 +1,15 @@
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Set, Tuple
 
 import torch
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.sequence import (
+    ExecuteModelRequest,
+    SamplerOutput,
+    SequenceGroupMetadata,
+)
 from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
@@ -19,6 +24,9 @@ class MultiProposersWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
     def __init__(self, *args, **kwargs):
         self.vocab_size = kwargs["model_config"].get_vocab_size()
         self._workers = kwargs.pop('worker_list', {})
+        # Once we support more policies, we can make this configurable.
+        self.scheduling_policy = kwargs.pop('scheduling_policy',
+                                            'proposal_latency')
 
         draft_parallel_config: ParallelConfig = kwargs['parallel_config']
         draft_tp = draft_parallel_config.tensor_parallel_size
@@ -77,13 +85,17 @@ class MultiProposersWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
         the current batch. This could be optimized when we have multiple
         scorers.
         """
-        chosen_proposer = self._get_proposer_for_this_step(
-            execute_model_req,
-            # Once we support more policies, we can make this configurable.
-            scheduling_policy="proposal_latency")
 
-        return self._workers[chosen_proposer].get_spec_proposals(
-            execute_model_req, seq_ids_with_bonus_token_in_last_step)
+        # This policy is deprecated for now due to poor performance.
+        if self.scheduling_policy == "divide_and_conquer":
+            return self._get_combined_spec_proposals(
+                execute_model_req, seq_ids_with_bonus_token_in_last_step)
+        else:
+            chosen_proposer = self._get_proposer_for_this_step(
+                execute_model_req, scheduling_policy=self.scheduling_policy)
+
+            return self._workers[chosen_proposer].get_spec_proposals(
+                execute_model_req, seq_ids_with_bonus_token_in_last_step)
 
     @torch.inference_mode()
     def execute_model(
@@ -157,21 +169,7 @@ class MultiProposersWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
         seq_group_metadata_list = execute_model_req.seq_group_metadata_list
         valid_proposers = list(self._workers.keys())
 
-        if scheduling_policy == "popularity":
-            proposer_count: Dict[str, int] = {}
-            for seq in seq_group_metadata_list:
-                sd_params = seq.spec_decode_params
-                if sd_params is not None:
-                    proposer = sd_params.get_proposer()
-                    if proposer not in valid_proposers:
-                        continue
-                    if proposer not in proposer_count:
-                        proposer_count[proposer] = 0
-                    proposer_count[proposer] += 1
-            if len(proposer_count.keys()) != 0:
-                chosen_proposer = max(proposer_count, key=proposer_count.get)
-
-        elif scheduling_policy == "proposal_latency":
+        if scheduling_policy == "proposal_latency":
             for _, seq in enumerate(seq_group_metadata_list):
                 sd_params = seq.spec_decode_params
                 if sd_params:
@@ -205,6 +203,75 @@ class MultiProposersWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
                 f"Invalid scheduling_policy: '{scheduling_policy}'.")
 
         return chosen_proposer
+
+    def _get_combined_spec_proposals(
+        self,
+        execute_model_req: ExecuteModelRequest,
+        seq_ids_with_bonus_token_in_last_step: Set[int],
+    ) -> SpeculativeProposals:
+        """Produce speculations given an input batch of sequences. This method
+        use multiple speculative proposers to generate speculations and return
+        the combined results.
+        """
+
+        proposer_requests: Dict[str, List[SequenceGroupMetadata]] = {}
+        original_indices: Dict[str, List[int]] = {}
+        valid_proposers = list(self._workers.keys())
+
+        # Split batch by proposer
+        for idx, seq in enumerate(execute_model_req.seq_group_metadata_list):
+            sd_params = seq.spec_decode_params
+            if sd_params:
+                proposer = sd_params.get_proposer()
+                if proposer not in valid_proposers:
+                    # Got unknown proposer. Use '[ngram]' as default instead.
+                    proposer = '[ngram]'
+                if proposer not in proposer_requests:
+                    proposer_requests[proposer] = []
+                    original_indices[proposer] = []
+                proposer_requests[proposer].append(seq)
+                original_indices[proposer].append(idx)
+
+        all_proposals: Dict[str, SpeculativeProposals] = {}
+
+        # Although we use ThreadPoolExecutor to get_spec_proposals concurently,
+        # we still need to wait for the slowest proposer to finish on each
+        # batch for further scoring.
+        # TODO: Fix this when there are multiple scorer instances available for
+        # scoring.
+        with ThreadPoolExecutor() as executor:
+            futures = {
+                executor.submit(self._workers[proposer].get_spec_proposals,
+                                execute_model_req.clone(sq_list), seq_ids_with_bonus_token_in_last_step):
+                proposer
+                for proposer, sq_list in proposer_requests.items()
+                if len(sq_list) != 0
+            }
+
+            for future in futures:
+                proposer = futures[future]
+                all_proposals[proposer] = future.result()
+
+        seq_group_metadata_length = len(
+            execute_model_req.seq_group_metadata_list)
+        merged_token_ids = [None] * seq_group_metadata_length
+        merged_probs = [None] * seq_group_metadata_length
+        merged_lens = [None] * seq_group_metadata_length
+
+        # Combine and restore the original order of the proposals
+        for proposer, indices in original_indices.items():
+            proposals = all_proposals[proposer]
+            if len(indices) != 0:
+                for i, idx in enumerate(indices):
+                    merged_token_ids[idx] = proposals.proposal_token_ids[i]
+                    merged_probs[idx] = proposals.proposal_probs[i]
+                    merged_lens[idx] = proposals.proposal_lens[i]
+
+        combined_proposals = SpeculativeProposals(
+            proposal_token_ids=torch.stack(merged_token_ids),
+            proposal_probs=torch.stack(merged_probs),
+            proposal_lens=torch.stack(merged_lens))
+        return combined_proposals
 
     def is_multi_step_worker_instance(self, obj: ProposerWorkerBase) -> bool:
         if isinstance(obj, MultiStepWorker):
