@@ -100,7 +100,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
                 model_outputs.append(model_output)
 
         filtered_model_outputs = self._filter_model_output(
-            model_outputs, indices_of_seq_with_bonus_tokens)
+            model_outputs, indices_of_seq_with_bonus_tokens, self.device)
         return filtered_model_outputs, True
 
     @staticmethod
