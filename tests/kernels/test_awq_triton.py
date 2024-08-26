@@ -35,7 +35,7 @@ def awq_dequantize_torch(qweight: torch.Tensor, scales: torch.Tensor,
                          group_size: int) -> torch.Tensor:
 
     if group_size == -1:
-        group_size = qweights.shape[0]
+        group_size = qweight.shape[0]
 
     bits = 4
     shifts = torch.arange(0, 32, bits, device=qzeros.device)
