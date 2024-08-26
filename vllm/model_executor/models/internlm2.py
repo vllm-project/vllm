@@ -228,10 +228,9 @@ class InternLM2Model(nn.Module):
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: InternLMDecoderLayer(
-                config, cache_config, quant_config
-            ), prefix=f"{prefix}.layers"
-        )
+            lambda prefix: InternLMDecoderLayer(config, cache_config,
+                                                quant_config),
+            prefix=f"{prefix}.layers")
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(

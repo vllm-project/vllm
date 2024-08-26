@@ -34,21 +34,11 @@ logger = init_logger(__name__)
 _EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 
 _PP_SUPPORTED_MODELS = [
-    "AquilaModel",
-    "AquilaForCausalLM",
-    "DeepseekV2ForCausalLM",
-    "InternLMForCausalLM",
-    "JAISLMHeadModel",
-    "LlamaForCausalLM",
-    "LLaMAForCausalLM",
-    "MistralForCausalLM",
-    "Phi3ForCausalLM",
-    "GPT2LMHeadModel",
-    "MixtralForCausalLM",
-    "NemotronForCausalLM",
-    "Qwen2ForCausalLM",
-    "Qwen2MoeForCausalLM",
-    "QWenLMHeadModel",
+    "AquilaModel", "AquilaForCausalLM", "DeepseekV2ForCausalLM",
+    "InternLMForCausalLM", "JAISLMHeadModel", "LlamaForCausalLM",
+    "LLaMAForCausalLM", "MistralForCausalLM", "Phi3ForCausalLM",
+    "GPT2LMHeadModel", "MixtralForCausalLM", "NemotronForCausalLM",
+    "Qwen2ForCausalLM", "Qwen2MoeForCausalLM", "QWenLMHeadModel",
     "InternVLChatModel"
 ]
 
