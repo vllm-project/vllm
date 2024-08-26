@@ -23,7 +23,7 @@ logger = init_logger(__name__)
 WEIGHT_LOADER_V2_SUPPORTED = [
     "CompressedTensorsLinearMethod", "AWQMarlinLinearMethod",
     "AWQLinearMethod", "GPTQMarlinLinearMethod", "Fp8LinearMethod",
-    "MarlinLinearMethod", "QQQLinearMethod"
+    "MarlinLinearMethod", "QQQLinearMethod", "GPTQMarlin24LinearMethod"
 ]
 
 
