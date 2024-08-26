@@ -75,6 +75,8 @@ class OpenAIServingCompletion(OpenAIServing):
             - suffix (the language models we currently support do not support
             suffix)
         """
+        # krishna
+        print("call to create_completion")
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret

@@ -650,14 +650,17 @@ class LLMEngine:
         min_cost_scheduler = self.scheduler[costs.index(min(costs))]
 
         # Check if request would exceed max queue length of min_cost_scheduler
-        curr_queue_len = len(min_cost_scheduler.waiting)
-        max_queue_len = min_cost_scheduler.scheduler_config.get_max_queue_length
-        if max_queue_len > -1 and curr_queue_len >= max_queue_len:
+        curr_queue_len = len(min_cost_scheduler.running) + len(min_cost_scheduler.waiting)
+        max_queue_len = min_cost_scheduler.scheduler_config.max_queue_length
+        max_num_seqs = min_cost_scheduler.scheduler_config.max_num_seqs
+        
+        if max_queue_len > -1 and curr_queue_len >= max_num_seqs + max_queue_len:
             raise QueueOverflowError(
                 f"Request {request_id} would exceed the indicated maximum "
                 f"queue length of {max_queue_len}",
                 HTTPStatus.SERVICE_UNAVAILABLE)
 
+        # Add to scheduler
         min_cost_scheduler.add_seq_group(seq_group)
 
     def stop_remote_worker_execution_loop(self) -> None:

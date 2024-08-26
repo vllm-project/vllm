@@ -432,6 +432,12 @@ class Scheduler:
 
                 self._free_seq_group_cross_attn_blocks(aborted_group)
 
+                # krishna
+                full_queue = self.waiting + self.running + self.swapped
+                present_requests = [seq_group.request_id for seq_group in full_queue]
+                print("scheduler abort_seq_group request_id: ", aborted_group.request_id)
+                print("present_requests: ", present_requests)
+
     def _free_seq_group_cross_attn_blocks(
         self,
         seq_group: SequenceGroup,

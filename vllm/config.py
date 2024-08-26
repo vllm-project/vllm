@@ -882,7 +882,7 @@ class SchedulerConfig:
                  max_num_batched_tokens: Optional[int],
                  max_num_seqs: int,
                  max_model_len: int,
-                 max_queue_length: int,
+                 max_queue_length: int = -1,
                  use_v2_block_manager: bool = False,
                  num_lookahead_slots: int = 0,
                  delay_factor: float = 0.0,
@@ -959,10 +959,6 @@ class SchedulerConfig:
     @property
     def is_multi_step(self) -> bool:
         return self.num_scheduler_steps > 1
-
-    @property
-    def get_max_queue_length(self) -> int:
-        return self.max_queue_length
 
 
 class DeviceConfig:

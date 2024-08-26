@@ -27,7 +27,7 @@ def schedule_and_update_computed_tokens(scheduler):
     return metas, out
 
 
-def test_simple():
+def  test_simple():
     """Verify basic scheduling works."""
     block_size = 4
     num_seq_group = 4
