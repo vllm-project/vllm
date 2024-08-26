@@ -1158,7 +1158,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
                               %s supplied", extension)
 
         config_args = FlexibleArgumentParser._load_config_file(file_path)
-        args = args[:index] + config_args + args[index + 2:]
+        args = config_args + args[:index] + args[index + 2:]
 
         return args
 

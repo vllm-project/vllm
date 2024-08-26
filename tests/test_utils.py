@@ -132,6 +132,15 @@ def parser():
     return parser
 
 
+@pytest.fixture
+def parser_with_config():
+    parser = FlexibleArgumentParser()
+    parser.add_argument('--config', type=str)
+    parser.add_argument('--port', type=int)
+    parser.add_argument('--tensor-parallel-size', type=int)
+    return parser
+
+
 def test_underscore_to_dash(parser):
     args = parser.parse_args(['--image_input_type', 'pixel_values'])
     assert args.image_input_type == 'pixel_values'
@@ -176,3 +185,17 @@ def test_missing_required_argument(parser):
     parser.add_argument('--required-arg', required=True)
     with pytest.raises(SystemExit):
         parser.parse_args([])
+
+
+def test_cli_override_to_config(parser_with_config):
+    args = parser.parse_args(
+        ['--config', './data/test_config.yaml', '--tensor-parallel-size', 3])
+    assert args.tensor_parallel_size == 3
+    args = parser.parse_args(
+        ['--tensor-parallel-size', 3, '--config', './data/test_config.yaml'])
+    assert args.tensor_parallel_size == 3
+
+
+def test_config_args(parser_with_config):
+    args = parser.parse_args(['--config', './data/test_config.yaml'])
+    assert args.tensor_parallel_size == 3
