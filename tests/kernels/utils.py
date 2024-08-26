@@ -16,10 +16,17 @@ from vllm.utils import (STR_BACKEND_ENV_VAR, STR_XFORMERS_ATTN_VAL,
 
 # For now, disable "test_aot_dispatch_dynamic" since there are some
 # bugs related to this test in PyTorch 2.4.
-OPCHECK_TEST_UTILS: Tuple[str, ...] = (
+DEFAULT_OPCHECK_TEST_UTILS: Tuple[str, ...] = (
     "test_schema",
     "test_autograd_registration",
     "test_faketensor",
+)
+
+ALL_OPCHECK_TEST_UTILS: Tuple[str, ...] = (
+    "test_schema",
+    "test_autograd_registration",
+    "test_faketensor",
+    "test_aot_dispatch_dynamic",
 )
 
 
@@ -942,14 +949,12 @@ def opcheck(op: Union[torch._ops.OpOverload, torch._ops.OpOverloadPacket,
             args: Tuple[Any, ...],
             kwargs: Optional[Dict[str, Any]] = None,
             *,
-            test_utils: Union[str, Sequence[str]] = OPCHECK_TEST_UTILS,
+            test_utils: Union[str, Sequence[str]] = ALL_OPCHECK_TEST_UTILS,
             raise_exception: bool = True,
             cond: bool = True) -> Dict[str, str]:
-    if not cond:
-        return {}
-    else:
-        return torch.library.opcheck(op,
-                                     args,
-                                     kwargs,
-                                     test_utils=test_utils,
-                                     raise_exception=raise_exception)
+    return torch.library.opcheck(
+        op,
+        args,
+        kwargs,
+        test_utils=test_utils,
+        raise_exception=raise_exception) if cond else {}

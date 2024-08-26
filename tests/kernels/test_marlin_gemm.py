@@ -5,7 +5,7 @@ Run `pytest tests/kernels/marlin/test_marlin_gemm.py`.
 import pytest
 import torch
 
-from tests.kernels.utils import opcheck
+from tests.kernels.utils import DEFAULT_OPCHECK_TEST_UTILS, opcheck
 from tests.quantization.utils import is_quant_method_supported
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
@@ -226,7 +226,8 @@ def test_gptq_marlin_gemm(
         torch.ops._C.gptq_marlin_gemm,
         (a_input, marlin_q_w, marlin_s, marlin_zp, g_idx, sort_indices,
          workspace.scratch, quant_type, a_input.shape[0], b_weight.shape[1],
-         a_input.shape[1], is_k_full, False, use_fp32_reduce))
+         a_input.shape[1], is_k_full, False, use_fp32_reduce),
+        test_utils=DEFAULT_OPCHECK_TEST_UTILS)
 
     output = ops.gptq_marlin_gemm(
         a_input,
@@ -282,7 +283,8 @@ def test_gptq_marlin_24_gemm(k_chunk, n_chunk, quant_type, group_size,
     opcheck(torch.ops._C.gptq_marlin_24_gemm,
             (a_input, marlin_24_q_w_comp, marlin_24_meta, marlin_24_s,
              workspace_24.scratch, quant_type, a_input.shape[0],
-             b_weight.shape[1], a_input.shape[1]))
+             b_weight.shape[1], a_input.shape[1]),
+            test_utils=DEFAULT_OPCHECK_TEST_UTILS)
 
     output = ops.gptq_marlin_24_gemm(
         a_input,
