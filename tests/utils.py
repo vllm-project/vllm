@@ -71,7 +71,10 @@ class RemoteOpenAIServer:
                 raise ValueError("You have manually specified the port "
                                  "when `auto_port=True`.")
 
-            vllm_serve_args += ["--port", str(get_open_port())]
+            # Don't mutate the input args
+            vllm_serve_args = vllm_serve_args + [
+                "--port", str(get_open_port())
+            ]
 
         parser = FlexibleArgumentParser(
             description="vLLM's remote OpenAI server.")
