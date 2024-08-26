@@ -18,7 +18,9 @@ def test_custom_executor(model, tmpdir):
         os.environ["VLLM_PLUGINS"] = "switch_executor"
         assert not os.path.exists(".marker")
 
-        engine_args = EngineArgs(model=model, enforce_eager=True)
+        engine_args = EngineArgs(model=model,
+                                 enforce_eager=True,
+                                 gpu_memory_utilization=0.3)
         engine = LLMEngine.from_engine_args(engine_args)
         sampling_params = SamplingParams(max_tokens=1)
 
@@ -43,7 +45,9 @@ def test_custom_executor_async(model, tmpdir):
         os.environ["VLLM_PLUGINS"] = "switch_executor"
         assert not os.path.exists(".marker")
 
-        engine_args = AsyncEngineArgs(model=model, enforce_eager=True)
+        engine_args = AsyncEngineArgs(model=model,
+                                      enforce_eager=True,
+                                      gpu_memory_utilization=0.3)
         engine = AsyncLLMEngine.from_engine_args(engine_args)
         sampling_params = SamplingParams(max_tokens=1)
 
