@@ -2,7 +2,8 @@ import torch
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.sequence import ExecuteModelRequest
-from vllm.utils import get_distributed_init_method, get_ip, get_open_port
+from vllm.utils import (BlockSwapParam, Device, get_distributed_init_method,
+                        get_ip, get_open_port)
 from vllm.worker.worker import Worker
 
 
@@ -54,7 +55,11 @@ def test_swap() -> None:
         a.cuda(), b.cuda(), rtol=0.0, atol=0.0)
 
     # Test swap out.
-    blocks_to_swap_out = [(3, 72), (56, 35), (84, 34)]
+    blocks_to_swap_out = [
+        (BlockSwapParam(3, Device.GPU), BlockSwapParam(72, Device.CPU)),
+        (BlockSwapParam(56, Device.GPU), BlockSwapParam(35, Device.CPU)),
+        (BlockSwapParam(84, Device.GPU), BlockSwapParam(34, Device.CPU)),
+    ]
     execute_model_req = ExecuteModelRequest(
         seq_group_metadata_list=[],
         blocks_to_swap_in=[],
@@ -67,17 +72,19 @@ def test_swap() -> None:
         gpu_key_cache, gpu_value_cache = gpu_cache[i]
         cpu_key_cache, cpu_value_cache = cpu_cache[i]
         for src, dst in blocks_to_swap_out:
-            assert allclose(gpu_key_cache[src], cpu_key_cache[dst])
-            assert allclose(gpu_value_cache[src], cpu_value_cache[dst])
+            assert allclose(gpu_key_cache[src.block_id],
+                            cpu_key_cache[dst.block_id])
+            assert allclose(gpu_value_cache[src.block_id],
+                            cpu_value_cache[dst.block_id])
 
     # Test swap in.
     execute_model_req.blocks_to_swap_out = []
     execute_model_req.blocks_to_swap_in = [
-        (19, 45),
-        (67, 23),
-        (12, 78),
-        (40, 99),
-        (1, 71),
+        (BlockSwapParam(19, Device.CPU), BlockSwapParam(45, Device.GPU)),
+        (BlockSwapParam(67, Device.CPU), BlockSwapParam(23, Device.GPU)),
+        (BlockSwapParam(12, Device.CPU), BlockSwapParam(78, Device.GPU)),
+        (BlockSwapParam(40, Device.CPU), BlockSwapParam(99, Device.GPU)),
+        (BlockSwapParam(1, Device.CPU), BlockSwapParam(71, Device.GPU)),
     ]
     worker.execute_model(execute_model_req=execute_model_req)
 
@@ -85,5 +92,7 @@ def test_swap() -> None:
         gpu_key_cache, gpu_value_cache = gpu_cache[i]
         cpu_key_cache, cpu_value_cache = cpu_cache[i]
         for src, dst in execute_model_req.blocks_to_swap_in:
-            assert allclose(gpu_key_cache[dst], cpu_key_cache[src])
-            assert allclose(gpu_value_cache[dst], cpu_value_cache[src])
+            assert allclose(gpu_key_cache[dst.block_id],
+                            cpu_key_cache[src.block_id])
+            assert allclose(gpu_value_cache[dst.block_id],
+                            cpu_value_cache[src.block_id])

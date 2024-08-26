@@ -86,6 +86,12 @@ class TPUExecutor(ExecutorBase):
         underlying worker."""
         return self.driver_worker.determine_num_available_blocks()
 
+    def determine_num_external_available_blocks(self) -> int:
+        return 0
+
+    def initialize_external_cache(self, num_external_blocks: int) -> None:
+        pass
+
     def execute_model(
         self,
         execute_model_req: ExecuteModelRequest,

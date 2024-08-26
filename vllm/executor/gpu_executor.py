@@ -113,6 +113,9 @@ class GPUExecutor(ExecutorBase):
         """
         return self.driver_worker.determine_num_available_blocks()
 
+    def determine_num_external_available_blocks(self) -> int:
+        return self.driver_worker.determine_num_external_available_blocks()
+
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks) -> None:
         """Initialize the KV cache by invoking the underlying worker.
         """
@@ -123,6 +126,11 @@ class GPUExecutor(ExecutorBase):
                     num_cpu_blocks)
 
         self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
+
+    def initialize_external_cache(self, num_external_blocks: int) -> None:
+        logger.info("# External blocks: %d", num_external_blocks)
+
+        self.driver_worker.initialize_external_cache(num_external_blocks)
 
     def execute_model(
         self, execute_model_req: ExecuteModelRequest
