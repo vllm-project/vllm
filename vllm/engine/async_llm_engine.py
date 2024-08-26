@@ -778,8 +778,6 @@ class AsyncLLMEngine:
             self._request_tracker.get_new_and_aborted_requests())
 
         for new_request in new_requests:
-            # krishna
-            print("engine_step new_request", new_request["request_id"])
             try:
                 if self.engine_use_ray:
                     await self.engine.add_request.remote(  # type: ignore
