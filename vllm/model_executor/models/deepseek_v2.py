@@ -138,9 +138,13 @@ class DeepseekV2MoE(nn.Module):
                 reduce_results=False,
             )
 
+    def load_experts_non_blocking(self):
+        self.experts.load_experts_to_gpu_nonblocking()
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
+        self.load_experts_non_blocking()
         if self.n_shared_experts is not None:
             shared_output = self.shared_experts(hidden_states)
         # router_logits: (num_tokens, n_experts)

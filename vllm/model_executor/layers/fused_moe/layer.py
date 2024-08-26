@@ -26,6 +26,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     @abstractmethod
     def apply(self, layer: torch.nn.Module, x: torch.Tensor,
               router_logits: torch.Tensor, top_k: int, renormalize: bool,
+              stream:torch.cuda.Stream,
               use_grouped_topk: bool) -> torch.Tensor:
         raise NotImplementedError
 
@@ -62,6 +63,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
               x: torch.Tensor,
               router_logits: torch.Tensor,
               top_k: int,
+              stream: torch.cuda.Stream,
               renormalize: bool,
               use_grouped_topk: bool,
               topk_group: Optional[int] = None,
@@ -72,6 +74,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         return self.forward(x=x,
                             w1=w13_weight,
                             w2=w2_weight,
+                            stream=stream,
                             layer=layer,
                             router_logits=router_logits,
                             top_k=top_k,
@@ -108,6 +111,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         return fused_experts(hidden_states=x,
                              w1=w1,
                              w2=w2,
+                             stream=stream,
                              topk_weights=topk_weights,
                              topk_ids=topk_ids,
                              inplace=True)
@@ -309,6 +313,7 @@ class FusedMoE(torch.nn.Module):
             layer=self,
             x=hidden_states,
             router_logits=router_logits,
+            stream=self.stream,
             top_k=self.top_k,
             renormalize=self.renormalize,
             use_grouped_topk=self.use_grouped_topk,
@@ -320,6 +325,7 @@ class FusedMoE(torch.nn.Module):
         # of memory. We can change this by calling clear_cache() after the deletions.
         del self.w2_gpu
         del self.w1_gpu
+        torch.cuda.empty_cache()
 
         if self.reduce_results and self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(
