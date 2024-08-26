@@ -295,6 +295,21 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         sequences are provided."""
         start_time = time.perf_counter()
 
+        #FIXME: This is a workaround to use same logits_processors for requests
+        # with same request_id. Otherwise async execute model will not work due
+        # to logits_processors being copied when submitting to multi processing
+        # Queue.
+        if not hasattr(self, 'global_logits_processors'):
+            self.global_logits_processors = dict()
+
+        for seq_group in execute_model_req.seq_group_metadata_list:
+            if seq_group.request_id not in self.global_logits_processors:
+                self.global_logits_processors[seq_group.request_id] = \
+                    seq_group.sampling_params.logits_processors
+            else:
+                seq_group.sampling_params.logits_processors = \
+                    self.global_logits_processors[seq_group.request_id]
+
         inputs = self.prepare_input(execute_model_req)
         if inputs is None:
             return None
