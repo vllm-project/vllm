@@ -4,8 +4,8 @@ import os
 import pytest
 
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
-from vllm.engine.llm_engine import LLMEngine
 from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.engine.llm_engine import LLMEngine
 from vllm.sampling_params import SamplingParams
 
 
@@ -13,7 +13,7 @@ from vllm.sampling_params import SamplingParams
 def test_custom_executor(model, tmpdir):
     cwd = os.path.abspath(".")
     os.chdir(tmpdir)
-    old_env = os.environ["VLLM_PLUGINS"]
+    old_env = os.environ.get("VLLM_PLUGINS", None)
     try:
         os.environ["VLLM_PLUGINS"] = "switch_executor"
         assert not os.path.exists(".marker")
@@ -28,14 +28,17 @@ def test_custom_executor(model, tmpdir):
         assert os.path.exists(".marker")
     finally:
         os.chdir(cwd)
-        os.environ["VLLM_PLUGINS"] = old_env
+        if old_env is not None:
+            os.environ["VLLM_PLUGINS"] = old_env
+        else:
+            del os.environ["VLLM_PLUGINS"]
 
 
 @pytest.mark.parametrize("model", ["facebook/opt-125m"])
 def test_custom_executor_async(model, tmpdir):
     cwd = os.path.abspath(".")
     os.chdir(tmpdir)
-    old_env = os.environ["VLLM_PLUGINS"]
+    old_env = os.environ.get("VLLM_PLUGINS", None)
     try:
         os.environ["VLLM_PLUGINS"] = "switch_executor"
         assert not os.path.exists(".marker")
@@ -54,4 +57,7 @@ def test_custom_executor_async(model, tmpdir):
         assert os.path.exists(".marker")
     finally:
         os.chdir(cwd)
-        os.environ["VLLM_PLUGINS"] = old_env
+        if old_env is not None:
+            os.environ["VLLM_PLUGINS"] = old_env
+        else:
+            del os.environ["VLLM_PLUGINS"]
