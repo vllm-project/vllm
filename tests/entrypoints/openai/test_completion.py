@@ -754,11 +754,12 @@ async def test_guided_decoding_type_error(client: openai.AsyncOpenAI,
 async def test_max_queue_length(model_name: str, max_queue_len: int,
                                 max_num_seqs: int):
 
-    print(f"Name of model: {model_name}")
-    print(f"Test max queue length of {max_queue_len}")
+    print(f"\n \n--- Test Specs ---\n"
+          f" model: {model_name}\n"
+          f" max_queue_len: {max_queue_len}\n"
+          f" max_num_seqs: {max_num_seqs}\n")
 
     server_args = [
-        # use half precision for speed and memory savings in CI environment
         "--dtype",
         "bfloat16",
         "--max-model-len",
