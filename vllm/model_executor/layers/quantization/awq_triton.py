@@ -220,7 +220,7 @@ def awq_dequantize_triton(qweight: torch.Tensor,
     assert K > 0 and M > 0
     assert scales.shape[0] == K // group_size and scales.shape[1] == M
     assert zeros.shape[0] == K // group_size and zeros.shape[1] == M // 8
-    assert K >= group_size
+    assert group_size <= K
     assert group_size in AWQ_TRITON_SUPPORTED_GROUP_SIZES or group_size == K
 
     # Result tensor:
@@ -274,7 +274,7 @@ def awq_gemm_triton(input: torch.Tensor,
     assert scales.shape[0] == K // group_size and scales.shape[1] == N
     assert split_k_iters & (split_k_iters - 1) == 0 and split_k_iters != 0
     assert split_k_iters <= 32
-    assert K >= group_size
+    assert group_size <= K
     assert group_size in AWQ_TRITON_SUPPORTED_GROUP_SIZES or group_size == K
 
     grid = lambda META: (
