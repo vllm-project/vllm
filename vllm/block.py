@@ -60,6 +60,7 @@ class BlockTable:
         return self._blocks[key]
 
     if TYPE_CHECKING:
+
         def __iter__(self) -> Iterator[PhysicalTokenBlock]:
             raise RuntimeError("Method should be automatically generated")
 

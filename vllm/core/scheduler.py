@@ -288,7 +288,8 @@ def scheduler_running_outputs_builder():
 
 
 def scheduled_seq_group_builder():
-    return ScheduledSequenceGroup(SequenceGroup("", [], -1), token_chunk_size=0)
+    return ScheduledSequenceGroup(SequenceGroup("", [], -1),
+                                  token_chunk_size=0)
     # return ScheduledSequenceGroup(seq_group=None, token_chunk_size=0)
 
 
