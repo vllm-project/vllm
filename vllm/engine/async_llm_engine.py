@@ -449,6 +449,7 @@ class _AsyncLLMEngine(LLMEngine):
                 lora_request=lora_request,
             )
             multi_modal_data = None
+            negative_prompt = negative_prompt_token_ids = None
         elif isinstance(inputs, dict):
             if "prompt_token_ids" in inputs:
                 prompt = None
@@ -462,11 +463,24 @@ class _AsyncLLMEngine(LLMEngine):
                     lora_request=lora_request,
                 )
 
+            if "negative_prompt_token_ids" in inputs:
+                negative_prompt = None
+                negative_prompt_token_ids = inputs["negative_prompt_token_ids"]
+            elif "negative_prompt" in inputs:
+                negative_prompt = parsed_negative_prompt = inputs["negative_prompt"]
+                negative_prompt_token_ids = await self._tokenize_prompt_async(
+                    parsed_negative_prompt,
+                    request_id=request_id,
+                    lora_request=lora_request,
+                )
+            else:
+                negative_prompt = negative_prompt_token_ids = None
+
             multi_modal_data = inputs.get("multi_modal_data")
         else:
             assert_never(inputs)
 
-        return prompt, prompt_token_ids, multi_modal_data
+        return prompt, prompt_token_ids, multi_modal_data, negative_prompt, negative_prompt_token_ids
 
     async def _process_encoder_decoder_prompt_async(
         self,

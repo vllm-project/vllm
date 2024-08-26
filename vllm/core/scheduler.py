@@ -1192,6 +1192,7 @@ class Scheduler:
             if seq_group.is_finished():
                 # Free cross-attention block table, if it exists
                 self._free_seq_group_cross_attn_blocks(seq_group)
+                self._free_seq_group_negative_blocks(seq_group)
                 # Add the finished requests to the finished requests list.
                 # This list will be used to update the Mamba cache in the
                 # next step.
