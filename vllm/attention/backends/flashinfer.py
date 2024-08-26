@@ -94,8 +94,7 @@ class FlashInferBackend(AttentionBackend):
         elif kv_cache_dtype == "fp8_e5m2":
             return torch.float8_e5m2
         else:
-            return get_kv_cache_torch_dtype(kv_cache_dtype,
-                                                      model_dtype)
+            return get_kv_cache_torch_dtype(kv_cache_dtype, model_dtype)
 
 
 class FlashInferState(AttentionState):

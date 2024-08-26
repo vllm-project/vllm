@@ -353,12 +353,14 @@ def is_xpu() -> bool:
         return False
     return hasattr(torch, "xpu") and torch.xpu.is_available()
 
+
 def is_flashinfer() -> bool:
     try:
         import flashinfer
     except ImportError:
         flashinfer = None
     return flashinfer is not None
+
 
 @lru_cache(maxsize=None)
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
