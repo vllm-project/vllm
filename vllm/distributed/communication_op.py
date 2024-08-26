@@ -27,11 +27,6 @@ def _tp_in_place_ar(input_: torch.Tensor) -> None:
     get_tp_group().in_place_ar(input_)
 
 
-@torch.library.register_fake("vllm::tp_in_place_ar")
-def _tp_in_place_ar_fake(input_: torch.Tensor) -> None:
-    return
-
-
 def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     if get_tp_group().should_run_out_of_place_ar(input_):
         return torch.ops.vllm.tp_out_of_place_ar(input_)
