@@ -1086,7 +1086,7 @@ class Scheduler:
         )
 
     def _allow_async_output_proc(self, seq_group: SequenceGroup) -> bool:
-        no_beam_search = (seq_group.sampling_params.n == 1
+        no_beam_search = (seq_group.sampling_params.best_of == 1
                           and not seq_group.sampling_params.use_beam_search)
 
         return no_beam_search
