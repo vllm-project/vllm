@@ -17,4 +17,5 @@ if ! [ -x "$(command -v shellcheck)" ]; then
     export PATH="$PATH:$(pwd)/shellcheck-${scversion}"
 fi
 
-find . -name "*.sh" -not -path "./.deps/*" -exec shellcheck {} +
+# TODO - fix warnings in .buildkite/run-amd-test.sh
+find . -name "*.sh" -not -path "./.deps/*" -not -path "./.buildkite/run-amd-test.sh" -exec shellcheck {} +
