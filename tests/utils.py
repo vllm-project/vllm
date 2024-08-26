@@ -61,22 +61,22 @@ class RemoteOpenAIServer:
 
     def __init__(self,
                  model: str,
-                 serve_args: List[str],
+                 vllm_serve_args: List[str],
                  *,
                  env_dict: Optional[Dict[str, str]] = None,
                  auto_port: bool = True,
                  max_wait_seconds: Optional[float] = None) -> None:
         if auto_port:
-            if "-p" in serve_args or "--port" in serve_args:
-                raise ValueError("You have manually specified the port"
+            if "-p" in vllm_serve_args or "--port" in vllm_serve_args:
+                raise ValueError("You have manually specified the port "
                                  "when `auto_port=True`.")
 
-            serve_args = serve_args + ["--port", str(get_open_port())]
+            vllm_serve_args += ["--port", str(get_open_port())]
 
         parser = FlexibleArgumentParser(
             description="vLLM's remote OpenAI server.")
         parser = make_arg_parser(parser)
-        args = parser.parse_args(["--model", model, *serve_args])
+        args = parser.parse_args(["--model", model, *vllm_serve_args])
         self.host = str(args.host or 'localhost')
         self.port = int(args.port)
 
@@ -87,8 +87,8 @@ class RemoteOpenAIServer:
             engine_config = engine_args.create_engine_config()
             dummy_loader = DefaultModelLoader(engine_config.load_config)
             dummy_loader._prepare_weights(engine_config.model_config.model,
-                                        engine_config.model_config.revision,
-                                        fall_back_to_pt=True)
+                                          engine_config.model_config.revision,
+                                          fall_back_to_pt=True)
 
         env = os.environ.copy()
         # the current process might initialize cuda,
@@ -96,10 +96,12 @@ class RemoteOpenAIServer:
         env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
         if env_dict is not None:
             env.update(env_dict)
-        self.proc = subprocess.Popen(["vllm", "serve", model, *serve_args],
-                                     env=env,
-                                     stdout=sys.stdout,
-                                     stderr=sys.stderr)
+        self.proc = subprocess.Popen(
+            ["vllm", "serve", model, *vllm_serve_args],
+            env=env,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
         max_wait_seconds = max_wait_seconds or 240
         self._wait_for_server(url=self.url_for("health"),
                               timeout=max_wait_seconds)
