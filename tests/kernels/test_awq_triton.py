@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.quantization.awq_triton import (
-    awq_dequantize_triton, awq_gemm_triton)
+    awq_dequantize_triton, awq_gemm_triton, AWQ_TRITON_SUPPORTED_GROUP_SIZES)
 
 device = "cuda"
 
@@ -31,9 +31,13 @@ def reverse_awq_order(t: torch.Tensor):
 # scales   - [R // G, C     ], float16
 # zeros    - [R // G, C // 8], int32
 def awq_dequantize_torch(qweight: torch.Tensor, scales: torch.Tensor,
-                         qzeros: torch.Tensor) -> torch.Tensor:
+                         qzeros: torch.Tensor,
+                         group_size: int) -> torch.Tensor:
+
+    if group_size == -1:
+        group_size = qweights.shape[0]
+
     bits = 4
-    group_size = 128
     shifts = torch.arange(0, 32, bits, device=qzeros.device)
 
     iweights = torch.bitwise_right_shift(qweight[:, :, None],
@@ -61,8 +65,11 @@ def awq_dequantize_torch(qweight: torch.Tensor, scales: torch.Tensor,
 # zeros    - [R // G, C // 8], int32
 @pytest.mark.parametrize("qweight_rows", [3584, 18944, 128, 256, 512, 1024])
 @pytest.mark.parametrize("qweight_cols", [448, 576, 4736, 16, 32, 64, 128])
-def test_dequantize(qweight_rows, qweight_cols):
-    group_size = 128
+@pytest.mark.parametrize("group_size", AWQ_TRITON_SUPPORTED_GROUP_SIZES)
+def test_dequantize(qweight_rows, qweight_cols, group_size):
+
+    if group_size == -1:
+        group_size = qweight_rows
 
     qweight_dtype = torch.int32
     scales_rows = qweight_rows // group_size
@@ -94,7 +101,7 @@ def test_dequantize(qweight_rows, qweight_cols):
     assert (not torch.any(torch.isinf(iweights_triton))
             and not torch.any(torch.isnan(iweights_triton)))
 
-    iweights_torch = awq_dequantize_torch(qweight, scales, zeros)
+    iweights_torch = awq_dequantize_torch(qweight, scales, zeros, group_size)
 
     torch.testing.assert_close(iweights_triton, iweights_torch)
 
@@ -104,12 +111,16 @@ def test_dequantize(qweight_rows, qweight_cols):
 # qzeros  - [K // G, M // 8]
 # scales  - [K // G, M]
 @pytest.mark.parametrize("N", [1, 2, 4, 8, 14, 17, 23, 32])
-@pytest.mark.parametrize("K", [128, 256])
+@pytest.mark.parametrize("K", [128])
 @pytest.mark.parametrize("M", [16, 24, 32])
+@pytest.mark.parametrize("group_size", AWQ_TRITON_SUPPORTED_GROUP_SIZES)
 @pytest.mark.parametrize("splitK", [1, 8])
-def test_gemm(N, K, M, splitK):
+def test_gemm(N, K, M, splitK, group_size):
+
+    if group_size == -1:
+        group_size = K
+
     split_k_iters = splitK
-    group_size = 128
 
     input_rows = N
     input_cols = K
@@ -154,5 +165,5 @@ def test_gemm(N, K, M, splitK):
 
     torch.testing.assert_close(output_triton.cpu(),
                                output_torch.cpu(),
-                               atol=1e-1,
-                               rtol=1e-1)
+                               atol=1e-2,
+                               rtol=1e-2)
