@@ -81,12 +81,14 @@ class RemoteOpenAIServer:
         self.port = int(args.port)
 
         # download the model before starting the server to avoid timeout
-        engine_args = AsyncEngineArgs.from_cli_args(args)
-        engine_config = engine_args.create_engine_config()
-        dummy_loader = DefaultModelLoader(engine_config.load_config)
-        dummy_loader._prepare_weights(engine_config.model_config.model,
-                                      engine_config.model_config.revision,
-                                      fall_back_to_pt=True)
+        is_local = os.path.isdir(model)
+        if not is_local:
+            engine_args = AsyncEngineArgs.from_cli_args(args)
+            engine_config = engine_args.create_engine_config()
+            dummy_loader = DefaultModelLoader(engine_config.load_config)
+            dummy_loader._prepare_weights(engine_config.model_config.model,
+                                        engine_config.model_config.revision,
+                                        fall_back_to_pt=True)
 
         env = os.environ.copy()
         # the current process might initialize cuda,
