@@ -105,6 +105,15 @@ add_dependencies(default _core_C)
 #
 # Forward the non-CUDA device extensions to external CMake scripts.
 #
+if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda" AND
+    NOT VLLM_TARGET_DEVICE STREQUAL "rocm")
+    if (VLLM_TARGET_DEVICE STREQUAL "cpu")
+        include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
+    else()
+        return()
+    endif()
+    return()
+endif()
 
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
 
@@ -298,7 +307,6 @@ define_gpu_extension_target(
   ARCHITECTURES ${VLLM_GPU_ARCHES}
   USE_SABI 3
   WITH_SOABI)
-
 
 if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   message(STATUS "Enabling C extension.")
