@@ -12,4 +12,3 @@ torch
 py-cpuinfo
 transformers
 openai # Required by docs/source/serving/openai_compatible_server.md's vllm.entrypoints.openai.cli_args
-configargparse # Required by vllm/utils.FlexibleArgumentParser
