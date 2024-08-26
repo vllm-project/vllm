@@ -308,6 +308,8 @@ define_gpu_extension_target(
   USE_SABI 3
   WITH_SOABI)
 
+
+
 if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   message(STATUS "Enabling C extension.")
   add_dependencies(default _C)
