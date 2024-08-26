@@ -10,9 +10,9 @@ MAX_TOKENS = 200
 IS_ASYNC = False
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="session")
 def vllm_model(vllm_runner):
-    with vllm_runner(MODEL, disable_async_output_proc=True) as vllm_model:
+    with vllm_runner(MODEL) as vllm_model:
         yield vllm_model
 
 
@@ -54,74 +54,110 @@ def _test_stopping(llm_engine: LLMEngine,
     assert stop_reason == expected_reason
 
 
-@pytest.mark.skip_global_cleanup
-def test_stop_basic(vllm_model):
-    _test_stopping(vllm_model.model.llm_engine,
+def _set_async_mode(llm_engine, is_async):
+    llm_engine.scheduler[0].use_async_output_proc = is_async
+
+
+def _stop_basic(llm_engine, is_async):
+    _test_stopping(llm_engine,
                    stop=["."],
                    include_in_output=False,
                    expected_output="VLLM is a 100% volunteer organization",
                    expected_reason=".",
-                   use_async_output_proc=IS_ASYNC)
+                   use_async_output_proc=is_async)
 
-    _test_stopping(vllm_model.model.llm_engine,
+    _test_stopping(llm_engine,
                    stop=["."],
                    include_in_output=True,
                    expected_output="VLLM is a 100% volunteer organization.",
                    expected_reason=".",
-                   use_async_output_proc=IS_ASYNC)
+                   use_async_output_proc=is_async)
 
 
-@pytest.mark.skip_global_cleanup
-def test_stop_multi_tokens(vllm_model):
+def _stop_multi_tokens(llm_engine, is_async):
     _test_stopping(
-        vllm_model.model.llm_engine,
+        llm_engine,
         stop=["group of peo", "short"],
         include_in_output=False,
         expected_output="VLLM is a 100% volunteer organization. We are a ",
         expected_reason="group of peo",
-        use_async_output_proc=IS_ASYNC)
+        use_async_output_proc=is_async)
 
     _test_stopping(
-        vllm_model.model.llm_engine,
+        llm_engine,
         stop=["group of peo", "short"],
         include_in_output=True,
         expected_output=
         "VLLM is a 100% volunteer organization. We are a group of peo",
         expected_reason="group of peo",
-        use_async_output_proc=IS_ASYNC)
+        use_async_output_proc=is_async)
 
 
-@pytest.mark.skip_global_cleanup
-def test_stop_partial_token(vllm_model):
-    _test_stopping(vllm_model.model.llm_engine,
+def _stop_partial_token(llm_engine, is_async):
+    _test_stopping(llm_engine,
                    stop=["gani"],
                    include_in_output=False,
                    expected_output="VLLM is a 100% volunteer or",
                    expected_reason="gani",
-                   use_async_output_proc=IS_ASYNC)
+                   use_async_output_proc=is_async)
 
-    _test_stopping(vllm_model.model.llm_engine,
+    _test_stopping(llm_engine,
                    stop=["gani"],
                    include_in_output=True,
                    expected_output="VLLM is a 100% volunteer organi",
                    expected_reason="gani",
-                   use_async_output_proc=IS_ASYNC)
+                   use_async_output_proc=is_async)
 
 
-@pytest.mark.skip_global_cleanup
-def test_stop_token_id(vllm_model):
+def _stop_token_id(llm_engine, is_async):
     # token id 13013 => " organization"
 
-    _test_stopping(vllm_model.model.llm_engine,
+    _test_stopping(llm_engine,
                    stop_token_ids=[13013],
                    include_in_output=False,
                    expected_output="VLLM is a 100% volunteer",
                    expected_reason=13013,
-                   use_async_output_proc=IS_ASYNC)
+                   use_async_output_proc=is_async)
 
-    _test_stopping(vllm_model.model.llm_engine,
+    _test_stopping(llm_engine,
                    stop_token_ids=[13013],
                    include_in_output=True,
                    expected_output="VLLM is a 100% volunteer organization",
                    expected_reason=13013,
-                   use_async_output_proc=IS_ASYNC)
+                   use_async_output_proc=is_async)
+
+
+@pytest.mark.skip_global_cleanup
+def test_stop_basic(vllm_model):
+    _set_async_mode(vllm_model.model.llm_engine, True)
+    _stop_basic(vllm_model.model.llm_engine, is_async=True)
+
+    _set_async_mode(vllm_model.model.llm_engine, False)
+    _stop_basic(vllm_model.model.llm_engine, is_async=False)
+
+
+@pytest.mark.skip_global_cleanup
+def test_stop_multi_tokens(vllm_model):
+    _set_async_mode(vllm_model.model.llm_engine, True)
+    _stop_multi_tokens(vllm_model.model.llm_engine, is_async=True)
+
+    _set_async_mode(vllm_model.model.llm_engine, False)
+    _stop_multi_tokens(vllm_model.model.llm_engine, is_async=False)
+
+
+@pytest.mark.skip_global_cleanup
+def test_stop_partial_token(vllm_model):
+    _set_async_mode(vllm_model.model.llm_engine, True)
+    _stop_partial_token(vllm_model.model.llm_engine, is_async=True)
+
+    _set_async_mode(vllm_model.model.llm_engine, False)
+    _stop_partial_token(vllm_model.model.llm_engine, is_async=False)
+
+
+@pytest.mark.skip_global_cleanup
+def test_stop_token_id(vllm_model):
+    _set_async_mode(vllm_model.model.llm_engine, True)
+    _stop_token_id(vllm_model.model.llm_engine, is_async=True)
+
+    _set_async_mode(vllm_model.model.llm_engine, False)
+    _stop_token_id(vllm_model.model.llm_engine, is_async=False)

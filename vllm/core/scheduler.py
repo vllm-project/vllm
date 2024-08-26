@@ -387,9 +387,6 @@ class Scheduler:
             self._scheduled_seq_group_cache.append(
                 PyObjectCache(scheduled_seq_group_builder))
 
-        # Avoid deque alloc
-        self.tmp_queue: Deque[SequenceGroup] = deque()
-
         self._async_stopped: List[SequenceGroup] = []
 
     @property
@@ -1256,7 +1253,7 @@ class Scheduler:
         self.block_manager.free(seq)
 
     def free_finished_seq_groups(self) -> None:
-        self.tmp_queue.clear()
+        remaining: Deque[SequenceGroup] = deque()
         for seq_group in self.running:
             if seq_group.is_finished():
                 # Free cross-attention block table, if it exists
@@ -1266,17 +1263,14 @@ class Scheduler:
                 # next step.
                 self._finished_requests_ids.append(seq_group.request_id)
             else:
-                self.tmp_queue.append(seq_group)
+                remaining.append(seq_group)
+
             # Free finished seqs
             for seq in seq_group.get_seqs():
                 if seq.is_finished():
                     self.free_seq(seq)
 
-        # Swap
-        q = self.running
-        self.running = self.tmp_queue
-        q.clear()
-        self.tmp_queue = q
+        self.running = remaining
 
         # Handle async stopped sequence groups
         # (ones that reached max model len)
