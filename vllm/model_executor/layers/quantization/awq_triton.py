@@ -10,7 +10,7 @@ def awq_dequantize_kernel(
         qweight_ptr,  # quantized matrix
         scales_ptr,  # scales, per group
         zeros_ptr,  # zeros, per group
-        group_size,  # Should always be 128
+        group_size,  # Should always be one of the supported group sizes
         result_ptr,  # Output matrix
         num_cols,  # input num cols in qweight
         num_rows,  # input num rows in qweight
