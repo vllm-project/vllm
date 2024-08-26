@@ -80,14 +80,18 @@ class Worker(LocalOrDistributedWorkerBase):
             init_cached_hf_modules()
         self.observability_config = observability_config
 
+
+        additional_args = {}
         # Return hidden states from target model if the draft model is an
         # mlp_speculator
-        speculative_args = {} if speculative_config is None \
-            or (speculative_config.draft_model_config.model ==
-                model_config.model) \
-            or (speculative_config.draft_model_config.hf_config.model_type
-                not in ["medusa", "mlp_speculator", "eagle"]) \
-                    else {"return_hidden_states": True}
+        if (
+            speculative_config is not None 
+            and speculative_config.draft_model_config.model != \
+                    model_config.model
+            and speculative_config.draft_model_config.hf_config.model_type in \
+                    ["medusa", "mlp_speculator", "eagle"]
+        ) or model_config.return_hidden_states:
+                additional_args["return_hidden_states"] = True
 
         ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
         if model_runner_cls is not None:
@@ -108,7 +112,7 @@ class Worker(LocalOrDistributedWorkerBase):
             is_driver_worker=is_driver_worker,
             prompt_adapter_config=prompt_adapter_config,
             observability_config=observability_config,
-            **speculative_args,
+            **additional_args,
         )
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
