@@ -1107,7 +1107,6 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
                 else:
                     processed_args.append('--' +
                                           arg[len('--'):].replace('_', '-'))
-
             else:
                 processed_args.append(arg)
 
