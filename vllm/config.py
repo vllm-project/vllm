@@ -24,7 +24,6 @@ from vllm.utils import (STR_NOT_IMPL_ENC_DEC_CUDAGRAPH, GiB_bytes,
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
-    from vllm.executor.executor_base import ExecutorBase
     from vllm.model_executor.model_loader.loader import BaseModelLoader
     from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
         BaseTokenizerGroup)
@@ -765,8 +764,7 @@ class ParallelConfig:
         tokenizer_pool_config: Optional[TokenizerPoolConfig] = None,
         ray_workers_use_nsight: bool = False,
         placement_group: Optional["PlacementGroup"] = None,
-        distributed_executor_backend: Optional[Union[
-            str, Type["ExecutorBase"]]] = None,
+        distributed_executor_backend: Optional[str] = None,
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
         self.tensor_parallel_size = tensor_parallel_size
@@ -781,7 +779,7 @@ class ParallelConfig:
         if worker_use_ray:
             if self.distributed_executor_backend is None:
                 self.distributed_executor_backend = "ray"
-            elif not self.use_ray:
+            elif self.distributed_executor_backend != "ray":
                 raise ValueError(f"worker-use-ray can't be used with "
                                  f"distributed executor backend "
                                  f"'{self.distributed_executor_backend}'.")
@@ -823,18 +821,11 @@ class ParallelConfig:
             and self.distributed_executor_backend.uses_ray)
 
     def _verify_args(self) -> None:
-        # Lazy import to avoid circular import
-        from vllm.executor.executor_base import ExecutorBase
-
-        if self.distributed_executor_backend not in (
-                "ray", "mp", None) and not (isinstance(
-                    self.distributed_executor_backend, type) and issubclass(
-                        self.distributed_executor_backend, ExecutorBase)):
+        if self.distributed_executor_backend not in ("ray", "mp", None):
             raise ValueError(
-                "Unrecognized distributed executor backend "
-                f"{self.distributed_executor_backend}. Supported "
-                "values are 'ray', 'mp' or custom ExecutorBase subclass.")
-        if self.use_ray:
+                "Unrecognized distributed executor backend. Supported values "
+                "are 'ray' or 'mp'.")
+        if self.distributed_executor_backend == "ray":
             from vllm.executor import ray_utils
             ray_utils.assert_ray_available()
         if is_hip():
@@ -842,7 +833,8 @@ class ParallelConfig:
             logger.info(
                 "Disabled the custom all-reduce kernel because it is not "
                 "supported on AMD GPUs.")
-        if self.ray_workers_use_nsight and not self.use_ray:
+        if self.ray_workers_use_nsight and (
+                not self.distributed_executor_backend == "ray"):
             raise ValueError("Unable to use nsight profiling unless workers "
                              "run with Ray.")
 

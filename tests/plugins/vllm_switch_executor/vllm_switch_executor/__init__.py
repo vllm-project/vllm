@@ -1,5 +1,6 @@
 from vllm.executor.gpu_executor import GPUExecutor
 
+
 class CustomGPUExecutor(GPUExecutor):
 
     def execute_model(self, *args, **kwargs):
@@ -7,6 +8,7 @@ class CustomGPUExecutor(GPUExecutor):
         with open(".marker", "w"):
             ...
         return super().execute_model(*args, **kwargs)
+
 
 def switch_executor():
     from vllm.plugins import set_executor_cls

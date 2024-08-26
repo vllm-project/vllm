@@ -13,7 +13,6 @@ from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          ModelConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig, TokenizerPoolConfig)
-from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.utils import FlexibleArgumentParser
@@ -70,11 +69,7 @@ class EngineArgs:
     seed: int = 0
     max_model_len: Optional[int] = None
     worker_use_ray: bool = False
-    # Note: Specifying a custom executor backend by passing a class
-    # is intended for expert use only. The API may change without
-    # notice.
-    distributed_executor_backend: Optional[Union[str,
-                                                 Type[ExecutorBase]]] = None
+    distributed_executor_backend: Optional[str] = None
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
     max_parallel_loading_workers: Optional[int] = None

@@ -595,20 +595,12 @@ class AsyncLLMEngine:
             cls, engine_config: EngineConfig) -> Type[ExecutorAsyncBase]:
         distributed_executor_backend = (
             engine_config.parallel_config.distributed_executor_backend)
-        if isinstance(distributed_executor_backend, type):
-            if not issubclass(distributed_executor_backend, ExecutorAsyncBase):
-                raise TypeError(
-                    "distributed_executor_backend must be a subclass of "
-                    f"ExecutorAsyncBase. Got {distributed_executor_backend}.")
-            if distributed_executor_backend.uses_ray:  # type: ignore
-                initialize_ray_cluster(engine_config.parallel_config)
-            executor_class = distributed_executor_backend
-        elif engine_config.device_config.device_type == "neuron":
+
+        if engine_config.device_config.device_type == "neuron":
             from vllm.executor.neuron_executor import NeuronExecutorAsync
             executor_class = NeuronExecutorAsync
         elif engine_config.device_config.device_type == "tpu":
             if distributed_executor_backend == "ray":
-                initialize_ray_cluster(engine_config.parallel_config)
                 from vllm.executor.ray_tpu_executor import RayTPUExecutorAsync
                 executor_class = RayTPUExecutorAsync
             else:
@@ -629,14 +621,12 @@ class AsyncLLMEngine:
                 from vllm.executor.xpu_executor import XPUExecutorAsync
                 executor_class = XPUExecutorAsync
             elif distributed_executor_backend == "ray":
-                initialize_ray_cluster(engine_config.parallel_config)
                 from vllm.executor.ray_xpu_executor import RayXPUExecutorAsync
                 executor_class = RayXPUExecutorAsync
             else:
                 raise RuntimeError(
                     "Not supported distributed execution model on XPU device.")
         elif distributed_executor_backend == "ray":
-            initialize_ray_cluster(engine_config.parallel_config)
             from vllm.executor.ray_gpu_executor import RayGPUExecutorAsync
             executor_class = RayGPUExecutorAsync
         elif distributed_executor_backend == "mp":
@@ -646,6 +636,19 @@ class AsyncLLMEngine:
         else:
             from vllm.executor.gpu_executor import GPUExecutorAsync
             executor_class = GPUExecutorAsync
+
+        from vllm.plugins import get_executor_cls
+        plugin_executor_class = get_executor_cls(async_executor=True)
+        if plugin_executor_class is not None:
+            assert issubclass(plugin_executor_class, ExecutorAsyncBase), (
+                f"Plugin executor class {plugin_executor_class} must be a "
+                "subclass of ExecutorAsyncBase.")
+            logger.info("Using plugin executor class: %s",
+                        plugin_executor_class)
+            executor_class = plugin_executor_class
+
+        if executor_class.uses_ray:
+            initialize_ray_cluster(engine_config.parallel_config)
         return executor_class
 
     @classmethod
