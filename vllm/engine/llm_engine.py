@@ -1214,7 +1214,7 @@ class LLMEngine:
 
         return
 
-    def _process_model_outputs(self, is_async, clear_outputs=True) -> None:
+    def _process_model_outputs(self, is_async: bool, clear_outputs: bool = True) -> None:
         """Apply the model output to the sequences in the scheduled seq groups.
 
         is_async: Indicates whether this postprocessor runs in 

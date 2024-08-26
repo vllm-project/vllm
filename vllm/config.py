@@ -140,7 +140,7 @@ class ModelConfig:
         skip_tokenizer_init: bool = False,
         served_model_name: Optional[Union[str, List[str]]] = None,
         limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
-        use_async_output_proc: Optional[bool] = True,
+        use_async_output_proc: bool = True,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -405,7 +405,7 @@ class ModelConfig:
 
         if pipeline_parallel_size > 1 and self.use_async_output_proc:
             logger.warning("Async output processor is not supported with "
-                           "pipeline parallelism currently. Disabling it")
+                           "pipeline parallelism currently. Disabling it.")
             self.use_async_output_proc = False
 
     def get_hf_config_sliding_window(self) -> Optional[int]:
