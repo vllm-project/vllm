@@ -958,7 +958,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         if envs.VLLM_TEST_DYNAMO_GRAPH_CAPTURE:
             self.model = torch.compile(self.model,
                                        fullgraph=True,
-                                       backend="inductor")
+                                       backend="eager")
 
     def save_sharded_state(
         self,
