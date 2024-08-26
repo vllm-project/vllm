@@ -287,11 +287,11 @@ class BlockSpaceManagerV2(BlockSpaceManager):
                 seq.seq_id, now)
 
     def mark_blocks_as_computed(self, seq_group: SequenceGroup):
-        # The only need for mark block as computed is for prefix caching,
-        # while currently we could determine whether one block is computed
-        # or not by check whether it has content hash.
-        # So this function is useless for block_v2.
-        pass
+        # If prefix caching is enabled, mark immutable blocks as computed
+        # right after they have been scheduled (for prefill). This assumes
+        # the scheduler is synchronous so blocks are actually computed when
+        # scheduling the next batch.
+        self.block_allocator.mark_blocks_as_computed([])
 
     def get_common_computed_block_ids(
             self, seqs: List[Sequence]) -> GenericSequence[int]:
