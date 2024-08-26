@@ -237,9 +237,6 @@ class LLMEngine:
             cache_config.enable_prefix_caching,
         )
         # TODO(woosuk): Print more configs in debug mode.
-        from vllm.plugins import load_general_plugins
-        load_general_plugins()
-
         self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config
@@ -484,6 +481,9 @@ class LLMEngine:
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
     ) -> "LLMEngine":
         """Creates an LLM engine from the engine arguments."""
+        from vllm.plugins import load_general_plugins
+        load_general_plugins()
+
         # Create the engine configs.
         engine_config = engine_args.create_engine_config()
         executor_class = cls._get_executor_cls(engine_config)
