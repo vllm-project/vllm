@@ -33,8 +33,19 @@ from vllm.utils import print_warning_once
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.image import cached_get_tokenizer
 
 from .utils import is_pp_missing_parameter, make_layers
+
+IMG_START = "<img>"
+IMG_END = "</img>"
+IMG_PAD = "<imgpad>"
+# Qwen models have a few other special tags, e.g., ref, bbox, quad;
+# for the time being, these tags are not considered as special at encoding
+# time. This may change as VLLMs multimodal API changes in the future.
+
+# Qwen images are encoded into a fixed token length of 256, not include IMG_START/IMG_END
+MAX_QWEN_IMG_TOKENS = 256
 
 ### This is a directly copy paste of the qwen visual modeling code for now
 from collections import OrderedDict
@@ -663,34 +674,55 @@ class QWenModel(nn.Module):
         hidden_states, _ = self.ln_f(hidden_states, residual)
         return hidden_states
 
+def get_image_text(image_num: int, padding: bool) -> str:
+    """Retrieves a placeholder text that when tokenized, will be expanded with image pads.
 
-def get_max_qwen_image_tokens(ctx: InputContext):
-    """Calculates the max number of image tokens for qwen, i.e., the number of patches."""
-    config = ctx.get_hf_config()
-    vision_config = config.visual
-    # Images and patches are square and are usually 448/14, respectively
-    image_size = vision_config["image_size"]
-    patch_size = vision_config["patch_size"]
-    # Features will be of size (grid_height, grid_height)
-    # so usually our max tokens will be 1024 for qwen-vl/chat
-    grid_height = image_size // patch_size
-    return grid_height ** 2
-
+    NOTE: The reason that the reason we don't directly encode the image padding here is that
+    it will break the re-encoding of the tokens tokenizer, because the contents between the 
+    start / end are treated as bytes containing a URL that then get padded up to the image context
+    size.
+    """
+    if not padding:
+        return f"Picture {image_num}: {IMG_START}{IMG_END}\n"
+    return f"Picture {image_num}: {IMG_START}{MAX_QWEN_IMG_TOKENS * IMG_PAD}{IMG_END}\n"
 
 def input_processor_for_qwen(ctx: InputContext, llm_inputs: LLMInputs):
     multi_modal_data = llm_inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
         return llm_inputs
-    print("STUB - skipping multimodal image data for qwen")
     prompt = llm_inputs.get("prompt")
     prompt_token_ids = llm_inputs["prompt_token_ids"]
-    return LLMInputs(prompt=prompt,
-                     prompt_token_ids=prompt_token_ids,
-                     multi_modal_data=None)
+    model_config = ctx.model_config
+    tokenizer = cached_get_tokenizer(model_config.tokenizer, trust_remote_code=True)
+    image_data = multi_modal_data["image"]
+
+    if prompt is None:
+        prompt = tokenizer.decode(prompt_token_ids)
+
+    if not isinstance(image_data, Image.Image):
+        raise NotImplementedError("Image supported not yet implemented for directly provided image features yet")
+
+    # Replace the image tag with the image prompt with no img pads. We currently do this in
+    # two steps to sidestep some tokenization substitution stuff with URLs behind handled as bytes
+    # that do not like existing image pads strings, but it would be nice to find a better way to
+    # handle it.
+    image_prompt_without_padding = get_image_text(0, padding=False)
+    image_prompt_with_padding = get_image_text(0, padding=True)
+
+    new_prompt_no_img_pads = prompt.replace('<image>', image_prompt_without_padding, 1)
+    new_prompt_with_img_pads = prompt.replace('<image>', image_prompt_with_padding, 1)
+    new_prompt_token_ids = tokenizer.encode(new_prompt_no_img_pads)
+
+    return LLMInputs(prompt=new_prompt_with_img_pads,
+                     prompt_token_ids=new_prompt_token_ids,
+                     multi_modal_data=multi_modal_data)
+
+def input_mapper_for_qwen(ctx: InputContext, data: object):
+    raise NotImplementedError("Need to implement the input mapper")
 
 
-@MULTIMODAL_REGISTRY.register_image_input_mapper()
-@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_qwen_image_tokens)
+@MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_qwen)
+@MULTIMODAL_REGISTRY.register_max_image_tokens(MAX_QWEN_IMG_TOKENS)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_qwen)
 class QWenLMHeadModel(nn.Module, SupportsMultiModal):
 
