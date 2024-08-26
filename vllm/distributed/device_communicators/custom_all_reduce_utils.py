@@ -216,22 +216,23 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
         # use a temporary file to store the result
         # we don't use the output of the subprocess directly,
         # because the subprocess might produce logging output
-        output_file = tempfile.NamedTemporaryFile(delete=False)
-        input_bytes = pickle.dumps((batch_src, batch_tgt, output_file.name))
-        returned = subprocess.run([sys.executable, __file__],
-                                  input=input_bytes,
-                                  capture_output=True)
-        # check if the subprocess is successful
-        try:
-            returned.check_returncode()
-        except Exception as e:
-            # wrap raised exception to provide more information
-            raise RuntimeError(
-                f"Error happened when batch testing "
-                f"peer-to-peer access from {batch_src} to {batch_tgt}:\n"
-                f"{returned.stderr.decode()}") from e
-        with open(output_file.name, "rb") as f:
-            result = pickle.load(f)
+        with tempfile.NamedTemporaryFile() as output_file:
+            input_bytes = pickle.dumps(
+                (batch_src, batch_tgt, output_file.name))
+            returned = subprocess.run([sys.executable, __file__],
+                                      input=input_bytes,
+                                      capture_output=True)
+            # check if the subprocess is successful
+            try:
+                returned.check_returncode()
+            except Exception as e:
+                # wrap raised exception to provide more information
+                raise RuntimeError(
+                    f"Error happened when batch testing "
+                    f"peer-to-peer access from {batch_src} to {batch_tgt}:\n"
+                    f"{returned.stderr.decode()}") from e
+            with open(output_file.name, "rb") as f:
+                result = pickle.load(f)
         for _i, _j, r in zip(batch_src, batch_tgt, result):
             cache[f"{_i}->{_j}"] = r
         with open(path, "w") as f:
