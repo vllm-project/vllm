@@ -4,6 +4,7 @@ import os
 import pickle
 import subprocess
 import sys
+import tempfile
 from itertools import product
 from typing import Dict, List, Optional, Sequence
 
@@ -17,8 +18,6 @@ from vllm.utils import (cuda_device_count_stateless,
                         update_environment_variables)
 
 logger = init_logger(__name__)
-
-__start_end_magic_marker__ = b"64e8dffc68216343941d770622f9e31e"
 
 
 def producer(batch_src: Sequence[int],
@@ -213,7 +212,12 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
         # However, `can_actually_p2p` requires spawn method.
         # The fix is, we use `subprocess` to call the function,
         # where we have `if __name__ == "__main__":` in this file.
-        input_bytes = pickle.dumps((batch_src, batch_tgt))
+
+        # use a temporary file to store the result
+        # we don't use the output of the subprocess directly,
+        # because the subprocess might produce logging output
+        output_file = tempfile.NamedTemporaryFile(delete=False)
+        input_bytes = pickle.dumps((batch_src, batch_tgt, output_file.name))
         returned = subprocess.run([sys.executable, __file__],
                                   input=input_bytes,
                                   capture_output=True)
@@ -226,14 +230,8 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
                 f"Error happened when batch testing "
                 f"peer-to-peer access from {batch_src} to {batch_tgt}:\n"
                 f"{returned.stderr.decode()}") from e
-        assert returned.stdout.count(__start_end_magic_marker__) == 2, (
-            "The subprocess should return exactly one result, "
-            "which is wrapped by the magic marker. However, we get:\n"
-            f"{returned.stdout!r}")
-        start = returned.stdout.find(__start_end_magic_marker__) + len(
-            __start_end_magic_marker__)
-        end = returned.stdout.rfind(__start_end_magic_marker__)
-        result = pickle.loads(returned.stdout[start:end])
+        with open(output_file.name, "rb") as f:
+            result = pickle.load(f)
         for _i, _j, r in zip(batch_src, batch_tgt, result):
             cache[f"{_i}->{_j}"] = r
         with open(path, "w") as f:
@@ -250,7 +248,7 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
 __all__ = ["gpu_p2p_access_check"]
 
 if __name__ == "__main__":
-    batch_src, batch_tgt = pickle.loads(sys.stdin.buffer.read())
+    batch_src, batch_tgt, output_file = pickle.loads(sys.stdin.buffer.read())
     result = can_actually_p2p(batch_src, batch_tgt)
-    sys.stdout.buffer.write(__start_end_magic_marker__ + pickle.dumps(result) +
-                            __start_end_magic_marker__)
+    with open(output_file, "wb") as f:
+        f.write(pickle.dumps(result))
