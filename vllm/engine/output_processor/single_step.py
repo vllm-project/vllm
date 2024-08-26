@@ -82,7 +82,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
     def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
                                         outputs: SequenceGroupOutput) -> None:
         sampling_params = seq_group.sampling_params
-        if sampling_params.n == 1 and not sampling_params.use_beam_search:
+        if sampling_params.best_of == 1 and not sampling_params.use_beam_search:
             # only have one output sample
             sample = outputs.samples[0]
             # only have one sequence
