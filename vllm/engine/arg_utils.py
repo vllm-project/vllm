@@ -85,6 +85,8 @@ class EngineArgs:
     swap_space: float = 4  # GiB
     cpu_offload_gb: float = 0  # GiB
     gpu_memory_utilization: float = 0.90
+    external_swapper: str = "",
+    external_swapper_space: int = 0 #GiB,
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: int = 256
     max_logprobs: int = 20  # Default value for OpenAI Chat Completions API
@@ -741,6 +743,21 @@ class EngineArgs:
             default=EngineArgs.disable_async_output_proc,
             help="Disable async output processing. This may result in "
             "lower performance.")
+        # The external storage medium of the kv cache.
+        # You can customize the format of the string.
+        # For example, currently only local file is supported.
+        # Local file format is: "file://path/to/directory"
+        parser.add_argument(
+            '--external-swapper',
+            type=str,
+            default="",
+            help="The external storage medium of the kv cache. Currently only "
+            "local file is supported. Local file format is: 'file://path/to/directory'.")
+        parser.add_argument(
+            '--external-swapper-space',
+            type=int,
+            default=0,
+            help="External swapper space size (GiB) per GPU")
         return parser
 
     @classmethod
@@ -812,6 +829,8 @@ class EngineArgs:
             sliding_window=model_config.get_sliding_window(),
             enable_prefix_caching=self.enable_prefix_caching,
             cpu_offload_gb=self.cpu_offload_gb,
+            external_swapper=self.external_swapper,
+            external_swapper_space=self.external_swapper_space,
         )
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,

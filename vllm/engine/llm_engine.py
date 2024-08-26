@@ -221,7 +221,8 @@ class LLMEngine:
             "decoding_config=%r, observability_config=%r, "
             "seed=%d, served_model_name=%s, use_v2_block_manager=%s, "
             "num_scheduler_steps=%d, enable_prefix_caching=%s, "
-            "use_async_output_proc=%s)",
+            "use_async_output_proc=%s, external_swapper=%s, "
+            "external_swapper_space=%d)",
             VLLM_VERSION,
             model_config.model,
             speculative_config,
@@ -253,6 +254,8 @@ class LLMEngine:
             scheduler_config.num_scheduler_steps,
             cache_config.enable_prefix_caching,
             model_config.use_async_output_proc,
+            cache_config.external_swapper,
+            cache_config.external_swapper_space_bytes,
         )
         # TODO(woosuk): Print more configs in debug mode.
         from vllm.plugins import load_general_plugins
@@ -310,6 +313,8 @@ class LLMEngine:
             observability_config=self.observability_config,
         )
 
+        self.enable_external_swapper = (self.cache_config.external_swapper !=
+                                        "")
         if not self.model_config.embedding_mode:
             self._initialize_kv_caches()
 

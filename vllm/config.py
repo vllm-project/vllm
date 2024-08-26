@@ -589,6 +589,8 @@ class CacheConfig:
         gpu_memory_utilization: float,
         swap_space: float,
         cache_dtype: str,
+        external_swapper: str = "",
+        external_swapper_space: int = 0,
         num_gpu_blocks_override: Optional[int] = None,
         sliding_window: Optional[int] = None,
         enable_prefix_caching: bool = False,
@@ -602,6 +604,8 @@ class CacheConfig:
         self.sliding_window = sliding_window
         self.enable_prefix_caching = enable_prefix_caching
         self.cpu_offload_gb = cpu_offload_gb
+        self.external_swapper = external_swapper
+        self.external_swapper_space_bytes = external_swapper_space * GiB_bytes
         self._verify_args()
         self._verify_cache_dtype()
         self._verify_prefix_caching()
@@ -609,6 +613,7 @@ class CacheConfig:
         # Will be set after profiling.
         self.num_gpu_blocks = None
         self.num_cpu_blocks = None
+        self.num_external_blocks = None
 
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus
