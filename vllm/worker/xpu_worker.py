@@ -9,8 +9,8 @@ import torch
 import torch.distributed
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, MultiModalConfig, ObservabilityConfig,
-                         ParallelConfig, PromptAdapterConfig, SchedulerConfig,
+                         ModelConfig, ObservabilityConfig, ParallelConfig,
+                         PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
@@ -46,7 +46,6 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
         rank: int,
         distributed_init_method: str,
         lora_config: Optional[LoRAConfig] = None,
-        multimodal_config: Optional[MultiModalConfig] = None,
         speculative_config: Optional[SpeculativeConfig] = None,
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         is_driver_worker: bool = False,
@@ -73,8 +72,6 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
             assert rank % parallel_config.tensor_parallel_size == 0, \
                    "Driver worker should be rank 0 of tensor parallel group."
 
-        self.multimodal_config = multimodal_config
-
         self.model_runner = XPUModelRunner(  # type: ignore
             model_config,
             parallel_config,
@@ -85,7 +82,7 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
             lora_config=self.lora_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=is_driver_worker,
-            multimodal_config=multimodal_config,
+            observability_config=self.observability_config,
         )
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
