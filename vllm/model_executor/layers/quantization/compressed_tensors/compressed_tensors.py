@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 import torch
 from pydantic import BaseModel
@@ -56,7 +56,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         self,
         layer: torch.nn.Module,
         prefix: str,
-    ) -> Optional[Union["QuantizeMethodBase"]]:
+    ) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
 
         # Check if the layer is skipped for quantization.
