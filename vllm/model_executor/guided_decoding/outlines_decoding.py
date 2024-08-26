@@ -127,6 +127,13 @@ def _get_guide_and_mode(
           and request.response_format is not None
           and request.response_format.type == "json_object"):
         return JSON_GRAMMAR, GuidedDecodingMode.GRAMMAR
+    elif (not isinstance(request, GuidedDecodingRequest)
+          and request.response_format is not None
+          and request.response_format.type == "json_schema"
+          and request.response_format.json_schema is not None
+          and request.response_format.json_schema.json_schema is not None):
+        json = json_dumps(request.response_format.json_schema.json_schema)
+        return json, GuidedDecodingMode.JSON
     else:
         return None, None
 
