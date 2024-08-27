@@ -181,8 +181,8 @@ elif core_C_available:
 
     ScalarType = torch.classes._core_C.ScalarType
 
-    if (hasattr(torch, "_library") and
-        hasattr(torch._library, "register_fake_class")):
+    if (hasattr(torch, "_library")
+            and hasattr(torch._library, "register_fake_class")):
         # Needed for dynamo support of ScalarType.
         @torch._library.register_fake_class("_core_C::ScalarType")
         class FakeScalarType:
