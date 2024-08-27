@@ -364,18 +364,18 @@ template void selective_scan_fwd_cuda<float, float>(SSMParamsBase &params, cudaS
 
 #define CHECK_SHAPE(x, ...) TORCH_CHECK(x.sizes() == torch::IntArrayRef({__VA_ARGS__}), #x " must have shape (" #__VA_ARGS__ ")")
 
-#define DISPATCH_WTYPE_ITYPE_FLOAT_AND_HALF_AND_BF16(ITYPE, NAME, ...)                    \
+#define DISPATCH_WTYPE_ITYPE_FLOAT_AND_HALF_AND_BF16(ITYPE, NAME, ...)              \
     if (ITYPE == at::ScalarType::Half) {                                            \
         using input_t = at::Half;                                                   \
-        using weight_t = at::Half;                                                   \
+        using weight_t = float;                                                     \
         __VA_ARGS__();                                                              \
     } else if (ITYPE == at::ScalarType::BFloat16) {                                 \
         using input_t = at::BFloat16;                                               \
-        using weight_t = at::BFloat16;                                                   \
+        using weight_t = float;                                                     \
         __VA_ARGS__();                                                              \
     } else if (ITYPE == at::ScalarType::Float)  {                                   \
         using input_t = float;                                                      \
-        using weight_t = float;                                                   \
+        using weight_t = float;                                                     \
         __VA_ARGS__();                                                              \
     } else {                                                                        \
         AT_ERROR(#NAME, " not implemented for input type '", toString(ITYPE), "'"); \

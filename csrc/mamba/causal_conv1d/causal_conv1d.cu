@@ -19,18 +19,18 @@
 
 #define CHECK_SHAPE(x, ...) TORCH_CHECK(x.sizes() == torch::IntArrayRef({__VA_ARGS__}), #x " must have shape (" #__VA_ARGS__ ")")
 
-#define DISPATCH_WTYPE_ITYPE_FLOAT_AND_HALF_AND_BF16(ITYPE, NAME, ...)                    \
+#define DISPATCH_WTYPE_ITYPE_FLOAT_AND_HALF_AND_BF16(ITYPE, NAME, ...)              \
     if (ITYPE == at::ScalarType::Half) {                                            \
         using input_t = at::Half;                                                   \
-        using weight_t = at::Half;                                                   \
+        using weight_t = at::Half;                                                  \
         __VA_ARGS__();                                                              \
     } else if (ITYPE == at::ScalarType::BFloat16) {                                 \
         using input_t = at::BFloat16;                                               \
-        using weight_t = at::BFloat16;                                                   \
+        using weight_t = at::BFloat16;                                              \
         __VA_ARGS__();                                                              \
     } else if (ITYPE == at::ScalarType::Float)  {                                   \
         using input_t = float;                                                      \
-        using weight_t = float;                                                   \
+        using weight_t = float;                                                     \
         __VA_ARGS__();                                                              \
     } else {                                                                        \
         AT_ERROR(#NAME, " not implemented for input type '", toString(ITYPE), "'"); \
@@ -404,7 +404,7 @@ void causal_conv1d_fwd_kernel(ConvParamsBase params) {
 template<int kNThreads, int kWidth, typename input_t, typename weight_t>
 void causal_conv1d_fwd_launch(ConvParamsBase &params, cudaStream_t stream) {
     static constexpr int kNElts = sizeof(input_t) == 4 ? 4 : 8;
-    constexpr kHasSeqPosIdx = false;
+    constexpr bool kHasSeqPosIdx = false;
     BOOL_SWITCH(params.seqlen % kNElts == 0, kIsVecLoad, [&] {
         using Ktraits = Causal_conv1d_fwd_kernel_traits<kNThreads, kWidth, kIsVecLoad, input_t, weight_t>;
         constexpr int kSmemSize = Ktraits::kSmemSize;
