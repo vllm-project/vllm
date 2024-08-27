@@ -1427,6 +1427,8 @@ class LLMEngine:
                 "Pipeline parallelism is only supported through AsyncLLMEngine "
                 "as performance will be severely degraded otherwise.")
 
+        # For llm_engine, there is no pipeline parallel support, so the engine
+        # used is always 0
         virtual_engine = 0
 
         # These are cached outputs from previous iterations. None if on first
