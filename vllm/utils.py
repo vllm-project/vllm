@@ -1127,12 +1127,16 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
                 tensor-parallel-size: 4
             ```
             ```python
+            $: vllm {serve,chat,complete} "facebook/opt-12B" \
+                --config config.yaml -tp 2
             $: args = [
+                "serve,chat,complete",
                 "facebook/opt-12B", 
                 '--config', 'config.yaml', 
                 '-tp', '2'
             ]
             $: args = [
+                "serve,chat,complete",
                 "facebook/opt-12B", 
                 '--port', '12323', 
                 '--tensor-parallel-size', '4', 
@@ -1143,6 +1147,8 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
         """
 
         index = args.index('--config')
+        assert args.count(
+            '--config') <= 1, "More than one config file specified!"
 
         if index == len(args) - 1:
             raise ValueError("No config file specified! \
@@ -1156,7 +1162,13 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
                               %s supplied", extension)
 
         config_args = FlexibleArgumentParser._load_config_file(file_path)
-        args = config_args + args[:index] + args[index + 2:]
+
+        # 0th index is for {serve,chat,complete}
+        # followed by config args
+        # followed by rest of cli args.
+        # maintaining this order will enforce the precedence
+        # of cli > config > defaults
+        args = [args[0]] + config_args + args[1:index] + args[index + 2:]
 
         return args
 
