@@ -294,6 +294,10 @@ echo 'vLLM actionlint:'
 tools/actionlint.sh -color
 echo 'vLLM actionlint: Done'
 
+echo 'vLLM shellcheck:'
+tools/shellcheck.sh
+echo 'vLLM shellcheck: Done'
+
 if ! git diff --quiet &>/dev/null; then
     echo 
     echo "🔍🔍There are files changed by the format checker or by you that are not added and committed:"
