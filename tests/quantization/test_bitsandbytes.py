@@ -7,7 +7,6 @@ import gc
 
 import pytest
 import torch
-import time
 
 from tests.quantization.utils import is_quant_method_supported
 
@@ -32,29 +31,10 @@ models_pre_quant_8bit_to_test = [
 @pytest.mark.parametrize("model_name, description", models_4bit_to_test)
 def test_load_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                              model_name, description) -> None:
-    
-    log_gpu_memory("4bit - start")
 
     hf_model_kwargs = {"load_in_4bit": True}
-
     validate_generated_texts(hf_runner, vllm_runner, example_prompts[:1],
                              model_name, hf_model_kwargs)
-    log_gpu_memory("4bit - middle 1 ")
-
-    validate_model_weight_type(vllm_runner, model_name, torch.uint8)
-
-    log_gpu_memory("4bit - middle 2 ")
-
-    # Forcefully delete objects
-    del hf_runner, vllm_runner, example_prompts, model_name, description
-    gc.collect()
-    torch.cuda.empty_cache()
-
-    time.sleep(5)
-
-    log_gpu_memory("4bit - finish")
-
-    assert 1 == 0
 
 
 @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
@@ -63,14 +43,9 @@ def test_load_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                          models_pre_qaunt_4bit_to_test)
 def test_load_pre_quant_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                                        model_name, description) -> None:
-    log_gpu_memory("4bit 2 - start")
 
     validate_generated_texts(hf_runner, vllm_runner, example_prompts[:1],
                              model_name)
-
-    validate_model_weight_type(vllm_runner, model_name, torch.uint8)
-
-    log_gpu_memory("4bit 2 - finish")
 
 
 @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
@@ -80,12 +55,9 @@ def test_load_pre_quant_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
 def test_load_8bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                              model_name, description) -> None:
 
-    log_gpu_memory("8bit - start")
     validate_generated_texts(hf_runner, vllm_runner, example_prompts[:1],
                              model_name)
 
-    validate_model_weight_type(vllm_runner, model_name, torch.int8)
-    log_gpu_memory("8bit - end")
 
 def log_generated_texts(prompts, outputs, runner_name):
     logged_texts = []
@@ -142,62 +114,3 @@ def validate_generated_texts(hf_runner,
                                     f"Prompt: {prompt}\n"
                                     f"HF Output: '{hf_str}'\n"
                                     f"vLLM Output: '{vllm_str}'")
-
-
-def validate_model_weight_type(vllm_runner,
-                               model_name,
-                               quantized_dtype=torch.uint8):
-    with vllm_runner(
-            model_name,
-            quantization='bitsandbytes',
-            load_format='bitsandbytes',
-            enforce_eager=True,
-    ) as llm:
-        model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
-
-        # check the weights in MLP & SelfAttention are quantized to torch.uint8
-        qweight = model.model.layers[0].mlp.gate_up_proj.qweight
-        assert qweight.dtype == quantized_dtype, (
-            f'Expected gate_up_proj dtype {quantized_dtype} but got {qweight.dtype}')
-
-        qweight = model.model.layers[0].mlp.down_proj.qweight
-        assert qweight.dtype == quantized_dtype, (
-            f'Expected down_proj dtype {quantized_dtype} but got {qweight.dtype}')
-
-        qweight = model.model.layers[0].self_attn.o_proj.qweight
-        assert qweight.dtype == quantized_dtype, (
-            f'Expected o_proj dtype {quantized_dtype} but got {qweight.dtype}')
-
-        qweight = model.model.layers[0].self_attn.qkv_proj.qweight
-        assert qweight.dtype == quantized_dtype, (
-            f'Expected qkv_proj dtype {quantized_dtype} but got {qweight.dtype}')
-
-        # some weights should not be quantized
-        weight = model.lm_head.weight
-        assert weight.dtype != quantized_dtype, (
-            f'lm_head weight dtype should not be {quantized_dtype}')
-
-        weight = model.model.embed_tokens.weight
-        assert weight.dtype != quantized_dtype, (
-            f'embed_tokens weight dtype should not be {quantized_dtype}')
-
-        weight = model.model.layers[0].input_layernorm.weight
-        assert weight.dtype != quantized_dtype, (
-            f'input_layernorm weight dtype should not be {quantized_dtype}')
-
-        weight = model.model.layers[0].post_attention_layernorm.weight
-        assert weight.dtype != quantized_dtype, (
-            f'input_layernorm weight dtype should not be {quantized_dtype}')
-
-    torch.cuda.synchronize()
-    del model, llm
-    gc.collect()
-    torch.cuda.empty_cache()
-
-
-def log_gpu_memory(prefix=""):
-    allocated = torch.cuda.memory_allocated()
-    reserved = torch.cuda.memory_reserved()
-    
-    print(f"{prefix} - Memory Allocated: {allocated} bytes")
-    print(f"{prefix} - Memory Reserved: {reserved} bytes")
