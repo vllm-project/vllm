@@ -1,7 +1,6 @@
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type,
-                    Union)
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type
 
 try:
     from flashinfer import BatchDecodeWithPagedKVCacheWrapper
@@ -86,13 +85,13 @@ class FlashInferBackend(AttentionBackend):
 
     @staticmethod
     def get_fp8_dtype_for_flashinfer(
-        kv_cache_dtype: Union[str, torch.dtype], ) -> torch.dtype:
-        if kv_cache_dtype in ["fp8", "fp8_e4m3"]:
+        kv_cache_dtype: str) -> torch.dtype:
+        if kv_cache_dtype in ("fp8", "fp8_e4m3"):
             return torch.float8_e4m3fn
         elif kv_cache_dtype == "fp8_e5m2":
             return torch.float8_e5m2
         else:
-            return ValueError("Unrecognized FP8 dtype: {kv_cache_dtype}")
+            return ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
 
 
 class FlashInferState(AttentionState):
