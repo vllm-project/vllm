@@ -7,7 +7,7 @@ from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
 
 from ..conftest import IMAGE_ASSETS
-from .utils import check_tokenstexts_match_or_in_top_logprobs
+from .utils import check_logprobs_close
 
 pytestmark = pytest.mark.vlm
 
@@ -92,7 +92,7 @@ def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
 
     for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
                                         vllm_outputs_per_image):
-        check_tokenstexts_match_or_in_top_logprobs(
+        check_logprobs_close(
             outputs_0_lst=hf_outputs,
             outputs_1_lst=[
                 vllm_to_hf_output(vllm_output, model)

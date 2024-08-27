@@ -11,7 +11,7 @@ from transformers import AutoTokenizer
 
 from tests.quantization.utils import is_quant_method_supported
 
-from .utils import check_tokenstexts_match_or_in_top_logprobs
+from .utils import check_logprobs_close
 
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
@@ -82,7 +82,7 @@ def test_models(
         gguf_outputs = gguf_model.generate_greedy_logprobs(
             example_prompts[:-1], max_tokens, num_logprobs)
 
-    check_tokenstexts_match_or_in_top_logprobs(
+    check_logprobs_close(
         outputs_0_lst=original_outputs,
         outputs_1_lst=gguf_outputs,
         name_0="original",

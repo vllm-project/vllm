@@ -7,7 +7,7 @@ from vllm.sequence import SampleLogprobs
 from vllm.utils import is_cpu
 
 from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
-from .utils import check_tokenstexts_match_or_in_top_logprobs
+from .utils import check_logprobs_close
 
 pytestmark = pytest.mark.vlm
 
@@ -96,7 +96,7 @@ def run_test(
 
     for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
                                         vllm_outputs_per_image):
-        check_tokenstexts_match_or_in_top_logprobs(
+        check_logprobs_close(
             outputs_0_lst=hf_outputs,
             outputs_1_lst=[
                 vllm_to_hf_output(vllm_output) for vllm_output in vllm_outputs

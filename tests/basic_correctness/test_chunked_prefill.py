@@ -9,8 +9,7 @@ Run `pytest tests/models/test_chunked_prefill.py`.
 
 import pytest
 
-from ..models.utils import (check_outputs_equal,
-                            check_tokenstexts_match_or_in_top_logprobs)
+from ..models.utils import (check_outputs_equal, check_logprobs_close)
 
 MODELS = [
     "facebook/opt-125m",
@@ -151,7 +150,7 @@ def test_models_with_fp8_kv_cache(
         chunked_prefill_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, NUM_LOG_PROBS)
 
-    check_tokenstexts_match_or_in_top_logprobs(
+    check_logprobs_close(
         outputs_0_lst=no_chunked_prefill_outputs,
         outputs_1_lst=chunked_prefill_outputs,
         name_0="no_chunked_prefill",

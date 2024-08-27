@@ -1,8 +1,9 @@
 # Test the LLMEngine with multi-step-decoding
 
 import pytest
+from typing import Optional
 
-from ..models.utils import check_outputs_equal
+from ..models.utils import check_outputs_equal, check_logprobs_close
 
 MODELS = [
     "JackFram/llama-160m",
@@ -18,10 +19,20 @@ NUM_PROMPTS = [10]
 @pytest.mark.parametrize("enforce_eager", [True])
 @pytest.mark.parametrize("num_scheduler_steps", NUM_SCHEDULER_STEPS)
 @pytest.mark.parametrize("num_prompts", NUM_PROMPTS)
-def test_multi_step_llm(hf_runner, vllm_runner, example_prompts, model: str,
-                        dtype: str, tp_size: int, max_tokens: int,
-                        enforce_eager: int, num_scheduler_steps: int,
-                        num_prompts: int) -> None:
+@pytest.mark.parametrize("num_logprobs", [None, 5])
+def test_multi_step_llm(
+    hf_runner,
+    vllm_runner,
+    example_prompts,
+    model: str,
+    dtype: str,
+    tp_size: int,
+    max_tokens: int,
+    enforce_eager: int,
+    num_scheduler_steps: int,
+    num_prompts: int,
+    num_logprobs: Optional[int],
+) -> None:
 
     prompts = example_prompts
     if len(prompts) < num_prompts:
@@ -29,21 +40,37 @@ def test_multi_step_llm(hf_runner, vllm_runner, example_prompts, model: str,
     prompts = prompts[:num_prompts]
     assert len(prompts) == num_prompts
 
-    with vllm_runner(model,
-                     dtype=dtype,
-                     enforce_eager=enforce_eager,
-                     gpu_memory_utilization=0.7,
-                     tensor_parallel_size=tp_size,
-                     use_v2_block_manager=True,
-                     num_scheduler_steps=num_scheduler_steps) as vllm_model:
-        vllm_outputs = vllm_model.generate_greedy(prompts, max_tokens)
+    with vllm_runner(
+            model,
+            dtype=dtype,
+            enforce_eager=enforce_eager,
+            gpu_memory_utilization=0.7,
+            tensor_parallel_size=tp_size,
+            use_v2_block_manager=True,
+            num_scheduler_steps=num_scheduler_steps,
+    ) as vllm_model:
+        vllm_outputs = (vllm_model.generate_greedy(prompts, max_tokens)
+                        if num_logprobs is None else
+                        vllm_model.generate_greedy_logprobs(
+                            prompts, max_tokens, num_logprobs))
 
     with hf_runner(model, dtype=dtype) as hf_model:
-        hf_outputs = hf_model.generate_greedy(prompts, max_tokens)
+        hf_outputs = (hf_model.generate_greedy(prompts, max_tokens)
+                      if num_logprobs is None else
+                      hf_model.generate_greedy_logprobs_limit(
+                          prompts, max_tokens, num_logprobs))
 
-    check_outputs_equal(
-        outputs_0_lst=hf_outputs,
-        outputs_1_lst=vllm_outputs,
-        name_0="hf",
-        name_1="vllm",
-    )
+    if num_logprobs is None:
+        check_outputs_equal(
+            outputs_0_lst=hf_outputs,
+            outputs_1_lst=vllm_outputs,
+            name_0="hf",
+            name_1="vllm",
+        )
+    else:
+        check_logprobs_close(
+            outputs_0_lst=hf_outputs,
+            outputs_1_lst=vllm_outputs,
+            name_0="hf",
+            name_1="vllm",
+        )

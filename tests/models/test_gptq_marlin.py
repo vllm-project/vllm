@@ -15,7 +15,7 @@ import pytest
 from tests.quantization.utils import is_quant_method_supported
 from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
 
-from .utils import check_tokenstexts_match_or_in_top_logprobs
+from .utils import check_logprobs_close
 
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
@@ -88,7 +88,7 @@ def test_models(
         gptq_outputs = gptq_model.generate_greedy_logprobs(
             example_prompts[:-1], max_tokens, num_logprobs)
 
-    check_tokenstexts_match_or_in_top_logprobs(
+    check_logprobs_close(
         outputs_0_lst=gptq_outputs,
         outputs_1_lst=gptq_marlin_outputs,
         name_0="gptq",

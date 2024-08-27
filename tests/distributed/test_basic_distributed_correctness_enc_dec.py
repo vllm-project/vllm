@@ -15,7 +15,7 @@ from transformers import AutoModelForSeq2SeqLM
 from vllm.utils import cuda_device_count_stateless
 
 from ..conftest import DecoderPromptType
-from ..models.utils import check_tokenstexts_match_or_in_top_logprobs
+from ..models.utils import check_logprobs_close
 from ..utils import fork_new_process_for_each_test
 
 
@@ -94,7 +94,7 @@ def test_models(
             **hf_kwargs,
         ))
 
-    check_tokenstexts_match_or_in_top_logprobs(
+    check_logprobs_close(
         outputs_0_lst=hf_outputs,
         outputs_1_lst=vllm_outputs,
         name_0="hf",
