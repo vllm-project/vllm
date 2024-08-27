@@ -1,7 +1,4 @@
 # imports for guided decoding tests
-import asyncio
-import contextlib
-import gc
 import json
 import re
 import shutil
@@ -11,16 +8,13 @@ from typing import Dict, List, Optional
 import jsonschema
 import openai  # use the official client for correctness check
 import pytest
-import torch
+import pytest_asyncio
 # downloading lora to test lora requests
 from huggingface_hub import snapshot_download
-from openai import BadRequestError, InternalServerError
+from openai import BadRequestError
 from transformers import AutoTokenizer
 
-from vllm.distributed import (destroy_distributed_environment,
-                              destroy_model_parallel)
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.utils import is_cpu
 
 from ...utils import RemoteOpenAIServer
 
@@ -96,11 +90,17 @@ def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files,
 
 @pytest.fixture(scope="module",
                 params=["", "--disable-frontend-multiprocessing"])
-def client(default_server_args, request):
+def server(default_server_args, request):
     if request.param:
         default_server_args.append(request.param)
     with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
-        yield remote_server.get_async_client()
+        yield remote_server
+
+
+@pytest_asyncio.fixture
+async def client(server):
+    async with server.get_async_client() as async_client:
+        yield async_client
 
 
 @pytest.mark.asyncio

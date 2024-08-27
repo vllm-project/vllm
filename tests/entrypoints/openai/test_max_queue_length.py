@@ -1,7 +1,10 @@
 import asyncio
+
 import pytest
 from openai import InternalServerError
+
 from ...utils import RemoteOpenAIServer
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", ["facebook/opt-125m"])
