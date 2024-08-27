@@ -1,5 +1,6 @@
 import time
 from dataclasses import dataclass
+from types import CodeType
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
 from unittest.mock import patch
 
@@ -144,11 +145,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             )
         model = model.eval()
         xm.wait_device_ops()
-        model = ModelWrapper(model)
-        self.model = torch.compile(model,
-                                   backend="openxla",
-                                   fullgraph=True,
-                                   dynamic=False)
+        self.model = ModelWrapper(model)
 
     def _dummy_run(
         self,
@@ -530,7 +527,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                     if getattr(arg, "context_lens", None) is not None:
                         arg.context_lens = arg.context_lens.to(self.device)
                 new_args.append(arg)
-            return self.model(*new_args)
+            return self.model(*new_args, is_prompt=is_prompt)
 
         num_prefills = model_input.attn_metadata.num_prefills
         is_prompt = num_prefills > 0
@@ -601,11 +598,22 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         return [SamplerOutput(sampler_outputs)]
 
 
-class ModelWrapper(nn.Module):
+class ModelWrapper:
 
     def __init__(self, model: nn.Module):
-        super().__init__()
         self.model = model
+
+    def __call__(self, *args, is_prompt: bool = False, **kwargs):
+        if len(ModelWrapper.compiled_codes) < 3:
+            # not fully compiled yet, let PyTorch handle it
+            return self.compiled_forward(*args, **kwargs)
+        # dispatch to the compiled code directly, skip PyTorch
+        if is_prompt:
+            ModelWrapper.forward.__code__ = ModelWrapper.compiled_codes[1]
+            return self.forward(*args, **kwargs)
+        else:
+            ModelWrapper.forward.__code__ = ModelWrapper.compiled_codes[2]
+            return self.forward(*args, **kwargs)
 
     def forward(
         self,
@@ -694,6 +702,23 @@ class ModelWrapper(nn.Module):
         next_token_ids = torch.where(t != 0, sampled_token_ids,
                                      argmax_token_ids)
         return next_token_ids
+
+    compiled_forward = torch.compile(forward,
+                                     backend="openxla",
+                                     fullgraph=True,
+                                     dynamic=False)
+
+    target_code = forward.__code__
+    compiled_codes: List[CodeType] = []
+
+    @staticmethod
+    def collect_bytecode_hook(old, new):
+        global compiled_codes
+        if old is ModelWrapper.target_code:
+            ModelWrapper.compiled_codes.append(new)
+            print(ModelWrapper.compiled_codes)
+
+    torch._dynamo.convert_frame.register_bytecode_hook(collect_bytecode_hook)
 
 
 def _get_padded_prefill_len(x: int) -> int:
