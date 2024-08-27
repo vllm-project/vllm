@@ -120,7 +120,6 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             seq_len=self.scheduler_config.max_num_batched_tokens,
             kv_caches=kv_caches,
             is_prompt=True,
-            compiled=False,
         )
         # Synchronize before measuring the memory usage.
         xm.wait_device_ops()
@@ -144,6 +143,12 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         num_cpu_blocks = int(self.cache_config.swap_space_bytes //
                              block_size_bytes)
         num_cpu_blocks = (num_cpu_blocks // 8) * 8  # Round down to 8.
+
+        # only compile after profiling runs
+        self.model_runner.model = torch.compile(self.model_runner.model,
+                                                backend="openxla",
+                                                fullgraph=True,
+                                                dynamic=False)
         return num_tpu_blocks, num_cpu_blocks
 
     def initialize_cache(
