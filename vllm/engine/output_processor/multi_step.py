@@ -11,7 +11,7 @@ from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (Sequence, SequenceGroup, SequenceGroupOutput,
                            SequenceOutput, SequenceStatus)
-from vllm.transformers_utils.detokenizer import Detokenizer
+from vllm.transformers_utils.detokenizer import Detokenizer, INVALID_TOKEN_ID
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import Counter
 
@@ -110,7 +110,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             # we can take the first sample.
             samples = [output.samples[0] for output in outputs]
 
-            # -1 means the output token is not valid (eg. due to spec decode
+            # entries in sample tokens may be invalid (eg. due to spec decode
             # rejecting tokens).
             valid_samples = [
                 sample for sample in samples if sample.output_token != -1
