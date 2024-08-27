@@ -1,5 +1,6 @@
 """A block manager that manages token blocks."""
 import math
+import time
 from abc import ABC, abstractmethod
 from itertools import count, takewhile
 from os.path import commonprefix
@@ -89,8 +90,12 @@ class CachedBlockAllocator(BlockAllocatorBase):
                        num_hashed_tokens: int) -> PhysicalTokenBlock:
         if self.current_num_blocks == self.num_blocks:
             block = self.evictor.evict()
+            block.prev_block_hash = block.block_hash
             block.block_hash = block_hash
+            block.prev_num_hashed_tokens = block.num_hashed_tokens
             block.num_hashed_tokens = num_hashed_tokens
+            if block.computed:
+                print(f"Computed block {block.number} from {self.device}")
             return block
         block = PhysicalTokenBlock(device=self.device,
                                    block_number=self.current_num_blocks,
@@ -126,6 +131,9 @@ class CachedBlockAllocator(BlockAllocatorBase):
             raise ValueError(f"Double free! {block} is already freed.")
         block.ref_count -= 1
         if block.ref_count == 0:
+            if self.device == Device.CPU:
+                block.last_accessed = time.time()
+                print("Free CPU block: ", block.block_number)
             assert block.block_hash not in self.evictor
             self.evictor.add(block)
 
@@ -221,6 +229,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         watermark: float = 0.01,
         sliding_window: Optional[int] = None,
         enable_caching: bool = False,
+        enable_memory_tiering: bool = False,
+        enable_chunked_prefill: bool = False,
     ) -> None:
         self.block_size = block_size
         self.num_total_gpu_blocks = num_gpu_blocks
@@ -240,11 +250,15 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         assert watermark >= 0.0
 
         self.enable_caching = enable_caching
+        self.enable_memory_tiering = enable_memory_tiering
+        self.enable_chunked_prefill = enable_chunked_prefill
 
         self.watermark_blocks = int(watermark * num_gpu_blocks)
 
         if self.enable_caching:
             logger.info("Automatic prefix caching is enabled.")
+            if self.enable_memory_tiering:
+                logger.info("Memory Tiering is enabled.")
             self.gpu_allocator: BlockAllocatorBase = CachedBlockAllocator(
                 Device.GPU, block_size, num_gpu_blocks)
             self.cpu_allocator: BlockAllocatorBase = CachedBlockAllocator(
@@ -256,6 +270,9 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 Device.CPU, block_size, num_cpu_blocks)
         # Mapping: seq_id -> BlockTable.
         self.block_tables: Dict[int, BlockTable] = {}
+        # Mappng: seq_id -> BlockTable (CPU):
+        # Only used for eviction from HBM to DRAM
+        self.evict_block_tables: Dict[int, BlockTable] = {}
         # Mapping: req_id -> BlockTable
         # Note that each SequenceGroup has a unique
         # request ID
@@ -292,14 +309,28 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         else:
             return AllocStatus.LATER
 
+    def _block_in_allocator(self, block_hash: int) -> Tuple[bool, bool]:
+        # Check whether the block is in each tier (allocated or in evictor)
+        return (self.gpu_allocator.contains_block(block_hash),
+                self.cpu_allocator.contains_block(block_hash))
+
     def _allocate_sequence(self, \
                            seq: Sequence, \
                            ref_count: int, \
-                           is_encoder_decoder: bool = True) -> BlockTable:
+                           is_encoder_decoder: bool = True
+                           ) -> Tuple[BlockTable,
+                                      BlockTable,
+                                      List[Tuple[int, int]],
+                                      List[Tuple[int, int]]]:
         # Allocate new physical token blocks that will store the prompt tokens.
         num_prompt_blocks = seq.n_blocks
 
         block_table: BlockTable = []
+        cpu_block_table: BlockTable = []
+        is_hit_history = []
+        swap_in: List[Tuple[int, int]] = []
+        swap_out_mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
+        is_prev_hit = True
         for logical_idx in range(num_prompt_blocks):
             if (self.block_sliding_window is not None
                     and logical_idx >= self.block_sliding_window):
@@ -307,18 +338,109 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 # Set the reference counts of the token blocks.
                 block.ref_count = ref_count
             elif not is_encoder_decoder and self.enable_caching:
+                block_hash = seq.hash_of_block(logical_idx)
+                is_in_allocator = self._block_in_allocator(block_hash)
+                is_hit = True in is_in_allocator
+                is_hit_history.append(is_in_allocator)
+                if self.enable_memory_tiering and is_prev_hit is False:
+                    #NOTE[PAN]: Should not have ooooxxxooo pattern
+                    #is_hit = False
+                    if is_hit:
+                        print("Failed Seq ID: ", seq.seq_id)
+                        if is_in_allocator[0]:
+                            block = self.gpu_allocator.allocate(
+                                block_hash,
+                                seq.num_hashed_tokens_of_block(logical_idx))
+                            block_table_list = [
+                                block.block_number for block in block_table
+                            ]
+                            cpu_block_table_list = [
+                                block.block_number for block in cpu_block_table
+                            ]
+                            print("Hit GPU Block: ", block.block_number)
+                            print("Hit history: ", is_hit_history)
+                            print(block_table_list)
+                            print(cpu_block_table_list)
+                            print(swap_in)
+                        else:
+                            block = self.cpu_allocator.allocate(
+                                block_hash,
+                                seq.num_hashed_tokens_of_block(logical_idx))
+                            block_table_list = [
+                                block.block_number for block in block_table
+                            ]
+                            cpu_block_table_list = [
+                                block.block_number for block in cpu_block_table
+                            ]
+                            print("Hit CPU Block: ", block.block_number)
+                            print("Hit history: ", is_hit_history)
+                            print(block_table_list)
+                            print(cpu_block_table_list)
+                            print(swap_in)
+                    #is_hit = False
+                    assert is_hit is False
+                is_prev_hit = is_hit
+                # Either a block existing or a new block or an evicted block
                 block = self.gpu_allocator.allocate(
-                    seq.hash_of_block(logical_idx),
-                    seq.num_hashed_tokens_of_block(logical_idx))
+                    block_hash, seq.num_hashed_tokens_of_block(logical_idx))
+
+                if self.enable_memory_tiering:
+                    # Handle swap in
+                    if ((not is_in_allocator[0]) and is_in_allocator[1]
+                            and is_prev_hit):
+                        cpu_block = self.cpu_allocator.allocate(
+                            block_hash,
+                            seq.num_hashed_tokens_of_block(logical_idx))
+                        #NOTE: We always take blocks from CPU evictor
+                        assert cpu_block.computed
+                        assert cpu_block.ref_count == 1
+                        block.computed = True
+                        swap_in.append(
+                            (cpu_block.block_number, block.block_number))
+                        cpu_block_table.append(cpu_block)
+
+                    # Handle swap out
+                    # For those block not computed (e.g. length capped)
+                    if block.is_evicted and block.prev_computed:
+                        assert block.ref_count == 1
+                        if block in swap_out_mapping:
+                            to_block = swap_out_mapping[block]
+                            to_block.ref_count += 1
+                            to_block.computed = block.prev_computed
+                            cpu_block_table.append(to_block)
+                        elif self.cpu_allocator.get_num_free_blocks() > 0:
+                            to_block = self.cpu_allocator.allocate(
+                                block.prev_block_hash,
+                                block.prev_num_hashed_tokens)
+                            assert to_block.ref_count == 1
+                            swap_out_mapping[block] = to_block
+                            to_block.computed = block.prev_computed
+                            cpu_block_table.append(to_block)
             else:
                 block = self.gpu_allocator.allocate()
                 # Set the reference counts of the token blocks.
                 block.ref_count = ref_count
+
+            # Verify
+            if (is_encoder_decoder or not self.enable_caching or
+                (self.enable_caching and not self.enable_memory_tiering)):
+                assert (cpu_block_table
+                        == []) and (swap_in == []) and (swap_out_mapping == {})
+
             block_table.append(block)
 
-        return block_table
+        swap_out = [(gpu_block.block_number, cpu_block.block_number)\
+                for gpu_block, cpu_block in swap_out_mapping.items()]
 
-    def allocate(self, seq_group: SequenceGroup) -> None:
+        block_table_list = [block.block_number for block in block_table]
+        #print("Seq id: ", seq.seq_id)
+        #print(block_table_list, swap_in, swap_out)
+
+        return block_table, cpu_block_table, swap_in, swap_out
+
+    def allocate(
+        self, seq_group: SequenceGroup
+    ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]:
         is_encoder_decoder = seq_group.is_encoder_decoder()
         check_no_caching_or_swa_for_blockmgr_encdec(self, seq_group)
 
@@ -327,23 +449,28 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         # NOTE: Here we assume that all sequences in the group have the same
         # decoder prompt.
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
-        block_table: BlockTable = \
+        block_table, cpu_block_table, swap_in, swap_out = \
             self._allocate_sequence(seq,
                                     seq_group.num_seqs(),
                                     is_encoder_decoder)
 
         # Assign the self-attention block tables for each sequence.
+        cpu_access_time = time.time()
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             self.block_tables[seq.seq_id] = block_table.copy()
+            if self.enable_memory_tiering:
+                self.evict_block_tables[seq.seq_id] = cpu_block_table.copy()
+                self._access_all_cpu_blocks_in_seq(seq, cpu_access_time)
 
         # Allocate encoder sequence
         if is_encoder_decoder:
             # A SequenceGroup has only a single encoder sequence (at most),
             # thus allocate with a ref count of 1
-            block_table = self._allocate_sequence(seq_group.get_encoder_seq(),
-                                                  1, is_encoder_decoder)
+            block_table, _, _, _ = self._allocate_sequence(
+                seq_group.get_encoder_seq(), 1, is_encoder_decoder)
             # Assign the cross-attention block table for the SequenceGroup.
             self.cross_block_tables[seq_group.request_id] = block_table
+        return swap_in, swap_out
 
     def can_append_slots(self,
                          seq_group: SequenceGroup,
@@ -397,14 +524,14 @@ class BlockSpaceManagerV1(BlockSpaceManager):
     def _allocate_last_physical_block(
         self,
         seq: Sequence,
-    ) -> PhysicalTokenBlock:
+    ) -> Tuple[PhysicalTokenBlock, PhysicalTokenBlock]:
         # Called before a new block is appended.
         # This is in charge of allocating a new physical block (to be appended).
 
         # None if the last block is not full. Otherwise, we set it to the
         # content hash.
         if not self.enable_caching:
-            return self.gpu_allocator.allocate()
+            return self.gpu_allocator.allocate(), None
         block_hash: Optional[int] = None
         n_blocks = seq.n_blocks
         if (self._is_last_block_full(seq)):
@@ -415,18 +542,28 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         # (e.g. in the hashing function, it is used to ask the sequence for
         # prefix tokens)
         new_block = self.gpu_allocator.allocate(block_hash, num_hashed_tokens)
+        if (self.enable_caching and self.enable_memory_tiering
+                and new_block.is_evicted and new_block.prev_computed
+                and self.cpu_allocator.get_num_free_blocks() > 0):
+            # For now, don't swap in for decode. Decode should be faster
+            #TODO: Is it necessary to swapin and swapout for decode case?
+            cpu_block = self.cpu_allocator.allocate(
+                new_block.prev_block_hash, new_block.prev_num_hashed_tokens)
+            cpu_block.computed = new_block.prev_computed
+            return new_block, cpu_block
 
         # If the block has is None, then the block is not full.
         # If the block is not full, then we expect it to have a refcount of 1.
         if block_hash is None:
             assert new_block.ref_count == 1
-        return new_block
+        return new_block, None
 
     def append_slots(
         self,
         seq: Sequence,
         num_lookahead_slots: int = 0,
-    ) -> List[Tuple[int, int]]:
+    ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]], List[Tuple[int,
+                                                                        int]]]:
         """Allocate a physical slot for a new token."""
         n_blocks = seq.n_blocks
         block_table = self.block_tables[seq.seq_id]
@@ -443,9 +580,15 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             else:
                 # The sequence hash a new logical block.
                 # Allocate a new physical block.
-                new_block = self._allocate_last_physical_block(seq)
+                new_block, cpu_block = self._allocate_last_physical_block(seq)
                 block_table.append(new_block)
-                return []
+                if cpu_block is not None:
+                    self.evict_block_tables.setdefault(seq.seq_id,
+                                                       []).append(cpu_block)
+                    return [], [], [(new_block.block_number,
+                                     cpu_block.block_number)]
+                else:
+                    return [], [], []
 
         # We want to append the token to the last physical block.
         last_block = block_table[-1]
@@ -458,15 +601,23 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 maybe_new_block = self._maybe_promote_last_block(
                     seq, last_block)
                 block_table[-1] = maybe_new_block
-            return []
+            return [], [], []
         else:
             # The last block is shared with other sequences.
             # Copy on Write: Allocate a new block and copy the tokens.
-            new_block = self._allocate_last_physical_block(seq)
+            new_block, cpu_block = self._allocate_last_physical_block(seq)
+            if cpu_block is not None:
+                self.evict_block_tables.setdefault(seq.seq_id,
+                                                   []).append(cpu_block)
 
             block_table[-1] = new_block
             self.gpu_allocator.free(last_block)
-            return [(last_block.block_number, new_block.block_number)]
+            if cpu_block is not None:
+                return ([(last_block.block_number, new_block.block_number)],
+                        [], [new_block.block_number, cpu_block.block_number])
+            else:
+                return ([(last_block.block_number, new_block.block_number)],
+                        [], [])
 
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         # NOTE: fork does not allocate a new physical block.
@@ -523,11 +674,17 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             return AllocStatus.LATER
 
     def _swap_block_table(
-            self, block_table: BlockTable, src_allocator: BlockAllocatorBase,
-            dest_allocator: BlockAllocatorBase,
-            mapping: Dict[PhysicalTokenBlock,
-                          PhysicalTokenBlock]) -> BlockTable:
+        self,
+        block_table: BlockTable,
+        src_allocator: BlockAllocatorBase,
+        dest_allocator: BlockAllocatorBase,
+        mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock],
+        delayed_free: bool = False,
+        evict_mapping: Optional[Dict[PhysicalTokenBlock,
+                                     PhysicalTokenBlock]] = None
+    ) -> Tuple[BlockTable, BlockTable]:
         new_block_table = []
+        old_block_table = []
 
         for from_block in block_table:
             if from_block in mapping:
@@ -537,35 +694,67 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 to_block = dest_allocator.allocate(
                     from_block.block_hash, from_block.num_hashed_tokens)
                 mapping[from_block] = to_block
+                if (delayed_free and evict_mapping is not None
+                        and to_block.is_evicted and to_block.prev_computed):
+                    if to_block in evict_mapping:
+                        evict_block = evict_mapping[to_block]
+                        evict_block.computed = to_block.prev_computed
+                    elif src_allocator.get_num_free_blocks() > 0:
+                        evict_block = src_allocator.allocate(
+                            to_block.prev_block_hash,
+                            to_block.prev_num_hashed_tokens)
+                        evict_mapping[to_block] = evict_block
+                        evict_block.computed = to_block.prev_computed
+                        if delayed_free:
+                            old_block_table.append(evict_block)
+                        else:
+                            src_allocator.free(evict_block)
+
             new_block_table.append(to_block)
-            # Free the source block swapped in to destination.
-            src_allocator.free(from_block)
+            if delayed_free:
+                old_block_table.append(from_block)
+            else:
+                # Free the source block swapped in to destination.
+                src_allocator.free(from_block)
 
-        return new_block_table
+        return new_block_table, old_block_table
 
-    def swap_in(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
+    def swap_in(
+        self, seq_group: SequenceGroup
+    ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]:
 
         request_id = seq_group.request_id
-
+        # Avoid the case where prefill swaps blocks to
+        # freed swap in chunked prefill
+        enable_evict = ((not seq_group.is_encoder_decoder)
+                        and self.enable_caching and self.enable_memory_tiering)
         # CPU block -> GPU block.
         # dict is efficient in lookup `if cpu_block in mapping`
         mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
+        evict_mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
+
         for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
-            self.block_tables[seq.seq_id] = \
+            self.block_tables[seq.seq_id],  \
+            self.evict_block_tables[seq.seq_id] = \
                 self._swap_block_table(self.block_tables[seq.seq_id],
                                        self.cpu_allocator,
                                        self.gpu_allocator,
-                                       mapping)
+                                       mapping,
+                                       enable_evict,
+                                       evict_mapping)
 
         if seq_group.is_encoder_decoder():
-            self.cross_block_tables[request_id] = \
+            self.cross_block_tables[request_id], _= \
                 self._swap_block_table(self.cross_block_tables[request_id],
                                        self.cpu_allocator,
                                        self.gpu_allocator,
                                        mapping)
 
-        return [(cpu_block.block_number, gpu_block.block_number)
-                for cpu_block, gpu_block in mapping.items()]
+        return ([(cpu_block.block_number, gpu_block.block_number)
+                 for cpu_block, gpu_block in mapping.items()], [
+                     (gpu_block.block_number, cpu_block.block_number)
+                     for gpu_block, cpu_block in evict_mapping.items()
+                 ] if evict_mapping is not None else [])
 
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:
         blocks = self._get_physical_blocks(seq_group)
@@ -578,14 +767,14 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         # dict is efficient in lookup `if gpu_block in mapping`
         mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-            self.block_tables[seq.seq_id] = \
+            self.block_tables[seq.seq_id], _ = \
                 self._swap_block_table(self.block_tables[seq.seq_id],
                                        self.gpu_allocator,
                                        self.cpu_allocator,
                                        mapping)
 
         if seq_group.is_encoder_decoder():
-            self.cross_block_tables[request_id] = \
+            self.cross_block_tables[request_id], _= \
                 self._swap_block_table(self.cross_block_tables[request_id],
                                        self.gpu_allocator,
                                        self.cpu_allocator,
@@ -603,11 +792,83 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         blocks_to_free = (block_table[-self.block_sliding_window:]
                           if self.block_sliding_window is not None else
                           block_table)
-        for block in set(blocks_to_free):
+        for block in blocks_to_free:
             if block.device == Device.GPU:
                 self.gpu_allocator.free(block)
             else:
                 self.cpu_allocator.free(block)
+
+    #NOTE: This function can be very slow
+    def adjust_swap(
+        self,
+        new_swap_in: List[Tuple[int, int]],
+        new_swap_out: List[Tuple[int, int]],
+        old_swap_in: List[Tuple[int, int]],
+        old_swap_out: List[Tuple[int, int]],
+        old_swap_copy: List[Tuple[int, int]],
+    ) -> None:
+        if not (self.enable_caching and self.enable_memory_tiering):
+            old_swap_in.extend(new_swap_in)
+            old_swap_out.extend(new_swap_out)
+            return
+        # Perform in-place change to the old lists
+        # Verify first:
+        new_swap_in_cpu_blocks = [t[0] for t in new_swap_in]
+        new_swap_in_gpu_blocks = [t[1] for t in new_swap_in]
+        new_swap_out_cpu_blocks = [t[1] for t in new_swap_out]
+        old_swap_in_set = {t[0] for t in old_swap_in}
+        old_swap_out_set = {t[1] for t in old_swap_out}
+        old_copy_to_set = {t[1] for t in old_swap_copy}
+
+        # Old swap and new swap is joint when they contain the same block
+        cpu_only_intersect = old_swap_in_set.intersection(
+            set(new_swap_in_cpu_blocks))
+        tuple_intersect = set(old_swap_in).intersection(set(new_swap_in))
+        assert cpu_only_intersect == {t[0] for t in tuple_intersect}
+        # cpu blocks to swap in cannot overlap with any other cpu blocks
+        assert old_swap_in_set.isdisjoint(set(new_swap_out_cpu_blocks))
+
+        # gpu blocks copied to should to overlap with those being swapped in
+        assert old_copy_to_set.isdisjoint(set(new_swap_in_gpu_blocks))
+
+        # Warning for swap_out and swap_out overlap
+        overlap_set = {t[1] for t in new_swap_out if t[1] in old_swap_out_set}
+        if len(overlap_set) != 0:
+            logger.warning("new swap out overlaps with the old swap out")
+            # Remove the old ones and add the new ones:
+            old_swap_out = [t for t in old_swap_out if t[1] not in overlap_set]
+        old_swap_out += new_swap_out
+
+        # Warning for swap_out and swap_in overlap and change swap_in to copy
+        overlap_tuple = [
+            t for t in old_swap_out if t[1] in set(new_swap_in_cpu_blocks)
+        ]
+        overlap_set = {t[1] for t in overlap_tuple}
+        if len(overlap_set) != 0:
+            logger.warning("new swap in overlaps with the old swap out")
+            old_swap_in += [t for t in new_swap_in if t[0] not in overlap_set]
+            # Now get the matching tuple: swap_out + swap_in = copy
+            overlap_dict: Dict[int, List[Tuple[int, int]]] = {}
+            for t in overlap_tuple:
+                assert t[1] not in overlap_dict
+                overlap_dict[t[1]] = [t]
+            overlap_tuple = [t for t in new_swap_in if t[0] in overlap_set]
+            for t in overlap_tuple:
+                assert t[0] in overlap_dict
+                overlap_dict[t[0]].append(t)
+            for _, v in overlap_dict.items():
+                old_swap_copy.append((v[0][0], v[1][1]))
+        else:
+            old_swap_in += new_swap_in
+
+        return
+
+    def free_evict(self, seq: Sequence) -> None:
+        if seq.seq_id not in self.evict_block_tables:
+            return
+        evict_block_table = self.evict_block_tables[seq.seq_id]
+        self._free_block_table(evict_block_table)
+        del self.evict_block_tables[seq.seq_id]
 
     def free(self, seq: Sequence) -> None:
         if seq.seq_id not in self.block_tables:
@@ -659,6 +920,19 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             # in this step.
             block_table = self.block_tables[seq.seq_id]
             for block in block_table:
+                block.last_accessed = access_time
+
+    def _access_all_cpu_blocks_in_seq(
+        self,
+        seq: Sequence,
+        access_time: float,
+    ) -> None:
+        if self.enable_caching and self.enable_memory_tiering:
+            # Update the last accessed time of all the blocks accessed
+            # in this step.
+            block_table = self.evict_block_tables[seq.seq_id]
+            for block in block_table:
+                print("Set access time: ", block.block_number)
                 block.last_accessed = access_time
 
     def compute_full_blocks_in_seq(self, seq: Sequence):

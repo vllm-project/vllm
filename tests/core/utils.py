@@ -15,13 +15,18 @@ def create_dummy_prompt(
     lora_request: Optional[LoRARequest] = None,
     use_beam_search: bool = False,
     best_of: int = 1,
+    prompt_range: Optional[Tuple[int, int]] = None,
 ) -> Tuple[Sequence, SequenceGroup]:
     if not block_size:
         block_size = prompt_length
 
     # Create dummy prompt sequence with tokens 0...block_size-1
     # and prompt "0 ... block_size".
-    prompt_tokens = list(range(prompt_length))
+    if prompt_range:
+        prompt_tokens = list(range(prompt_range[0], prompt_range[1]))
+        assert (len(prompt_tokens) == prompt_length)
+    else:
+        prompt_tokens = list(range(prompt_length))
     prompt_str = " ".join([str(t) for t in prompt_tokens])
     prompt = Sequence(int(request_id),
                       inputs={

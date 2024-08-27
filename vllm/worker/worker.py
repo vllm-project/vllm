@@ -253,6 +253,11 @@ class Worker(LocalOrDistributedWorkerBase):
             self, execute_model_req: ExecuteModelRequest) -> WorkerInput:
         virtual_engine = execute_model_req.virtual_engine
         num_seq_groups = len(execute_model_req.seq_group_metadata_list)
+        # Some final verification
+        swap_in_cpu_set = {t[0] for t in execute_model_req.blocks_to_swap_in}
+        swap_out_cpu_set = {t[1] for t in execute_model_req.blocks_to_swap_out}
+        assert swap_in_cpu_set.isdisjoint(swap_out_cpu_set)
+
         # `blocks_to_swap_in` and `blocks_to_swap_out` are cpu tensors.
         # they contain parameters to launch cudamemcpyasync.
         blocks_to_swap_in = torch.tensor(execute_model_req.blocks_to_swap_in,
@@ -279,18 +284,24 @@ class Worker(LocalOrDistributedWorkerBase):
     @torch.inference_mode()
     def execute_worker(self, worker_input: WorkerInput) -> None:
         virtual_engine = worker_input.virtual_engine
+        #NOTE: Here we change the order to prevent overlap
         # Issue cache operations.
-        if (worker_input.blocks_to_swap_in is not None
-                and worker_input.blocks_to_swap_in.numel() > 0):
-            self.cache_engine[virtual_engine].swap_in(
-                worker_input.blocks_to_swap_in)
         if (worker_input.blocks_to_swap_out is not None
                 and worker_input.blocks_to_swap_out.numel() > 0):
             self.cache_engine[virtual_engine].swap_out(
                 worker_input.blocks_to_swap_out)
+        #    self.cache_engine[virtual_engine].swap_out_one_layer(
+        #        worker_input.blocks_to_swap_out, 0)
+        #NOTE: We leave copy for now because it should not be the common case
         if (worker_input.blocks_to_copy is not None
                 and worker_input.blocks_to_copy.numel() > 0):
             self.cache_engine[virtual_engine].copy(worker_input.blocks_to_copy)
+        if (worker_input.blocks_to_swap_in is not None
+                and worker_input.blocks_to_swap_in.numel() > 0):
+            self.cache_engine[virtual_engine].swap_in(
+                worker_input.blocks_to_swap_in)
+        #    self.cache_engine[virtual_engine].swap_in_one_layer(
+        #        worker_input.blocks_to_swap_in, 0)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)

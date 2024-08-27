@@ -46,8 +46,11 @@ class BlockSpaceManager(ABC):
     def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
         pass
 
+    # Return: swapin, swapout
     @abstractmethod
-    def allocate(self, seq_group: SequenceGroup) -> None:
+    def allocate(
+        self, seq_group: SequenceGroup
+    ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]:
         pass
 
     @abstractmethod
@@ -60,7 +63,8 @@ class BlockSpaceManager(ABC):
         self,
         seq: Sequence,
         num_lookahead_slots: int,
-    ) -> List[Tuple[int, int]]:
+    ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]], List[Tuple[int,
+                                                                        int]]]:
         pass
 
     @abstractmethod
@@ -73,7 +77,9 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def swap_in(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
+    def swap_in(
+        self, seq_group: SequenceGroup
+    ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]:
         pass
 
     @abstractmethod

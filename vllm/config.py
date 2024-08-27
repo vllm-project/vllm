@@ -448,6 +448,7 @@ class CacheConfig:
         num_gpu_blocks_override: Optional[int] = None,
         sliding_window: Optional[int] = None,
         enable_prefix_caching: bool = False,
+        enable_memory_tiering: bool = False,
         cpu_offload_gb: float = 0,
     ) -> None:
         self.block_size = block_size
@@ -457,6 +458,7 @@ class CacheConfig:
         self.cache_dtype = cache_dtype
         self.sliding_window = sliding_window
         self.enable_prefix_caching = enable_prefix_caching
+        self.enable_memory_tiering = enable_memory_tiering
         self.cpu_offload_gb = cpu_offload_gb
         self._verify_args()
         self._verify_cache_dtype()
