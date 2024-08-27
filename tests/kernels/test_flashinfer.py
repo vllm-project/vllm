@@ -1,8 +1,8 @@
 from typing import List, Optional, Tuple
+
 import flashinfer
 import pytest
 import torch
-
 
 NUM_HEADS = [(16, 16), (32, 8), (64, 8), (6, 1)]
 HEAD_SIZES = [128, 256]
