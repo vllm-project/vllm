@@ -24,6 +24,7 @@ DEFAULT_SERVER_ARGS: List[str] = [
     "16",
 ]
 
+
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize(("tp_size, pp_size"), [
     (1, 1),
