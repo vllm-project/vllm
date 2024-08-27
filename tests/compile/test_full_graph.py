@@ -23,13 +23,13 @@ class MyWrapper(TorchCompileWrapperWithCustomDispacther):
         # this is the function to be compiled
         return self.model(x, a)
 
-    def __call__(self, x, a):
+    def __call__(self, x: torch.Tensor, a: int):
         # let torch.compile compile twice
         if len(self.compiled_codes) >= 2:
             with self.dispatch_to_code(0):
-                return self.compiled_callable(x, a)
+                return self.forward(x, a)
         else:
-            return self.compiled_callable(x)
+            return self.compiled_callable(x, a)
 
 
 def test_torch_compile_wrapper():
