@@ -28,12 +28,12 @@ async def completions_with_server_args(prompts: List[str], model_name: str,
 
     outputs = None
     with RemoteOpenAIServer(model_name, server_cli_args) as server:
-        client = server.get_async_client()
-        outputs = await client.completions.create(model=model_name,
-                                                  prompt=prompts,
-                                                  temperature=0,
-                                                  stream=False,
-                                                  max_tokens=5)
+        async with server.get_async_client() as client:
+            outputs = await client.completions.create(model=model_name,
+                                                      prompt=prompts,
+                                                      temperature=0,
+                                                      stream=False,
+                                                      max_tokens=5)
     assert outputs is not None
 
     return outputs
