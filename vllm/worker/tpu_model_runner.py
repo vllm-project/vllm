@@ -607,6 +607,10 @@ class ModelWrapper:
         if len(ModelWrapper.compiled_codes) < 3:
             # not fully compiled yet, let PyTorch handle it
             return self.compiled_forward(*args, **kwargs)
+        # the 3 compiled codes are:
+        # 0: for profiling
+        # 1: for prompt
+        # 2: for decode
         # dispatch to the compiled code directly, skip PyTorch
         if is_prompt:
             ModelWrapper.forward.__code__ = ModelWrapper.compiled_codes[1]
@@ -716,7 +720,6 @@ class ModelWrapper:
         global compiled_codes
         if old is ModelWrapper.target_code:
             ModelWrapper.compiled_codes.append(new)
-            print(ModelWrapper.compiled_codes)
 
     torch._dynamo.convert_frame.register_bytecode_hook(collect_bytecode_hook)
 
