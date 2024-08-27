@@ -209,7 +209,6 @@ def test_swap_infeasible(
     prefill_blocks = 2
     decode_blocks = max_tokens // BLOCK_SIZE
     example_prompts = example_prompts[:1]
-
     with vllm_runner(
             model,
             dtype=dtype,

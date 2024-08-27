@@ -147,6 +147,7 @@ class EngineArgs:
 
     otlp_traces_endpoint: Optional[str] = None
     collect_detailed_traces: Optional[str] = None
+    disable_async_output_proc: bool = False
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -733,6 +734,12 @@ class EngineArgs:
             "modules. This involves use of possibly costly and or blocking "
             "operations and hence might have a performance impact.")
 
+        parser.add_argument(
+            '--disable-async-output-proc',
+            action='store_true',
+            default=EngineArgs.disable_async_output_proc,
+            help="Disable async output processing. This may result in "
+            "lower performance.")
         return parser
 
     @classmethod
@@ -792,6 +799,7 @@ class EngineArgs:
             skip_tokenizer_init=self.skip_tokenizer_init,
             served_model_name=self.served_model_name,
             limit_mm_per_prompt=self.limit_mm_per_prompt,
+            use_async_output_proc=not self.disable_async_output_proc,
         )
         cache_config = CacheConfig(
             block_size=self.block_size if self.device != "neuron" else
