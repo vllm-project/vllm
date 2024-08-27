@@ -80,11 +80,16 @@ class LRUEvictor(Evictor):
 
         self.free_table.pop(evicted_block.block_hash)
 
+        #NOTE: It is uncertain that the block is computed
+        evicted_block.prev_computed = evicted_block.computed
         evicted_block.computed = False
+        assert evicted_block.is_evicted is False
+        evicted_block.is_evicted = True
         return evicted_block
 
     def add(self, block: PhysicalTokenBlock):
         self.free_table[block.block_hash] = block
+        block.is_evicted = False
 
     def remove(self, block_hash: int) -> PhysicalTokenBlock:
         if block_hash not in self.free_table:

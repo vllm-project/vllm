@@ -21,20 +21,27 @@ class PhysicalTokenBlock:
         self.block_number = block_number
         self.block_size = block_size
         self.block_hash = block_hash
+        self.prev_block_hash = block_hash
         self.num_hashed_tokens = num_hashed_tokens
+        self.prev_num_hashed_tokens = num_hashed_tokens
 
         self.ref_count = 0
         self.last_accessed = DEFAULT_LAST_ACCESSED_TIME
 
+        self.prev_computed = False
         self.computed = False
+
+        self.is_evicted = False
 
     def __repr__(self) -> str:
         return (f'PhysicalTokenBlock(device={self.device}, '
                 f'block_number={self.block_number}, '
+                f'block_hash={self.block_hash},'
                 f'num_hashed_tokens={self.num_hashed_tokens}, '
                 f'ref_count={self.ref_count}, '
                 f'last_accessed={self.last_accessed}, '
-                f'computed={self.computed})')
+                f'computed={self.computed}, '
+                f'is_evicted={self.is_evicted})')
 
 
 class BlockTable:

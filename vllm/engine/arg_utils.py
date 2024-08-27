@@ -92,6 +92,7 @@ class EngineArgs:
     max_parallel_loading_workers: Optional[int] = None
     block_size: int = 16
     enable_prefix_caching: bool = False
+    enable_memory_tiering: bool = False
     disable_sliding_window: bool = False
     use_v2_block_manager: bool = False
     swap_space: float = 4  # GiB
@@ -347,6 +348,11 @@ class EngineArgs:
         parser.add_argument('--enable-prefix-caching',
                             action='store_true',
                             help='Enables automatic prefix caching.')
+        parser.add_argument(
+            '--enable-memory-tiering',
+            action='store_true',
+            help='Enable memory tiering when the block manager '
+            'evicts blocks from HBM.')
         parser.add_argument('--disable-sliding-window',
                             action='store_true',
                             help='Disables sliding window, '
@@ -859,6 +865,7 @@ class EngineArgs:
             num_gpu_blocks_override=self.num_gpu_blocks_override,
             sliding_window=model_config.get_sliding_window(),
             enable_prefix_caching=self.enable_prefix_caching,
+            enable_memory_tiering=self.enable_memory_tiering,
             cpu_offload_gb=self.cpu_offload_gb,
         )
         parallel_config = ParallelConfig(
@@ -918,6 +925,9 @@ class EngineArgs:
             logger.warning(
                 "Enabled BlockSpaceManagerV2 because it is "
                 "required for multi-step (--num-scheduler-steps > 1)")
+        if self.use_v2_block_manager and self.enable_memory_tiering:
+            raise ValueError(
+                "Block Manager V2 does not support memory tiering yet")
 
         speculative_config = SpeculativeConfig.maybe_create_spec_config(
             target_model_config=model_config,
