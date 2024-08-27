@@ -1179,7 +1179,8 @@ class SpeculativeConfig:
             draft_parallel_config = (
                 SpeculativeConfig.create_draft_parallel_config(
                     target_parallel_config,
-                    speculative_draft_tensor_parallel_size, draft_hf_config))
+                    speculative_draft_tensor_parallel_size, draft_hf_config,
+                    cpu_draft_worker))
 
         if num_speculative_tokens is None:
             raise ValueError(
@@ -1251,13 +1252,15 @@ class SpeculativeConfig:
         target_parallel_config: ParallelConfig,
         speculative_draft_tensor_parallel_size: Optional[int],
         draft_hf_config: PretrainedConfig,
+        cpu_draft_worker: Optional[bool],
     ) -> ParallelConfig:
         """Create a parallel config for use by the draft worker.
 
         This is mostly a copy of the target parallel config, except the tp_size.
         """
         if speculative_draft_tensor_parallel_size is None:
-            if draft_hf_config.model_type == "mlp_speculator":
+            if draft_hf_config.model_type == "mlp_speculator" or \
+                    cpu_draft_worker:
                 speculative_draft_tensor_parallel_size = 1
                 if target_parallel_config.tensor_parallel_size > 1:
                     logger.warning(
