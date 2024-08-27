@@ -22,7 +22,7 @@ from vllm.spec_decode.interfaces import (SpeculativeProposals,
 from vllm.spec_decode.medusa_worker import MedusaWorker
 from vllm.spec_decode.metrics import AsyncMetricsCollector
 from vllm.spec_decode.mlp_speculator_worker import MLPSpeculatorWorker
-from vllm.spec_decode.multi_proposers_worker import MultiProposersWorker
+from vllm.spec_decode.multi_proposer_worker import MultiProposerWorker
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.ngram_worker import NGramWorker
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
@@ -164,10 +164,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             worker_list[
                 draft_worker_kwargs['model_config'].model] = proposer_worker
 
-            # Currently, MultiProposersWorker is designed to support NGram
+            # Currently, MultiProposerWorker is designed to support NGram
             # proposer as a backup to pair up with another slower but more
             # accurate proposer. If NGramWorker is not configured, then we do
-            # not need MultiProposersWorker at this moment. More flexible
+            # not need MultiProposerWorker at this moment. More flexible
             # choices will be added in the future.
             if ngram_prompt_lookup_max > 0:
                 backup_proposer_worker = NGramWorker(**draft_worker_kwargs)
@@ -176,7 +176,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 worker_list['[ngram]'] = backup_proposer_worker
 
             if len(worker_list.keys()) > 1:
-                proposer_worker = MultiProposersWorker(**draft_worker_kwargs,
+                proposer_worker = MultiProposerWorker(**draft_worker_kwargs,
                                                        worker_list=worker_list)
 
         logger.info("Configuring SpecDecodeWorker with proposer=%s",

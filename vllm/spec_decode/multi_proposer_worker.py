@@ -19,7 +19,7 @@ from vllm.worker.worker_base import LoraNotSupportedWorkerBase
 logger = init_logger(__name__)
 
 
-class MultiProposersWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
+class MultiProposerWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
 
     def __init__(self, *args, **kwargs):
         self.vocab_size = kwargs["model_config"].get_vocab_size()
@@ -37,7 +37,7 @@ class MultiProposersWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
         if draft_tp != 1:
             raise ValueError(
                 f"speculative_draft_tensor_parallel_size cannot be "
-                f"other value than 1 when using MultiProposersWorker. "
+                f"other value than 1 when using MultiProposerWorker. "
                 f"Got {draft_tp} instead.")
 
     def init_device(self) -> None:
@@ -59,8 +59,8 @@ class MultiProposersWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
         sample_len: int,
         seq_ids_with_bonus_token_in_last_step: Set[int],
     ) -> Tuple[Optional[List[Optional[SamplerOutput]]], bool]:
-        """No need to implement sampler_output for MultiProposersWorker,
-        as the optional proposers of MultiProposersWorker will use their
+        """No need to implement sampler_output for MultiProposerWorker,
+        as the optional proposers of MultiProposerWorker will use their
         own Top1Proposers to call their sampler_output functions.
         """
         raise NotImplementedError
@@ -178,7 +178,7 @@ class MultiProposersWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
                         continue
                     else:
                         chosen_proposer = proposer
-                        # Since MultiProposersWorker only supports Ngram as the
+                        # Since MultiProposerWorker only supports Ngram as the
                         # backup proposer currently, we should use Ngram for
                         # the whole batch if any seq_group specifies it.
                         # TODO: Refactor this when flexible backup speculative
