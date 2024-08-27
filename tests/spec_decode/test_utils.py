@@ -135,7 +135,7 @@ def test_get_sampled_token_logprobs():
     with regular get_ranks when probabilities match exactly.
     """
     logprob_tensor = torch.tensor(
-        [[[-.1, -0.1]] * 2])  # shape (num_steps, batch_size, vocab_size)
+        [[[-.1, -.1]] * 2])  # shape (num_steps, batch_size, vocab_size)
     sampled_token_tensor = torch.tensor([[1,
                                           0]])  # shape (num_steps, batch_size)
     ranks_spec_dec, _ = get_sampled_token_logprobs(logprob_tensor,
