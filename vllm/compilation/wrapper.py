@@ -5,6 +5,8 @@ from contextlib import contextmanager
 from types import CodeType
 from typing import Callable, List
 
+import torch
+
 
 class TorchCompileWrapperWithCustomDispacther:
     """
@@ -23,6 +25,7 @@ class TorchCompileWrapperWithCustomDispacther:
         self.compiled_callable = compiled_callable
         self.original_code_object = self.__class__.forward.__code__
         self.compiled_codes: List[CodeType] = []
+        torch._dynamo.convert_frame.register_bytecode_hook(self.bytecode_hook)
 
     def __call__(self, *args, **kwargs):
         """Implement the dispatch logic here, beyond the torch.compile level.
@@ -39,7 +42,6 @@ class TorchCompileWrapperWithCustomDispacther:
         """Hook to save the compiled bytecode for direct execution."""
         if old_code is not self.original_code_object:
             return
-
         # code borrowed from https://github.com/thuml/depyf/blob/f4ad79fadee27ea113b4c75202db1eb1a11c0dbc/depyf/explain/enable_debugging.py#L25
         frame = sys._getframe()
         while True:
