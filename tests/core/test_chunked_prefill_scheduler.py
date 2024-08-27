@@ -21,7 +21,7 @@ def append_new_token(seq_group, token_id: int):
 
 
 def schedule_and_update_computed_tokens(scheduler):
-    metas, out = scheduler.schedule()
+    metas, out, _ = scheduler.schedule()
     for s, meta in zip(out.scheduled_seq_groups, metas):
         s.seq_group.update_num_computed_tokens(meta.token_chunk_size)
     return metas, out
@@ -180,7 +180,7 @@ def test_maximal_decoding():
     """Verify decoding requests are prioritized."""
     block_size = 4
     max_seqs = 2
-    max_model_len = 2
+    max_model_len = 8
     max_num_batched_tokens = 2
     scheduler_config = SchedulerConfig(max_num_batched_tokens,
                                        max_seqs,

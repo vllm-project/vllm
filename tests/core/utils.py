@@ -199,7 +199,7 @@ def append_new_token(out, token_id: int):
 
 
 def schedule_and_update_computed_tokens(scheduler):
-    metas, out = scheduler.schedule()
+    metas, out, _ = scheduler.schedule()
     for s, meta in zip(out.scheduled_seq_groups, metas):
         s.seq_group.update_num_computed_tokens(meta.token_chunk_size)
     return metas, out
