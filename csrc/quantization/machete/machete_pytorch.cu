@@ -8,8 +8,13 @@ namespace machete {
 
 using namespace vllm;
 
-std::vector<std::string> supported_schedules(ScalarTypeTorchPtr const& btype) {
-  return {};
+std::vector<std::string> supported_schedules(
+    at::ScalarType a_type, ScalarTypeTorchPtr b_type,
+    c10::optional<at::ScalarType> maybe_scales_type,
+    c10::optional<at::ScalarType> maybe_zeros_type,
+    c10::optional<at::ScalarType> maybe_out_type) {
+  return supported_schedules_dispatch(a_type, *b_type, maybe_scales_type,
+                                      maybe_zeros_type, maybe_out_type);
 }
 
 torch::Tensor gemm(torch::Tensor const& A, torch::Tensor const& B,

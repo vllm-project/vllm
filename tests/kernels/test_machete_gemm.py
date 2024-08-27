@@ -50,6 +50,7 @@ TEST_TYPE_TUPLES = [
     ([torch.float16, torch.bfloat16], scalar_types.uint8, None, None, True),
     # QQQ style
     ([torch.int8], scalar_types.uint4b8, torch.int, torch.float16, False),
+    ([torch.float8_e4m3fn], scalar_types.uint4b8, torch.float, torch.float16, False),
 ]
 
 # TODO: in future PR refactor this and `is_quant_method_supported` in the kernel
@@ -62,7 +63,7 @@ IS_SUPPORTED_BY_GPU = current_platform.has_device_capability(90)
 
 def rand_data(shape, dtype=torch.float16):
     if dtype.is_floating_point:
-        return 8 * (torch.rand(shape, device="cuda") - 0.3).to(dtype)
+        return (5 * torch.rand(shape, device="cuda") - 0.3).to(dtype)
     else:
         return torch.randint(-15, 15, shape, dtype=dtype, device="cuda")
 
@@ -71,8 +72,8 @@ def maybe_convert_zeropoints(zps: Optional[torch.Tensor], s: torch.Tensor):
     return zps if zps is None else -1 * s * (zps.to(s.dtype))
 
 
-def machete_quantize_and_pack(w: torch.Tensor,
-                              atype: torch.dtype,
+def machete_quantize_and_pack(atype: torch.dtype,
+                              w: torch.Tensor,
                               wtype: ScalarType,
                               group_size: Optional[int],
                               zero_points: bool = False):
@@ -96,21 +97,22 @@ def machete_quantize_and_pack(w: torch.Tensor,
 # None stype means scales use the same dtype as a
 def machete_gemm_test_helper(a: torch.Tensor, w: torch.Tensor,
                              wtype: ScalarType, 
-                             outtype: Optional[torch.dtype],
-                             stype: Optional[torch.dtype],
-                             group_size: Optional[int],
-                             zero_points: bool):
+                             outtype: Optional[torch.dtype] = None,
+                             stype: Optional[torch.dtype] = None,
+                             group_size: Optional[int] = -1,
+                             zero_points: bool = False):
     if stype is not None:
         w = w.to(stype)
 
     w_ref, w_q_packed, w_s, w_zp = machete_quantize_and_pack(
-        w, a.dtype, wtype, group_size, zero_points)
+        a.dtype, w, wtype, group_size, zero_points)
 
-    a_ref = a
     if not a.dtype.is_floating_point:
-        a_ref = a.to(torch.float32)
         aiinfo = torch.iinfo(a.dtype)
-        w_ref = w_ref.round().clamp(aiinfo.min, aiinfo.max).to(torch.float32)
+        w_ref = w_ref.round().clamp(aiinfo.min, aiinfo.max)
+
+    a_ref = a.to(torch.float32)
+    w_ref = w_ref.to(torch.float32)
 
     output_ref = torch.matmul(a_ref, w_ref)
 
@@ -164,10 +166,12 @@ def test_machete_all_schedules(shape,
         w_ref, w_q_machete, w_s, w_zp = machete_quantize_and_pack(
             w, atype, wtype, group_size, zero_points)
 
-        a_ref = a
-        if not atype.is_floating_point:
-            a_ref = a.to(torch.float32)
-            w_ref = w_ref.to(atype).to(torch.float32)
+        if not a.dtype.is_floating_point:
+            aiinfo = torch.iinfo(a.dtype)
+            w_ref = w_ref.round().clamp(aiinfo.min, aiinfo.max)
+
+        a_ref = a.to(torch.float32)
+        w_ref = w_ref.to(torch.float32)
 
         output_ref = torch.matmul(a_ref, w_ref)
 
@@ -190,7 +194,7 @@ def test_machete_all_schedules(shape,
             #  zeropoints (after scales) causes noise around 0
             atol = 1 if zero_points else min(5e-2 * math.sqrt(k), 1)
             torch.testing.assert_close(
-                output, output_ref, rtol=1e-1, atol=atol),\
+                output.to(torch.float32), output_ref, rtol=1e-1, atol=atol),\
                 f"Schedule failed {schedule}"
 
 
@@ -237,7 +241,8 @@ def test_machete_devices(device: str):
     a = rand_data((m, k), torch.float16).to(device)
     b = rand_data((k, n), torch.float16).to(device)
 
-    machete_gemm_test_helper(a, b, wtype, None, group_size, zero_points)
+    machete_gemm_test_helper(a, b, wtype,
+                             group_size=group_size, zero_points=zero_points)
 
 
 # Test working with a subset of A and B
@@ -256,7 +261,8 @@ def test_machete_subset():
     a = whole_a[0:m, 0:k]
     b = whole_b[0:k, 0:n]
 
-    machete_gemm_test_helper(a, b, wtype, group_size, zero_points)
+    machete_gemm_test_helper(a, b, wtype, group_size=group_size, 
+                             zero_points=zero_points)
 
 
 # Test to make sure cuda graphs work

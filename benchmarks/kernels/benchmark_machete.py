@@ -5,7 +5,9 @@ import math
 import pickle as pkl
 import time
 from itertools import product
-from typing import Callable, Iterable, List, Optional, Tuple
+from typing import Callable, Iterable, List, Optional, Tuple, Dict
+from functools import partial
+from dataclasses import dataclass
 
 import pandas as pd
 import torch
@@ -15,9 +17,12 @@ from weight_shapes import WEIGHT_SHAPES
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_N, marlin_permute_scales)
+    GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_N, marlin_permute_scales, 
+    marlin_zero_points)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     MarlinWorkspace)
+from vllm.model_executor.layers.quantization.utils.marlin_utils_test_qqq import (
+    marlin_qqq_quantize)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     gptq_pack, pack_rows, quantize_weights)
 from vllm.scalar_type import ScalarType, scalar_types
@@ -27,18 +32,110 @@ DEFAULT_MODELS = ["meta-llama/Llama-3-8b", "meta-llama/Llama-2-70b-hf"]
 DEFAULT_BATCH_SIZES = [1, 16, 32, 64, 128, 256, 512, 1024]
 DEFAULT_TP_SIZES = [1]
 
+@dataclass
+class BenchmarkTensors:
+    a: torch.tensor
+    w_ref: torch.tensor
+    w_q: torch.tensor
+    group_size: int
+    wtype: ScalarType
+    w_s: torch.tensor
+    w_zp: Optional[torch.tensor]
 
-def machete_pack_weights(w_q: torch.tensor, wtype: ScalarType) -> torch.tensor:
+def quantize_and_pack_contiguous(w: torch.tensor, 
+                             wtype: ScalarType, 
+                             stype: torch.dtype,
+                             zero_points: bool,
+                             group_size: int) -> Dict[str, torch.tensor]:
+    if stype is not None:
+        w = w.to(stype)
+        
+    w_ref, w_q, w_s, w_zp = quantize_weights(
+        w,
+        wtype,
+        group_size=group_size,
+        zero_points=zero_points)
     w_q = pack_rows(w_q, wtype.size_bits, *w_q.shape)
-    w_q = w_q.t().contiguous().t()  # make col major
-    return ops.machete_prepack_B(w_q, wtype)
+    
+    return { "w_ref": w_ref, "w_q": w_q, "w_s": w_s, "w_zp": w_zp }
+
+def torch_matmul_create_bench_fn(bt: BenchmarkTensors) -> Callable:
+    return lambda: torch.matmul(bt.a, bt.w_ref)
+
+def marlin_create_bench_fn(bt: BenchmarkTensors) -> Callable:
+    device = bt.a.device
+    
+    workspace = MarlinWorkspace(
+        bt.w_ref.shape[1], GPTQ_MARLIN_MIN_THREAD_N, GPTQ_MARLIN_MAX_PARALLEL)
+    
+    if bt.w_zp is None:
+        w_zp = torch.empty(0, dtype=torch.int, device=device)
+    else:
+        w_zp = marlin_zero_points(bt.w_zp, *bt.w_ref.shape, bt.wtype.size_bits)
+    w_s = marlin_permute_scales(bt.w_s, *bt.w_ref.shape, bt.group_size)
+
+    sort_indices = torch.empty(0, dtype=torch.int, device=device)
+    g_idx = torch.empty(0, dtype=torch.int, device=device)
+
+    w_q = ops.gptq_marlin_repack(bt.w_q, sort_indices, *bt.w_ref.shape, 
+                                 bt.wtype.size_bits)
+
+    if bt.a.dtype.is_floating_point:
+        fn = partial(ops.gptq_marlin_gemm,
+                     a=bt.a,
+                     b_q_weight=w_q,
+                     b_scales=w_s,
+                     b_zeros=w_zp,
+                     g_idx=g_idx,
+                     perm=sort_indices,
+                     workspace=workspace.scratch,
+                     b_q_type=bt.wtype,
+                     size_m=bt.a.shape[0],
+                     size_n=bt.w_ref.shape[1],
+                     size_k=bt.w_ref.shape[0],
+                     is_k_full=True)
+    else:
+        assert bt.a.dtype == torch.int8
+        s_ch = torch.ones(bt.w_ref.shape[1], dtype=torch.float32, device=device)
+        s_tok = torch.ones(bt.a.shape[0], dtype=torch.float32, device=device)
+        fn = partial(ops.marlin_qqq_gemm,
+                     a=bt.a,
+                     b_q_weight=bt.w_q,
+                     s_group=w_s,
+                     s_tok=s_tok,
+                     s_ch=s_ch,
+                     workspace=workspace.scratch,
+                     b_q_type=bt.wtype,
+                     size_m=bt.a.shape[0],
+                     size_n=bt.w_ref.shape[1],
+                     size_k=bt.w_ref.shape[0])
+    
+    return fn
+
+def machete_create_bench_fn(bt: BenchmarkTensors, schedule=None) -> Callable:
+    w_q = bt.w_q.t().contiguous().t()  # make col major
+    w_q = ops.machete_prepack_B(w_q, bt.a.dtype, bt.wtype)
+    
+    w_zp = bt.w_zp
+    if w_zp is not None:
+        w_zp = -1 * bt.w_s * (w_zp.to(bt.w_s.dtype))
+
+    fn = partial(ops.machete_gemm,
+                 a=bt.a, b_q=w_q, b_type=bt.wtype, b_scales=bt.w_s, 
+                 b_group_size=bt.group_size, schedule=schedule)
+    
+    return fn
 
 
 def make_bench_tensors(
-    atype: torch.dtype, wtype: ScalarType, group_size: int, m: int, n: int,
+    atype: torch.dtype, 
+    wtype: ScalarType, 
+    stype: torch.dtype,
+    group_size: int, 
+    m: int, 
+    n: int,
     k: int
-) -> Tuple[torch.tensor, List[Tuple[torch.tensor, torch.tensor, torch.tensor,
-                                    torch.tensor]]]:
+) -> List[BenchmarkTensors]:
     assert wtype.is_integer(), "TODO: support floating point weights"
 
     # we want to make sure that weights don't fit into L2 cache between runs so
@@ -51,11 +148,13 @@ def make_bench_tensors(
         torch.randn((k, n), device="cuda", dtype=atype)
         for _ in range(num_weights)
     ]
-    quanitized_weights = [
-        quantize_weights(w, wtype, group_size) for w in weights
-    ]
 
-    return a, quanitized_weights
+    return [
+        BenchmarkTensors(a=a, group_size=group_size, wtype=wtype,
+                         **quantize_and_pack_contiguous(
+            w, wtype,stype, zero_points=False, group_size=group_size))
+        for w in weights
+    ]
 
 
 # impl
@@ -77,13 +176,24 @@ def bench_fn(label: str, sub_label: str, description: str,
     ).blocked_autorange(min_run_time=min_run_time)
 
 
-def loop_over_weights(
-    a: torch.tensor, weights: List[Tuple[torch.tensor, torch.tensor,
-                                         torch.tensor, torch.tensor]],
-    fn: Callable[[torch.tensor, torch.tensor, torch.tensor, torch.tensor],
-                 None]):
-    for w_ref, w_q, w_s, _ in weights:
-        fn(a, w_ref, w_q, w_s)
+def loop_bench_fns(fns: List[Callable], label: str, sub_label: str):
+    for fn in fns:
+        fn()
+
+def bench_fns(label: str, sub_label: str, description: str, fns: List[Callable]):
+    min_run_time = 1
+    return TBenchmark.Timer(
+        stmt="""
+        for fn in fns:
+            fn()
+        """,
+        globals={
+            "fns": fns
+        },
+        label=label,
+        sub_label=sub_label,
+        description=description,
+    ).blocked_autorange(min_run_time=min_run_time)
 
 
 _SWEEP_SCHEDULES_RESULTS: Optional[pd.DataFrame] = None
@@ -92,6 +202,7 @@ _SWEEP_SCHEDULES_RESULTS_CSV: Optional[str] = None
 
 def bench(atype: torch.dtype,
           wtype: ScalarType,
+          stype: torch.dtype,
           group_size: int,
           m: int,
           k: int,
@@ -102,74 +213,32 @@ def bench(atype: torch.dtype,
           sweep_schedules: bool = True) -> Iterable[TMeasurement]:
     global _SWEEP_SCHEDULES_RESULTS
 
-    a, weights = make_bench_tensors(atype, wtype, group_size, m, n, k)
-    sub_label += f", L={len(weights)}"
+    benchmark_tensors = make_bench_tensors(atype, wtype, stype, group_size, m, n, k)
+    sub_label += f", L={len(benchmark_tensors)}"
 
-    weights_machete = [(w_ref, machete_pack_weights(w_q, wtype), w_s, w_zp)
-                       for w_ref, w_q, w_s, w_zp in weights]
 
     timers = []
     # pytorch impl
-    timers.append(
-        bench_fn(
-            label, sub_label, "torch.matmul", lambda: loop_over_weights(
-                a,
-                weights,
-                lambda a, w_ref, w_q, w_s: torch.matmul(a, w_ref),
-            )))
-
+    timers.append(bench_fns(
+        label, sub_label, "torch.matmul", [
+            torch_matmul_create_bench_fn(bt) for bt in benchmark_tensors]))
+    
     if benchmark_marlinv1:
-        w_ref = weights[0][0]
-
-        w_zp_empty = torch.empty(0, dtype=torch.int, device=w_ref.device)
-        sort_indices = torch.empty(0, dtype=torch.int, device=w_ref.device)
-        g_idx = torch.empty(0, dtype=torch.int, device=w_ref.device)
-
-        def marlinv1_pack_weights(w_q: torch.tensor) -> torch.tensor:
-            w_q_gptq = gptq_pack(w_q, wtype.size_bits, *w_ref.shape)
-            return ops.gptq_marlin_repack(w_q_gptq, sort_indices, *w_ref.shape,
-                                          wtype.size_bits)
-
-        def marlinv1_permute_scales(w_s: torch.tensor) -> torch.tensor:
-            return marlin_permute_scales(w_s, *w_ref.shape, group_size)
-
-        weights_marlinv1 = [(w_ref, marlinv1_pack_weights(w_q),
-                             marlinv1_permute_scales(w_s), w_zp)
-                            for w_ref, w_q, w_s, w_zp in weights]
-
-        workspace = MarlinWorkspace(w_ref.shape[1], GPTQ_MARLIN_MIN_THREAD_N,
-                                    GPTQ_MARLIN_MAX_PARALLEL)
-
-        # marlinv1
-        timers.append(
-            bench_fn(
-                label, sub_label, "marlin_orig", lambda: loop_over_weights(
-                    a, weights_marlinv1, lambda a, w_ref, w_q, w_s: ops.
-                    gptq_marlin_gemm(a,
-                                     w_q,
-                                     w_s,
-                                     w_zp_empty,
-                                     g_idx,
-                                     sort_indices,
-                                     workspace.scratch,
-                                     wtype,
-                                     size_m=a.shape[0],
-                                     size_n=w_ref.shape[1],
-                                     size_k=w_ref.shape[0],
-                                     is_k_full=True))))
+        timers.append(bench_fns(
+            label, sub_label, "marlin", [
+                marlin_create_bench_fn(bt) for bt in benchmark_tensors]))
 
     # machete
-    timers.append(
-        bench_fn(
-            label, sub_label, "machete_heuristic", lambda: loop_over_weights(
-                a, weights_machete, lambda a, _, w_q, w_s: ops.machete_gemm(
-                    a, w_q, wtype, b_scales=w_s, b_group_size=group_size))))
+    timers.append(bench_fns(
+        label, sub_label, "machete", [
+            machete_create_bench_fn(bt) for bt in benchmark_tensors]))
 
     if sweep_schedules:
         print("Finding best schedule for machete")
         best = None
         best_schedule = None
-        schedules = ops.machete_supported_schedules(wtype)
+        schedules = ops.machete_supported_schedules(
+            atype, wtype, stype)
         for schedule in reversed(schedules):
             schedule_M = int(schedule.split("_")[0].split("x")[1])
 
@@ -177,16 +246,9 @@ def bench(atype: torch.dtype,
             if schedule_M >= 2 * max(m, 16) or schedule_M < m // 4:
                 continue
 
-            def run(a, _, w_q, w_s, schedule=schedule):
-                ops.machete_gemm(a,
-                                 w_q,
-                                 wtype,
-                                 w_s,
-                                 b_group_size=group_size,
-                                 schedule=schedule)
-
-            res = bench_fn(label, sub_label, "machete_best",
-                           lambda: loop_over_weights(a, weights_machete, run))
+            res = bench_fns(label, sub_label, "machete_best", [
+                machete_create_bench_fn(bt, schedule=schedule) 
+                for bt in benchmark_tensors])
 
             results_row = {
                 "M": m,
@@ -225,6 +287,7 @@ def run(dtype: torch.dtype, sweep_schedules: bool,
     for m, k, n in MKNs:
         timers = bench(dtype,
                        scalar_types.uint4b8,
+                       torch.float16,
                        128,
                        m,
                        k,
@@ -354,7 +417,7 @@ Benchmark Machete GEMM.
     )
 
     parser.add_argument(
-        "--dtype",
+        "--atype",
         type=to_torch_dtype,
         required=True,
         help="Available options are ['bfloat16', 'float16']",

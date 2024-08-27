@@ -105,6 +105,38 @@ torch::Tensor gemm_dispatch(PyTorchArguments args) {
     "");
 }
 
+std::vector<std::string> supported_schedules_dispatch(
+    at::ScalarType a_type,
+    vllm::ScalarType b_type,
+    c10::optional<at::ScalarType> maybe_scales_type,
+    c10::optional<at::ScalarType> maybe_zeros_type,
+    c10::optional<at::ScalarType> maybe_out_type
+) {
+    auto out_type = maybe_out_type.value_or(a_type);
+    {% for impl_config in impl_configs %}
+    {% set t = impl_config.types -%}
+    {% set schs = impl_config.schedules -%}
+    {% set with_scales = t.b_scale != void -%}
+    {% set with_zeropoints = t.b_zeropoint != void -%}
+    if (a_type == {{TorchTypeTag[t.a]}}
+        && b_type == {{VLLMScalarTypeTag[t.b]}}
+        && out_type == {{TorchTypeTag[t.d]}}
+        && {%if with_scales%}maybe_scales_type && *maybe_scales_type == {{TorchTypeTag[t.b_scale]}}
+        {%- else %}!scales_type{%endif%}
+        && {%if with_zeropoints%}maybe_zeros_type && *maybe_zeros_type == {{TorchTypeTag[t.b_zeropoint]}}
+        {%- else %}!maybe_zeros_type{%endif%}
+    ) {
+        return {
+            {%- for s in impl_config.schedules %}
+            "{{gen_sch_sig(s)}}"{% if not loop.last %},{% endif %}
+            {%- endfor %}
+        };
+    }
+    {%- endfor %}
+    
+    return {};
+};
+
 }; // namespace machete
 """
 
@@ -339,7 +371,7 @@ mm_impl_template = create_template(IMPL_TEMPLATE)
 prepack_dispatch_template = create_template(PREPACK_TEMPLATE)
 
 
-def create_sources(impl_configs: List[ImplConfig], num_impl_files=16):
+def create_sources(impl_configs: List[ImplConfig], num_impl_files=8):
     sources = []
 
     sources.append((
@@ -587,12 +619,12 @@ def generate():
         ) for b in (DataType.u4, DataType.u8)
          for a in (DataType.f16, DataType.bf16)))
 
-    # impl_configs += [
-    #     ImplConfig(x[0], x[1], x[2])
-    #     for x in zip(AWQ_kernel_types, 
-    #                  itertools.repeat(schedules),
-    #                  itertools.repeat(default_heuristic))
-    # ]
+    impl_configs += [
+        ImplConfig(x[0], x[1], x[2])
+        for x in zip(AWQ_kernel_types, 
+                     itertools.repeat(schedules),
+                     itertools.repeat(default_heuristic))
+    ]
     
     QQQ_kernel_types = [
         *(TypeConfig(

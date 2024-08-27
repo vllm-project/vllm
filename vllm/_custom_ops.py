@@ -627,8 +627,16 @@ def machete_catch_unsupported(fn):
 
     return wrapper
 
-def machete_supported_schedules(b_type: ScalarType) -> List[str]:
-    return torch.ops._C.machete_supported_schedules(b_type)
+
+def machete_supported_schedules(
+    a_type: torch.dtype,
+    b_type: ScalarType,
+    scales_type: Optional[torch.dtype],
+    zeros_type: Optional[torch.dtype] = None,
+    out_type: Optional[torch.dtype] = None
+) -> List[str]:
+    return torch.ops._C.machete_supported_schedules(
+        a_type, b_type, scales_type, zeros_type, out_type)
 
 
 def machete_gemm(
