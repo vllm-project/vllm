@@ -86,6 +86,7 @@ def run_vllm(
     use_v2_block_manager: bool = False,
     download_dir: Optional[str] = None,
     load_format: str = EngineArgs.load_format,
+    disable_async_output_proc: bool = False,
 ) -> float:
     from vllm import LLM, SamplingParams
     llm = LLM(
@@ -110,6 +111,7 @@ def run_vllm(
         load_format=load_format,
         num_scheduler_steps=num_scheduler_steps,
         use_v2_block_manager=use_v2_block_manager,
+        disable_async_output_proc=disable_async_output_proc,
     )
 
     # Add the requests to the engine.
@@ -237,7 +239,8 @@ def main(args: argparse.Namespace):
             args.enable_prefix_caching, args.enable_chunked_prefill,
             args.max_num_batched_tokens, args.distributed_executor_backend,
             args.gpu_memory_utilization, args.num_scheduler_steps,
-            args.use_v2_block_manager, args.download_dir, args.load_format)
+            args.use_v2_block_manager, args.download_dir, args.load_format,
+            args.disable_async_output_proc)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
@@ -418,6 +421,11 @@ if __name__ == "__main__":
         'section for more information.\n'
         '* "bitsandbytes" will load the weights using bitsandbytes '
         'quantization.\n')
+    parser.add_argument(
+        "--disable-async-output-proc",
+        action='store_true',
+        default=False,
+        help="Disable async output processor for vLLM backend.")
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model

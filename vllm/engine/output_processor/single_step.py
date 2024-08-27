@@ -29,14 +29,9 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
     that is currently difficult to schedule multiple steps ahead of time.
     """
 
-    def __init__(
-        self,
-        scheduler_config: SchedulerConfig,
-        detokenizer: Detokenizer,
-        scheduler: List[Scheduler],
-        seq_counter: Counter,
-        stop_checker: StopChecker,
-    ):
+    def __init__(self, scheduler_config: SchedulerConfig,
+                 detokenizer: Detokenizer, scheduler: List[Scheduler],
+                 seq_counter: Counter, stop_checker: StopChecker):
         self.scheduler_config = scheduler_config
         self.detokenizer = detokenizer
         self.scheduler = scheduler
@@ -44,16 +39,24 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         self.stop_checker = stop_checker
 
     def process_outputs(self, sequence_group: SequenceGroup,
-                        outputs: List[SequenceGroupOutput]) -> None:
+                        outputs: List[SequenceGroupOutput],
+                        is_async: bool) -> None:
         """Append all new tokens to sequences in the sequence group. Fork any
         surviving beam candidates; free any unsurviving ones.
 
         Invokes detokenizer to detokenize new tokens, and also marks sequences
         as finished if they meet stop conditions.
+        
+        is_async - Indicates whether this postprocessor runs in 
+            parallel with the GPU forward pass and is processing 
+            tokens from the previous step. If this is true, then
+            no tokens need to be appended since it is already done
+            externally (before the next schedule() call)
         """
         assert (len(outputs) == 1
                 ), f"{type(self)} does not support multiple outputs per step"
-        return self._process_sequence_group_outputs(sequence_group, outputs[0])
+        return self._process_sequence_group_outputs(sequence_group, outputs[0],
+                                                    is_async)
 
     def process_prompt_logprob(self, seq_group: SequenceGroup,
                                outputs: List[SequenceGroupOutput]) -> None:
@@ -80,14 +83,16 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
             seq_group.prompt_logprobs.extend(prompt_logprobs)
 
     def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
-                                        outputs: SequenceGroupOutput) -> None:
+                                        outputs: SequenceGroupOutput,
+                                        is_async: bool) -> None:
         sampling_params = seq_group.sampling_params
         if sampling_params.n == 1 and not sampling_params.use_beam_search:
             # only have one output sample
             sample = outputs.samples[0]
             # only have one sequence
             seq = seq_group.seqs[0]
-            seq.append_token_id(sample.output_token, sample.logprobs)
+            if not is_async:
+                seq.append_token_id(sample.output_token, sample.logprobs)
             if sampling_params.detokenize and self.detokenizer:
                 new_char_count = self.detokenizer.decode_sequence_inplace(
                     seq, sampling_params)
@@ -103,6 +108,9 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                 for scheduler in self.scheduler:
                     scheduler.free_seq(seq)
             return
+
+        # TODO: Add support for async for beam search
+        assert not is_async
 
         # Process samples
         samples = outputs.samples
