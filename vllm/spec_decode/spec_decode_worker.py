@@ -32,6 +32,7 @@ from vllm.spec_decode.util import (Timer, create_sequence_group_output,
                                    get_all_num_logprobs,
                                    get_sampled_token_logprobs, nvtx_range,
                                    split_batch_by_proposal_len)
+from vllm.transformers_utils.detokenizer import INVALID_TOKEN_ID
 from vllm.worker.worker import Worker
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
 
@@ -455,7 +456,12 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             IDs populated.
         """
         seq_ids = get_all_seq_ids(execute_model_req.seq_group_metadata_list)
-        sampled_token_ids_list = sampler_output.sampled_token_ids.tolist()
+        # ignore slots for prompt tokens that are filled with INVALID_TOKEN_ID
+        sampled_token_ids_list = (sampler_output.sampled_token_ids[torch.where(
+            sampler_output.sampled_token_ids - INVALID_TOKEN_ID)[0]] \
+            if any(seq.is_prompt
+                for seq in execute_model_req.seq_group_metadata_list) else \
+                sampler_output.sampled_token_ids).tolist()
         completion_seq_group_output_list: List[
             CompletionSequenceGroupOutput] = []
         for index, seq_id in enumerate(seq_ids):
@@ -487,6 +493,11 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # Store hidden states from target model execution.
         hidden_states = sampler_output.hidden_states
         if hidden_states is not None:
+            # remove hidden_states for prompt tokens
+            if any(seq.is_prompt
+                   for seq in execute_model_req.seq_group_metadata_list):
+                hidden_states = hidden_states[torch.where(
+                    sampler_output.sampled_token_ids - INVALID_TOKEN_ID)[0]]
             if self.previous_hidden_states is None:
                 self.previous_hidden_states = HiddenStates(
                     hidden_states, execute_model_req.seq_group_metadata_list)
