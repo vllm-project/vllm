@@ -242,7 +242,6 @@ class OpenAIServingCompletion(OpenAIServing):
                     # TODO(simon): optimize the performance by avoiding full
                     # text O(n^2) sending.
 
-                    assert request.max_tokens is not None
                     if request.echo and request.max_tokens == 0:
                         assert prompt_text is not None
                         # only return the prompt
@@ -250,8 +249,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         delta_token_ids = prompt_token_ids
                         out_logprobs = prompt_logprobs
                         has_echoed[i] = True
-                    elif (request.echo and request.max_tokens > 0
-                          and not has_echoed[i]):
+                    elif (request.echo and not has_echoed[i]):
                         assert prompt_text is not None
                         assert prompt_logprobs is not None
                         # echo the prompt and first token
@@ -364,13 +362,12 @@ class OpenAIServingCompletion(OpenAIServing):
                                                                  Logprob]]]]
 
             for output in final_res.outputs:
-                assert request.max_tokens is not None
                 if request.echo and request.max_tokens == 0:
                     assert prompt_text is not None
                     token_ids = prompt_token_ids
                     out_logprobs = prompt_logprobs
                     output_text = prompt_text
-                elif request.echo and request.max_tokens > 0:
+                elif request.echo:
                     assert prompt_text is not None
                     token_ids = [*prompt_token_ids, *output.token_ids]
 
