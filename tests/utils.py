@@ -456,7 +456,8 @@ async def completions_with_server_args(
     '''
 
     outputs = None
-    with RemoteOpenAIServer(model_name, server_cli_args) as server:
+    max_wait_seconds = 240*3 # 240 is default
+    with RemoteOpenAIServer(model_name, server_cli_args, max_wait_seconds=max_wait_seconds) as server:
         client = server.get_async_client()
         outputs = await client.completions.create(model=model_name,
                                                   prompt=prompts,
