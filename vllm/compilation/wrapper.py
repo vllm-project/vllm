@@ -60,7 +60,14 @@ class TorchCompileWrapperWithCustomDispacther:
 
     @contextmanager
     def dispatch_to_code(self, index: int):
-        """Context manager to dispatch to the compiled code."""
+        """Context manager to dispatch to the compiled code.
+        Why does this work? Because Dynamo guarantees that the compiled
+        bytecode has exactly the same arguments, cell variables, and free
+        variables as the original code. Therefore we can directly switch
+        the code object in the function and call it.
+
+        See https://dev-discuss.pytorch.org/t/what-is-the-relationship-requirement-among-original-bytecode-transformed-bytecode-and-bytecode-returned-by-hooks-in-dynamo/1693/7 for more details.
+        """ # noqa
         self.__class__.forward.__code__ = self.compiled_codes[index]
         yield
         self.__class__.forward.__code__ = self.original_code_object
