@@ -1,5 +1,4 @@
-from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, Hashable, Optional, TypeVar, List, Type
+from typing import Any, Callable, Dict, Optional, List, Type
 from vllm.adapter_commons.models import (AdapterLRUCache, AdapterModel,
                                          AdapterModelManager)
 from torch import nn
@@ -7,11 +6,9 @@ from huggingface_hub import hf_hub_download
 import torch
 import numpy as np
 from vllm.control_vectors.layers import ControlVectorMapping, MLPWithControlVector
-from vllm.logger import init_logger
 from vllm.adapter_commons.utils import (add_adapter, deactivate_adapter,
                                         get_adapter, list_adapters,
                                         remove_adapter, set_adapter_mapping)
-from vllm.utils import LRUCache
 from vllm.config import ControlVectorConfig
 
 from pathlib import Path

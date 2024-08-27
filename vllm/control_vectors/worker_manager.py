@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Optional, Set, Type
+from typing import Any, Set, Type
 
 import torch
 

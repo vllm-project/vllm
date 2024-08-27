@@ -1,11 +1,8 @@
-from dataclasses import dataclass, field
-from typing import Optional, Dict, List
+from dataclasses import dataclass
+from typing import Optional, Dict
 
 import torch
 from torch import nn
-
-from vllm.adapter_commons.layers import AdapterMapping
-from vllm.control_vectors.request import ControlVectorRequest
 
 
 @dataclass

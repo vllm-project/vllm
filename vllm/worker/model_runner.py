@@ -32,7 +32,6 @@ from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.control_vectors.request import ControlVectorRequest
-from vllm.control_vectors.layers import ControlVectorMapping
 from vllm.control_vectors.worker_manager import LRUCacheWorkerControlVectorManager
 from vllm.model_executor import SamplingMetadata, SamplingMetadataCache
 from vllm.model_executor.model_loader import get_model
