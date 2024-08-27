@@ -29,9 +29,11 @@ class Stats:
     num_running_sys: int
     num_waiting_sys: int
     num_swapped_sys: int
+    num_cumulative_preemption: int
     #   KV Cache Usage in %
     gpu_cache_usage_sys: float
     cpu_cache_usage_sys: float
+    external_cache_usage_sys: float
     #   Prefix caching block hit rate
     cpu_prefix_cache_hit_rate: float
     gpu_prefix_cache_hit_rate: float
