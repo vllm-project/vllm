@@ -617,13 +617,19 @@ class QWenModel(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors],
         pixel_values: Optional[torch.Tensor]=None,
     ) -> torch.Tensor:
+        img_pos, images  = None, None
         if pixel_values is not None:
-            # TODO: get the positions of the image tags from the text
             images = self.visual(pixel_values)
+            img_pos = get_image_positions(input_ids)
+            assert img_pos is not None # TODO - compare with image / batch len
 
         if get_pp_group().is_first_rank:
             hidden_states = self.wte(input_ids)
-            # TODO - merge image / with wte embeddings
+            # TODO - make sure batch size etc is properly handled,
+            # refactor to use common multimodal embedding merging utils
+            if images is not None and img_pos is not None:
+                for idx, (img_bos, img_eos) in enumerate(img_pos):
+                    hidden_states[img_bos + 1 : img_eos] = images[idx]
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -645,6 +651,20 @@ class QWenModel(nn.Module):
             })
         hidden_states, _ = self.ln_f(hidden_states, residual)
         return hidden_states
+
+def get_image_positions(input_ids, image_start_id=151857):
+    # HACK - hardcoded IDs for now to test qwen-vl/chat
+    image_pad_id = image_start_id + 2
+    image_end_id = image_start_id + 1
+    if torch.any(input_ids == image_start_id):
+        bos_pos = torch.where(input_ids == image_start_id)
+        eos_pos = torch.where(input_ids == image_end_id)
+        print("BOS: {}".format(bos_pos)) # BOS: (tensor([11], device='cuda:0'),)
+        print("EOS: {}".format(eos_pos)) # EOS: (tensor([268], device='cuda:0'),)
+        print("tok stack: {}".format( torch.stack((bos_pos[0], bos_pos[0]), dim=1)))
+        return torch.stack((bos_pos[0], eos_pos[0]), dim=1)
+    return None
+
 
 def get_image_text(image_num: int, padding: bool) -> str:
     """Retrieves a placeholder text that when tokenized, will be expanded with image pads.
