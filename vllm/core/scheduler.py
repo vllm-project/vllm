@@ -1251,6 +1251,12 @@ class Scheduler:
         """Free a sequence from a block table."""
         self.block_manager.free(seq)
 
+    def _free_finished_seqs(self, seq_group: SequenceGroup) -> None:
+        """Free finished seqs in a sequence group."""
+        for seq in seq_group.get_seqs():
+            if seq.is_finished():
+                self.free_seq(seq)
+
     def free_finished_seq_groups(self) -> None:
         remaining: Deque[SequenceGroup] = deque()
         for seq_group in self.running:
@@ -1265,9 +1271,7 @@ class Scheduler:
                 remaining.append(seq_group)
 
             # Free finished seqs
-            for seq in seq_group.get_seqs():
-                if seq.is_finished():
-                    self.free_seq(seq)
+            self._free_finished_seqs(seq_group)
 
         self.running = remaining
 
@@ -1278,9 +1282,8 @@ class Scheduler:
                 self._free_seq_group_cross_attn_blocks(seq_group)
                 self._finished_requests_ids.append(seq_group.request_id)
 
-                for seq in seq_group.get_seqs():
-                    if seq.is_finished():
-                        self.free_seq(seq)
+                # Free finished seqs
+                self._free_finished_seqs(seq_group)
 
             self._async_stopped.clear()
 
