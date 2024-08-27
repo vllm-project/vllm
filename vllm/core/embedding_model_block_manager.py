@@ -77,8 +77,8 @@ class EmbeddingModelBlockSpaceManager(BlockSpaceManager):
         pass
 
     def get_common_computed_block_ids(self,
-                                      seq_group: SequenceGroup) -> List[int]:
-        return None  # type: ignore
+                                      seq_group: List[Sequence]) -> List[int]:
+        return []
 
     def mark_blocks_as_computed(self, seq_group: SequenceGroup):
         pass
