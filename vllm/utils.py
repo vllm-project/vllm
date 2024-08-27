@@ -151,6 +151,15 @@ ALL_PINNED_SENTINEL = _Sentinel()
 class Device(enum.Enum):
     GPU = enum.auto()
     CPU = enum.auto()
+    # External swapper device
+    File = enum.auto()
+
+
+def get_external_device(external_swapper: str) -> Device:
+    if external_swapper.startswith("file://"):
+        return Device.File
+    else:
+        raise ValueError(f"Invalid external swapper name: {external_swapper}")
 
 
 class Counter:
