@@ -31,13 +31,21 @@ def test_multimodal_input_batch_multiple_tensors():
     b = torch.rand([1, 1, 2])
     c = torch.rand([1, 1, 2])
     result = MultiModalInputs.batch([{"image": a}, {"image": b}, {"image": c}])
-    assert_multimodal_inputs_equal(result, {"image": torch.stack((a, b, c))})
+    assert_multimodal_inputs_equal(result, {"image": torch.stack([a, b, c])})
+
+
+def test_multimodal_input_batch_multiple_heterogeneous_tensors():
+    a = torch.rand([1, 2, 2])
+    b = torch.rand([1, 3, 2])
+    c = torch.rand([1, 4, 2])
+    result = MultiModalInputs.batch([{"image": a}, {"image": b}, {"image": c}])
+    assert_multimodal_inputs_equal(result, {"image": [a, b, c]})
 
 
 def test_multimodal_input_batch_nested_tensors():
-    a = torch.rand([1, 2, 3])
-    b = torch.rand([1, 2, 3])
-    c = torch.rand([1, 2, 3])
+    a = torch.rand([2, 3])
+    b = torch.rand([2, 3])
+    c = torch.rand([2, 3])
     result = MultiModalInputs.batch([{
         "image": [a]
     }, {
@@ -45,24 +53,25 @@ def test_multimodal_input_batch_nested_tensors():
     }, {
         "image": [c]
     }])
-    assert_multimodal_inputs_equal(
-        result, {
-            "image": torch.stack(
-                (a.unsqueeze(0), b.unsqueeze(0), c.unsqueeze(0)))
-        })
+    assert_multimodal_inputs_equal(result, {
+        "image":
+        torch.stack([a.unsqueeze(0),
+                     b.unsqueeze(0),
+                     c.unsqueeze(0)])
+    })
 
 
-def test_lists_of_tensors():
+def test_multimodal_input_batch_heterogeneous_lists():
     a = torch.rand([1, 2, 3])
     b = torch.rand([1, 2, 3])
     c = torch.rand([1, 2, 3])
     result = MultiModalInputs.batch([{"image": [a, b]}, {"image": [c]}])
     assert_multimodal_inputs_equal(
-        result, {"image": [torch.stack(
-            (a, b)), c.unsqueeze(0)]})
+        result,
+        {"image": [torch.stack([a, b]), c.unsqueeze(0)]})
 
 
-def test_batched_lists_of_tensors():
+def test_multimodal_input_batch_multiple_batchable_lists():
     a = torch.rand([1, 2, 3])
     b = torch.rand([1, 2, 3])
     c = torch.rand([1, 2, 3])
@@ -70,12 +79,5 @@ def test_batched_lists_of_tensors():
     result = MultiModalInputs.batch([{"image": [a, b]}, {"image": [c, d]}])
     assert_multimodal_inputs_equal(
         result,
-        {"image": torch.stack((torch.stack((a, b)), torch.stack((c, d))))})
-
-
-def test_heterogenous_tensors():
-    a = torch.rand([1, 2, 3])
-    b = torch.rand([1, 4, 5])
-    c = torch.rand([1, 2, 3])
-    result = MultiModalInputs.batch([{"image": [a, b]}, {"image": [c]}])
-    assert_multimodal_inputs_equal(result, {"image": [[a, b], c.unsqueeze(0)]})
+        {"image": torch.stack([torch.stack([a, b]),
+                               torch.stack([c, d])])})
