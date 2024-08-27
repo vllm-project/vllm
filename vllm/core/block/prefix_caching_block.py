@@ -1,6 +1,6 @@
 """Token blocks."""
 from os.path import commonprefix
-from typing import Dict, FrozenSet, Iterable, List, Optional, Tuple
+from typing import Dict, FrozenSet, Iterable, List, Optional, Set, Tuple
 
 from vllm.core.block.common import (CacheMetricData, CopyOnWriteTracker,
                                     get_all_blocks_recursively)
@@ -72,6 +72,11 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # A mapping of prefix hash to block index. All blocks which have a
         # prefix hash will be in this dict, even if they have refcount 0.
         self._cached_blocks: Dict[PrefixHash, BlockId] = {}
+
+        # A list of immutable block IDs that have been touched by scheduler
+        # and should be marked as computed after an entire batch of sequences
+        # are scheduled.
+        self._touched_blocks: Set[BlockId] = set()
 
         # Used to track status of each physical block id
         self._block_tracker: Dict[BlockId, BlockTracker] = {}
@@ -438,10 +443,14 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         assert self._refcounter.get(block.block_id) > 0
 
         if block.content_hash not in self._cached_blocks:
-            # No cached content hash => Set this block as cached
-            # (Note that this block is not computed yet =>
-            #  Will be computed after free())
+            # No cached content hash => Set this block as cached.
+            # Note that this block cannot be marked as computed yet
+            # because other sequences in the same batch cannot reuse
+            # this block.
             self._cached_blocks[block.content_hash] = block.block_id
+            # Mark this block as touched so that it can be marked as
+            # computed after the entire batch of sequences are scheduled.
+            self._touched_blocks.add(block.block_id)
             return block.block_id
 
         # Reuse the cached content hash
@@ -507,7 +516,10 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                     "Mark block as accessed which is not belonged to GPU")
 
     def mark_blocks_as_computed(self, block_ids: List[int]) -> None:
-        raise NotImplementedError("Marking as computed is incremental")
+        # Mark all touched blocks as computed.
+        for block_id in self._touched_blocks:
+            self._block_tracker[block_id].computed = True
+        self._touched_blocks.clear()
 
     def _track_block_id(self, block_id: Optional[BlockId],
                         computed: bool) -> None:

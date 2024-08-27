@@ -318,9 +318,10 @@ class EngineArgs:
         parser.add_argument('--block-size',
                             type=int,
                             default=EngineArgs.block_size,
-                            choices=[8, 16, 32, 128, 256, 512, 1024, 2048],
+                            choices=[8, 16, 32],
                             help='Token block size for contiguous chunks of '
-                            'tokens.')
+                            'tokens. This is ignored on neuron devices and '
+                            'set to max-model-len')
 
         parser.add_argument('--enable-prefix-caching',
                             action='store_true',
@@ -748,7 +749,7 @@ class EngineArgs:
         engine_args = cls(**{attr: getattr(args, attr) for attr in attrs})
         return engine_args
 
-    def create_engine_config(self, ) -> EngineConfig:
+    def create_engine_config(self) -> EngineConfig:
         # gguf file needs a specific model loader and doesn't use hf_repo
         if self.model.endswith(".gguf"):
             self.quantization = self.load_format = "gguf"
@@ -800,7 +801,8 @@ class EngineArgs:
             limit_mm_per_prompt=self.limit_mm_per_prompt,
         )
         cache_config = CacheConfig(
-            block_size=self.block_size,
+            block_size=self.block_size if self.device != "neuron" else
+            self.max_model_len,  # neuron needs block_size = max_model_len
             gpu_memory_utilization=self.gpu_memory_utilization,
             swap_space=self.swap_space,
             cache_dtype=self.kv_cache_dtype,
