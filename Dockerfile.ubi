@@ -146,7 +146,8 @@ RUN curl -LO https://github.com/jedisct1/libsodium/releases/download/${LIBSODIUM
     && rm -f libsodium*.tar.gz \
     && mv libsodium*/* ./
 
-RUN ./configure --prefix="/usr/" && make && make check
+RUN CFLAGS="-O3 -Wall -Werror=format-security -Wno-unused-function -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -fstack-clash-protection -fcf-protection"\
+    ./configure --prefix="/usr/" && make -j $MAX_JOBS && make check
 
 ## Release #####################################################################
 FROM python-install AS vllm-openai
@@ -220,5 +221,7 @@ ENV GRPC_PORT=8033 \
     # see: https://github.com/vllm-project/vllm/pull/6485
     DISABLE_LOGPROBS_DURING_SPEC_DECODING=false
 
-USER 2000
-ENTRYPOINT ["python3", "-m", "vllm_tgis_adapter", "--uvicorn-log-level=warning"]
+#USER 2000
+#ENTRYPOINT ["python3", "-m", "vllm_tgis_adapter", "--uvicorn-log-level=warning"]
+USER root
+ENTRYPOINT ["/bin/sh" ]
