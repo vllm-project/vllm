@@ -1,11 +1,12 @@
+import os
 from functools import lru_cache
 from typing import Tuple
-import os
 
 import torch
 
-from .interface import Platform, PlatformEnum
 from vllm.logger import init_logger
+
+from .interface import Platform, PlatformEnum
 
 logger = init_logger(__name__)
 
