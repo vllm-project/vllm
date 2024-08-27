@@ -52,7 +52,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         scheduled computation.
 
         Args:
-          seq_group: the output is associated with this :class:`SequenceGroup`
+          seq_group: the outputs are associated with this :class:`SequenceGroup`
           outputs: the :class:`SequenceGroupOutput`s for all scheduler steps
         """
         for output in outputs:

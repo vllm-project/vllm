@@ -449,6 +449,7 @@ async def completions_with_server_args(
       prompts: test prompts
       model_name: model to spin up on the vLLM server
       server_cli_args: CLI args for starting the server
+      num_logprobs: Number of logprobs to report (or `None`)
 
     Returns:
       OpenAI Completion instance
@@ -468,7 +469,7 @@ async def completions_with_server_args(
     return outputs
 
 
-def get_client_text_generations(completions: Completion):
+def get_client_text_generations(completions: Completion) -> List[str]:
     '''Extract generated tokens from the output of a
     request made to an Open-AI-protocol completions endpoint.
     '''
