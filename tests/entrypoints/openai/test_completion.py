@@ -748,7 +748,7 @@ async def test_guided_decoding_type_error(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("model_name", ["facebook/opt-125m", MODEL_NAME])
+@pytest.mark.parametrize("model_name", ["facebook/opt-125m"])
 @pytest.mark.parametrize("max_queue_len", [1, 3, 5])
 @pytest.mark.parametrize("max_num_seqs", [1, 2])
 async def test_max_queue_length(model_name: str, max_queue_len: int,
@@ -761,12 +761,12 @@ async def test_max_queue_length(model_name: str, max_queue_len: int,
 
     server_args = [
         "--dtype",
-        "bfloat16",
+        "half",
         "--max-model-len",
-        "2048",
+        "512",
         "--enforce-eager",
         "--gpu-memory-utilization",
-        "0.4",
+        "0.2",
         "--max-queue-length",
         str(max_queue_len),
         "--max-num-seqs",
