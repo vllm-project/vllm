@@ -59,6 +59,7 @@ def run_test(
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
+    mm_limit: int,
     tensor_parallel_size: int,
     distributed_executor_backend: Optional[str] = None,
 ):
@@ -82,6 +83,7 @@ def run_test(
                      max_model_len=4096,
                      max_num_seqs=1,
                      dtype=dtype,
+                     limit_mm_per_prompt={"image": mm_limit},
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
                      enforce_eager=True) as vllm_model:
@@ -153,6 +155,7 @@ def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
         dtype=dtype,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,
+        mm_limit=1,
         tensor_parallel_size=1,
     )
 
@@ -193,5 +196,6 @@ def test_multi_images_models(hf_runner, vllm_runner, image_assets, model,
         dtype=dtype,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,
+        mm_limit=2,
         tensor_parallel_size=1,
     )
