@@ -226,31 +226,39 @@ class Top1Proposer(SpeculativeProposer):
         if maybe_sampler_output is None:
             # If no speculative tokens, the sampler output will be None.
             # In this case we return empty proposals.
-            proposal_tokens = torch.full((batch_size, proposal_len), -1,
-                                         dtype=torch.long, device=self._device)
+            proposal_tokens = torch.full((batch_size, proposal_len),
+                                         -1,
+                                        dtype=torch.long,
+                                        device=self._device)
             proposal_probs = torch.zeros((batch_size, proposal_len, self._vocab_size),
-                                         dtype=torch.float32, device=self._device)
+                                        dtype=torch.float32,
+                                        device=self._device)
             proposal_lens_tensor = torch.zeros(len(proposal_lens),
-                                               dtype=torch.long, device=self._device)
+                                            dtype=torch.long,
+                                            device=self._device)
             return proposal_tokens, proposal_probs, proposal_lens_tensor
 
         sampler_output = maybe_sampler_output
-        proposal_tokens, proposal_probs, *_ = sampler_output_to_torch(sampler_output, sampler_transposed)
+        proposal_tokens, proposal_probs, *_ = sampler_output_to_torch(
+            sampler_output, sampler_transposed)
 
-        # Initialize tensors with appropriate sizes
-        entire_proposal_tokens = torch.full_like(proposal_tokens, -1, dtype=torch.long, device=self._device)
-        entire_proposal_probs = torch.zeros_like(proposal_probs, dtype=torch.float32, device=self._device)
-        
-        # Convert nonzero_proposal_len_indices to a tensor for efficient indexing
-        nonzero_indices_tensor = torch.tensor(nonzero_proposal_len_indices, device=self._device)
-        
-        # Use advanced indexing to avoid multiple tensor assignments
-        entire_proposal_tokens.index_copy_(0, nonzero_indices_tensor, proposal_tokens)
-        entire_proposal_probs.index_copy_(0, nonzero_indices_tensor, proposal_probs)
+        # Now, reformat the output GPU tensors such that each sequence has
+        # a proposal. the proposal can be empty, e.g. [-1, -1, -1]
+
+        entire_proposal_tokens = proposal_tokens.new_full(
+            size=(batch_size, *proposal_tokens.shape[1:]),
+            fill_value=-1,
+        )
+        entire_proposal_tokens[nonzero_proposal_len_indices] = proposal_tokens
+        entire_proposal_probs = proposal_probs.new_zeros(
+            batch_size,
+            *proposal_probs.shape[1:],
+        )
+        entire_proposal_probs[nonzero_proposal_len_indices] = proposal_probs
 
         proposal_lens_tensor = torch.zeros(batch_size,
                                            dtype=torch.long,
                                            device=self._device)
-        proposal_lens_tensor.index_fill_(0, nonzero_indices_tensor, proposal_len)
+        proposal_lens_tensor[nonzero_proposal_len_indices] = proposal_len
 
         return entire_proposal_tokens, entire_proposal_probs, proposal_lens_tensor
