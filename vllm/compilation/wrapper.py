@@ -3,7 +3,7 @@ import sys
 from abc import abstractmethod
 from contextlib import contextmanager
 from types import CodeType
-from typing import Any, Callable, Dict, List, Optional
+from typing import Callable, List
 
 
 class TorchCompileWrapperWithCustomDispacther:
@@ -24,12 +24,10 @@ class TorchCompileWrapperWithCustomDispacther:
         self.original_code_object = self.__class__.forward.__code__
         self.compiled_codes: List[CodeType] = []
 
-    def __call__(self,
-                 *args,
-                 dispatch_args: Optional[Dict[str, Any]] = None,
-                 **kwargs):
-        """Implement the dispatch logic here, beyond the torch.compile level,
-        according to the dispatch_args, which is not visible to torch.compile.
+    def __call__(self, *args, **kwargs):
+        """Implement the dispatch logic here, beyond the torch.compile level.
+        NOTE: this function can have additional arguments beyond the forward
+         method, for directly dispatching to the compiled code.
         """
         return self.compiled_callable(*args, **kwargs)
 
