@@ -99,7 +99,11 @@ class MultiModalInputs(_MultiModalInputsBase):
                 raise ValueError(msg)
 
             for k, v in inputs.items():
-                item_lists[k].append(v)
+                # For models that supports multiple modalities (e.g. Qwen2-VL),
+                # input mapper will set values of unused modality keys to None,
+                # and batching procedure should skip them.
+                if v is not None:
+                    item_lists[k].append(v)
 
         return {
             k: MultiModalInputs._try_concat(item_list)

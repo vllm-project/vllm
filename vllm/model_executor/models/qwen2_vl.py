@@ -528,6 +528,10 @@ def mm_input_mapper_for_qwen2_vl(
         logger.error("Failed to process image (%s)", data)
         raise
 
+    # Ensure different modalities will return a batch_data with same keys, avoid error in `MultiModalInputs.batch()`.
+    for key in ['pixel_values', 'image_grid_thw', 'pixel_values_videos', 'video_grid_thw']:
+        batch_data.setdefault(key, None)
+
     return MultiModalInputs(batch_data)
 
 
