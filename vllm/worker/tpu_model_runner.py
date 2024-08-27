@@ -602,16 +602,16 @@ class ModelWrapper(TorchCompileWrapperWithCustomDispacther):
 
     def __init__(self, model: nn.Module):
         self.model = model
-        compiled_forward = torch.compile(self.forward,
-                                         backend="openxla",
-                                         fullgraph=True,
-                                         dynamic=False)
-        super().__init__(compiled_forward)
+        compiled_callable = torch.compile(self.forward,
+                                          backend="openxla",
+                                          fullgraph=True,
+                                          dynamic=False)
+        super().__init__(compiled_callable)
 
     def __call__(self, *args, is_prompt: bool = False, **kwargs):
         if len(self.compiled_codes) < 3:
             # not fully compiled yet, let PyTorch handle it
-            return self.compiled_forward(*args, **kwargs)
+            return self.compiled_callable(*args, **kwargs)
         # the 3 compiled codes are:
         # 0: for profiling
         # 1: for prompt
