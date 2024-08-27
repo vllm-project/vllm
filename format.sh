@@ -263,7 +263,7 @@ clang_format_changed() {
     MERGEBASE="$(git merge-base origin/main HEAD)"
 
     # Get the list of changed files, excluding the specified ones
-    changed_files=$(git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.h' '*.cpp' '*.cu' '*.cuh' | grep -vFf <(printf "%s\n" "${CLANG_FORMAT_EXCLUDES[@]}"))
+    changed_files=$(git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.h' '*.cpp' '*.cu' '*.cuh' | (grep -vFf <(printf "%s\n" "${CLANG_FORMAT_EXCLUDES[@]}") || echo -e))
     if [ -n "$changed_files" ]; then
         echo "$changed_files" | xargs -P 5 clang-format -i
     fi
