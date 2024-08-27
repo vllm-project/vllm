@@ -278,13 +278,8 @@ def _build_custom_ops() -> bool:
     return _is_cuda() or _is_hip() or _is_cpu()
 
 
-def _base_torch_version() -> Version:
-    return Version(Version(torch.__version__).base_version)
-
-
 def _build_core_ext() -> bool:
-    return not (_is_neuron() or _is_tpu() or _is_openvino() or _is_xpu()
-                or _base_torch_version() < Version("2.4.0"))
+    return not (_is_neuron() or _is_tpu() or _is_openvino() or _is_xpu())
 
 
 def get_hipcc_rocm_version():

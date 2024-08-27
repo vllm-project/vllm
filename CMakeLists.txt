@@ -80,28 +80,24 @@ find_package(Torch REQUIRED)
 # cmake --build . --target default
 #
 add_custom_target(default)
+message(STATUS "Enabling core extension.")
 
 # Define _core_C extension
 #  built for (almost) every target platform, (excludes TPU and Neuron)
-# Note: _core_C requires PyTorch 2.4.0 or greater to compile.
-if (Torch_VERSION VERSION_GREATER_EQUAL "2.4.0")
-   message(STATUS "Enabling core extension.")
-   set(VLLM_EXT_SRC
-    "csrc/core/torch_bindings.cpp")
 
-  define_gpu_extension_target(
-    _core_C
-    DESTINATION vllm
-    LANGUAGE CXX
-    SOURCES ${VLLM_EXT_SRC}
-    COMPILE_FLAGS ${CXX_COMPILE_FLAGS}
-    USE_SABI 3
-    WITH_SOABI)
+set(VLLM_EXT_SRC
+  "csrc/core/torch_bindings.cpp")
 
-  add_dependencies(default _core_C)
-else()
-   message(STATUS "Not enabling core extension for Pytorch ${Torch_VERSION} < 2.4.0.")
-endif()
+define_gpu_extension_target(
+  _core_C
+  DESTINATION vllm
+  LANGUAGE CXX
+  SOURCES ${VLLM_EXT_SRC}
+  COMPILE_FLAGS ${CXX_COMPILE_FLAGS}
+  USE_SABI 3
+  WITH_SOABI)
+
+add_dependencies(default _core_C)
 
 #
 # Forward the non-CUDA device extensions to external CMake scripts.
