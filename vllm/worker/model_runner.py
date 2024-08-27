@@ -502,7 +502,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 range(context_len, seq_len))
 
         if (seq_len - context_len) == 1:
-            inter_data.num_orig_input_tokens_list[seq_idx].append(seq_data.get_prompt_len())
+            inter_data.num_orig_input_tokens_list[seq_idx].append(
+                seq_data.get_prompt_len())
         else:
             inter_data.num_orig_input_tokens_list[seq_idx].extend(
                 [seq_data.get_prompt_len()] * (seq_len - context_len))
@@ -551,8 +552,9 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 seq_idx][uncomputed_start:]
             inter_data.input_positions[seq_idx] = inter_data.input_positions[
                 seq_idx][context_len:]
-            inter_data.num_orig_input_tokens_list[seq_idx] = inter_data.num_orig_input_tokens_list[
-                seq_idx][context_len:]
+            inter_data.num_orig_input_tokens_list[
+                seq_idx] = inter_data.num_orig_input_tokens_list[seq_idx][
+                    context_len:]
             inter_data.context_lens[seq_idx] = context_len
             inter_data.query_lens[
                 seq_idx] = inter_data.seq_lens[seq_idx] - context_len
@@ -709,8 +711,9 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         num_orig_input_tokens_list = []
         for inter_data in self.inter_data_list:
             for cur_num_orig_input_tokens_list in inter_data.num_orig_input_tokens_list:
-                num_orig_input_tokens_list.extend(cur_num_orig_input_tokens_list)
-        
+                num_orig_input_tokens_list.extend(
+                    cur_num_orig_input_tokens_list)
+
         seq_lens = []
         max_decode_seq_len = 0
         for inter_data in self.inter_data_list:
@@ -747,8 +750,9 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         if cuda_graph_pad_size:
             input_tokens.extend(itertools.repeat(0, cuda_graph_pad_size))
             input_positions.extend(itertools.repeat(0, cuda_graph_pad_size))
-            num_orig_input_tokens_list.extend(itertools.repeat(0, cuda_graph_pad_size))
-        
+            num_orig_input_tokens_list.extend(
+                itertools.repeat(0, cuda_graph_pad_size))
+
         assert self.runner.device is not None
         input_tokens_tensor = async_tensor_h2d(input_tokens, torch.long,
                                                self.runner.device,
@@ -763,7 +767,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         # Attention metadata.
         attn_metadata = self.attn_metadata_builder.build(
-            seq_lens, query_lens, num_orig_input_tokens_list, cuda_graph_pad_size, batch_size)
+            seq_lens, query_lens, num_orig_input_tokens_list,
+            cuda_graph_pad_size, batch_size)
 
         # LoRA data.
         lora_requests = set()

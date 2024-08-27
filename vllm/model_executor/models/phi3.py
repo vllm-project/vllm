@@ -1,6 +1,5 @@
 # coding=utf-8
 # Adapted from llama.py
-
 """Inference-only Phi3 model code inherit from Llama.py"""
 
 from typing import Optional
@@ -18,7 +17,9 @@ from .utils import make_layers
 from vllm.model_executor.models.llama import LlamaAttention, LlamaDecoderLayer, LlamaForCausalLM, LlamaModel
 from transformers import Phi3Config
 
+
 class Phi3Attention(LlamaAttention):
+
     def __init__(
         self,
         config: Phi3Config,
@@ -28,8 +29,8 @@ class Phi3Attention(LlamaAttention):
         prefix: str = "",
     ) -> None:
         super().__init__(
-            config=config, 
-            hidden_size=config.hidden_size, 
+            config=config,
+            hidden_size=config.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
             rope_theta=config.rope_theta,
@@ -39,9 +40,8 @@ class Phi3Attention(LlamaAttention):
             bias=bias,
             cache_config=cache_config,
             prefix=prefix)
-        
-        self.rope_scaling = config.rope_scaling
 
+        self.rope_scaling = config.rope_scaling
 
     def forward(
         self,
@@ -55,7 +55,7 @@ class Phi3Attention(LlamaAttention):
         q, k =  self.rotary_emb(positions, q, k) \
             if self.rope_scaling is None \
             else self.rotary_emb(positions, q, k, num_orig_input_tokens_tensor=attn_metadata.num_orig_input_tokens_tensor)
-            
+
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
         return output
@@ -70,21 +70,18 @@ class Phi3DecoderLayer(LlamaDecoderLayer):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
-        super().__init__(
-            config=config,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=prefix
-        )
+        super().__init__(config=config,
+                         cache_config=cache_config,
+                         quant_config=quant_config,
+                         prefix=prefix)
         self.self_attn = Phi3Attention(
             config=config,
             quant_config=quant_config,
-            bias=getattr(config, "attention_bias", False) or getattr(
-            config, "bias", False),
+            bias=getattr(config, "attention_bias", False)
+            or getattr(config, "bias", False),
             cache_config=cache_config,
             prefix=f"{prefix}.self_attn",
         )
-
 
 
 class Phi3Model(LlamaModel):
@@ -97,20 +94,18 @@ class Phi3Model(LlamaModel):
         lora_config: Optional[LoRAConfig] = None,
         prefix: str = "",
     ) -> None:
-        super().__init__(
-            config=config,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            lora_config=lora_config,
-            prefix=prefix
-        )
+        super().__init__(config=config,
+                         cache_config=cache_config,
+                         quant_config=quant_config,
+                         lora_config=lora_config,
+                         prefix=prefix)
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: Phi3DecoderLayer(config=config,
-                                             cache_config=cache_config,
-                                             quant_config=quant_config,
-                                             prefix=prefix),
+                                            cache_config=cache_config,
+                                            quant_config=quant_config,
+                                            prefix=prefix),
             prefix=f"{prefix}.layers")
 
 
@@ -154,20 +149,17 @@ class Phi3ForCausalLM(LlamaForCausalLM):
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
-        super().__init__(
-            config=config,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            lora_config=lora_config
-        )
+        super().__init__(config=config,
+                         cache_config=cache_config,
+                         quant_config=quant_config,
+                         lora_config=lora_config)
 
         self.model = Phi3Model(config,
-                                cache_config,
-                                quant_config,
-                                lora_config=lora_config,
-                                prefix="model")
-        
+                               cache_config,
+                               quant_config,
+                               lora_config=lora_config,
+                               prefix="model")
+
         if get_pp_group().is_last_rank:
             if config.tie_word_embeddings:
                 self.lm_head.weight = self.model.embed_tokens.weight
-                

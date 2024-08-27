@@ -263,7 +263,8 @@ class FlashAttentionMetadata(AttentionMetadata):
             slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
             seq_lens=self.seq_lens[:self.num_prefills],
             seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
-            num_orig_input_tokens_tensor=self.num_orig_input_tokens_tensor[:self.num_prefills],
+            num_orig_input_tokens_tensor=self.
+            num_orig_input_tokens_tensor[:self.num_prefills],
             max_query_len=self.max_query_len,
             max_prefill_seq_len=self.max_prefill_seq_len,
             max_decode_seq_len=0,
@@ -292,7 +293,8 @@ class FlashAttentionMetadata(AttentionMetadata):
             slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
             seq_lens=None,
             seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
-            num_orig_input_tokens_tensor=self.num_orig_input_tokens_tensor[:self.num_prefills],
+            num_orig_input_tokens_tensor=self.
+            num_orig_input_tokens_tensor[:self.num_prefills],
             max_query_len=None,
             max_prefill_seq_len=0,
             max_decode_seq_len=self.max_decode_seq_len,
@@ -428,8 +430,9 @@ class FlashAttentionMetadataBuilder(
                                  seq_len, context_len, start_idx,
                                  self.block_size, inter_data.block_tables)
 
-    def build(self, seq_lens: List[int], query_lens: List[int], num_orig_input_tokens_list: List[int],
-              cuda_graph_pad_size: int, batch_size: int):
+    def build(self, seq_lens: List[int], query_lens: List[int],
+              num_orig_input_tokens_list: List[int], cuda_graph_pad_size: int,
+              batch_size: int):
         """Build attention metadata with on-device tensors.
 
         Args:
@@ -501,7 +504,9 @@ class FlashAttentionMetadataBuilder(
                      dim=0,
                      dtype=query_start_loc.dtype,
                      out=query_start_loc[1:])
-        num_orig_input_tokens_tensor = torch.tensor(num_orig_input_tokens_list, dtype=torch.long, device=device)
+        num_orig_input_tokens_tensor = torch.tensor(num_orig_input_tokens_list,
+                                                    dtype=torch.long,
+                                                    device=device)
 
         return FlashAttentionMetadata(
             num_prefills=self.num_prefills,
