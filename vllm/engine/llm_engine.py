@@ -1272,7 +1272,7 @@ class LLMEngine:
                 seq_group.update_num_computed_tokens(
                     scheduled_seq_group.token_chunk_size)
 
-            if outputs is not None and len(outputs) > 0:
+            if outputs:
                 for o in outputs:
                     if (isinstance(o, SamplerOutput)
                             and seq_group.metrics is not None):
@@ -1343,20 +1343,20 @@ class LLMEngine:
 
             if seq_group.is_finished():
                 continue
-            else:
-                seq_group.update_num_computed_tokens(
-                    seq_group_metadata.token_chunk_size)
 
-                if seq_group_metadata.do_sample:
-                    assert len(sequence_group_outputs.samples) == 1, (
-                        "Async output processor expects a single sample"
-                        " (i.e sampling_params.n == 1 and no "
-                        "sampling_params.best_of > 1)")
-                    sample = sequence_group_outputs.samples[0]
+            seq_group.update_num_computed_tokens(
+                seq_group_metadata.token_chunk_size)
 
-                    assert len(seq_group.seqs) == 1
-                    seq = seq_group.seqs[0]
-                    seq.append_token_id(sample.output_token, sample.logprobs)
+            if seq_group_metadata.do_sample:
+                assert len(sequence_group_outputs.samples) == 1, (
+                    "Async output processor expects a single sample"
+                    " (i.e sampling_params.n == 1 and no "
+                    "sampling_params.best_of > 1)")
+                sample = sequence_group_outputs.samples[0]
+
+                assert len(seq_group.seqs) == 1
+                seq = seq_group.seqs[0]
+                seq.append_token_id(sample.output_token, sample.logprobs)
 
     def step(self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
@@ -1442,8 +1442,8 @@ class LLMEngine:
         assert seq_group_metadata_list is not None
         assert scheduler_outputs is not None
 
-        if self.scheduler_config.is_multi_step:
-            assert not allow_async_output_proc
+        assert not (self.scheduler_config.is_multi_step and \
+            allow_async_output_proc)
 
         if not scheduler_outputs.is_empty():
             finished_requests_ids = self.scheduler[
@@ -1500,7 +1500,7 @@ class LLMEngine:
             self.output_queue.append(
                 (output, seq_group_metadata_list, scheduler_outputs))
 
-            if (len(output) > 0) and allow_async_output_proc:
+            if output and allow_async_output_proc:
                 assert len(output) == 1, ("Multi step decoding does not work "
                                           "with async output processing.")
 

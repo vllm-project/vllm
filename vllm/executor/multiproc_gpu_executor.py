@@ -218,7 +218,7 @@ class MultiprocessingGPUExecutorAsync(MultiprocessingGPUExecutor,
 
     async def _driver_execute_model_async(
         self,
-        execute_model_req: Optional[ExecuteModelRequest] = None,
+        execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> List[SamplerOutput]:
         if not self.tp_driver_workers:
             return await self.driver_exec_model(execute_model_req)

@@ -304,8 +304,8 @@ class _AsyncLLMEngine(LLMEngine):
         assert seq_group_metadata_list is not None
         assert scheduler_outputs is not None
 
-        if self.scheduler_config.is_multi_step:
-            assert not allow_async_output_proc
+        assert not (self.scheduler_config.is_multi_step and \
+            allow_async_output_proc)
 
         if not scheduler_outputs.is_empty():
             finished_requests_ids = self.scheduler[
@@ -363,7 +363,7 @@ class _AsyncLLMEngine(LLMEngine):
             self.output_queue.append(
                 (output, seq_group_metadata_list, scheduler_outputs))
 
-            if (len(output) > 0) and allow_async_output_proc:
+            if output and allow_async_output_proc:
                 assert len(
                     output
                 ) == 1, "Multi step decoding does not work with async output processing."  # noqa: E501

@@ -1273,7 +1273,7 @@ class Scheduler:
 
         # Handle async stopped sequence groups
         # (ones that reached max model len)
-        if self.use_async_output_proc and len(self._async_stopped) > 0:
+        if self._async_stopped:
             for seq_group in self._async_stopped:
                 self._free_seq_group_cross_attn_blocks(seq_group)
                 self._finished_requests_ids.append(seq_group.request_id)
