@@ -486,6 +486,7 @@ class OpenAIServingChat(OpenAIServing):
                 full_message = last_msg_content + choice.message.content
                 choice.message.content = full_message
 
+        assert final_res.prompt_token_ids is not None
         num_prompt_tokens = len(final_res.prompt_token_ids)
         num_generated_tokens = sum(
             len(output.token_ids) for output in final_res.outputs)

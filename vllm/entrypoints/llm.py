@@ -693,6 +693,7 @@ class LLM:
                     if use_tqdm:
                         if isinstance(output, RequestOutput):
                             # Calculate tokens only for RequestOutput
+                            assert output.prompt_token_ids is not None
                             total_in_toks += len(output.prompt_token_ids)
                             in_spd = total_in_toks / pbar.format_dict["elapsed"]
                             total_out_toks += sum(

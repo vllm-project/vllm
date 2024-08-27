@@ -268,7 +268,7 @@ class RequestOutputFactory:
     def create(
             seq_group,
             previous_output_lens: Dict[int, Tuple[int, int]] = {},  # noqa
-            include_prompt: bool = True):
+    ):
         # Determine the type based on a condition, for example:
         if hasattr(seq_group,
                    'embeddings') and seq_group.embeddings is not None:

@@ -1253,7 +1253,6 @@ class LLMEngine:
         #             seq.get_output_len(),
         #             seq.get_output_text_to_return_len(text_buffer_length))
 
-
         (outputs, seq_group_metadata_list,
          scheduler_outputs) = self.output_queue.popleft()
 
@@ -1263,35 +1262,34 @@ class LLMEngine:
 
         # Organize outputs by [step][sequence group] instead of
         # [sequence group][step].
-        if len(outputs) > 1:
+
+        if len(outputs) == 1:
+            outputs_by_sequence_group = outputs[0]
+        else:
             outputs_by_sequence_group = create_output_by_sequence_group(
                 outputs, num_seq_groups=len(seq_group_metadata_list))
-        else:
-            outputs_by_sequence_group = outputs
 
-        finished_before: List[int] = []
-        for i, seq_group_meta in enumerate(seq_group_metadata_list):
-            scheduled_seq_group = scheduler_outputs.scheduled_seq_groups[i]
-
+        finished_before: Set[int] = set()
+        for i, (scheduled_seq_group, seq_group_meta, output) in enumerate(
+                zip(seq_group_metadata_list,
+                    scheduler_outputs.scheduled_seq_groups,
+                    outputs_by_sequence_group)):
             seq_group = scheduled_seq_group.seq_group
 
             if seq_group.is_finished():
-                finished_before.append(i)
+                finished_before.add(i)
                 continue
 
-            if len(outputs) > 1:
-                output = outputs_by_sequence_group[i]
-            else:
-                output = [outputs_by_sequence_group[0][i]]
+            if not isinstance(output, GenericSequence):
+                output = [output]
 
             if not is_async:
                 seq_group.update_num_computed_tokens(
                     scheduled_seq_group.token_chunk_size)
 
-            if outputs:
+            if seq_group.metrics is not None:
                 for o in outputs:
-                    if (isinstance(o, SamplerOutput)
-                            and seq_group.metrics is not None):
+                    if isinstance(o, SamplerOutput):
                         if seq_group.metrics.model_forward_time is not None:
                             seq_group.metrics.model_forward_time += (
                                 o.model_forward_time)
@@ -1319,18 +1317,18 @@ class LLMEngine:
             scheduler.free_finished_seq_groups()
 
         # Create the outputs.
-        for i, _ in enumerate(seq_group_metadata_list):
-            scheduled_seq_group = scheduler_outputs.scheduled_seq_groups[i]
+        for i, scheduled_seq_group in enumerate(
+                scheduler_outputs.scheduled_seq_groups):
+            seq_group = scheduled_seq_group.seq_group
 
             if i in finished_before:
                 continue  # Avoids double processing
 
-            seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
-        request_output = RequestOutputFactory.create(
-            seq_group, previous_output_lens)
-        if request_output:
-            self.request_outputs.append(request_output)
+            request_output = RequestOutputFactory.create(
+                seq_group, previous_output_lens)
+            if request_output:
+                self.request_outputs.append(request_output)
         for seq_group in scheduler_outputs.ignored_seq_groups:
             params = seq_group.sampling_params
             if params is not None and params.output_kind == (
@@ -1354,10 +1352,9 @@ class LLMEngine:
             # Tracing
             self.do_tracing(scheduler_outputs)
 
-        return None
-
+    @staticmethod
     def _advance_to_next_step(
-            self, output: List[SamplerOutput],
+            output: List[SamplerOutput],
             seq_group_metadata_list: List[SequenceGroupMetadata],
             scheduled_seq_groups: List[ScheduledSequenceGroup]) -> None:
         """Given model output from a single run, append the tokens to the
@@ -1384,7 +1381,6 @@ class LLMEngine:
                 assert len(seq_group.seqs) == 1
                 seq = seq_group.seqs[0]
                 seq.append_token_id(sample.output_token, sample.logprobs)
-
 
     def step(self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
@@ -1528,15 +1524,15 @@ class LLMEngine:
             self.output_queue.append(
                 (output, seq_group_metadata_list, scheduler_outputs))
 
-            if output and allow_async_output_proc:
-                assert len(output) == 1, ("Multi step decoding does not work "
-                                          "with async output processing.")
+            if allow_async_output_proc:
+                if output:
+                    assert len(output) == 1, ("Multi step decoding does not work "
+                                              "with async output processing.")
 
-                self._advance_to_next_step(
-                    output[0], seq_group_metadata_list,
-                    scheduler_outputs.scheduled_seq_groups)
-
-            if not allow_async_output_proc:
+                    self._advance_to_next_step(
+                        output[0], seq_group_metadata_list,
+                        scheduler_outputs.scheduled_seq_groups)
+            else:
                 self._process_model_outputs(is_async=False)
 
                 # Log stats.
@@ -1632,7 +1628,7 @@ class LLMEngine:
     def do_log_stats(self,
                      scheduler_outputs: Optional[SchedulerOutputs] = None,
                      model_output: Optional[List[SamplerOutput]] = None,
-                     finished_before: Optional[List[int]] = None) -> None:
+                     finished_before: Optional[Set[int]] = None) -> None:
         """Forced log when no requests active."""
         if self.log_stats:
             stats = self._get_stats(scheduler_outputs, model_output,
@@ -1643,7 +1639,7 @@ class LLMEngine:
     def _get_stats(self,
                    scheduler_outputs: Optional[SchedulerOutputs],
                    model_output: Optional[List[SamplerOutput]] = None,
-                   finished_before: Optional[List[int]] = None) -> Stats:
+                   finished_before: Optional[Set[int]] = None) -> Stats:
         """Get Stats to be Logged to Prometheus.
 
         Args:

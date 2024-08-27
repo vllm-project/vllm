@@ -249,6 +249,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
                     assert request.max_tokens is not None
                     if request.echo and request.max_tokens == 0:
+                        assert prompt_token_ids is not None
                         assert prompt_text is not None
                         # only return the prompt
                         delta_text = prompt_text
@@ -257,6 +258,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         has_echoed[i] = True
                     elif (request.echo and request.max_tokens > 0
                           and not has_echoed[i]):
+                        assert prompt_token_ids is not None
                         assert prompt_text is not None
                         assert prompt_logprobs is not None
                         # echo the prompt and first token
@@ -359,6 +361,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
         for final_res in final_res_batch:
             prompt_token_ids = final_res.prompt_token_ids
+            assert prompt_token_ids is not None
             prompt_logprobs = final_res.prompt_logprobs
             prompt_text = final_res.prompt
 
@@ -414,9 +417,9 @@ class OpenAIServingCompletion(OpenAIServing):
                 )
                 choices.append(choice_data)
 
+                num_generated_tokens += len(output.token_ids)
+
             num_prompt_tokens += len(prompt_token_ids)
-            num_generated_tokens += sum(
-                len(output.token_ids) for output in final_res.outputs)
 
         usage = UsageInfo(
             prompt_tokens=num_prompt_tokens,
