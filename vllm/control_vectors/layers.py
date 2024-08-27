@@ -19,12 +19,14 @@ class MLPWithControlVector(BaseLayerWithControlVector):
     def __init__(self, base_layer) -> None:
         super().__init__()
         self.base_layer = base_layer
-        self.normalize = True
         self.control_vectors = {}
+        self.normalize = False
         self.active_vector: torch.Tensor = None
 
-    
-    def set_layer_id(self, layer_id) -> None:
+    def set_normalization(self, normalize: bool) -> None:
+        self.normalize = normalize
+
+    def set_layer_id(self, layer_id: int) -> None:
         self.layer_id = layer_id
 
     def set_control_vector(self, index: int, cv_vector: torch.Tensor):
@@ -50,45 +52,13 @@ class MLPWithControlVector(BaseLayerWithControlVector):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Forward pass with optional application of control vectors."""
         hidden_states = self.base_layer(hidden_states)
-
         norm_pre = torch.norm(hidden_states, dim=-1, keepdim=True)
-        
         cv = self.active_vector
 
-        if cv is not None and cv.numel() > 0:
-            cv = cv.to(hidden_states.device)
-            
+        if cv is not None and cv.numel() > 0:            
             hidden_states += cv
-            
             if self.normalize:
+                print("HERE")
                 hidden_states = hidden_states * norm_pre / torch.norm(hidden_states, dim=-1, keepdim=True)
 
         return hidden_states
-
-
-
-
-
-
-
-
-        # cv_vector = self.get_control_vector(0)
-        
-        # if self.layer_id is not None and cv_vector is not None:
-        #     if self.layer_id < len(cv_vector):
-        #         cv_vector = cv_vector[self.layer_id] * 0.5
-        #     else:
-        #         cv_vector = None
-
-        # if cv_vector is not None:
-        #     norm_pre = torch.norm(hidden_states, dim=-1, keepdim=True)
-        #     control = cv_vector.to(hidden_states.device)
-
-        #     print("control shape", control.shape)
-        #     print("hidden shape", hidden_states.shape)
-        #     hidden_states += control
-
-        #     if self.normalize:
-        #         hidden_states = hidden_states * (norm_pre / torch.norm(hidden_states, dim=-1, keepdim=True))
-
-        # return hidden_states

@@ -114,6 +114,8 @@ class EngineArgs:
     max_prompt_adapter_token: int = 0
     enable_control_vector: bool = False
     max_control_vectors: int = 1
+    normalize_control_vector: bool = False
+
     fully_sharded_loras: bool = False
     lora_extra_vocab_size: int = 256
     long_lora_scaling_factors: Optional[Tuple[float]] = None
@@ -542,6 +544,17 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.max_prompt_adapter_token,
                             help='Max number of PromptAdapters tokens')
+        parser.add_argument('--enable-control-vector',
+                            action='store_true',
+                            help='If True, enable handling of ControlVectors.')
+        parser.add_argument('--max-control-vectors',
+                            type=int,
+                            default=EngineArgs.max_control_vectors,
+                            help='Max number of Control Vectors in a batch.')
+        parser.add_argument('--normalize-control-vector',
+                            type=bool,
+                            default=EngineArgs.normalize_control_vector,
+                            help='Enable normalization of control vector')
         parser.add_argument("--device",
                             type=str,
                             default=EngineArgs.device,
@@ -951,6 +964,7 @@ class EngineArgs:
 
         control_vector_config = ControlVectorConfig(
             max_control_vectors=self.max_control_vectors,
+            normalize=self.normalize_control_vector,
         ) if self.enable_control_vector else None
 
         decoding_config = DecodingConfig(

@@ -3,8 +3,10 @@ from typing import Any, Callable, Dict, Hashable, Optional, TypeVar, List, Type
 from vllm.adapter_commons.models import (AdapterLRUCache, AdapterModel,
                                          AdapterModelManager)
 from torch import nn
+from huggingface_hub import hf_hub_download
 import torch
-from vllm.control_vectors.layers import ControlVectorMapping, MLPWithControlVector, BaseLayerWithControlVector
+import numpy as np
+from vllm.control_vectors.layers import ControlVectorMapping, MLPWithControlVector
 from vllm.logger import init_logger
 from vllm.adapter_commons.utils import (add_adapter, deactivate_adapter,
                                         get_adapter, list_adapters,
@@ -31,13 +33,25 @@ _all_cv_classes = {
 
 def parse_number_from_string(s: str) -> int:
     parts = s.split('.')
-    
     for part in parts:
         if part.isdigit():
             return int(part)
-    
     return None
 
+def load_control_vector_file(file_path, revision="main"):
+    try:
+        if Path(file_path).exists():
+            return str(Path(file_path).resolve())
+        parts = file_path.split("/")
+        repo_id = "/".join(parts[:2])
+        file_name = "/".join(parts[2:])
+
+        return hf_hub_download(repo_id=repo_id, filename=file_name, revision=revision)
+    except FileNotFoundError as e:
+        raise FileNotFoundError(f"File not found: {file_path}")
+    except Exception as e:
+        raise RuntimeError(f"An unexpected error occurred: {e}")
+    
 class ControlVectorModel(AdapterModel):
 
     def __init__(self, 
@@ -53,16 +67,17 @@ class ControlVectorModel(AdapterModel):
         cls,
         control_vector_model_path: str,
         control_vector_id: int,
-        config: ControlVectorConfig, ##add adapter_dtype to ControlVectorConfig
+        config: ControlVectorConfig,
         device: str = "cuda",
         scale_factor: float = 1.0,
     ) -> "ControlVectorModel":
         
-        if Path(control_vector_model_path).exists():
-            reader = gguf.GGUFReader(control_vector_model_path)
+        try:
+            file_path = load_control_vector_file(control_vector_model_path)
+            reader = gguf.GGUFReader(file_path)
             archf = reader.get_field("general.architecture")
+
             if not archf or not len(archf.parts):
-                # warnings.warn(".gguf file missing architecture field")
                 logger.error(".gguf file missing architecture field")
             else:
                 arch = str(bytes(archf.parts[-1]), encoding="utf-8", errors="replace")
@@ -71,27 +86,32 @@ class ControlVectorModel(AdapterModel):
                         f".gguf file with architecture {arch!r} does not appear to be a control vector!"
                     )
             modelf = reader.get_field('controlvector.model_hint')
+
             if not modelf or not len(modelf.parts):
-                raise ValueError(".gguf file mssing controlvector.model_hint field")
+                raise ValueError(".gguf file missing controlvector.model_hint field")
+            
             model_hint = str(bytes(modelf.parts[-1]), encoding="utf-8")
+            logger.info(f"Control Vector for {model_hint} loaded.")
             cv_weights = {}
             for tensor in reader.tensors:
                 if not tensor.name.startswith("direction."):
                     continue
                 try:
                     layer = int(tensor.name.split(".")[1])
-                except:
-                    raise ValueError(
-                        f".gguf file has invalid direction field name: {tensor.name}"
-                    )
-                cv_weights[layer] = torch.from_numpy(tensor.data)
-        else: 
-            from peft.utils import load_peft_weights
+                except ValueError:
+                    raise ValueError(f".gguf file has invalid direction field name: {tensor.name}")
+                np_copy = np.array(tensor.data, copy=True)
+                cv_weights[layer] = torch.from_numpy(np_copy).to(device).to(config.adapter_dtype)
 
-            cv = load_peft_weights(control_vector_model_path, device)
-            cv_weights = cv['prompt_embeddings'].to(config.adapter_dtype)
-
-        return cls(control_vector_id, cv_weights, scale_factor)
+            return cls(control_vector_id, cv_weights, scale_factor)
+        
+        except FileNotFoundError:
+            logger.error(f"Control vector file not found: {control_vector_model_path}")
+            raise
+        except Exception as e:
+            logger.error(f"An error occurred while loading the control vector: {e}")
+            raise
+        
 
 class ControlVectorModelManager(AdapterModelManager):
 
@@ -176,6 +196,7 @@ class ControlVectorModelManager(AdapterModelManager):
                 new_module = self.replace_submodule(self.model, module_name, _all_cv_classes[key](module))
                 new_module.set_layer_id(parse_number_from_string(module_name))
                 self.register_module(module_name, new_module)
+                new_module.set_normalization(self.control_vector_config.normalize)
         
     def replace_submodule(self, model: nn.Module, module_name: str,
                           new_module: nn.Module) -> nn.Module:

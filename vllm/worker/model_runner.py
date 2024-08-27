@@ -789,8 +789,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         if self.enable_control_vector:
             control_vector_requests = set(
                 data.control_vector_request for data in self.inter_data_list if data.control_vector_request
-            ) ##TODO:figure this out 
-
+            )
 
         # Multi-modal data.
         multi_modal_inputs_list = [

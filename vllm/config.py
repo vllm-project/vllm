@@ -1485,9 +1485,10 @@ class PromptAdapterConfig:
 @dataclass
 class ControlVectorConfig:
     max_control_vectors: int
-    adapter_dtype: Optional[torch.dtype] = None
+    adapter_dtype: Optional[torch.dtype] = torch.float16
+    normalize: bool = False
 
-    def __post__init(self):
+    def __post_init__(self):
         if self.max_control_vectors < 1:
             raise ValueError(f"max_control_vectors must be >= 1")
     
