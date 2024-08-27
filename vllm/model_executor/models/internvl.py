@@ -410,6 +410,10 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
             if not isinstance(image_embeds, torch.Tensor):
                 raise ValueError("Incorrect type of image embeddings. "
                                  f"Got type: {type(image_embeds)}")
+
+            # Remove the N dimension until multiple images are supported.
+            image_embeds = image_embeds.squeeze(1)
+
             return InternVLImageEmbeddingInputs(
                 type="image_embeds",
                 data=image_embeds,
@@ -421,6 +425,9 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
             if not isinstance(pixel_values, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
+
+            # Remove the N dimension until multiple images are supported.
+            pixel_values = pixel_values.squeeze(1)
 
             return InternVLImagePixelInputs(
                 type="pixel_values",
