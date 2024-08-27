@@ -27,25 +27,36 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.scalar_type import ScalarType, scalar_types
 from vllm.utils import FlexibleArgumentParser
 
-DEFAULT_MODELS = ["meta-llama/Llama-2-70b-hf"]  # "meta-llama/Llama-3-8b",
+DEFAULT_MODELS = ["meta-llama/Llama-3-8b", "meta-llama/Llama-2-70b-hf"]
 DEFAULT_BATCH_SIZES = [1, 16, 32, 64, 128, 256, 512, 1024]
 DEFAULT_TP_SIZES = [1]
 
 
+def terse_type_name(dt):
+    return {
+        torch.bfloat16: "bf16",
+        torch.float16: "fp16",
+        torch.int8: "int8",
+        torch.float8_e4m3fn: "fp8",
+        torch.bfloat16: "bf16",
+        torch.float: "float",
+        torch.int: "int",
+    }[dt]
+
 @dataclass
 class BenchmarkTensors:
-    a: torch.tensor
-    w_ref: torch.tensor
-    w_q: torch.tensor
+    a: torch.Tensor
+    w_ref: torch.Tensor
+    w_q: torch.Tensor
     group_size: int
     wtype: ScalarType
-    w_s: torch.tensor
-    w_zp: Optional[torch.tensor]
+    w_s: torch.Tensor
+    w_zp: Optional[torch.Tensor]
 
 
-def quantize_and_pack_contiguous(w: torch.tensor, wtype: ScalarType,
+def quantize_and_pack_contiguous(w: torch.Tensor, wtype: ScalarType,
                                  stype: torch.dtype, zero_points: bool,
-                                 group_size: int) -> Dict[str, torch.tensor]:
+                                 group_size: int) -> Dict[str, torch.Tensor]:
     if stype is not None:
         w = w.to(stype)
 
@@ -58,12 +69,20 @@ def quantize_and_pack_contiguous(w: torch.tensor, wtype: ScalarType,
     return {"w_ref": w_ref, "w_q": w_q, "w_s": w_s, "w_zp": w_zp}
 
 
-def torch_matmul_create_bench_fn(bt: BenchmarkTensors) -> Callable:
+def torch_matmul_f16_create_bench_fn(bt: BenchmarkTensors) -> Callable:
     a, w = bt.a, bt.w_ref
-    if not a.dtype.is_floating_point or a.dtype == torch.float8_e4m3fn:
+    if a.dtype not in [torch.float16, torch.bfloat16]:
         a = a.to(torch.float16)
         w = w.to(torch.float16)
-    return partial(torch.matmul, a, w)
+    return lambda: torch.matmul(a, w)
+
+
+def cutlass_scaled_mm_create_bench_fn(bt: BenchmarkTensors) -> Callable:
+    scale_a = torch.tensor(1.0, dtype=torch.float32, device=bt.a.device)
+    scale_b = torch.tensor(1.0, dtype=torch.float32, device=bt.a.device)
+    w_col_major = bt.w_ref.to(bt.a.dtype).t().contiguous().t()
+    return lambda: ops.cutlass_scaled_mm(bt.a, w_col_major,
+                   scale_a, scale_b, out_dtype=torch.float16)
 
 
 def marlin_create_bench_fn(bt: BenchmarkTensors) -> Callable:
@@ -85,19 +104,18 @@ def marlin_create_bench_fn(bt: BenchmarkTensors) -> Callable:
 
     if bt.a.dtype.is_floating_point:
 
-        fn = partial(ops.gptq_marlin_gemm,
-                     a=bt.a,
-                     b_q_weight=w_q,
-                     b_scales=w_s,
-                     b_zeros=w_zp,
-                     g_idx=g_idx,
-                     perm=sort_indices,
-                     workspace=workspace.scratch,
-                     b_q_type=bt.wtype,
-                     size_m=bt.a.shape[0],
-                     size_n=bt.w_ref.shape[1],
-                     size_k=bt.w_ref.shape[0],
-                     is_k_full=True)
+        fn = lambda: ops.gptq_marlin_gemm(a=bt.a,
+                                          b_q_weight=w_q,
+                                          b_scales=w_s,
+                                          b_zeros=w_zp,
+                                          g_idx=g_idx,
+                                          perm=sort_indices,
+                                          workspace=workspace.scratch,
+                                          b_q_type=bt.wtype,
+                                          size_m=bt.a.shape[0],
+                                          size_n=bt.w_ref.shape[1],
+                                          size_k=bt.w_ref.shape[0],
+                                          is_k_full=True)
     else:
         assert bt.a.dtype == torch.int8
         assert bt.wtype == scalar_types.uint4b8
@@ -106,16 +124,15 @@ def marlin_create_bench_fn(bt: BenchmarkTensors) -> Callable:
                           dtype=torch.float32,
                           device=device)
         s_tok = torch.ones(bt.a.shape[0], dtype=torch.float32, device=device)
-        fn = partial(ops.marlin_qqq_gemm,
-                     a=bt.a,
-                     b_q_weight=w_q,
-                     s_group=w_s,
-                     s_tok=s_tok,
-                     s_ch=s_ch,
-                     workspace=workspace.scratch,
-                     size_m=bt.a.shape[0],
-                     size_n=bt.w_ref.shape[1],
-                     size_k=bt.w_ref.shape[0])
+        fn = lambda: ops.marlin_qqq_gemm(a=bt.a,
+                                         b_q_weight=w_q,
+                                         s_group=w_s,
+                                         s_tok=s_tok,
+                                         s_ch=s_ch,
+                                         workspace=workspace.scratch,
+                                         size_m=bt.a.shape[0],
+                                         size_n=bt.w_ref.shape[1],
+                                         size_k=bt.w_ref.shape[0])
 
     return fn
 
@@ -130,17 +147,14 @@ def machete_create_bench_fn(bt: BenchmarkTensors,
     if w_zp is not None:
         w_zp = -1 * bt.w_s * (w_zp.to(bt.w_s.dtype))
 
-    fn = partial(ops.machete_gemm,
-                 a=bt.a,
-                 b_q=w_q,
-                 b_type=bt.wtype,
-                 b_scales=bt.w_s,
-                 b_zeros=w_zp,
-                 out_type=otype,
-                 b_group_size=bt.group_size,
-                 schedule=schedule)
-
-    return fn
+    return lambda: ops.machete_gemm(a=bt.a,
+                                    b_q=w_q,
+                                    b_type=bt.wtype,
+                                    b_scales=bt.w_s,
+                                    b_zeros=w_zp,
+                                    out_type=otype,
+                                    b_group_size=bt.group_size,
+                                    schedule=schedule)
 
 
 def make_bench_tensors(atype: torch.dtype, wtype: ScalarType,
@@ -215,23 +229,34 @@ def bench(atype: torch.dtype,
     benchmark_tensors = make_bench_tensors(atype, wtype, stype, group_size, m,
                                            n, k)
     sub_label += f", L={len(benchmark_tensors)}"
+    name_type_string = f"W{wtype}-A{terse_type_name(atype)}" +\
+                       f"-S{terse_type_name(stype)}-O{terse_type_name(otype)}"+\
+                       f"-G{group_size}"
 
     timers = []
     # pytorch impl
     timers.append(
         bench_fns(
-            label, sub_label, "torch.matmul",
-            [torch_matmul_create_bench_fn(bt) for bt in benchmark_tensors]))
+            label, sub_label, "torch.matmul (fp16)",
+            [torch_matmul_f16_create_bench_fn(bt) for bt in benchmark_tensors]))
+    
+    if atype == torch.int8 or atype == torch.float8_e4m3fn:
+        timers.append(
+            bench_fns(
+                label, sub_label, 
+                f"cutlass_scaled_mm ({terse_type_name(atype)})",
+                [cutlass_scaled_mm_create_bench_fn(bt)
+                 for bt in benchmark_tensors]))
 
     if benchmark_marlinv1 and atype != torch.float8_e4m3fn:
         timers.append(
-            bench_fns(label, sub_label, "marlin",
+            bench_fns(label, sub_label, f"marlin ({name_type_string})",
                       [marlin_create_bench_fn(bt)
                        for bt in benchmark_tensors]))
 
     # machete
     timers.append(
-        bench_fns(label, sub_label, "machete", [
+        bench_fns(label, sub_label, f"machete ({name_type_string})", [
             machete_create_bench_fn(bt, otype=otype)
             for bt in benchmark_tensors
         ]))
