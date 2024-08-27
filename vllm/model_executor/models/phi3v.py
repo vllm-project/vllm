@@ -422,6 +422,8 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
 
     prompt = llm_inputs.get("prompt")
     if prompt is None:
+        # for async server request, we assume prompt and its token_ids is always
+        # in correct format. And num_image_tags == len(image_data) is always True.
         image_idx = range(1, len(image_data) + 1)
         new_prompt = None
     else:
