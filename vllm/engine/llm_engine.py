@@ -299,8 +299,7 @@ class LLMEngine:
             load_config=load_config,
             prompt_adapter_config=prompt_adapter_config,
             observability_config=self.observability_config,
-            control_vector_config=control_vector_config
-        )
+            control_vector_config=control_vector_config)
 
         if not self.model_config.embedding_mode:
             self._initialize_kv_caches()
@@ -619,16 +618,15 @@ class LLMEngine:
         return dec_start_token_id
 
     def _add_processed_request(
-        self,
-        request_id: str,
-        processed_inputs: Union[LLMInputs, EncoderDecoderLLMInputs],
-        params: Union[SamplingParams, PoolingParams],
-        arrival_time: float,
-        lora_request: Optional[LoRARequest],
-        prompt_adapter_request: Optional[PromptAdapterRequest],
-        trace_headers: Optional[Mapping[str, str]] = None,
-        control_vector_request: ControlVectorRequest = None
-    ) -> None:
+            self,
+            request_id: str,
+            processed_inputs: Union[LLMInputs, EncoderDecoderLLMInputs],
+            params: Union[SamplingParams, PoolingParams],
+            arrival_time: float,
+            lora_request: Optional[LoRARequest],
+            prompt_adapter_request: Optional[PromptAdapterRequest],
+            trace_headers: Optional[Mapping[str, str]] = None,
+            control_vector_request: ControlVectorRequest = None) -> None:
         self._validate_model_inputs(processed_inputs)
         # Create the sequences.
         block_size = self.cache_config.block_size
@@ -1087,20 +1085,19 @@ class LLMEngine:
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
             trace_headers=trace_headers,
-            control_vector_request=control_vector_request
-        )
+            control_vector_request=control_vector_request)
 
     def _create_sequence_group_with_sampling(
-        self,
-        request_id: str,
-        seq: Sequence,
-        sampling_params: SamplingParams,
-        arrival_time: float,
-        lora_request: Optional[LoRARequest],
-        trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        encoder_seq: Optional[Sequence] = None,
-        control_vector_request: ControlVectorRequest = None
+            self,
+            request_id: str,
+            seq: Sequence,
+            sampling_params: SamplingParams,
+            arrival_time: float,
+            lora_request: Optional[LoRARequest],
+            trace_headers: Optional[Mapping[str, str]] = None,
+            prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+            encoder_seq: Optional[Sequence] = None,
+            control_vector_request: ControlVectorRequest = None
     ) -> SequenceGroup:
         """Creates a SequenceGroup with SamplingParams."""
         max_logprobs = self.get_model_config().max_logprobs
@@ -1133,15 +1130,15 @@ class LLMEngine:
         return seq_group
 
     def _create_sequence_group_with_pooling(
-        self,
-        request_id: str,
-        seq: Sequence,
-        pooling_params: PoolingParams,
-        arrival_time: float,
-        lora_request: Optional[LoRARequest],
-        prompt_adapter_request: Optional[PromptAdapterRequest],
-        encoder_seq: Optional[Sequence] = None,
-        control_vector_request: ControlVectorRequest = None
+            self,
+            request_id: str,
+            seq: Sequence,
+            pooling_params: PoolingParams,
+            arrival_time: float,
+            lora_request: Optional[LoRARequest],
+            prompt_adapter_request: Optional[PromptAdapterRequest],
+            encoder_seq: Optional[Sequence] = None,
+            control_vector_request: ControlVectorRequest = None
     ) -> SequenceGroup:
         """Creates a SequenceGroup with PoolingParams."""
         # Defensive copy of PoolingParams, which are used by the pooler

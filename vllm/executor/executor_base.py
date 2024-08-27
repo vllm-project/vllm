@@ -21,20 +21,15 @@ class ExecutorBase(ABC):
 
     uses_ray: bool  # whether the executor uses Ray for orchestration.
 
-    def __init__(
-        self,
-        model_config: ModelConfig,
-        cache_config: CacheConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        load_config: LoadConfig,
-        lora_config: Optional[LoRAConfig],
-        speculative_config: Optional[SpeculativeConfig],
-        prompt_adapter_config: Optional[PromptAdapterConfig],
-        control_vector_config: Optional[ControlVectorConfig],
-        observability_config: Optional[ObservabilityConfig]
-    ) -> None:
+    def __init__(self, model_config: ModelConfig, cache_config: CacheConfig,
+                 parallel_config: ParallelConfig,
+                 scheduler_config: SchedulerConfig,
+                 device_config: DeviceConfig, load_config: LoadConfig,
+                 lora_config: Optional[LoRAConfig],
+                 speculative_config: Optional[SpeculativeConfig],
+                 prompt_adapter_config: Optional[PromptAdapterConfig],
+                 control_vector_config: Optional[ControlVectorConfig],
+                 observability_config: Optional[ObservabilityConfig]) -> None:
         self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config
@@ -118,9 +113,10 @@ class ExecutorBase(ABC):
     @abstractmethod
     def list_prompt_adapters(self) -> Set[int]:
         raise NotImplementedError
-    
+
     @abstractmethod
-    def add_control_vector(self, control_vector_request: ControlVectorRequest) -> bool:
+    def add_control_vector(
+            self, control_vector_request: ControlVectorRequest) -> bool:
         raise NotImplementedError
 
     @abstractmethod

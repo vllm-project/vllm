@@ -12,7 +12,8 @@ from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoadFormat, LoRAConfig,
                          ModelConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig, TokenizerPoolConfig, ControlVectorConfig)
+                         SpeculativeConfig, TokenizerPoolConfig,
+                         ControlVectorConfig)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -1000,20 +1001,18 @@ class EngineArgs:
                 "Chunked prefill is not supported with sliding window. "
                 "Set --disable-sliding-window to disable sliding window.")
 
-        return EngineConfig(
-            model_config=model_config,
-            cache_config=cache_config,
-            parallel_config=parallel_config,
-            scheduler_config=scheduler_config,
-            device_config=device_config,
-            lora_config=lora_config,
-            speculative_config=speculative_config,
-            load_config=load_config,
-            decoding_config=decoding_config,
-            observability_config=observability_config,
-            prompt_adapter_config=prompt_adapter_config,
-            control_vector_config=control_vector_config
-        )
+        return EngineConfig(model_config=model_config,
+                            cache_config=cache_config,
+                            parallel_config=parallel_config,
+                            scheduler_config=scheduler_config,
+                            device_config=device_config,
+                            lora_config=lora_config,
+                            speculative_config=speculative_config,
+                            load_config=load_config,
+                            decoding_config=decoding_config,
+                            observability_config=observability_config,
+                            prompt_adapter_config=prompt_adapter_config,
+                            control_vector_config=control_vector_config)
 
 
 @dataclass

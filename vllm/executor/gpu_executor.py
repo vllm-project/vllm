@@ -170,13 +170,13 @@ class GPUExecutor(ExecutorBase):
         # it's running.
         return
 
-    def add_control_vector(self, control_vector_request: ControlVectorRequest)-> bool:
+    def add_control_vector(
+            self, control_vector_request: ControlVectorRequest) -> bool:
         assert control_vector_request.adapter_id > 0
         return self.driver_worker.add_control_vector(control_vector_request)
 
     def remove_control_vector(self, cv_id: int) -> bool:
         return self.driver_worker.add_control_vector(cv_id)
-
 
 
 class GPUExecutorAsync(GPUExecutor, ExecutorAsyncBase):

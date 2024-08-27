@@ -286,7 +286,6 @@ class LLM:
         guided_options_request: Optional[Union[LLMGuidedOptions,
                                                GuidedDecodingRequest]] = None,
         control_vector_request: Optional[ControlVectorRequest] = None,
-        
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 

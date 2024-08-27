@@ -65,8 +65,7 @@ class WorkerControlVectorManager(AbstractWorkerManager):
                     control_vector_id=control_vector_request.control_vector_id,
                     config=self.control_vector_config,
                     device=str(self.device),
-                    scale_factor=control_vector_request.scale_factor
-                ))
+                    scale_factor=control_vector_request.scale_factor))
         except Exception as e:
             raise RuntimeError(
                 f"Loading control vector "
@@ -82,7 +81,9 @@ class WorkerControlVectorManager(AbstractWorkerManager):
         return self._adapter_manager.pin_adapter(adapter_id)
 
     def set_active_adapters(self, requests: Set[Any]) -> None:
-        assert len(requests) <= 1, "Currently, we do not support more than 1 control vectors at one time"
+        assert len(
+            requests
+        ) <= 1, "Currently, we do not support more than 1 control vectors at one time"
         if requests:
             mapping = [req.adapter_id for req in requests][0]
         else:
@@ -142,13 +143,11 @@ class LRUCacheWorkerControlVectorManager(WorkerControlVectorManager):
             for control_vector_request in control_vector_requests
             if control_vector_request
         }
-        if len(control_vectors_map
-               ) > self._adapter_manager.adapter_slots:
-            raise RuntimeError(
-                f"Number of requested control vectors "
-                f"({len(control_vectors_map)}) is greater "
-                "than the number of GPU control vector slots "
-                f"({self._adapter_manager.adapter_slots}).")
+        if len(control_vectors_map) > self._adapter_manager.adapter_slots:
+            raise RuntimeError(f"Number of requested control vectors "
+                               f"({len(control_vectors_map)}) is greater "
+                               "than the number of GPU control vector slots "
+                               f"({self._adapter_manager.adapter_slots}).")
         for control_vector in control_vectors_map.values():
             self.add_adapter(control_vector)
 
@@ -162,7 +161,8 @@ class LRUCacheWorkerControlVectorManager(WorkerControlVectorManager):
             control_vector = self._load_adapter(control_vector_request)
             loaded = self._adapter_manager.add_adapter(control_vector)
         else:
-            loaded = self._adapter_manager.get_adapter(control_vector_request.adapter_id)
+            loaded = self._adapter_manager.get_adapter(
+                control_vector_request.adapter_id)
         self._adapter_manager.activate_adapter(
             control_vector_request.control_vector_id)
         return loaded

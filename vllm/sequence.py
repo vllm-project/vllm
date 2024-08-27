@@ -931,8 +931,9 @@ class SequenceGroupMetadata(
     def prompt_adapter_num_virtual_tokens(self) -> int:
         return self.prompt_adapter_request.prompt_adapter_num_virtual_tokens \
                         if self.prompt_adapter_request else 0
+
     @property
-    def control_vector_id(self)->int:
+    def control_vector_id(self) -> int:
         return self.control_vector_request.adapter_id if self.control_vector_request else 0
 
     def apply_delta(self,

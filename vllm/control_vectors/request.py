@@ -13,7 +13,7 @@ class ControlVectorRequest(AdapterRequest):
     control_vector_id: int
     control_vector_local_path: str
     scale: float = 1.0
-    
+
     def __hash__(self):
         return super().__hash__()
 
@@ -28,7 +28,7 @@ class ControlVectorRequest(AdapterRequest):
     @property
     def local_path(self):
         return self.control_vector_local_path
-    
+
     @property
     def scale_factor(self):
         return self.scale

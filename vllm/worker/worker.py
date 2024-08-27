@@ -422,10 +422,11 @@ class Worker(LocalOrDistributedWorkerBase):
 
     def list_prompt_adapters(self) -> Set[int]:
         return self.model_runner.list_prompt_adapters()
-    
-    def add_control_vector(self, control_vector_request: ControlVectorRequest) -> bool:
+
+    def add_control_vector(
+            self, control_vector_request: ControlVectorRequest) -> bool:
         return self.model_runner.add_control_vector(control_vector_request)
-    
+
     def remove_control_vector(self, cv_id: int) -> bool:
         return self.model_runner.remove_control_vector(cv_id)
 
