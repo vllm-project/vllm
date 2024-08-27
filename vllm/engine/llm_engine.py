@@ -1691,6 +1691,8 @@ class LLMEngine:
             len(scheduler.swapped) for scheduler in self.scheduler)
         num_waiting_sys = sum(
             len(scheduler.waiting) for scheduler in self.scheduler)
+        num_cumulative_preemption = sum(scheduler.num_cumulative_preemption
+                                        for scheduler in self.scheduler)
 
         # KV Cache Usage in %
         num_total_gpu = self.cache_config.num_gpu_blocks
@@ -1708,6 +1710,15 @@ class LLMEngine:
                 scheduler.block_manager.get_num_free_cpu_blocks()
                 for scheduler in self.scheduler)
             cpu_cache_usage_sys = 1.0 - (num_free_cpu / num_total_cpu)
+
+        num_total_external = self.cache_config.num_external_blocks
+        external_cache_usage_sys = 0.
+        if num_total_external is not None and num_total_external > 0:
+            num_free_external = sum(
+                scheduler.block_manager.get_num_free_external_blocks()
+                for scheduler in self.scheduler)
+            external_cache_usage_sys = 1.0 - (num_free_external /
+                                              num_total_external)
 
         # Prefix Cache Hit Rate. Note that we always use
         # the cache hit rate of the first virtual engine.
@@ -1829,9 +1840,11 @@ class LLMEngine:
             num_running_sys=num_running_sys,
             num_swapped_sys=num_swapped_sys,
             num_waiting_sys=num_waiting_sys,
+            num_cumulative_preemption=num_cumulative_preemption,
             #   KV Cache Usage in %
             gpu_cache_usage_sys=gpu_cache_usage_sys,
             cpu_cache_usage_sys=cpu_cache_usage_sys,
+            external_cache_usage_sys=external_cache_usage_sys,
             #   Prefix Cache Hit Rate
             cpu_prefix_cache_hit_rate=cpu_prefix_cache_hit_rate,
             gpu_prefix_cache_hit_rate=gpu_prefix_cache_hit_rate,
