@@ -3,7 +3,7 @@ within a vision language model."""
 
 import math
 from array import array
-from typing import Iterable, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 from PIL import Image
@@ -93,7 +93,7 @@ def input_processor_for_siglip(
     llm_inputs: LLMInputs,
     *,
     image_token_id: int,
-    image_feature_size_override: Optional[int] = None,
+    image_feature_size_override: Optional[Union[int, List[int]]] = None,
 ):
     multi_modal_data = llm_inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
