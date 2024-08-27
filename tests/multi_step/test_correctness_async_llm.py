@@ -101,7 +101,6 @@ async def test_multi_step(example_prompts, model: str, tp_size: int,
     # to single-step scheduling.
     ref_text_logprobs = get_client_text_logprob_generations(ref_completions)
     test_text_logprobs = get_client_text_logprob_generations(test_completions)
-
     check_logprobs_close(
         outputs_0_lst=ref_text_logprobs,
         outputs_1_lst=test_text_logprobs,
