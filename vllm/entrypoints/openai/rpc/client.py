@@ -101,6 +101,7 @@ class AsyncEngineRPCClient:
         # Maximum number of sockets that can be opened (typically 65536).
         # ZMQ_SOCKET_LIMIT (http://api.zeromq.org/4-2:zmq-ctx-get)
         socket_limit = self.context.get(zmq.constants.SOCKET_LIMIT)
+        assert isinstance(socket_limit, int)
         if socket_limit < VLLM_RPC_SOCKET_LIMIT_CUTOFF:
             raise ValueError(
                 f"Found zmq.constants.SOCKET_LIMIT={socket_limit}, which caps "
@@ -141,8 +142,8 @@ class AsyncEngineRPCClient:
         poller.register(socket_from, zmq.constants.POLLIN)
         poller.register(socket_to, zmq.constants.POLLIN)
         while True:
-            events = await poller.poll()
-            events = dict(events)
+            events_lst = await poller.poll()
+            events = dict(events_lst)
             if socket_from in events:
                 identity, msg = await socket_from.recv_multipart()
                 await socket_to.send_multipart([identity, msg])
