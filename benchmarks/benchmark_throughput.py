@@ -87,6 +87,9 @@ def run_vllm(
     download_dir: Optional[str] = None,
     load_format: str = EngineArgs.load_format,
     disable_async_output_proc: bool = False,
+    swap_space: int = 4,
+    external_swapper: str = "",
+    external_swapper_space: int = 0,
 ) -> float:
     from vllm import LLM, SamplingParams
     llm = LLM(
@@ -112,6 +115,9 @@ def run_vllm(
         num_scheduler_steps=num_scheduler_steps,
         use_v2_block_manager=use_v2_block_manager,
         disable_async_output_proc=disable_async_output_proc,
+        swap_space=swap_space,
+        external_swapper=external_swapper,
+        external_swapper_space=external_swapper_space,
     )
 
     # Add the requests to the engine.
@@ -240,7 +246,8 @@ def main(args: argparse.Namespace):
             args.max_num_batched_tokens, args.distributed_executor_backend,
             args.gpu_memory_utilization, args.num_scheduler_steps,
             args.use_v2_block_manager, args.download_dir, args.load_format,
-            args.disable_async_output_proc)
+            args.disable_async_output_proc, args.swap_space,
+            args.external_swapper, args.external_swapper_space)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
@@ -426,6 +433,21 @@ if __name__ == "__main__":
         action='store_true',
         default=False,
         help="Disable async output processor for vLLM backend.")
+    parser.add_argument('--swap-space',
+                        type=float,
+                        default=EngineArgs.swap_space,
+                        help='CPU swap space size (GiB) per GPU.')
+
+    parser.add_argument(
+        '--external-swapper',
+        type=str,
+        default="",
+        help="External storage kv cache medium, supports local file currently."
+    )
+    parser.add_argument('--external-swapper-space',
+                        type=int,
+                        default=0,
+                        help="External swapper space size (GiB) per GPU.")
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model
