@@ -31,6 +31,7 @@ VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
                              (1, 4, 1, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
                              (2, 2, 1, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
                              (2, 2, 0, 1, "meta-llama/Meta-Llama-3-8B", "ray"),
+                             (1, 2, 1, 1, "OpenGVLab/InternVL2-8B", "ray"),
                          ])
 @fork_new_process_for_each_test
 def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME,
@@ -72,6 +73,8 @@ def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME,
         pp_args.append("--enforce-eager")
         tp_args.append("--enforce-eager")
     pp_env = None
+    pp_args.append("--trust-remote-code")
+    tp_args.append("--trust-remote-code")
     if (DIST_BACKEND == "ray" and TP_SIZE == 2 and PP_SIZE == 2
             and CHUNKED_PREFILL):
         # Test Ray ADAG for a subset of the tests
