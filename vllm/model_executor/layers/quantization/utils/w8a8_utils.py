@@ -219,7 +219,7 @@ def apply_int8_linear(
             "Please install torch_xla by following the instructions at "
             "https://docs.vllm.ai/en/latest/getting_started/tpu-installation.html "  # noqa: E501
             "to run vLLM on TPU.") from err
-    return torch.ops.xla.quantized_matmul(input, weight.t(), weight_scale.squeeze(-1), quantize_activation=True)
+    return torch.ops.xla.quantized_matmul(input, weight.t(), weight_scale.squeeze(-1).to(torch.bfloat16), quantize_activation=True)
 
     # ops.scaled_int8_quant supports both dynamic and static quant.
     # * dynamic, layer.input_scale is None and x_scale computed from x.
