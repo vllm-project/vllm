@@ -335,7 +335,18 @@ class AsyncEngineRPCClient:
 
     async def abort(self, request_id: str):
         """Send an ABORT_REQUEST signal to the RPC Server"""
-        with suppress(RPCClientClosedError):
+
+        # Suppress timeouts as well.
+        # In cases where the server is busy processing requests and a very
+        # large volume of abort requests arrive, it is likely that the server
+        # will not be able to ack all of them in time. We have seen this when
+        # we abort 20k requests at once while another 2k are processing- many
+        # of them time out, but we see the server successfully abort all of the
+        # requests.
+        # In this case we assume that the server has received or will receive
+        # these abort requests, and ignore the timeout. This prevents a massive
+        # wall of `TimeoutError` stack traces.
+        with suppress(RPCClientClosedError, TimeoutError):
             await self._send_one_way_rpc_request(
                 request=RPCAbortRequest(request_id),
                 error_message=f"RPCAbortRequest {request_id} failed")

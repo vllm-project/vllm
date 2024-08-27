@@ -87,7 +87,8 @@ steps:
   commands:
   - pip install -e ./plugins/vllm_add_dummy_model
   - pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git@a4987bba6e9e9b3f22bd3a6c1ecf0abd04fd5622#egg=lm_eval[api]
-  - pytest -v -s entrypoints/llm
+  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py
+  - pytest -v -s entrypoints/llm/test_lazy_outlines.py # it needs a clean process
   - pytest -v -s entrypoints/openai
 
 - label: Distributed Tests (4 GPUs) # 10min
@@ -95,7 +96,8 @@ steps:
   num_gpus: 4
   fast_check: true
   source_file_dependencies:
-  - vllm/
+  - vllm/distributed/
+  - vllm/core/
   - tests/distributed
   - tests/spec_decode/e2e/test_integration_dist_tp4
   commands:
@@ -231,12 +233,13 @@ steps:
   parallelism: 4
 
 - label: Tensorizer Test # 11min
+  mirror_hardwares: [amd]
   soft_fail: true
   source_file_dependencies:
   - vllm/model_executor/model_loader
   - tests/tensorizer_loader
   commands:
-    - apt-get install -y curl libsodium23
+    - apt-get update && apt-get install -y curl libsodium23
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s tensorizer_loader
 
@@ -284,11 +287,15 @@ steps:
   num_gpus: 2
   num_nodes: 2
   source_file_dependencies:
-  - vllm/
-  - tests/distributed/test_same_node
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/executor/
+  - vllm/model_executor/models/
+  - tests/distributed/
   commands:
   - # the following commands are for the first node, with ip 192.168.10.10 (ray environment already set up)
     - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py
+    - VLLM_MULTI_NODE=1 pytest -v -s distributed/test_multi_node_assignment.py
     - VLLM_MULTI_NODE=1 pytest -v -s distributed/test_pipeline_parallel.py
   - # the following commands are for the second node, with ip 192.168.10.11 (ray environment already set up)
     - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py
@@ -298,8 +305,11 @@ steps:
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   source_file_dependencies:
-  - vllm/
-  - tests/distributed
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/executor/
+  - vllm/model_executor/models/
+  - tests/distributed/
   commands:
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py
   - TARGET_TEST_SUITE=L4 pytest -v -s distributed/test_basic_distributed_correctness.py
@@ -327,15 +337,18 @@ steps:
   - vllm/engine
   - tests/multi_step
   commands:
-  - pytest -v -s multi_step/test_correctness.py
+  - pytest -v -s multi_step/test_correctness_async_llm.py
+  - pytest -v -s multi_step/test_correctness_llm.py
 
 - label: Pipeline Parallelism Test # 23min
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
   source_file_dependencies:
-  - vllm/
-  - tests/distributed/test_pp_cudagraph.py
-  - tests/distributed/test_pipeline_parallel
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/executor/
+  - vllm/model_executor/models/
+  - tests/distributed/
   commands:
   - pytest -v -s distributed/test_pp_cudagraph.py
   - pytest -v -s distributed/test_pipeline_parallel.py
