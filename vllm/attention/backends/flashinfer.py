@@ -4,11 +4,11 @@ from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type,
                     Union)
 
 try:
+    from flashinfer import BatchDecodeWithPagedKVCacheWrapper
     from flashinfer.decode import CUDAGraphBatchDecodeWithPagedKVCacheWrapper
     from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper
 
     import vllm.attention.backends.flash_attn  # noqa
-    from flashinfer import BatchDecodeWithPagedKVCacheWrapper
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
 except ImportError:
     BatchDecodeWithPagedKVCacheWrapper = None
@@ -86,15 +86,13 @@ class FlashInferBackend(AttentionBackend):
 
     @staticmethod
     def get_fp8_dtype_for_flashinfer(
-            kv_cache_dtype: Union[str, torch.dtype],
-            model_dtype: Optional[Union[str,
-                                        torch.dtype]] = None) -> torch.dtype:
+        kv_cache_dtype: Union[str, torch.dtype], ) -> torch.dtype:
         if kv_cache_dtype in ["fp8", "fp8_e4m3"]:
             return torch.float8_e4m3fn
         elif kv_cache_dtype == "fp8_e5m2":
             return torch.float8_e5m2
         else:
-            return get_kv_cache_torch_dtype(kv_cache_dtype, model_dtype)
+            return ValueError("Unrecognized FP8 dtype: {kv_cache_dtype}")
 
 
 class FlashInferState(AttentionState):
@@ -192,8 +190,7 @@ class FlashInferState(AttentionState):
             use_tensor_cores)
 
         kv_cache_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
-            self.runner.kv_cache_dtype, self.runner.model_config.dtype)
-
+            self.runner.kv_cache_dtype)
         paged_kv_indptr_tensor_host = torch.arange(0,
                                                    batch_size + 1,
                                                    dtype=torch.int32)
@@ -354,7 +351,7 @@ class FlashInferMetadata(AttentionMetadata):
                 self.page_size,
                 # Disable flashinfer's pos encoding and use vllm's rope.
                 pos_encoding_mode="NONE",
-                data_type=self.data_type)
+            )
 
     def asdict_zerocopy(self,
                         skip_fields: Optional[Set[str]] = None
@@ -591,7 +588,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             paged_kv_indptr_tensor = None
             paged_kv_last_page_len_tensor = None
 
-        kv_cache_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
+        kv_cache_dtype = get_kv_cache_torch_dtype(
             self.runner.kv_cache_dtype, self.runner.model_config.dtype)
 
         return FlashInferMetadata(
@@ -677,7 +674,6 @@ class FlashInferImpl(AttentionImpl):
         if attn_metadata.num_decode_tokens > 0:
             assert attn_metadata.num_prefill_tokens == 0, (
                 "Chunked prefill is not supported with flashinfer yet.")
-
         if kv_cache is not None:
             # Use the same reshape and cache kernel as flash attention.
             ops.reshape_and_cache_flash(

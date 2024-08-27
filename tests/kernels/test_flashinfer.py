@@ -1,9 +1,9 @@
 from typing import List, Optional, Tuple
 
+import flashinfer
 import pytest
 import torch
 
-import flashinfer
 
 NUM_HEADS = [(16, 16), (32, 8), (64, 8), (6, 1)]
 HEAD_SIZES = [128, 256]
@@ -130,7 +130,7 @@ def test_flashinfer_decode_with_paged_kv(
     wrapper = flashinfer.\
         BatchDecodeWithPagedKVCacheWrapper(workspace_buffer, "NHD",
                 use_tensor_cores=(
-                    (num_query_heads//num_kv_heads) not in (1, 2, 4, 8))
+                    (num_query_heads//num_kv_heads) > 4)
                 )
     wrapper.begin_forward(kv_indptr,
                           kv_indices,
@@ -388,7 +388,7 @@ def test_flashinfer_decode_with_paged_fp8_kv(
     assert num_query_heads % num_kv_heads == 0
     max_kv_len = max(kv_lens)
     scale = head_size**-0.5
-    use_tensor_cores = ((num_query_heads // num_kv_heads) not in (1, 2, 4, 8))
+    use_tensor_cores = (num_query_heads // num_kv_heads) > 4
     kv_cache_dtype = torch.float8_e4m3fn
 
     query = torch.randn(num_seqs, num_query_heads, head_size, dtype=dtype)

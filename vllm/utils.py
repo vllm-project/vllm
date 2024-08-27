@@ -359,7 +359,11 @@ def is_flashinfer() -> bool:
         import flashinfer
     except ImportError:
         flashinfer = None
-    return flashinfer is not None
+    if not torch.cuda.is_available():
+        return False
+    gpu_properties = torch.cuda.get_device_properties(0)
+    sm_ver = gpu_properties.major + gpu_properties.minor / 10.0
+    return (flashinfer is not None and sm_ver >= 9.0)
 
 
 @lru_cache(maxsize=None)
