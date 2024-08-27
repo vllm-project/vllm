@@ -6,8 +6,8 @@ import time
 import warnings
 import weakref
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set,
-                    Tuple, Type, TypeVar, Union)
+from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type,
+                    TypeVar, Union)
 
 import numpy as np
 import torch
@@ -41,8 +41,8 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.prompt_adapter.worker_manager import (
     LRUCacheWorkerPromptAdapterManager)
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (IntermediateTensors, SamplerOutput,
-                           SequenceGroupMetadata, AsyncCallbackData)
+from vllm.sequence import (AsyncCallbackData, IntermediateTensors,
+                           SamplerOutput, SequenceGroupMetadata)
 from vllm.utils import (CudaMemoryProfiler, PyObjectCache, async_tensor_h2d,
                         flatten_2d_lists, is_hip, is_pin_memory_available)
 from vllm.worker.model_runner_base import (
@@ -1460,7 +1460,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             func = model_input.async_callback.func
             kw_args = model_input.async_callback.kw_args
             func(**kw_args)
-            
+
         # Sample the next token.
         output: SamplerOutput = self.model.sample(
             logits=logits,

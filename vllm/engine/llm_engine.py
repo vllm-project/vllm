@@ -38,10 +38,10 @@ from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
-                           SamplerOutput, Sequence, SequenceGroup,
-                           SequenceGroupMetadata, SequenceStatus,
-                           AsyncCallbackData)
+from vllm.sequence import (AsyncCallbackData, EmbeddingSequenceGroupOutput,
+                           ExecuteModelRequest, SamplerOutput, Sequence,
+                           SequenceGroup, SequenceGroupMetadata,
+                           SequenceStatus)
 from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
 from vllm.transformers_utils.config import try_get_generation_config
@@ -91,9 +91,7 @@ class SchedulerOutputState:
 
 @dataclass
 class SchedulerContext:
-    output_queue: Deque[Tuple[List[SamplerOutput],
-                              List[Tuple[ScheduledSequenceGroup,
-                                         SequenceGroupMetadata]],
+    output_queue: Deque[Tuple[List[SamplerOutput], List[SequenceGroupMetadata],
                               SchedulerOutputs]] = field(
                                   default_factory=lambda: deque())
 
@@ -1551,7 +1549,7 @@ class LLMEngine:
                 self.do_tracing(scheduler_outputs)
         else:
             # Multi-step case
-            self.request_outputs = []
+            ctx.request_outputs = []
 
         if not self.has_unfinished_requests():
             # Drain async postprocessor (if exists)
