@@ -945,12 +945,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     "provided. Defaulting to scaling factors of 1.0. "
                     "This may lead to less accurate results!")
 
-        if envs.VLLM_TEST_DYNAMO_GRAPH_CAPTURE:
-            self._not_compiled_model = self.model
-            self.model = torch.compile(self.model,
-                                       fullgraph=True,
-                                       backend="eager")
-
     def save_sharded_state(
         self,
         path: str,
@@ -1095,12 +1089,14 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 batch_size=batch_size,
                 dtype=self.model_config.dtype,
                 device=self.device)
-        # no compilation is needed for profiling memory
-        self.execute_model(model_input,
-                           kv_caches,
-                           intermediate_tensors,
-                           compiled=False)
+        self.execute_model(model_input, kv_caches, intermediate_tensors)
         torch.cuda.synchronize()
+
+        if envs.VLLM_TEST_DYNAMO_GRAPH_CAPTURE:
+            self.model = torch.compile(self.model,
+                                       fullgraph=True,
+                                       backend="eager")
+
         return
 
     def remove_all_loras(self):
@@ -1372,7 +1368,6 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         kv_caches: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
-        compiled: bool = True,
     ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         if num_steps > 1:
             raise ValueError("num_steps > 1 is not supported in ModelRunner")
@@ -1404,10 +1399,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             graph_batch_size = model_input.input_tokens.shape[0]
             model_executable = self.graph_runners[virtual_engine][
                 graph_batch_size]
-        elif compiled:
-            model_executable = self.model
         else:
-            model_executable = self.not_compiled_model
+            model_executable = self.model
 
         multi_modal_kwargs = model_input.multi_modal_kwargs or {}
         seqlen_agnostic_kwargs = {
