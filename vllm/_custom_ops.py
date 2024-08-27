@@ -17,7 +17,7 @@ if not current_platform.is_tpu():
         logger.warning("Failed to import from vllm._C with %r", e)
 
     try:
-        import vllm._C
+        import vllm._C_cpu
     except ImportError as e:
         logger.warning("Failed to import from vllm._C_cpu with %r", e)
 
