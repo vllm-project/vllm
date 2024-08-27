@@ -84,8 +84,7 @@ class FlashInferBackend(AttentionBackend):
         return [64, 128, 256]
 
     @staticmethod
-    def get_fp8_dtype_for_flashinfer(
-        kv_cache_dtype: str) -> torch.dtype:
+    def get_fp8_dtype_for_flashinfer(kv_cache_dtype: str) -> torch.dtype:
         if kv_cache_dtype in ("fp8", "fp8_e4m3"):
             return torch.float8_e4m3fn
         elif kv_cache_dtype == "fp8_e5m2":
