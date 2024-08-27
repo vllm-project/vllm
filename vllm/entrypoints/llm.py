@@ -390,15 +390,21 @@ class LLM:
         conversations, _ = parse_chat_messages(messages, model_config,
                                                tokenizer)
 
-        prompts = apply_chat_template(
+        prompt = apply_chat_template(
             tokenizer,
             conversations,
             chat_template=chat_template,
             add_generation_prompt=add_generation_prompt)
 
+        inputs: PromptInputs
+        if isinstance(prompt, list) and isinstance(prompt[0], int):
+            inputs = TokensPrompt(prompt_token_ids=prompt)
+        else:
+            inputs = TextPrompt(prompt=prompt)
+
         return self.generate(
-            prompts,
-            sampling_params,
+            inputs,
+            sampling_params=sampling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
         )
