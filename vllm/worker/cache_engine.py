@@ -8,6 +8,7 @@ from vllm.config import CacheConfig, DeviceConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size,
                         is_pin_memory_available)
+from vllm.worker.external_swapper import ExternalSwapperBase
 
 logger = init_logger(__name__)
 
@@ -26,6 +27,8 @@ class CacheEngine:
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
         device_config: DeviceConfig,
+        rank: int = 0,
+        pipeline_parallel_id: int = 0,
     ) -> None:
         self.cache_config = cache_config
         self.model_config = model_config
@@ -66,6 +69,37 @@ class CacheEngine:
         self.gpu_cache = self._allocate_kv_cache(
             self.num_gpu_blocks, self.device_config.device_type)
         self.cpu_cache = self._allocate_kv_cache(self.num_cpu_blocks, "cpu")
+        self.enable_external_swapper = (
+            self.cache_config.external_swapper != ""
+            and self.cache_config.external_swapper is not None)
+
+        if self.enable_external_swapper:
+            self.num_external_blocks = cache_config.num_external_blocks
+            if self.num_external_blocks:
+                self.num_external_blocks //= \
+                    parallel_config.pipeline_parallel_size
+
+            self.rank = rank
+            self.pipeline_parallel_id = pipeline_parallel_id
+            self.identifier = self._get_cache_engine_identifier()
+
+            external_swapper_impl = ExternalSwapperBase. \
+                get_external_swapper_class(
+                    self.cache_config.external_swapper)
+            self.external_swapper = external_swapper_impl(
+                cache_config=self.cache_config,
+                model_config=self.model_config,
+                parallel_config=self.parallel_config,
+                dtype=self.dtype,
+                attn_backend=self.attn_backend,
+                gpu_cache=self.gpu_cache,
+                cache_engine_identifier=self.identifier,
+            )
+
+    def _get_cache_engine_identifier(self) -> str:
+        """Returns a unique identifier for the cache engine."""
+
+        return f"cache_engine_rank_{self.rank}_pp_{self.pipeline_parallel_id}"
 
     def _allocate_kv_cache(
         self,
@@ -93,10 +127,16 @@ class CacheEngine:
             self.attn_backend.swap_blocks(self.cpu_cache[i], self.gpu_cache[i],
                                           src_to_dst)
 
+    def swap_in_from_external(self, src_to_dst: torch.Tensor) -> None:
+        self.external_swapper.swap_in(src_to_dst)
+
     def swap_out(self, src_to_dst: torch.Tensor) -> None:
         for i in range(self.num_attention_layers):
             self.attn_backend.swap_blocks(self.gpu_cache[i], self.cpu_cache[i],
                                           src_to_dst)
+
+    def swap_out_to_external(self, src_to_dst: torch.Tensor) -> None:
+        self.external_swapper.swap_out(src_to_dst)
 
     def copy(self, src_to_dsts: torch.Tensor) -> None:
         self.attn_backend.copy_blocks(self.gpu_cache, src_to_dsts)
