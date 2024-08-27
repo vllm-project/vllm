@@ -230,7 +230,7 @@ class GPTNeoXForCausalLM(nn.Module):
 
     def __init__(
         self,
-        config,
+        config: GPTNeoXConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
@@ -243,6 +243,8 @@ class GPTNeoXForCausalLM(nn.Module):
             config.hidden_size,
             quant_config=quant_config,
         )
+        if self.config.tie_word_embeddings:
+            self.embed_out.weight = self.gpt_neox.embed_in.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 

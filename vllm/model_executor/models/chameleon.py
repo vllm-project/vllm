@@ -1,6 +1,7 @@
+from array import array
 from functools import cached_property
-from typing import (Any, Dict, Iterable, List, Literal, Optional, Tuple,
-                    TypedDict)
+from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional,
+                    Tuple, TypedDict)
 
 import torch
 import torch.nn.functional as F
@@ -19,8 +20,7 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -30,9 +30,10 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import (cached_get_tokenizer,
-                                   repeat_and_pad_image_tokens)
-from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
+from vllm.multimodal.utils import (cached_get_tokenizer,
+                                   repeat_and_pad_placeholder_tokens)
+from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
+                           SamplerOutput, SequenceData)
 from vllm.utils import print_warning_once
 
 from .interfaces import SupportsMultiModal
@@ -61,6 +62,7 @@ def get_max_chameleon_image_tokens(ctx: InputContext):
 
 def dummy_seq_data_for_chameleon(
     seq_len: int,
+    num_images: int,
     *,
     image_token_id: int,
     image_feature_size_override: Optional[int] = None,
@@ -70,12 +72,16 @@ def dummy_seq_data_for_chameleon(
     else:
         image_feature_size = image_feature_size_override
 
-    token_ids = [image_token_id] * image_feature_size
-    token_ids += [0] * (seq_len - image_feature_size)
+    token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
+                      [image_token_id]) * image_feature_size * num_images
+    token_ids += array(VLLM_TOKEN_ID_ARRAY_TYPE,
+                       [0]) * (seq_len - image_feature_size * num_images)
     return SequenceData(token_ids)
 
 
 def dummy_image_for_chameleon(
+    num_images: int,
+    *,
     image_width_override: Optional[int] = None,
     image_height_override: Optional[int] = None,
 ):
@@ -87,17 +93,20 @@ def dummy_image_for_chameleon(
         height = image_height_override
 
     image = Image.new("RGB", (width, height), color=0)
-    return {"image": image}
+    return {"image": image if num_images == 1 else [image] * num_images}
 
 
-def dummy_data_for_chameleon(ctx: InputContext, seq_len: int):
+def dummy_data_for_chameleon(ctx: InputContext, seq_len: int,
+                             mm_counts: Mapping[str, int]):
+    num_images = mm_counts["image"]
 
     seq_data = dummy_seq_data_for_chameleon(
         seq_len,
+        num_images,
         image_token_id=CHAMELEON_IMAGE_TOKEN_ID,
     )
 
-    mm_data = dummy_image_for_chameleon()
+    mm_data = dummy_image_for_chameleon(num_images)
     return seq_data, mm_data
 
 
@@ -115,11 +124,11 @@ def input_processor_for_chameleon(ctx: InputContext, llm_inputs: LLMInputs):
 
     model_config = ctx.model_config
     tokenizer = cached_get_tokenizer(model_config.tokenizer)
-    new_prompt, new_token_ids = repeat_and_pad_image_tokens(
+    new_prompt, new_token_ids = repeat_and_pad_placeholder_tokens(
         tokenizer,
         llm_inputs.get("prompt"),
         llm_inputs["prompt_token_ids"],
-        image_token_id=CHAMELEON_IMAGE_TOKEN_ID,
+        placeholder_token_id=CHAMELEON_IMAGE_TOKEN_ID,
         repeat_count=CHAMELEON_IMAGE_SEQ_LENGTH,
         pad_token_left=CHAMELEON_IMAGE_START_TOKEN_ID,
         pad_token_right=CHAMELEON_IMAGE_END_TOKEN_ID,

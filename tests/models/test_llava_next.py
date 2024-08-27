@@ -1,7 +1,7 @@
 from typing import List, Optional, Tuple, Type, overload
 
 import pytest
-from transformers import AutoConfig, AutoTokenizer
+from transformers import AutoConfig, AutoModelForVision2Seq, AutoTokenizer
 
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
@@ -129,7 +129,8 @@ def run_test(
             for prompts, images in inputs_per_image
         ]
 
-    with hf_runner(model, dtype=dtype, is_vision_model=True) as hf_model:
+    with hf_runner(model, dtype=dtype,
+                   auto_cls=AutoModelForVision2Seq) as hf_model:
         hf_outputs_per_image = [
             hf_model.generate_greedy_logprobs_limit(prompts,
                                                     max_tokens,
@@ -177,7 +178,7 @@ def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
     All the image fixtures for the test is under tests/images.
     For huggingface runner, we provide the PIL images as input.
     For vllm runner, we provide MultiModalDataDict objects 
-    and corresponding vision language config as input.
+    and corresponding MultiModalConfig as input.
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """

@@ -11,7 +11,7 @@ pytest-shard
 
 # testing utils
 awscli
-einops # required for MPT
+einops # required for MPT and qwen-vl
 httpx
 peft
 requests
@@ -19,6 +19,8 @@ ray
 sentence-transformers # required for embedding
 compressed-tensors==0.4.0 # required for compressed-tensors
 timm # required for internvl test
+transformers_stream_generator # required for qwen-vl test
+matplotlib # required for qwen-vl test
 
 # TODO: Add this after fully implementing llava(mantis)
 # git+https://github.com/TIGER-AI-Lab/Mantis.git # required for llava(mantis) test
@@ -28,3 +30,4 @@ aiohttp
 
 # quantization
 bitsandbytes==0.42.0
+buildkite-test-collector==0.1.8

@@ -3,10 +3,11 @@ from io import StringIO
 from typing import Awaitable, Callable, List
 
 import aiohttp
+from prometheus_client import start_http_server
 
 from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.logger import RequestLogger, logger
 # yapf: disable
 from vllm.entrypoints.openai.protocol import (BatchRequestInput,
                                               BatchRequestOutput,
@@ -16,12 +17,9 @@ from vllm.entrypoints.openai.protocol import (BatchRequestInput,
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
-from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, random_uuid
 from vllm.version import __version__ as VLLM_VERSION
-
-logger = init_logger(__name__)
 
 
 def parse_args():
@@ -58,6 +56,24 @@ def parse_args():
                         help='Max number of prompt characters or prompt '
                         'ID numbers being printed in log.'
                         '\n\nDefault: Unlimited')
+
+    parser.add_argument("--enable-metrics",
+                        action="store_true",
+                        help="Enable Prometheus metrics")
+    parser.add_argument(
+        "--url",
+        type=str,
+        default="0.0.0.0",
+        help="URL to the Prometheus metrics server "
+        "(only needed if enable-metrics is set).",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Port number for the Prometheus metrics server "
+        "(only needed if enable-metrics is set).",
+    )
 
     return parser.parse_args()
 
@@ -184,7 +200,15 @@ async def main(args):
 if __name__ == "__main__":
     args = parse_args()
 
-    logger.info("vLLM API server version %s", VLLM_VERSION)
+    logger.info("vLLM batch processing API version %s", VLLM_VERSION)
     logger.info("args: %s", args)
+
+    # Start the Prometheus metrics server. LLMEngine uses the Prometheus client
+    # to publish metrics at the /metrics endpoint.
+    if args.enable_metrics:
+        logger.info("Prometheus metrics enabled")
+        start_http_server(port=args.port, addr=args.url)
+    else:
+        logger.info("Prometheus metrics disabled")
 
     asyncio.run(main(args))

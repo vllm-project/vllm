@@ -1,37 +1,29 @@
 import dataclasses
 import gc
+import inspect
 import itertools
 import time
 import warnings
 import weakref
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type,
-                    TypeVar, Union)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set,
+                    Tuple, Type, TypeVar, Union)
 
 import numpy as np
 import torch
 import torch.distributed
 import torch.nn as nn
 
-try:
-    from flashinfer import BatchDecodeWithPagedKVCacheWrapper
-    from flashinfer.decode import CUDAGraphBatchDecodeWithPagedKVCacheWrapper
-    from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper
-    FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
-except ImportError:
-    BatchDecodeWithPagedKVCacheWrapper = None
-    CUDAGraphBatchDecodeWithPagedKVCacheWrapper = None
-    BatchPrefillWithPagedKVCacheWrapper = None
-    FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
-
 import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
+from vllm.attention.backends.abstract import AttentionState
+from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, MultiModalConfig, ObservabilityConfig,
-                         ParallelConfig, PromptAdapterConfig, SchedulerConfig)
+                         ModelConfig, ObservabilityConfig, ParallelConfig,
+                         PromptAdapterConfig, SchedulerConfig)
 from vllm.distributed import get_pp_group
 from vllm.distributed.parallel_state import graph_capture
-from vllm.inputs import INPUT_REGISTRY
+from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
@@ -43,7 +35,7 @@ from vllm.model_executor.models.interfaces import (supports_lora,
                                                    supports_multimodal)
 from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
-                             MultiModalInputs)
+                             MultiModalInputs, MultiModalRegistry)
 from vllm.prompt_adapter.layers import PromptAdapterMapping
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.prompt_adapter.worker_manager import (
@@ -52,8 +44,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import (IntermediateTensors, SamplerOutput,
                            SequenceGroupMetadata)
 from vllm.utils import (CudaMemoryProfiler, PyObjectCache, async_tensor_h2d,
-                        flatten_2d_lists, get_kv_cache_torch_dtype, is_hip,
-                        is_pin_memory_available)
+                        flatten_2d_lists, is_hip, is_pin_memory_available)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
     _add_attn_metadata_broadcastable_dict,
@@ -66,7 +57,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-_PAD_SLOT_ID = -1
 LORA_WARMUP_RANK = 8
 _BATCH_SIZE_ALIGNMENT = 8
 # Capture graphs for token size 1, 2, 4, 8, 16, 24, 32, 40, ..., 256.
@@ -100,6 +90,7 @@ class ModelInputForGPU(ModelRunnerInputBase):
     request_ids_to_seq_ids: Optional[Dict[str, List[int]]] = None
     finished_requests_ids: Optional[List[str]] = None
     virtual_engine: int = 0
+    output_proc_callback_fn: Optional[Callable] = None
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
@@ -804,9 +795,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
-        multimodal_config: Optional[MultiModalConfig] = None,
         return_hidden_states: bool = False,
         observability_config: Optional[ObservabilityConfig] = None,
+        input_registry: InputRegistry = INPUT_REGISTRY,
+        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -817,7 +809,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.load_config = load_config
         self.is_driver_worker = is_driver_worker
         self.prompt_adapter_config = prompt_adapter_config
-        self.multimodal_config = multimodal_config
         self.return_hidden_states = return_hidden_states
         self.observability_config = observability_config
 
@@ -858,21 +849,24 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             self.kv_cache_dtype,
             self.block_size,
         ) if num_attn_heads else None
+        if self.attn_backend:
+            self.attn_state = self.attn_backend.get_state_cls()(
+                weakref.proxy(self))
+        else:
+            self.attn_state = CommonAttentionState(weakref.proxy(self))
 
         # Multi-modal data support
-        self.multi_modal_input_mapper = MULTIMODAL_REGISTRY \
-            .create_input_mapper(self.model_config)
+        self.input_registry = input_registry
+        self.mm_registry = mm_registry
+        self.multi_modal_input_mapper = mm_registry \
+            .create_input_mapper(model_config)
+        self.mm_registry.init_mm_limits_per_prompt(self.model_config)
 
         # Lazy initialization
         self.model: nn.Module  # Set after load_model
         # Set after load_model.
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
         self.prompt_adapter_manager: LRUCacheWorkerPromptAdapterManager = None
-
-        self.flashinfer_decode_workspace_buffer = None
-        self.flashinfer_decode_wrapper = None
-        self.flashinfer_prefill_workspace_buffer = None
-        self.flashinfer_prefill_wrapper = None
 
         set_cpu_offload_max_bytes(
             int(self.cache_config.cpu_offload_gb * 1024**3))
@@ -889,7 +883,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                                    device_config=self.device_config,
                                    load_config=self.load_config,
                                    lora_config=self.lora_config,
-                                   multimodal_config=self.multimodal_config,
                                    parallel_config=self.parallel_config,
                                    scheduler_config=self.scheduler_config,
                                    cache_config=self.cache_config)
@@ -902,7 +895,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             assert supports_lora(self.model), "Model does not support LoRA"
             assert not supports_multimodal(
                 self.model
-            ), "To be tested: multimodal language model with LoRA settings."
+            ), "To be tested: Multi-modal model with LoRA settings."
 
             self.lora_manager = LRUCacheWorkerLoRAManager(
                 self.scheduler_config.max_num_seqs,
@@ -1046,17 +1039,16 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         # Profile memory usage with max_num_sequences sequences and the total
         # number of tokens equal to max_num_batched_tokens.
         seqs: List[SequenceGroupMetadata] = []
-        # Additional GPU memory may be needed for vision encoding, which needs
-        # to be accounted for when calculating the GPU blocks for
+        # Additional GPU memory may be needed for multi-modal encoding, which
+        # needs to be accounted for when calculating the GPU blocks for
         # vLLM blocker manager.
         # To exercise the worst scenario for GPU memory consumption,
         # the number of seqs (batch_size) is chosen to maximize the number
         # of images processed.
-        model_config = self.model_config
 
-        if supports_multimodal(self.model):
-            max_mm_tokens = MULTIMODAL_REGISTRY \
-                .get_max_multimodal_tokens(model_config)
+        max_mm_tokens = self.mm_registry.get_max_multimodal_tokens(
+            self.model_config)
+        if max_mm_tokens > 0:
             max_num_seqs_orig = max_num_seqs
             max_num_seqs = min(max_num_seqs,
                                max_num_batched_tokens // max_mm_tokens)
@@ -1074,13 +1066,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                        (group_id < max_num_batched_tokens % max_num_seqs))
             batch_size += seq_len
 
-            seq_data, dummy_multi_modal_data = INPUT_REGISTRY \
-                .dummy_data_for_profiling(model_config, seq_len)
-
-            # Having more tokens is over-conservative but otherwise fine
-            assert len(seq_data.prompt_token_ids) >= seq_len, (
-                f"Expected at least {seq_len} dummy tokens for profiling, "
-                f"but got: {len(seq_data.prompt_token_ids)}")
+            seq_data, dummy_multi_modal_data = self.input_registry \
+                .dummy_data_for_profiling(self.model_config,
+                                          seq_len,
+                                          self.mm_registry)
 
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
@@ -1108,6 +1097,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 device=self.device)
         self.execute_model(model_input, kv_caches, intermediate_tensors)
         torch.cuda.synchronize()
+
+        # reset and discard the guard and compiled bytecode for profiling runs
+        torch._dynamo.reset()
+
         return
 
     def remove_all_loras(self):
@@ -1205,10 +1198,18 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         max_batch_size = max(_BATCH_SIZES_TO_CAPTURE)
         input_tokens = torch.zeros(max_batch_size, dtype=torch.long).cuda()
         input_positions = torch.zeros(max_batch_size, dtype=torch.long).cuda()
-        slot_mapping = torch.empty(max_batch_size, dtype=torch.long).cuda()
-        slot_mapping.fill_(_PAD_SLOT_ID)
-        seq_lens = torch.ones(max_batch_size, dtype=torch.int32).cuda()
-        block_tables = torch.from_numpy(self.graph_block_tables).cuda()
+
+        # Prepare dummy previous_hidden_states only if needed by the model.
+        # This is used by draft models such as EAGLE.
+        previous_hidden_states = None
+        if "previous_hidden_states" in inspect.signature(
+                self.model.forward).parameters:
+            previous_hidden_states = torch.empty(
+                [max_batch_size,
+                 self.model_config.get_hidden_size()],
+                dtype=self.model_config.dtype,
+                device=self.device)
+
         intermediate_inputs = None
         if not get_pp_group().is_first_rank:
             intermediate_inputs = self.model.make_empty_intermediate_tensors(
@@ -1228,102 +1229,16 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             bs for bs in _BATCH_SIZES_TO_CAPTURE if bs <= graph_batch_size
         ]
 
-        if self.attn_backend.get_name() == "flashinfer":
-            # For flashinfer, different batch sizes will share the
-            # same workspace buffer.
-            decode_workspace_buffer = \
-            torch.empty(FLASHINFER_WORKSPACE_BUFFER_SIZE,
-                                                dtype=torch.uint8,
-                                              device=self.device)
-            indices_buffer = torch.empty(max_batch_size *
-                                         self.cache_config.num_gpu_blocks,
-                                         dtype=torch.int32,
-                                         device=self.device)
-            indptr_buffer = torch.empty(max_batch_size + 1,
-                                        dtype=torch.int32,
-                                        device=self.device)
-            last_page_len_buffer = torch.empty(max_batch_size,
-                                               dtype=torch.int32,
-                                               device=self.device)
-
-        with graph_capture() as graph_capture_context:
+        with self.attn_state.graph_capture(
+                max_batch_size), graph_capture() as graph_capture_context:
             # NOTE: Capturing the largest batch size first may help reduce the
             # memory usage of CUDA graph.
             for virtual_engine in range(
                     self.parallel_config.pipeline_parallel_size):
                 for batch_size in reversed(batch_size_capture_list):
-                    if self.attn_backend.get_name() == "flashinfer":
-                        _indptr_buffer = indptr_buffer[:batch_size + 1]
-                        _last_page_len_buffer = last_page_len_buffer[:
-                                                                     batch_size]
-
-                        num_qo_heads = (
-                            self.model_config.get_num_attention_heads(
-                                self.parallel_config))
-                        num_kv_heads = self.model_config.get_num_kv_heads(
-                            self.parallel_config)
-                        if num_qo_heads // num_kv_heads >= 4:
-                            use_tensor_cores = True
-                        else:
-                            use_tensor_cores = False
-                        decode_wrapper = \
-                            CUDAGraphBatchDecodeWithPagedKVCacheWrapper(
-                            decode_workspace_buffer, _indptr_buffer,
-                            indices_buffer, _last_page_len_buffer, "NHD",
-                            use_tensor_cores)
-                        kv_cache_dtype = get_kv_cache_torch_dtype(
-                            self.kv_cache_dtype, self.model_config.dtype)
-
-                        paged_kv_indptr_tensor_host = torch.arange(
-                            0, batch_size + 1, dtype=torch.int32)
-                        paged_kv_indices_tensor_host = torch.arange(
-                            0, batch_size, dtype=torch.int32)
-                        paged_kv_last_page_len_tensor_host = torch.full(
-                            (batch_size, ), self.block_size, dtype=torch.int32)
-                        query_start_loc_host = torch.arange(0,
-                                                            batch_size + 1,
-                                                            dtype=torch.int32)
-
-                        attn_metadata = self.attn_backend.make_metadata(
-                            num_prefills=0,
-                            slot_mapping=slot_mapping[:batch_size],
-                            num_prefill_tokens=0,
-                            num_decode_tokens=batch_size,
-                            max_prefill_seq_len=0,
-                            block_tables=block_tables,
-                            paged_kv_indptr=paged_kv_indptr_tensor_host,
-                            paged_kv_indices=paged_kv_indices_tensor_host,
-                            paged_kv_last_page_len=
-                            paged_kv_last_page_len_tensor_host,
-                            num_qo_heads=num_qo_heads,
-                            num_kv_heads=num_kv_heads,
-                            head_dim=self.model_config.get_head_size(),
-                            page_size=self.block_size,
-                            seq_start_loc=None,
-                            query_start_loc=query_start_loc_host,
-                            device=self.device,
-                            data_type=kv_cache_dtype,
-                            use_cuda_graph=True,
-                            decode_wrapper=decode_wrapper,
-                            prefill_wrapper=None)
-                        attn_metadata.begin_forward()
-                    else:
-                        attn_metadata = self.attn_backend.make_metadata(
-                            num_prefills=0,
-                            num_prefill_tokens=0,
-                            num_decode_tokens=batch_size,
-                            slot_mapping=slot_mapping[:batch_size],
-                            seq_lens=None,
-                            seq_lens_tensor=seq_lens[:batch_size],
-                            max_query_len=None,
-                            max_prefill_seq_len=0,
-                            max_decode_seq_len=self.max_seq_len_to_capture,
-                            query_start_loc=None,
-                            seq_start_loc=None,
-                            context_lens_tensor=None,
-                            block_tables=block_tables[:batch_size],
-                            use_cuda_graph=True,
-                        )
+                    attn_metadata = (
+                        self.attn_state.graph_capture_get_metadata_for_batch(
+                            batch_size))
 
                     if self.lora_config:
                         lora_mapping = LoRAMapping(
@@ -1341,17 +1256,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                             set(), prompt_adapter_mapping)
 
                     graph_runner = CUDAGraphRunner(
-                        self.model, self.attn_backend.get_name())
-
-                    if self.attn_backend.get_name() == "flashinfer":
-                        graph_runner.flashinfer_indptr_buffer = _indptr_buffer
-                        graph_runner.flashinfer_indices_buffer = indices_buffer
-                        graph_runner.flashinfer_last_page_len_buffer = \
-                            _last_page_len_buffer
-                        graph_runner.flashinfer_decode_workspace_buffer = \
-                                decode_workspace_buffer
-                        graph_runner.flashinfer_decode_wrapper = \
-                            decode_wrapper
+                        self.model, self.attn_backend.get_name(),
+                        self.attn_state.graph_clone(batch_size))
 
                     capture_inputs = {
                         "input_ids":
@@ -1376,6 +1282,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         "stream":
                         graph_capture_context.stream
                     }
+                    if previous_hidden_states is not None:
+                        capture_inputs[
+                            "previous_hidden_states"] = previous_hidden_states[:
+                                                                               batch_size]
+
                     if self.has_seqlen_agnostic:
                         # Only used by Mamba-based models CUDA graph atm (Jamba)
                         capture_inputs.update({
@@ -1421,7 +1332,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         virtual_engine: int = 0,
-        finished_requests_ids: Optional[List[str]] = None
+        finished_requests_ids: Optional[List[str]] = None,
     ) -> ModelInputForGPUWithSamplingMetadata:
         """Prepare the model input based on a given sequence group, including
         metadata for the sampling step.
@@ -1478,36 +1389,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                 model_input.prompt_adapter_requests,
                 model_input.prompt_adapter_mapping)
 
-        if self.attn_backend.get_name() == "flashinfer":
-            assert model_input.attn_metadata is not None
-            assert model_input.input_tokens is not None
-            if self.flashinfer_decode_workspace_buffer is None:
-                self.flashinfer_decode_workspace_buffer = torch.empty(
-                    FLASHINFER_WORKSPACE_BUFFER_SIZE,
-                    dtype=torch.uint8,
-                    device=self.device)
-                self.flashinfer_decode_wrapper = \
-                    BatchDecodeWithPagedKVCacheWrapper(
-                    self.flashinfer_decode_workspace_buffer, "NHD")
-                self.flashinfer_prefill_workspace_buffer = torch.empty(
-                    FLASHINFER_WORKSPACE_BUFFER_SIZE,
-                    dtype=torch.uint8,
-                    device=self.device)
-                self.flashinfer_prefill_wrapper = \
-                    BatchPrefillWithPagedKVCacheWrapper(
-                    self.flashinfer_prefill_workspace_buffer, "NHD")
-
-            model_input.attn_metadata.prefill_wrapper = \
-                self.flashinfer_prefill_wrapper
-            if model_input.attn_metadata.use_cuda_graph:
-                batch_size = model_input.input_tokens.shape[0]
-                model_input.attn_metadata.decode_wrapper = self.graph_runners[
-                    model_input.
-                    virtual_engine][batch_size].flashinfer_decode_wrapper
-            else:
-                model_input.attn_metadata.decode_wrapper = \
-                    self.flashinfer_decode_wrapper
-            model_input.attn_metadata.begin_forward()
+        self.attn_state.begin_forward(model_input)
 
         # Currently cuda graph is only supported by the decode phase.
         assert model_input.attn_metadata is not None
@@ -1551,6 +1433,21 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
         # Compute the logits in the last pipeline stage.
         if not get_pp_group().is_last_rank:
+            if (self.is_driver_worker
+                    and hidden_or_intermediate_states is not None
+                    and isinstance(hidden_or_intermediate_states,
+                                   IntermediateTensors)
+                    and self.observability_config is not None
+                    and self.observability_config.collect_model_forward_time):
+                model_forward_end.synchronize()
+                model_forward_time = model_forward_start.elapsed_time(
+                    model_forward_end)
+                orig_model_forward_time = 0.0
+                if intermediate_tensors is not None:
+                    orig_model_forward_time = intermediate_tensors.tensors.get(
+                        "model_forward_time", torch.tensor(0.0)).item()
+                hidden_or_intermediate_states.tensors["model_forward_time"] = (
+                    torch.tensor(model_forward_time + orig_model_forward_time))
             return hidden_or_intermediate_states
 
         logits = self.model.compute_logits(hidden_or_intermediate_states,
@@ -1558,6 +1455,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
         if not self.is_driver_worker:
             return []
+
+        if model_input.output_proc_callback_fn is not None:
+            model_input.output_proc_callback_fn(is_async=True)
 
         # Sample the next token.
         output: SamplerOutput = self.model.sample(
@@ -1570,11 +1470,16 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_forward_end.synchronize()
             model_forward_time = model_forward_start.elapsed_time(
                 model_forward_end)
+            orig_model_forward_time = 0.0
+            if intermediate_tensors is not None:
+                orig_model_forward_time = intermediate_tensors.tensors.get(
+                    "model_forward_time", torch.tensor(0.0)).item()
             # If there are multiple workers, we are still tracking the latency
             # from the start time of the driver worker to the end time of the
             # driver worker. The model forward time will then end up covering
             # the communication time as well.
-            output.model_forward_time = model_forward_time
+            output.model_forward_time = (orig_model_forward_time +
+                                         model_forward_time)
 
         if self.return_hidden_states:
             # we only need to pass hidden states of most recent token
@@ -1583,6 +1488,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             if model_input.is_prompt:
                 hidden_states = hidden_or_intermediate_states.index_select(
                     0, indices)
+                output.prefill_hidden_states = hidden_or_intermediate_states
             elif decode_meta.use_cuda_graph:
                 hidden_states = hidden_or_intermediate_states[:len(indices)]
             else:
@@ -1595,21 +1501,16 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
 class CUDAGraphRunner:
 
-    def __init__(self, model: nn.Module, backend_name: str):
+    def __init__(self, model: nn.Module, backend_name: str,
+                 attn_state: AttentionState):
         self.model = model
         self.backend_name = backend_name
+        self.attn_state = attn_state
 
         self.input_buffers: Dict[str, torch.Tensor] = {}
         self.output_buffers: Dict[str, torch.Tensor] = {}
 
         self._graph: Optional[torch.cuda.CUDAGraph] = None
-
-        self.flashinfer_decode_workspace_buffer: Optional[torch.Tensor] = None
-        self.flashinfer_indptr_buffer: Optional[torch.Tensor] = None
-        self.flashinfer_indices_buffer: Optional[torch.Tensor] = None
-        self.flashinfer_last_page_len_buffer: Optional[torch.Tensor] = None
-        self.flashinfer_decode_wrapper: Optional[
-            CUDAGraphBatchDecodeWithPagedKVCacheWrapper] = None
 
     @property
     def graph(self):
@@ -1636,11 +1537,11 @@ class CUDAGraphRunner:
         # Note one iteration is not enough for torch.jit.script
         for _ in range(_NUM_WARMUP_ITERS):
             self.model(
-                input_ids,
-                positions,
-                kv_caches,
-                attn_metadata,
-                intermediate_inputs,
+                input_ids=input_ids,
+                positions=positions,
+                kv_caches=kv_caches,
+                attn_metadata=attn_metadata,
+                intermediate_tensors=intermediate_inputs,
                 **kwargs,
             )
         torch.cuda.synchronize()
@@ -1649,11 +1550,11 @@ class CUDAGraphRunner:
         self._graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self._graph, pool=memory_pool, stream=stream):
             output_hidden_or_intermediate_states = self.model(
-                input_ids,
-                positions,
-                kv_caches,
-                attn_metadata,
-                intermediate_inputs,
+                input_ids=input_ids,
+                positions=positions,
+                kv_caches=kv_caches,
+                attn_metadata=attn_metadata,
+                intermediate_tensors=intermediate_inputs,
                 **kwargs,
             )
             if hidden_or_intermediate_states is not None:
@@ -1675,25 +1576,13 @@ class CUDAGraphRunner:
         torch.cuda.synchronize()
 
         # Save the input and output buffers.
-        if self.backend_name == "flashinfer":
-            self.input_buffers = {
-                "input_ids": input_ids,
-                "positions": positions,
-                "kv_caches": kv_caches,
-                "slot_mapping": attn_metadata.slot_mapping,
-                **kwargs,
-            }
-        else:
-            self.input_buffers = {
-                "input_ids": input_ids,
-                "positions": positions,
-                "kv_caches": kv_caches,
-                "slot_mapping": attn_metadata.slot_mapping,
-                "seq_lens_tensor":
-                attn_metadata.decode_metadata.seq_lens_tensor,
-                "block_tables": attn_metadata.decode_metadata.block_tables,
-                **kwargs,
-            }
+        self.input_buffers = {
+            "input_ids": input_ids,
+            "positions": positions,
+            "kv_caches": kv_caches,
+            **self.attn_state.get_graph_input_buffers(attn_metadata),
+            **kwargs,
+        }
         if intermediate_inputs is not None:
             self.input_buffers.update(intermediate_inputs.tensors)
         if get_pp_group().is_last_rank:
@@ -1721,18 +1610,19 @@ class CUDAGraphRunner:
         self.input_buffers["positions"].copy_(positions, non_blocking=True)
         self.input_buffers["slot_mapping"].copy_(attn_metadata.slot_mapping,
                                                  non_blocking=True)
-        if self.backend_name != "flashinfer":
-            self.input_buffers["seq_lens_tensor"].copy_(
-                attn_metadata.decode_metadata.seq_lens_tensor,
-                non_blocking=True)
-            self.input_buffers["block_tables"].copy_(
-                attn_metadata.decode_metadata.block_tables, non_blocking=True)
+        self.attn_state.prepare_graph_input_buffers(self.input_buffers,
+                                                    attn_metadata)
         if "seqlen_agnostic_capture_inputs" in self.input_buffers:
             self.model.copy_inputs_before_cuda_graphs(self.input_buffers,
                                                       **kwargs)
+
+        if "previous_hidden_states" in self.input_buffers:
+            self.input_buffers["previous_hidden_states"].copy_(
+                kwargs["previous_hidden_states"], non_blocking=True)
+
         if intermediate_tensors is not None:
             for key in intermediate_tensors.tensors:
-                if key != "model_execute_time":
+                if key != "model_execute_time" and key != "model_forward_time":
                     self.input_buffers[key].copy_(intermediate_tensors[key],
                                                   non_blocking=True)
         # Run the graph.

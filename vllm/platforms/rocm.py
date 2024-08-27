@@ -13,3 +13,8 @@ class RocmPlatform(Platform):
     @lru_cache(maxsize=8)
     def get_device_capability(device_id: int = 0) -> Tuple[int, int]:
         return torch.cuda.get_device_capability(device_id)
+
+    @staticmethod
+    @lru_cache(maxsize=8)
+    def get_device_name(device_id: int = 0) -> str:
+        return torch.cuda.get_device_name(device_id)

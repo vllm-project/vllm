@@ -8,7 +8,7 @@ vLLM supports Google Cloud TPUs using PyTorch XLA.
 Requirements
 ------------
 
-* Google Cloud TPU VM (single host)
+* Google Cloud TPU VM (single & multi host)
 * TPU versions: v5e, v5p, v4
 * Python: 3.10
 
