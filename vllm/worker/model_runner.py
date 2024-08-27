@@ -1093,6 +1093,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         torch.cuda.synchronize()
 
         if envs.VLLM_TEST_DYNAMO_GRAPH_CAPTURE:
+            # only compile after profiling runs
             self.model = torch.compile(self.model,
                                        fullgraph=True,
                                        backend="eager")
