@@ -150,9 +150,11 @@ __global__ void dynamic_scaled_int8_azp_quant_kernel(
   }
 
   // Reduce the max and min values across the block
-  max_val = blockReduceMax(max_val);
+  using BlockReduce = cub::BlockReduce<float, 1024>;
+  __shared__ typename BlockReduce::TempStorage reduceStorage;
+  max_val = BlockReduce(reduceStorage).Reduce(max_val, cub::Max{}, blockDim.x);
   __syncthreads();  // Make sure min doesn't mess with max shared memory
-  min_val = blockReduceMin(min_val);
+  min_val = BlockReduce(reduceStorage).Reduce(min_val, cub::Min{}, blockDim.x);
 
   __shared__ scale_type scale_sh;
   __shared__ azp_type azp_sh;

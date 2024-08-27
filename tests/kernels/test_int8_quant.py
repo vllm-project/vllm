@@ -39,7 +39,7 @@ def test_dynamic_scaled_int8_quant(num_tokens: int, hidden_size: int,
     # reference
     ref_out, ref_scales = ref_dynamic_per_token_quant(x, torch.int8)
     # kernel
-    ops_out, ops_scales = scaled_int8_quant(x)
+    ops_out, ops_scales, _ = scaled_int8_quant(x)
 
     torch.testing.assert_close(ops_scales, ref_scales)
     torch.testing.assert_close(
@@ -103,11 +103,10 @@ def test_static_scaled_int8_quant(num_tokens: int, hidden_size: int,
 
     out1 = (x / scale).round().clamp(int8_traits.min,
                                      int8_traits.max).to(torch.int8)
-    out2, _ = scaled_int8_quant(x, scale)
+    out2, _, _ = scaled_int8_quant(x, scale)
 
-    torch.testing.assert_close(
-        out1, out2, atol=1,
-        rtol=0.0)  # big atol to account for rounding errors
+    # big atol to account for rounding errors
+    torch.testing.assert_close(out1, out2, atol=1, rtol=0.0)
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -135,4 +134,6 @@ def test_static_scaled_int8_azp_quant(num_tokens: int, hidden_size: int,
 
     torch.ops._C.static_scaled_int8_quant(out2, x, scale_argument,
                                           azp_argument)
-    torch.testing.assert_close(out1, out2, atol=1)  # atol for rounding
+
+    # big atol to account for rounding errors
+    torch.testing.assert_close(out1, out2, atol=1, rtol=0.0)
