@@ -633,7 +633,13 @@ def input_processor_for_qwen2_vl(ctx: InputContext,
     video_inputs = multi_modal_data.get("video", None)
 
     processor = cached_get_processor(ctx.model_config.model)
-    inputs = processor(text=[llm_inputs['prompt']],
+
+    prompt = llm_inputs['prompt']
+    if prompt is None:
+        prompt_token_ids = llm_inputs['prompt_token_ids']
+        prompt = processor.tokenizer.decode(prompt_token_ids)
+
+    inputs = processor(text=[prompt],
                        images=image_inputs,
                        videos=video_inputs,
                        padding=True,
