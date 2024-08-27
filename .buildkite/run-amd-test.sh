@@ -75,6 +75,7 @@ docker run \
         --network host \
         --shm-size=16gb \
         --rm \
+        -e HIP_VISIBLE_DEVICES=0 \
         -e HF_TOKEN \
         -v ${HF_CACHE}:${HF_MOUNT} \
         -e HF_HOME=${HF_MOUNT} \
