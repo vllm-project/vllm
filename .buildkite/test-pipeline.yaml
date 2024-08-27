@@ -233,12 +233,13 @@ steps:
   parallelism: 4
 
 - label: Tensorizer Test # 11min
+  mirror_hardwares: [amd]
   soft_fail: true
   source_file_dependencies:
   - vllm/model_executor/model_loader
   - tests/tensorizer_loader
   commands:
-    - apt-get install -y curl libsodium23
+    - apt-get update && apt-get install -y curl libsodium23
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s tensorizer_loader
 
