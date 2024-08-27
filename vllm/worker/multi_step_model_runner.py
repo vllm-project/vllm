@@ -484,8 +484,8 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
             assert seq_group.seq_len is None  # Decode
             assert seq_group.query_len is None  # Decode
 
-    def _advance_step(self, model_input: StatefulModelInput,
-                      out: SamplerOutput) -> StatefulModelInput:
+    def _advance_step_flashattn(self, model_input: StatefulModelInput,
+                                out: SamplerOutput) -> StatefulModelInput:
         frozen_model_input = model_input.frozen_model_input
         assert frozen_model_input is not None
         assert frozen_model_input.attn_metadata is not None
@@ -509,6 +509,54 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
                 frozen_model_input.seq_lens[i] = attn_metadata.seq_lens[i]
 
         return model_input
+
+    def _advance_step_flashinfer(
+        self,
+        model_input: StatefulModelInput,
+        out: SamplerOutput,
+    ) -> StatefulModelInput:
+        """Advance the model input for the next step."""
+        # Append the output token to the sequence data.
+        frozen_model_input = model_input.frozen_model_input
+        assert frozen_model_input is not None
+        assert frozen_model_input.attn_metadata is not None
+        attn_metadata = frozen_model_input.attn_metadata
+        num_seqs = model_input.num_seqs
+        num_queries = model_input.num_queries
+
+        sampled_tokens = model_input.cached_outputs[-1].sampled_token_ids
+        assert sampled_tokens is not None
+        assert frozen_model_input.input_tokens is not None
+        frozen_model_input.input_tokens[:num_queries] = sampled_tokens.flatten(
+        )
+
+        # Update GPU tensors
+        ops.advance_step_flashinfer(
+            num_seqs=num_seqs,
+            num_queries=num_queries,
+            block_size=self.block_size,
+            input_tokens=frozen_model_input.input_tokens,
+            sampled_token_ids=frozen_model_input.input_tokens,
+            input_positions=frozen_model_input.input_positions,
+            seq_lens=attn_metadata.seq_lens_tensor,
+            slot_mapping=attn_metadata.slot_mapping,
+            block_tables=attn_metadata.block_tables,
+            paged_kv_indices=attn_metadata.paged_kv_indices,
+            paged_kv_indptr=attn_metadata.paged_kv_indptr,
+            paged_kv_last_page_len=attn_metadata.paged_kv_last_page_len,
+            block_table_bound=attn_metadata.block_table_bound)
+
+        return model_input
+
+    def _advance_step(self, model_input: StatefulModelInput,
+                      out: SamplerOutput) -> StatefulModelInput:
+        if self.attn_backend.get_name() == "flash-attn":
+            return self._advance_step_flashattn(model_input, out)
+        elif self.attn_backend.get_name() == "flashinfer":
+            return self._advance_step_flashinfer(model_input, out)
+        else:
+            raise ValueError(
+                f"Unsupported attention backend: {self.attn_backend}")
 
     def load_model(self) -> None:
         return self._base_model_runner.load_model()

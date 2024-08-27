@@ -80,6 +80,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor block_tables) -> ()");
   ops.impl("advance_step", torch::kCUDA, &advance_step);
 
+  ops.def("advance_step_flashinfer", &advance_step_flashinfer);
+  ops.impl("advance_step_flashinfer", torch::kCUDA, &advance_step_flashinfer);
+
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(

@@ -268,6 +268,10 @@ class FlashInferMetadata(AttentionMetadata):
     query_start_loc: Optional[torch.Tensor] = None
     block_tables: Optional[torch.Tensor] = None
 
+    # used for GPU in-place advance_step
+    seq_lens_tensor: Optional[torch.Tensor] = None
+    block_table_bound: Optional[torch.Tensor] = None
+
     # An example for paged_kv_indices, paged_kv_indptr:
     # request 1, page indices [0, 5, 8]
     # request 2, page indices [1, 6, 7]
@@ -318,6 +322,8 @@ class FlashInferMetadata(AttentionMetadata):
             assert self.paged_kv_indices is not None
             assert self.paged_kv_indptr is not None
             assert self.paged_kv_last_page_len is not None
+            assert self.block_table_bound is not None
+            assert self.seq_lens_tensor is not None
             batch_size = self.query_start_loc.shape[0] - 1
             assert batch_size >= 0
             # We will use flash attention for profiling to
@@ -327,6 +333,8 @@ class FlashInferMetadata(AttentionMetadata):
                 self.paged_kv_indptr = self.paged_kv_indptr.to(self.device)
                 self.paged_kv_last_page_len = self.paged_kv_last_page_len.to(
                     self.device)
+                self.block_table_bound = self.block_table_bound.to(self.device)
+                self.seq_lens_tensor = self.seq_lens_tensor.to(self.device)
                 self.paged_kv_indices = self.paged_kv_indices.to(self.device)
                 self.prefill_wrapper.end_forward()
                 self.prefill_wrapper.begin_forward(
@@ -335,14 +343,18 @@ class FlashInferMetadata(AttentionMetadata):
                     self.num_qo_heads, self.num_kv_heads, self.head_dim,
                     self.page_size)
         else:
-            if not self.use_cuda_graph:
-                assert self.paged_kv_indices is not None
-                assert self.paged_kv_indptr is not None
-                assert self.paged_kv_last_page_len is not None
-                self.paged_kv_indices = self.paged_kv_indices.to(self.device)
-                self.paged_kv_indptr = self.paged_kv_indptr.to(self.device)
-                self.paged_kv_last_page_len = self.paged_kv_last_page_len.to(
-                    self.device)
+            assert self.paged_kv_indices is not None
+            assert self.paged_kv_indptr is not None
+            assert self.paged_kv_last_page_len is not None
+            self.paged_kv_indices = self.paged_kv_indices.to(self.device)
+            self.paged_kv_indptr = self.paged_kv_indptr.to(self.device)
+            self.paged_kv_last_page_len = self.paged_kv_last_page_len.to(
+                self.device)
+            # handle model warmup path
+            if self.block_table_bound is not None:
+                self.block_table_bound = self.block_table_bound.to(self.device)
+            if self.seq_lens_tensor is not None:
+                self.seq_lens_tensor = self.seq_lens_tensor.to(self.device)
 
             assert self.decode_wrapper is not None
             self.decode_wrapper.end_forward()
@@ -428,7 +440,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.paged_kv_indptr: List[int] = [0]
         # paged_kv_last_page_len is the length of the last page of each request
         self.paged_kv_last_page_len: List[int] = []
-
+        self.total_blocks = 0
         self.is_profile_run: bool = False
 
     def _add_seq_group(
@@ -499,6 +511,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # block_table_bound is 1 with 1 valid block.
         # If seq_len = 15, block_size = 16,
         # block_table_bound is 0 + 1 with 1 valid block.
+        self.total_blocks += len(block_table)
         block_table_bound = seq_len // self.block_size + 1 \
                             if seq_len % self.block_size != 0 \
                             else seq_len // self.block_size
@@ -583,6 +596,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                      out=query_start_loc[1:])
 
         if len(self.paged_kv_indptr) > 0:
+            # extend to the maximum number of blocks as returned by the
+            # scheduler
+            self.paged_kv_indices.extend(
+                [0] * (self.total_blocks - len(self.paged_kv_indices)))
             paged_kv_indices_tensor = torch.tensor(self.paged_kv_indices,
                                                    device="cpu",
                                                    dtype=torch.int)
@@ -591,10 +608,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                                                   dtype=torch.int)
             paged_kv_last_page_len_tensor = torch.tensor(
                 self.paged_kv_last_page_len, device="cpu", dtype=torch.int)
+            block_table_bound_tensor = torch.zeros(len(self.paged_kv_indptr) -
+                                                   1,
+                                                   device="cpu",
+                                                   dtype=torch.int)
         else:
             paged_kv_indices_tensor = None
             paged_kv_indptr_tensor = None
             paged_kv_last_page_len_tensor = None
+            block_table_bound_tensor = None
 
         if self.runner.kv_cache_dtype.startswith("fp8"):
             kv_cache_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
@@ -613,6 +635,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             paged_kv_indptr=paged_kv_indptr_tensor,
             paged_kv_indices=paged_kv_indices_tensor,
             paged_kv_last_page_len=paged_kv_last_page_len_tensor,
+            block_table_bound=block_table_bound_tensor,
+            seq_lens_tensor=seq_lens_tensor,
             num_qo_heads=self.runner.model_config.get_num_attention_heads(
                 self.runner.parallel_config),
             num_kv_heads=self.runner.model_config.get_num_kv_heads(
