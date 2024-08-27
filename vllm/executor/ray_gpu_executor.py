@@ -91,12 +91,13 @@ class RayGPUExecutor(DistributedGPUExecutor):
         return ray_remote_kwargs
 
     def _get_worker_wrapper_args(self) -> Dict[str, Any]:
-        (worker_module_name,
-         worker_class_name) = self._get_worker_module_and_class()
+        (worker_module_name, worker_class_name,
+         worker_class_fn) = self._get_worker_module_and_class()
 
         return dict(
             worker_module_name=worker_module_name,
             worker_class_name=worker_class_name,
+            worker_class_fn=worker_class_fn,
             trust_remote_code=self.model_config.trust_remote_code,
         )
 
