@@ -7,7 +7,8 @@ from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.model_executor.layers.typical_acceptance_sampler import (
     TypicalAcceptanceSampler)
 from vllm.sequence import SequenceGroupMetadata, get_all_seq_ids
-from vllm.spec_decode.util import split_batch_by_proposal_len
+from vllm.spec_decode.util import split_batch_by_proposal_len, get_sampled_token_logprobs
+from vllm.model_executor.layers.sampler import _get_ranks
 
 
 def test_get_all_seq_ids():
@@ -131,3 +132,16 @@ def mock_spec_decode_sampler(acceptance_sampler_method):
         return sampler
     else:
         raise ValueError(f"Invalid sampler name {acceptance_sampler_method}")
+
+
+def test_get_sampled_token_logprobs():
+    """Verify get_sampled_token_logprobs returns consistent rankings with regular get_ranks when probabilities match exactly.
+    """ 
+    logprob_tensor = torch.tensor([[[-.1, -0.1]]*2])  # shape (num_steps, batch_size, vocab_size)
+    sampled_token_tensor = torch.tensor([[1, 0]])  # shape (num_steps, batch_size)
+    ranks_spec_dec, _ = get_sampled_token_logprobs(logprob_tensor, sampled_token_tensor)
+
+    ranks_regular = _get_ranks(logprob_tensor.reshape((2,-1)), sampled_token_tensor.reshape(-1))
+    print(ranks_regular)
+    assert torch.equal(ranks_spec_dec.reshape(-1), ranks_regular)
+
