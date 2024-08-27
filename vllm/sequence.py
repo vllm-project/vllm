@@ -811,6 +811,9 @@ class SequenceGroup:
         self.is_single_seq = len(self.seqs) == 1
 
     def is_finished(self) -> bool:
+        if self.is_single_seq:
+            return self.seqs[0].is_finished()
+
         return all(seq.is_finished() for seq in self.seqs)
 
     def is_prefill(self) -> bool:
@@ -1259,6 +1262,12 @@ class HiddenStates(msgspec.Struct, array_like=True,
             [self.hidden_states, self.second_last_token_hidden_states])[index]
 
 
+@dataclass
+class AsyncCallbackData:
+    func: Callable
+    kw_args: Dict[str, Any]
+
+
 class ExecuteModelRequest(
         msgspec.Struct,
         array_like=True,  # type: ignore[call-arg]
@@ -1290,8 +1299,8 @@ class ExecuteModelRequest(
     finished_requests_ids: List[str] = msgspec.field(default_factory=list)
     # The last sampled token ids for multi step decoding.
     last_sampled_token_ids: Optional[torch.Tensor] = None
-    # Async postprocessor
-    output_proc_callback_fn: Optional[Callable] = None
+    # Async callback
+    async_callback: Optional[AsyncCallbackData] = None
 
     @property
     def is_first_multi_step(self) -> bool:
@@ -1338,4 +1347,4 @@ class ExecuteModelRequest(
             finished_requests_ids=self.finished_requests_ids,
             last_sampled_token_ids=self.last_sampled_token_ids.clone()
             if self.last_sampled_token_ids is not None else None,
-            output_proc_callback_fn=self.output_proc_callback_fn)
+            async_callback=self.async_callback)
