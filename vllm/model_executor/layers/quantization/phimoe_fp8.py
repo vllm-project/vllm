@@ -81,6 +81,7 @@ class PhiFp8MoEMethod(FusedMoEMethodBase):
     def __init__(self, quant_config: PhiMoEFp8Config):
         self.quant_config = quant_config
         self.run_on_sm80 = self.is_sm80()
+        self.fp8_dtype = torch.float8_e4m3fn
 
         if not self.run_on_sm80:
             raise NotImplementedError(
@@ -89,7 +90,7 @@ class PhiFp8MoEMethod(FusedMoEMethodBase):
         try:
             import vllm._phi_C
         except ImportError:
-            raise ImportError("Phi FP8 fused MoE requires the Phi C extension. ")
+            raise ImportError("Phi FP8 fused MoE requires the Phi C extension.")
 
         from vllm.model_executor.layers.phi_ops.moe.tensorrt_llm_moe.ampere_fp8_fused_moe import fused_moe
         self.phi_fused_moe_forward = fused_moe
@@ -99,18 +100,14 @@ class PhiFp8MoEMethod(FusedMoEMethodBase):
             return False
         device_properties = torch.cuda.get_device_properties(device_id)
         return (device_properties.major == 8 and device_properties.minor == 0)
-    
+
     def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
                        intermediate_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
-        # This is different from the original implementation fp8.py, because we 
-        # are targeting to load phimoe model inside one A100 GPU.
-        # WEIGHTS
         w13_weight = torch.nn.Parameter(torch.empty(num_experts,
                                                     2 * intermediate_size,
                                                     hidden_size,
-                                                    device="cpu",
-                                                    dtype=params_dtype),
+                                                    dtype=self.fp8_dtype),
                                         requires_grad=False)
         layer.register_parameter("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
@@ -118,35 +115,26 @@ class PhiFp8MoEMethod(FusedMoEMethodBase):
         w2_weight = torch.nn.Parameter(torch.empty(num_experts,
                                                    hidden_size,
                                                    intermediate_size,
-                                                   device="cpu",
-                                                   dtype=params_dtype),
+                                                   dtype=self.fp8_dtype),
                                        requires_grad=False)
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
-
-        # WEIGHT_SCALES
-        # Allocate 2 scales for w1 and w3 respectively.
-        # They will be combined to a single scale after weight loading.
         w13_weight_scale = torch.nn.Parameter(torch.ones(num_experts,
                                                          2,
                                                          dtype=torch.float32),
                                               requires_grad=False)
         layer.register_parameter("w13_weight_scale", w13_weight_scale)
-
         w2_weight_scale = torch.nn.Parameter(torch.ones(num_experts,
                                                         dtype=torch.float32),
                                              requires_grad=False)
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
 
-
     def process_weights_after_loading(self, layer: Module) -> None:
         # Currently used by PhiMOE
         w13_weight = torch.empty_like(layer.w13_weight.data,
-                                    dtype=torch.float8_e4m3fn,
-                                    device="cuda")
+                                    dtype=self.fp8_dtype)
         w2_weight = torch.empty_like(layer.w2_weight.data,
-                                    dtype=torch.float8_e4m3fn,
-                                    device="cuda")
+                                    dtype=self.fp8_dtype)
         # Re-initialize w13_scale because we directly quantize
         # merged w13 weights and generate a single scaling factor.
         layer.w13_weight_scale = torch.nn.Parameter(torch.ones(
@@ -182,14 +170,8 @@ class PhiFp8MoEMethod(FusedMoEMethodBase):
             requires_grad=False,
         )
 
-        # This is to skip the move to cpu 
-        layer.register_parameter("w13_weight_fp8", torch.nn.Parameter(w13_weight, requires_grad=False))
-        layer.register_parameter("w2_weight_fp8", torch.nn.Parameter(w2_weight, requires_grad=False))
-
-        layer.w13_weight = torch.nn.Parameter(torch.empty(0),
-                                            requires_grad=False)
-        layer.w2_weight = torch.nn.Parameter(torch.empty(0),
-                                            requires_grad=False)
+        layer.w13_weight = torch.nn.Parameter(w13_weight, requires_grad=False)
+        layer.w2_weight = torch.nn.Parameter(w2_weight, requires_grad=False)
         return
 
     def apply(self,
@@ -202,10 +184,10 @@ class PhiFp8MoEMethod(FusedMoEMethodBase):
               topk_group: Optional[int] = None,
               num_expert_group: Optional[int] = None,
               custom_routing_function: Optional[Callable] = None) -> torch.Tensor:
-        
+
         return self.phi_fused_moe_forward(x,
-                                        layer.w13_weight_fp8,
-                                        layer.w2_weight_fp8,
+                                        layer.w13_weight,
+                                        layer.w2_weight,
                                         router_logits,
                                         top_k,
                                         renormalize=renormalize,
