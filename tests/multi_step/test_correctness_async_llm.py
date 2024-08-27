@@ -28,12 +28,12 @@ async def completions_with_server_args(prompts: List[str], model_name: str,
 
     outputs = None
     with RemoteOpenAIServer(model_name, server_cli_args) as server:
-        client = server.get_async_client()
-        outputs = await client.completions.create(model=model_name,
-                                                  prompt=prompts,
-                                                  temperature=0,
-                                                  stream=False,
-                                                  max_tokens=5)
+        async with server.get_async_client() as client:
+            outputs = await client.completions.create(model=model_name,
+                                                      prompt=prompts,
+                                                      temperature=0,
+                                                      stream=False,
+                                                      max_tokens=5)
     assert outputs is not None
 
     return outputs
@@ -62,6 +62,9 @@ async def test_multi_step(example_prompts, model: str, tp_size: int,
     ms_server_args = DEFAULT_SERVER_ARGS + \
         ["--num-scheduler-steps", f"{num_scheduler_steps}"]
 
+    # Disable output proc callback as its not supported
+    # with multi-step right now
+    ms_server_args += ["--disable-async-output-proc"]
     if eager_mode:
         ms_server_args.append("--enforce-eager")
 

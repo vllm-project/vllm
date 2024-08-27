@@ -1,6 +1,6 @@
 """
 This example shows how to use vLLM for running offline inference 
-with the correct prompt format on vision language models.
+with the correct prompt format on audio language models.
 
 For most models, the prompt format should follow corresponding examples
 on HuggingFace model repository.
