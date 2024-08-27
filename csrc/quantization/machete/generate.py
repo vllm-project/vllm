@@ -3,10 +3,10 @@ import math
 import os
 import shutil
 from collections.abc import Iterable
-from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union
-from functools import reduce
 from copy import deepcopy
+from dataclasses import dataclass
+from functools import reduce
+from typing import List, Optional, Tuple, Union
 
 import jinja2
 # yapf conflicts with isort for this block
@@ -16,10 +16,10 @@ from vllm_cutlass_library_extension import (DataType, EpilogueScheduleTag,
                                             MixedInputKernelScheduleType,
                                             TileSchedulerTag,
                                             TileSchedulerType, VLLMDataType,
-                                            VLLMDataTypeNames, VLLMDataTypeTag, 
-                                            VLLMDataTypeVLLMScalarTypeTag,
+                                            VLLMDataTypeNames,
+                                            VLLMDataTypeSize, VLLMDataTypeTag,
                                             VLLMDataTypeTorchDataTypeTag,
-                                            VLLMDataTypeSize,
+                                            VLLMDataTypeVLLMScalarTypeTag,
                                             VLLMKernelScheduleTag)
 
 # yapf: enable
@@ -73,9 +73,11 @@ torch::Tensor gemm_dispatch(PyTorchArguments args) {
   if (a_type == {{TorchTypeTag[t.a]}}
       && args.btype == {{VLLMScalarTypeTag[t.b]}}
       && out_type == {{TorchTypeTag[t.d]}}
-      && {%if with_scales%}args.scales && args.scales->scalar_type() == {{TorchTypeTag[t.b_scale]}}
+      && {%if with_scales%}args.scales
+      && args.scales->scalar_type() == {{TorchTypeTag[t.b_scale]}}
       {%- else %}!args.scales{%endif%}
-      && {%if with_zeropoints%}args.zeros && args.zeros->scalar_type() == {{TorchTypeTag[t.b_zeropoint]}}
+      && {%if with_zeropoints%}args.zeros
+      && args.zeros->scalar_type() == {{TorchTypeTag[t.b_zeropoint]}}
       {%- else %}!args.zeros{%endif%}
   ) {
       return gemm_dispatch_{{type_sig}}(args);
@@ -87,8 +89,10 @@ torch::Tensor gemm_dispatch(PyTorchArguments args) {
     "a_type=", args.A.scalar_type(),
     ", b_type=", args.btype.str(),
     ", out_type=", out_type,
-    ", with_scales=", args.scales.has_value() ? toString(args.scales->scalar_type()) : "None",
-    ", with_zeropoints=", args.zeros.has_value() ? toString(args.zeros->scalar_type()) : "None"
+    ", with_scales=", args.scales.has_value()
+        ? toString(args.scales->scalar_type()) : "None",
+    ", with_zeropoints=", args.zeros.has_value()
+        ? toString(args.zeros->scalar_type()) : "None"
     "; implemented types are: \\n",
     {%- for impl_config in impl_configs %}
     {% set t = impl_config.types -%}
@@ -121,9 +125,11 @@ std::vector<std::string> supported_schedules_dispatch(
     if (a_type == {{TorchTypeTag[t.a]}}
         && b_type == {{VLLMScalarTypeTag[t.b]}}
         && out_type == {{TorchTypeTag[t.d]}}
-        && {%if with_scales%}maybe_scales_type && *maybe_scales_type == {{TorchTypeTag[t.b_scale]}}
+        && {%if with_scales%}maybe_scales_type
+        && *maybe_scales_type == {{TorchTypeTag[t.b_scale]}}
         {%- else %}!scales_type{%endif%}
-        && {%if with_zeropoints%}maybe_zeros_type && *maybe_zeros_type == {{TorchTypeTag[t.b_zeropoint]}}
+        && {%if with_zeropoints%}maybe_zeros_type
+        && *maybe_zeros_type == {{TorchTypeTag[t.b_zeropoint]}}
         {%- else %}!maybe_zeros_type{%endif%}
     ) {
         return {
@@ -242,13 +248,15 @@ class TypeConfig:
     b_zeropoint: DataType
     d: DataType
     accumulator: DataType
-    
+
+
 @dataclass(frozen=True)
 class PrepackTypeConfig:
     a: DataType
     b_num_bits: int
     convert: DataType
     accumulator: DataType
+
 
 @dataclass
 class ImplConfig:
@@ -296,8 +304,7 @@ def generate_type_signature(kernel_types: TypeConfig):
     d = VLLMDataTypeNames[kernel_types.d]
     accumulator = VLLMDataTypeNames[kernel_types.accumulator]
     element_scale = VLLMDataTypeNames[kernel_types.b_scale]
-    element_zeropoint = VLLMDataTypeNames[
-        kernel_types.b_zeropoint]
+    element_zeropoint = VLLMDataTypeNames[kernel_types.b_zeropoint]
 
     return (f"{a}{b}{d}"
             f"{accumulator}{element_scale}{element_zeropoint}")
@@ -314,6 +321,7 @@ def generate_terse_type_signature(kernel_types: TypeConfig):
 def is_power_of_two(n):
     return (n != 0) and (n & (n - 1) == 0)
 
+
 def to_cute_constant(value: List[int]):
 
     def _to_cute_constant(value: int):
@@ -329,9 +337,10 @@ def to_cute_constant(value: List[int]):
 
 
 def unique_schedules(impl_configs: List[ImplConfig]):
-    return list(set(sch
-                    for impl_config in impl_configs 
-                    for sch in impl_config.schedules))
+    return list(
+        set(sch for impl_config in impl_configs
+            for sch in impl_config.schedules))
+
 
 def unsigned_type_with_bitwidth(num_bits):
     return {
@@ -341,7 +350,6 @@ def unsigned_type_with_bitwidth(num_bits):
         32: DataType.u32,
         64: DataType.u64,
     }[num_bits]
-
 
 
 template_globals = {
@@ -375,17 +383,16 @@ def create_sources(impl_configs: List[ImplConfig], num_impl_files=8):
     sources = []
 
     sources.append((
-        f"machete_mm_dispatch",
+        "machete_mm_dispatch",
         mm_dispatch_template.render(impl_configs=impl_configs),
     ))
-    
+
     prepack_types = [
         PrepackTypeConfig(
-            a=impl_config.types.a, 
+            a=impl_config.types.a,
             b_num_bits=VLLMDataTypeSize[impl_config.types.b],
-            convert=impl_config.types.b_scale 
-            if impl_config.types.b_scale == DataType.void 
-            else impl_config.types.b_scale,
+            convert=impl_config.types.b_scale if impl_config.types.b_scale
+            == DataType.void else impl_config.types.b_scale,
             accumulator=impl_config.types.accumulator,
         ) for impl_config in impl_configs
     ]
@@ -405,18 +412,16 @@ def create_sources(impl_configs: List[ImplConfig], num_impl_files=8):
             prepack_types_seen.add(key)
 
     sources.append((
-        f"machete_prepack",
-        prepack_dispatch_template.render(
-            types=unique_prepack_types,
-        ),
+        "machete_prepack",
+        prepack_dispatch_template.render(types=unique_prepack_types, ),
     ))
-    
+
     # Split up impls across files
     num_impls = reduce(lambda x, y: x + len(y.schedules), impl_configs, 0)
     num_impls_per_file = math.ceil(num_impls / num_impl_files)
-    
+
     files_impls: List[List[ImplConfig]] = [[]]
-    
+
     curr_num_impls_assigned = 0
     curr_impl_in_file = 0
     curr_impl_configs = deepcopy(list(reversed(impl_configs)))
@@ -427,10 +432,10 @@ def create_sources(impl_configs: List[ImplConfig], num_impl_files=8):
             files_impls.append([])
             room_left_in_file = num_impls_per_file
             curr_impl_in_file = 0
-        
+
         curr_ic = curr_impl_configs[-1]
         if len(curr_ic.schedules) >= room_left_in_file:
-            # Break appart the current impl config
+            # Break apart the current impl config
             tmp_ic = deepcopy(curr_ic)
             tmp_ic.schedules = curr_ic.schedules[:room_left_in_file]
             curr_ic.schedules = curr_ic.schedules[room_left_in_file:]
@@ -440,7 +445,7 @@ def create_sources(impl_configs: List[ImplConfig], num_impl_files=8):
             curr_impl_configs.pop()
         curr_num_impls_assigned += len(files_impls[-1][-1].schedules)
         curr_impl_in_file += len(files_impls[-1][-1].schedules)
-        
+
     for part, file_impls in enumerate(files_impls):
         sources.append((
             f"machete_mm_impl_part{part+1}",
@@ -594,41 +599,41 @@ def generate():
 
     impl_configs = []
 
-    GPTQ_kernel_types = list(
-        (TypeConfig(
-            a=a, b=b,
-            b_scale=a,
-            b_zeropoint=DataType.void,
-            d=a, accumulator=DataType.f32,
-        ) for b in (VLLMDataType.u4b8, VLLMDataType.u8b128)
-         for a in (DataType.f16, DataType.bf16)))
+    GPTQ_kernel_types = list((TypeConfig(
+        a=a,
+        b=b,
+        b_scale=a,
+        b_zeropoint=DataType.void,
+        d=a,
+        accumulator=DataType.f32,
+    ) for b in (VLLMDataType.u4b8, VLLMDataType.u8b128)
+                              for a in (DataType.f16, DataType.bf16)))
 
     impl_configs += [
         ImplConfig(x[0], x[1], x[2])
-        for x in zip(GPTQ_kernel_types, 
-                     itertools.repeat(schedules),
+        for x in zip(GPTQ_kernel_types, itertools.repeat(schedules),
                      itertools.repeat(default_heuristic))
     ]
 
-    AWQ_kernel_types = list(
-        (TypeConfig(
-            a=a, b=b, 
-            b_scale=a, 
-            b_zeropoint=a,
-            d=a, accumulator=DataType.f32,
-        ) for b in (DataType.u4, DataType.u8)
-         for a in (DataType.f16, DataType.bf16)))
+    AWQ_kernel_types = list((TypeConfig(
+        a=a,
+        b=b,
+        b_scale=a,
+        b_zeropoint=a,
+        d=a,
+        accumulator=DataType.f32,
+    ) for b in (DataType.u4, DataType.u8)
+                             for a in (DataType.f16, DataType.bf16)))
 
     impl_configs += [
         ImplConfig(x[0], x[1], x[2])
-        for x in zip(AWQ_kernel_types, 
-                     itertools.repeat(schedules),
+        for x in zip(AWQ_kernel_types, itertools.repeat(schedules),
                      itertools.repeat(default_heuristic))
     ]
-    
+
     QQQ_kernel_types = [
         *(TypeConfig(
-            a=DataType.s8, 
+            a=DataType.s8,
             b=VLLMDataType.u4b8,
             b_scale=DataType.f16,
             b_zeropoint=DataType.void,
@@ -636,7 +641,7 @@ def generate():
             accumulator=DataType.s32,
         ) for d in (DataType.s32, DataType.f16)),
         *(TypeConfig(
-            a=DataType.e4m3, 
+            a=DataType.e4m3,
             b=VLLMDataType.u4b8,
             b_scale=DataType.f16,
             b_zeropoint=DataType.void,

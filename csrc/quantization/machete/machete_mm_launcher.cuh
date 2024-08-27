@@ -90,11 +90,9 @@ torch::Tensor run_impl(PyTorchArguments args) {
 torch::Tensor gemm_dispatch(PyTorchArguments args);
 
 std::vector<std::string> supported_schedules_dispatch(
-    at::ScalarType a_type,
-    vllm::ScalarType b_type,
+    at::ScalarType a_type, vllm::ScalarType b_type,
     c10::optional<at::ScalarType> maybe_scales_type,
     c10::optional<at::ScalarType> maybe_zeros_type,
-    c10::optional<at::ScalarType> maybe_out_type
-);
+    c10::optional<at::ScalarType> maybe_out_type);
 
 };  // namespace machete

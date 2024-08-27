@@ -614,13 +614,15 @@ def fp8_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
 
 # machete
 def machete_catch_unsupported(fn):
+
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
         except RuntimeError as e:
             if "Unsupported schedule" in str(e):
-                logger.warning("Unsupported schedule in Machete, falling back to default")
+                logger.warning(
+                    "Unsupported schedule in Machete, falling back to default")
                 return fn(*args, schedule="default", **kwargs)
             else:
                 raise e
@@ -629,14 +631,14 @@ def machete_catch_unsupported(fn):
 
 
 def machete_supported_schedules(
-    a_type: torch.dtype,
-    b_type: ScalarType,
-    scales_type: Optional[torch.dtype],
-    zeros_type: Optional[torch.dtype] = None,
-    out_type: Optional[torch.dtype] = None
-) -> List[str]:
-    return torch.ops._C.machete_supported_schedules(
-        a_type, b_type, scales_type, zeros_type, out_type)
+        a_type: torch.dtype,
+        b_type: ScalarType,
+        scales_type: Optional[torch.dtype],
+        zeros_type: Optional[torch.dtype] = None,
+        out_type: Optional[torch.dtype] = None) -> List[str]:
+    return torch.ops._C.machete_supported_schedules(a_type, b_type,
+                                                    scales_type, zeros_type,
+                                                    out_type)
 
 
 def machete_gemm(
@@ -652,12 +654,12 @@ def machete_gemm(
     beta: Optional[float] = None,
     schedule: Optional[str] = None,
 ) -> torch.Tensor:
-    return torch.ops._C.machete_gemm(a, b_q, b_type, out_type, b_scales, b_zeros,
-                                     b_group_size, c, alpha, beta, schedule)
+    return torch.ops._C.machete_gemm(a, b_q, b_type, out_type, b_scales,
+                                     b_zeros, b_group_size, c, alpha, beta,
+                                     schedule)
 
 
-def machete_prepack_B(b_q_weight: torch.Tensor,
-                      a_type: torch.dtype,
+def machete_prepack_B(b_q_weight: torch.Tensor, a_type: torch.dtype,
                       b_type: ScalarType) -> torch.Tensor:
     return torch.ops._C.machete_prepack_B(b_q_weight, a_type, b_type)
 
