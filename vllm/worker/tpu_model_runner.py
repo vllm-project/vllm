@@ -1,6 +1,5 @@
 import time
 from dataclasses import dataclass
-from types import CodeType
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
 from unittest.mock import patch
 
@@ -11,6 +10,7 @@ import torch_xla.core.xla_model as xm
 import torch_xla.runtime as xr
 
 from vllm.attention import AttentionMetadata, get_attn_backend
+from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispacther
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.logger import init_logger
@@ -598,10 +598,15 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         return [SamplerOutput(sampler_outputs)]
 
 
-class ModelWrapper:
+class ModelWrapper(TorchCompileWrapperWithCustomDispacther):
 
     def __init__(self, model: nn.Module):
         self.model = model
+        compiled_forward = torch.compile(self.forward,
+                                         backend="openxla",
+                                         fullgraph=True,
+                                         dynamic=False)
+        super().__init__(compiled_forward)
 
     def __call__(self, *args, is_prompt: bool = False, **kwargs):
         if len(ModelWrapper.compiled_codes) < 3:
@@ -613,11 +618,11 @@ class ModelWrapper:
         # 2: for decode
         # dispatch to the compiled code directly, skip PyTorch
         if is_prompt:
-            ModelWrapper.forward.__code__ = ModelWrapper.compiled_codes[1]
-            return self.forward(*args, **kwargs)
+            with self.dispatch_to_code(1):
+                return self.forward(*args, **kwargs)
         else:
-            ModelWrapper.forward.__code__ = ModelWrapper.compiled_codes[2]
-            return self.forward(*args, **kwargs)
+            with self.dispatch_to_code(2):
+                return self.forward(*args, **kwargs)
 
     def forward(
         self,
@@ -706,22 +711,6 @@ class ModelWrapper:
         next_token_ids = torch.where(t != 0, sampled_token_ids,
                                      argmax_token_ids)
         return next_token_ids
-
-    compiled_forward = torch.compile(forward,
-                                     backend="openxla",
-                                     fullgraph=True,
-                                     dynamic=False)
-
-    target_code = forward.__code__
-    compiled_codes: List[CodeType] = []
-
-    @staticmethod
-    def collect_bytecode_hook(old, new):
-        global compiled_codes
-        if old is ModelWrapper.target_code:
-            ModelWrapper.compiled_codes.append(new)
-
-    torch._dynamo.convert_frame.register_bytecode_hook(collect_bytecode_hook)
 
 
 def _get_padded_prefill_len(x: int) -> int:
