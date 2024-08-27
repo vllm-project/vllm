@@ -4,7 +4,7 @@
 # Copyright (c) Alibaba Cloud.
 # LICENSE: https://huggingface.co/Qwen/Qwen-7B/blob/main/LICENSE
 """Inference-only QWen model compatible with HuggingFace weights."""
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Mapping
 
 import torch
 from torch import nn
@@ -32,7 +32,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.base import MultiModalInputs
 from vllm.multimodal.image import cached_get_tokenizer
-from vllm.sequence import IntermediateTensors
+from vllm.sequence import IntermediateTensors, SequenceData
 
 from .utils import is_pp_missing_parameter, make_layers
 
@@ -46,7 +46,6 @@ IMG_PAD = "<imgpad>"
 # Qwen images are encoded into a fixed token length of 256, not include IMG_START/IMG_END
 MAX_QWEN_IMG_TOKENS = 256
 
-### This is a directly copy paste of the qwen visual modeling code for now
 from collections import OrderedDict
 import math
 import requests
@@ -659,9 +658,6 @@ def get_image_positions(input_ids, image_start_id=151857):
     if torch.any(input_ids == image_start_id):
         bos_pos = torch.where(input_ids == image_start_id)
         eos_pos = torch.where(input_ids == image_end_id)
-        print("BOS: {}".format(bos_pos)) # BOS: (tensor([11], device='cuda:0'),)
-        print("EOS: {}".format(eos_pos)) # EOS: (tensor([268], device='cuda:0'),)
-        print("tok stack: {}".format( torch.stack((bos_pos[0], bos_pos[0]), dim=1)))
         return torch.stack((bos_pos[0], eos_pos[0]), dim=1)
     return None
 
@@ -744,8 +740,44 @@ def build_normalization_transform(image_size):
         transforms.Normalize(mean=mean, std=std),
     ])
 
+
+def dummy_data_for_qwen(ctx: InputContext, seq_len: int,
+                            mm_counts: Mapping[str, int]):
+    hf_config = ctx.get_hf_config()
+
+    # The presence of a visual config indicates this is a multimodal model.
+    # If we don't have it, the model is considered an LLM for warmup purposes.
+    if not hasattr(hf_config, "visual"):
+        print("Using text data to warmup")
+        seq_data = SequenceData([0] * seq_len)
+        mm_data = None
+        return seq_data, mm_data
+
+    # We have a visual component! Use images to warm up
+    num_images = mm_counts["image"]
+    image_feature_size = MAX_QWEN_IMG_TOKENS
+    model_config = ctx.model_config
+
+    print("Using multimodal data to warmup")
+    tokenizer = cached_get_tokenizer(model_config.tokenizer,
+                                     trust_remote_code=True)
+    # Encode an image pair for each image. During the encoding, qwen tokenizers will add
+    # image pads between the start/end. We leave this to the tokenizer, because we need
+    # to rely on the number of added pads at inference time.
+    seq_data = SequenceData(tokenizer.encode(
+        (IMG_START+IMG_END) * num_images, add_special_tokens=False, return_tensors="pt"
+    )[0].tolist())
+    assert seq_data.get_len() == ((2 + MAX_QWEN_IMG_TOKENS) * num_images)
+
+    # Build the input images; width/height doesn't actually matter here since the
+    # data will get resized, and the number of tokens per image is constant per model.
+    image = Image.new("RGB", (224, 224), color=0)
+    mm_data =  {"image": image if num_images == 1 else [image] * num_images}
+    return seq_data, mm_data
+
 @MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_qwen)
 @MULTIMODAL_REGISTRY.register_max_image_tokens(MAX_QWEN_IMG_TOKENS)
+@INPUT_REGISTRY.register_dummy_data(dummy_data_for_qwen)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_qwen)
 class QWenLMHeadModel(nn.Module, SupportsMultiModal):
 
