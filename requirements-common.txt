@@ -1,5 +1,3 @@
-cmake >= 3.21
-ninja  # For faster builds.
 psutil
 sentencepiece  # Required for LLaMA tokenizer.
 numpy < 2.0.0
@@ -8,18 +6,24 @@ tqdm
 py-cpuinfo
 transformers >= 4.43.2  # Required for Chameleon and Llama 3.1 hotfox.
 tokenizers >= 0.19.1  # Required for Llama 3.
+protobuf # Required by LlamaTokenizer.
 fastapi
 aiohttp
-openai
+openai >= 1.0 # Ensure modern openai package (ensure types module present)
 uvicorn[standard]
-pydantic >= 2.0  # Required for OpenAI server.
+pydantic >= 2.8  # Required for OpenAI server.
 pillow  # Required for image processing
 prometheus_client >= 0.18.0
 prometheus-fastapi-instrumentator >= 7.0.0
 tiktoken >= 0.6.0  # Required for DBRX tokenizer
-lm-format-enforcer == 0.10.3
+lm-format-enforcer == 0.10.6
 outlines >= 0.0.43, < 0.1 # Requires torch >= 2.1.0
-typing_extensions
+typing_extensions >= 4.10
 filelock >= 3.10.4 # filelock starts to support `mode` argument from 3.10.4
 pyzmq
+msgspec
+librosa # Required for audio processing
+soundfile # Required for audio processing
 gguf == 0.9.1
+importlib_metadata
+mistral_common >= 1.3.4

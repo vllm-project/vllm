@@ -1,9 +1,8 @@
 import asyncio
 import os
 import socket
-import sys
-from typing import (TYPE_CHECKING, Any, AsyncIterator, Awaitable, Protocol,
-                    Tuple, TypeVar)
+from functools import partial
+from typing import AsyncIterator, Tuple
 
 import pytest
 
@@ -12,36 +11,23 @@ from vllm.utils import (FlexibleArgumentParser, deprecate_kwargs,
 
 from .utils import error_on_warning
 
-if sys.version_info < (3, 10):
-    if TYPE_CHECKING:
-        _AwaitableT = TypeVar("_AwaitableT", bound=Awaitable[Any])
-        _AwaitableT_co = TypeVar("_AwaitableT_co",
-                                 bound=Awaitable[Any],
-                                 covariant=True)
-
-        class _SupportsSynchronousAnext(Protocol[_AwaitableT_co]):
-
-            def __anext__(self) -> _AwaitableT_co:
-                ...
-
-    def anext(i: "_SupportsSynchronousAnext[_AwaitableT]", /) -> "_AwaitableT":
-        return i.__anext__()
-
 
 @pytest.mark.asyncio
 async def test_merge_async_iterators():
 
-    async def mock_async_iterator(idx: int) -> AsyncIterator[str]:
+    async def mock_async_iterator(idx: int):
         try:
             while True:
                 yield f"item from iterator {idx}"
                 await asyncio.sleep(0.1)
         except asyncio.CancelledError:
-            pass
+            print(f"iterator {idx} cancelled")
 
     iterators = [mock_async_iterator(i) for i in range(3)]
-    merged_iterator: AsyncIterator[Tuple[int, str]] = merge_async_iterators(
-        *iterators)
+    merged_iterator = merge_async_iterators(*iterators,
+                                            is_cancelled=partial(asyncio.sleep,
+                                                                 0,
+                                                                 result=False))
 
     async def stream_output(generator: AsyncIterator[Tuple[int, str]]):
         async for idx, output in generator:
@@ -55,7 +41,8 @@ async def test_merge_async_iterators():
 
     for iterator in iterators:
         try:
-            await asyncio.wait_for(anext(iterator), 1)
+            # Can use anext() in python >= 3.10
+            await asyncio.wait_for(iterator.__anext__(), 1)
         except StopAsyncIteration:
             # All iterators should be cancelled and print this message.
             print("Iterator was cancelled normally")

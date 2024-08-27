@@ -11,7 +11,7 @@ import torch_xla.runtime as xr
 
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
-                         MultiModalConfig, ParallelConfig, SchedulerConfig)
+                         ParallelConfig, SchedulerConfig)
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -89,7 +89,6 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         device_config: DeviceConfig,
         cache_config: CacheConfig,
         load_config: LoadConfig,
-        multimodal_config: Optional[MultiModalConfig] = None,
         is_driver_worker: bool = False,
     ):
         self.model_config = model_config
@@ -98,7 +97,6 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         self.device_config = device_config
         self.cache_config = cache_config
         self.load_config = load_config
-        self.multimodal_config = multimodal_config
         self.is_driver_worker = is_driver_worker
 
         self.block_size = self.cache_config.block_size
@@ -142,24 +140,15 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 parallel_config=self.parallel_config,
                 cache_config=self.cache_config,
                 scheduler_config=self.scheduler_config,
-                multimodal_config=self.multimodal_config,
                 lora_config=None,
             )
         model = model.eval()
         xm.wait_device_ops()
-
         model = ModelWrapper(model)
-        # NOTE(woosuk): There are two stages of compilation: torch.compile and
-        # XLA compilation. Setting dynamic=True can reduce the torch.compile
-        # overhead by reusing the FX graph for different shapes.
-        # However, the XLA graph will still require static shapes and needs to
-        # be re-compiled for every different shapes. This overhead is inevitable
-        # in the first run, but can be skipped afterwards as we cache the XLA
-        # graphs in the disk (VLLM_XLA_CACHE_PATH).
         self.model = torch.compile(model,
                                    backend="openxla",
                                    fullgraph=True,
-                                   dynamic=True)
+                                   dynamic=False)
 
     def _dummy_run(
         self,
@@ -221,9 +210,31 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             )
         t = torch.ones((batch_size, ), dtype=torch.float32, device=self.device)
         p = torch.ones((batch_size, ), dtype=torch.float32, device=self.device)
-
-        # Dummy run.
         num_samples = _MAX_NUM_SAMPLES if is_prompt else 1
+
+        # NOTE(woosuk): There are two stages of compilation: torch.compile and
+        # XLA compilation. Using `mark_dynamic` can reduce the torch.compile
+        # overhead by reusing the FX graph for different shapes.
+        # However, the XLA graph will still require static shapes and needs to
+        # be re-compiled for every different shapes. This overhead is inevitable
+        # in the first run, but can be skipped afterwards as we cache the XLA
+        # graphs in the disk (VLLM_XLA_CACHE_PATH).
+        if is_prompt:
+            # Prefll
+            torch._dynamo.mark_dynamic(token_ids, 1)
+            torch._dynamo.mark_dynamic(position_ids, 1)
+            torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 1)
+        else:
+            # Decode
+            torch._dynamo.mark_dynamic(token_ids, 0)
+            torch._dynamo.mark_dynamic(position_ids, 0)
+            torch._dynamo.mark_dynamic(input_lens, 0)
+            torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
+            torch._dynamo.mark_dynamic(attn_metadata.context_lens, 0)
+            torch._dynamo.mark_dynamic(attn_metadata.block_tables, 0)
+            torch._dynamo.mark_dynamic(t, 0)
+            torch._dynamo.mark_dynamic(p, 0)
+        # Dummy run.
         self.model(token_ids, position_ids, attn_metadata, input_lens, t, p,
                    num_samples, kv_caches)
 
@@ -505,27 +516,19 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             raise ValueError(
                 "TPUModelRunner does not support multi-step execution.")
 
-        def _execute_model(*args, clone: bool = False) -> torch.Tensor:
+        def _execute_model(*args):
             """Move input args from CPU to device and execute the model."""
-
-            def _copy_to_device(x: torch.Tensor) -> torch.Tensor:
-                if clone:
-                    # When x is a slice of a CPU tensor, XLA may copy the whole
-                    # original tensor to TPU instead of only copying x.
-                    # To avoid this, we copy x after cloning.
-                    x = x.clone()
-                return x.to(self.device)
 
             new_args = []
             for arg in args:
                 if isinstance(arg, torch.Tensor):
-                    arg = _copy_to_device(arg)
+                    arg = arg.to(self.device)
                 elif isinstance(arg, AttentionMetadata):
-                    arg.slot_mapping = _copy_to_device(arg.slot_mapping)
+                    arg.slot_mapping = arg.slot_mapping.to(self.device)
                     if getattr(arg, "block_tables", None) is not None:
-                        arg.block_tables = _copy_to_device(arg.block_tables)
+                        arg.block_tables = arg.block_tables.to(self.device)
                     if getattr(arg, "context_lens", None) is not None:
-                        arg.context_lens = _copy_to_device(arg.context_lens)
+                        arg.context_lens = arg.context_lens.to(self.device)
                 new_args.append(arg)
             return self.model(*new_args)
 
@@ -552,13 +555,9 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 output_token_ids = _execute_model(
                     model_input.token_ids[None, start_idx:end_idx],
                     model_input.position_ids[None, start_idx:end_idx],
-                    model_input.attn_metadata,
-                    model_input.input_lens[i:i + 1],
-                    model_input.t[i:i + 1],
-                    model_input.p[i:i + 1],
-                    model_input.num_samples,
-                    kv_caches,
-                    clone=True)
+                    model_input.attn_metadata, model_input.input_lens[i:i + 1],
+                    model_input.t[i:i + 1], model_input.p[i:i + 1],
+                    model_input.num_samples, kv_caches)
                 # Retrieve the outputs to CPU.
                 next_token_ids += output_token_ids.cpu().tolist()
                 start_idx = end_idx

@@ -1,7 +1,8 @@
 import enum
 import json
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, ClassVar, List, Optional, Tuple, Type, Union
+from typing import (TYPE_CHECKING, ClassVar, List, Mapping, Optional, Tuple,
+                    Type, Union)
 
 import torch
 from transformers import PretrainedConfig
@@ -10,10 +11,14 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
-from vllm.tracing import is_otel_installed
-from vllm.transformers_utils.config import get_config, get_hf_text_config
-from vllm.utils import (cuda_device_count_stateless, get_cpu_memory, is_cpu,
-                        is_hip, is_neuron, is_openvino, is_tpu, is_xpu,
+from vllm.platforms import current_platform
+from vllm.tracing import is_otel_available, otel_import_error_traceback
+from vllm.transformers_utils.config import (get_config,
+                                            get_hf_image_processor_config,
+                                            get_hf_text_config)
+from vllm.utils import (STR_NOT_IMPL_ENC_DEC_CUDAGRAPH, GiB_bytes,
+                        cuda_device_count_stateless, get_cpu_memory, is_cpu,
+                        is_hip, is_neuron, is_openvino, is_xpu,
                         print_warning_once)
 
 if TYPE_CHECKING:
@@ -26,7 +31,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-_GB = 1 << 30
 _EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 
 _PP_SUPPORTED_MODELS = [
@@ -34,6 +38,7 @@ _PP_SUPPORTED_MODELS = [
     "AquilaForCausalLM",
     "DeepseekV2ForCausalLM",
     "InternLMForCausalLM",
+    "JAISLMHeadModel",
     "LlamaForCausalLM",
     "LLaMAForCausalLM",
     "MistralForCausalLM",
@@ -56,7 +61,8 @@ class ModelConfig:
             output when `served_model_name` is not specified. 
         tokenizer: Name or path of the huggingface tokenizer to use.
         tokenizer_mode: Tokenizer mode. "auto" will use the fast tokenizer if
-            available, and "slow" will always use the slow tokenizer.
+            available, "slow" will always use the slow tokenizer, and
+            "mistral" will always use the tokenizer from `mistral_common`.
         trust_remote_code: Trust remote code (e.g., from HuggingFace) when
             downloading the model and tokenizer.
         dtype: Data type for model weights and activations. The "auto" option
@@ -87,6 +93,9 @@ class ModelConfig:
         enforce_eager: Whether to enforce eager execution. If True, we will
             disable CUDA graph and always execute the model in eager mode.
             If False, we will use CUDA graph and eager execution in hybrid.
+            If None, the user did not specify, so default to False -
+            except for encoder/decoder models, which currently require
+            eager mode.
         max_context_len_to_capture: Maximum context len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
             to eager mode (DEPRECATED. Use max_seq_len_to_capture instead).
@@ -103,6 +112,8 @@ class ModelConfig:
             matches the model name exposed via the APIs. If multiple model 
             names provided, the first name will be used. If not specified, 
             the model name will be the same as `model`.
+        limit_mm_per_prompt: Maximum number of data instances per modality 
+            per prompt. Only applicable for multimodal models.
     """
 
     def __init__(
@@ -119,16 +130,18 @@ class ModelConfig:
         rope_theta: Optional[float] = None,
         tokenizer_revision: Optional[str] = None,
         max_model_len: Optional[int] = None,
+        spec_target_max_model_len: Optional[int] = None,
         quantization: Optional[str] = None,
         quantization_param_path: Optional[str] = None,
-        enforce_eager: bool = False,
+        enforce_eager: Optional[bool] = None,
         max_context_len_to_capture: Optional[int] = None,
         max_seq_len_to_capture: Optional[int] = None,
         max_logprobs: int = 20,
         disable_sliding_window: bool = False,
         skip_tokenizer_init: bool = False,
         served_model_name: Optional[Union[str, List[str]]] = None,
-        multimodal_config: Optional["MultiModalConfig"] = None,
+        limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
+        use_async_output_proc: bool = True,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -158,7 +171,38 @@ class ModelConfig:
         self.hf_config = get_config(self.model, trust_remote_code, revision,
                                     code_revision, rope_scaling, rope_theta)
         self.hf_text_config = get_hf_text_config(self.hf_config)
+        self.hf_image_processor_config = get_hf_image_processor_config(
+            self.model, revision)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
+        self.use_async_output_proc = use_async_output_proc
+
+        # Choose a default enforce_eager value if the user did not specify
+        # a value (enforce_eager is None)
+        if getattr(self.hf_config, 'is_encoder_decoder', False):
+            if self.enforce_eager is None:
+                # *Only for encoder/decoder models* and
+                # *only if enforce_eager is unset*, override
+                # to enforce_eager=True
+                #
+                # Add a logger message since it is *somewhat* non-intuitive that
+                # enforce_eager is True when the user has not specified its
+                # value.
+                logger.info("Forcing enforce_eager == True because "
+                            "enforce_eager setting was unspecified and "
+                            "CUDAGraph is not supported with encoder/ "
+                            "decoder models.")
+                self.enforce_eager = True
+
+            if not self.enforce_eager:
+                # Eager mode explicitly disabled by user for an encoder/
+                # decoder model; however CUDAGRAPH + encoder/decoder is
+                # not currently supported
+                raise ValueError(STR_NOT_IMPL_ENC_DEC_CUDAGRAPH)
+        elif self.enforce_eager is None:
+            # *Only for decoder-only models*, enforce_eager
+            # defaults to False if unset. This is intuitive
+            # so no logging message needed.
+            self.enforce_eager = False
 
         if (not self.disable_sliding_window
                 and self.hf_text_config.model_type == "gemma2"
@@ -174,23 +218,39 @@ class ModelConfig:
             hf_config=self.hf_text_config,
             max_model_len=max_model_len,
             disable_sliding_window=self.disable_sliding_window,
-            sliding_window_len=self.get_hf_config_sliding_window())
+            sliding_window_len=self.get_hf_config_sliding_window(),
+            spec_target_max_model_len=spec_target_max_model_len)
         self.served_model_name = get_served_model_name(model,
                                                        served_model_name)
-        self.multimodal_config = multimodal_config
-
+        self.multimodal_config = self._init_multimodal_config(
+            limit_mm_per_prompt)
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
         self._verify_embedding_mode()
         self._verify_quantization()
         self._verify_cuda_graph()
 
+    def _init_multimodal_config(
+        self, limit_mm_per_prompt: Optional[Mapping[str, int]]
+    ) -> Optional["MultiModalConfig"]:
+        architectures = getattr(self.hf_config, "architectures", [])
+        if any(
+                ModelRegistry.is_multimodal_model(arch)
+                for arch in architectures):
+            return MultiModalConfig(limit_per_prompt=limit_mm_per_prompt or {})
+        else:
+            if limit_mm_per_prompt:
+                raise ValueError(
+                    "limit_mm_per_prompt is only supported for multimodal "
+                    "models.")
+            return None
+
     def _verify_tokenizer_mode(self) -> None:
         tokenizer_mode = self.tokenizer_mode.lower()
-        if tokenizer_mode not in ["auto", "slow"]:
+        if tokenizer_mode not in ["auto", "slow", "mistral"]:
             raise ValueError(
                 f"Unknown tokenizer mode: {self.tokenizer_mode}. Must be "
-                "either 'auto' or 'slow'.")
+                "either 'auto', 'slow' or 'mistral'.")
         self.tokenizer_mode = tokenizer_mode
 
     def _verify_embedding_mode(self) -> None:
@@ -207,11 +267,13 @@ class ModelConfig:
 
     def _verify_quantization(self) -> None:
         supported_quantization = [*QUANTIZATION_METHODS]
-        rocm_supported_quantization = ["gptq", "squeezellm"]
+        rocm_supported_quantization = ["gptq", "squeezellm", "fp8"]
         optimized_quantization_methods = [
             "fp8", "marlin", "gptq_marlin_24", "gptq_marlin", "awq_marlin",
-            "fbgemm_fp8", "compressed_tensors", "compressed-tensors"
+            "fbgemm_fp8", "compressed_tensors", "compressed-tensors",
+            "experts_int8"
         ]
+        tpu_supported_quantization = ["tpu_int8"]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
 
@@ -250,6 +312,11 @@ class ModelConfig:
                 raise ValueError(
                     f"{self.quantization} quantization is currently not "
                     f"supported in ROCm.")
+            if current_platform.is_tpu(
+            ) and self.quantization not in tpu_supported_quantization:
+                raise ValueError(
+                    f"{self.quantization} quantization is currently not "
+                    f"supported in TPU Backend.")
             if self.quantization not in optimized_quantization_methods:
                 logger.warning(
                     "%s quantization is not fully "
@@ -261,6 +328,49 @@ class ModelConfig:
             self.max_seq_len_to_capture = self.max_model_len
         self.max_seq_len_to_capture = min(self.max_seq_len_to_capture,
                                           self.max_model_len)
+
+    def verify_async_output_proc(self, parallel_config, speculative_config,
+                                 device_config) -> None:
+        if not self.use_async_output_proc:
+            # Nothing to check
+            return
+
+        if parallel_config.pipeline_parallel_size > 1:
+            logger.warning("Async output processing can not be enabled "
+                           "with pipeline parallel")
+            self.use_async_output_proc = False
+            return
+
+        if device_config.device_type != "cuda":
+            logger.warning(
+                "Async output processing is only supported for CUDA."
+                " Disabling it for other platforms.")
+            self.use_async_output_proc = False
+            return
+
+        if envs.VLLM_USE_RAY_SPMD_WORKER:
+            logger.warning(
+                "Async output processing can not be enabled with ray spmd")
+            self.use_async_output_proc = False
+            return
+
+        if self.enforce_eager:
+            logger.warning(
+                "To see benefits of async output processing, enable CUDA "
+                "graph. Since, enforce-eager is enabled, async output "
+                "processor cannot be used")
+            self.use_async_output_proc = not self.enforce_eager
+            return
+
+        # Async postprocessor is not necessary with embedding mode
+        # since there is no token generation
+        if self.embedding_mode:
+            self.use_async_output_proc = False
+
+        if speculative_config:
+            logger.warning("Async output processing is not supported with"
+                           " speculative decoding currently.")
+            self.use_async_output_proc = False
 
     def verify_with_parallel_config(
         self,
@@ -290,8 +400,14 @@ class ModelConfig:
                 "BitAndBytes quantization with TP or PP is not supported yet.")
 
         if self.quantization == "bitsandbytes" and self.enforce_eager is False:
-            raise ValueError(
-                "BitAndBytes with enforce_eager = False is not supported yet.")
+            logger.warning("CUDA graph is not supported on BitAndBytes yet, "
+                           "fallback to the eager mode.")
+            self.enforce_eager = True
+
+        if pipeline_parallel_size > 1 and self.use_async_output_proc:
+            logger.warning("Async output processor is not supported with "
+                           "pipeline parallelism currently. Disabling it.")
+            self.use_async_output_proc = False
 
     def get_hf_config_sliding_window(self) -> Optional[int]:
         """Get the sliding window size, or None if disabled."""
@@ -425,6 +541,28 @@ class ModelConfig:
             if t != "attention"
         ])
 
+    def get_multimodal_config(self) -> "MultiModalConfig":
+        """
+        Get the multimodal configuration of the model.
+
+        Raises:
+            ValueError: If the model is not multimodal.
+        """
+        if self.multimodal_config is None:
+            raise ValueError("The model is not multimodal.")
+
+        return self.multimodal_config
+
+    @property
+    def is_encoder_decoder_model(self) -> bool:
+        """Extract the HF encoder/decoder model flag."""
+        return getattr(self.hf_config, "is_encoder_decoder", False)
+
+    @property
+    def is_embedding_model(self) -> bool:
+        """Extract the embedding model flag."""
+        return self.embedding_mode
+
 
 class CacheConfig:
     """Configuration for the KV cache.
@@ -443,7 +581,7 @@ class CacheConfig:
         self,
         block_size: int,
         gpu_memory_utilization: float,
-        swap_space: int,
+        swap_space: float,
         cache_dtype: str,
         num_gpu_blocks_override: Optional[int] = None,
         sliding_window: Optional[int] = None,
@@ -452,7 +590,7 @@ class CacheConfig:
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
-        self.swap_space_bytes = swap_space * _GB
+        self.swap_space_bytes = swap_space * GiB_bytes
         self.num_gpu_blocks_override = num_gpu_blocks_override
         self.cache_dtype = cache_dtype
         self.sliding_window = sliding_window
@@ -497,10 +635,6 @@ class CacheConfig:
             raise NotImplementedError(
                 "Prefix caching is not supported with sliding window. "
                 "Run with --disable-sliding-window to use prefix caching.")
-        if self.cache_dtype == "fp8":
-            raise NotImplementedError(
-                "Prefix caching is not supported for fp8 cache_dtype. "
-                "Run with --kv-cache-dtype auto to use prefix caching.")
 
     def verify_with_parallel_config(
         self,
@@ -512,9 +646,9 @@ class CacheConfig:
         num_gpus_per_node = parallel_config.tensor_parallel_size
         cpu_memory_usage = self.swap_space_bytes * num_gpus_per_node
 
-        msg = (f"{cpu_memory_usage / _GB:.2f} GiB out of "
-               f"the {total_cpu_memory / _GB:.2f} GiB total CPU memory is "
-               "allocated for the swap space.")
+        msg = (f"{cpu_memory_usage / GiB_bytes:.2f} GiB out of the "
+               f"{total_cpu_memory / GiB_bytes:.2f} GiB total CPU memory "
+               "is allocated for the swap space.")
         if cpu_memory_usage > 0.7 * total_cpu_memory:
             raise ValueError("Too large swap space. " + msg)
         elif cpu_memory_usage > 0.4 * total_cpu_memory:
@@ -693,8 +827,8 @@ class ParallelConfig:
         self.tokenizer_pool_config = tokenizer_pool_config
         self.ray_workers_use_nsight = ray_workers_use_nsight
         self.placement_group = placement_group
-
         self.world_size = pipeline_parallel_size * self.tensor_parallel_size
+
         if worker_use_ray:
             if self.distributed_executor_backend is None:
                 self.distributed_executor_backend = "ray"
@@ -790,6 +924,11 @@ class SchedulerConfig:
             swapping. However, when the sequence group has multiple sequences
             (e.g., beam search), recomputation is not currently supported. In
             such a case, we use swapping instead.
+        send_delta_data: Private API. If used, scheduler sends delta data to
+            workers instead of an entire data. It should be enabled only
+            when SPMD worker architecture is enabled. I.e.,
+            VLLM_USE_RAY_SPMD_WORKER=1
+
     """
 
     def __init__(self,
@@ -801,7 +940,9 @@ class SchedulerConfig:
                  delay_factor: float = 0.0,
                  enable_chunked_prefill: bool = False,
                  embedding_mode: Optional[bool] = False,
-                 preemption_mode: Optional[str] = None) -> None:
+                 preemption_mode: Optional[str] = None,
+                 num_scheduler_steps: int = 1,
+                 send_delta_data: bool = False) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
         else:
@@ -830,6 +971,8 @@ class SchedulerConfig:
         self.chunked_prefill_enabled = enable_chunked_prefill
         self.embedding_mode = embedding_mode
         self.preemption_mode = preemption_mode
+        self.num_scheduler_steps = num_scheduler_steps
+        self.send_delta_data = send_delta_data
         self._verify_args()
 
     def _verify_args(self) -> None:
@@ -855,6 +998,16 @@ class SchedulerConfig:
                 f"({self.num_lookahead_slots}) must be greater than or "
                 "equal to 0.")
 
+        if self.num_scheduler_steps < 1:
+            raise ValueError(
+                "num_scheduler_steps "
+                f"({self.num_scheduler_steps}) must be greater than or "
+                "equal to 1.")
+
+    @property
+    def is_multi_step(self) -> bool:
+        return self.num_scheduler_steps > 1
+
 
 class DeviceConfig:
     device: Optional[torch.device]
@@ -866,7 +1019,7 @@ class DeviceConfig:
                 self.device_type = "neuron"
             elif is_openvino():
                 self.device_type = "openvino"
-            elif is_tpu():
+            elif current_platform.is_tpu():
                 self.device_type = "tpu"
             elif is_cpu():
                 self.device_type = "cpu"
@@ -903,6 +1056,7 @@ class SpeculativeConfig:
         target_parallel_config: ParallelConfig,
         target_dtype: str,
         speculative_model: Optional[str],
+        speculative_model_quantization: Optional[str],
         speculative_draft_tensor_parallel_size: Optional[int],
         num_speculative_tokens: Optional[int],
         speculative_max_model_len: Optional[int],
@@ -931,6 +1085,9 @@ class SpeculativeConfig:
             target_dtype (str): The data type used for the target model.
             speculative_model (Optional[str]): The name of the speculative
                 model, if provided.
+            speculative_model_quantization (Optional[str]): Quantization method
+                that was used to quantize the speculative model weights. If
+                None, we assume the model weights are not quantized.
             speculative_draft_tensor_parallel_size (Optional[int]): The degree
                 of the tensor parallelism for the draft model.
             num_speculative_tokens (Optional[int]): The number of speculative
@@ -998,11 +1155,11 @@ class SpeculativeConfig:
                 "Speculative decoding requires usage of the V2 "
                 "block manager. Enable it with --use-v2-block-manager.")
 
-        # TODO: The user should be able to specify revision/quantization/max
-        # model len for the draft model. It is not currently supported.
+        # TODO: The user should be able to specify revision/max model len
+        # for the draft model. It is not currently supported.
         draft_revision = None
         draft_code_revision = None
-        draft_quantization = None
+        draft_quantization = speculative_model_quantization
 
         if speculative_model == "[ngram]":
             if ngram_prompt_lookup_min is None:
@@ -1034,6 +1191,7 @@ class SpeculativeConfig:
                 code_revision=draft_code_revision,
                 tokenizer_revision=target_model_config.tokenizer_revision,
                 max_model_len=None,
+                spec_target_max_model_len=target_model_config.max_model_len,
                 quantization=draft_quantization,
                 enforce_eager=target_model_config.enforce_eager,
                 max_seq_len_to_capture=target_model_config.
@@ -1159,7 +1317,7 @@ class SpeculativeConfig:
         elif speculative_draft_tensor_parallel_size != 1:
             # TODO(wooyeon): allow tp values larger than 1
             raise ValueError(
-                f"{speculative_draft_tensor_parallel_size=} cannot be"
+                f"{speculative_draft_tensor_parallel_size=} cannot be "
                 f"other value than 1")
 
         draft_parallel_config = ParallelConfig(
@@ -1345,11 +1503,6 @@ class LoRAConfig:
                            model_config.quantization)
 
     def verify_with_scheduler_config(self, scheduler_config: SchedulerConfig):
-        if scheduler_config.max_num_batched_tokens > 65528:
-            raise ValueError(
-                "Due to limitations of the custom LoRA CUDA kernel, "
-                "max_num_batched_tokens must be <= 65528 when "
-                "LoRA is enabled.")
         if scheduler_config.chunked_prefill_enabled:
             raise ValueError("LoRA is not supported with chunked prefill yet.")
 
@@ -1389,10 +1542,15 @@ class PromptAdapterConfig:
 
 @dataclass
 class MultiModalConfig:
-    """Configs the input data format and how models should run for
-    multimodal models."""
+    """Controls the behavior of multimodal models."""
+
+    limit_per_prompt: Mapping[str, int] = field(default_factory=dict)
+    """
+    The maximum number of multi-modal input instances allowed per prompt
+    for each :class:`~vllm.multimodal.MultiModalPlugin`.
+    """
+
     # TODO: Add configs to init vision tower or not.
-    pass
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
@@ -1463,6 +1621,7 @@ def _get_and_verify_max_len(
     max_model_len: Optional[int],
     disable_sliding_window: bool,
     sliding_window_len: Optional[int],
+    spec_target_max_model_len: Optional[int] = None,
 ) -> int:
     """Get and verify the model's maximum length."""
     derived_max_model_len = float("inf")
@@ -1504,6 +1663,11 @@ def _get_and_verify_max_len(
         if max_model_len is not None:
             # If max_model_len is specified, we use it.
             return max_model_len
+
+        if spec_target_max_model_len is not None:
+            # If this is a speculative draft model, we use the max model len
+            # from the target model.
+            return spec_target_max_model_len
 
         default_max_len = 2048
         logger.warning(
@@ -1612,10 +1776,27 @@ class ObservabilityConfig:
     """Configuration for observability."""
     otlp_traces_endpoint: Optional[str] = None
 
+    # Collecting detailed timing information for each request can be expensive.
+
+    # If set, collects the model forward time for the request.
+    collect_model_forward_time: bool = False
+
+    # If set, collects the model execute time for the request.
+    collect_model_execute_time: bool = False
+
     def __post_init__(self):
-        if not is_otel_installed() and self.otlp_traces_endpoint is not None:
-            raise ValueError("OpenTelemetry packages must be installed before "
-                             "configuring 'otlp_traces_endpoint'")
+        if not is_otel_available() and self.otlp_traces_endpoint is not None:
+            raise ValueError(
+                "OpenTelemetry is not available. Unable to configure "
+                "'otlp_traces_endpoint'. Ensure OpenTelemetry packages are "
+                f"installed. Original error:\n{otel_import_error_traceback}")
+
+        if ((self.collect_model_forward_time
+             or self.collect_model_execute_time)
+                and self.otlp_traces_endpoint is None):
+            raise ValueError(
+                "collect_model_forward_time or collect_model_execute_time "
+                "requires --otlp-traces-endpoint to be set.")
 
 
 @dataclass(frozen=True)
@@ -1631,7 +1812,6 @@ class EngineConfig:
     device_config: DeviceConfig
     load_config: LoadConfig
     lora_config: Optional[LoRAConfig]
-    multimodal_config: Optional[MultiModalConfig]
     speculative_config: Optional[SpeculativeConfig]
     decoding_config: Optional[DecodingConfig]
     observability_config: Optional[ObservabilityConfig]
@@ -1640,6 +1820,9 @@ class EngineConfig:
     def __post_init__(self):
         """Verify configs are valid & consistent with each other.
         """
+        self.model_config.verify_async_output_proc(self.parallel_config,
+                                                   self.speculative_config,
+                                                   self.device_config)
         self.model_config.verify_with_parallel_config(self.parallel_config)
         self.cache_config.verify_with_parallel_config(self.parallel_config)
 

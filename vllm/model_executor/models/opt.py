@@ -36,7 +36,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
+    ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
@@ -307,7 +307,11 @@ class OPTForCausalLM(nn.Module):
         self.config = config
         self.quant_config = quant_config
         self.model = OPTModel(config, cache_config, quant_config)
-        self.lm_head = self.model.decoder.embed_tokens
+        if self.config.tie_word_embeddings:
+            self.lm_head = self.model.decoder.embed_tokens
+        else:
+            self.lm_head = ParallelLMHead(config.vocab_size,
+                                          config.word_embed_proj_dim)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
@@ -323,8 +327,11 @@ class OPTForCausalLM(nn.Module):
                                    attn_metadata)
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits

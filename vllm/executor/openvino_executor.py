@@ -10,8 +10,8 @@ from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
-from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
-                        make_async)
+from vllm.utils import (GiB_bytes, get_distributed_init_method, get_ip,
+                        get_open_port, make_async)
 
 logger = init_logger(__name__)
 
@@ -49,7 +49,6 @@ class OpenVINOExecutor(ExecutorBase):
             rank=0,
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
-            multimodal_config=self.multimodal_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=True,
         )
@@ -165,14 +164,13 @@ def _verify_and_get_cache_config(config: CacheConfig) -> CacheConfig:
 
     kv_cache_space = envs.VLLM_OPENVINO_KVCACHE_SPACE
     if kv_cache_space >= 0:
-        _GB = 1 << 30
         if kv_cache_space == 0:
-            config.openvino_kvcache_space_bytes = 4 * _GB  # type: ignore
+            config.openvino_kvcache_space_bytes = 4 * GiB_bytes  # type: ignore
             logger.warning(
                 "Environment variable VLLM_OPENVINO_KVCACHE_SPACE (GB) "
                 "for OpenVINO backend is not set, using 4 by default.")
         else:
-            config.openvino_kvcache_space_bytes = kv_cache_space * _GB  # type: ignore
+            config.openvino_kvcache_space_bytes = kv_cache_space * GiB_bytes  # type: ignore
     else:
         raise RuntimeError(
             "Invalid environment variable VLLM_OPENVINO_KVCACHE_SPACE"

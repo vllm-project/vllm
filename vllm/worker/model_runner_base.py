@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
     from vllm.model_executor import SamplingMetadata
 
-T = TypeVar('T', bound="ModelRunnerInputBase")
+T = TypeVar('T', bound="BroadcastableModelInput")
 
 
 def _add_attn_metadata_broadcastable_dict(
@@ -81,18 +81,26 @@ def _add_sampling_metadata_broadcastable_dict(
             sampling_metadata.selected_token_indices)
 
 
-@dataclasses.dataclass(frozen=True)
-class ModelRunnerInputBase(ABC):
-    """Local inputs to each worker's model runner. May contain
-    device-specific data. Different worker backends may have different methods
-    of converting from the global ExecuteModelRequest produced by the LLM
-    engine to the worker-local ModelRunnerInputBase objects.
-
-    Model runners that support multi-GPU execution should define a
-    ModelRunnerInputBase subclass, add their required fields, and specify how to
-    serialize/deserialize a ModelInput for broadcast between workers.
+def _init_frozen_model_input_from_tensor_dict(
+        frozen_model_input_cls: Type["ModelRunnerInputBase"],
+        tensor_dict: Dict[str, Any]) -> Dict[str, Any]:
     """
+    Helper method to initialize a frozen ModelInput based on broadcastable
+    """
+    valid_tensor_kwargs = {}
+    for field in dataclasses.fields(frozen_model_input_cls):
+        val = tensor_dict.pop(field.name, None)
+        if val is not None:
+            valid_tensor_kwargs[field.name] = val
 
+    frozen_model_input = frozen_model_input_cls(**valid_tensor_kwargs)
+    tensor_dict["frozen_model_input"] = frozen_model_input
+    return tensor_dict
+
+
+class BroadcastableModelInput(ABC):
+
+    @abstractmethod
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         """
         Extract broadcastable fields. Override for fields that require some
@@ -109,9 +117,23 @@ class ModelRunnerInputBase(ABC):
     ) -> T:
         """
         Pop fields from the given tensor_dict and populate a new instance of
-        ModelRunnerInputBase.
+        BroadcastableModelInput.
         """
         raise NotImplementedError
+
+
+@dataclasses.dataclass(frozen=True)
+class ModelRunnerInputBase(BroadcastableModelInput):
+    """Local inputs to each worker's model runner. May contain
+    device-specific data. Different worker backends may have different methods
+    of converting from the global ExecuteModelRequest produced by the LLM
+    engine to the worker-local ModelRunnerInputBase objects.
+
+    Model runners that support multi-GPU execution should define a
+    ModelRunnerInputBase subclass, add their required fields, and specify how to
+    serialize/deserialize a ModelInput for broadcast between workers.
+    """
+    pass
 
 
 class ModelRunnerInputBuilderBase(ABC, Generic[T]):

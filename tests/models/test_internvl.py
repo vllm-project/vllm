@@ -1,10 +1,10 @@
 import types
-from typing import List, Optional, Type
+from typing import List, Optional, Tuple, Type
 
 import pytest
 import torch
-from huggingface_hub import snapshot_download
 from PIL.Image import Image
+from transformers import AutoConfig
 
 from vllm.model_executor.models.internvl import (IMG_CONTEXT, IMG_END,
                                                  IMG_START,
@@ -24,12 +24,12 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "<|im_start|>User\n<image>\nWhat is the season?<|im_end|>\n<|im_start|>Assistant\n",  # noqa: E501
 })
 
-# we use snapshot_download to prevent conflicts between
-# dynamic_module and trust_remote_code for hf_runner
 models = [
-    snapshot_download("OpenGVLab/InternVL2-1B"),
-    snapshot_download("OpenGVLab/InternVL2-2B"),
-    # snapshot_download("OpenGVLab/InternVL2-4B"),  # broken
+    "OpenGVLab/InternVL2-1B",
+    "OpenGVLab/InternVL2-2B",
+    # Broken due to outdated implementation of Phi-3
+    # See: https://huggingface.co/OpenGVLab/InternVL2-4B/discussions/3
+    # "OpenGVLab/InternVL2-4B",
 ]
 
 
@@ -41,8 +41,17 @@ class InternVLProcessor:
         self.tokenizer = hf_runner.tokenizer
         self.dtype = hf_runner.model.dtype
 
+        self.config = AutoConfig.from_pretrained(hf_runner.model_name)
+        self.vision_config = self.config.vision_config
+        self.use_thumbnail = self.config.use_thumbnail
+        self.min_num = self.config.min_dynamic_patch
+        self.max_num = self.config.max_dynamic_patch
+        self.image_size = self.vision_config.image_size
+
     def __call__(self, text: str, images: Image, **kwargs):
-        pixel_values = image_to_pixel_values(images).to(self.dtype)
+        pixel_values = image_to_pixel_values(images, self.image_size,
+                                             self.min_num, self.max_num,
+                                             self.use_thumbnail).to(self.dtype)
         num_patches_list = [pixel_values.shape[0]]
         for num_patches in num_patches_list:
             context_tokens = IMG_CONTEXT * self.num_image_token * num_patches
@@ -102,7 +111,7 @@ def run_test(
     All the image fixtures for the test is under tests/images.
     For huggingface runner, we provide the PIL images as input.
     For vllm runner, we provide MultiModalDataDict objects 
-    and corresponding vision language config as input.
+    and corresponding MultiModalConfig as input.
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """
@@ -163,6 +172,74 @@ def run_test(
         )
 
 
+def run_awq_test(
+    vllm_runner: Type[VllmRunner],
+    image_assets: _ImageAssets,
+    models: Tuple[str, str],
+    *,
+    size_factors: List[float],
+    dtype: str,
+    max_tokens: int,
+    num_logprobs: int,
+    tensor_parallel_size: int,
+    distributed_executor_backend: Optional[str] = None,
+):
+    source_model, quant_model = models
+
+    images = [asset.pil_image for asset in image_assets]
+
+    inputs_per_image = [(
+        [prompt for _ in size_factors],
+        [rescale_image_size(image, factor) for factor in size_factors],
+    ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
+
+    # NOTE: take care of the order. run vLLM first, and then run HF.
+    # vLLM needs a fresh new process without cuda initialization.
+    # if we run HF first, the cuda initialization will be done and it
+    # will hurt multiprocessing backend with fork method (the default method).
+
+    # max_model_len should be greater than image_feature_size
+    with vllm_runner(source_model,
+                     max_model_len=4096,
+                     dtype=dtype,
+                     tensor_parallel_size=tensor_parallel_size,
+                     distributed_executor_backend=distributed_executor_backend,
+                     enforce_eager=True) as vllm_model:
+        source_outputs_per_image = [
+            vllm_model.generate_greedy_logprobs(prompts,
+                                                max_tokens,
+                                                num_logprobs=num_logprobs,
+                                                images=images)
+            for prompts, images in inputs_per_image
+        ]
+
+    with vllm_runner(quant_model,
+                     quantization="awq",
+                     max_model_len=4096,
+                     dtype=dtype,
+                     tensor_parallel_size=tensor_parallel_size,
+                     distributed_executor_backend=distributed_executor_backend,
+                     enforce_eager=True) as vllm_model:
+        quant_outputs_per_image = [
+            vllm_model.generate_greedy_logprobs(prompts,
+                                                max_tokens,
+                                                num_logprobs=num_logprobs,
+                                                images=images)
+            for prompts, images in inputs_per_image
+        ]
+
+    for source_outputs, quant_outputs in zip(source_outputs_per_image,
+                                             quant_outputs_per_image):
+        # TODO: Check whether using original CLIPVisionModel can improve
+        # consistency against HF
+        check_logprobs_close(
+            outputs_0_lst=source_outputs,
+            outputs_1_lst=quant_outputs,
+            name_0="source",
+            name_1="awq",
+        )
+
+
 target_dtype = "half"
 if is_cpu():
     target_dtype = "bfloat16"
@@ -193,6 +270,39 @@ def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
         vllm_runner,
         image_assets,
         model,
+        size_factors=size_factors,
+        dtype=dtype,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        tensor_parallel_size=1,
+    )
+
+
+@pytest.mark.parametrize(
+    "models", [("OpenGVLab/InternVL2-2B", "OpenGVLab/InternVL2-2B-AWQ")])
+@pytest.mark.parametrize(
+    "size_factors",
+    [
+        # No image
+        [],
+        # Single-scale
+        [1.0],
+        # Single-scale, batched
+        [1.0, 1.0, 1.0],
+        # Multi-scale
+        [0.25, 0.5, 1.0],
+    ],
+)
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("num_logprobs", [5])
+@torch.inference_mode()
+def test_awq_models(vllm_runner, image_assets, models, size_factors,
+                    dtype: str, max_tokens: int, num_logprobs: int) -> None:
+    run_awq_test(
+        vllm_runner,
+        image_assets,
+        models,
         size_factors=size_factors,
         dtype=dtype,
         max_tokens=max_tokens,

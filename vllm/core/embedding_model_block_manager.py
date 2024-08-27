@@ -2,6 +2,7 @@ from typing import List, Tuple
 
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.sequence import Sequence, SequenceGroup
+from vllm.utils import Device
 
 
 class EmbeddingModelBlockSpaceManager(BlockSpaceManager):
@@ -81,3 +82,6 @@ class EmbeddingModelBlockSpaceManager(BlockSpaceManager):
 
     def mark_blocks_as_computed(self, seq_group: SequenceGroup):
         pass
+
+    def get_prefix_cache_hit_rate(self, device: Device) -> float:
+        return -1

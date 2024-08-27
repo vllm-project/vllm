@@ -1,11 +1,12 @@
 # imports for guided decoding tests
 import json
 import re
-from typing import List
+from typing import Dict, List, Optional
 
 import jsonschema
 import openai  # use the official client for correctness check
 import pytest
+import pytest_asyncio
 import torch
 from openai import BadRequestError
 
@@ -46,9 +47,10 @@ def server(zephyr_lora_files, zephyr_lora_added_tokens_files):  # noqa: F811
         yield remote_server
 
 
-@pytest.fixture(scope="module")
-def client(server):
-    return server.get_async_client()
+@pytest_asyncio.fixture
+async def client(server):
+    async with server.get_async_client() as async_client:
+        yield async_client
 
 
 @pytest.mark.asyncio
@@ -172,6 +174,88 @@ async def test_too_many_chat_logprobs(client: openai.AsyncOpenAI,
                                                            stream=False)
     message = chat_completion.choices[0].message
     assert message.content is not None and len(message.content) >= 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name, prompt_logprobs",
+    [(MODEL_NAME, 1), (MODEL_NAME, 0), (MODEL_NAME, -1), (MODEL_NAME, None)],
+)
+async def test_prompt_logprobs_chat(client: openai.AsyncOpenAI,
+                                    model_name: str,
+                                    prompt_logprobs: Optional[int]):
+    params: Dict = {
+        "messages": [{
+            "role": "system",
+            "content": "You are a helpful assistant."
+        }, {
+            "role": "user",
+            "content": "Who won the world series in 2020?"
+        }, {
+            "role":
+            "assistant",
+            "content":
+            "The Los Angeles Dodgers won the World Series in 2020."
+        }, {
+            "role": "user",
+            "content": "Where was it played?"
+        }],
+        "model":
+        model_name
+    }
+
+    if prompt_logprobs is not None:
+        params["extra_body"] = {"prompt_logprobs": prompt_logprobs}
+
+    if prompt_logprobs is not None and prompt_logprobs < 0:
+        with pytest.raises(BadRequestError):
+            await client.chat.completions.create(**params)
+    else:
+        completion = await client.chat.completions.create(**params)
+        if prompt_logprobs is not None:
+            assert completion.prompt_logprobs is not None
+            assert len(completion.prompt_logprobs) > 0
+        else:
+            assert completion.prompt_logprobs is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME],
+)
+async def test_more_than_one_prompt_logprobs_chat(client: openai.AsyncOpenAI,
+                                                  model_name: str):
+    params: Dict = {
+        "messages": [{
+            "role": "system",
+            "content": "You are a helpful assistant."
+        }, {
+            "role": "user",
+            "content": "Who won the world series in 2020?"
+        }, {
+            "role":
+            "assistant",
+            "content":
+            "The Los Angeles Dodgers won the World Series in 2020."
+        }, {
+            "role": "user",
+            "content": "Where was it played?"
+        }],
+        "model":
+        model_name,
+        "extra_body": {
+            "prompt_logprobs": 1
+        }
+    }
+
+    completion_1 = await client.chat.completions.create(**params)
+
+    params["extra_body"] = {"prompt_logprobs": 2}
+    completion_2 = await client.chat.completions.create(**params)
+
+    assert len(completion_1.prompt_logprobs[3]) == 1
+    assert len(completion_2.prompt_logprobs[3]) == 2
 
 
 @pytest.mark.asyncio
@@ -747,6 +831,39 @@ async def test_response_format_json_object(client: openai.AsyncOpenAI):
                             'the format is {"result": 2}')
             }],
             response_format={"type": "json_object"})
+
+        content = resp.choices[0].message.content
+        assert content is not None
+
+        loaded = json.loads(content)
+        assert loaded == {"result": 2}, loaded
+
+
+@pytest.mark.asyncio
+async def test_response_format_json_schema(client: openai.AsyncOpenAI):
+    for _ in range(2):
+        resp = await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{
+                "role":
+                "user",
+                "content": ('what is 1+1? please respond with a JSON object, '
+                            'the format is {"result": 2}')
+            }],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "foo_test",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "result": {
+                                "type": "integer"
+                            },
+                        },
+                    },
+                }
+            })
 
         content = resp.choices[0].message.content
         assert content is not None

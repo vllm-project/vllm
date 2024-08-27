@@ -1,13 +1,12 @@
 from abc import ABC, abstractmethod
 from typing import Callable, List
 
-from transformers import PreTrainedTokenizer
-
 from vllm.config import SchedulerConfig
 from vllm.core.scheduler import Scheduler
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.sequence import Sequence, SequenceGroup, SequenceGroupOutput
 from vllm.transformers_utils.detokenizer import Detokenizer
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import Counter
 
 
@@ -29,7 +28,7 @@ class SequenceGroupOutputProcessor(ABC):
         detokenizer: Detokenizer,
         scheduler: List[Scheduler],
         seq_counter: Counter,
-        get_tokenizer_for_seq: Callable[[Sequence], PreTrainedTokenizer],
+        get_tokenizer_for_seq: Callable[[Sequence], AnyTokenizer],
         stop_checker: "StopChecker",
     ):
         """Create an output processor.
@@ -41,13 +40,9 @@ class SequenceGroupOutputProcessor(ABC):
             # Importing here to avoid cycle.
             from vllm.engine.output_processor.single_step import (
                 SingleStepOutputProcessor)
-            return SingleStepOutputProcessor(
-                scheduler_config,
-                detokenizer,
-                scheduler,
-                seq_counter,
-                stop_checker,
-            )
+            return SingleStepOutputProcessor(scheduler_config, detokenizer,
+                                             scheduler, seq_counter,
+                                             stop_checker)
         else:
             # Importing here to avoid cycle.
             from vllm.engine.output_processor.multi_step import (
@@ -62,7 +57,8 @@ class SequenceGroupOutputProcessor(ABC):
 
     @abstractmethod
     def process_outputs(self, sequence_group: SequenceGroup,
-                        outputs: List[SequenceGroupOutput]) -> None:
+                        outputs: List[SequenceGroupOutput],
+                        is_async: bool) -> None:
         """Process new token ids for the sequence group. Handles logic such as
         detokenization, stop checking, and freeing/forking sequences in the
         scheduler.

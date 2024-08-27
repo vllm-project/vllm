@@ -25,13 +25,11 @@ from typing import Iterable, List, Optional, Set, Tuple
 import torch
 import torch.utils.checkpoint
 from torch import nn
-from torch.nn.parameter import Parameter
 from transformers import CohereConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
-from vllm.distributed import (get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size)
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
@@ -43,7 +41,8 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader, row_parallel_weight_loader)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors, SamplerOutput
@@ -67,24 +66,13 @@ class LayerNorm(nn.Module):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(param_shape))
         self.variance_epsilon = eps
-        set_weight_attrs(self.weight, {"weight_loader": self.weight_loader})
+        set_weight_attrs(self.weight,
+                         {"weight_loader": row_parallel_weight_loader})
 
     def forward(self, hidden_states, residuals=None):
         hidden_states = layer_norm_func(hidden_states, self.weight,
                                         self.variance_epsilon)
         return hidden_states, residuals
-
-    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        tp_rank = get_tensor_model_parallel_rank()
-        shard_dim = 0 if param.dim() != 1 else None
-        param_data = param.data
-        if shard_dim is not None:
-            shard_size = param_data.shape[shard_dim]
-            start_idx = tp_rank * shard_size
-            loaded_weight = loaded_weight.narrow(shard_dim, start_idx,
-                                                 shard_size)
-        assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
 
 
 # Copied from transformers.models.llama.modeling_llama.LlamaMLP Llama->Cohere
@@ -333,6 +321,9 @@ class CohereForCausalLM(nn.Module):
     ) -> None:
         super().__init__()
         self.config = config
+        # currently all existing command R models have `tie_word_embeddings`
+        # enabled
+        assert config.tie_word_embeddings
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
@@ -359,8 +350,11 @@ class CohereForCausalLM(nn.Module):
                                    attn_metadata)
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
         is_not_lora = hasattr(self.model.embed_tokens, 'weight')
         if is_not_lora:
             logits = self.logits_processor(self.model.embed_tokens,

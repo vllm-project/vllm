@@ -362,6 +362,9 @@ class DbrxForCausalLM(nn.Module):
     ):
         super().__init__()
         self.config = config
+        if config.tie_word_embeddings:
+            raise ValueError(
+                "tie_word_embeddings is not supported for Dbrx models.")
         self.quant_config = quant_config
         self.unpadded_vocab_size = config.vocab_size
         self.transformer = DbrxModel(config, cache_config, quant_config)
@@ -388,8 +391,11 @@ class DbrxForCausalLM(nn.Module):
                                          attn_metadata)
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits

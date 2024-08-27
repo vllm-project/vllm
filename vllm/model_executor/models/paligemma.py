@@ -1,4 +1,5 @@
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
+from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
+                    TypedDict, Union)
 
 import torch
 from torch import nn
@@ -9,26 +10,44 @@ from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.gemma import GemmaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import cached_get_tokenizer
+from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
-from .interfaces import SupportsVision
+from .interfaces import SupportsMultiModal
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_max_siglip_image_tokens)
-from .utils import merge_vision_embeddings
+from .utils import merge_multimodal_embeddings
 
 logger = init_logger(__name__)
 
 _KEYS_TO_MODIFY_MAPPING = {
     "language_model.model": "language_model",
 }
+
+
+class PaliGemmaImagePixelInputs(TypedDict):
+    type: Literal["pixel_values"]
+    data: torch.Tensor
+    """Shape: (batch_size, num_channels, height, width)"""
+
+
+class PaliGemmaImageEmbeddingInputs(TypedDict):
+    type: Literal["image_embeds"]
+    data: torch.Tensor
+    """Shape: `(batch_size, image_feature_size, hidden_size)`
+
+    `hidden_size` must match the hidden size of language model backbone.
+    """
+
+
+PaliGemmaImageInputs = Union[PaliGemmaImagePixelInputs,
+                             PaliGemmaImageEmbeddingInputs]
 
 
 def get_max_paligemma_image_tokens(ctx: InputContext):
@@ -38,17 +57,20 @@ def get_max_paligemma_image_tokens(ctx: InputContext):
     return get_max_siglip_image_tokens(vision_config)
 
 
-def dummy_data_for_paligemma(ctx: InputContext, seq_len: int):
+def dummy_data_for_paligemma(ctx: InputContext, seq_len: int,
+                             mm_counts: Mapping[str, int]):
     hf_config = ctx.get_hf_config(PaliGemmaConfig)
     vision_config = hf_config.vision_config
+    num_images = mm_counts["image"]
 
     seq_data = dummy_seq_data_for_siglip(
         vision_config,
         seq_len,
+        num_images,
         image_token_id=hf_config.image_token_index,
     )
 
-    mm_data = dummy_image_for_siglip(vision_config)
+    mm_data = dummy_image_for_siglip(vision_config, num_images)
     return seq_data, mm_data
 
 
@@ -107,20 +129,11 @@ class PaliGemmaMultiModalProjector(nn.Module):
         return hidden_states
 
 
-class PaliGemmaImagePixelInputs(TypedDict):
-    type: Literal["pixel_values"]
-    data: torch.Tensor
-    """Shape: (batch_size, num_channels, height, width)"""
-
-
-PaliGemmaImageInputs = PaliGemmaImagePixelInputs
-
-
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_paligemma_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_paligemma)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_paligemma)
-class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
+class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def __init__(self,
                  config: PaliGemmaConfig,
@@ -163,18 +176,30 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[PaliGemmaImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
+        image_embeds = kwargs.pop("image_embeds", None)
 
-        if pixel_values is None:
+        if pixel_values is None and image_embeds is None:
             return None
 
-        if not isinstance(pixel_values, torch.Tensor):
-            raise ValueError("Incorrect type of pixel values. "
-                             f"Got type: {type(pixel_values)}")
+        if pixel_values is not None:
+            if not isinstance(pixel_values, torch.Tensor):
+                raise ValueError("Incorrect type of pixel values. "
+                                 f"Got type: {type(pixel_values)}")
+            return PaliGemmaImagePixelInputs(
+                type="pixel_values",
+                data=self._validate_pixel_values(pixel_values),
+            )
 
-        return PaliGemmaImagePixelInputs(
-            type="pixel_values",
-            data=self._validate_pixel_values(pixel_values),
-        )
+        if image_embeds is not None:
+            if not isinstance(image_embeds, torch.Tensor):
+                raise ValueError("Incorrect type of image embeddings. "
+                                 f"Got type: {type(image_embeds)}")
+            return PaliGemmaImageEmbeddingInputs(
+                type="image_embeds",
+                data=image_embeds,
+            )
+
+        raise AssertionError("This line should be unreachable.")
 
     def _image_pixels_to_features(
         self,
@@ -187,26 +212,20 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
 
         return image_features
 
-    def _process_image_pixels(
-        self,
-        inputs: PaliGemmaImagePixelInputs,
-    ) -> torch.Tensor:
-        assert self.vision_tower is not None
-
-        pixel_values = inputs["data"]
-
-        return self._image_pixels_to_features(
-            self.vision_tower,
-            pixel_values,
-        )
-
     def _process_image_input(
         self,
         image_input: PaliGemmaImageInputs,
     ) -> torch.Tensor:
 
+        if image_input["type"] == "image_embeds":
+            return image_input["data"]
+
         assert self.vision_tower is not None
-        image_features = self._process_image_pixels(image_input, )
+        pixel_values = image_input["data"]
+        image_features = self._image_pixels_to_features(
+            self.vision_tower,
+            pixel_values,
+        )
 
         return self.multi_modal_projector(image_features)
 
@@ -228,7 +247,7 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
 
             inputs_embeds = self.language_model.get_input_embeddings(input_ids)
 
-            inputs_embeds = merge_vision_embeddings(
+            inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, vision_embeddings,
                 self.config.image_token_index)
 
@@ -246,8 +265,11 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsVision):
         return hidden_states
 
     # Copied from vllm/model_executor/models/gemma.py
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.language_model.embed_tokens,
                                        hidden_states, sampling_metadata)
         return logits

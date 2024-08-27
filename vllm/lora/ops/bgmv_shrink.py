@@ -5,8 +5,6 @@ Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
-from typing import Dict, Optional
-
 import torch
 import triton
 import triton.language as tl
@@ -78,14 +76,13 @@ def _bgmv_shrink_kernel(
 
 
 @torch.inference_mode()
-def bgmv_shrink(
+def _bgmv_shrink(
     inputs: torch.Tensor,
     lora_a_weights: torch.Tensor,
     output_tensor: torch.Tensor,
     lora_indices_tensor: torch.Tensor,
     scaling: float = 1.0,
-    override_config: Optional[Dict[str, int]] = None,
-):
+) -> None:
     """
     Args:
         inputs (torch.Tensor): input tensor
@@ -96,8 +93,6 @@ def bgmv_shrink(
             applied.
         batches (int): batch size
         scaling (float):  Scaling factor.
-        override_config (Optional[Dict[str, int]], optional): Defaults to None. 
-            Triton grid config
     """
     assert inputs.dtype == lora_a_weights.dtype
     assert inputs.dtype in [torch.float16, torch.bfloat16]
@@ -119,11 +114,8 @@ def bgmv_shrink(
     batches = lora_indices_tensor.size(0)
     N, K = lora_a_weights.shape[-2:]  # K=hidden_size,N=rank
     BLOCK_N = triton.next_power_of_2(N)
-    if override_config:
-        config = override_config
-    else:
-        # First try to load optimal config from the file
-        config = get_lora_op_configs("bgmv_shrink", batches, K)
+    # First try to load optimal config from the file
+    config = get_lora_op_configs("bgmv_shrink", batches, K)
 
     grid = lambda META: (
         META["SPLIT_K"],
@@ -148,3 +140,8 @@ def bgmv_shrink(
         **config,
     )
     return
+
+
+bgmv_shrink = torch.library.custom_op("lora::bgmv_shrink",
+                                      _bgmv_shrink,
+                                      mutates_args=["output_tensor"])

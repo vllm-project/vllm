@@ -5,8 +5,6 @@ Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
-from typing import Dict, Optional
-
 import torch
 import triton
 import triton.language as tl
@@ -86,14 +84,13 @@ def _bgmv_expand_kernel(
 
 
 @torch.inference_mode()
-def bgmv_expand(
+def _bgmv_expand(
     inputs: torch.Tensor,
     lora_b_weights: torch.Tensor,
     output_tensor: torch.Tensor,
     lora_indices_tensor: torch.Tensor,
     add_inputs: bool = True,
-    override_config: Optional[Dict[str, int]] = None,
-):
+) -> None:
     """
     Args:
         inputs (torch.Tensor): input tensor
@@ -105,10 +102,7 @@ def bgmv_expand(
         batches (int): batch size
         add_inputs (bool, optional):  Defaults to False. adds the final lora 
             results to the output.
-        override_config (Optional[Dict[str, int]], optional): Defaults to None. 
-            Triton grid config
     """
-
     assert inputs.dtype in [torch.float16, torch.bfloat16, torch.float32]
     assert lora_b_weights.dtype in [
         torch.float16,
@@ -138,10 +132,7 @@ def bgmv_expand(
     ]:
         CAST_TYPE = True
     batches = lora_indices_tensor.size(0)
-    if override_config:
-        config = override_config
-    else:
-        config = get_lora_op_configs("expand", batches, N)
+    config = get_lora_op_configs("expand", batches, N)
     grid = lambda META: (
         META["SPLIT_N"],
         batches,
@@ -167,3 +158,8 @@ def bgmv_expand(
         **config,
     )
     return
+
+
+bgmv_expand = torch.library.custom_op("lora::bgmv_expand",
+                                      _bgmv_expand,
+                                      mutates_args=["output_tensor"])

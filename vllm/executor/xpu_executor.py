@@ -1,17 +1,17 @@
-from typing import List, Optional
+from typing import Callable, List, Optional, Tuple, Type, Union
 
 import torch
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, MultiModalConfig, ParallelConfig,
+                         ModelConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig)
 from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.logger import init_logger
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.sequence import ExecuteModelRequest, PoolerOutput, SamplerOutput
 from vllm.utils import make_async
-from vllm.worker.worker_base import WorkerWrapperBase
+from vllm.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
 
@@ -29,9 +29,9 @@ class XPUExecutor(GPUExecutor):
         device_config: DeviceConfig,
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
-        multimodal_config: Optional[MultiModalConfig],
         prompt_adapter_config: Optional[PromptAdapterConfig],
         speculative_config: Optional[SpeculativeConfig],
+        observability_config: Optional[ObservabilityConfig],
     ) -> None:
         assert device_config.device_type == "xpu"
         assert (not speculative_config
@@ -46,35 +46,27 @@ class XPUExecutor(GPUExecutor):
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
-        self.multimodal_config = multimodal_config
         self.prompt_adapter_config = prompt_adapter_config
         self.speculative_config = None
+        self.observability_config = observability_config
 
         # Instantiate the worker and load the model to GPU.
         self._init_executor()
 
-    def _create_worker(self,
-                       local_rank: int = 0,
-                       rank: int = 0,
-                       distributed_init_method: Optional[str] = None):
-        if self.speculative_config is None:
-            worker_module_name = "vllm.worker.xpu_worker"
-            worker_class_name = "XPUWorker"
-        else:
+    def _get_worker_module_and_class(
+            self) -> Tuple[str, str, Optional[Callable[[], Type[WorkerBase]]]]:
+        worker_class_fn = None
+        if self.speculative_config is not None:
             raise NotImplementedError(
                 "XPU does not support speculative decoding")
-
-        wrapper = WorkerWrapperBase(
-            worker_module_name=worker_module_name,
-            worker_class_name=worker_class_name,
-        )
-        wrapper.init_worker(**self._get_worker_kwargs(local_rank, rank,
-                                                      distributed_init_method))
-        return wrapper.worker
+        else:
+            worker_module_name = "vllm.worker.xpu_worker"
+            worker_class_name = "XPUWorker"
+        return (worker_module_name, worker_class_name, worker_class_fn)
 
     def execute_model(
-            self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+        self, execute_model_req: ExecuteModelRequest
+    ) -> Optional[List[Union[SamplerOutput, PoolerOutput]]]:
         output = self.driver_worker.execute_model(execute_model_req)
         return output
 

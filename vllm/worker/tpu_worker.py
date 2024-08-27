@@ -7,7 +7,7 @@ import torch_xla.runtime as xr
 
 import vllm.envs as envs
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
-                         MultiModalConfig, ParallelConfig, SchedulerConfig)
+                         ParallelConfig, SchedulerConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
@@ -31,7 +31,6 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         device_config: DeviceConfig,
         cache_config: CacheConfig,
         load_config: LoadConfig,
-        multimodal_config: Optional[MultiModalConfig],
         local_rank: int,
         rank: int,
         distributed_init_method: str,
@@ -44,7 +43,6 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         self.device_config = device_config
         self.cache_config = cache_config
         self.load_config = load_config
-        self.multimodal_config = multimodal_config
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
@@ -64,7 +62,6 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             device_config,
             cache_config,
             load_config,
-            multimodal_config,
             is_driver_worker=is_driver_worker)
 
     def init_device(self) -> None:
@@ -102,12 +99,12 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         # 30-40 graphs for decode. 128 is an arbitrary safe number.
         torch._dynamo.config.cache_size_limit = 128
         # Use persistent cache to avoid XLA recompilation.
-        # NOTE(woosuk): This does not completely eliminate the recompilation
-        # overhead because dynamo does not cache the compiled results.
-        # NOTE(woosuk): Set readonly=False only for the rank 0 process to avoid
-        # race conditions.
-        xr.initialize_cache(envs.VLLM_XLA_CACHE_PATH,
-                            readonly=not self.is_driver_worker)
+        # NOTE(woosuk): Set per-rank cache path since different ranks
+        # can have slightly different XLA graphs.
+        world_size = self.parallel_config.world_size
+        per_rank_path = os.path.join(envs.VLLM_XLA_CACHE_PATH,
+                                     f"tp{world_size}_rank{self.rank}")
+        xr.initialize_cache(per_rank_path, readonly=False)
 
     def load_model(self):
         self.model_runner.load_model()
@@ -143,9 +140,13 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         num_tpu_blocks = (num_tpu_blocks // 8) * 8  # Round down to 8.
 
         # Calculate the CPU KV cache size based on the config.
-        num_cpu_blocks = (self.cache_config.swap_space_bytes //
-                          block_size_bytes)
+        num_cpu_blocks = int(self.cache_config.swap_space_bytes //
+                             block_size_bytes)
         num_cpu_blocks = (num_cpu_blocks // 8) * 8  # Round down to 8.
+
+        # reset and discard the guard and compiled bytecode for profiling runs
+        torch._dynamo.reset()
+
         return num_tpu_blocks, num_cpu_blocks
 
     def initialize_cache(
@@ -274,7 +275,10 @@ def _make_src_to_dst(
     mapping: List[Tuple[int, int]],
     src_device: Union[torch.device, str],
     dst_device: Union[torch.device, str],
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+    if not mapping:
+        return None
+
     src_indices = [i for i, _ in mapping]
     dst_indices = [i for _, i in mapping]
     src_indices = torch.tensor(src_indices,

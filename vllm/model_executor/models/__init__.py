@@ -9,17 +9,12 @@ from vllm.utils import is_hip
 
 logger = init_logger(__name__)
 
-# Architecture -> (module, class).
 _GENERATION_MODELS = {
     "AquilaModel": ("llama", "LlamaForCausalLM"),
     "AquilaForCausalLM": ("llama", "LlamaForCausalLM"),  # AquilaChat2
     "BaiChuanForCausalLM": ("baichuan", "BaiChuanForCausalLM"),  # baichuan-7b
     "BaichuanForCausalLM": ("baichuan", "BaichuanForCausalLM"),  # baichuan-13b
     "BloomForCausalLM": ("bloom", "BloomForCausalLM"),
-    "Blip2ForConditionalGeneration":
-    ("blip2", "Blip2ForConditionalGeneration"),
-    "ChameleonForConditionalGeneration":
-    ("chameleon", "ChameleonForConditionalGeneration"),
     "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
     "ChatGLMForConditionalGeneration": ("chatglm", "ChatGLMForCausalLM"),
     "CohereForCausalLM": ("commandr", "CohereForCausalLM"),
@@ -28,7 +23,6 @@ _GENERATION_MODELS = {
     "DeepseekForCausalLM": ("deepseek", "DeepseekForCausalLM"),
     "DeepseekV2ForCausalLM": ("deepseek_v2", "DeepseekV2ForCausalLM"),
     "FalconForCausalLM": ("falcon", "FalconForCausalLM"),
-    "FuyuForCausalLM": ("fuyu", "FuyuForCausalLM"),
     "GemmaForCausalLM": ("gemma", "GemmaForCausalLM"),
     "Gemma2ForCausalLM": ("gemma2", "Gemma2ForCausalLM"),
     "GPT2LMHeadModel": ("gpt2", "GPT2LMHeadModel"),
@@ -37,13 +31,8 @@ _GENERATION_MODELS = {
     "GPTNeoXForCausalLM": ("gpt_neox", "GPTNeoXForCausalLM"),
     "InternLMForCausalLM": ("llama", "LlamaForCausalLM"),
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
-    "InternVLChatModel": ("internvl", "InternVLChatModel"),
     "JAISLMHeadModel": ("jais", "JAISLMHeadModel"),
     "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
-    "LlavaForConditionalGeneration":
-    ("llava", "LlavaForConditionalGeneration"),
-    "LlavaNextForConditionalGeneration":
-    ("llava_next", "LlavaNextForConditionalGeneration"),
     # For decapoda-research/llama-*
     "LLaMAForCausalLM": ("llama", "LlamaForCausalLM"),
     "MistralForCausalLM": ("llama", "LlamaForCausalLM"),
@@ -53,17 +42,13 @@ _GENERATION_MODELS = {
     "MptForCausalLM": ("mpt", "MPTForCausalLM"),
     "MPTForCausalLM": ("mpt", "MPTForCausalLM"),
     "MiniCPMForCausalLM": ("minicpm", "MiniCPMForCausalLM"),
-    "MiniCPMV": ("minicpmv", "MiniCPMV"),
     "NemotronForCausalLM": ("nemotron", "NemotronForCausalLM"),
     "OlmoForCausalLM": ("olmo", "OlmoForCausalLM"),
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
     "OrionForCausalLM": ("orion", "OrionForCausalLM"),
     "PersimmonForCausalLM": ("persimmon", "PersimmonForCausalLM"),
-    "PaliGemmaForConditionalGeneration": ("paligemma",
-                                          "PaliGemmaForConditionalGeneration"),
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
     "Phi3ForCausalLM": ("llama", "LlamaForCausalLM"),
-    "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
     "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2MoeForCausalLM": ("qwen2_moe", "Qwen2MoeForCausalLM"),
@@ -75,15 +60,43 @@ _GENERATION_MODELS = {
     "XverseForCausalLM": ("xverse", "XverseForCausalLM"),
     "Phi3SmallForCausalLM": ("phi3_small", "Phi3SmallForCausalLM"),
     "MedusaModel": ("medusa", "Medusa"),
+    "EAGLEModel": ("eagle", "EAGLE"),
     "MLPSpeculatorPreTrainedModel": ("mlp_speculator", "MLPSpeculator"),
-    "JambaForCausalLM": ("jamba", "JambaForCausalLM")
+    "JambaForCausalLM": ("jamba", "JambaForCausalLM"),
 }
 
 _EMBEDDING_MODELS = {
     "MistralModel": ("llama_embedding", "LlamaEmbeddingModel"),
 }
 
-_MODELS = {**_GENERATION_MODELS, **_EMBEDDING_MODELS}
+_MULTIMODAL_MODELS = {
+    "Blip2ForConditionalGeneration":
+    ("blip2", "Blip2ForConditionalGeneration"),
+    "ChameleonForConditionalGeneration":
+    ("chameleon", "ChameleonForConditionalGeneration"),
+    "FuyuForCausalLM": ("fuyu", "FuyuForCausalLM"),
+    "InternVLChatModel": ("internvl", "InternVLChatModel"),
+    "LlavaForConditionalGeneration":
+    ("llava", "LlavaForConditionalGeneration"),
+    "LlavaNextForConditionalGeneration":
+    ("llava_next", "LlavaNextForConditionalGeneration"),
+    "MiniCPMV": ("minicpmv", "MiniCPMV"),
+    "PaliGemmaForConditionalGeneration": ("paligemma",
+                                          "PaliGemmaForConditionalGeneration"),
+    "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
+    "UltravoxModel": ("ultravox", "UltravoxModel"),
+}
+_CONDITIONAL_GENERATION_MODELS = {
+    "BartModel": ("bart", "BartForConditionalGeneration"),
+    "BartForConditionalGeneration": ("bart", "BartForConditionalGeneration"),
+}
+
+_MODELS = {
+    **_GENERATION_MODELS,
+    **_EMBEDDING_MODELS,
+    **_MULTIMODAL_MODELS,
+    **_CONDITIONAL_GENERATION_MODELS,
+}
 
 # Architecture -> type.
 # out of tree models
@@ -157,7 +170,7 @@ class ModelRegistry:
 
     @staticmethod
     def get_supported_archs() -> List[str]:
-        return list(_MODELS.keys())
+        return list(_MODELS.keys()) + list(_OOT_MODELS.keys())
 
     @staticmethod
     def register_model(model_arch: str, model_cls: Type[nn.Module]):
@@ -172,6 +185,15 @@ class ModelRegistry:
     @staticmethod
     def is_embedding_model(model_arch: str) -> bool:
         return model_arch in _EMBEDDING_MODELS
+
+    @staticmethod
+    def is_multimodal_model(model_arch: str) -> bool:
+
+        # TODO: find a way to avoid initializing CUDA prematurely to
+        # use `supports_multimodal` to determine if a model is multimodal
+        # model_cls = ModelRegistry._try_load_model_cls(model_arch)
+        # from vllm.model_executor.models.interfaces import supports_multimodal
+        return model_arch in _MULTIMODAL_MODELS
 
 
 __all__ = [
