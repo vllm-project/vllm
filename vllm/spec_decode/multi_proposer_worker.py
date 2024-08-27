@@ -74,19 +74,17 @@ class MultiProposerWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
         recieve and process all sequences in the same batch with one specified
         proposer. However, if multiple proposers are specified, we currently
         use the proposer with the lowest proposal latency for the whole batch.
-
-        If we use different proposers for different sequences in the same
-        batch, all proposers will need to wait for the slowest proposer to
-        finish on each batch for further scoring. It means those proposers
-        with lower acceptance rates but faster speed, like Ngram, will be
-        dragged down by the slowest proposer for each step when there remain
-        more steps for them to complete. Therefore, a better strategy is to
-        use the fastest proposer adaptively among all specified proposers for
-        the current batch. This could be optimized when we have multiple
-        scorers.
         """
 
-        # This policy is deprecated for now due to poor performance.
+        # If we use different proposers for different sequences in the same
+        # batch, all proposers will need to wait for the slowest proposer to
+        # finish on each batch for further scoring. It means those proposers
+        # with lower acceptance rates but faster speed, like Ngram, will be
+        # dragged down by the slowest proposer for each step when there remain
+        # more steps for them to complete. Therefore, a better strategy is to
+        # use the fastest proposer adaptively among all specified proposers for
+        # the current batch. This could be optimized when we have multiple
+        # scorers.
         if self.scheduling_policy == "divide_and_conquer":
             return self._get_combined_spec_proposals(
                 execute_model_req, seq_ids_with_bonus_token_in_last_step)
