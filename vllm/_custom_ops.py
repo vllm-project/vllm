@@ -329,6 +329,32 @@ def fp8_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                                         num_bits, size_m, size_n, size_k)
 
 
+# machete
+def machete_supported_schedules(b_type: ScalarType) -> List[str]:
+    return torch.ops._C.machete_supported_schedules(b_type)
+
+
+def machete_gemm(
+    a: torch.Tensor,
+    b_q: torch.Tensor,  # Should be the tensor returned by machete_prepack_B
+    b_type: ScalarType,
+    b_scales: Optional[torch.Tensor] = None,
+    b_zeros: Optional[torch.Tensor] = None,
+    b_group_size: Optional[int] = None,
+    c: Optional[torch.Tensor] = None,
+    alpha: Optional[float] = None,
+    beta: Optional[float] = None,
+    schedule: Optional[str] = None,
+) -> torch.Tensor:
+    return torch.ops._C.machete_gemm(a, b_q, b_type, b_scales, b_zeros,
+                                     b_group_size, c, alpha, beta, schedule)
+
+
+def machete_prepack_B(b_q_weight: torch.Tensor,
+                      b_type: ScalarType) -> torch.Tensor:
+    return torch.ops._C.machete_prepack_B(b_q_weight, b_type)
+
+
 # fp8
 def scaled_fp8_quant(
     input: torch.Tensor,

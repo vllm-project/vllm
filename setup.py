@@ -184,6 +184,10 @@ class cmake_build_ext(build_ext):
         # match.
         cmake_args += ['-DVLLM_PYTHON_EXECUTABLE={}'.format(sys.executable)]
 
+        # Pass the python path to cmake so it can reuse the build dependencies
+        # on subsequent calls to python.
+        cmake_args += ['-DVLLM_PYTHON_PATH={}'.format(":".join(sys.path))]
+
         #
         # Setup parallelism and build tool
         #
