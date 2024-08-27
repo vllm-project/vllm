@@ -172,8 +172,6 @@ class OlmoeAttention(nn.Module):
         output, _ = self.o_proj(attn_output)
         return output
 
-# from transformers import OlmoeForCausalLM
-# model = OlmoeForCausalLM.from_pretrained("OLMoE/OLMoE-1B-7B-0824", torch_dtype=torch.bfloat16)
 
 class OlmoeDecoderLayer(nn.Module):
 
@@ -214,8 +212,6 @@ class OlmoeDecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=1e-5)
 
-        # self.layer_idx = layer_idx
-
 
     def forward(
         self,
@@ -233,26 +229,12 @@ class OlmoeDecoderLayer(nn.Module):
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
 
-        # print("#-"*20)
-        # print(positions)
-        # print(hidden_states)
-        # print("#-"*20)
-
-        # self_attn = model.model.layers[self.layer_idx].self_attn.cuda()
-        # hidden_states_old = self_attn(
-        #     hidden_states=hidden_states.unsqueeze(0),
-        #     position_ids=positions.unsqueeze(0)
-        # )[0][0]
-        # print("old:", hidden_states_old)
-
-
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
         )
-        # print("new: ", hidden_states)
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
