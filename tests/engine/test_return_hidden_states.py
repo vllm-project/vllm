@@ -9,18 +9,16 @@ from vllm.sampling_params import SamplingParams
 
 @pytest.mark.parametrize("model", ["facebook/opt-125m"])
 def test_return_hidden_states(model: str):
-    # This test checks if stepping the LLM successfully runs iterations 
+    # This test checks if stepping the LLM successfully runs iterations
     # and returns hidden states.
     prompt = (
         "You are a helpful assistant. How do I build a car from cardboard and "
         "paper clips? Is there an easy to follow video tutorial available "
-        "online for free?"
-    )
+        "online for free?")
     prompt2 = (
         " Please recommend to me some resources where I can learn not only to "
         "handle technical difficulties of building a car, but also "
-        "decoration."
-    )
+        "decoration.")
 
     engine_args = EngineArgs(model=model, return_hidden_states=True)
 
@@ -37,7 +35,6 @@ def test_return_hidden_states(model: str):
     assert isinstance(step2_out, list)
     assert isinstance(step2_out[0], RequestOutput)
     assert step2_out[0].prompt_hidden_states is not None
-    assert torch.equal(step1_out[0].prompt_hidden_states, step2_out[0].prompt_hidden_states)
+    assert torch.equal(step1_out[0].prompt_hidden_states,
+                       step2_out[0].prompt_hidden_states)
     assert step2_out[0].outputs[0].hidden_states is not None
-
-

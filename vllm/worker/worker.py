@@ -80,18 +80,17 @@ class Worker(LocalOrDistributedWorkerBase):
             init_cached_hf_modules()
         self.observability_config = observability_config
 
-
         additional_args = {}
         # Return hidden states from target model if the draft model is an
         # mlp_speculator
         if (
-            speculative_config is not None 
+            speculative_config is not None
             and speculative_config.draft_model_config.model != \
                     model_config.model
             and speculative_config.draft_model_config.hf_config.model_type in \
                     ["medusa", "mlp_speculator", "eagle"]
         ) or model_config.return_hidden_states:
-                additional_args["return_hidden_states"] = True
+            additional_args["return_hidden_states"] = True
 
         ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
         if model_runner_cls is not None:

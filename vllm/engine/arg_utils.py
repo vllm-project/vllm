@@ -607,11 +607,10 @@ class EngineArgs:
             help='The maximum sequence length supported by the '
             'draft model. Sequences over this length will skip '
             'speculation.')
-        parser.add_argument(
-            "--return-hidden-states",
-            action="store_true",
-            default=False,
-            help="Return hidden states from the model.")
+        parser.add_argument("--return-hidden-states",
+                            action="store_true",
+                            default=False,
+                            help="Return hidden states from the model.")
 
         parser.add_argument(
             '--speculative-disable-by-batch-size',
