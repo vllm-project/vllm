@@ -84,6 +84,9 @@ except ModuleNotFoundError:
 def device_id_to_physical_device_id(device_id: int) -> int:
     if "CUDA_VISIBLE_DEVICES" in os.environ:
         device_ids = os.environ["CUDA_VISIBLE_DEVICES"].split(",")
+        if device_ids == [""]:
+            raise RuntimeError("CUDA_VISIBLE_DEVICES is set to empty string,"
+                               " which means GPU support is disabled.")
         physical_device_id = device_ids[device_id]
         return int(physical_device_id)
     else:
