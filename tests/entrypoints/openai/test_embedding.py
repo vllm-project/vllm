@@ -3,6 +3,7 @@ import base64
 import numpy as np
 import openai
 import pytest
+import pytest_asyncio
 
 from ...utils import RemoteOpenAIServer
 
@@ -24,10 +25,10 @@ def embedding_server():
         yield remote_server
 
 
-@pytest.mark.asyncio
-@pytest.fixture(scope="module")
-def embedding_client(embedding_server):
-    return embedding_server.get_async_client()
+@pytest_asyncio.fixture
+async def embedding_client(embedding_server):
+    async with embedding_server.get_async_client() as async_client:
+        yield async_client
 
 
 @pytest.mark.asyncio

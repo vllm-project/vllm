@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 import jsonschema
 import openai  # use the official client for correctness check
 import pytest
+import pytest_asyncio
 import torch
 from openai import BadRequestError
 
@@ -46,9 +47,10 @@ def server(zephyr_lora_files, zephyr_lora_added_tokens_files):  # noqa: F811
         yield remote_server
 
 
-@pytest.fixture(scope="module")
-def client(server):
-    return server.get_async_client()
+@pytest_asyncio.fixture
+async def client(server):
+    async with server.get_async_client() as async_client:
+        yield async_client
 
 
 @pytest.mark.asyncio

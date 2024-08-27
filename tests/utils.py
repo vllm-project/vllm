@@ -154,6 +154,7 @@ class RemoteOpenAIServer:
         return openai.AsyncOpenAI(
             base_url=self.url_for("v1"),
             api_key=self.DUMMY_API_KEY,
+            max_retries=0,
         )
 
 
