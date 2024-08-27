@@ -13,6 +13,7 @@ from transformers import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -26,14 +27,12 @@ from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors
-from vllm.utils import print_warning_once
-# Multimodal imports
-from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.models.interfaces import SupportsMultiModal
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.base import MultiModalInputs
 from vllm.multimodal.image import cached_get_tokenizer
+from vllm.sequence import IntermediateTensors
 
 from .utils import is_pp_missing_parameter, make_layers
 
@@ -155,10 +154,11 @@ class Resampler(nn.Module):
         self.num_heads = num_heads
 
         self.pos_embed = nn.Parameter(
-            torch.from_numpy(get_2d_sincos_pos_embed(embed_dim, grid_size)).float()
+            # TODO - fix the hacks for device / dtype here & in the positional embedding retrieval
+            torch.from_numpy(get_2d_sincos_pos_embed(embed_dim, grid_size)).half().to("cuda"),
         ).requires_grad_(False)
 
-        self.query = nn.Parameter(torch.zeros(self.num_queries, embed_dim))
+        self.query = nn.Parameter(torch.zeros(self.num_queries, embed_dim).to("cuda"))
         trunc_normal_(self.query, std=.02)
 
         if kv_dim is not None and kv_dim != embed_dim:
@@ -169,20 +169,9 @@ class Resampler(nn.Module):
         self.attn = nn.MultiheadAttention(embed_dim, num_heads)
         self.ln_q = norm_layer(embed_dim)
         self.ln_kv = norm_layer(embed_dim)
-        
-        # self.apply(self._init_weights)
 
-    def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=.02)
-            if isinstance(m, nn.Linear) and m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.LayerNorm):
-            nn.init.constant_(m.bias, 0)
-            nn.init.constant_(m.weight, 1.0)
 
     def forward(self, x, attn_mask=None):
-
         pos_embed = get_abs_pos(self.pos_embed, x.size(1))
 
         x = self.kv_proj(x)
@@ -392,18 +381,6 @@ class VisionTransformer(nn.Module):
         patch_height, patch_width = self.patch_size = (patch_size, patch_size)
         self.grid_size = (image_height // patch_height, image_width // patch_width)
         self.output_dim = output_dim
-
-        mean = (0.48145466, 0.4578275, 0.40821073)
-        std = (0.26862954, 0.26130258, 0.27577711)
-        self.image_transform = transforms.Compose([
-            transforms.Resize(
-                (image_size, image_size),
-                interpolation=InterpolationMode.BICUBIC
-            ),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std),
-        ])
-
         self.conv1 = nn.Conv2d(in_channels=3, out_channels=width, kernel_size=patch_size, stride=patch_size, bias=False)
 
         # class embeddings and positional embeddings
@@ -435,9 +412,10 @@ class VisionTransformer(nn.Module):
 
     def forward(self, x: torch.Tensor):
         x = x.to(
-            dtype=self.transformer.get_cast_dtype(),
-            device=self.transformer.get_cast_device(),
+           dtype=self.transformer.get_cast_dtype(),
+           device=self.transformer.get_cast_device(),
         )
+
         # to patches
         x = self.conv1(x)  # shape = [*, width, grid, grid]
         x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
@@ -457,18 +435,6 @@ class VisionTransformer(nn.Module):
 
         return x
 
-    def encode(self, image_paths: List[str]):
-        images = []
-        for image_path in image_paths:
-            if image_path.startswith("http://") or image_path.startswith("https://"):
-                image = Image.open(requests.get(image_path, stream=True).raw)
-            else:
-                image = Image.open(image_path)
-            image = image.convert("RGB")
-            images.append(self.image_transform(image))
-        images = torch.stack(images, dim=0)
-        return self(images)
-###
 
 class QWenMLP(nn.Module):
 
@@ -649,9 +615,15 @@ class QWenModel(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
+        pixel_values: Optional[torch.Tensor]=None,
     ) -> torch.Tensor:
+        if pixel_values is not None:
+            # TODO: get the positions of the image tags from the text
+            images = self.visual(pixel_values)
+
         if get_pp_group().is_first_rank:
             hidden_states = self.wte(input_ids)
+            # TODO - merge image / with wte embeddings
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -718,8 +690,39 @@ def input_processor_for_qwen(ctx: InputContext, llm_inputs: LLMInputs):
                      multi_modal_data=multi_modal_data)
 
 def input_mapper_for_qwen(ctx: InputContext, data: object):
-    raise NotImplementedError("Need to implement the input mapper")
+    model_config = ctx.model_config
+    tokenizer = cached_get_tokenizer(model_config.tokenizer,
+                                     trust_remote_code=True)
+    image_pair_tok = tokenizer.encode(IMG_START+IMG_END, add_special_tokens=False, return_tensors="pt").squeeze()
+    image_start_id = image_pair_tok[0]
+    image_end_id = image_pair_tok[-1]
+    assert (image_start_id + 1) == image_end_id
+    assert len(image_pair_tok) == (MAX_QWEN_IMG_TOKENS + 2)
 
+    # Apply the normalization transform to the PIL Image
+    hf_config = ctx.get_hf_config()
+    image_size = hf_config.visual["image_size"]
+    transform = build_normalization_transform(image_size)
+    transformed_images = [transform(data)]
+
+    return MultiModalInputs({
+        "pixel_values":  torch.stack(transformed_images, dim=0)
+    })
+
+def build_normalization_transform(image_size):
+    # Currently, normalized image tensors are of shape: (batch, 3, image_size, image_size),
+    # which is usually [1, 3, 448, 448], where batch is single dimension since we don't handle
+    # multiimage inputs yet.
+    mean = (0.48145466, 0.4578275, 0.40821073)
+    std = (0.26862954, 0.26130258, 0.27577711)
+    return transforms.Compose([
+        transforms.Resize(
+            (image_size, image_size),
+            interpolation=InterpolationMode.BICUBIC
+        ),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=mean, std=std),
+    ])
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_qwen)
 @MULTIMODAL_REGISTRY.register_max_image_tokens(MAX_QWEN_IMG_TOKENS)
@@ -753,10 +756,10 @@ class QWenLMHeadModel(nn.Module, SupportsMultiModal):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
-        pixel_values: torch.Tensor = None,
+        pixel_values = None,
     ) -> torch.Tensor:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         attn_metadata, intermediate_tensors)
+                                         attn_metadata, intermediate_tensors, pixel_values)
         return hidden_states
 
     def make_empty_intermediate_tensors(
