@@ -181,6 +181,35 @@ class FlashAttentionBackend(AttentionBackend):
         value_caches = [kv_cache[1] for kv_cache in kv_caches]
         ops.copy_blocks(key_caches, value_caches, src_to_dists)
 
+    @staticmethod
+    def swap_out_to_local_file(
+        src_kv_cache: torch.Tensor,
+        dst_kv_cache: Tuple[str, str],
+        src_to_dst: torch.Tensor,
+    ) -> None:
+        src_key_cache = src_kv_cache[0]
+        dst_key_addr = dst_kv_cache[0]
+        ops.swap_out_to_local_file(src_key_cache, dst_key_addr, src_to_dst)
+
+        src_value_cache = src_kv_cache[1]
+        dst_value_addr = dst_kv_cache[1]
+        ops.swap_out_to_local_file(src_value_cache, dst_value_addr, src_to_dst)
+
+    @staticmethod
+    def swap_in_form_local_file(
+        src_kv_cache: Tuple[str, str],
+        dst_kv_cache: torch.Tensor,
+        src_to_dst: torch.Tensor,
+    ) -> None:
+        src_key_cache = src_kv_cache[0]
+        dst_key_addr = dst_kv_cache[0]
+        ops.swap_in_from_local_file(src_key_cache, dst_key_addr, src_to_dst)
+
+        src_value_cache = src_kv_cache[1]
+        dst_value_addr = dst_kv_cache[1]
+        ops.swap_in_from_local_file(src_value_cache, dst_value_addr,
+                                    src_to_dst)
+
 
 @dataclass
 class FlashAttentionMetadata(AttentionMetadata):
