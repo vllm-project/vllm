@@ -64,6 +64,17 @@ _BATCH_SIZE_ALIGNMENT = 8
 _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
     _BATCH_SIZE_ALIGNMENT * i for i in range(1, 33)
 ]
+
+# Get the current GPU properties
+gpu_properties = torch.cuda.get_device_properties(0)
+# Retrieve the total memory in GB
+mem = gpu_properties.total_memory / 1024**3
+# Retrieve the SM version
+gpu_sm_version = gpu_properties.major + gpu_properties.minor / 10.0
+# extend cuda graph for H200 GPUs
+if mem > 120.0 and gpu_sm_version >= 9.0:
+    _BATCH_SIZES_TO_CAPTURE.extend([512, 768])
+
 _NUM_WARMUP_ITERS = 2
 
 TModelInputForGPU = TypeVar('TModelInputForGPU', bound="ModelInputForGPU")
