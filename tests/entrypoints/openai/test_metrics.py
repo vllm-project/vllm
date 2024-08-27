@@ -6,6 +6,7 @@ from http import HTTPStatus
 
 import openai
 import pytest
+import pytest_asyncio
 import requests
 from prometheus_client.parser import text_string_to_metric_families
 from transformers import AutoTokenizer
@@ -35,11 +36,17 @@ def default_server_args():
                     "--enable-chunked-prefill",
                     "--disable-frontend-multiprocessing",
                 ])
-def client(default_server_args, request):
+def server(default_server_args, request):
     if request.param:
         default_server_args.append(request.param)
     with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
-        yield remote_server.get_async_client()
+        yield remote_server
+
+
+@pytest_asyncio.fixture
+async def client(server):
+    async with server.get_async_client() as cl:
+        yield cl
 
 
 _PROMPT = "Hello my name is Robert and I love magic"
