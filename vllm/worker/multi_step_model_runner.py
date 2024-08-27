@@ -18,7 +18,7 @@ from vllm.model_executor.layers.sampler import (PromptLogprobs, SampleLogprobs,
                                                 SamplingMetadata, get_logprobs,
                                                 get_pythonized_sample_results)
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
-                           SequenceGroupMetadata, SequenceOutput)
+                           SequenceGroupMetadata, SequenceOutput, Logprob)
 from vllm.worker.model_runner import (GPUModelRunnerBase,
                                       ModelInputForGPUWithSamplingMetadata)
 from vllm.worker.model_runner_base import (
@@ -525,17 +525,24 @@ def _pythonize_sampler_output(
     #
     # However this computation may be skipped entirely
     # if no pythonization was deferred.
+    seq_groups = sampling_metadata.seq_groups
+    logprobs_are_requested = any([
+        sg.sampling_params.logprobs is not None
+        or sg.sampling_params.prompt_logprobs is not None for sg in seq_groups
+    ])
+    do_pythonize_logprobs = (skip_sampler_cpu_output
+                             and logprobs_are_requested)
     (
         prompt_logprobs,
         sample_logprobs,
     ) = (deferred_pythonize_logprobs(output, sampling_metadata,
                                      logprobs_tensor)
-         if skip_sampler_cpu_output else (None, None))
+         if do_pythonize_logprobs else (None, None))
 
-    for sgdx, (seq_group, sample_result) in enumerate(
-            zip(sampling_metadata.seq_groups, samples_list)):
+    for sgdx, (seq_group,
+               sample_result) in enumerate(zip(seq_groups, samples_list)):
 
-        if skip_sampler_cpu_output:
+        if do_pythonize_logprobs:
             assert prompt_logprobs is not None
             assert sample_logprobs is not None
 
@@ -545,7 +552,12 @@ def _pythonize_sampler_output(
             ) = (  # Utilize deferred pythonization results
                 prompt_logprobs[sgdx],
                 sample_logprobs[sgdx],
-            ) if skip_sampler_cpu_output else (
+            )
+        elif logprobs_are_requested:
+            (
+                group_prompt_logprobs,
+                group_sample_logprobs,
+            ) = (
                 # profile_run: use already-computed logprobs
                 output.outputs[sgdx].prompt_logprobs,
                 [sample.logprobs for sample in output.outputs[sgdx].samples])
@@ -557,11 +569,19 @@ def _pythonize_sampler_output(
         if seq_group.sampling_params.logits_processors:
             assert len(seq_group.sampling_params.logits_processors) == 0, (
                 "Logits Processors are not supported in multi-step decoding")
-        for (parent_id, next_token_id,
-             logprobs) in zip(parent_ids, next_token_ids,
-                              group_sample_logprobs):
+        for tdx, (parent_id,
+                  next_token_id) in enumerate(zip(parent_ids, next_token_ids)):
             seq_outputs.append(
-                SequenceOutput(seq_ids[parent_id], next_token_id, logprobs))
+                SequenceOutput(seq_ids[parent_id], next_token_id,
+                               (group_sample_logprobs[tdx]
+                                if logprobs_are_requested else {
+                                    next_token_id:
+                                    Logprob(logprob=float('inf'),
+                                            rank=None,
+                                            decoded_token=None)
+                                })))
         output.outputs.append(
-            CompletionSequenceGroupOutput(seq_outputs, group_prompt_logprobs))
+            CompletionSequenceGroupOutput(
+                seq_outputs,
+                (group_prompt_logprobs if logprobs_are_requested else None)))
     assert len(output.outputs) > 0
