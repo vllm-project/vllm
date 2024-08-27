@@ -1144,6 +1144,9 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
                 ]
             ```
 
+            Please note how the config args are inserted after the sub command.
+            this way the order of priorities is maintained when these are args 
+            parsed by super().
         """
         assert args.count(
             '--config') <= 1, "More than one config file specified!"
