@@ -422,7 +422,7 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
 
     prompt = llm_inputs.get("prompt")
     if prompt is None:
-        image_idx = []
+        image_idx = range(1, len(image_data) + 1)
         new_prompt = None
     else:
         image_idx = sorted(map(int, re.findall(r"<\|image_(\d+)\|>+", prompt)))
