@@ -776,9 +776,10 @@ class MRotaryEmbedding(RotaryEmbedding):
         base: int,
         is_neox_style: bool,
         dtype: torch.dtype,
-        mrope_section: List[int] = None,
+        mrope_section: Optional[List[int]] = None,
     ) -> None:
-        super().__init__(head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype)
+        super().__init__(head_size, rotary_dim, max_position_embeddings, base,
+                         is_neox_style, dtype)
 
         self.mrope_section = mrope_section
         if self.mrope_section:
@@ -806,8 +807,16 @@ class MRotaryEmbedding(RotaryEmbedding):
         cos_sin = self.cos_sin_cache[positions]
         cos, sin = cos_sin.chunk(2, dim=-1)
         if self.mrope_section and positions.ndim == query.ndim - 1:
-            cos = torch.cat([m[i] for i, m in enumerate(cos.split(self.mrope_section, dim=-1))], dim=-1)
-            sin = torch.cat([m[i] for i, m in enumerate(sin.split(self.mrope_section, dim=-1))], dim=-1)
+            cos = torch.cat([
+                m[i]
+                for i, m in enumerate(cos.split(self.mrope_section, dim=-1))
+            ],
+                            dim=-1)
+            sin = torch.cat([
+                m[i]
+                for i, m in enumerate(sin.split(self.mrope_section, dim=-1))
+            ],
+                            dim=-1)
 
         if self.is_neox_style:
             # NOTE(woosuk): Here we assume that the positions tensor has the
@@ -857,7 +866,8 @@ class MRotaryEmbedding(RotaryEmbedding):
             video_grid_thw = video_grid_thw.tolist()
 
         input_tokens_tensor = torch.tensor(input_tokens)
-        vision_start_indices = torch.argwhere(input_tokens_tensor == vision_start_token_id).squeeze(1)
+        vision_start_indices = torch.argwhere(
+            input_tokens_tensor == vision_start_token_id).squeeze(1)
         vision_tokens = input_tokens_tensor[vision_start_indices + 1]
         image_nums = (vision_tokens == image_token_id).sum()
         video_nums = (vision_tokens == video_token_id).sum()
@@ -897,23 +907,32 @@ class MRotaryEmbedding(RotaryEmbedding):
             llm_grid_t, llm_grid_h, llm_grid_w = t, h // spatial_merge_size, w // spatial_merge_size
             text_len = ed - st
 
-            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
-            llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
+            st_idx = llm_pos_ids_list[-1].max() + 1 if len(
+                llm_pos_ids_list) > 0 else 0
+            llm_pos_ids_list.append(
+                torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
 
-            t_index = torch.arange(llm_grid_t).view(-1, 1).expand(-1, llm_grid_h * llm_grid_w).flatten()
-            h_index = torch.arange(llm_grid_h).view(1, -1, 1).expand(llm_grid_t, -1, llm_grid_w).flatten()
-            w_index = torch.arange(llm_grid_w).view(1, 1, -1).expand(llm_grid_t, llm_grid_h, -1).flatten()
-            llm_pos_ids_list.append(torch.stack([t_index, h_index, w_index]) + text_len + st_idx)
+            t_index = torch.arange(llm_grid_t).view(-1, 1).expand(
+                -1, llm_grid_h * llm_grid_w).flatten()
+            h_index = torch.arange(llm_grid_h).view(1, -1, 1).expand(
+                llm_grid_t, -1, llm_grid_w).flatten()
+            w_index = torch.arange(llm_grid_w).view(1, 1, -1).expand(
+                llm_grid_t, llm_grid_h, -1).flatten()
+            llm_pos_ids_list.append(
+                torch.stack([t_index, h_index, w_index]) + text_len + st_idx)
             st = ed + llm_grid_t * llm_grid_h * llm_grid_w
 
         if st < len(input_tokens):
-            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+            st_idx = llm_pos_ids_list[-1].max() + 1 if len(
+                llm_pos_ids_list) > 0 else 0
             text_len = len(input_tokens) - st
-            llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
+            llm_pos_ids_list.append(
+                torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
 
         llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
         llm_positions = llm_positions[:, context_len:]
-        mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
+        mrope_position_delta = (llm_positions.max() + 1 -
+                                len(input_tokens)).item()
 
         return llm_positions.tolist(), mrope_position_delta
 
@@ -924,8 +943,9 @@ class MRotaryEmbedding(RotaryEmbedding):
         seq_len: int,
     ) -> List[List[int]]:
         return [
-            list(range(context_len + mrope_position_delta, seq_len + mrope_position_delta))
-            for _ in range(3)
+            list(
+                range(context_len + mrope_position_delta,
+                      seq_len + mrope_position_delta)) for _ in range(3)
         ]
 
 
@@ -1035,7 +1055,12 @@ def get_rope(
                 **extra_kwargs)
         elif scaling_type == "mrope":
             return MRotaryEmbedding(
-                head_size, rotary_dim, max_position, base, is_neox_style, dtype,
+                head_size,
+                rotary_dim,
+                max_position,
+                base,
+                is_neox_style,
+                dtype,
                 mrope_section=rope_scaling["mrope_section"],
             )
         else:

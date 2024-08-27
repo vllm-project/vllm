@@ -495,9 +495,12 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
             from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 
-            inter_data.mrope_input_positions[seq_idx] = MRotaryEmbedding.get_next_input_positions(
-                seq_data.mrope_position_delta, context_len, seq_len,
-            )
+            inter_data.mrope_input_positions[
+                seq_idx] = MRotaryEmbedding.get_next_input_positions(
+                    seq_data.mrope_position_delta,
+                    context_len,
+                    seq_len,
+                )
 
     def _compute_for_prefix_cache_hit(
             self, inter_data: InterDataForSeqGroup, seq_idx: int,
@@ -631,7 +634,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
             inter_data.mrope_input_positions = [None] * inter_data.n_seqs
             for seq_idx in range(inter_data.n_seqs):
-                seq_data = seq_group_metadata.seq_data[inter_data.seq_ids[seq_idx]]
+                seq_data = seq_group_metadata.seq_data[
+                    inter_data.seq_ids[seq_idx]]
                 token_ids = seq_data.get_token_ids()
 
                 mrope_input_positions, mrope_position_delta = MRotaryEmbedding.get_input_positions(
@@ -642,12 +646,14 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                     video_token_id=hf_config.video_token_id,
                     vision_start_token_id=hf_config.vision_start_token_id,
                     vision_end_token_id=hf_config.vision_end_token_id,
-                    spatial_merge_size=hf_config.vision_config.spatial_merge_size,
+                    spatial_merge_size=hf_config.vision_config.
+                    spatial_merge_size,
                     context_len=inter_data.context_lens[seq_idx],
                 )
 
                 seq_data.mrope_position_delta = mrope_position_delta
-                inter_data.mrope_input_positions[seq_idx] = mrope_input_positions
+                inter_data.mrope_input_positions[
+                    seq_idx] = mrope_input_positions
 
     def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata):
         """Add a sequence group to the builder."""
@@ -698,16 +704,19 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             return self.model_input_cls()
 
         mrope_input_positions = None
-        if any(inter_data.mrope_input_positions is not None for inter_data in self.inter_data_list):
+        if any(inter_data.mrope_input_positions is not None
+               for inter_data in self.inter_data_list):
             mrope_input_positions = [[] for _ in range(3)]
             for idx in range(3):
                 for inter_data in self.inter_data_list:
                     if inter_data.mrope_input_positions is None:
                         for _seq_input_positions in inter_data.input_positions:
-                            mrope_input_positions[idx].extend(_seq_input_positions)
+                            mrope_input_positions[idx].extend(
+                                _seq_input_positions)
                     else:
                         for _seq_mrope_input_positions in inter_data.mrope_input_positions:
-                            mrope_input_positions[idx].extend(_seq_mrope_input_positions[idx])
+                            mrope_input_positions[idx].extend(
+                                _seq_mrope_input_positions[idx])
             input_positions = None
         else:
             input_positions = []
@@ -756,13 +765,16 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                                                self.runner.pin_memory)
         if mrope_input_positions is not None:
             for idx in range(3):
-                mrope_input_positions[idx].extend(itertools.repeat(0, cuda_graph_pad_size))
-            input_positions_tensor = async_tensor_h2d(mrope_input_positions, torch.long,
+                mrope_input_positions[idx].extend(
+                    itertools.repeat(0, cuda_graph_pad_size))
+            input_positions_tensor = async_tensor_h2d(mrope_input_positions,
+                                                      torch.long,
                                                       self.runner.device,
                                                       self.runner.pin_memory)
         else:
             input_positions.extend(itertools.repeat(0, cuda_graph_pad_size))
-            input_positions_tensor = async_tensor_h2d(input_positions, torch.long,
+            input_positions_tensor = async_tensor_h2d(input_positions,
+                                                      torch.long,
                                                       self.runner.device,
                                                       self.runner.pin_memory)
         # Sequence and query lengths.

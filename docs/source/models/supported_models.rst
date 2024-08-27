@@ -219,6 +219,11 @@ Multimodal Language Models
     - Image
     - :code:`llava-hf/llava-v1.6-mistral-7b-hf`, :code:`llava-hf/llava-v1.6-vicuna-7b-hf`, etc.
     -
+  * - :code:`Qwen2VLForConditionalGeneration`
+    - Qwen2-VL
+    - Image / Video
+    - :code:`Qwen/Qwen2-VL-2B-Instruct`, :code:`Qwen/Qwen2-VL-7B-Instruct`, :code:`Qwen/Qwen2-VL-72B-Instruct`, etc.
+    -
   * - :code:`PaliGemmaForConditionalGeneration`
     - PaliGemma
     - Image
