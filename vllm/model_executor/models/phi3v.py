@@ -87,6 +87,7 @@ def _init_img_processor(hf_config: PretrainedConfig):
 
     return img_processor
 
+
 class Phi3VImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     data: Union[torch.Tensor, List[torch.Tensor]]
