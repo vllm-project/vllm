@@ -186,7 +186,7 @@ Multimodal Language Models
 
   * - Architecture
     - Models
-    - Supported Modality(ies)
+    - Supported Modalities
     - Example HuggingFace Models
     - :ref:`LoRA <lora>`
   * - :code:`Blip2ForConditionalGeneration`
@@ -225,14 +225,19 @@ Multimodal Language Models
     - :code:`google/paligemma-3b-pt-224`, :code:`google/paligemma-3b-mix-224`, etc.
     - 
   * - :code:`Phi3VForCausalLM`
-    - Phi-3-Vision
+    - Phi-3-Vision, Phi-3.5-Vision
     - Image
-    - :code:`microsoft/Phi-3-vision-128k-instruct`, etc.
+    - :code:`microsoft/Phi-3-vision-128k-instruct`, :code:`microsoft/Phi-3.5-vision-instruct` etc.
     -
   * - :code:`MiniCPMV`
     - MiniCPM-V
     - Image
     - :code:`openbmb/MiniCPM-V-2` (see note), :code:`openbmb/MiniCPM-Llama3-V-2_5`, :code:`openbmb/MiniCPM-V-2_6`, etc.
+    -
+  * - :code:`UltravoxModel`
+    - Ultravox
+    - Audio
+    - :code:`fixie-ai/ultravox-v0_3`
     -
 
 .. note::

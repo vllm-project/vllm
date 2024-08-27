@@ -1,12 +1,13 @@
 import dataclasses
 import gc
+import inspect
 import itertools
 import time
 import warnings
 import weakref
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type,
-                    TypeVar, Union)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set,
+                    Tuple, Type, TypeVar, Union)
 
 import numpy as np
 import torch
@@ -89,6 +90,7 @@ class ModelInputForGPU(ModelRunnerInputBase):
     request_ids_to_seq_ids: Optional[Dict[str, List[int]]] = None
     finished_requests_ids: Optional[List[str]] = None
     virtual_engine: int = 0
+    output_proc_callback_fn: Optional[Callable] = None
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
@@ -1095,6 +1097,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 device=self.device)
         self.execute_model(model_input, kv_caches, intermediate_tensors)
         torch.cuda.synchronize()
+
+        # reset and discard the guard and compiled bytecode for profiling runs
+        torch._dynamo.reset()
+
         return
 
     def remove_all_loras(self):
@@ -1192,6 +1198,18 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         max_batch_size = max(_BATCH_SIZES_TO_CAPTURE)
         input_tokens = torch.zeros(max_batch_size, dtype=torch.long).cuda()
         input_positions = torch.zeros(max_batch_size, dtype=torch.long).cuda()
+
+        # Prepare dummy previous_hidden_states only if needed by the model.
+        # This is used by draft models such as EAGLE.
+        previous_hidden_states = None
+        if "previous_hidden_states" in inspect.signature(
+                self.model.forward).parameters:
+            previous_hidden_states = torch.empty(
+                [max_batch_size,
+                 self.model_config.get_hidden_size()],
+                dtype=self.model_config.dtype,
+                device=self.device)
+
         intermediate_inputs = None
         if not get_pp_group().is_first_rank:
             intermediate_inputs = self.model.make_empty_intermediate_tensors(
@@ -1264,6 +1282,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         "stream":
                         graph_capture_context.stream
                     }
+                    if previous_hidden_states is not None:
+                        capture_inputs[
+                            "previous_hidden_states"] = previous_hidden_states[:
+                                                                               batch_size]
+
                     if self.has_seqlen_agnostic:
                         # Only used by Mamba-based models CUDA graph atm (Jamba)
                         capture_inputs.update({
@@ -1309,7 +1332,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         virtual_engine: int = 0,
-        finished_requests_ids: Optional[List[str]] = None
+        finished_requests_ids: Optional[List[str]] = None,
     ) -> ModelInputForGPUWithSamplingMetadata:
         """Prepare the model input based on a given sequence group, including
         metadata for the sampling step.
@@ -1433,6 +1456,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         if not self.is_driver_worker:
             return []
 
+        if model_input.output_proc_callback_fn is not None:
+            model_input.output_proc_callback_fn(is_async=True)
+
         # Sample the next token.
         output: SamplerOutput = self.model.sample(
             logits=logits,
@@ -1462,6 +1488,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             if model_input.is_prompt:
                 hidden_states = hidden_or_intermediate_states.index_select(
                     0, indices)
+                output.prefill_hidden_states = hidden_or_intermediate_states
             elif decode_meta.use_cuda_graph:
                 hidden_states = hidden_or_intermediate_states[:len(indices)]
             else:
@@ -1510,11 +1537,11 @@ class CUDAGraphRunner:
         # Note one iteration is not enough for torch.jit.script
         for _ in range(_NUM_WARMUP_ITERS):
             self.model(
-                input_ids,
-                positions,
-                kv_caches,
-                attn_metadata,
-                intermediate_inputs,
+                input_ids=input_ids,
+                positions=positions,
+                kv_caches=kv_caches,
+                attn_metadata=attn_metadata,
+                intermediate_tensors=intermediate_inputs,
                 **kwargs,
             )
         torch.cuda.synchronize()
@@ -1523,11 +1550,11 @@ class CUDAGraphRunner:
         self._graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self._graph, pool=memory_pool, stream=stream):
             output_hidden_or_intermediate_states = self.model(
-                input_ids,
-                positions,
-                kv_caches,
-                attn_metadata,
-                intermediate_inputs,
+                input_ids=input_ids,
+                positions=positions,
+                kv_caches=kv_caches,
+                attn_metadata=attn_metadata,
+                intermediate_tensors=intermediate_inputs,
                 **kwargs,
             )
             if hidden_or_intermediate_states is not None:
@@ -1588,6 +1615,11 @@ class CUDAGraphRunner:
         if "seqlen_agnostic_capture_inputs" in self.input_buffers:
             self.model.copy_inputs_before_cuda_graphs(self.input_buffers,
                                                       **kwargs)
+
+        if "previous_hidden_states" in self.input_buffers:
+            self.input_buffers["previous_hidden_states"].copy_(
+                kwargs["previous_hidden_states"], non_blocking=True)
+
         if intermediate_tensors is not None:
             for key in intermediate_tensors.tensors:
                 if key != "model_execute_time" and key != "model_forward_time":
