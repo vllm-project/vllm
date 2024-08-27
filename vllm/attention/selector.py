@@ -10,8 +10,7 @@ import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import (STR_BACKEND_ENV_VAR, is_cpu, is_flashinfer, is_hip,
-                        is_openvino, is_xpu)
+from vllm.utils import STR_BACKEND_ENV_VAR, is_cpu, is_hip, is_openvino, is_xpu
 
 logger = init_logger(__name__)
 
@@ -227,10 +226,9 @@ def which_attn_to_use(
         elif kv_cache_dtype is not None and kv_cache_dtype.startswith("fp8"):
             logger.info(
                 "Cannot use FlashAttention-2 backend for FP8 KV cache.")
-            if is_flashinfer():
-                selected_backend = _Backend.FLASHINFER
-            else:
-                selected_backend = _Backend.XFORMERS
+            logger.warning("Use flashinfer backend with FP8 KV Cache for "
+                           " better performance.")
+            selected_backend = _Backend.XFORMERS
         elif block_size % 16 != 0:
             logger.info(
                 "Cannot use FlashAttention-2 backend for block size not "

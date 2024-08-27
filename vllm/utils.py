@@ -354,18 +354,6 @@ def is_xpu() -> bool:
     return hasattr(torch, "xpu") and torch.xpu.is_available()
 
 
-def is_flashinfer() -> bool:
-    try:
-        import flashinfer
-    except ImportError:
-        flashinfer = None
-    if not torch.cuda.is_available():
-        return False
-    gpu_properties = torch.cuda.get_device_properties(0)
-    sm_ver = gpu_properties.major + gpu_properties.minor / 10.0
-    return (flashinfer is not None and sm_ver >= 9.0)
-
-
 @lru_cache(maxsize=None)
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
