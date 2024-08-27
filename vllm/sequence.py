@@ -1006,6 +1006,8 @@ class CompletionSequenceGroupOutput(
     samples: List[SequenceOutput]
     # Prompt logprob for each prompt query token.
     prompt_logprobs: Optional[PromptLogprobs]
+    prompt_hidden_states: Optional[torch.Tensor] = None
+    hidden_state: Optional[torch.Tensor] = None
 
     def __repr__(self) -> str:
         return (f"CompletionSequenceGroupOutput(samples={self.samples}, "

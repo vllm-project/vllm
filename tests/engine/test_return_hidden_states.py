@@ -26,6 +26,7 @@ def test_return_hidden_states(model: str):
     sampling_params = SamplingParams()
 
     engine.add_request("0", prompt + prompt2, sampling_params)
+    engine.add_request("1", prompt + prompt2, sampling_params)
     step1_out = engine.step()
     assert isinstance(step1_out, list)
     assert isinstance(step1_out[0], RequestOutput)

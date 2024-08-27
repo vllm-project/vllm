@@ -1,4 +1,5 @@
 from typing import Dict, List, Optional, Tuple, Union
+import torch
 
 from vllm.config import SchedulerConfig
 from vllm.core.scheduler import Scheduler
@@ -55,9 +56,24 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                 ), f"{type(self)} does not support multiple outputs per step"
         return self._process_sequence_group_outputs(sequence_group, outputs[0])
 
+    def process_hidden_states(self, seq_group: SequenceGroup,
+                               outputs: List[SequenceGroupOutput]) -> None:
+        assert len(outputs) == 1, ("Single step should only have 1 output.")
+        output = outputs[0]
+        seq = seq_group.seqs[0]
+        if seq_group.prompt_hidden_states is None:
+            logger.error("output: %s", output)
+            logger.error("output hidden states: %s", output.hidden_state)
+            seq_group.prompt_hidden_states = output.prompt_hidden_states
+        # Each output contains the hidden state from the last decode step, 
+        # so they need to be accumulated on the sequence.
+        seq.hidden_states = (
+                torch.cat([seq.hidden_states, output.hidden_state], dim=1) 
+                if seq.hidden_states is not None else output.hidden_state)
+
     def process_prompt_logprob(self, seq_group: SequenceGroup,
                                outputs: List[SequenceGroupOutput]) -> None:
-        assert len(outputs) == 1, ("Single step should only has 1 output.")
+        assert len(outputs) == 1, ("Single step should only have 1 output.")
         output = outputs[0]
         prompt_logprobs = output.prompt_logprobs
 
