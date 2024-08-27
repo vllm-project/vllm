@@ -1145,11 +1145,10 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
             ```
 
         """
-
-        index = args.index('--config')
         assert args.count(
             '--config') <= 1, "More than one config file specified!"
 
+        index = args.index('--config')
         if index == len(args) - 1:
             raise ValueError("No config file specified! \
                              Please check your commandline arguments.")
