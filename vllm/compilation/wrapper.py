@@ -7,6 +7,8 @@ from typing import Callable, List
 
 import torch
 
+import vllm.envs as envs
+
 
 class TorchCompileWrapperWithCustomDispacther:
     """
@@ -26,6 +28,12 @@ class TorchCompileWrapperWithCustomDispacther:
         self.original_code_object = self.__class__.forward.__code__
         self.compiled_codes: List[CodeType] = []
         torch._dynamo.convert_frame.register_bytecode_hook(self.bytecode_hook)
+
+        # read the env var to determine whether to use the custom dispatcher
+        # subclasses can use this to switch between the custom dispatcher
+        # and the default Dynamo guard mechanism.
+        self.use_custom_dispatcher: bool = \
+            envs.VLLM_DYNAMO_USE_CUSTOM_DISPATCHER
 
     def __call__(self, *args, **kwargs):
         """Implement the dispatch logic here, beyond the torch.compile level.

@@ -609,8 +609,9 @@ class ModelWrapper(TorchCompileWrapperWithCustomDispacther):
         super().__init__(compiled_callable)
 
     def __call__(self, *args, is_prompt: bool = False, **kwargs):
-        if len(self.compiled_codes) < 3:
-            # not fully compiled yet, let PyTorch handle it
+        if len(self.compiled_codes) < 3 or not self.use_custom_dispatcher:
+            # not fully compiled yet, or not using the custom dispatcher,
+            # let PyTorch handle it
             return self.compiled_callable(*args, **kwargs)
         # the 3 compiled codes are:
         # 0: for profiling
