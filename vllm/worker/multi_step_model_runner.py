@@ -1,3 +1,4 @@
+import dataclasses
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
@@ -13,9 +14,9 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
-from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
-                           Logprob, SamplerOutput, SequenceGroupMetadata,
-                           SequenceOutput)
+from vllm.sequence import (AsyncCallbackData, CompletionSequenceGroupOutput,
+                           IntermediateTensors, Logprob, SamplerOutput,
+                           SequenceGroupMetadata, SequenceOutput)
 from vllm.worker.model_runner import (GPUModelRunnerBase,
                                       ModelInputForGPUWithSamplingMetadata)
 from vllm.worker.model_runner_base import (
@@ -215,6 +216,49 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         )
         return model_input
 
+    def _async_process_outputs(self, model_input: StatefulModelInput,
+                               output_proc_callback: AsyncCallbackData):
+        output_proc_fn = output_proc_callback.func
+        output_proc_kw_args = output_proc_callback.kw_args
+        virtual_engine = output_proc_kw_args["virtual_engine"]
+
+        for model_output in model_input.cached_outputs:
+            if not model_output.pythonized:
+                model_output.maybe_pythonize(model_input, self._copy_stream,
+                                             self.pinned_sampled_token_ids)
+                if model_output.pythonized:
+                    output_proc_fn(virtual_engine=virtual_engine,
+                                   is_async=False,
+                                   sampler_output=model_output.sampler_output)
+
+    def _final_process_outputs(self, model_input: StatefulModelInput,
+                               output_proc_callback: AsyncCallbackData):
+        assert model_input.frozen_model_input is not None
+
+        if output_proc_callback is not None:
+            output_proc_fn = output_proc_callback.func
+            output_proc_kw_args = output_proc_callback.kw_args
+            virtual_engine = output_proc_kw_args["virtual_engine"]
+
+        outputs = []
+        for output_id in range(len(model_input.cached_outputs)):
+            is_last_output = output_id == len(model_input.cached_outputs) - 1
+
+            output = model_input.cached_outputs[output_id]
+            if not output.pythonized:
+                output.pythonize(model_input, self._copy_stream,
+                                 self.pinned_sampled_token_ids)
+
+                if model_input.frozen_model_input.use_async_and_multi_step:
+                    output_proc_fn(virtual_engine=virtual_engine,
+                                   is_async=False,
+                                   sampler_output=output.sampler_output,
+                                   is_last_output=is_last_output)
+
+            outputs.append(output.sampler_output)
+
+        return outputs
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -271,6 +315,20 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
             model_input = self._advance_step(
                 model_input, model_input.cached_outputs[-1].sampler_output)
 
+        output_proc_callback = None
+        if frozen_model_input.use_async_and_multi_step:
+            output_proc_callback = frozen_model_input.async_callback
+            async_callback = AsyncCallbackData(
+                self._async_process_outputs, {
+                    "model_input": model_input,
+                    "output_proc_callback": output_proc_callback
+                })
+
+            frozen_model_input = dataclasses.replace(  # type: ignore
+                model_input.frozen_model_input,
+                async_callback=async_callback)
+            assert frozen_model_input is not None
+
         # Execute the model
         output = self._base_model_runner.execute_model(frozen_model_input,
                                                        kv_caches,
@@ -301,9 +359,11 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
             output[0].logprobs = None
             # Pythonize the output if CPU is ahead and the previous step is
             # ready.
-            for model_output in model_input.cached_outputs:
-                model_output.maybe_pythonize(model_input, self._copy_stream,
-                                             self.pinned_sampled_token_ids)
+            if not frozen_model_input.use_async_and_multi_step:
+                for model_output in model_input.cached_outputs:
+                    model_output.maybe_pythonize(model_input,
+                                                 self._copy_stream,
+                                                 self.pinned_sampled_token_ids)
 
         model_input.current_step += 1
 
@@ -316,11 +376,8 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
 
         # Pythonize the output and block if needed since it is the last step
         if model_input.is_last_step:
-            outputs = []
-            for output in model_input.cached_outputs:
-                output.pythonize(model_input, self._copy_stream,
-                                 self.pinned_sampled_token_ids)
-                outputs.append(output.sampler_output)
+            outputs = self._final_process_outputs(model_input,
+                                                  output_proc_callback)
             return outputs
 
         # should be [SamplerOutput]

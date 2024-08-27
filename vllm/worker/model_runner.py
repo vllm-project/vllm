@@ -6,8 +6,8 @@ import time
 import warnings
 import weakref
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set,
-                    Tuple, Type, TypeVar, Union)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple, Type,
+                    TypeVar, Union)
 
 import numpy as np
 import torch
@@ -41,8 +41,8 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.prompt_adapter.worker_manager import (
     LRUCacheWorkerPromptAdapterManager)
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (IntermediateTensors, SamplerOutput,
-                           SequenceGroupMetadata)
+from vllm.sequence import (AsyncCallbackData, IntermediateTensors,
+                           SamplerOutput, SequenceGroupMetadata)
 from vllm.utils import (CudaMemoryProfiler, PyObjectCache, async_tensor_h2d,
                         flatten_2d_lists, is_hip, is_pin_memory_available,
                         supports_dynamo)
@@ -92,6 +92,7 @@ class ModelInputForGPU(ModelRunnerInputBase):
     finished_requests_ids: Optional[List[str]] = None
     virtual_engine: int = 0
     async_callback: Optional[Callable] = None
+    use_async_and_multi_step: bool = False
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
