@@ -945,6 +945,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     "provided. Defaulting to scaling factors of 1.0. "
                     "This may lead to less accurate results!")
 
+        if envs.VLLM_TEST_DYNAMO_GRAPH_CAPTURE:
+            self.model = torch.compile(self.model,
+                                       fullgraph=True,
+                                       backend="eager")
+
     def save_sharded_state(
         self,
         path: str,
@@ -1092,11 +1097,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.execute_model(model_input, kv_caches, intermediate_tensors)
         torch.cuda.synchronize()
 
-        if envs.VLLM_TEST_DYNAMO_GRAPH_CAPTURE:
-            # only compile after profiling runs
-            self.model = torch.compile(self.model,
-                                       fullgraph=True,
-                                       backend="eager")
+        # reset and discard the guard and compiled bytecode for profiling runs
+        torch._dynamo.reset()
 
         return
 
