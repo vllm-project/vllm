@@ -4,9 +4,9 @@ from typing import List, Optional
 
 import pytest
 
-from ..utils import (completions_with_server_args,
-                     get_client_logprob_generations,
-                     get_client_text_generations)
+from ..models.utils import check_logprobs_close
+from ..utils import (completions_with_server_args, get_client_text_generations,
+                     get_client_text_logprob_generations)
 
 MODELS = [
     "JackFram/llama-160m",
@@ -99,5 +99,12 @@ async def test_multi_step(example_prompts, model: str, tp_size: int,
 
     # Assert multi-step scheduling produces nearly-identical logprobs
     # to single-step scheduling.
-    ref_logprobs = get_client_logprob_generations(ref_completions)
-    test_logprobs = get_client_logprob_generations(test_completions)
+    ref_text_logprobs = get_client_text_logprob_generations(ref_completions)
+    test_text_logprobs = get_client_text_logprob_generations(test_completions)
+
+    check_logprobs_close(
+        outputs_0_lst=ref_text_logprobs,
+        outputs_1_lst=test_text_logprobs,
+        name_0="hf",
+        name_1="vllm",
+    )

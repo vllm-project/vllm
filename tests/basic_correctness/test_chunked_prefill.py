@@ -9,7 +9,7 @@ Run `pytest tests/models/test_chunked_prefill.py`.
 
 import pytest
 
-from ..models.utils import (check_outputs_equal, check_logprobs_close)
+from ..models.utils import check_logprobs_close, check_outputs_equal
 
 MODELS = [
     "facebook/opt-125m",

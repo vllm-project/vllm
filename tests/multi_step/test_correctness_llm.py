@@ -1,9 +1,10 @@
 # Test the LLMEngine with multi-step-decoding
 
-import pytest
 from typing import Optional
 
-from ..models.utils import check_outputs_equal, check_logprobs_close
+import pytest
+
+from ..models.utils import check_logprobs_close, check_outputs_equal
 
 MODELS = [
     "JackFram/llama-160m",

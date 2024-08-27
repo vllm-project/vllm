@@ -15,6 +15,7 @@ from openai.types.completion import Completion
 from transformers import AutoTokenizer
 from typing_extensions import ParamSpec
 
+from tests.models.utils import TextTextLogprobs
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -474,23 +475,14 @@ def get_client_text_generations(completions: Completion):
     return [x.text for x in completions.choices]
 
 
-'''Logprobs values are extracted as
-List[Optional[List[Dict[str,float]]]], i.e.:
-
-For each :class:`SequenceGroup`...
-  ...if the completions API was invoked with a non-`None` `logprobs` argument:
-      ...for each token offset in a sequence...
-          ...store a mapping from str(token) -> logprob
-  ...else, if the completions API was invoked with `logprobs=None`:
-      ...store None
-'''
-LogprobType = List[Optional[List[Dict[str, float]]]]
-
-
-def get_client_logprob_generations(completions: Completion) -> LogprobType:
+def get_client_text_logprob_generations(
+        completions: Completion) -> List[TextTextLogprobs]:
     '''Operates on the output of a request made to an Open-AI-protocol
     completions endpoint; obtains top-rank logprobs for each token in
     each :class:`SequenceGroup`
     '''
-    return [(None if x.logprobs is None else x.logprobs.top_logprobs)
+    text_generations = get_client_text_generations(completions)
+    text = ''.join(text_generations)
+    return [(text_generations, text,
+             (None if x.logprobs is None else x.logprobs.top_logprobs))
             for x in completions.choices]

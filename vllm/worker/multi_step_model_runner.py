@@ -18,7 +18,7 @@ from vllm.model_executor.layers.sampler import (PromptLogprobs, SampleLogprobs,
                                                 SamplingMetadata, get_logprobs,
                                                 get_pythonized_sample_results)
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
-                           SequenceGroupMetadata, SequenceOutput, Logprob)
+                           Logprob, SequenceGroupMetadata, SequenceOutput)
 from vllm.worker.model_runner import (GPUModelRunnerBase,
                                       ModelInputForGPUWithSamplingMetadata)
 from vllm.worker.model_runner_base import (
