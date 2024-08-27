@@ -143,5 +143,5 @@ def test_get_sampled_token_logprobs():
 
     ranks_regular = _get_ranks(logprob_tensor.reshape((2, -1)),
                                sampled_token_tensor.reshape(-1))
-    print(ranks_regular)
+
     assert torch.equal(ranks_spec_dec.reshape(-1), ranks_regular)
