@@ -577,16 +577,10 @@ def reshape_and_cache_flash(
     k_scale: float,
     v_scale: float,
 ) -> None:
-    if key.device.type == "cuda":
-        torch.ops._C_cache_ops.reshape_and_cache_flash(key, value, key_cache,
-                                                       value_cache,
-                                                       slot_mapping,
-                                                       kv_cache_dtype, k_scale,
-                                                       v_scale)
-    elif key.device.type == "cpu":
-        torch.ops._C_cpu_cache_ops.reshape_and_cache_flash(
-            key, value, key_cache, value_cache, slot_mapping, kv_cache_dtype,
-            k_scale, v_scale)
+    torch.ops._C_cache_ops.reshape_and_cache_flash(key, value, key_cache,
+                                                   value_cache, slot_mapping,
+                                                   kv_cache_dtype, k_scale,
+                                                   v_scale)
 
 
 def copy_blocks(key_caches: List[torch.Tensor],
@@ -602,10 +596,7 @@ def copy_blocks(key_caches: List[torch.Tensor],
 
 def swap_blocks(src: torch.Tensor, dst: torch.Tensor,
                 block_mapping: torch.Tensor) -> None:
-    if src.device.type == "cuda":
-        torch.ops._C_cache_ops.swap_blocks(src, dst, block_mapping)
-    elif src.device.type == "cpu":
-        torch.ops._C_cpu_cache_ops.swap_blocks(src, dst, block_mapping)
+    torch.ops._C_cache_ops.swap_blocks(src, dst, block_mapping)
 
 
 def convert_fp8(output: torch.Tensor,
