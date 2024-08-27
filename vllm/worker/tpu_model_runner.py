@@ -609,7 +609,7 @@ class ModelWrapper(TorchCompileWrapperWithCustomDispacther):
         super().__init__(compiled_forward)
 
     def __call__(self, *args, is_prompt: bool = False, **kwargs):
-        if len(ModelWrapper.compiled_codes) < 3:
+        if len(self.compiled_codes) < 3:
             # not fully compiled yet, let PyTorch handle it
             return self.compiled_forward(*args, **kwargs)
         # the 3 compiled codes are:
