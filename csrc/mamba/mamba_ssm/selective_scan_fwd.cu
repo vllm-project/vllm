@@ -311,26 +311,21 @@ void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
     // Only kNRows == 1 is tested for now, which ofc doesn't differ from previously when we had each block
     // processing 1 row.
     constexpr int kNRows = 1;
+    constexpr bool kIsVariableB = true;
+    constexpr bool kIsVariableC = true;
+    constexpr bool kHasZ = true;
     BOOL_SWITCH(params.seqlen % (kNThreads * kNItems) == 0, kIsEvenLen, [&] {
-        BOOL_SWITCH(params.is_variable_B, kIsVariableB, [&] {
-            BOOL_SWITCH(params.is_variable_C, kIsVariableC, [&] {
-                BOOL_SWITCH(params.z_ptr != nullptr , kHasZ, [&] {
-                    BOOL_SWITCH(params.index_ptr != nullptr , kUseIndex, [&] {
-                        using Ktraits = Selective_Scan_fwd_kernel_traits<kNThreads, kNItems, kNRows, kIsEvenLen, kIsVariableB, kIsVariableC, kHasZ,  kUseIndex, input_t, weight_t>;
-                        // constexpr int kSmemSize = Ktraits::kSmemSize;
-                        constexpr int kSmemSize = Ktraits::kSmemSize + kNRows * MAX_DSTATE * sizeof(typename Ktraits::scan_t);
-                        // printf("smem_size = %d\n", kSmemSize);
-                        dim3 grid(params.batch, params.dim / kNRows);
-                        auto kernel = &selective_scan_fwd_kernel<Ktraits>;
-                        if (kSmemSize >= 48 * 1024) {
-                            C10_CUDA_CHECK(cudaFuncSetAttribute(
-                                kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
-                        }
-                        kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
-                        C10_CUDA_KERNEL_LAUNCH_CHECK();
-                    });
-                });
-            });
+        BOOL_SWITCH(params.index_ptr != nullptr , kUseIndex, [&] {
+            using Ktraits = Selective_Scan_fwd_kernel_traits<kNThreads, kNItems, kNRows, kIsEvenLen, kIsVariableB, kIsVariableC, kHasZ,  kUseIndex, input_t, weight_t>;
+            constexpr int kSmemSize = Ktraits::kSmemSize + kNRows * MAX_DSTATE * sizeof(typename Ktraits::scan_t);
+            dim3 grid(params.batch, params.dim / kNRows);
+            auto kernel = &selective_scan_fwd_kernel<Ktraits>;
+            if (kSmemSize >= 48 * 1024) {
+                C10_CUDA_CHECK(cudaFuncSetAttribute(
+                    kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
+            }
+            kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
+            C10_CUDA_KERNEL_LAUNCH_CHECK();
         });
     });
 }
@@ -369,27 +364,23 @@ template void selective_scan_fwd_cuda<float, float>(SSMParamsBase &params, cudaS
 
 #define CHECK_SHAPE(x, ...) TORCH_CHECK(x.sizes() == torch::IntArrayRef({__VA_ARGS__}), #x " must have shape (" #__VA_ARGS__ ")")
 
-#define DISPATCH_ITYPE_FLOAT_AND_HALF_AND_BF16(ITYPE, NAME, ...)                    \
+#define DISPATCH_WTYPE_ITYPE_FLOAT_AND_HALF_AND_BF16(ITYPE, NAME, ...)                    \
     if (ITYPE == at::ScalarType::Half) {                                            \
         using input_t = at::Half;                                                   \
+        using weight_t = at::Half;                                                   \
         __VA_ARGS__();                                                              \
     } else if (ITYPE == at::ScalarType::BFloat16) {                                 \
         using input_t = at::BFloat16;                                               \
+        using weight_t = at::BFloat16;                                                   \
         __VA_ARGS__();                                                              \
     } else if (ITYPE == at::ScalarType::Float)  {                                   \
         using input_t = float;                                                      \
+        using weight_t = float;                                                   \
         __VA_ARGS__();                                                              \
     } else {                                                                        \
         AT_ERROR(#NAME, " not implemented for input type '", toString(ITYPE), "'"); \
     }
 
-#define DISPATCH_WTYPE_FLOAT(WTYPE, NAME, ...)                           \
-    if (WTYPE == at::ScalarType::Float) {                                            \
-       using weight_t = float;                                                       \
-        __VA_ARGS__();                                                               \
-    } else {                                                                         \
-        AT_ERROR(#NAME, " not implemented for weight type '", toString(WTYPE), "'"); \
-    }
 
 template<typename input_t, typename weight_t>
 void selective_scan_fwd_cuda(SSMParamsBase &params, cudaStream_t stream);
@@ -598,10 +589,8 @@ selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
     // Cast to char to avoid compiler warning about narrowing
     at::cuda::CUDAGuard device_guard{(char)u.get_device()};
     auto stream = at::cuda::getCurrentCUDAStream().stream();
-    DISPATCH_ITYPE_FLOAT_AND_HALF_AND_BF16(u.scalar_type(), "selective_scan_fwd", [&] {
-        DISPATCH_WTYPE_FLOAT(A.scalar_type(), "selective_scan_fwd", [&] {
+    DISPATCH_WTYPE_ITYPE_FLOAT_AND_HALF_AND_BF16(u.scalar_type(), "selective_scan_fwd", [&] {
         selective_scan_fwd_cuda<input_t, weight_t>(params, stream);
-        });
     });
     std::vector<at::Tensor> result = {out, x.value()};
     if (has_z) { result.push_back(out_z); }

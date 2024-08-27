@@ -404,19 +404,18 @@ void causal_conv1d_fwd_kernel(ConvParamsBase params) {
 template<int kNThreads, int kWidth, typename input_t, typename weight_t>
 void causal_conv1d_fwd_launch(ConvParamsBase &params, cudaStream_t stream) {
     static constexpr int kNElts = sizeof(input_t) == 4 ? 4 : 8;
-    BOOL_SWITCH(params.seq_pos_idx_ptr != nullptr, kHasSeqPosIdx, [&] {
-        BOOL_SWITCH(params.seqlen % kNElts == 0, kIsVecLoad, [&] {
-            using Ktraits = Causal_conv1d_fwd_kernel_traits<kNThreads, kWidth, kIsVecLoad, input_t, weight_t>;
-            constexpr int kSmemSize = Ktraits::kSmemSize;
-            dim3 grid(params.batch, params.dim);
-            auto kernel = &causal_conv1d_fwd_kernel<Ktraits, kHasSeqPosIdx>;
-            if (kSmemSize >= 48 * 1024) {
-                C10_CUDA_CHECK(cudaFuncSetAttribute(
-                    kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
-                }
-            kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
-            C10_CUDA_KERNEL_LAUNCH_CHECK();
-        });
+    constexpr kHasSeqPosIdx = false;
+    BOOL_SWITCH(params.seqlen % kNElts == 0, kIsVecLoad, [&] {
+        using Ktraits = Causal_conv1d_fwd_kernel_traits<kNThreads, kWidth, kIsVecLoad, input_t, weight_t>;
+        constexpr int kSmemSize = Ktraits::kSmemSize;
+        dim3 grid(params.batch, params.dim);
+        auto kernel = &causal_conv1d_fwd_kernel<Ktraits, kHasSeqPosIdx>;
+        if (kSmemSize >= 48 * 1024) {
+            C10_CUDA_CHECK(cudaFuncSetAttribute(
+                kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
+            }
+        kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
     });
 }
 
