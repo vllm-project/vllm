@@ -203,5 +203,10 @@ def test_config_args(parser_with_config):
 
 
 def test_config_file(parser_with_config):
-    with pytest.raises(SystemExit):
+    with pytest.raises(ValueError):
         parser_with_config.parse_args(['--config', './data/test_config.json'])
+
+    with pytest.raises(ValueError):
+        args = parser_with_config.parse_args(
+            ['--tensor-parallel-size', '3', '--config', '--batch-size', '32'])
+        
