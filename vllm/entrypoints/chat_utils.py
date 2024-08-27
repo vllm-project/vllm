@@ -131,11 +131,17 @@ def _mm_token_str(model_config: ModelConfig, tokenizer: AnyTokenizer,
             return tokenizer.decode(model_config.hf_config.image_token_index)
         if model_type in ("chameleon", "internvl_chat"):
             return "<image>"
+        if model_type == "qwen2_vl":
+            return "<|vision_start|><|image_pad|><|vision_end|>"
 
         raise TypeError(f"Unknown model type: {model_type}")
     elif modality == "audio":
         if model_type == "ultravox":
             return "<|reserved_special_token_0|>"
+        raise TypeError(f"Unknown model type: {model_type}")
+    elif modality == "video":
+        if model_type == "qwen2_vl":
+            return "<|vision_start|><|video_pad|><|vision_end|>"
         raise TypeError(f"Unknown model type: {model_type}")
     else:
         raise TypeError(f"Unknown modality: {modality}")

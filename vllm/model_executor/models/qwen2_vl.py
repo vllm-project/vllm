@@ -698,16 +698,16 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
                 NOTE: If mrope is enabled (default setting for Qwen2-VL opensource models), the shape will be `(3, seq_len)`, otherwise it will be `(seq_len,).
             pixel_values: Pixel values to be fed to a model. `None` if no images are passed.
             image_grid_thw: Tensor `(n_images, 3)` of image 3D grid in LLM. `None` if no images are passed.
-            pixel_values_video: Pixel values of videos to be fed to a model. `None` if no videos are passed.
+            pixel_values_videos: Pixel values of videos to be fed to a model. `None` if no videos are passed.
             video_grid_thw: Tensor `(n_videos, 3)` of video 3D grid in LLM. `None` if no videos are passed.
         """
         pixel_values: torch.Tensor = kwargs.get('pixel_values', None)
         image_grid_thw: torch.Tensor = kwargs.get('image_grid_thw', None)
-        pixel_values_video: torch.Tensor = kwargs.get('pixel_values_video',
+        pixel_values_videos: torch.Tensor = kwargs.get('pixel_values_videos',
                                                       None)
         video_grid_thw: torch.Tensor = kwargs.get('video_grid_thw', None)
 
-        no_vision = pixel_values is None and pixel_values_video is None
+        no_vision = pixel_values is None and pixel_values_videos is None
 
         if no_vision:
             inputs_embeds = None
@@ -725,10 +725,10 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
                                            grid_thw=image_grid_thw)
                 image_mask = (input_ids == self.config.image_token_id)
                 inputs_embeds[image_mask, :] = image_embeds
-            if pixel_values_video is not None:
-                pixel_values_video = pixel_values_video.type(
+            if pixel_values_videos is not None:
+                pixel_values_videos = pixel_values_videos.type(
                     self.visual.get_dtype())
-                video_embeds = self.visual(pixel_values_video,
+                video_embeds = self.visual(pixel_values_videos,
                                            grid_thw=video_grid_thw)
                 video_mask = (input_ids == self.config.video_token_id)
                 inputs_embeds[video_mask, :] = video_embeds
