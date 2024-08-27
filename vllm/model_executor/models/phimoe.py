@@ -41,10 +41,10 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
-from vllm.utils import print_warning_once
 
 from .interfaces import SupportsLoRA
 
@@ -157,9 +157,7 @@ class mp(torch.autograd.Function):
         )
 
 
-def sparsemixer(scores, top_k, jitter_eps=0.01):
-    assert top_k == 2
-
+def sparsemixer(scores, jitter_eps=0.01):
     ################ first expert ################
 
     with torch.no_grad():
@@ -221,11 +219,10 @@ def phimoe_routing_function(
 ):
     assert hidden_states.shape[0] == gating_output.shape[0], (
         "Number of tokens mismatch")
+    assert topk == 2, "Only top-2 routing is supported"
+    assert renormalize is False, "Renormalization is not supported"
 
-    topk_weights, topk_ids = sparsemixer(gating_output, topk)
-    if renormalize:
-        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
-
+    topk_weights, topk_ids = sparsemixer(gating_output)
     return topk_weights, topk_ids
 
 
@@ -613,19 +610,10 @@ class PhiMoEForCausalLM(nn.Module, SupportsLoRA):
                     if name.endswith(".bias") and name not in params_dict:
                         continue
                     # Remapping the name of FP8 kv-scale.
-                    if name.endswith("kv_scale"):
-                        remapped_kv_scale_name = name.replace(
-                            ".kv_scale", ".attn.kv_scale")
-                        if remapped_kv_scale_name not in params_dict:
-                            print_warning_once(
-                                "Found kv scale in the checkpoint "
-                                f"(e.g. {name}), but not found the expected "
-                                f"name in the model "
-                                f"(e.g. {remapped_kv_scale_name}). "
-                                "kv-scale is not loaded.")
-                            continue
-                        else:
-                            name = remapped_kv_scale_name
+                    name = maybe_remap_kv_scale_name(name, params_dict)
+                    if name is None:
+                        continue
+
                     param = params_dict[name]
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
