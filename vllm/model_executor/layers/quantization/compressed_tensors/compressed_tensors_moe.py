@@ -256,16 +256,17 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         )
         replace_tensor("w2_weight_scale", marlin_w2_scales)
 
-    def apply(self,
-              layer: torch.nn.Module,
-              x: torch.Tensor,
-              router_logits: torch.Tensor,
-              top_k: int,
-              renormalize: bool = True,
-              use_grouped_topk: bool = False,
-              num_expert_group: Optional[int] = None,
-              topk_group: Optional[int] = None,
-              custom_routing_function: Optional[Callable] = None,
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        top_k: int,
+        renormalize: bool = True,
+        use_grouped_topk: bool = False,
+        num_expert_group: Optional[int] = None,
+        topk_group: Optional[int] = None,
+        custom_routing_function: Optional[Callable] = None,
     ) -> torch.Tensor:
 
         from vllm.model_executor.layers.fused_moe.fused_moe import (

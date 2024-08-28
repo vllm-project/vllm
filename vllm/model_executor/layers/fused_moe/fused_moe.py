@@ -502,9 +502,8 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
         topk_weights, topk_ids = fused_topk(hidden_states, gating_output, topk,
                                             renormalize)
     else:
-        topk_weights, topk_ids = custom_routing_function(hidden_states,
-                                                         gating_output,
-                                                         topk, renormalize)
+        topk_weights, topk_ids = custom_routing_function(
+            hidden_states, gating_output, topk, renormalize)
 
     get_config_func = functools.partial(try_get_optimal_moe_config,
                                         w1.shape,
@@ -753,9 +752,8 @@ def fused_moe(
         topk_weights, topk_ids = fused_topk(hidden_states, gating_output, topk,
                                             renormalize)
     else:
-        topk_weights, topk_ids = custom_routing_function(hidden_states,
-                                                         gating_output, topk,
-                                                         renormalize)
+        topk_weights, topk_ids = custom_routing_function(
+            hidden_states, gating_output, topk, renormalize)
 
     return fused_experts(hidden_states,
                          w1,
