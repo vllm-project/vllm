@@ -133,7 +133,9 @@ class MultiModalItemTracker:
                 return MultiModalItemTracker._cached_token_str(
                     self._tokenizer,
                     self._model_config.hf_config.image_token_index)
-            if model_type in ("chameleon", "internvl_chat"):
+            # NOTE: qwen models do not use <image> normally, but input
+            # processor will expand it to the expected format
+            if model_type in ("chameleon", "internvl_chat", "qwen"):
                 return "<image>"
 
             raise TypeError(f"Unknown model type: {model_type}")
