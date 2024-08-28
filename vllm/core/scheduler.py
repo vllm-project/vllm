@@ -1226,7 +1226,8 @@ class Scheduler:
         # will crash the vLLM instance / will not retry.
         for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
             self.block_manager.mark_blocks_as_computed(
-                scheduled_seq_group.seq_group)
+                scheduled_seq_group.seq_group,
+                scheduled_seq_group.token_chunk_size)
 
         self._seq_group_metadata_cache[self.next_cache_id].reset()
 
@@ -1457,10 +1458,27 @@ class Scheduler:
         for seq in seqs:
             num_new_tokens += seq.get_num_new_tokens()
         assert num_new_tokens > 0
-        # Chunk if a running request cannot fit in.
-        # If number of seq > 1, it means it is doing beam search in a
-        # decode phase. Do not chunk in that case.
+        # Chunk if a running request cannot fit in the given budget.
+        # If number of seq > 1, it means it is doing beam search
+        # in a decode phase. Do not chunk.
         if enable_chunking and len(seqs) == 1:
-            num_new_tokens = min(num_new_tokens,
-                                 budget.remaining_token_budget())
+            remaining_token_budget = budget.remaining_token_budget()
+            if self.cache_config.enable_prefix_caching:
+                # When prefix caching is enabled, we always allocate
+                # the number of new tokens that is dividable by the block size
+                # to avoid partial block matching.
+                block_size = self.cache_config.block_size
+                reminder = budget.token_budget % block_size
+                if reminder != 0:
+                    raise ValueError("When enabling chunked prefill and "
+                                     "prefix caching, max_num_batched_tokens "
+                                     "(chunk size) must be dividable by "
+                                     "block size, but got chunk_size "
+                                     f"({budget.token_budget}) % block_size "
+                                     f"({block_size}) = {reminder}")
+                if remaining_token_budget < num_new_tokens:
+                    num_new_tokens = (remaining_token_budget //
+                                      block_size) * block_size
+            else:
+                num_new_tokens = min(num_new_tokens, remaining_token_budget)
         return num_new_tokens
