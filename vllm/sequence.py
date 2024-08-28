@@ -811,6 +811,9 @@ class SequenceGroup:
         self.is_single_seq = len(self.seqs) == 1
 
     def is_finished(self) -> bool:
+        if self.is_single_seq:
+            return self.seqs[0].is_finished()
+
         return all(seq.is_finished() for seq in self.seqs)
 
     def is_prefill(self) -> bool:
@@ -883,7 +886,7 @@ class SequenceGroupMetadata(
     request_id: str
     is_prompt: bool
     seq_data: Dict[int, SequenceData]
-    sampling_params: SamplingParams
+    sampling_params: Optional[SamplingParams]
     block_tables: Dict[int, List[int]]
     do_sample: bool = True
     pooling_params: Optional[PoolingParams] = None
@@ -1290,8 +1293,8 @@ class ExecuteModelRequest(
     finished_requests_ids: List[str] = msgspec.field(default_factory=list)
     # The last sampled token ids for multi step decoding.
     last_sampled_token_ids: Optional[torch.Tensor] = None
-    # Async postprocessor
-    output_proc_callback_fn: Optional[Callable] = None
+    # Async callback
+    async_callback: Optional[Callable] = None
 
     @property
     def is_first_multi_step(self) -> bool:
@@ -1338,4 +1341,4 @@ class ExecuteModelRequest(
             finished_requests_ids=self.finished_requests_ids,
             last_sampled_token_ids=self.last_sampled_token_ids.clone()
             if self.last_sampled_token_ids is not None else None,
-            output_proc_callback_fn=self.output_proc_callback_fn)
+            async_callback=self.async_callback)
