@@ -176,12 +176,12 @@ speculative decoding, breaking down the guarantees into three key areas:
    temperature parameter (`temp`) is set to 0. Key tests include:
 
     - **Rejection Sampler Convergence**: Ensures that samples from vLLM’s rejection sampler align with the target 
-     distribution. `View Test Code <https://github.com/vllm-project/vllm/blob/47b65a550866c7ffbd076ecb74106714838ce7da/tests/samplers/test_rejection_sampler.py#L252>`_
+    distribution. `View Test Code <https://github.com/vllm-project/vllm/blob/47b65a550866c7ffbd076ecb74106714838ce7da/tests/samplers/test_rejection_sampler.py#L252>`_
 
     - **Greedy Sampling Equality**: Confirms that greedy sampling with speculative decoding matches greedy sampling
-     without it. This verifies that vLLM's speculative decoding framework, when integrated with the vLLM forward pass and the vLLM rejection sampler, 
-     provides a lossless guarantee.  Almost all of the tests in `this directory <https://github.com/vllm-project/vllm/tree/b67ae00cdbbe1a58ffc8ff170f0c8d79044a684a/tests/spec_decode/e2e>`_
-     verify this property using `this assertion implementation <https://github.com/vllm-project/vllm/blob/b67ae00cdbbe1a58ffc8ff170f0c8d79044a684a/tests/spec_decode/e2e/conftest.py#L291>`_
+    without it. This verifies that vLLM's speculative decoding framework, when integrated with the vLLM forward pass and the vLLM rejection sampler, 
+    provides a lossless guarantee.  Almost all of the tests in `this directory <https://github.com/vllm-project/vllm/tree/b67ae00cdbbe1a58ffc8ff170f0c8d79044a684a/tests/spec_decode/e2e>`_
+    verify this property using `this assertion implementation <https://github.com/vllm-project/vllm/blob/b67ae00cdbbe1a58ffc8ff170f0c8d79044a684a/tests/spec_decode/e2e/conftest.py#L291>`_
 
 3. **vLLM Logprob Stability**
    - vLLM currently does not guarantee stable log probabilities (logprobs) across different batch sizes, which might 
@@ -190,7 +190,7 @@ speculative decoding, breaking down the guarantees into three key areas:
    `See Test Code and Discussion <https://github.com/vllm-project/vllm/blob/47b65a5/vllm/tests/spec_decode/e2e/test_multistep_correctness.py>`_ as explained
    `here in the Numerical Accuracy section <https://pytorch.org/docs/stable/notes/numerical_accuracy.html#batched-computations-or-slice-computations>`_
 
-**Conclusion
+**Conclusion**
 
 While vLLM strives to ensure losslessness in speculative decoding, variations in generated outputs with and without speculative decoding 
 can occur due to following factors:
