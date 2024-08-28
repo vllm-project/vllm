@@ -33,11 +33,11 @@ def test_models(hf_runner, vllm_runner, image_assets, model: str,
     tensor_parallel_size = 2
 
     if model.startswith("llava-hf/llava-1.5"):
-        from ..models.test_llava import models, run_test
+        from ..models.decoder_only.vision_language.test_llava import models, run_test
     elif model.startswith("llava-hf/llava-v1.6"):
-        from ..models.test_llava_next import models, run_test
+        from ..models.decoder_only.vision_language.test_llava_next import models, run_test
     elif model.startswith("facebook/chameleon"):
-        from ..models.test_chameleon import models, run_test
+        from ..models.decoder_only.vision_language.test_chameleon import models, run_test
     else:
         raise NotImplementedError(f"Unsupported model: {model}")
 
