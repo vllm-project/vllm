@@ -151,7 +151,7 @@ CPU Backend Considerations
 * Like the GPU backend, vLLM CPU backend also supports tensor-parallel inference and serving. On CPU based vLLM deployment with NUMA enabled, the memory access performance may be largely impacted by the topology (details). Two optimizations are to enable Tensor Parallel or Data Parallel:  
 
   * Tensor Parallel for a latency constraints deployment: a Megatron-LM's parallel algorithm will be used to shard the model, based on the NUMA nodes (e.g. TP = 2 for a two NUMA node system).
-  * Data Parallel for better throughput: the idea is to launch LLM serving endpoint on each NUMA node, also with one additional load balancer to dispatch the requests to those endpoints. 
+  * Data Parallel for better throughput: the idea is to launch an LLM serving endpoint on each NUMA node along with one additional load balancer to dispatch the requests to those endpoints. 
 * On Ray based vLLM deployment, each Ray cluster will have components for monitoring, statistics and logging. It's highly recommend to turn off unnecessary features to introduce less context switches for the inference threads.  As there are several components that cannot be turned off, we recommend using one CPU core for these components.  
 
 ... code-block:: console
