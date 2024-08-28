@@ -142,21 +142,28 @@ Performance tips
 - If using vLLM CPU backend on a multi-socket machine with NUMA, be aware to set CPU cores using ``VLLM_CPU_OMP_THREADS_BIND`` to avoid cross NUMA node memory access.
 
 CPU Backend Considerations
----------------------------------------------
+--------------------------
 
 * The CPU backend significantly differs from the GPU backend since the vLLM architecture was originally optimized for GPU use. A number of optimizations are needed to enhance its performance.
 
 * Decouple the HTTP serving components from the inference components. In a GPU backend configuration, the HTTP serving and tokenization tasks operate on the CPU, while inference runs on the GPU, which typically does not pose a problem. However, in a CPU-based setup, the HTTP serving and tokenization can cause significant context switching and reduced cache efficiency. Therefore, it is strongly recommended to segregate these two components for improved performance.
 
-* Like the GPU backend, vLLM CPU backend also supports tensor-parallel inference and serving. On CPU based vLLM deployment with NUMA enabled, the memory access performance may be largely impacted by the topology (details). Two optimizations are to enable Tensor Parallel or Data Parallel:  
+* Like the GPU backend, vLLM CPU backend also supports tensor-parallel inference and serving. On CPU based vLLM setup with NUMA enabled, the memory access performance may be largely impacted by the `topology <https://github.com/intel/intel-extension-for-pytorch/blob/main/docs/tutorials/performance_tuning/tuning_guide.md#non-uniform-memory-access-numa>`_. For NUMA architecture, two optimizations are to recommended: Tensor Parallel or Data Parallel.  
 
-  * Tensor Parallel for a latency constraints deployment: a Megatron-LM's parallel algorithm will be used to shard the model, based on the NUMA nodes (e.g. TP = 2 for a two NUMA node system).
-  * Data Parallel for better throughput: the idea is to launch an LLM serving endpoint on each NUMA node along with one additional load balancer to dispatch the requests to those endpoints. 
-* On Ray based vLLM deployment, each Ray cluster will have components for monitoring, statistics and logging. It's highly recommend to turn off unnecessary features to introduce less context switches for the inference threads.  As there are several components that cannot be turned off, we recommend using one CPU core for these components.  
+  * Tensor Parallel for a latency constraints deployment: a Megatron-LM's parallel algorithm will be used to shard the model, based on the NUMA nodes (e.g. TP = 2 for a two NUMA node system). With `TP feature on CPU <https://github.com/vllm-project/vllm/pull/6125>`_ merged, below is the example script to enable Tensor Parallel = 2
 
 ... code-block:: console
 
-     $ numactl --physcpubind=63 --membind=1 ray start --head --num-cpus=0 --num-gpus=0 --disable-usage-stats --include-dashboard=false # launch a Ray head node with 0 cpu resources
-     $ numactl --physcpubind=32-63 --membind=1 ray start --address=auto --num-cpus=32 --num-gpus=0
-     $ numactl --physcpubind=0-31 --membind=0 ray start --address=auto --num-cpus=32 --num-gpus=0
-     $ numactl --physcpubind=31 --membind=0 python3 -m vllm.entrypoints.openai.api_server --model meta-llama/Llama-2-7b-chat-hf --dtype=bfloat16 --device cpu --engine-use-ray --disable-log-stats -tp=2
+     $ VLLM_CPU_KVCACHE_SPACE=40 VLLM_CPU_OMP_THREADS_BIND="0-31|32-63" vllm serve meta-llama/Llama-2-7b-chat-hf -tp=2 --distributed-executor-backend mp
+
+
+  * Data Parallel for maximum throughput: to launch an LLM serving endpoint on each NUMA node along with one additional load balancer to dispatch the requests to those endpoints. Common solutions like Nginx or HAProxy are recommended. Anyscale Ray project provides the feature on LLM `serving <https://docs.ray.io/en/latest/serve/index.html>`_. Below are the examples to setup a scalable LLM serving with Ray Serve
+
+... code-block:: console
+
+     $ pip install ray[serve]
+     $ git clone https://github.com/xwu99/ray-llm && cd ray-llm && git checkout support-vllm-cpu
+     $ pip install -e .
+     $ VLLM_TARGET_DEVICE=cpu pip install -v git+https://github.com/vllm-project/vllm --extra-index-url https://download.pytorch.org/whl/cpu
+     $ ray start --head
+     $ serve run ./serve_configs/cpu/meta-llama--Llama-2-7b-chat-hf.yaml
