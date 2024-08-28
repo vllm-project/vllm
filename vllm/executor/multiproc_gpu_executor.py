@@ -126,7 +126,7 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
                           max_parallel_loading_workers)
 
     def _check_executor_parameters(self):
-        world_size = self.parallel_config.tensor_parallel_size
+        world_size = self.parallel_config.world_size
         tensor_parallel_size = self.parallel_config.tensor_parallel_size
 
         # Set CUDA_VISIBLE_DEVICES for the driver, inherited by workers
