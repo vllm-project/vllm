@@ -167,7 +167,7 @@ In vLLM, speculative decoding aims to enhance inference efficiency while maintai
 speculative decoding, breaking down the guarantees into three key areas:
 
 1. **Theoretical Losslessness**
-   - Speculative decoding is theoretically lossless up to the precision limits of hardware numerics. Floating-point errors might 
+   - Speculative decoding sampling is theoretically lossless up to the precision limits of hardware numerics. Floating-point errors might 
    cause slight variations in output distributions, as discussed 
    in `Accelerating Large Language Model Decoding with Speculative Sampling <https://arxiv.org/pdf/2302.01318>`_
 
