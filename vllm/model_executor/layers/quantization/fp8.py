@@ -34,7 +34,7 @@ logger = init_logger(__name__)
 
 
 class Fp8Config(QuantizationConfig):
-    """Config class for FP8. """
+    """Config class for FP8."""
 
     def __init__(
         self,
