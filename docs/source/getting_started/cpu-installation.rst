@@ -144,7 +144,7 @@ Performance tips
 CPU Backend Considerations
 ---------------------------------------------
 
-* The CPU backend significantly differs from the GPU backend since the vLLM architecture was originally optimized for GPU use, we need to apply a number of optimizations to enhance the performance on the CPU backend.
+* The CPU backend significantly differs from the GPU backend since the vLLM architecture was originally optimized for GPU use. A number of optimizations are needed to enhance its performance.
 
 * Decouple the HTTP serving components from the inference components. In a GPU backend configuration, the HTTP serving and tokenization tasks operate on the CPU, while inference runs on the GPU, which typically does not pose a problem. However, in a CPU-based setup, the HTTP serving and tokenization can cause significant context switching and reduced cache efficiency. Therefore, it is strongly recommended to segregate these two components for improved performance.
 
