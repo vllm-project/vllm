@@ -1,9 +1,11 @@
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <cassert>
 
 #include "cuda_compat.h"
 #include "dispatch_utils.h"
+#include "cache.h"
 
 #ifdef USE_ROCM
   #include "quantization/fp8/amd/quant_utils.cuh"
@@ -15,7 +17,10 @@
 #include <cassert>
 #include <map>
 #include <vector>
-
+#include <string>
+#include <pthread.h>
+#include <fcntl.h>
+#include <unistd.h>
 #ifdef USE_ROCM
   #include <hip/hip_bf16.h>
 typedef __hip_bfloat16 __nv_bfloat16;
@@ -60,6 +65,127 @@ void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
     cudaMemcpyAsync(dst_ptr + dst_offset, src_ptr + src_offset,
                     block_size_in_bytes, memcpy_type, stream);
   }
+}
+
+void* copy_blocks_to_file(void* args) {
+    FileSwapperParam* param = static_cast<FileSwapperParam*>(args);
+    char* gpu_ptr = param->cache_ptr;
+    int64_t file_offset = param->file_offset;
+    int64_t size = param->size;
+    std::string file_name = param->file_name;
+    cudaStream_t stream = param->stream;
+
+    char* cpu_ptr = new char[size];
+    cudaError_t cudaStatus = cudaMemcpyAsync(cpu_ptr, gpu_ptr, size,
+                                             cudaMemcpyDeviceToHost, stream);
+
+    // Currently, error handling is not supported in the kernel,
+    // so use assert to handle it.
+    // Please refer to https://github.com/vllm-project/vllm/issues/7577
+    assert(cudaStatus == cudaSuccess && "cudaMemcpyAsync failed");
+
+    int fd = open(file_name.c_str(), O_WRONLY);
+    assert(fd != -1 && "failed to open the file: " + file_name);
+
+    ssize_t bytesWritten = pwrite(fd, cpu_ptr, size, file_offset);
+    assert(bytesWritten == size && "failed to write the file: " + file_name);
+    close(fd);
+
+    delete[] cpu_ptr;
+    delete param;
+    return nullptr;
+}
+
+void swap_out_to_local_file(torch::Tensor& src, std::string dst_file,
+                            const torch::Tensor& block_mapping) {
+  TORCH_CHECK(block_mapping.device().is_cpu(), "block_mapping must be on CPU");
+
+  const int64_t block_size_in_bytes = src.element_size() * src[0].numel();
+  char* src_ptr = static_cast<char*>(src.data_ptr());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  const int64_t num_blocks = block_mapping.size(0);
+  pthread_t* threads = new pthread_t[num_blocks];
+  for (size_t i = 0; i < num_blocks; i++) {
+    int64_t src_block_number = block_mapping[i][0].item<int64_t>();
+    int64_t dst_block_number = block_mapping[i][1].item<int64_t>();
+    int64_t src_offset = src_block_number * block_size_in_bytes;
+    int64_t dst_offset = dst_block_number * block_size_in_bytes;
+
+    char* gpu_ptr = src_ptr + src_offset;
+    FileSwapperParam* param = new FileSwapperParam(gpu_ptr, dst_file, dst_offset,
+                                                   block_size_in_bytes, stream);
+
+    // In order to increase the cache copy speed,
+    // multi-threading is used for copying.
+    int ret = pthread_create(&threads[i], nullptr, copy_blocks_to_file, param);
+    assert(ret == 0 && "create thread failed");
+  }
+
+  for (size_t i = 0; i < num_blocks; i++) {
+    pthread_join(threads[i], nullptr);
+  }
+
+  delete[] threads;
+}
+
+void* copy_blocks_from_file(void* args) {
+    FileSwapperParam* param = static_cast<FileSwapperParam*>(args);
+    char* gpu_ptr = param->cache_ptr;
+    int64_t size = param->size;
+    int64_t file_offset = param->file_offset;
+    std::string file_name = param->file_name;
+    cudaStream_t stream = param->stream;
+    char* cpu_ptr = new char[size];
+
+    int fd = open(file_name.c_str(), O_RDONLY);
+    assert(fd != -1 && "failed to open the file: " + file_name);
+
+    int ret = pread(fd, cpu_ptr, size, file_offset);
+    assert(ret != -1 && "failed to read the file: " + file_name);
+    close(fd);
+
+    cudaError_t cudaStatus = cudaMemcpyAsync(gpu_ptr, cpu_ptr, size,
+                                             cudaMemcpyHostToDevice, stream);
+    assert(cudaStatus == cudaSuccess && "cudaMemcpyAsync failed");
+
+    delete[] cpu_ptr;
+    delete param;
+    return nullptr;
+}
+
+void swap_in_from_local_file(std::string src_file, torch::Tensor& dst,
+                 const torch::Tensor& block_mapping) {
+  TORCH_CHECK(block_mapping.device().is_cpu(), "block_mapping must be on CPU");
+
+  const int64_t block_size_in_bytes = dst.element_size() * dst[0].numel();
+  char* dst_ptr = static_cast<char*>(dst.data_ptr());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  const int64_t num_blocks = block_mapping.size(0);
+  pthread_t* threads = new pthread_t[num_blocks];
+  for (size_t i = 0; i < num_blocks; i++) {
+    int64_t src_block_number = block_mapping[i][0].item<int64_t>();
+    int64_t dst_block_number = block_mapping[i][1].item<int64_t>();
+
+    int64_t src_offset = src_block_number * block_size_in_bytes;
+    int64_t dst_offset = dst_block_number * block_size_in_bytes;
+
+    char* gpu_ptr = dst_ptr + dst_offset;
+    FileSwapperParam* param = new FileSwapperParam(gpu_ptr, src_file, src_offset,
+                                                   block_size_in_bytes, stream);
+
+    // In order to increase the cache copy speed,
+    // multi-threading is used for copying.
+    int ret = pthread_create(&threads[i], nullptr, copy_blocks_from_file, param);
+    assert(ret == 0 && "create thread failed");
+  }
+
+  for (size_t i = 0; i < num_blocks; i++) {
+    pthread_join(threads[i], nullptr);
+  }
+
+  delete[] threads;
 }
 
 namespace vllm {

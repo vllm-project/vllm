@@ -584,6 +584,16 @@ def copy_blocks(key_caches: List[torch.Tensor],
     torch.ops._C_cache_ops.copy_blocks(key_caches, value_caches, block_mapping)
 
 
+def swap_out_to_local_file(src: torch.Tensor, dst: str,
+                           block_mapping: torch.Tensor) -> None:
+    torch.ops._C_cache_ops.swap_out_to_local_file(src, dst, block_mapping)
+
+
+def swap_in_from_local_file(src: str, dst: torch.Tensor,
+                            block_mapping: torch.Tensor) -> None:
+    torch.ops._C_cache_ops.swap_in_from_local_file(src, dst, block_mapping)
+
+
 def swap_blocks(src: torch.Tensor, dst: torch.Tensor,
                 block_mapping: torch.Tensor) -> None:
     torch.ops._C_cache_ops.swap_blocks(src, dst, block_mapping)
