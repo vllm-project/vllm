@@ -159,6 +159,15 @@ def run_blip2(question):
     return llm, prompt, stop_token_ids
 
 
+# Qwen
+def run_qwen_vl(question):
+
+    llm = LLM(model="Qwen/Qwen-VL", trust_remote_code=True)
+    prompt = f"{question}<image>"
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
+
+
 model_example_map = {
     "llava": run_llava,
     "llava-next": run_llava_next,
@@ -169,6 +178,7 @@ model_example_map = {
     "minicpmv": run_minicpmv,
     "blip-2": run_blip2,
     "internvl_chat": run_internvl,
+    "qwen_vl": run_qwen_vl,
 }
 
 
