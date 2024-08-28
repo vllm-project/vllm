@@ -23,13 +23,13 @@ from vllm.model_executor.models.intern_vit import InternVisionModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.base import MultiModalInputs
-from vllm.multimodal.image import cached_get_tokenizer
+from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
                    get_clip_num_patches)
 from .interfaces import SupportsMultiModal
-from .utils import (filter_weights, init_vllm_registered_model,
+from .utils import (filter_weights, flatten_bn, init_vllm_registered_model,
                     merge_multimodal_embeddings)
 
 IMG_START = '<img>'
@@ -42,19 +42,17 @@ IMAGENET_STD = (0.229, 0.224, 0.225)
 
 class InternVLImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
-    data: Union[torch.Tensor, List[torch.Tensor]]
+    data: torch.Tensor
     """
-    Shape: `(batch_size, 1 + num_patches, num_channels, height, width)`
-
-    Note that `num_patches` may be different for each batch, in which case
-    the data is passed as a list instead of a batched tensor.
+    Shape:
+    `(batch_size * num_images * (1 + num_patches), num_channels, height, width)`
     """
 
 
 class InternVLImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
-    data: Union[torch.Tensor, List[torch.Tensor]]
-    """Shape: `(batch_size, image_feature_size, hidden_size)`
+    data: torch.Tensor
+    """Shape: `(batch_size * num_images, image_feature_size, hidden_size)`
 
     `hidden_size` must match the hidden size of language model backbone.
     """
@@ -244,6 +242,8 @@ def input_mapper_for_internvl(ctx: InputContext, data: object):
                                      min_num,
                                      max_num,
                                      use_thumbnail=use_thumbnail)
+        # Add an N dimension for number of images per prompt (currently 1).
+        data = data.unsqueeze(0)
     model_config = ctx.model_config
     tokenizer = cached_get_tokenizer(model_config.tokenizer,
                                      trust_remote_code=True)
@@ -355,7 +355,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
             x = x.permute(0, 2, 1, 3).contiguous()
         return x
 
-    def extract_feature(self, pixel_values):
+    def extract_feature(self, pixel_values: torch.Tensor) -> torch.Tensor:
         vit_embeds = self.vision_model(pixel_values=pixel_values)
         vit_embeds = vit_embeds[:, 1:, :]
 
@@ -368,17 +368,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
         vit_embeds = self.mlp1(vit_embeds)
         return vit_embeds
 
-    def _validate_image_sizes(self, data: torch.Tensor) -> torch.Tensor:
-        if list(data.shape[1:]) != [2]:
-            raise ValueError(
-                f"The expected image sizes shape is batch dimension plus "
-                f"{[2]}. You supplied {data.shape}.")
-
-        return data
-
-    def _validate_pixel_values(
-        self, data: Union[torch.Tensor, List[torch.Tensor]]
-    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+    def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
 
         h = w = self.config.vision_config.image_size
         expected_dims = (3, h, w)
@@ -387,10 +377,11 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
             actual_dims = tuple(d.shape)
 
             if actual_dims != expected_dims:
-                expected_expr = ("num_patches", *map(str, expected_dims))
+                expected_expr = str(expected_dims)
                 raise ValueError(
-                    "The expected shape of pixel values in each batch element "
-                    f"is {expected_expr}. You supplied {tuple(d.shape)}.")
+                    "The expected shape of pixel values per image per batch "
+                    f" per patch is {expected_expr}. "
+                    f"You supplied {tuple(d.shape)}.")
 
         for d in data:
             _validate_shape(d)
@@ -410,9 +401,10 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
             if not isinstance(image_embeds, torch.Tensor):
                 raise ValueError("Incorrect type of image embeddings. "
                                  f"Got type: {type(image_embeds)}")
+
             return InternVLImageEmbeddingInputs(
                 type="image_embeds",
-                data=image_embeds,
+                data=flatten_bn(image_embeds),
             )
 
         self.img_context_token_id = image_token_id[0]
@@ -424,7 +416,8 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
 
             return InternVLImagePixelInputs(
                 type="pixel_values",
-                data=self._validate_pixel_values(pixel_values),
+                data=self._validate_pixel_values(
+                    flatten_bn(pixel_values, concat=True).flatten(0, 1)),
             )
 
         raise AssertionError("This line should be unreachable.")
