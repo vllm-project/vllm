@@ -219,7 +219,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
 
     def _async_process_outputs(self, model_input: StatefulModelInput,
                                output_proc_callback: Callable):
-        # Proceed with pythonization and output_proc in order. 
+        # Proceed with pythonization and output_proc in order.
         # Stop on the first one that fails to pythonize
         cont = True
         for model_output in model_input.cached_outputs:
