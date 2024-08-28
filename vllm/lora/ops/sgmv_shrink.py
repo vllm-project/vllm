@@ -189,6 +189,9 @@ def _sgmv_shrink(
     return
 
 
-sgmv_shrink = torch.library.custom_op("lora::sgmv_shrink",
-                                      _sgmv_shrink,
-                                      mutates_args=["output_tensor"])
+try:
+    sgmv_shrink = torch.library.custom_op("lora::sgmv_shrink",
+                                          _sgmv_shrink,
+                                          mutates_args=["output_tensor"])
+except AttributeError:
+    sgmv_shrink = _sgmv_shrink

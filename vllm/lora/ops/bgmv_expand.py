@@ -160,6 +160,9 @@ def _bgmv_expand(
     return
 
 
-bgmv_expand = torch.library.custom_op("lora::bgmv_expand",
-                                      _bgmv_expand,
-                                      mutates_args=["output_tensor"])
+try:
+    bgmv_expand = torch.library.custom_op("lora::bgmv_expand",
+                                          _bgmv_expand,
+                                          mutates_args=["output_tensor"])
+except AttributeError:
+    bgmv_expand = _bgmv_expand

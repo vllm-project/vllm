@@ -173,6 +173,9 @@ def _bgmv_expand_slice(
     return
 
 
-bgmv_expand_slice = torch.library.custom_op("lora::bgmv_expand_slice",
-                                            _bgmv_expand_slice,
-                                            mutates_args=["output_tensor"])
+try:
+    bgmv_expand_slice = torch.library.custom_op("lora::bgmv_expand_slice",
+                                                _bgmv_expand_slice,
+                                                mutates_args=["output_tensor"])
+except AttributeError:
+    bgmv_expand_slice = _bgmv_expand_slice
