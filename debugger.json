@@ -1,9 +1,0 @@
-{
-    "name": "Python: Attach",
-    "type": "python",
-    "request": "attach",
-    "connect": {
-        "host": "localhost",
-        "port": 5678
-    }
-}
