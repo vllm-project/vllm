@@ -1,5 +1,5 @@
-from typing import (Dict, Iterable, List, Optional, Protocol, Tuple, Union,
-                    overload)
+from typing import (Dict, Iterable, List, Literal, Optional, Protocol, Tuple,
+                    Union, overload)
 
 import numpy as np
 import torch
@@ -66,8 +66,19 @@ def flatten_bn(x: List[torch.Tensor]) -> List[torch.Tensor]:
     ...
 
 
+@overload
 def flatten_bn(
-    x: Union[List[torch.Tensor], torch.Tensor]
+    x: Union[List[torch.Tensor], torch.Tensor],
+    *,
+    concat: Literal[True],
+) -> torch.Tensor:
+    ...
+
+
+def flatten_bn(
+    x: Union[List[torch.Tensor], torch.Tensor],
+    *,
+    concat: bool = False,
 ) -> Union[List[torch.Tensor], torch.Tensor]:
     """
     Flatten the ``B`` and ``N`` dimensions of batched multimodal inputs.
@@ -76,6 +87,9 @@ def flatten_bn(
     """
     if isinstance(x, torch.Tensor):
         return x.flatten(0, 1)
+
+    if concat:
+        return torch.cat(x)
 
     return [x_n for x_b in x for x_n in x_b]
 

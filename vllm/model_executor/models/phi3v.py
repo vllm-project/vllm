@@ -511,9 +511,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal):
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
-    def _validate_image_sizes(
-        self, data: Union[torch.Tensor, List[torch.Tensor]]
-    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+    def _validate_image_sizes(self, data: torch.Tensor) -> torch.Tensor:
         expected_dims = (2, )
 
         def _validate_shape(d: torch.Tensor):
@@ -568,7 +566,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal):
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
 
-            if not isinstance(image_sizes, torch.Tensor):
+            if not isinstance(image_sizes, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of image sizes. "
                                  f"Got type: {type(image_sizes)}")
 
@@ -576,7 +574,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal):
                 type="pixel_values",
                 data=self._validate_pixel_values(flatten_bn(pixel_values)),
                 image_sizes=self._validate_image_sizes(
-                    flatten_bn(image_sizes)))
+                    flatten_bn(image_sizes, concat=True)))
 
         if image_embeds is not None:
             if not isinstance(image_embeds, torch.Tensor):
