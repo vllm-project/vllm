@@ -29,7 +29,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
                    get_clip_num_patches)
 from .interfaces import SupportsMultiModal
-from .utils import (filter_weights, init_vllm_registered_model,
+from .utils import (filter_weights, flatten_bn, init_vllm_registered_model,
                     merge_multimodal_embeddings)
 
 IMG_START = '<img>'
@@ -44,7 +44,8 @@ class InternVLImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     data: Union[torch.Tensor, List[torch.Tensor]]
     """
-    Shape: `(batch_size, 1 + num_patches, num_channels, height, width)`
+    Shape:
+    `(batch_size, num_images, 1 + num_patches, num_channels, height, width)`
 
     Note that `num_patches` may be different for each batch, in which case
     the data is passed as a list instead of a batched tensor.
@@ -54,7 +55,7 @@ class InternVLImagePixelInputs(TypedDict):
 class InternVLImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
     data: Union[torch.Tensor, List[torch.Tensor]]
-    """Shape: `(batch_size, image_feature_size, hidden_size)`
+    """Shape: `(batch_size, num_images, image_feature_size, hidden_size)`
 
     `hidden_size` must match the hidden size of language model backbone.
     """
@@ -413,12 +414,9 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
                 raise ValueError("Incorrect type of image embeddings. "
                                  f"Got type: {type(image_embeds)}")
 
-            # Flatten the B and N dimensions
-            image_embeds = image_embeds.flatten(0, 2)
-
             return InternVLImageEmbeddingInputs(
                 type="image_embeds",
-                data=image_embeds,
+                data=flatten_bn(image_embeds),
             )
 
         self.img_context_token_id = image_token_id[0]
@@ -428,12 +426,9 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
 
-            # Flatten the B and N dimensions
-            pixel_values = pixel_values.flatten(0, 2)
-
             return InternVLImagePixelInputs(
                 type="pixel_values",
-                data=self._validate_pixel_values(pixel_values),
+                data=self._validate_pixel_values(flatten_bn(pixel_values)),
             )
 
         raise AssertionError("This line should be unreachable.")

@@ -75,7 +75,8 @@ class Phi3VImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     data: Union[torch.Tensor, List[torch.Tensor]]
     """
-    Shape: `(batch_size, 1 + num_patches, num_channels, height, width)`
+    Shape:
+    `(batch_size, num_images, 1 + num_patches, num_channels, height, width)`
 
     Note that `num_patches` may be different for each batch, in which case
     the data is passed as a list instead of a batched tensor.
@@ -83,7 +84,7 @@ class Phi3VImagePixelInputs(TypedDict):
 
     image_sizes: torch.Tensor
     """
-    Shape: `(batch_size, 2)`
+    Shape: `(batch_size, num_images, 2)`
 
     This should be in `(height, width)` format.
     """
@@ -92,7 +93,7 @@ class Phi3VImagePixelInputs(TypedDict):
 class Phi3VImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
     data: Union[torch.Tensor, List[torch.Tensor]]
-    """Shape: `(batch_size, image_feature_size, hidden_size)`
+    """Shape: `(batch_size, num_images, image_feature_size, hidden_size)`
 
     `hidden_size` must match the hidden size of language model backbone.
     """
