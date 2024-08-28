@@ -154,7 +154,7 @@ class MultiProposerWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
 
     def _get_proposer_for_this_step(
         self,
-        execute_model_req: Optional[ExecuteModelRequest] = None,
+        execute_model_req: Optional[ExecuteModelRequest],
         scheduling_policy: Optional[str] = "proposal_latency",
     ) -> str:
         """Get the current proposer for the given sequence batch according to
@@ -275,5 +275,7 @@ class MultiProposerWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
         elif isinstance(obj, SmallerTpProposerWorker):
             if hasattr(obj, '_worker'):
                 return self.is_multi_step_worker_instance(obj._worker)
+            else:
+                return False
         else:
             return False
