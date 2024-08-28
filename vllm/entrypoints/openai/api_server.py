@@ -96,6 +96,22 @@ async def lifespan(app: FastAPI):
 @asynccontextmanager
 async def build_async_engine_client(
         args: Namespace) -> AsyncIterator[Optional[AsyncEngineClient]]:
+
+    # Context manager to handle async_engine_client lifecycle
+    # Ensures everything is shutdown and cleaned up on error/exit
+    global engine_args
+    engine_args = AsyncEngineArgs.from_cli_args(args)
+
+    async with build_async_engine_client_from_engine_args(
+            engine_args, args.disable_frontend_multiprocessing) as engine:
+        yield engine
+
+
+@asynccontextmanager
+async def build_async_engine_client_from_engine_args(
+    engine_args: AsyncEngineArgs,
+    disable_frontend_multiprocessing: bool = False,
+) -> AsyncIterator[Optional[AsyncEngineClient]]:
     """
     Create AsyncEngineClient, either:
         - in-process using the AsyncLLMEngine Directly
@@ -104,22 +120,21 @@ async def build_async_engine_client(
     Returns the Client or None if the creation failed.
     """
 
-    # Context manager to handle async_engine_client lifecycle
-    # Ensures everything is shutdown and cleaned up on error/exit
-    global engine_args
-    engine_args = AsyncEngineArgs.from_cli_args(args)
-
     # Backend itself still global for the silly lil' health handler
     global async_engine_client
 
     # If manually triggered or embedding model, use AsyncLLMEngine in process.
     # TODO: support embedding model via RPC.
-    if (model_is_embedding(args.model, args.trust_remote_code,
-                           args.quantization)
-            or args.disable_frontend_multiprocessing):
+    if (model_is_embedding(engine_args.model, engine_args.trust_remote_code,
+                           engine_args.quantization)
+            or disable_frontend_multiprocessing):
         async_engine_client = AsyncLLMEngine.from_engine_args(
             engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
-        yield async_engine_client
+        try:
+            yield async_engine_client
+        finally:
+            async_engine_client.shutdown_background_loop()
+            async_engine_client = None  #TODO
         return
 
     # Otherwise, use the multiprocessing AsyncLLMEngine.
@@ -191,6 +206,8 @@ async def build_async_engine_client(
             # See https://prometheus.github.io/client_python/multiprocess/
             from prometheus_client import multiprocess
             multiprocess.mark_process_dead(rpc_server_process.pid)
+
+            async_engine_client = None  #TODO
 
 
 router = APIRouter()
