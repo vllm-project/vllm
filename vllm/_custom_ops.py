@@ -25,6 +25,7 @@ with contextlib.suppress(ImportError):
 if is_hip():
     import vllm._custom_C
 
+
 def hint_on_error(fn):
 
     @functools.wraps(fn)
@@ -207,17 +208,10 @@ def advance_step(num_seqs: int, num_queries: int, block_size: int,
 def awq_dequantize(qweight: torch.Tensor, scales: torch.Tensor,
                    zeros: torch.Tensor, split_k_iters: int, thx: int,
                    thy: int) -> torch.Tensor:
-    # print(f"awq_dequantize:qweight.shape = {qweight.shape}"
-    #       f"scales = {scales.shape},"
-    #       f"zeros = {zeros.shape},"
-    #       f"split_k_iters = {split_k_iters},"
-    #       f"thx = {thx}"
-    #       f"thy = {thy}")
-    if is_hip() and envs.VLLM_USE_TRITON_AWQ:
+    if envs.VLLM_USE_TRITON_AWQ:
         from vllm.model_executor.layers.quantization.awq_triton import (
             awq_dequantize_triton)
         return awq_dequantize_triton(qweight, scales, zeros)
-
     if is_hip():
         return torch.zeros(qweight.shape[0],
                            8 * qweight.shape[1],
@@ -229,13 +223,7 @@ def awq_dequantize(qweight: torch.Tensor, scales: torch.Tensor,
 
 def awq_gemm(input: torch.Tensor, qweight: torch.Tensor, qzeros: torch.Tensor,
              scales: torch.Tensor, split_k_iters: int) -> torch.Tensor:
-    # if input.shape[0] > 1:
-    #     print(f"awq_gemm:input.shape = {input.shape},"
-    #           f"qweight = {qweight.shape},"
-    #           f"qzeros = {qzeros.shape},"
-    #           f"scales.shape = {scales.shape},"
-    #           f"split_k_iters = {split_k_iters}")
-    if is_hip() and envs.VLLM_USE_TRITON_AWQ:
+    if envs.VLLM_USE_TRITON_AWQ:
         from vllm.model_executor.layers.quantization.awq_triton import (
             awq_gemm_triton)
         return awq_gemm_triton(input, qweight, qzeros, scales, split_k_iters)
@@ -549,6 +537,36 @@ def ggml_mul_mat_a8(
     row: int,
 ) -> torch.Tensor:
     return torch.ops._C.ggml_mul_mat_a8(W, X, quant_type, row)
+
+
+# mamba
+def causal_conv1d_fwd(x: torch.Tensor, weight: torch.Tensor,
+                      bias_: Optional[torch.Tensor],
+                      seq_idx_: Optional[torch.Tensor],
+                      initial_states_: Optional[torch.Tensor],
+                      final_states_out_: Optional[torch.Tensor],
+                      silu_activation: bool) -> torch.Tensor:
+    return torch.ops._C.causal_conv1d_fwd(x, weight, bias_, seq_idx_,
+                                          initial_states_, final_states_out_,
+                                          silu_activation)
+
+
+def causal_conv1d_update(x: torch.Tensor, conv_state: torch.Tensor,
+                         weight: torch.Tensor, bias_: Optional[torch.Tensor],
+                         silu_activation: bool) -> torch.Tensor:
+    return torch.ops._C.causal_conv1d_update(x, conv_state, weight, bias_,
+                                             silu_activation)
+
+
+def selective_scan_fwd(u: torch.Tensor, delta: torch.Tensor, A: torch.Tensor,
+                       B: torch.Tensor, C: torch.Tensor,
+                       D_: Optional[torch.Tensor], z_: Optional[torch.Tensor],
+                       delta_bias_: Optional[torch.Tensor],
+                       delta_softplus: bool, index_: Optional[torch.Tensor],
+                       x: Optional[torch.Tensor]) -> List[torch.Tensor]:
+    return torch.ops._C.selective_scan_fwd(u, delta, A, B, C, D_, z_,
+                                           delta_bias_, delta_softplus, index_,
+                                           x)
 
 
 # moe
