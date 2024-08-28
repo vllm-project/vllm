@@ -361,13 +361,16 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
                 raise ValueError("Incorrect type of image sizes. "
                                  f"Got type: {type(image_sizes)}")
 
-            # Remove the N dimension until multiple images are supported.
+            # Flatten the B and N dimensions
             if isinstance(pixel_values, torch.Tensor):
-                pixel_values = pixel_values.squeeze(1)
+                pixel_values = pixel_values.flatten(0, 1)
             else:
-                pixel_values = [t.squeeze(0) for t in pixel_values]
+                pixel_values = [
+                    patch_item for batch_item in pixel_values
+                    for patch_item in batch_item
+                ]
 
-            image_sizes = image_sizes.squeeze(1)
+            image_sizes = image_sizes.flatten(0, 1)
 
             return LlavaNextImagePixelInputs(
                 type="pixel_values",
@@ -380,8 +383,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
                 raise ValueError("Incorrect type of image embeds. "
                                  f"Got type: {type(image_embeds)}")
 
-            # Remove the N dimension until multiple images are supported.
-            image_embeds = image_embeds.squeeze(1)
+            # Flatten the B and N dimensions
+            image_embeds = image_embeds.flatten(0, 1)
 
             return LlavaNextImageEmbeddingInputs(
                 type="image_embeds",
