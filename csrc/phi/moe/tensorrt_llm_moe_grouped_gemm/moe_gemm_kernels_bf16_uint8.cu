@@ -14,21 +14,9 @@
  * limitations under the License.
  */
 
-// DISABLE Pytorch CUDAExtension Flags
-#undef __CUDA_NO_HALF_CONVERSIONS__ 
-#undef __CUDA_NO_HALF_OPERATORS__
-#undef __CUDA_NO_BFLOAT16_CONVERSIONS__
-#undef __CUDA_NO_HALF2_OPERATORS__
-
-#include "fpA_intB_gemm_template.h"
+#include "moe_gemm_kernels_template.h"
 
 namespace tensorrt_llm
 {
-namespace kernels
-{
-namespace cutlass_kernels
-{
-template class CutlassFpAIntBGemmRunner<half, uint8_t, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_ONLY>;
-} // namespace cutlass_kernels
-} // namespace kernels
-} // namespace tensorrt_llm
+template class MoeGemmRunner<__nv_bfloat16, uint8_t>;
+}

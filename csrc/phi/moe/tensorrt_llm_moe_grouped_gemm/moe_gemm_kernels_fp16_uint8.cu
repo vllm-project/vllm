@@ -14,16 +14,9 @@
  * limitations under the License.
  */
 
-// DISABLE Pytorch CUDAExtension Flags
-#undef __CUDA_NO_HALF_CONVERSIONS__ 
-#undef __CUDA_NO_HALF_OPERATORS__
-#undef __CUDA_NO_BFLOAT16_CONVERSIONS__
-#undef __CUDA_NO_HALF2_OPERATORS__
-
 #include "moe_gemm_kernels_template.h"
 
 namespace tensorrt_llm
 {
 template class MoeGemmRunner<half, uint8_t>;
-template class MoeGemmRunner<__nv_bfloat16, uint8_t>;
 }

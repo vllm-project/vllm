@@ -318,20 +318,19 @@ define_gpu_extension_target(
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   set(VLLM_PHI_EXT_SRC
     "csrc/phi/torch_bindings.cpp"
-    "csrc/phi/moe/tensorrt_llm_moe_grouped_gemm/fp16_int8_gemm_fg_scaleonly.cu"
     "csrc/phi/moe/tensorrt_llm_moe_grouped_gemm/fused_moe_gemm_launcher_sm80.cu"
     "csrc/phi/moe/tensorrt_llm_moe_grouped_gemm/moe_gemm_kernels_fp16_uint8.cu"
+    "csrc/phi/moe/tensorrt_llm_moe_grouped_gemm/moe_gemm_kernels_bf16_uint8.cu"
     "csrc/phi/moe/tensorrt_llm_moe_grouped_gemm/cutlass_heuristic.cpp"
     "csrc/phi/moe/tensorrt_llm_moe_grouped_gemm/cutlass_preprocessors.cpp"
     "csrc/phi/moe/tensorrt_llm_moe_grouped_gemm/th_moe_ops.cc"
-    "csrc/phi/moe/tensorrt_llm_moe_grouped_gemm/tllmException.cpp"
-    "csrc/phi/moe/tensorrt_llm_moe_grouped_gemm/logger.cpp"
-    "csrc/phi/moe/tensorrt_llm_moe_grouped_gemm/stringUtils.cpp"
+    "csrc/phi/moe/tensorrt_llm_moe_grouped_gemm/tensorrt_llm/common/tllmException.cpp"
+    "csrc/phi/moe/tensorrt_llm_moe_grouped_gemm/tensorrt_llm/common/logger.cpp"
+    "csrc/phi/moe/tensorrt_llm_moe_grouped_gemm/tensorrt_llm/common/stringUtils.cpp"
     "csrc/phi/moe/utils/moe_align_block_size_kernels.cu"
     )
 
   set_source_files_properties(
-            "csrc/phi/moe/tensorrt_llm_moe_grouped_gemm/fp16_int8_gemm_fg_scaleonly.cu"
             "csrc/phi/moe/tensorrt_llm_moe_grouped_gemm/fused_moe_gemm_launcher_sm80.cu"
             "csrc/phi/moe/tensorrt_llm_moe_grouped_gemm/moe_gemm_kernels_fp16_uint8.cu"
             PROPERTIES
@@ -360,7 +359,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
   set(VLLM_PHI_INCLUDE_DIR
     "${CMAKE_SOURCE_DIR}/csrc/phi/moe/tensorrt_llm_moe_grouped_gemm"
-    "${CMAKE_SOURCE_DIR}/csrc/phi/moe/tensorrt_llm_moe_grouped_gemm/include"
     "${CMAKE_SOURCE_DIR}/csrc/phi/moe/tensorrt_llm_moe_grouped_gemm/cutlass_extensions/include"
     "${CUTLASS_INCLUDE_DIR}"
     "${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}"

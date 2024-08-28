@@ -1,11 +1,6 @@
-// DISABLE Pytorch CUDAExtension Flags
-#undef __CUDA_NO_HALF_CONVERSIONS__ 
-#undef __CUDA_NO_HALF_OPERATORS__
-#undef __CUDA_NO_BFLOAT16_CONVERSIONS__
-#undef __CUDA_NO_HALF2_OPERATORS__
+
 
 #include "moe_gemm_kernels.h"
-#include "moe_kernels.h"
 
 #include "c10/cuda/CUDAStream.h"
 

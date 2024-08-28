@@ -177,7 +177,6 @@ public:
 
     std::vector<cutlass_extensions::CutlassGemmConfig> getConfigs() const;
     static std::vector<cutlass_extensions::CutlassGemmConfig> getConfigs(int sm);
-    static std::vector<cutlass_extensions::CutlassGemmConfig> getHopperConfigs(int sm);
     static std::vector<cutlass_extensions::CutlassGemmConfig> getAmpereConfigs(int sm);
 
     bool isHopperSpecialised() const;

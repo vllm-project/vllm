@@ -371,10 +371,7 @@ namespace tensorrt_llm
     template <typename T, typename WeightType>
     std::vector<cutlass_extensions::CutlassGemmConfig> MoeGemmRunner<T, WeightType>::getConfigs(int sm)
     {
-        std::vector<cutlass_extensions::CutlassGemmConfig> candidate_configs = getHopperConfigs(sm);
-        std::vector<cutlass_extensions::CutlassGemmConfig> ampere_configs = getAmpereConfigs(sm);
-        std::copy(ampere_configs.begin(), ampere_configs.end(), std::back_inserter(candidate_configs));
-
+        std::vector<cutlass_extensions::CutlassGemmConfig> candidate_configs = getAmpereConfigs(sm);
         return candidate_configs;
     }
 
@@ -400,32 +397,6 @@ namespace tensorrt_llm
 
         std::vector<cutlass_extensions::CutlassGemmConfig> ampere_configs = kernels::cutlass_kernels::get_candidate_configs(sm, max_split_k, config_type_param);
         return ampere_configs;
-    }
-
-    template <typename T, typename WeightType>
-    std::vector<cutlass_extensions::CutlassGemmConfig> MoeGemmRunner<T, WeightType>::getHopperConfigs(int sm)
-    {
-        using tensorrt_llm::cutlass_extensions::CutlassGemmConfig;
-        static constexpr auto weight_only_flag = std::is_same<T, WeightType>::value ? CutlassGemmConfig::NONE : CutlassGemmConfig::WEIGHT_ONLY;
-        static constexpr auto simt_only_flag = std::is_same<T, float>::value ? CutlassGemmConfig::SIMT_ONLY : CutlassGemmConfig::NONE;
-        int const max_split_k = 1;
-        int const grouped_gemm_flag = CutlassGemmConfig::GROUPED_GEMM;
-        int const enable_hopper = CutlassGemmConfig::HOPPER;
-
-        auto config_type_param = static_cast<CutlassGemmConfig::CandidateConfigTypeParam>(
-            weight_only_flag | simt_only_flag | grouped_gemm_flag | enable_hopper);
-        
-        return {};
-
-        /*
-        if (!kernels::cutlass_kernels::isValidHopperMOESpecialisation<T, WeightType>())
-        {
-            return {};
-        }
-
-        std::vector<cutlass_extensions::CutlassGemmConfig> hopper_configs = kernels::cutlass_kernels::get_candidate_configs(sm, max_split_k, config_type_param);
-        return hopper_configs;
-        */
     }
 
     template <typename T, typename WeightType>
@@ -472,70 +443,12 @@ namespace tensorrt_llm
                                                                    int64_t gemm_n, int64_t gemm_k, int num_experts, cutlass_extensions::CutlassGemmConfig gemm_config,
                                                                    bool use_fused_moe, cudaStream_t stream, int *occupancy)
     {
-
-        TLLM_CHECK_WITH_INFO(
-            sm_ == 90 || !hopper_input.isValid(), "Hopper input information is set for non specialised implementation");
-        TLLM_CHECK_WITH_INFO(
-            sm_ == 90 || !gemm_config.is_sm90, "Hopper configuration provided for non-Hopper architecture");
-
-        if (sm_ >= 70 && sm_ < 75)
-        {
-            dispatchMoeGemmToCutlass<T, WeightType, cutlass::arch::Sm70, EpilogueTag>(A, B, weight_scales, biases, C,
-                                                                                      total_rows_before_expert, total_rows, gemm_n, gemm_k, num_experts, gemm_config, multi_processor_count_,
-                                                                                      use_fused_moe, stream, occupancy);
-        }
-        else if (sm_ >= 75 && sm_ < 80)
-        {
-            dispatchMoeGemmToCutlass<T, WeightType, cutlass::arch::Sm75, EpilogueTag>(A, B, weight_scales, biases, C,
-                                                                                      total_rows_before_expert, total_rows, gemm_n, gemm_k, num_experts, gemm_config, multi_processor_count_,
-                                                                                      use_fused_moe, stream, occupancy);
-        }
-        else if (sm_ >= 80 && sm_ < 90)
+        if (sm_ >= 80 && sm_ < 90)
         {
             dispatchMoeGemmToCutlass<T, WeightType, cutlass::arch::Sm80, EpilogueTag>(A, B, weight_scales, biases, C,
                                                                                       total_rows_before_expert, total_rows, gemm_n, gemm_k, num_experts, gemm_config, multi_processor_count_,
                                                                                       use_fused_moe, stream, occupancy);
         }
-        /*
-        else if (sm_ >= 90)
-        {
-            if constexpr (kernels::cutlass_kernels::isValidHopperMOESpecialisation<T, WeightType, EpilogueTag>())
-            {
-                // We allow both SM90 and SM80 configurations to coexist because for some cases with small numbers of tokens
-                // SM80 is faster. We check here to see which is selected
-                if (gemm_config.is_sm90)
-                {
-                    TLLM_CHECK_WITH_INFO(biases != nullptr || hopper_input.ptr_c == nullptr,
-                                         "Input biases and hopper input disagree if bias is enabled");
-                    TLLM_CHECK_WITH_INFO(hopper_input.isValid(), "Calling SM90 configuration with invalid hopper config");
-
-                    dispatchMoeGemmSelectTileShapeSM90<T, WeightType, EpilogueTag>(
-                        hopper_input, num_experts, gemm_config, multi_processor_count_, stream, occupancy, nullptr);
-                    return;
-                }
-
-                // Fallthrough to SM80 impl below
-            }
-
-            // Do Ampere case instead
-            if constexpr (kernels::cutlass_kernels::isValidAmpereMOESpecialisation<T, WeightType, EpilogueTag>())
-            {
-                TLLM_CHECK_WITH_INFO(!hopper_input.isValid(),
-                                     "Non-specialised Hopper implementation is being rerouted to fallback implementation so input "
-                                     "information is not required");
-                TLLM_CHECK_WITH_INFO(!gemm_config.is_sm90,
-                                     "GEMM config is for SM90 configuration, but this configuration is not valid for Hppper");
-
-                dispatchMoeGemmToCutlass<T, WeightType, cutlass::arch::Sm80, EpilogueTag>(A, B, weight_scales, biases, C,
-                                                                                          total_rows_before_expert, total_rows, gemm_n, gemm_k, num_experts, gemm_config, multi_processor_count_,
-                                                                                          use_fused_moe, stream, occupancy);
-            }
-            else
-            {
-                // Should only hit by FP8 configs during GEMM profiling pass. Never at runtime
-                TLLM_THROW("Configuration expects SM80 but configuration is not supported by SM80 kernels");
-            }
-        } */
         else
         {
             TLLM_THROW("Arch unsupported for MoE GEMM");
@@ -546,38 +459,6 @@ namespace tensorrt_llm
     size_t MoeGemmRunner<T, WeightType>::calcMaxWorkspaceSize(int num_experts) const
     {
         return 0;
-        /*
-        if (!supportsHopperSpecialisation())
-        {
-            return 0;
-        }
-        if constexpr (kernels::cutlass_kernels::isValidHopperMOESpecialisation<T, WeightType>())
-        {
-            auto configs = getHopperConfigs(sm_);
-            size_t max_size = 0;
-            bool has_config = false;
-            for (auto conf : configs)
-            {
-                try
-                {
-                    size_t size = calcMaxWorkspaceSizeSM90<T, WeightType>(num_experts, conf, multi_processor_count_);
-                    max_size = std::max(max_size, size);
-                    has_config = true;
-                }
-                catch (tensorrt_llm::common::TllmException const &e)
-                {
-                    TLLM_LOG_TRACE("Unsupported config skipped when calculating MOE workspace size");
-                }
-            }
-            TLLM_CHECK_WITH_INFO(has_config, "Could not find valid config when calculating workspace size");
-            return max_size;
-        }
-        else
-        {
-            TLLM_THROW("Attempting to calculate Hopper GEMM workspace size with unsupported weight combination");
-            return 0;
-        }
-        */
     }
 
     template <typename T, typename WeightType>

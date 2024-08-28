@@ -14,12 +14,6 @@
  * limitations under the License.
  */
 
-// DISABLE Pytorch CUDAExtension Flags
-#undef __CUDA_NO_HALF_CONVERSIONS__ 
-#undef __CUDA_NO_HALF_OPERATORS__
-#undef __CUDA_NO_BFLOAT16_CONVERSIONS__
-#undef __CUDA_NO_HALF2_OPERATORS__
-
 #include "cutlass_preprocessors.h"
 #include "tensorrt_llm/common/assert.h"
 #include "tensorrt_llm/common/cudaBf16Wrapper.h"
@@ -127,21 +121,9 @@ LayoutDetails getLayoutDetailsForArch(QuantType quant_type)
 
 LayoutDetails getLayoutDetailsForTransform(QuantType quant_type, int arch)
 {
-    if (arch >= 70 && arch < 75)
-    {
-        return getLayoutDetailsForArch<cutlass::arch::Sm70>(quant_type);
-    }
-    else if (arch >= 75 && arch < 80)
-    {
-        return getLayoutDetailsForArch<cutlass::arch::Sm75>(quant_type);
-    }
-    else if (arch >= 80 && arch < 90)
+    if (arch >= 80 && arch < 90)
     {
         return getLayoutDetailsForArch<cutlass::arch::Sm80>(quant_type);
-    }
-    else if (arch == 90)
-    {
-        return getLayoutDetailsForArch<cutlass::arch::Sm90>(quant_type);
     }
     else
     {
@@ -168,16 +150,6 @@ std::vector<int> get_permutation_map(QuantType quant_type)
     if (quant_type == QuantType::W8_A16)
     {
         return {0, 1, 8, 9, 2, 3, 10, 11, 4, 5, 12, 13, 6, 7, 14, 15};
-    }
-    else if (quant_type == QuantType::W4_A16)
-    {
-        return {0, 1, 8, 9, 16, 17, 24, 25, 2, 3, 10, 11, 18, 19, 26, 27, 4, 5, 12, 13, 20, 21, 28, 29, 6, 7, 14, 15,
-            22, 23, 30, 31};
-    }
-    else if (quant_type == QuantType::W4_AFP8)
-    {
-        return {0, 1, 2, 3, 16, 17, 18, 19, 4, 5, 6, 7, 20, 21, 22, 23, 8, 9, 10, 11, 24, 25, 26, 27, 12, 13, 14, 15,
-            28, 29, 30, 31};
     }
     else
     {
@@ -398,14 +370,6 @@ void subbyte_transpose(int8_t* transposed_quantized_tensor, int8_t const* quanti
     {
         subbyte_transpose_impl<QuantType::W8_A16>(transposed_quantized_tensor, quantized_tensor, shape);
     }
-    else if (quant_type == QuantType::W4_A16)
-    {
-        subbyte_transpose_impl<QuantType::W4_A16>(transposed_quantized_tensor, quantized_tensor, shape);
-    }
-    else if (quant_type == QuantType::W4_AFP8)
-    {
-        subbyte_transpose_impl<QuantType::W4_AFP8>(transposed_quantized_tensor, quantized_tensor, shape);
-    }
     else
     {
         TLLM_CHECK_WITH_INFO(false, "Invalid quant_type");
@@ -414,80 +378,10 @@ void subbyte_transpose(int8_t* transposed_quantized_tensor, int8_t const* quanti
 
 void add_bias_and_interleave_int8s_inplace(int8_t* int8_tensor, const size_t num_elts)
 {
-    for (int ii = 0; ii < num_elts; ++ii)
-    {
-        // int8_tensor[ii] = int8_t(int(int8_tensor[ii]) + 128);
-    }
-
-    // Step 2 will transform the layout of a 32-bit register in CUDA in order to match the int4 layout. This has no
-    // performance benefit and is purely so that int4 and int8 have the same layout.
-    // Pictorially, this does the following:
-    // bit 32                                                      0
-    //      [elt_3  elt_2  elt_1  elt_0] (each elt occupies 8 bits)
-    //
-    // And it will rearrange the output 32 bit register to be the following:
-    // bit 32                                                      0
-    //      [elt_3  elt_1  elt_2  elt_0] (each elt occupies 8 bits)
-
     TLLM_CHECK_WITH_INFO(num_elts % 4 == 0, "Dimensions of int8 tensor must be a multiple of 4 for register relayout");
     for (size_t base = 0; base < num_elts; base += 4)
     {
         std::swap(int8_tensor[base + 1], int8_tensor[base + 2]);
-    }
-}
-
-void add_bias_and_interleave_int4s_inplace(int8_t* packed_int4_tensor, const size_t num_elts)
-{
-    int const num_bytes = num_elts / 2;
-
-    // Step 1 will be to transform all the int4s to unsigned in order to make the dequantize take as little
-    // instructions as possible in the CUDA code.
-    for (size_t ii = 0; ii < num_bytes; ++ii)
-    {
-        int8_t transformed_packed_int4s = 0;
-        int8_t transformed_first_elt
-            = (int8_t(packed_int4_tensor[ii] << 4) >> 4) + 8; // The double shift here is to ensure sign extension
-        int8_t transformed_second_elt = (packed_int4_tensor[ii] >> 4) + 8;
-
-        TLLM_CHECK_WITH_INFO(
-            transformed_first_elt >= 0 && transformed_first_elt <= 15, "Illegal result for int4 transform (first elt)");
-        TLLM_CHECK_WITH_INFO(transformed_second_elt >= 0 && transformed_second_elt <= 15,
-            "Illegal result for int4 transform (second elt)");
-
-        // We don't need to mask in these ops since everything should be in the range 0-15
-        transformed_packed_int4s |= transformed_first_elt;
-        transformed_packed_int4s |= (transformed_second_elt << 4);
-        packed_int4_tensor[ii] = transformed_packed_int4s;
-    }
-
-    // Step 2 will transform the layout of a 32-bit register in CUDA in order to minimize the number of shift & logical
-    // instructions That are needed to extract the int4s in the GEMM main loop. Pictorially, the loop below will do the
-    // following: Take as input a 32 bit register with layout: bit 32 0
-    //      [elt_7  elt_6  elt_5  elt_4  elt_3  elt_2  elt_1  elt_0] (each elt occupies 4 bits)
-    //
-    // And it will rearrange the output 32 bit register to be the following:
-    // bit 32                                                      0
-    //      [elt_7  elt_5  elt_3  elt_1  elt_6  elt_4  elt_2  elt_0] (each elt occupies 4 bits)
-
-    TLLM_CHECK_WITH_INFO(num_bytes % 4 == 0, "Dimensions of int4 tensor must be a multiple of 8 for register relayout");
-    const size_t num_registers = num_bytes / 4;
-
-    uint32_t* register_ptr = reinterpret_cast<uint32_t*>(packed_int4_tensor);
-    for (size_t ii = 0; ii < num_registers; ++ii)
-    {
-        const uint32_t current_register = register_ptr[ii];
-        uint32_t transformed_register = 0;
-
-        for (int dest_idx = 0; dest_idx < 8; ++dest_idx)
-        {
-            int const src_idx = dest_idx < 4 ? 2 * dest_idx : 2 * (dest_idx - 4) + 1;
-            int const src_shift = 4 * src_idx;
-            int const dest_shift = 4 * dest_idx;
-
-            const uint32_t src_bits = (current_register >> src_shift) & 0xF;
-            transformed_register |= (src_bits << dest_shift);
-        }
-        register_ptr[ii] = transformed_register;
     }
 }
 
@@ -496,14 +390,6 @@ void add_bias_and_interleave_quantized_tensor_inplace(int8_t* tensor, const size
     if (quant_type == QuantType::W8_A16)
     {
         add_bias_and_interleave_int8s_inplace(tensor, num_elts);
-    }
-    else if (quant_type == QuantType::W4_A16 || quant_type == QuantType::W4_AFP8)
-    {
-        // W4_AFP8 uses the same preprocessor as W4_A16 because the FP8 data must
-        // be converted to FP16 before the scales can be applied using CUDA cores.
-        // As a result, we still want permute the data so that it is well aligned
-        // for conversion to FP16.
-        add_bias_and_interleave_int4s_inplace(tensor, num_elts);
     }
     else
     {
@@ -606,203 +492,8 @@ void preprocess_weights_for_mixed_gemm(int8_t* preprocessed_quantized_weight, in
         src_buf.swap(dst_buf);
     }
 
-    if (arch >= 70 && arch < 90)
-    {
-        // add_bias_and_interleave_quantized_tensor_inplace(src_buf.data(), num_elts, quant_type);
-    }
     std::copy(src_buf.begin(), src_buf.end(), preprocessed_quantized_weight);
 }
-
-/*
-    Arguments:
-      input_weight_ptr - the weight tensor to be quantized. Must be 2-D or 3-D and of type FP16.
-
-      quant_type - the type of the output quantization weight.
-
-    This function does symmetric quantization on 2-D or 3-D tensors. It uses the full int range and assumes the
-    zero-point is zero and will automatically construct the scales.
-
-    It always quantizes the last axis of the tensor. For 3-D tensors, it operates in "batched" mode where the tensor is
-    viewed as a stack of matrices and a scale is produced for each column of every matrix.
-
-Outputs
-    processed_quantized_weight - quantized AND processed weight for GEMM. This MUST be used with the CUTLASS GEMM
-    unprocessed_quantized_weight - quantized but unprocessed weights. Useful for reference checking.
-    scale_ptr - scales for the quantized weight.
-
-    Note that the returned quantized_weights will be preprocessed in a way to accelerate the mixed type GEMM. The data
-    layout may not make sense if printed.
-
-    Shapes:
-      quant_type == int8:
-        If weight is a [m,n] matrix, quantized_weights will have shape [m,n] and scales of shape [n]
-        If weight is a [b,m,n] tensor, unprocessed_quantized_weight will have shape [b,m,n] and scales of shape [b,n]
-      quant_type == int4:
-        If weight is a [m,n] matrix, quantized_weights will have shape [m, ceil(n/2)] and scales of shape [n]
-        If weight is a [b,m,n] tensor, unprocessed_quantized_weight will have shape [b,m, ceil(n/2)] and scales of shape
-          [b,n]
-
-      The quantized_weight will be of type torch.int8 and have two int4 values packed in a single byte. This is the
-      reason for halving the shape. At the time of writing this code, there was not an elegant way to handle this kind
-      of batched quantization using torch's quantized tensors (to the best of the author's knowledge). Scale tensors
-      must have a dimension of 1, which breaks the semantics we need for batched weights.
-  */
-
-template <typename ComputeType, typename WeightType>
-void symmetric_quantize(int8_t* processed_quantized_weight, int8_t* unprocessed_quantized_weight,
-    ComputeType* scale_ptr, WeightType const* input_weight_ptr, std::vector<size_t> const& shape, QuantType quant_type,
-    bool force_interleave)
-{
-
-    TLLM_CHECK_WITH_INFO(processed_quantized_weight, "Processed quantized tensor is NULL");
-    TLLM_CHECK_WITH_INFO(scale_ptr, "Scale output pointer is NULL");
-    TLLM_CHECK_WITH_INFO(input_weight_ptr, "Input weight pointer is NULL");
-
-    TLLM_CHECK_WITH_INFO(shape.size() == 2 || shape.size() == 3, "Shape must be 2-D or 3-D");
-    const size_t num_experts = shape.size() == 2 ? 1 : shape[0];
-    const size_t num_rows = shape.size() == 2 ? shape[0] : shape[1];
-    const size_t num_cols = shape.size() == 2 ? shape[1] : shape[2];
-
-    int const bits_in_type = get_weight_quant_bits(quant_type);
-    int const bytes_per_out_col = num_cols * bits_in_type / 8;
-
-    int const bits_per_weigtht_element = get_weight_quant_bits(quant_type);
-
-    std::vector<int8_t> weight_buf;
-    if (unprocessed_quantized_weight == nullptr)
-    {
-        weight_buf.resize(num_experts * num_rows * num_cols);
-        unprocessed_quantized_weight = weight_buf.data();
-    }
-
-    int const input_mat_size = num_rows * num_cols;
-    int const quantized_mat_size = num_rows * bytes_per_out_col;
-    float const quant_range_scale = 1.f / float(1 << (bits_in_type - 1));
-
-    std::vector<float> per_col_max(num_cols);
-
-    for (int expert = 0; expert < num_experts; ++expert)
-    {
-        WeightType const* current_weight = input_weight_ptr + expert * input_mat_size;
-        int8_t* current_quantized_weight = unprocessed_quantized_weight + expert * quantized_mat_size;
-
-        // First we find the per column max for this expert weight.
-        for (int jj = 0; jj < num_cols; ++jj)
-        {
-            per_col_max[jj] = 0.f;
-        }
-
-        for (int ii = 0; ii < num_rows; ++ii)
-        {
-            WeightType const* current_weight_row = current_weight + ii * num_cols;
-            for (int jj = 0; jj < num_cols; ++jj)
-            {
-                per_col_max[jj] = std::max(per_col_max[jj], std::abs(float(current_weight_row[jj])));
-            }
-        }
-
-        // Then, we construct the scales
-        ComputeType* current_scales = scale_ptr + expert * num_cols;
-        for (int jj = 0; jj < num_cols; ++jj)
-        {
-            per_col_max[jj] *= quant_range_scale;
-            current_scales[jj] = ComputeType(per_col_max[jj]);
-        }
-
-        // Finally, construct the weights.
-        for (int ii = 0; ii < num_rows; ++ii)
-        {
-            int8_t* current_quantized_weight_row = current_quantized_weight + ii * bytes_per_out_col;
-            WeightType const* current_weight_row = current_weight + ii * num_cols;
-            for (int jj = 0; jj < bytes_per_out_col; ++jj)
-            {
-
-                if (bits_per_weigtht_element == 8)
-                {
-                    float const col_scale = per_col_max[jj];
-                    float const weight_elt = float(current_weight_row[jj]);
-                    float const scaled_weight = (col_scale != 0.0f) ? round(weight_elt / col_scale) : 0.0f;
-                    const int8_t clipped_weight = int8_t(std::max(-128.f, std::min(127.f, scaled_weight)));
-                    current_quantized_weight_row[jj] = clipped_weight;
-                }
-                else if (bits_per_weigtht_element == 4)
-                {
-
-                    // We will pack two int4 elements per iteration of the inner loop.
-                    int8_t packed_int4s = 0;
-                    for (int packed_idx = 0; packed_idx < 2; ++packed_idx)
-                    {
-                        int const input_idx = 2 * jj + packed_idx;
-                        if (input_idx < num_cols)
-                        {
-                            float const col_scale = per_col_max[input_idx];
-                            float const weight_elt = float(current_weight_row[input_idx]);
-                            float const scaled_weight = (col_scale != 0.0f) ? round(weight_elt / col_scale) : 0.0f;
-                            int int_weight = int(scaled_weight);
-                            const int8_t clipped_weight = std::max(-8, std::min(7, int_weight));
-
-                            // Kill the sign extension bits (hence 0x0F mask) then shift to upper bits
-                            // if packing the second int4 and or the bits into the final result.
-                            packed_int4s |= ((clipped_weight & 0x0F) << (4 * packed_idx));
-                        }
-                    }
-                    current_quantized_weight_row[jj] = packed_int4s;
-                }
-                else
-                {
-                    TLLM_CHECK_WITH_INFO(false, "Unsupported quantization type");
-                }
-            }
-        }
-    }
-
-    preprocess_weights_for_mixed_gemm(
-        processed_quantized_weight, unprocessed_quantized_weight, shape, quant_type, force_interleave);
-}
-
-template void symmetric_quantize<half, float>(
-    int8_t*, int8_t*, half*, float const*, std::vector<size_t> const&, QuantType, bool);
-
-template void symmetric_quantize<half, half>(
-    int8_t*, int8_t*, half*, half const*, std::vector<size_t> const&, QuantType, bool);
-
-#ifdef ENABLE_BF16
-template void symmetric_quantize<__nv_bfloat16, __nv_bfloat16>(
-    int8_t*, int8_t*, __nv_bfloat16*, __nv_bfloat16 const*, std::vector<size_t> const&, QuantType, bool);
-
-template void symmetric_quantize<__nv_bfloat16, float>(
-    int8_t*, int8_t*, __nv_bfloat16*, float const*, std::vector<size_t> const&, QuantType, bool);
-#endif
-
-template <typename ComputeType, typename WeightType>
-void symmetric_quantize(int8_t* processed_quantized_weight, ComputeType* scale_ptr, WeightType const* input_weight_ptr,
-    std::vector<size_t> const& shape, QuantType quant_type, bool force_interleave)
-{
-    symmetric_quantize(
-        processed_quantized_weight, nullptr, scale_ptr, input_weight_ptr, shape, quant_type, force_interleave);
-}
-
-template void symmetric_quantize<float, float>(
-    int8_t*, float*, float const*, std::vector<size_t> const&, QuantType, bool);
-
-template void symmetric_quantize<half, float>(
-    int8_t*, half*, float const*, std::vector<size_t> const&, QuantType, bool);
-
-template void symmetric_quantize<half, half>(int8_t*, half*, half const*, std::vector<size_t> const&, QuantType, bool);
-
-#ifdef ENABLE_BF16
-template void symmetric_quantize<__nv_bfloat16, __nv_bfloat16>(
-    int8_t*, __nv_bfloat16*, __nv_bfloat16 const*, std::vector<size_t> const&, QuantType, bool);
-
-template void symmetric_quantize<__nv_bfloat16, half>(
-    int8_t*, __nv_bfloat16*, half const*, std::vector<size_t> const&, QuantType, bool);
-
-template void symmetric_quantize<half, __nv_bfloat16>(
-    int8_t*, half*, __nv_bfloat16 const*, std::vector<size_t> const&, QuantType, bool);
-
-template void symmetric_quantize<__nv_bfloat16, float>(
-    int8_t*, __nv_bfloat16*, float const*, std::vector<size_t> const&, QuantType, bool);
-#endif
 
 } // namespace cutlass_kernels
 } // namespace kernels

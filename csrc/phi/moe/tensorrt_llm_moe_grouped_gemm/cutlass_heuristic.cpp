@@ -14,12 +14,6 @@
  * limitations under the License.
  */
 
-// DISABLE Pytorch CUDAExtension Flags
-#undef __CUDA_NO_HALF_CONVERSIONS__ 
-#undef __CUDA_NO_HALF_OPERATORS__
-#undef __CUDA_NO_BFLOAT16_CONVERSIONS__
-#undef __CUDA_NO_HALF2_OPERATORS__
-
 #include "cutlass_heuristic.h"
 #include "tensorrt_llm/common/cudaBf16Wrapper.h"
 
@@ -176,84 +170,9 @@ std::vector<CutlassTileConfig> get_candidate_tiles(
     }
 }
 
-std::vector<CutlassTileConfigSM90> get_candidate_tiles_sm90(
-    int const sm, CutlassGemmConfig::CandidateConfigTypeParam const config)
-{
-    if (config & CutlassGemmConfig::GROUPED_GEMM)
-    {
-        return {CutlassTileConfigSM90::CtaShape128x16x128B, CutlassTileConfigSM90::CtaShape128x32x128B,
-            CutlassTileConfigSM90::CtaShape128x64x128B, CutlassTileConfigSM90::CtaShape128x128x128B,
-            CutlassTileConfigSM90::CtaShape128x256x128B};
-    }
-    else
-    {
-        return {CutlassTileConfigSM90::CtaShape64x16x128B, CutlassTileConfigSM90::CtaShape64x32x128B,
-            CutlassTileConfigSM90::CtaShape64x64x128B, CutlassTileConfigSM90::CtaShape64x128x128B,
-            CutlassTileConfigSM90::CtaShape64x256x128B, CutlassTileConfigSM90::CtaShape128x16x128B,
-            CutlassTileConfigSM90::CtaShape128x32x128B, CutlassTileConfigSM90::CtaShape128x64x128B,
-            CutlassTileConfigSM90::CtaShape128x128x128B, CutlassTileConfigSM90::CtaShape128x256x128B};
-    }
-}
-
-// We only compile CUTLASS kernels with multi-cast along M if the M tile is >= 128. This is purely to improve
-// compilation speed.
-bool supports_mcast_along_m(const CutlassTileConfigSM90 tile)
-{
-    std::set<CutlassTileConfigSM90> valid_tiles{CutlassTileConfigSM90::CtaShape128x16x128B,
-        CutlassTileConfigSM90::CtaShape128x32x128B, CutlassTileConfigSM90::CtaShape128x64x128B,
-        CutlassTileConfigSM90::CtaShape128x128x128B, CutlassTileConfigSM90::CtaShape128x256x128B};
-    return valid_tiles.count(tile) == 1;
-}
-
-// We only compile CUTLASS kernels with multi-cast along N if the N tile is >= 128. This is purely to improve
-// compilation speed.
-bool supports_mcast_along_n(const CutlassTileConfigSM90 tile)
-{
-    std::set<CutlassTileConfigSM90> valid_tiles{CutlassTileConfigSM90::CtaShape64x128x128B,
-        CutlassTileConfigSM90::CtaShape64x256x128B, CutlassTileConfigSM90::CtaShape128x128x128B,
-        CutlassTileConfigSM90::CtaShape128x256x128B};
-    return valid_tiles.count(tile) == 1;
-}
-
 std::vector<CutlassGemmConfig> get_candidate_configs(
     int sm, int const max_split_k, CutlassGemmConfig::CandidateConfigTypeParam const config_type_param)
 {
-    if (sm == 90 && (config_type_param & CutlassGemmConfig::HOPPER))
-    {
-        std::vector<CutlassTileConfigSM90> tiles = get_candidate_tiles_sm90(sm, config_type_param);
-
-        std::vector<CutlassGemmConfig> candidate_configs;
-        for (auto const& tile_config : tiles)
-        {
-            CutlassGemmConfig config(
-                tile_config, MainloopScheduleType::AUTO, EpilogueScheduleType::AUTO, ClusterShape::ClusterShape_1x1x1);
-            candidate_configs.push_back(config);
-
-            bool const has_m_mcast = supports_mcast_along_m(tile_config);
-            bool const has_n_mcast = supports_mcast_along_n(tile_config);
-            if (has_m_mcast)
-            {
-                CutlassGemmConfig config(tile_config, MainloopScheduleType::AUTO, EpilogueScheduleType::AUTO,
-                    ClusterShape::ClusterShape_2x1x1);
-                candidate_configs.push_back(config);
-            }
-
-            if (has_n_mcast)
-            {
-                CutlassGemmConfig config(tile_config, MainloopScheduleType::AUTO, EpilogueScheduleType::AUTO,
-                    ClusterShape::ClusterShape_1x2x1);
-                candidate_configs.push_back(config);
-            }
-
-            if (has_m_mcast && has_n_mcast)
-            {
-                CutlassGemmConfig config(tile_config, MainloopScheduleType::AUTO, EpilogueScheduleType::AUTO,
-                    ClusterShape::ClusterShape_2x2x1);
-                candidate_configs.push_back(config);
-            }
-        }
-        return candidate_configs;
-    }
     std::vector<CutlassTileConfig> tiles = get_candidate_tiles(sm, config_type_param);
 
     std::vector<CutlassGemmConfig> candidate_configs;
