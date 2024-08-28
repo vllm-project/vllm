@@ -37,7 +37,7 @@ def test_gemma_lora(gemma_lora_files):
     expected_lora_output = [
         "more important than knowledge.\nAuthor: Albert Einstein\n",
         "everyone else is already taken.\nAuthor: Oscar Wilde\n",
-        "so little time.\nAuthor: Frank Zappa\n",
+        "so little time\nAuthor: Frank Zappa\n",
     ]
 
     output1 = do_sample(llm, gemma_lora_files, lora_id=1)

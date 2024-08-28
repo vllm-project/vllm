@@ -203,6 +203,7 @@ class TP1DraftModelRunner(ModelRunner):
         self,
         model_input: ModelInputForGPUWithSamplingMetadata,
         kv_caches: List[torch.Tensor],
+        previous_hidden_states: Optional[torch.Tensor] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
     ) -> Optional[List[SamplerOutput]]:
@@ -280,12 +281,29 @@ class TP1DraftModelRunner(ModelRunner):
             graph_batch_size = model_input.input_tokens.shape[0]
             model_executable = (self.graph_runners[model_input.virtual_engine]
                                 [graph_batch_size])
+
+            if previous_hidden_states is not None:
+                hidden_states = torch.cat([
+                    previous_hidden_states,
+                    torch.empty([
+                        graph_batch_size - previous_hidden_states.shape[0],
+                        *previous_hidden_states.shape[1:]
+                    ],
+                                dtype=previous_hidden_states.dtype,
+                                device=previous_hidden_states.device)
+                ])
+            else:
+                hidden_states = None
         else:
             model_executable = self.model
+            hidden_states = previous_hidden_states
 
         outputs: List[SamplerOutput] = []
         for step in range(num_steps):
             multi_modal_kwargs = model_input.multi_modal_kwargs or {}
+
+            kwargs = {"previous_hidden_states": hidden_states} \
+                if previous_hidden_states is not None else {}
 
             # Run model
             hidden_states = model_executable(
@@ -296,6 +314,7 @@ class TP1DraftModelRunner(ModelRunner):
                 intermediate_tensors=intermediate_tensors,
                 **MultiModalInputs.as_kwargs(multi_modal_kwargs,
                                              device=self.device),
+                **kwargs,
             )
 
             # Compute the logits.
