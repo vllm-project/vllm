@@ -223,7 +223,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "causal_conv1d_fwd(Tensor! x, Tensor! weight,"
       "Tensor? bias_,"
       "Tensor? seq_idx_,"
-      "Tensor? seq_pos_idx_,"
       "Tensor? initial_states_,"
       "Tensor? final_states_out_,"
       "bool silu_activation) -> Tensor");

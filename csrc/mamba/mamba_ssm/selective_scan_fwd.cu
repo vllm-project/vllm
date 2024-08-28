@@ -311,6 +311,7 @@ void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
     // Only kNRows == 1 is tested for now, which ofc doesn't differ from previously when we had each block
     // processing 1 row.
     constexpr int kNRows = 1;
+    // kIsVariableB, kIsVariableC and kHasZ are all set to True to reduce binary size
     constexpr bool kIsVariableB = true;
     constexpr bool kIsVariableC = true;
     constexpr bool kHasZ = true;
@@ -485,11 +486,10 @@ selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
     auto input_type = u.scalar_type();
     auto weight_type = A.scalar_type();
     TORCH_CHECK(input_type == at::ScalarType::Float || input_type == at::ScalarType::Half || input_type == at::ScalarType::BFloat16);
-    TORCH_CHECK(weight_type == at::ScalarType::Float || weight_type == at::ScalarType::ComplexFloat);
+    TORCH_CHECK(weight_type == at::ScalarType::Float);
 
     const bool is_variable_B = B.dim() >= 3;
     const bool is_variable_C = C.dim() >= 3;
-    const bool is_complex = weight_type == at::ScalarType::ComplexFloat;
 
     TORCH_CHECK(delta.scalar_type() == input_type);
     TORCH_CHECK(B.scalar_type() == (!is_variable_B ? weight_type : input_type));
@@ -516,18 +516,13 @@ selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
     CHECK_SHAPE(u, batch_size, dim, seqlen);
     CHECK_SHAPE(delta, batch_size, dim, seqlen);
     CHECK_SHAPE(A, dim, dstate);
-    if (!is_variable_B) {
-        CHECK_SHAPE(B, dim, dstate);
-    } else {
-        CHECK_SHAPE(B, batch_size, n_groups, dstate, !is_complex ? seqlen : seqlen * 2);
-        TORCH_CHECK(B.stride(-1) == 1 || B.size(-1) == 1);
-    }
-    if (!is_variable_C) {
-        CHECK_SHAPE(C, dim, dstate);
-    } else {
-        CHECK_SHAPE(C, batch_size, n_groups, dstate, !is_complex ? seqlen: seqlen * 2);
-        TORCH_CHECK(C.stride(-1) == 1 || C.size(-1) == 1);
-    }
+    TORCH_CHECK(is_variable_B, "is_variable_B = False is disabled in favor of reduced binary size")
+    CHECK_SHAPE(B, batch_size, n_groups, dstate, seqlen );
+    TORCH_CHECK(B.stride(-1) == 1 || B.size(-1) == 1);
+
+    TORCH_CHECK(is_variable_C, "is_variable_C = False is disabled in favor of reduced binary size")
+    CHECK_SHAPE(C, batch_size, n_groups, dstate, seqlen);
+    TORCH_CHECK(C.stride(-1) == 1 || C.size(-1) == 1);
 
     if (D_.has_value()) {
         auto D = D_.value();
@@ -553,14 +548,13 @@ selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
 
     at::Tensor z, out_z;
     const bool has_z = z_.has_value();
-    if (has_z) {
-        z = z_.value();
-        TORCH_CHECK(z.scalar_type() == input_type);
-        TORCH_CHECK(z.is_cuda());
-        TORCH_CHECK(z.stride(-1) == 1 || z.size(-1) == 1);
-        CHECK_SHAPE(z, batch_size, dim, seqlen);
-        out_z = torch::empty_like(z);
-    }
+    TORCH_CHECK(has_z, "has_z = False is disabled in favor of reduced binary size")
+    z = z_.value();
+    TORCH_CHECK(z.scalar_type() == input_type);
+    TORCH_CHECK(z.is_cuda());
+    TORCH_CHECK(z.stride(-1) == 1 || z.size(-1) == 1);
+    CHECK_SHAPE(z, batch_size, dim, seqlen);
+    out_z = torch::empty_like(z);
 
     const int n_chunks = (seqlen + 2048 - 1) / 2048;
     // const int n_chunks = (seqlen + 1024 - 1) / 1024;
