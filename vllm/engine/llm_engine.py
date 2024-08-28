@@ -1,3 +1,4 @@
+import functools
 import time
 from collections import deque
 from contextlib import contextmanager
@@ -38,10 +39,9 @@ from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (AsyncCallbackData, EmbeddingSequenceGroupOutput,
-                           ExecuteModelRequest, SamplerOutput, Sequence,
-                           SequenceGroup, SequenceGroupMetadata,
-                           SequenceStatus)
+from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
+                           SamplerOutput, Sequence, SequenceGroup,
+                           SequenceGroupMetadata, SequenceStatus)
 from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
 from vllm.transformers_utils.config import try_get_generation_config
@@ -362,9 +362,11 @@ class LLMEngine:
             Scheduler(
                 scheduler_config, cache_config, lora_config,
                 parallel_config.pipeline_parallel_size,
-                self._process_model_outputs
+                functools.partial(self._process_model_outputs,
+                                  virtual_engine=v_id,
+                                  is_async=True)
                 if model_config.use_async_output_proc else None)
-            for _ in range(parallel_config.pipeline_parallel_size)
+            for v_id in range(parallel_config.pipeline_parallel_size)
         ]
 
         # Metric Logging.
@@ -423,11 +425,11 @@ class LLMEngine:
             for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
 
-        self.async_callback_data = [
-            AsyncCallbackData(self._process_model_outputs, {
-                "virtual_engine": v_id,
-                "is_async": True,
-            }) for v_id in range(self.parallel_config.pipeline_parallel_size)
+        self.async_callback = [
+            functools.partial(self._process_model_outputs,
+                              virtual_engine=v_id,
+                              is_async=True)
+            for v_id in range(self.parallel_config.pipeline_parallel_size)
         ]
 
     def _initialize_kv_caches(self) -> None:
@@ -1496,7 +1498,7 @@ class LLMEngine:
                 last_sampled_token_ids=last_sampled_token_ids)
 
             if allow_async_output_proc:
-                execute_model_req.async_callback = self.async_callback_data[
+                execute_model_req.async_callback = self.async_callback[
                     virtual_engine]
 
             output = self.model_executor.execute_model(
