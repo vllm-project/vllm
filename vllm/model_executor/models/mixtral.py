@@ -451,7 +451,9 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
         super().__init__()
         # TODO keep the fused mixtral_quant codepath around as long as we don't
         # support all quant_types
-        self.use_fused_moe = (quant_config.quant_type == scalar_types.uint4b8)
+        self.use_fused_moe = (quant_config.quant_type == scalar_types.uint4b8
+                              or quant_config.quant_type
+                              == scalar_types.uint8b128)
         self.config = config
         self.lora_config = lora_config
         self.model = MixtralModel(self.use_fused_moe,

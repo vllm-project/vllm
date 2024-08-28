@@ -5,12 +5,13 @@ from typing import Any, Dict, Optional
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.scalar_type import scalar_types
 
 from .fused_moe import (fused_topk, moe_align_block_size,
                         try_get_optimal_moe_config)
 
 
-def single_marlin_moe(
+def single_moe_marlin(
     hidden_states: torch.Tensor,
     w: torch.Tensor,
     scales: torch.Tensor,
@@ -21,6 +22,7 @@ def single_marlin_moe(
     renormalize: bool,
     override_config: Optional[Dict[str, Any]] = None,
     use_fp8: bool = False,
+    num_bits: int = 8,
 ) -> torch.Tensor:
     """
     This function computes a Marlin MoE MMM using weights w
@@ -38,7 +40,7 @@ def single_marlin_moe(
     - override_config (Optional[Dict[str, Any]]): Optional override
         for the kernel configuration.
     - use_fp8 (bool): If True, use fp8 arithmetic to compute the inner
-        products for w and w2. Defaults to False.
+        product for w. Defaults to False.
 
     Returns:
     - torch.Tensor: The output tensor after applying the MoE layer.
@@ -53,9 +55,13 @@ def single_marlin_moe(
     assert hidden_states.dtype in [
         torch.float32, torch.float16, torch.bfloat16
     ]
+    assert num_bits in [4, 8]
+    # TODO support this
+    assert not use_fp8
+
     M, K = hidden_states.shape
     E = w.shape[0]
-    N = w.shape[2] // 2
+    N = w.shape[2] // (num_bits // 2)
 
     topk_weights, topk_ids = fused_topk(hidden_states, gating_output, topk,
                                         renormalize)
@@ -80,10 +86,13 @@ def single_marlin_moe(
                             device="cuda",
                             requires_grad=False)
 
+    scalar_type = (scalar_types.uint4b8
+                   if num_bits == 4 else scalar_types.uint8b128)
+
     intermediate_cache = torch.ops._moe_C.marlin_gemm_moe(
         hidden_states, w, sorted_token_ids, topk_weights, topk_ids, scales,
-        g_idx, rand_perm, workspace, M, N, K, True, E, topk, block_size_m,
-        True, False)
+        g_idx, rand_perm, workspace, scalar_type, M, N, K, True, E, topk,
+        block_size_m, True, False)
 
     return torch.sum(intermediate_cache.view(*intermediate_cache.shape), dim=1)
 
@@ -145,6 +154,10 @@ def fused_moe_marlin(
     assert hidden_states.dtype in [
         torch.float32, torch.float16, torch.bfloat16
     ]
+    assert num_bits in [4, 8]
+    # TODO support this
+    assert not use_fp8
+
     M, K = hidden_states.shape
     E = w1.shape[0]
     N = w2.shape[1] * 16
@@ -173,6 +186,9 @@ def fused_moe_marlin(
                             device="cuda",
                             requires_grad=False)
 
+    scalar_type = (scalar_types.uint4b8
+                   if num_bits == 4 else scalar_types.uint8b128)
+
     intermediate_cache2 = torch.empty(
         (M * topk_ids.shape[1], N),
         device=hidden_states.device,
@@ -189,6 +205,7 @@ def fused_moe_marlin(
         g_idx1,
         rand_perm1,
         workspace,
+        scalar_type,
         M,
         2 * N,
         K,
@@ -212,6 +229,7 @@ def fused_moe_marlin(
         g_idx2,
         rand_perm2,
         workspace,
+        scalar_type,
         M,
         K,
         N,

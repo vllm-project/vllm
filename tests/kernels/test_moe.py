@@ -12,7 +12,7 @@ from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.fused_moe.fused_moe_marlin import (
-    fused_moe_marlin, single_marlin_moe)
+    fused_moe_marlin, single_moe_marlin)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     marlin_quantize)
 from vllm.model_executor.models.mixtral import MixtralMoE
@@ -132,11 +132,6 @@ def compute_max_diff(output, output_ref):
         torch.abs(output_ref))
 
 
-# TODO: make sure this test works
-# @pytest.mark.skip("C compiler not installed in NM automation. "
-#                   "This codepath follows a triton pathway, which "
-#                   "JITs using clang or gcc. Since neither are installed "
-#                   "in our test instances, we need to skip this for now.")
 @pytest.mark.parametrize("m", [64, 512, 222, 33, 1])
 @pytest.mark.parametrize("n", [128, 2048, 256, 1024])
 @pytest.mark.parametrize("k", [128, 1024, 512])
@@ -144,6 +139,7 @@ def compute_max_diff(output, output_ref):
 @pytest.mark.parametrize("topk", [2, 6])
 @pytest.mark.parametrize("group_size", [-1, 32, 64, 128])
 @pytest.mark.parametrize("act_order", [True, False])
+@pytest.mark.parametrize("num_bits", [4, 8])
 def test_fused_marlin_moe(
     m: int,
     n: int,
@@ -152,6 +148,7 @@ def test_fused_marlin_moe(
     topk: int,
     group_size: int,
     act_order: bool,
+    num_bits: int,
 ):
     torch.manual_seed(7)
 
@@ -165,7 +162,8 @@ def test_fused_marlin_moe(
         if group_size in (k, n):
             return
 
-    quant_type = scalar_types.uint4b8
+    quant_type = (scalar_types.uint4b8
+                  if num_bits == 4 else scalar_types.uint8b128)
     dtype = torch.float16
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
@@ -241,18 +239,14 @@ def test_fused_marlin_moe(
         renormalize=False,
         w1_scale=scales1,
         w2_scale=scales2,
-        num_bits=4,
+        num_bits=num_bits,
     )
 
     assert compute_max_diff(marlin_output, triton_output) < 4e-2
 
 
-# TODO: make sure this test works
-# UPSTREAM SYNC: breaks NM automation.
-# @pytest.mark.skip("C compiler not installed in NM automation. "
-#                   "This codepath follows a triton pathway, which "
-#                   "JITs using clang or gcc. Since neither are installed "
-#                   "in our test instances, we need to skip this for now.")
+@pytest.mark.skip("This test is here for the sake of debugging, "
+                  "don't run it in automated tests.")
 @pytest.mark.parametrize("m", [64, 512, 222, 33, 1])
 @pytest.mark.parametrize("n", [128, 2048, 256, 1024])
 @pytest.mark.parametrize("k", [128, 1024, 512])
@@ -260,7 +254,8 @@ def test_fused_marlin_moe(
 @pytest.mark.parametrize("topk", [2, 6])
 @pytest.mark.parametrize("group_size", [-1, 32, 64, 128])
 @pytest.mark.parametrize("act_order", [True, False])
-def test_single_marlin_moe(
+@pytest.mark.parametrize("num_bits", [4, 8])
+def test_marlin_moe_mmm(
     m: int,
     n: int,
     k: int,
@@ -268,6 +263,7 @@ def test_single_marlin_moe(
     topk: int,
     group_size: int,
     act_order: bool,
+    num_bits: int,
 ):
     if topk > e:
         return
@@ -279,7 +275,8 @@ def test_single_marlin_moe(
         if group_size == k:
             return
 
-    quant_type = scalar_types.uint4b8
+    quant_type = (scalar_types.uint4b8
+                  if num_bits == 4 else scalar_types.uint8b128)
     dtype = torch.float16
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w = torch.randn((e, n, k), device="cuda", dtype=dtype) / 10
@@ -307,14 +304,15 @@ def test_single_marlin_moe(
     sort_indices = stack_and_dev(sort_indices_l)
 
     score = torch.randn((m, e), device="cuda", dtype=dtype)
-    marlin_output = single_marlin_moe(a,
+    marlin_output = single_moe_marlin(a,
                                       qweight,
                                       scales,
                                       score,
                                       g_idx,
                                       sort_indices,
                                       topk,
-                                      renormalize=False)
+                                      renormalize=False,
+                                      num_bits=num_bits)
     torch_output = torch_moe_single(a, w_ref.transpose(1, 2), score, topk)
 
     assert compute_max_diff(marlin_output, torch_output) < 1e-2

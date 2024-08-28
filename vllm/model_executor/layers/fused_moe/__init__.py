@@ -1,5 +1,5 @@
 from vllm.model_executor.layers.fused_moe.fused_moe_marlin import (
-    fused_moe_marlin, single_marlin_moe)
+    fused_moe_marlin, single_moe_marlin)
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE,
                                                         FusedMoEMethodBase)
 from vllm.triton_utils import HAS_TRITON
@@ -8,7 +8,7 @@ __all__ = [
     "FusedMoE",
     "FusedMoEMethodBase",
     "fused_moe_marlin",
-    "single_marlin_moe",
+    "single_moe_marlin",
 ]
 
 if HAS_TRITON:
