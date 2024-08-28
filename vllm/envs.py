@@ -196,6 +196,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Internal flag to enable Dynamo graph capture
     "VLLM_TEST_DYNAMO_GRAPH_CAPTURE":
     lambda: int(os.environ.get("VLLM_TEST_DYNAMO_GRAPH_CAPTURE", "0")),
+    "VLLM_DYNAMO_USE_CUSTOM_DISPATCHER":
+    lambda:
+    (os.environ.get("VLLM_DYNAMO_USE_CUSTOM_DISPATCHER", "True").lower() in
+     ("true", "1")),
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
