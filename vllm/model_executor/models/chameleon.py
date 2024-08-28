@@ -53,7 +53,7 @@ CHAMELEON_SEP_TOKEN_ID = 8710
 class ChameleonImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     data: torch.Tensor
-    """Shape: `(batch_size, num_channels, height, width)`"""
+    """Shape: `(batch_size * num_images, num_channels, height, width)`"""
 
 
 def get_max_chameleon_image_tokens(ctx: InputContext):

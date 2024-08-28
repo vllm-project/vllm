@@ -18,7 +18,7 @@ from vllm.utils import JSONTree, is_list_of, json_map_leaves
 
 logger = init_logger(__name__)
 
-NestedTensors = Union[List["NestedTensors"], torch.Tensor]
+NestedTensors = Union[List["NestedTensors"], List[torch.Tensor], torch.Tensor]
 """
 Uses a list instead of a tensor if the dimensions of each element do not match.
 """
@@ -61,7 +61,7 @@ class MultiModalInputs(_MultiModalInputsBase):
         tensors_ = cast(List[torch.Tensor], stacked)
         if any(t.shape != tensors_[0].shape for t in tensors_):
             # The tensors have incompatible shapes and can't be stacked.
-            return stacked
+            return tensors_
 
         return torch.stack(tensors_)
 

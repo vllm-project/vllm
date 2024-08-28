@@ -49,7 +49,7 @@ logger = init_logger(__name__)
 class UltravoxAudioFeatureInputs(TypedDict):
     type: Literal["audio_features"]
     data: Union[torch.Tensor, List[torch.Tensor]]
-    """Shape: `(batch_size, 80, M)"""
+    """Shape: `(batch_size * num_audios, 80, M)"""
 
 
 class UltravoxAudioEmbeddingInputs(TypedDict):
