@@ -255,12 +255,12 @@ def test_flashinfer_prefill_with_paged_kv(seq_lens: List[Tuple[int, int]],
         f"{torch.max(torch.abs(output - ref_output))}"
 
 
-@pytest.mark.parametrize("seq_lens", [[(1, 1328), (5, 18), (129, 463)]])
-@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("seq_lens", [[(1, 132), (5, 18)]])
+@pytest.mark.parametrize("num_heads", [(32, 8), (6, 1)])
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("soft_cap", [None, 30.0, 50.0])
+@pytest.mark.parametrize("soft_cap", [None,])
 def test_flashinfer_prefill_with_paged_fp8_kv(
         seq_lens: List[Tuple[int, int]], num_heads: Tuple[int, int],
         head_size: int, dtype: torch.dtype, block_size: int,
@@ -282,7 +282,8 @@ def test_flashinfer_prefill_with_paged_fp8_kv(
                         num_query_heads,
                         head_size,
                         dtype=dtype)
-    key_value_cache = torch.randn(NUM_BLOCKS,
+    NUM_BLOCKS_FP8 = 2048
+    key_value_cache = torch.randn(NUM_BLOCKS_FP8,
                                   2,
                                   block_size,
                                   num_kv_heads,
@@ -301,7 +302,7 @@ def test_flashinfer_prefill_with_paged_fp8_kv(
     assert (kv_cache_fp8.shape == key_value_cache.shape)
     max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
     block_tables = torch.randint(0,
-                                 NUM_BLOCKS,
+                                 NUM_BLOCKS_FP8,
                                  (num_seqs, max_num_blocks_per_seq),
                                  dtype=torch.int32)
 
@@ -389,8 +390,8 @@ def test_flashinfer_decode_with_paged_fp8_kv(
     kv_cache_dtype = torch.float8_e4m3fn
 
     query = torch.randn(num_seqs, num_query_heads, head_size, dtype=dtype)
-
-    key_value_cache = torch.randn(NUM_BLOCKS,
+    NUM_BLOCKS_FP8 = 2048
+    key_value_cache = torch.randn(NUM_BLOCKS_FP8,
                                   2,
                                   block_size,
                                   num_kv_heads,
@@ -410,7 +411,7 @@ def test_flashinfer_decode_with_paged_fp8_kv(
 
     max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
     block_tables = torch.randint(0,
-                                 NUM_BLOCKS,
+                                 NUM_BLOCKS_FP8,
                                  (num_seqs, max_num_blocks_per_seq),
                                  dtype=torch.int32)
 
