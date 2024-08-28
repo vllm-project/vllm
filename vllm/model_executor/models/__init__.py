@@ -67,6 +67,8 @@ _GENERATION_MODELS = {
 _EMBEDDING_MODELS = {
     "MistralModel": ("llama_embedding", "LlamaEmbeddingModel"),
     "BertForMaskedLM": ("bert_embedding", "BertEmbeddingModel"),
+    "RobertaForMaskedLM": ("roberta_embedding", "RobertaEmbeddingModel"),
+    "RobertaModel": ("roberta_embedding", "RobertaEmbeddingModel"),
 }
 
 _MULTIMODAL_MODELS = {
