@@ -82,7 +82,7 @@ class Worker(LocalOrDistributedWorkerBase):
 
         additional_args = {}
         # Return hidden states from target model if the draft model is an
-        # mlp_speculator
+        # mlp_speculator or the model config requests hidden states.
         if (
             speculative_config is not None
             and speculative_config.draft_model_config.model != \

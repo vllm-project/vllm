@@ -24,6 +24,8 @@ def create_output_by_sequence_group(
             if return_hidden_states and isinstance(step, SamplerOutput):
                 assert len(scheduled_seq_groups[i].seq_group.seqs) == 1
                 if step.prefill_hidden_states is not None:
+                    # Prefill tokens are concatenated in the order that their 
+                    # sequence group is scheduled.
                     seq_group_offset = sum(input_lengths[:i])
                     seq_group_input_length = len(scheduled_seq_groups[i]
                                                  .seq_group.seqs[0]
