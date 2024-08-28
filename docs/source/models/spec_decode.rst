@@ -161,6 +161,31 @@ A variety of speculative models of this type are available on HF hub:
 * `granite-7b-instruct-accelerator <https://huggingface.co/ibm-granite/granite-7b-instruct-accelerator>`_
 * `granite-20b-code-instruct-accelerator <https://huggingface.co/ibm-granite/granite-20b-code-instruct-accelerator>`_
 
+Lossless guarantees of Speculative Decoding in vLLM
+---------------------------------------------------
+In vLLM, speculative decoding aims to enhance inference efficiency while maintaining accuracy. This section addresses the lossless guarantees of speculative decoding, breaking down the guarantees into three key areas:
+
+1. **Theoretical Losslessness**
+   - Speculative decoding is theoretically lossless up to the precision limits of hardware numerics. Floating-point errors might cause slight variations in output distributions, as discussed in *Accelerating Large Language Model Decoding with Speculative Sampling*.
+
+2. **vLLM Algorithmic Losslessness**
+   - vLLM’s implementation of speculative decoding is algorithmically validated to be lossless when the
+   temperature parameter (`temp`) is set to 0. Key tests include:
+    - **Rejection Sampler Convergence**: Ensures that samples from vLLM’s rejection sampler align with the target distribution. `View Test Code <https://github.com/vllm-project/vllm/blob/47b65a5/vllm/tests/samplers/test_rejection_sampler.py>`_
+    - **Greedy Sampling Equality**: Confirms that greedy sampling with speculative decoding matches greedy sampling without it. `View Test Code <https://github.com/vllm-project/vllm/tree/b67ae00cdbbe1a58ffc8ff170f0c8d79044a684a/tests/spec_decode/e2e>`_
+
+3. **vLLM Logprob Stability**
+   - vLLM currently does not guarantee stable log probabilities (logprobs) across different batch sizes, which might cause small variations in output probabilities. 
+   This issue may stem from non-deterministic behaviors in batched operations or numerical instability in Torch operations. `See Test Code and Discussion <https://github.com/vllm-project/vllm/blob/47b65a5/vllm/tests/spec_decode/e2e/test_multistep_correctness.py>`_
+
+#### Conclusion
+
+While vLLM strives to ensure losslessness in speculative decoding, variations in generated outputs can occur due to several factors:
+
+- **Floating-Point Precision**: Differences in hardware numerical precision may lead to slight discrepancies in the output distribution.
+- **Batch Size and Numerical Stability**: Changes in batch size or specific prompts may cause variations in logprobs and output probabilities, potentially due to non-deterministic behavior in batched operations or numerical instability.
+
+For stable generation across different runs, using request-seeds is recommended, although it may affect latency. For more information, refer to `Bugfix #6034 <https://github.com/vllm-project/vllm/issues/6034>`_.
 
 Resources for vLLM contributors
 -------------------------------
