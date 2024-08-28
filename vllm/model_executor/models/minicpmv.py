@@ -594,9 +594,14 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
 
         pixel_values_flat: List[torch.Tensor] = []
         tgt_sizes_flat: List[torch.Tensor] = []
-        for b in range(len(pixel_values)):
-            pixel_values_flat += pixel_values[b]
-            tgt_sizes_flat += tgt_sizes[b]
+        for pixel_b, tgt_b in zip(pixel_values, tgt_sizes):
+            if len(pixel_b) != len(tgt_b):
+                raise ValueError("Inconsistent N lengths, found: "
+                                 f"{len(pixel_b)} vs {len(tgt_b)}")
+
+            for pixel_n, tgt_n in zip(pixel_b, tgt_b):
+                pixel_values_flat += pixel_n
+                tgt_sizes_flat += tgt_n
 
         # NOTE: Input IDs does not contain image tokens during memory profiling,
         # so we allow it to be empty

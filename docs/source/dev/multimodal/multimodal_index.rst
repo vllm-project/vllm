@@ -45,8 +45,6 @@ Base Classes
 
 .. autodata:: vllm.multimodal.NestedTensors
 
-.. autodata:: vllm.multimodal.BatchedTensors
-
 .. autodata:: vllm.multimodal.BatchedTensorInputs
 
 .. autoclass:: vllm.multimodal.MultiModalDataBuiltins

@@ -249,6 +249,9 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal):
         image_patches = kwargs.pop("image_patches", None)
 
         if isinstance(image_patches, torch.Tensor):
+            # Remove the N dimension until multiple images are supported.
+            image_patches = image_patches.squeeze(1)
+
             expected_feature_size = self.image_feature_size
             if image_patches.size(-1) != expected_feature_size:
                 raise ValueError(

@@ -560,6 +560,14 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal):
                 raise ValueError("Incorrect type of image sizes. "
                                  f"Got type: {type(image_sizes)}")
 
+            # Merge the B and N dimensions.
+            if isinstance(pixel_values, torch.Tensor):
+                pixel_values = pixel_values.flatten(0, 1)
+            else:
+                pixel_values = torch.cat(pixel_values)
+
+            image_sizes = image_sizes.flatten(0, 1)
+
             return Phi3VImagePixelInputs(
                 type="pixel_values",
                 data=self._validate_pixel_values(pixel_values),
