@@ -365,12 +365,13 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         #    used during the prefill phase.
         # 2. Auto-disable enabled: The running queue size exceeds
         #    the specified threshold.
-        # 3. No request: There are no requests in the batch.
+        # 3. No request: There are no requests in the batch, or
+        #    none of the requests in the batch have spec decoding enabled.
         # In any of these cases, the proposer and scorer workers
         # are called normally.
-        no_spec = num_lookahead_slots == 0 or len(
-            execute_model_req.seq_group_metadata_list
-        ) == 0 or disable_all_speculation
+        no_spec = num_lookahead_slots == 0 or disable_all_speculation or all(
+            sgm.num_speculative_tokens == 0
+            for sgm in execute_model_req.seq_group_metadata_list)
 
         # Broadcast how many lookahead slots are scheduled for this step, and
         # whether all speculation is disabled, to all non-driver workers.
@@ -415,10 +416,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             self, execute_model_req: ExecuteModelRequest) -> bool:
         # When the batch size is too large, disable speculative decoding
         # to stop trading off throughput for latency.
-        disable_all_speculation = (execute_model_req.running_queue_size >=
-                                   self.disable_by_batch_size)
-
-        return disable_all_speculation
+        return (execute_model_req.running_queue_size >=
+                self.disable_by_batch_size)
 
     def _maybe_disable_speculative_tokens(
             self, disable_all_speculation: bool,
@@ -621,14 +620,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # proposal len. This adds some complexity (splitting the batch into spec
         # and non spec sequences) and should be removed in the future. It can be
         # done by supporting per-sequence proposal lens.
-        _, spec_indices = split_batch_by_proposal_len(
-            seq_group_metadata_list,
-            proposal_lens_list,
-            select_proposal_len_zero=False)
-        _, non_spec_indices = split_batch_by_proposal_len(
-            seq_group_metadata_list,
-            proposal_lens_list,
-            select_proposal_len_zero=True)
+        (_, spec_indices), (_, non_spec_indices) = split_batch_by_proposal_len(
+            seq_group_metadata_list, proposal_lens_list)
         original_indices = spec_indices + non_spec_indices
 
         # Get probabilities of target model, excluding bonus token.

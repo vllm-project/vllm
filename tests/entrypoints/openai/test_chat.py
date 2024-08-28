@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 import jsonschema
 import openai  # use the official client for correctness check
 import pytest
+import pytest_asyncio
 import torch
 from openai import BadRequestError
 
@@ -46,9 +47,10 @@ def server(zephyr_lora_files, zephyr_lora_added_tokens_files):  # noqa: F811
         yield remote_server
 
 
-@pytest.fixture(scope="module")
-def client(server):
-    return server.get_async_client()
+@pytest_asyncio.fixture
+async def client(server):
+    async with server.get_async_client() as async_client:
+        yield async_client
 
 
 @pytest.mark.asyncio
@@ -829,6 +831,39 @@ async def test_response_format_json_object(client: openai.AsyncOpenAI):
                             'the format is {"result": 2}')
             }],
             response_format={"type": "json_object"})
+
+        content = resp.choices[0].message.content
+        assert content is not None
+
+        loaded = json.loads(content)
+        assert loaded == {"result": 2}, loaded
+
+
+@pytest.mark.asyncio
+async def test_response_format_json_schema(client: openai.AsyncOpenAI):
+    for _ in range(2):
+        resp = await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{
+                "role":
+                "user",
+                "content": ('what is 1+1? please respond with a JSON object, '
+                            'the format is {"result": 2}')
+            }],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "foo_test",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "result": {
+                                "type": "integer"
+                            },
+                        },
+                    },
+                }
+            })
 
         content = resp.choices[0].message.content
         assert content is not None
