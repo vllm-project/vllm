@@ -25,6 +25,7 @@ import numpy.typing as npt
 import psutil
 import torch
 import torch.types
+from packaging.version import Version
 from typing_extensions import ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
@@ -1114,3 +1115,11 @@ async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
     """Utility function to run async task in a lock"""
     async with lock:
         return await task(*args, **kwargs)
+
+
+# Using dynamo with vLLM doesn't really work well with PyTorch versions < 2.4.0.
+# In particular, the FakeScalarType is not supported for earlier versions of
+# PyTorch which breaks dynamo for any ops registered using ScalarType.
+def supports_dynamo() -> bool:
+    base_torch_version = Version(Version(torch.__version__).base_version)
+    return base_torch_version >= Version("2.4.0")
