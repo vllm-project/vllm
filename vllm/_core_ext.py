@@ -181,92 +181,98 @@ elif core_C_available:
 
     ScalarType = torch.classes._core_C.ScalarType
 
-    # Needed for dynamo support of ScalarType.
-    @torch._library.register_fake_class("_core_C::ScalarType")
-    class FakeScalarType:
+    if (hasattr(torch, "_library")
+            and hasattr(torch._library, "register_fake_class")):
+        # Needed for dynamo support of ScalarType.
+        @torch._library.register_fake_class("_core_C::ScalarType")
+        class FakeScalarType:
 
-        def __init__(self, scalar_type):
-            self.ScalarType = scalar_type
+            def __init__(self, scalar_type):
+                self.ScalarType = scalar_type
 
-        def bias_getter(self) -> int:
-            return self.ScalarType.bias
+            def bias_getter(self) -> int:
+                return self.ScalarType.bias
 
-        def exponent_getter(self) -> int:
-            return self.ScalarType.exponent
+            def exponent_getter(self) -> int:
+                return self.ScalarType.exponent
 
-        def mantissa_getter(self) -> int:
-            return self.ScalarType.mantissa
+            def mantissa_getter(self) -> int:
+                return self.ScalarType.mantissa
 
-        def signed_getter(self) -> bool:
-            return self.ScalarType.signed
+            def signed_getter(self) -> bool:
+                return self.ScalarType.signed
 
-        def size_bits_getter(self) -> int:
-            return self.ScalarType.size_bits
+            def size_bits_getter(self) -> int:
+                return self.ScalarType.size_bits
 
-        @property
-        def size_bits(self) -> int:
-            return self.ScalarType.size_bits
+            @property
+            def size_bits(self) -> int:
+                return self.ScalarType.size_bits
 
-        def min(self) -> Union[int, float]:
-            return self.ScalarType.min()
+            def min(self) -> Union[int, float]:
+                return self.ScalarType.min()
 
-        def max(self) -> Union[int, float]:
-            return self.ScalarType.max()
+            def max(self) -> Union[int, float]:
+                return self.ScalarType.max()
 
-        def is_signed(self) -> bool:
-            return self.ScalarType.is_signed()
+            def is_signed(self) -> bool:
+                return self.ScalarType.is_signed()
 
-        def is_floating_point(self) -> bool:
-            return self.ScalarType.is_floating_point()
+            def is_floating_point(self) -> bool:
+                return self.ScalarType.is_floating_point()
 
-        def is_integer(self) -> bool:
-            return self.ScalarType.is_integer()
+            def is_integer(self) -> bool:
+                return self.ScalarType.is_integer()
 
-        def has_bias(self) -> bool:
-            return self.ScalarType.has_bias()
+            def has_bias(self) -> bool:
+                return self.ScalarType.has_bias()
 
-        def has_infs(self) -> bool:
-            return self.ScalarType.has_infs()
+            def has_infs(self) -> bool:
+                return self.ScalarType.has_infs()
 
-        def has_nans(self) -> bool:
-            return self.ScalarType.has_nans()
+            def has_nans(self) -> bool:
+                return self.ScalarType.has_nans()
 
-        def is_ieee_754(self) -> bool:
-            return self.ScalarType.is_ieee_754()
+            def is_ieee_754(self) -> bool:
+                return self.ScalarType.is_ieee_754()
 
-        def __str__(self) -> str:
-            return self.ScalarType.__str__()
+            def __str__(self) -> str:
+                return self.ScalarType.__str__()
 
-        def __repr__(self) -> str:
-            return self.ScalarType.__repr__()
+            def __repr__(self) -> str:
+                return self.ScalarType.__repr__()
 
-        def __len__(self) -> int:
-            return self.ScalarType.__len__()
+            def __len__(self) -> int:
+                return self.ScalarType.__len__()
 
-        def __obj_flatten__(self) -> Tuple[Tuple[str, Any], ...]:
-            return torch.classes._core_C.ScalarType.__obj_flatten__(
-                self.ScalarType)
+            def __obj_flatten__(self) -> Tuple[Tuple[str, Any], ...]:
+                return torch.classes._core_C.ScalarType.__obj_flatten__(
+                    self.ScalarType)
 
-        @classmethod
-        def __obj_unflatten__(
-                cls, flat_type: Tuple[Tuple[str, Any], ...]) -> 'ScalarType':
-            return cls(
-                torch.classes._core_C.ScalarType.__obj_unflatten__(flat_type))
+            @classmethod
+            def __obj_unflatten__(
+                    cls, flat_type: Tuple[Tuple[str, Any],
+                                          ...]) -> 'ScalarType':
+                return cls(
+                    torch.classes._core_C.ScalarType.__obj_unflatten__(
+                        flat_type))
 
-        @classmethod
-        def int_(cls, size_bits: int, bias: Optional[int]) -> 'ScalarType':
-            return ScalarType.int_(size_bits, bias)
+            @classmethod
+            def int_(cls, size_bits: int, bias: Optional[int]) -> 'ScalarType':
+                return ScalarType.int_(size_bits, bias)
 
-        @classmethod
-        def uint(cls, size_bits: int, bias: Optional[int]) -> 'ScalarType':
-            return ScalarType.uint(size_bits, bias)
+            @classmethod
+            def uint(cls, size_bits: int, bias: Optional[int]) -> 'ScalarType':
+                return ScalarType.uint(size_bits, bias)
 
-        @classmethod
-        def float_IEEE754(cls, exponent: int, mantissa: int) -> 'ScalarType':
-            return ScalarType.float_IEEE754(exponent, mantissa)
+            @classmethod
+            def float_IEEE754(cls, exponent: int,
+                              mantissa: int) -> 'ScalarType':
+                return ScalarType.float_IEEE754(exponent, mantissa)
 
-        @classmethod
-        def float_(cls, exponent: int, mantissa: int, finite_values_only: bool,
-                   nan_repr: int) -> 'ScalarType':
-            return ScalarType.float_(exponent, mantissa, finite_values_only,
-                                     nan_repr)
+            @classmethod
+            def float_(cls, exponent: int, mantissa: int,
+                       finite_values_only: bool,
+                       nan_repr: int) -> 'ScalarType':
+                return ScalarType.float_(exponent, mantissa,
+                                         finite_values_only, nan_repr)
