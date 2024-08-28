@@ -11,6 +11,9 @@ def create_output_by_sequence_group(
         return_hidden_states: bool = False) -> List[List[SequenceGroupOutput]]:
     """Helper method which transforms a 2d list organized by
     [step][sequence group] into [sequence group][step].
+
+    Also passes hidden states from the `SamplerOutputs` to the `SequenceGroupOutputs`
+    if `return_hidden_states` is `True`.
     """
     output_by_sequence_group: List[List[SequenceGroupOutput]] = [
         [] for _ in scheduled_seq_groups
