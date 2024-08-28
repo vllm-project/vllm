@@ -295,14 +295,10 @@ def test_flashinfer_prefill_with_paged_fp8_kv(
     k_scale = key_cache.amax().item() / 448.0
     v_scale = value_cache.amax().item() / 448.0
 
-    key_cache_fp8 = (key_cache / k_scale).to(kv_cache_dtype)
-    value_cache_fp8 = (value_cache / v_scale).to(kv_cache_dtype)
-    assert (key_cache_fp8.shape[1] == 1 and value_cache_fp8.shape[1] == 1)
-    kv_cache_fp8 = torch.cat([key_cache_fp8, value_cache_fp8], dim=1)
+    kv_cache_fp8 = torch.cat([key_cache / k_scale, value_cache / v_scale],
+                             dim=1).to(kv_cache_dtype)
 
     assert (kv_cache_fp8.shape == key_value_cache.shape)
-    # Normalize the scale of the key and value caches to mitigate
-    # numerical instability.
     max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
     block_tables = torch.randint(0,
                                  NUM_BLOCKS,
@@ -358,6 +354,8 @@ def test_flashinfer_prefill_with_paged_fp8_kv(
                                 block_tables=block_tables,
                                 scale=scale,
                                 soft_cap=soft_cap)
+    del query
+    del block_tables
     # verify prefill fp8
     torch.testing.assert_close(output, ref_output, atol=1e-2, rtol=1e-2), \
         f"{torch.max(torch.abs(output - ref_output))}"
