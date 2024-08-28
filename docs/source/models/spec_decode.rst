@@ -171,7 +171,7 @@ speculative decoding, breaking down the guarantees into three key areas:
    cause slight variations in output distributions, as discussed 
    in `Accelerating Large Language Model Decoding with Speculative Sampling <https://arxiv.org/pdf/2302.01318>`_
 
-2. **vLLM Algorithmic Losslessness**
+2. **Algorithmic Losslessness**
    - vLLM’s implementation of speculative decoding is algorithmically validated to be lossless when the
    temperature parameter (`temp`) is set to 0. Key tests include:
 
