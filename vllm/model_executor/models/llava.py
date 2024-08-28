@@ -232,6 +232,10 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal):
             if not isinstance(pixel_values, torch.Tensor):
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
+
+            # Remove the N dimension until multiple images are supported.
+            pixel_values = pixel_values.squeeze(1)
+
             return LlavaImagePixelInputs(
                 type="pixel_values",
                 data=self._validate_pixel_values(pixel_values),
@@ -241,6 +245,10 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal):
             if not isinstance(image_embeds, torch.Tensor):
                 raise ValueError("Incorrect type of image embeddings. "
                                  f"Got type: {type(image_embeds)}")
+
+            # Remove the N dimension until multiple images are supported.
+            image_embeds = image_embeds.squeeze(1)
+
             return LlavaImageEmbeddingInputs(
                 type="image_embeds",
                 data=image_embeds,
@@ -313,7 +321,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal):
         278, 2793, 310, 278, 1967, 29973, 13, 22933, 9047, 13566, 29901]`.
 
         To reserve space in KV cache, we have to insert placeholder tokens
-        before they are inputted to the model, so the input processor prepends 
+        before they are inputted to the model, so the input processor prepends
         additional image tokens (denoted as `32000`), resulting in:
         `[1, 3148, 1001, 29901, 29871, 32000, ..., 32000, 29871, 13, 5618,
         29915, 29879, 278, 2793, 310, 278, 1967, 29973, 13, 22933, 9047, 13566,
@@ -331,7 +339,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal):
             input_ids: Flattened (concatenated) input_ids corresponding to a
                 batch.
             pixel_values: The pixels in each input image.
-        
+
         See also:
             :class:`LlavaImageInputs`
         """

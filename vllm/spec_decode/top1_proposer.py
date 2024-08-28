@@ -138,7 +138,7 @@ class Top1Proposer(SpeculativeProposer):
 
             # Currently only proposal lens of 0 or the global batch proposal len
             # are supported.
-            # If max_proposal_len is defined, then we shall no exceed this
+            # If max_proposal_len is defined, then we shall not exceed this
             # quota for nonzero_proposal
             new_k = 0
             if (self.max_proposal_len is None
@@ -242,7 +242,7 @@ class Top1Proposer(SpeculativeProposer):
             return proposal_tokens, proposal_probs, proposal_lens_tensor
 
         sampler_output = maybe_sampler_output
-        proposal_tokens, proposal_probs, _ = sampler_output_to_torch(
+        proposal_tokens, proposal_probs, *_ = sampler_output_to_torch(
             sampler_output, sampler_transposed)
 
         # Now, reformat the output GPU tensors such that each sequence has

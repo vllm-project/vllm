@@ -91,18 +91,19 @@ class RayGPUExecutor(DistributedGPUExecutor):
         return ray_remote_kwargs
 
     def _get_worker_wrapper_args(self) -> Dict[str, Any]:
-        if self.speculative_config is not None:
-            worker_module_name = "vllm.spec_decode.spec_decode_worker"
-            worker_class_name = "create_spec_worker"
-        else:
-            worker_module_name = "vllm.worker.worker"
-            worker_class_name = "Worker"
+        (worker_module_name, worker_class_name,
+         worker_class_fn) = self._get_worker_module_and_class()
 
         return dict(
             worker_module_name=worker_module_name,
             worker_class_name=worker_class_name,
+            worker_class_fn=worker_class_fn,
             trust_remote_code=self.model_config.trust_remote_code,
         )
+
+    # child class could overwrite this to return actual env vars.
+    def _get_env_vars_to_be_updated(self):
+        return self._env_vars_for_all_workers
 
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
@@ -217,6 +218,19 @@ class RayGPUExecutor(DistributedGPUExecutor):
         for node_id, gpu_ids in node_gpus.items():
             node_gpus[node_id] = sorted(gpu_ids)
 
+        all_ips = set(worker_ips + [driver_ip])
+        n_ips = len(all_ips)
+        n_nodes = len(node_workers)
+
+        if n_nodes != n_ips:
+            raise RuntimeError(
+                f"Every node should have a unique IP address. Got {n_nodes}"
+                f" nodes with node ids {list(node_workers.keys())} and "
+                f"{n_ips} unique IP addresses {all_ips}. Please check your"
+                " network configuration. If you set `VLLM_HOST_IP` or "
+                "`HOST_IP` environment variable, make sure it is unique for"
+                " each node.")
+
         VLLM_INSTANCE_ID = get_vllm_instance_id()
 
         # Set environment variables for the driver and workers.
@@ -228,8 +242,12 @@ class RayGPUExecutor(DistributedGPUExecutor):
             "VLLM_TRACE_FUNCTION":
             str(envs.VLLM_TRACE_FUNCTION),
         }, ) for (node_id, _) in worker_node_and_gpu_ids]
+
+        self._env_vars_for_all_workers = (
+            all_args_to_update_environment_variables)
+
         self._run_workers("update_environment_variables",
-                          all_args=all_args_to_update_environment_variables)
+                          all_args=self._get_env_vars_to_be_updated())
 
         if len(node_gpus) == 1:
             # in single node case, we don't need to get the IP address.

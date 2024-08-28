@@ -356,6 +356,9 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA):
         self.max_position_embeddings = getattr(config, "max_sequence_length",
                                                8192)
         self.transformer = ChatGLMModel(config, cache_config, quant_config)
+        if self.config.tie_word_embeddings:
+            self.transformer.output_layer.weight = (
+                self.transformer.embedding.weight)
         self.lm_head = self.transformer.output_layer
         self.logits_processor = LogitsProcessor(config.padded_vocab_size)
         self.sampler = Sampler()

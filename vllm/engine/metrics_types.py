@@ -32,6 +32,9 @@ class Stats:
     #   KV Cache Usage in %
     gpu_cache_usage_sys: float
     cpu_cache_usage_sys: float
+    #   Prefix caching block hit rate
+    cpu_prefix_cache_hit_rate: float
+    gpu_prefix_cache_hit_rate: float
 
     # Iteration stats (should have _iter suffix)
     num_prompt_tokens_iter: int

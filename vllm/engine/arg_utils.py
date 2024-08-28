@@ -5,10 +5,12 @@ from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Dict, List, Mapping, Optional, Tuple, Type,
                     Union)
 
+import torch
+
 import vllm.envs as envs
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
-                         EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
-                         ObservabilityConfig, ParallelConfig,
+                         EngineConfig, LoadConfig, LoadFormat, LoRAConfig,
+                         ModelConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig, TokenizerPoolConfig)
 from vllm.executor.executor_base import ExecutorBase
@@ -113,7 +115,7 @@ class EngineArgs:
     fully_sharded_loras: bool = False
     lora_extra_vocab_size: int = 256
     long_lora_scaling_factors: Optional[Tuple[float]] = None
-    lora_dtype: str = 'auto'
+    lora_dtype: Optional[Union[str, torch.dtype]] = 'auto'
     max_cpu_loras: Optional[int] = None
     device: str = 'auto'
     num_scheduler_steps: int = 1
@@ -145,6 +147,7 @@ class EngineArgs:
 
     otlp_traces_endpoint: Optional[str] = None
     collect_detailed_traces: Optional[str] = None
+    disable_async_output_proc: bool = False
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -195,10 +198,11 @@ class EngineArgs:
             '--tokenizer-mode',
             type=str,
             default=EngineArgs.tokenizer_mode,
-            choices=['auto', 'slow'],
+            choices=['auto', 'slow', 'mistral'],
             help='The tokenizer mode.\n\n* "auto" will use the '
             'fast tokenizer if available.\n* "slow" will '
-            'always use the slow tokenizer.')
+            'always use the slow tokenizer. \n* '
+            '"mistral" will always use the `mistral_common` tokenizer.')
         parser.add_argument('--trust-remote-code',
                             action='store_true',
                             help='Trust remote code from huggingface.')
@@ -212,10 +216,7 @@ class EngineArgs:
             '--load-format',
             type=str,
             default=EngineArgs.load_format,
-            choices=[
-                'auto', 'pt', 'safetensors', 'npcache', 'dummy', 'tensorizer',
-                'bitsandbytes'
-            ],
+            choices=[f.value for f in LoadFormat],
             help='The format of the model weights to load.\n\n'
             '* "auto" will try to load the weights in the safetensors format '
             'and fall back to the pytorch bin format if safetensors format '
@@ -318,9 +319,10 @@ class EngineArgs:
         parser.add_argument('--block-size',
                             type=int,
                             default=EngineArgs.block_size,
-                            choices=[8, 16, 32, 128, 256, 512, 1024, 2048],
+                            choices=[8, 16, 32],
                             help='Token block size for contiguous chunks of '
-                            'tokens.')
+                            'tokens. This is ignored on neuron devices and '
+                            'set to max-model-len')
 
         parser.add_argument('--enable-prefix-caching',
                             action='store_true',
@@ -662,8 +664,10 @@ class EngineArgs:
 
         parser.add_argument(
             '--disable-logprobs-during-spec-decoding',
-            type=bool,
+            action=StoreBoolean,
             default=EngineArgs.disable_logprobs_during_spec_decoding,
+            nargs="?",
+            const="True",
             help='If set to True, token log probabilities are not returned '
             'during speculative decoding. If set to False, log probabilities '
             'are returned according to the settings in SamplingParams. If '
@@ -731,6 +735,12 @@ class EngineArgs:
             "modules. This involves use of possibly costly and or blocking "
             "operations and hence might have a performance impact.")
 
+        parser.add_argument(
+            '--disable-async-output-proc',
+            action='store_true',
+            default=EngineArgs.disable_async_output_proc,
+            help="Disable async output processing. This may result in "
+            "lower performance.")
         return parser
 
     @classmethod
@@ -741,7 +751,7 @@ class EngineArgs:
         engine_args = cls(**{attr: getattr(args, attr) for attr in attrs})
         return engine_args
 
-    def create_engine_config(self, ) -> EngineConfig:
+    def create_engine_config(self) -> EngineConfig:
         # gguf file needs a specific model loader and doesn't use hf_repo
         if self.model.endswith(".gguf"):
             self.quantization = self.load_format = "gguf"
@@ -790,9 +800,11 @@ class EngineArgs:
             skip_tokenizer_init=self.skip_tokenizer_init,
             served_model_name=self.served_model_name,
             limit_mm_per_prompt=self.limit_mm_per_prompt,
+            use_async_output_proc=not self.disable_async_output_proc,
         )
         cache_config = CacheConfig(
-            block_size=self.block_size,
+            block_size=self.block_size if self.device != "neuron" else
+            self.max_model_len,  # neuron needs block_size = max_model_len
             gpu_memory_utilization=self.gpu_memory_utilization,
             swap_space=self.swap_space,
             cache_dtype=self.kv_cache_dtype,
@@ -852,6 +864,12 @@ class EngineArgs:
                 "in low performance due to small KV cache space. Consider "
                 "setting --max-model-len to a smaller value.", max_model_len)
 
+        if self.num_scheduler_steps > 1 and not self.use_v2_block_manager:
+            self.use_v2_block_manager = True
+            logger.warning(
+                "Enabled BlockSpaceManagerV2 because it is "
+                "required for multi-step (--num-scheduler-steps > 1)")
+
         speculative_config = SpeculativeConfig.maybe_create_spec_config(
             target_model_config=model_config,
             target_parallel_config=parallel_config,
@@ -880,7 +898,6 @@ class EngineArgs:
         )
 
         if self.num_scheduler_steps > 1:
-            raise NotImplementedError("Multi-step is not yet supported.")
             if speculative_config is not None:
                 raise ValueError("Speculative decoding is not supported with "
                                  "multi-step (--num-scheduler-steps > 1)")
