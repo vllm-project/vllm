@@ -7,7 +7,7 @@ import pytest
 from .utils import check_logprobs_close
 
 MODELS = [
-    "mayank-mishra/granite-3b-mup",
+    "ibm/PowerLM-3b",
 ]
 
 

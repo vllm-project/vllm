@@ -48,8 +48,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, kv_cache_scales_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
-# from transformers import GraniteConfig
-from vllm.transformers_utils.configs.granite import GraniteConfig
+from transformers import GraniteConfig
 from vllm.utils import is_hip
 
 from .interfaces import SupportsLoRA
@@ -216,6 +215,7 @@ class GraniteDecoderLayer(nn.Module):
             cache_config=cache_config,
             prefix=f"{prefix}.self_attn",
         )
+
         self.mlp = GraniteMLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
