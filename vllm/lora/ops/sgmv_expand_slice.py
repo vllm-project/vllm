@@ -205,6 +205,9 @@ def _sgmv_expand_slice(
     return
 
 
-sgmv_expand_slice = torch.library.custom_op("lora::sgmv_expand_slice",
-                                            _sgmv_expand_slice,
-                                            mutates_args=["output_tensor"])
+try:
+    sgmv_expand_slice = torch.library.custom_op("lora::sgmv_expand_slice",
+                                                _sgmv_expand_slice,
+                                                mutates_args=["output_tensor"])
+except AttributeError:
+    sgmv_expand_slice = _sgmv_expand_slice

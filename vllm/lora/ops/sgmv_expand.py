@@ -192,6 +192,9 @@ def _sgmv_expand(
     return
 
 
-sgmv_expand = torch.library.custom_op("lora::sgmv_expand",
-                                      _sgmv_expand,
-                                      mutates_args=["output_tensor"])
+try:
+    sgmv_expand = torch.library.custom_op("lora::sgmv_expand",
+                                          _sgmv_expand,
+                                          mutates_args=["output_tensor"])
+except AttributeError:
+    sgmv_expand = _sgmv_expand
