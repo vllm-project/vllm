@@ -44,7 +44,8 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import (IntermediateTensors, SamplerOutput,
                            SequenceGroupMetadata)
 from vllm.utils import (CudaMemoryProfiler, PyObjectCache, async_tensor_h2d,
-                        flatten_2d_lists, is_hip, is_pin_memory_available)
+                        flatten_2d_lists, is_hip, is_pin_memory_available,
+                        supports_dynamo)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
     _add_attn_metadata_broadcastable_dict,
@@ -946,7 +947,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     "provided. Defaulting to scaling factors of 1.0. "
                     "This may lead to less accurate results!")
 
-        if envs.VLLM_TEST_DYNAMO_GRAPH_CAPTURE:
+        if envs.VLLM_TEST_DYNAMO_GRAPH_CAPTURE and supports_dynamo():
             self.model = torch.compile(self.model,
                                        fullgraph=True,
                                        backend="eager")
