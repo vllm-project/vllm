@@ -62,17 +62,12 @@ def flatten_bn(x: torch.Tensor) -> torch.Tensor:
 
 
 @overload
-def flatten_bn(x: List[torch.Tensor]) -> torch.Tensor:
-    ...
-
-
-@overload
-def flatten_bn(x: List[List[torch.Tensor]]) -> List[torch.Tensor]:
+def flatten_bn(x: List[torch.Tensor]) -> List[torch.Tensor]:
     ...
 
 
 def flatten_bn(
-    x: Union[List[List[torch.Tensor]], List[torch.Tensor], torch.Tensor]
+    x: Union[List[torch.Tensor], torch.Tensor]
 ) -> Union[List[torch.Tensor], torch.Tensor]:
     """
     Flatten the ``B`` and ``N`` dimensions of batched multimodal inputs.

@@ -48,15 +48,15 @@ class LlavaNextImagePixelInputs(TypedDict):
     data: Union[torch.Tensor, List[torch.Tensor]]
     """
     Shape:
-    `(batch_size, num_images, 1 + num_patches, num_channels, height, width)`
+    `(batch_size * num_images, 1 + num_patches, num_channels, height, width)`
 
-    Note that `num_patches` may be different for each batch, in which case
-    the data is passed as a list instead of a batched tensor.
+    Note that `num_patches` may be different for per batch and image,
+    in which case the data is passed as a list instead of a batched tensor.
     """
 
-    image_sizes: NotRequired[torch.Tensor]
+    image_sizes: NotRequired[Union[torch.Tensor, List[torch.Tensor]]]
     """
-    Shape: `(batch_size, num_images, 2)`
+    Shape: `(batch_size * num_images, 2)`
 
     This should be in `(height, width)` format.
     """
@@ -65,7 +65,7 @@ class LlavaNextImagePixelInputs(TypedDict):
 class LlavaNextImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
     data: torch.Tensor
-    """Shape: `(batch_size, num_images, image_feature_size, hidden_size)`
+    """Shape: `(batch_size * num_images, image_feature_size, hidden_size)`
 
     `hidden_size` must match the hidden size of language model backbone.
     """
@@ -315,11 +315,22 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
         self.image_newline = nn.Parameter(
             torch.empty(config.text_config.hidden_size))
 
-    def _validate_image_sizes(self, data: torch.Tensor) -> torch.Tensor:
-        if list(data.shape[1:]) != [2]:
-            raise ValueError(
-                f"The expected image sizes shape is batch dimension plus "
-                f"{[2]}. You supplied {data.shape}.")
+    def _validate_image_sizes(
+        self, data: Union[torch.Tensor, List[torch.Tensor]]
+    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+        expected_dims = (2,)
+
+        def _validate_shape(d: torch.Tensor):
+            actual_dims = tuple(d.shape)
+    
+            if actual_dims != expected_dims:
+                expected_expr = str(expected_dims)
+                raise ValueError(
+                    f"The expected shape of image sizes per image per batch "
+                    f"is {expected_expr}. You supplied {tuple(d.shape)}.")
+
+        for d in data:
+            _validate_shape(d)
 
         return data
 
@@ -336,7 +347,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
             if actual_dims != expected_dims:
                 expected_expr = ("num_patches", *map(str, expected_dims))
                 raise ValueError(
-                    "The expected shape of pixel values in each batch element "
+                    "The expected shape of pixel values per image per batch "
                     f"is {expected_expr}. You supplied {tuple(d.shape)}.")
 
         for d in data:
