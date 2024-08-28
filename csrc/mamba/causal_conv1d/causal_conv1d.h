@@ -37,7 +37,6 @@ struct ConvParamsBase {
     void *__restrict__ conv_state_ptr;
 
     void *__restrict__ seq_idx_ptr;
-    void *__restrict__ seq_pos_idx_ptr;
 
     // No __restrict__ since initial_states could be the same as final_states.
     void * initial_states_ptr;
@@ -51,6 +50,42 @@ struct ConvParamsBase {
     index_t final_states_c_stride;
 };
 
+
+#ifndef USE_ROCM
+    #include <cuda_bf16.h>
+
+    template<typename T>
+    __device__ inline T shuffle_xor(T val, int offset) {
+        return __shfl_xor_sync(uint32_t(-1), val, offset);
+    }
+
+    constexpr size_t custom_max(std::initializer_list<size_t> ilist) 
+    {
+        return std::max(ilist);
+    }
+
+    template<typename T>
+    constexpr T constexpr_min(T a, T b) {
+        return std::min(a, b);
+    }
+
+#else
+    #include <hip/hip_bf16.h>
+
+    template<typename T>
+    __device__ inline T shuffle_xor(T val, int offset) {
+        return __shfl_xor(val, offset);
+    }
+    constexpr size_t custom_max(std::initializer_list<size_t> ilist) 
+    {
+        return *std::max_element(ilist.begin(), ilist.end());
+    }
+
+    template<typename T>
+    constexpr T constexpr_min(T a, T b) {
+        return a < b ? a : b;
+    }
+#endif
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
