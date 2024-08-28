@@ -387,7 +387,8 @@ class ScalarTypeTorch : public torch::CustomClassHolder, public ScalarType {
   // This needs to be implemented and throw a TypeError in order for
   // PyTorch's opcheck to work on ops that use ScalarTypes.
   int64_t len() const {
-    throw c10::TypeError("__len__ not implemented");
+    throw c10::TypeError({__func__, __FILE__, static_cast<uint32_t>(__LINE__)},
+                         "__len__ not implemented");
     return 0;
   }
 

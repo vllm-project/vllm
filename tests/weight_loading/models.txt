@@ -13,6 +13,8 @@ compressed-tensors, nm-testing/tinyllama-oneshot-w8a16-per-channel, main
 compressed-tensors, nm-testing/Meta-Llama-3-8B-FP8-compressed-tensors-test, main
 compressed-tensors, nm-testing/Phi-3-mini-128k-instruct-FP8, main
 compressed-tensors, neuralmagic/Phi-3-medium-128k-instruct-quantized.w4a16, main
+compressed-tensors, nm-testing/Mixtral-8x7B-Instruct-v0.1-W4A16-quantized, main
+compressed-tensors, nm-testing/Mixtral-8x7B-Instruct-v0.1-W4A16-channel-quantized, main
 awq, casperhansen/mixtral-instruct-awq, main
 awq_marlin, casperhansen/mixtral-instruct-awq, main
 fp8, neuralmagic/Meta-Llama-3-8B-Instruct-FP8-KV, main

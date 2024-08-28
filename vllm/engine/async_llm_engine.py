@@ -280,10 +280,16 @@ class _AsyncLLMEngine(LLMEngine):
         scheduler_outputs = cached_outputs.scheduler_outputs
         allow_async_output_proc = cached_outputs.allow_async_output_proc
 
+        ctx = self.scheduler_contexts[virtual_engine]
+
         # skip the scheduler if there are any remaining steps in the seq groups.
         # This ensures that the scheduler is only called again when the current
         # batch has completed.
         if not self._has_remaining_steps(seq_group_metadata_list):
+
+            # Clear outputs on scheduler iteration start
+            ctx.request_outputs.clear()
+
             (seq_group_metadata_list, scheduler_outputs,
              allow_async_output_proc
              ) = self.scheduler[virtual_engine].schedule()
@@ -291,8 +297,9 @@ class _AsyncLLMEngine(LLMEngine):
             # If current scheduler iteration has no async postprocessor,
             # then we need first to drain the pending async postprocessor
             # before moving forward
-            if not allow_async_output_proc and len(self.output_queue) > 0:
-                self._process_model_outputs(is_async=True)
+            if not allow_async_output_proc and len(ctx.output_queue) > 0:
+                self._process_model_outputs(virtual_engine=virtual_engine,
+                                            is_async=True)
 
             if (self.scheduler_config.is_multi_step
                     and scheduler_outputs.num_lookahead_slots > 0):
@@ -333,8 +340,8 @@ class _AsyncLLMEngine(LLMEngine):
                 last_sampled_token_ids=last_sampled_token_ids)
 
             if allow_async_output_proc:
-                execute_model_req.output_proc_callback_fn = \
-                    self._process_model_outputs
+                execute_model_req.async_callback = self.async_callback[
+                    virtual_engine]
 
             # Execute the model.
             output = await self.model_executor.execute_model_async(
@@ -344,9 +351,10 @@ class _AsyncLLMEngine(LLMEngine):
             if self.scheduler_config.is_multi_step:
                 self._update_cached_scheduler_output(virtual_engine, output)
         else:
-            if len(self.output_queue) > 0:
+            if len(ctx.output_queue) > 0:
                 assert not self.scheduler_config.is_multi_step
-                self._process_model_outputs(is_async=True)
+                self._process_model_outputs(virtual_engine=virtual_engine,
+                                            is_async=True)
             output = []
 
         # Finish the current step for all the sequence groups.
@@ -361,7 +369,7 @@ class _AsyncLLMEngine(LLMEngine):
                     virtual_engine] = SchedulerOutputState()
 
             # Cache results in engine
-            self.output_queue.append(
+            ctx.output_queue.append(
                 (output, seq_group_metadata_list, scheduler_outputs))
 
             if output and allow_async_output_proc:
@@ -373,7 +381,8 @@ class _AsyncLLMEngine(LLMEngine):
                     scheduler_outputs.scheduled_seq_groups)
 
             if not allow_async_output_proc:
-                self._process_model_outputs(is_async=False)
+                self._process_model_outputs(virtual_engine=virtual_engine,
+                                            is_async=False)
 
                 # Log stats.
                 self.do_log_stats(scheduler_outputs, output)
@@ -382,9 +391,17 @@ class _AsyncLLMEngine(LLMEngine):
                 self.do_tracing(scheduler_outputs)
 
         else:
-            self.request_outputs = []
+            ctx.request_outputs = []
 
-        return self.request_outputs
+        if not self.has_unfinished_requests():
+            # Drain async postprocessor (if exists)
+            if len(ctx.output_queue) > 0:
+                assert not self.scheduler_config.is_multi_step
+                self._process_model_outputs(virtual_engine=virtual_engine,
+                                            is_async=True)
+            assert len(ctx.output_queue) == 0
+
+        return ctx.request_outputs
 
     async def stop_remote_worker_execution_loop_async(self) -> None:
         """Stop the remote worker execution loop."""
@@ -669,6 +686,11 @@ class AsyncLLMEngine:
                 initialize_ray_cluster(engine_config.parallel_config)
                 from vllm.executor.ray_xpu_executor import RayXPUExecutorAsync
                 executor_class = RayXPUExecutorAsync
+            elif distributed_executor_backend == "mp":
+                initialize_ray_cluster(engine_config.parallel_config)
+                from vllm.executor.multiproc_xpu_executor import (
+                    MultiprocessingXPUExecutorAsync)
+                executor_class = MultiprocessingXPUExecutorAsync
             else:
                 raise RuntimeError(
                     "Not supported distributed execution model on XPU device.")
