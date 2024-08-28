@@ -7,7 +7,8 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
+                                           PackedvLLMParameter)
 from vllm.utils import is_hip
 
 
@@ -84,38 +85,38 @@ class SqueezeLLMLinearMethod(QuantizeMethodBase):
                 "tensor parallel size.")
 
         output_size_per_partition = sum(output_partition_sizes)
-        qweight = Parameter(
-            torch.empty(
+        weight_loader = extra_weight_attrs.get("weight_loader")
+
+        qweight = PackedvLLMParameter(
+            data=torch.empty(
                 input_size_per_partition // self.quant_config.pack_factor,
                 output_size_per_partition,
                 dtype=torch.int32,
             ),
-            requires_grad=False,
-        )
-        set_weight_attrs(
-            qweight, {
-                "input_dim": 0,
-                "output_dim": 1,
-                "packed_dim": 0,
-                "pack_factor": self.quant_config.pack_factor,
-            })
-        lookup_table = Parameter(
-            torch.empty(
+            input_dim=0,
+            output_dim=1,
+            packed_dim=0,
+            packed_factor=self.quant_config.pack_factor,
+            weight_loader=weight_loader)
+
+        lookup_table = ChannelQuantScaleParameter(
+            data=torch.empty(
                 output_size,
                 self.quant_config.weight_bits**2,
                 dtype=params_dtype,
             ),
-            requires_grad=False,
+            output_dim=0,
+            weight_loader=weight_loader,
         )
-        set_weight_attrs(lookup_table, {
-            "output_dim": 0,
-        })
 
         layer.register_parameter("qweight", qweight)
-        set_weight_attrs(qweight, extra_weight_attrs)
         layer.register_parameter("lookup_table", lookup_table)
-        set_weight_attrs(lookup_table, extra_weight_attrs)
 
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # required by torch.compile
+        layer.qweight = Parameter(layer.qweight.data, requires_grad=False)
+        layer.lookup_table = Parameter(layer.lookup_table.data, requires_grad=False)
+        
     def apply(self,
               layer: torch.nn.Module,
               x: torch.Tensor,
