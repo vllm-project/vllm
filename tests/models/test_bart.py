@@ -140,17 +140,6 @@ if not is_cpu():
                     num_logprobs,
                     **hf_kwargs,
                 ))
-
-        # Note: currently encoder/decoder models are only compatible with
-        # enforce_eager=True. Normally this is not a problem because
-        # for encoder/decoder models vLLM will
-        # default to enforce_eager=True if enforce_eager
-        # is left unspecified. However, the
-        # VllmRunner test fixture (which wraps around the LLM class) defaults to
-        # enforce_eager=False (a behavior which a number of already-exisitng
-        # decoder-only unit tests expect), so when testing an encoder/decoder
-        # model we must explicitly specify enforce_eager=True in the VllmRunner
-        # constructor.
         with vllm_runner(model, dtype=dtype, enforce_eager=True) as vllm_model:
             vllm_outputs = vllm_model.generate_encoder_decoder_greedy_logprobs(
                 test_case_prompts, max_tokens, num_logprobs)

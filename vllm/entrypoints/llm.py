@@ -138,9 +138,7 @@ class LLM:
         LLM constructor.
 
         Note: if enforce_eager is unset (enforce_eager is None)
-        it defaults to False for decoder-only models and True
-        for encoder/decoder models, since encoder/decoder models
-        do not currently support CUDAGraph.
+        it defaults to False.
         '''
 
         if "disable_log_stats" not in kwargs:

@@ -12,8 +12,6 @@ from vllm.utils import is_cpu, make_tensor_with_pad
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner import _get_graph_batch_size
 
-ENFORCE_EAGER = [True]
-
 BATCH_SIZES = [1, 4, 16, 64, 256]
 
 
@@ -39,8 +37,7 @@ def _create_model_runner(model: str, *args,
                     reason="CPU backend is currently "
                     "unsupported for encoder/ "
                     "decoder models")
-@pytest.mark.parametrize("enforce_eager", ENFORCE_EAGER)
-def test_empty_seq_group(enforce_eager, ):
+def test_empty_seq_group():
     """Verify prepare prompt and decode returns empty output
        for empty seq group list"""
 
@@ -51,7 +48,7 @@ def test_empty_seq_group(enforce_eager, ):
         max_num_batched_tokens=100000,
         max_num_seqs=100000,
         enable_chunked_prefill=False,
-        enforce_eager=enforce_eager,
+        enforce_eager=True,
     )
     seq_group_metadata_list: List[SequenceGroupMetadata] = []
     model_input = model_runner._prepare_model_input_tensors(
@@ -84,11 +81,7 @@ def test_empty_seq_group(enforce_eager, ):
                     "unsupported for encoder/ "
                     "decoder models")
 @pytest.mark.parametrize("batch_size", BATCH_SIZES)
-@pytest.mark.parametrize("enforce_eager", ENFORCE_EAGER)
-def test_prepare_prompt(
-    batch_size,
-    enforce_eager,
-):
+def test_prepare_prompt(batch_size, ):
     '''
     Test the ability of the encoder/decoder model runner subclass to
     produce prefill-phase model inputs & attention metadata.
@@ -114,7 +107,7 @@ def test_prepare_prompt(
         max_num_batched_tokens=100000,
         max_num_seqs=100000,
         enable_chunked_prefill=False,
-        enforce_eager=enforce_eager,
+        enforce_eager=True,
     )
 
     seq_lens: List[int] = []
@@ -280,11 +273,7 @@ def test_prepare_prompt(
                     "unsupported for encoder/ "
                     "decoder models")
 @pytest.mark.parametrize("batch_size", BATCH_SIZES)
-@pytest.mark.parametrize("enforce_eager", ENFORCE_EAGER)
-def test_prepare_decode(
-    batch_size,
-    enforce_eager,
-):
+def test_prepare_decode(batch_size, ):
     '''
     Test the ability of the encoder/decoder model runner subclass to
     produce decode-phase model inputs & attention metadata.
@@ -310,7 +299,7 @@ def test_prepare_decode(
         max_num_batched_tokens=100000,
         max_num_seqs=100000,
         enable_chunked_prefill=False,
-        enforce_eager=enforce_eager,
+        enforce_eager=True,
     )
 
     seq_lens: List[int] = []
@@ -427,7 +416,8 @@ def test_prepare_decode(
         expected,
     )
 
-    # Cuda graph should is currently not supported for encoder/decoer.
+    # Model runner's CUDAGraph setting should be propagated to attention
+    # metadata.
     assert attn_metadata.use_cuda_graph is False
 
     # Verify the lengths of input tokens & positions
@@ -601,7 +591,8 @@ def test_prepare_decode_cuda_graph(batch_size):
         expected,
     )
 
-    # Cuda graph should is currently not supported for encoder/decoer.
+    # Model runner's CUDAGraph setting should be propagated to attention
+    # metadata.
     assert attn_metadata.use_cuda_graph is True
 
     # Verify the lengths of input tokens & positions

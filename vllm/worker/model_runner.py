@@ -855,7 +855,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.graph_block_tables = np.zeros(
             (max(_BATCH_SIZES_TO_CAPTURE), self.get_max_block_per_batch()),
             dtype=np.int32)
-
         num_attn_heads = self.model_config.get_num_attention_heads(
             self.parallel_config)
         self.attn_backend = get_attn_backend(
@@ -1632,7 +1631,6 @@ class CUDAGraphRunner:
         }
         if intermediate_inputs is not None:
             self.input_buffers.update(intermediate_inputs.tensors)
-
         if get_pp_group().is_last_rank:
             self.output_buffers = {
                 "hidden_states": hidden_or_intermediate_states
