@@ -4,16 +4,28 @@
 # Copyright (c) Alibaba Cloud.
 # LICENSE: https://huggingface.co/Qwen/Qwen-7B/blob/main/LICENSE
 """Inference-only QWen model compatible with HuggingFace weights."""
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Mapping, TypedDict, Literal, Union
 
+import math
+from collections import OrderedDict
+from functools import partial
+from typing import (Any, Callable, Dict, Iterable, List, Literal, Mapping,
+                    Optional, Tuple, TypedDict, Union)
+
+import numpy as np
 import torch
+from PIL import Image
 from torch import nn
+from torch.nn import functional as F
+from torch.nn.init import trunc_normal_
+from torchvision import transforms
+from torchvision.transforms import InterpolationMode
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -35,7 +47,6 @@ from vllm.multimodal.image import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors, SequenceData
 
 from .utils import is_pp_missing_parameter, make_layers
-from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 IMG_START = "<img>"
@@ -45,25 +56,8 @@ IMG_PAD = "<imgpad>"
 # for the time being, these tags are not considered as special at encoding
 # time. This may change as VLLMs multimodal API changes in the future.
 
-# Qwen images are encoded into a fixed token length of 256, not include IMG_START/IMG_END
+# Qwen images are encoded into a fixed context of 256
 MAX_QWEN_IMG_TOKENS = 256
-
-from collections import OrderedDict
-import math
-import requests
-from io import BytesIO
-from functools import partial
-from PIL import Image
-from typing import Callable, Optional, Sequence, Tuple, List
-import numpy as np
-
-import torch
-from torch import nn
-from torch.nn import functional as F
-from torch.nn.init import trunc_normal_
-from torchvision import transforms
-from torchvision.transforms import InterpolationMode
-
 
 
 class QwenImagePixelInputs(TypedDict):
@@ -90,6 +84,7 @@ class QwenImageEmbeddingInputs(TypedDict):
 
 QwenImageInputs = Union[QwenImagePixelInputs, QwenImageEmbeddingInputs]
 
+
 def get_abs_pos(abs_pos, tgt_size):
     # abs_pos: L, C
     # tgt_size: M
@@ -100,7 +95,8 @@ def get_abs_pos(abs_pos, tgt_size):
 
     if src_size != tgt_size:
         return F.interpolate(
-            abs_pos.float().reshape(1, src_size, src_size, -1).permute(0, 3, 1, 2),
+            abs_pos.float().reshape(1, src_size, src_size,
+                                    -1).permute(0, 3, 1, 2),
             size=(tgt_size, tgt_size),
             mode="bicubic",
             align_corners=False,
@@ -108,12 +104,14 @@ def get_abs_pos(abs_pos, tgt_size):
     else:
         return abs_pos
 
+
 # https://github.com/facebookresearch/mae/blob/efb2a8062c206524e35e47d04501ed4f544c0ae8/util/pos_embed.py#L20
 def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False):
     """
     grid_size: int of the grid height and width
     return:
-    pos_embed: [grid_size*grid_size, embed_dim] or [1+grid_size*grid_size, embed_dim] (w/ or w/o cls_token)
+    pos_embed: [grid_size*grid_size, embed_dim] or
+        [1+grid_size*grid_size, embed_dim] (w/ or w/o cls_token)
     """
     grid_h = np.arange(grid_size, dtype=np.float32)
     grid_w = np.arange(grid_size, dtype=np.float32)
@@ -123,7 +121,8 @@ def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False):
     grid = grid.reshape([2, 1, grid_size, grid_size])
     pos_embed = get_2d_sincos_pos_embed_from_grid(embed_dim, grid)
     if cls_token:
-        pos_embed = np.concatenate([np.zeros([1, embed_dim]), pos_embed], axis=0)
+        pos_embed = np.concatenate([np.zeros([1, embed_dim]), pos_embed],
+                                   axis=0)
     return pos_embed
 
 
@@ -131,10 +130,12 @@ def get_2d_sincos_pos_embed_from_grid(embed_dim, grid):
     assert embed_dim % 2 == 0
 
     # use half of dimensions to encode grid_h
-    emb_h = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[0])  # (H*W, D/2)
-    emb_w = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[1])  # (H*W, D/2)
+    emb_h = get_1d_sincos_pos_embed_from_grid(embed_dim // 2,
+                                              grid[0])  # (H*W, D/2)
+    emb_w = get_1d_sincos_pos_embed_from_grid(embed_dim // 2,
+                                              grid[1])  # (H*W, D/2)
 
-    emb = np.concatenate([emb_h, emb_w], axis=1) # (H*W, D)
+    emb = np.concatenate([emb_h, emb_w], axis=1)  # (H*W, D)
     return emb
 
 
@@ -152,8 +153,8 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
     pos = pos.reshape(-1)  # (M,)
     out = np.einsum('m,d->md', pos, omega)  # (M, D/2), outer product
 
-    emb_sin = np.sin(out) # (M, D/2)
-    emb_cos = np.cos(out) # (M, D/2)
+    emb_sin = np.sin(out)  # (M, D/2)
+    emb_cos = np.cos(out)  # (M, D/2)
 
     emb = np.concatenate([emb_sin, emb_cos], axis=1)  # (M, D)
     return emb
@@ -166,25 +167,26 @@ class Resampler(nn.Module):
     Outputs:
         A tensor with the shape of (grid_size**2, embed_dim)
     """
-    def __init__(
-            self,
-            grid_size,
-            embed_dim,
-            num_heads,
-            kv_dim=None,
-            norm_layer=nn.LayerNorm
-    ):
+
+    def __init__(self,
+                 grid_size,
+                 embed_dim,
+                 num_heads,
+                 kv_dim=None,
+                 norm_layer=nn.LayerNorm):
         super().__init__()
-        self.num_queries = grid_size ** 2
+        self.num_queries = grid_size**2
         self.embed_dim = embed_dim
         self.num_heads = num_heads
 
         self.pos_embed = nn.Parameter(
-            # TODO - fix the hacks for device / dtype here & in the positional embedding retrieval
-            torch.from_numpy(get_2d_sincos_pos_embed(embed_dim, grid_size)).half().to("cuda"),
-        ).requires_grad_(False)
+            # TODO - fix the hacks for device / dtype here & in the
+            # positional embedding retrieval
+            torch.from_numpy(get_2d_sincos_pos_embed(embed_dim, grid_size)
+                             ).half().to("cuda"), ).requires_grad_(False)
 
-        self.query = nn.Parameter(torch.zeros(self.num_queries, embed_dim).to("cuda"))
+        self.query = nn.Parameter(
+            torch.zeros(self.num_queries, embed_dim).to("cuda"))
         trunc_normal_(self.query, std=.02)
 
         if kv_dim is not None and kv_dim != embed_dim:
@@ -196,7 +198,6 @@ class Resampler(nn.Module):
         self.ln_q = norm_layer(embed_dim)
         self.ln_kv = norm_layer(embed_dim)
 
-
     def forward(self, x, attn_mask=None):
         pos_embed = get_abs_pos(self.pos_embed, x.size(1))
 
@@ -205,11 +206,10 @@ class Resampler(nn.Module):
 
         N = x.shape[1]
         q = self.ln_q(self.query)
-        out = self.attn(
-            self._repeat(q, N) + self.pos_embed.unsqueeze(1),
-            x + pos_embed.unsqueeze(1),
-            x,
-            attn_mask=attn_mask)[0]
+        out = self.attn(self._repeat(q, N) + self.pos_embed.unsqueeze(1),
+                        x + pos_embed.unsqueeze(1),
+                        x,
+                        attn_mask=attn_mask)[0]
         return out.permute(1, 0, 2)
 
     def _repeat(self, query, N: int):
@@ -222,13 +222,13 @@ class VisualAttention(nn.Module):
     and returns output of the same size.
     """
 
-    def __init__(self, embed_dim, num_heads,
-                 bias=True, kdim=None, vdim=None):
+    def __init__(self, embed_dim, num_heads, bias=True, kdim=None, vdim=None):
         super(VisualAttention, self).__init__()
         self.embed_dim = embed_dim
         self.kdim = kdim if kdim is not None else embed_dim
         self.vdim = vdim if vdim is not None else embed_dim
-        self._qkv_same_embed_dim = self.kdim == embed_dim and self.vdim == embed_dim
+        self._qkv_same_embed_dim = self.kdim == embed_dim \
+            and self.vdim == embed_dim
 
         self.num_heads = num_heads
 
@@ -244,11 +244,12 @@ class VisualAttention(nn.Module):
         self.out_proj = nn.Linear(embed_dim, embed_dim)
         self.norm_factor = math.sqrt(self.hidden_size_per_attention_head)
 
-    def forward(self, query, key, value, attn_mask = None):
+    def forward(self, query, key, value, attn_mask=None):
         # query/key/value: [sq, b, h]
         sq, b, _ = query.size()
 
-        assert torch.allclose(query, key), 'Only Support Self-Attention Currently'
+        assert torch.allclose(query,
+                              key), 'Only Support Self-Attention Currently'
         sk = sq
         mixed_x_layer = self.in_proj(query)
 
@@ -263,32 +264,33 @@ class VisualAttention(nn.Module):
             self.hidden_size_per_attention_head, dim=-1)
 
         # [sq, b, np, hn] -> [sq, b * np, hn]
-        query_layer = query_layer.view(sq,
-            b * self.num_attention_heads_per_partition,
+        query_layer = query_layer.view(
+            sq, b * self.num_attention_heads_per_partition,
             self.hidden_size_per_attention_head).transpose(0, 1)
         # [sk, b, np, hn] -> [sk, b * np, hn]
-        key_layer = key_layer.view(sk,
-            b * self.num_attention_heads_per_partition,
+        key_layer = key_layer.view(
+            sk, b * self.num_attention_heads_per_partition,
             self.hidden_size_per_attention_head).transpose(0, 1)
 
         q_scaled = query_layer / self.norm_factor
         if attn_mask is not None:
-            attention_probs = torch.baddbmm(attn_mask, q_scaled, key_layer.transpose(-2, -1))
+            attention_probs = torch.baddbmm(attn_mask, q_scaled,
+                                            key_layer.transpose(-2, -1))
         else:
             attention_probs = torch.bmm(q_scaled, key_layer.transpose(-2, -1))
         attention_probs = attention_probs.softmax(dim=-1)
 
-        value_layer = value_layer.view(sk,
-            b * self.num_attention_heads_per_partition,
+        value_layer = value_layer.view(
+            sk, b * self.num_attention_heads_per_partition,
             self.hidden_size_per_attention_head).transpose(0, 1)
 
         # matmul: [b * np, sq, hn]
         context_layer = torch.bmm(attention_probs, value_layer)
 
         # change view [b, np, sq, hn]
-        context_layer = context_layer.view(b,
-            self.num_attention_heads_per_partition,
-            sq, self.hidden_size_per_attention_head)
+        context_layer = context_layer.view(
+            b, self.num_attention_heads_per_partition, sq,
+            self.hidden_size_per_attention_head)
 
         # [b, np, sq, hn] --> [sq, b, np, hn]
         context_layer = context_layer.permute(2, 0, 1, 3).contiguous()
@@ -304,14 +306,15 @@ class VisualAttention(nn.Module):
 
 
 class VisualAttentionBlock(nn.Module):
+
     def __init__(
-            self,
-            d_model: int,
-            n_head: int,
-            mlp_ratio: float = 4.0,
-            act_layer: Callable = nn.GELU,
-            norm_layer: Callable = nn.LayerNorm,
-            is_cross_attention: bool = False,
+        self,
+        d_model: int,
+        n_head: int,
+        mlp_ratio: float = 4.0,
+        act_layer: Callable = nn.GELU,
+        norm_layer: Callable = nn.LayerNorm,
+        is_cross_attention: bool = False,
     ):
         super().__init__()
 
@@ -322,18 +325,17 @@ class VisualAttentionBlock(nn.Module):
         self.ln_2 = norm_layer(d_model)
         mlp_width = int(d_model * mlp_ratio)
         self.attn = VisualAttention(d_model, n_head)
-        self.mlp = nn.Sequential(OrderedDict([
-            ("c_fc", nn.Linear(d_model, mlp_width)),
-            ("gelu", act_layer()),
-            ("c_proj", nn.Linear(mlp_width, d_model))
-        ]))
+        self.mlp = nn.Sequential(
+            OrderedDict([("c_fc", nn.Linear(d_model, mlp_width)),
+                         ("gelu", act_layer()),
+                         ("c_proj", nn.Linear(mlp_width, d_model))]))
 
     def attention(
-            self,
-            q_x: torch.Tensor,
-            k_x: Optional[torch.Tensor] = None,
-            v_x: Optional[torch.Tensor] = None,
-            attn_mask: Optional[torch.Tensor] = None,
+        self,
+        q_x: torch.Tensor,
+        k_x: Optional[torch.Tensor] = None,
+        v_x: Optional[torch.Tensor] = None,
+        attn_mask: Optional[torch.Tensor] = None,
     ):
         k_x = k_x if k_x is not None else q_x
         v_x = v_x if v_x is not None else q_x
@@ -342,38 +344,44 @@ class VisualAttentionBlock(nn.Module):
         return self.attn(q_x, k_x, v_x, attn_mask=attn_mask)
 
     def forward(
-            self,
-            q_x: torch.Tensor,
-            k_x: Optional[torch.Tensor] = None,
-            v_x: Optional[torch.Tensor] = None,
-            attn_mask: Optional[torch.Tensor] = None,
+        self,
+        q_x: torch.Tensor,
+        k_x: Optional[torch.Tensor] = None,
+        v_x: Optional[torch.Tensor] = None,
+        attn_mask: Optional[torch.Tensor] = None,
     ):
-        k_x = self.ln_1_kv(k_x) if hasattr(self, "ln_1_kv") and k_x is not None else None
-        v_x = self.ln_1_kv(v_x) if hasattr(self, "ln_1_kv") and v_x is not None else None
+        k_x = self.ln_1_kv(k_x) if hasattr(
+            self, "ln_1_kv") and k_x is not None else None
+        v_x = self.ln_1_kv(v_x) if hasattr(
+            self, "ln_1_kv") and v_x is not None else None
 
-        x = q_x + self.attention(q_x=self.ln_1(q_x), k_x=k_x, v_x=v_x, attn_mask=attn_mask)
+        x = q_x + self.attention(
+            q_x=self.ln_1(q_x), k_x=k_x, v_x=v_x, attn_mask=attn_mask)
         x = x + self.mlp(self.ln_2(x))
         return x
 
 
 class TransformerBlock(nn.Module):
+
     def __init__(
-            self,
-            width: int,
-            layers: int,
-            heads: int,
-            mlp_ratio: float = 4.0,
-            act_layer: Callable = nn.GELU,
-            norm_layer: Callable = nn.LayerNorm,
+        self,
+        width: int,
+        layers: int,
+        heads: int,
+        mlp_ratio: float = 4.0,
+        act_layer: Callable = nn.GELU,
+        norm_layer: Callable = nn.LayerNorm,
     ):
         super().__init__()
         self.width = width
         self.layers = layers
 
         self.resblocks = nn.ModuleList([
-            VisualAttentionBlock(
-                width, heads, mlp_ratio, act_layer=act_layer, norm_layer=norm_layer)
-            for _ in range(layers)
+            VisualAttentionBlock(width,
+                                 heads,
+                                 mlp_ratio,
+                                 act_layer=act_layer,
+                                 norm_layer=norm_layer) for _ in range(layers)
         ])
 
     def get_cast_dtype(self) -> torch.dtype:
@@ -382,7 +390,9 @@ class TransformerBlock(nn.Module):
     def get_cast_device(self) -> torch.device:
         return self.resblocks[0].mlp.c_fc.weight.device
 
-    def forward(self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None):
+    def forward(self,
+                x: torch.Tensor,
+                attn_mask: Optional[torch.Tensor] = None):
         for r in self.resblocks:
             x = r(x, attn_mask=attn_mask)
         return x
@@ -390,29 +400,33 @@ class TransformerBlock(nn.Module):
 
 class VisionTransformer(nn.Module):
 
-    def __init__(
-            self,
-            image_size: int,
-            patch_size: int,
-            width: int,
-            layers: int,
-            heads: int,
-            mlp_ratio: float,
-            n_queries: int = 256,
-            output_dim: int = 512,
-            image_start_id: int = 151857,
-            **kwargs
-    ):
+    def __init__(self,
+                 image_size: int,
+                 patch_size: int,
+                 width: int,
+                 layers: int,
+                 heads: int,
+                 mlp_ratio: float,
+                 n_queries: int = 256,
+                 output_dim: int = 512,
+                 image_start_id: int = 151857,
+                 **kwargs):
         super().__init__()
         image_height, image_width = self.image_size = (image_size, image_size)
         patch_height, patch_width = self.patch_size = (patch_size, patch_size)
-        self.grid_size = (image_height // patch_height, image_width // patch_width)
+        self.grid_size = (image_height // patch_height,
+                          image_width // patch_width)
         self.output_dim = output_dim
-        self.conv1 = nn.Conv2d(in_channels=3, out_channels=width, kernel_size=patch_size, stride=patch_size, bias=False)
+        self.conv1 = nn.Conv2d(in_channels=3,
+                               out_channels=width,
+                               kernel_size=patch_size,
+                               stride=patch_size,
+                               bias=False)
 
         # class embeddings and positional embeddings
-        scale = width ** -0.5
-        self.positional_embedding = nn.Parameter(scale * torch.randn(256, width))
+        scale = width**-0.5
+        self.positional_embedding = nn.Parameter(scale *
+                                                 torch.randn(256, width))
 
         norm_layer = partial(nn.LayerNorm, eps=1e-6)
         act_layer = nn.GELU
@@ -435,19 +449,21 @@ class VisionTransformer(nn.Module):
             norm_layer=norm_layer,
         )
         self.ln_post = norm_layer(output_dim)
-        self.proj = nn.Parameter((output_dim** -0.5) * torch.randn(output_dim, output_dim))
+        self.proj = nn.Parameter(
+            (output_dim**-0.5) * torch.randn(output_dim, output_dim))
         self.image_start_id = image_start_id
         self.image_end_id = image_start_id + 1
 
     def forward(self, x: torch.Tensor):
         x = x.to(
-           dtype=self.transformer.get_cast_dtype(),
-           device=self.transformer.get_cast_device(),
+            dtype=self.transformer.get_cast_dtype(),
+            device=self.transformer.get_cast_device(),
         )
 
         # to patches
         x = self.conv1(x)  # shape = [*, width, grid, grid]
-        x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
+        x = x.reshape(x.shape[0], x.shape[1],
+                      -1)  # shape = [*, width, grid ** 2]
         x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
 
         x = x + get_abs_pos(self.positional_embedding, x.size(1))
@@ -642,7 +658,8 @@ class QWenModel(nn.Module):
             lambda prefix: QWenBlock(config, cache_config, quant_config),
             prefix=f"{prefix}.h")
         self.ln_f = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
-        self.visual = VisionTransformer(**config.visual) if hasattr(config, "visual") else None
+        self.visual = VisionTransformer(
+            **config.visual) if hasattr(config, "visual") else None
 
     def forward(
         self,
@@ -654,7 +671,7 @@ class QWenModel(nn.Module):
         pixel_values: Optional[QwenImageInputs],
     ) -> torch.Tensor:
         img_pos = None
-        # If pixel / visual embeddings are provided, this is a visual model since we filter inputs
+        # If pixel / visual embeddings are provided, this is a visual model
         if pixel_values is not None:
             if pixel_values["type"] != "image_embeds":
                 image_embeds = self.visual(pixel_values["data"])
@@ -664,8 +681,10 @@ class QWenModel(nn.Module):
             # features should be of shape (# images, 256, hidden_dim)
             img_pos = self.visual.get_image_positions(input_ids)
             if img_pos.shape[0] != image_embeds.shape[0]:
-                raise ValueError(f"Number of placeholders: {img_pos.shape[0]} "
-                                f"does not match the number of images {image_embeds.shape[0]}.")
+                raise ValueError(
+                    f"Number of placeholders: {img_pos.shape[0]} "
+                    f"does not match number of images {image_embeds.shape[0]}."
+                )
 
         if get_pp_group().is_first_rank:
             hidden_states = self.wte(input_ids)
@@ -673,7 +692,7 @@ class QWenModel(nn.Module):
             # visual features and the corresponding image tokens
             if img_pos is not None:
                 for idx, (img_bos, img_eos) in enumerate(img_pos):
-                    hidden_states[img_bos + 1 : img_eos] = image_embeds[idx]
+                    hidden_states[img_bos + 1:img_eos] = image_embeds[idx]
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -698,39 +717,44 @@ class QWenModel(nn.Module):
 
 
 def get_image_text(image_num: int, padding: bool) -> str:
-    """Retrieves a placeholder text that when tokenized, will be expanded with image pads.
+    """Retrieves a placeholder text that when tokenized, will be expanded with
+    image pads.
 
-    NOTE: The reason that the reason we don't directly encode the image padding here is that
-    it will break the re-encoding of the tokens tokenizer, because the contents between the 
-    start / end are treated as bytes containing a URL that then get padded up to the image context
-    size.
+    NOTE: The reason that the reason we don't directly encode the imagepadding
+    here is that it will break the re-encoding of the tokens tokenizer,
+    because the contents between the start / end are treated as bytes
+    containing a URL that then get padded up to the image context size.
     """
+    image_start = f"Picture {image_num}: {IMG_START}"
+    image_end = f"{IMG_END}\n"
     if not padding:
-        return f"Picture {image_num}: {IMG_START}{IMG_END}\n"
-    return f"Picture {image_num}: {IMG_START}{MAX_QWEN_IMG_TOKENS * IMG_PAD}{IMG_END}\n"
+        return f"{image_start}{image_end}"
+    return f"{image_start}{MAX_QWEN_IMG_TOKENS * IMG_PAD}{image_end}"
+
 
 def input_processor_for_qwen(ctx: InputContext, llm_inputs: LLMInputs):
     multi_modal_data = llm_inputs.get("multi_modal_data")
 
     # Only process images if we have multimodal data and a visual config
     hf_config = ctx.get_hf_config()
-    if multi_modal_data is None or "image" not in multi_modal_data or not hasattr(hf_config, "visual"):
+    if (multi_modal_data is None or "image" not in multi_modal_data
+            or not hasattr(hf_config, "visual")):
         return llm_inputs
 
     prompt = llm_inputs.get("prompt")
     prompt_token_ids = llm_inputs["prompt_token_ids"]
     model_config = ctx.model_config
-    tokenizer = cached_get_tokenizer(model_config.tokenizer, trust_remote_code=True)
+    tokenizer = cached_get_tokenizer(model_config.tokenizer,
+                                     trust_remote_code=True)
     image_data = multi_modal_data["image"]
     if isinstance(image_data, torch.Tensor):
-        if len(image_data.shape) < 2 or len(image_data.shape) > 3:
+        num_dims = len(image_data.shape)
+        if num_dims < 2 or num_dims > 3:
             raise ValueError(
-                f"Expected image embeds to be have 3 dimensions but got {len(image_data.shape)}"
-            )
-        num_images = 1 if len(image_data.shape) == 2 else image_data.shape[0]
+                f"Expected img embeds to be have 3 dimensions, got {num_dims}")
+        num_images = 1 if num_dims == 2 else image_data.shape[0]
     else:
         num_images = 1
-
 
     if prompt is None:
         prompt = tokenizer.decode(prompt_token_ids)
@@ -739,47 +763,52 @@ def input_processor_for_qwen(ctx: InputContext, llm_inputs: LLMInputs):
     num_img_tags = prompt.count("<image>")
 
     if num_img_tags != num_images:
-        logger.warning("Number of <image> tokens does not match the number of provided images!")
+        logger.warning(
+            "Number of <image> tokens does not match the number of images")
 
-    # Only replace as many image tags as we are going to be able to process correctly
-    # Sequentially replace image tags; padding shenanigans are mostly to sidestep
-    # url encoding logic in the tokenizer
+    # Only replace as many image tags as we are going to be able to process
+    # correctly. Sequentially replace image tags; padding shenanigans are
+    # mostly to sidestep url encoding logic in the tokenizer
     new_prompt_no_img_pads = new_prompt_with_img_pads = prompt
     for img_num in range(min(num_images, num_img_tags)):
         image_prompt_without_padding = get_image_text(img_num, padding=False)
         image_prompt_with_padding = get_image_text(img_num, padding=True)
-        new_prompt_no_img_pads = new_prompt_no_img_pads.replace('<image>', image_prompt_without_padding, 1)
-        new_prompt_with_img_pads = new_prompt_with_img_pads.replace('<image>', image_prompt_with_padding, 1)
+        new_prompt_no_img_pads = new_prompt_no_img_pads.replace(
+            '<image>', image_prompt_without_padding, 1)
+        new_prompt_with_img_pads = new_prompt_with_img_pads.replace(
+            '<image>', image_prompt_with_padding, 1)
     new_prompt_token_ids = tokenizer.encode(new_prompt_no_img_pads)
 
     return LLMInputs(prompt=new_prompt_with_img_pads,
                      prompt_token_ids=new_prompt_token_ids,
                      multi_modal_data=multi_modal_data)
 
+
 def input_mapper_for_qwen(ctx: InputContext, data: object):
     # Early exit if we have provided an image to a language only Qwen model
     hf_config = ctx.get_hf_config()
     if not hasattr(hf_config, "visual"):
-        logger.warning("Images were provided but this model has no visual config; "
-                        "multimodal inputs will not be forwarded to the model.")
+        logger.warning(
+            "Images were provided but this model has no visual config; "
+            "multimodal inputs will not be forwarded to the model.")
         return MultiModalInputs()
 
     model_config = ctx.model_config
     tokenizer = cached_get_tokenizer(model_config.tokenizer,
                                      trust_remote_code=True)
 
-    image_pair_tok = tokenizer.encode(
-        IMG_START+IMG_END,
-        add_special_tokens=False,
-        return_tensors="pt").squeeze()
+    image_pair_tok = tokenizer.encode(IMG_START + IMG_END,
+                                      add_special_tokens=False,
+                                      return_tensors="pt").squeeze()
     image_start_id = image_pair_tok[0]
     image_end_id = image_pair_tok[-1]
     if (image_start_id + 1) != image_end_id:
-        raise ValueError(f"Found image end ID {image_end_id}, but expected ID {IMG_START} + 1")
+        raise ValueError(
+            f"Found image end ID {image_end_id}, but expected {IMG_START} + 1")
     if len(image_pair_tok) != (MAX_QWEN_IMG_TOKENS + 2):
         raise ValueError(
-            f"Expected image context length of {MAX_QWEN_IMG_TOKENS}, but got {image_pair_tok - 2}"
-        )
+            f"Expected image context length of {MAX_QWEN_IMG_TOKENS}, "
+            f"but got {image_pair_tok - 2}")
 
     hf_config = ctx.get_hf_config()
     image_size = hf_config.visual["image_size"]
@@ -792,39 +821,38 @@ def input_mapper_for_qwen(ctx: InputContext, data: object):
         if len(data.shape) == 2:
             # Assume only one image embed was provided; unsqueeze the extra dim
             data = data.unsqueeze(0)
-        if len(data.shape) != 3 or data.shape[1] != MAX_QWEN_IMG_TOKENS or data.shape[2] != img_emb_size:
-            raise ValueError("Expected image embeds to be a tensor of shape"
-                f"[# images, {MAX_QWEN_IMG_TOKENS}, {img_emb_size}], but received "
-                f"shape [{pixel_values.shape}]")
+        if len(data.shape) != 3 or data.shape[
+                1] != MAX_QWEN_IMG_TOKENS or data.shape[2] != img_emb_size:
+            raise ValueError(
+                "Expected image embeds to be a tensor of shape"
+                f"[# images, {MAX_QWEN_IMG_TOKENS}, {img_emb_size}], but "
+                f"received shape [{data.shape}]")
         pixel_values = data
-            
+
     else:
         transform = build_normalization_transform(image_size)
         # TODO - handle multiple image inputs once the API is solidified
         transformed_images = [transform(data)]
         pixel_values = torch.stack(transformed_images, dim=0)
-    return MultiModalInputs({
-        "pixel_values":  pixel_values
-    })
+    return MultiModalInputs({"pixel_values": pixel_values})
+
 
 def build_normalization_transform(image_size):
-    """Builds a normalization transform which can be applied to one or more input images
-    from which we want to extract visual features.
+    """Builds a normalization transform which can be applied to one or
+    more input images from which we want to extract visual features.
     """
     mean = (0.48145466, 0.4578275, 0.40821073)
     std = (0.26862954, 0.26130258, 0.27577711)
     return transforms.Compose([
-        transforms.Resize(
-            (image_size, image_size),
-            interpolation=InterpolationMode.BICUBIC
-        ),
+        transforms.Resize((image_size, image_size),
+                          interpolation=InterpolationMode.BICUBIC),
         transforms.ToTensor(),
         transforms.Normalize(mean=mean, std=std),
     ])
 
 
 def dummy_data_for_qwen(ctx: InputContext, seq_len: int,
-                            mm_counts: Mapping[str, int]):
+                        mm_counts: Mapping[str, int]):
     hf_config = ctx.get_hf_config()
 
     # The presence of a visual config indicates this is a multimodal model.
@@ -836,24 +864,26 @@ def dummy_data_for_qwen(ctx: InputContext, seq_len: int,
 
     # We have a visual component - use images to warm up
     num_images = mm_counts["image"]
-    image_feature_size = MAX_QWEN_IMG_TOKENS
     model_config = ctx.model_config
     tokenizer = cached_get_tokenizer(model_config.tokenizer,
                                      trust_remote_code=True)
 
-    # Encode an image pair for each image. During the encoding, qwen tokenizers will add
-    # image pads between the start/end. We leave this to the tokenizer, because we need
-    # to rely on the number of added pads at inference time.
-    seq_data = SequenceData(tokenizer.encode(
-        (IMG_START+IMG_END) * num_images, add_special_tokens=False, return_tensors="pt"
-    )[0].tolist())
+    # Encode an image pair for each image. During the encoding, qwen tokenizers
+    # will add image pads between the start/end. We leave this to the
+    # tokenizer, because we need to rely on the number of added pads at
+    # inference time.
+    seq_data = SequenceData(
+        tokenizer.encode((IMG_START + IMG_END) * num_images,
+                         add_special_tokens=False,
+                         return_tensors="pt")[0].tolist())
     assert seq_data.get_len() == ((2 + MAX_QWEN_IMG_TOKENS) * num_images)
 
-    # Build the input images; width/height doesn't actually matter here since the
-    # data will get resized, and the number of tokens per image is constant per model.
+    # Build the input images; width/height doesn't actually matter here since
+    # the data will get resized and the # of tokens per image is constant
     image = Image.new("RGB", (224, 224), color=0)
-    mm_data =  {"image": image if num_images == 1 else [image] * num_images}
+    mm_data = {"image": image if num_images == 1 else [image] * num_images}
     return seq_data, mm_data
+
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_qwen)
 @MULTIMODAL_REGISTRY.register_max_image_tokens(MAX_QWEN_IMG_TOKENS)
@@ -881,32 +911,35 @@ class QWenLMHeadModel(nn.Module, SupportsMultiModal):
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
-    def _get_image_input_type(self, pixel_values: Optional[torch.Tensor]) -> Optional[QwenImageInputs]:
+    def _get_image_input_type(
+            self,
+            pixel_values: Optional[torch.Tensor]) -> Optional[QwenImageInputs]:
         if pixel_values is not None and self.transformer.visual is not None:
-            if len(pixel_values.shape) == 3 and pixel_values.shape[1] == MAX_QWEN_IMG_TOKENS and pixel_values.shape[2] == self.config.visual["output_dim"]:
+            if len(pixel_values.shape) == 3 and pixel_values.shape[
+                    1] == MAX_QWEN_IMG_TOKENS and pixel_values.shape[
+                        2] == self.config.visual["output_dim"]:
                 return QwenImageEmbeddingInputs(
                     type="image_embeds",
                     data=pixel_values,
                 )
             else:
-                # if we don't have the right embedding shape, assume we need to process still
+                # If we have the wrong shape, assume we still need to process
                 return QwenImagePixelInputs(
                     type="pixel_values",
                     data=pixel_values,
                 )
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        pixel_values: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+    def forward(self,
+                input_ids: torch.Tensor,
+                positions: torch.Tensor,
+                kv_caches: List[torch.Tensor],
+                attn_metadata: AttentionMetadata,
+                intermediate_tensors: Optional[IntermediateTensors] = None,
+                pixel_values: Optional[torch.Tensor] = None) -> torch.Tensor:
         pixel_values = self._get_image_input_type(pixel_values)
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         attn_metadata, intermediate_tensors, pixel_values)
+                                         attn_metadata, intermediate_tensors,
+                                         pixel_values)
         return hidden_states
 
     def make_empty_intermediate_tensors(
