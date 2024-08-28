@@ -6,8 +6,8 @@ import time
 import warnings
 import weakref
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type,
-                    TypeVar, Union)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set,
+                    Tuple, Type, TypeVar, Union)
 
 import numpy as np
 import torch
@@ -44,7 +44,8 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import (IntermediateTensors, SamplerOutput,
                            SequenceGroupMetadata)
 from vllm.utils import (CudaMemoryProfiler, PyObjectCache, async_tensor_h2d,
-                        flatten_2d_lists, is_hip, is_pin_memory_available)
+                        flatten_2d_lists, is_hip, is_pin_memory_available,
+                        supports_dynamo)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
     _add_attn_metadata_broadcastable_dict,
@@ -90,6 +91,7 @@ class ModelInputForGPU(ModelRunnerInputBase):
     request_ids_to_seq_ids: Optional[Dict[str, List[int]]] = None
     finished_requests_ids: Optional[List[str]] = None
     virtual_engine: int = 0
+    async_callback: Optional[Callable] = None
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
@@ -945,7 +947,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     "provided. Defaulting to scaling factors of 1.0. "
                     "This may lead to less accurate results!")
 
-        if envs.VLLM_TEST_DYNAMO_GRAPH_CAPTURE:
+        if envs.VLLM_TEST_DYNAMO_GRAPH_CAPTURE and supports_dynamo():
             self.model = torch.compile(self.model,
                                        fullgraph=True,
                                        backend="eager")
@@ -1096,6 +1098,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 device=self.device)
         self.execute_model(model_input, kv_caches, intermediate_tensors)
         torch.cuda.synchronize()
+
+        # reset and discard the guard and compiled bytecode for profiling runs
+        torch._dynamo.reset()
+
         return
 
     def remove_all_loras(self):
@@ -1327,7 +1333,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         virtual_engine: int = 0,
-        finished_requests_ids: Optional[List[str]] = None
+        finished_requests_ids: Optional[List[str]] = None,
     ) -> ModelInputForGPUWithSamplingMetadata:
         """Prepare the model input based on a given sequence group, including
         metadata for the sampling step.
@@ -1450,6 +1456,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
         if not self.is_driver_worker:
             return []
+
+        if model_input.async_callback is not None:
+            model_input.async_callback()
 
         # Sample the next token.
         output: SamplerOutput = self.model.sample(

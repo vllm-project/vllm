@@ -422,7 +422,9 @@ def input_processor_for_phi3v(ctx: InputContext, llm_inputs: LLMInputs):
 
     prompt = llm_inputs.get("prompt")
     if prompt is None:
-        image_idx = []
+        # for async server request, we assume prompt and its token_ids is always
+        # in correct format. And num_image_tags == len(image_data) always True.
+        image_idx = range(1, len(image_data) + 1)
         new_prompt = None
     else:
         image_idx = sorted(map(int, re.findall(r"<\|image_(\d+)\|>+", prompt)))
@@ -557,6 +559,14 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal):
             if not isinstance(image_sizes, torch.Tensor):
                 raise ValueError("Incorrect type of image sizes. "
                                  f"Got type: {type(image_sizes)}")
+
+            # Merge the B and N dimensions.
+            if isinstance(pixel_values, torch.Tensor):
+                pixel_values = pixel_values.flatten(0, 1)
+            else:
+                pixel_values = torch.cat(pixel_values)
+
+            image_sizes = image_sizes.flatten(0, 1)
 
             return Phi3VImagePixelInputs(
                 type="pixel_values",

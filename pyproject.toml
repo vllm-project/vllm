@@ -58,6 +58,7 @@ files = [
     "vllm/adapter_commons",
     "vllm/assets",
     "vllm/entrypoints",
+    "vllm/core",
     "vllm/inputs",
     "vllm/logging",
     "vllm/multimodal",
