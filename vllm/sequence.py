@@ -898,7 +898,7 @@ class SequenceGroupMetadata(
     do_sample: bool = True
     pooling_params: Optional[PoolingParams] = None
     lora_request: Optional[LoRARequest] = None
-    spec_decode_params: Optional[SpecDecodeParams] = None,
+    spec_decode_params: Optional[SpecDecodeParams] = None
     computed_block_nums: Optional[List[int]] = None
     state: Optional[SequenceGroupState] = msgspec.field(
         default_factory=lambda: SequenceGroupState())
