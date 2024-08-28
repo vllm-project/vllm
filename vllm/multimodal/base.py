@@ -1,9 +1,8 @@
 import sys
 from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
-from typing import Callable, Dict, List, Mapping, Optional
-from typing import Sequence as GenericSequence
-from typing import Tuple, Type, TypedDict, TypeVar, Union, cast, final
+from typing import (Callable, Dict, List, Mapping, Optional, Tuple, Type,
+                    TypedDict, TypeVar, Union, cast, final)
 
 import numpy as np
 import torch
@@ -15,23 +14,16 @@ from typing_extensions import TypeAlias
 from vllm.config import ModelConfig
 from vllm.inputs import InputContext
 from vllm.logger import init_logger
-from vllm.utils import JSONTree, json_map_leaves
+from vllm.utils import json_map_leaves
 
 logger = init_logger(__name__)
 
-NestedTensors = Union[GenericSequence[torch.Tensor], torch.Tensor]
+NestedTensors = Union[List["NestedTensors"], torch.Tensor]
 """
-Use a list instead of a tensor if the dimensions of each element do not match.
-Currently only supports up to singly nested list of tensors.
-"""
-
-BatchedTensors: TypeAlias = JSONTree[torch.Tensor]
-"""
-A nested JSON structure of tensors which have been batched via
-:meth:`MultiModalInputs.batch`.
+Uses a list instead of a tensor if the dimensions of each element do not match.
 """
 
-BatchedTensorInputs: TypeAlias = Dict[str, JSONTree[torch.Tensor]]
+BatchedTensorInputs: TypeAlias = Dict[str, NestedTensors]
 """
 A dictionary containing nested tensors which have been batched via
 :meth:`MultiModalInputs.batch`.
@@ -54,26 +46,23 @@ class MultiModalInputs(_MultiModalInputsBase):
     """
 
     @staticmethod
-    def _try_concat(tensors: List[NestedTensors]) -> BatchedTensors:
+    def _try_stack(nested_tensors: NestedTensors) -> NestedTensors:
         """
-        If each input tensor in the batch has the same shape, return a single
-        batched tensor; otherwise, return a list of :class:`NestedTensors` with
-        one element per item in the batch.
+        Recursively stacks lists of tensors when they all have the same shape.
         """
-        # may be list rather than tensors
-        if isinstance(tensors[0], list):
-            return [[t for t in tensor[0]]
-                    for tensor in cast(List[List[torch.Tensor]], tensors)]
+        if isinstance(nested_tensors, torch.Tensor):
+            return nested_tensors
 
-        tensors_ = cast(List[torch.Tensor], tensors)
+        stacked = [MultiModalInputs._try_stack(t) for t in nested_tensors]
+        if any(isinstance(t, list) for t in stacked):
+            return stacked
 
-        unbatched_shape = tensors_[0].shape[1:]
+        tensors_ = cast(List[torch.Tensor], stacked)
+        if any(t.shape != tensors_[0].shape for t in tensors_):
+            # The tensors have incompatible shapes and can't be stacked.
+            return tensors_
 
-        for tensor in tensors_:
-            if tensor.shape[1:] != unbatched_shape:
-                return [tensor.squeeze(0) for tensor in tensors_]
-
-        return torch.cat(tensors_, dim=0)
+        return torch.stack(tensors_)
 
     @staticmethod
     def batch(inputs_list: List["MultiModalInputs"]) -> BatchedTensorInputs:
@@ -102,7 +91,7 @@ class MultiModalInputs(_MultiModalInputsBase):
                 item_lists[k].append(v)
 
         return {
-            k: MultiModalInputs._try_concat(item_list)
+            k: MultiModalInputs._try_stack(item_list)
             for k, item_list in item_lists.items()
         }
 

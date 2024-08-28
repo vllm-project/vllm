@@ -333,6 +333,12 @@ class UltravoxModel(nn.Module, SupportsMultiModal):
                 raise ValueError("Incorrect type of audio features. "
                                  f"Got type: {type(audio_features)}")
 
+            # Remove the N dimension until multiple audios are supported.
+            if isinstance(audio_features, torch.Tensor):
+                audio_features = audio_features.squeeze(1)
+            else:
+                audio_features = [t.squeeze(0) for t in audio_features]
+
             return UltravoxAudioFeatureInputs(type="audio_features",
                                               data=audio_features)
 
@@ -340,6 +346,9 @@ class UltravoxModel(nn.Module, SupportsMultiModal):
             if not isinstance(audio_embeds, torch.Tensor):
                 raise ValueError("Incorrect type of audio embeds. "
                                  f"Got type: {type(audio_embeds)}")
+
+            # Remove the N dimension until multiple audios are supported.
+            audio_embeds = audio_embeds.squeeze(1)
 
             return UltravoxAudioEmbeddingInputs(type="audio_embeds",
                                                 data=audio_embeds)
