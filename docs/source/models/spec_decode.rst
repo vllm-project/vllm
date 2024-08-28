@@ -183,7 +183,7 @@ In vLLM, speculative decoding aims to enhance inference efficiency while maintai
    This issue may stem from non-deterministic behaviors in batched operations or numerical instability in Torch operations. 
    `See Test Code and Discussion <https://github.com/vllm-project/vllm/blob/47b65a5/vllm/tests/spec_decode/e2e/test_multistep_correctness.py>`_
 
-####Conclusion
+**Conclusion
 
 While vLLM strives to ensure losslessness in speculative decoding, variations in generated outputs with and without speculative decoding 
 can occur due to following factors:
