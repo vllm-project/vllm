@@ -161,8 +161,8 @@ A variety of speculative models of this type are available on HF hub:
 * `granite-7b-instruct-accelerator <https://huggingface.co/ibm-granite/granite-7b-instruct-accelerator>`_
 * `granite-20b-code-instruct-accelerator <https://huggingface.co/ibm-granite/granite-20b-code-instruct-accelerator>`_
 
-Lossless guarantees of Speculative Decoding in vLLM
----------------------------------------------------
+Lossless guarantees of Speculative Decoding
+-------------------------------------------
 In vLLM, speculative decoding aims to enhance inference efficiency while maintaining accuracy. This section addresses the lossless guarantees of 
 speculative decoding, breaking down the guarantees into three key areas:
 
