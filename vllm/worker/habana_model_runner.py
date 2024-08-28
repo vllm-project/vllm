@@ -758,7 +758,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 start_col = (lora_id - 1) * self.lora_config.max_lora_rank
                 end_col = start_col + self.lora_config.max_lora_rank
                 decode.mask[start_row:end_row, start_col:end_col] = ones
-                counter = counter + 1
+            counter = counter + 1
 
             lora_index_mapping += [lora_id] * (max_prompt_len - context_len)
             lora_prompt_mapping.extend(
@@ -872,7 +872,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 start_pos = (lora_id - 1) * self.lora_config.max_lora_rank
                 end_pos = start_pos + self.lora_config.max_lora_rank
                 decode.mask[counter, start_pos:end_pos] = ones
-                counter = counter + 1
+            counter = counter + 1
 
             for seq_id in seq_ids:
                 seq_data = seq_group_metadata.seq_data[seq_id]
@@ -1180,7 +1180,6 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                              True,
                              kv_caches,
                              is_profile_run=True)
-        return
 
     def warmup_scenario(self,
                         batch_size,
