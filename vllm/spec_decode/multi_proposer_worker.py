@@ -161,6 +161,8 @@ class MultiProposerWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
         required scheduling_policy.
         """
         chosen_proposer = '[ngram]'
+        if execute_model_req is None:
+            return chosen_proposer
         seq_group_metadata_list = execute_model_req.seq_group_metadata_list
         valid_proposers = list(self._workers.keys())
 
