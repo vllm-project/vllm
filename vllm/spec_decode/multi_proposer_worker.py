@@ -240,7 +240,8 @@ class MultiProposerWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
         with ThreadPoolExecutor() as executor:
             futures = {
                 executor.submit(self._workers[proposer].get_spec_proposals,
-                                execute_model_req.clone(sq_list), seq_ids_with_bonus_token_in_last_step):
+                                execute_model_req.clone(sq_list),
+                                seq_ids_with_bonus_token_in_last_step):
                 proposer
                 for proposer, sq_list in proposer_requests.items()
                 if len(sq_list) != 0

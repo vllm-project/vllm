@@ -19,8 +19,8 @@ class SpecDecodeParams:
 
     def _verify_args(self) -> None:
         if not isinstance(self.proposer_name, str) or not self.proposer_name:
-            raise ValueError(f"proposer_name (a non-empty string) must be "
-                             f"provided.")
+            raise ValueError("proposer_name (a non-empty string) must be "
+                             "provided.")
 
     def clone(self) -> "SpecDecodeParams":
         return copy.deepcopy(self)
@@ -30,8 +30,8 @@ class SpecDecodeParams:
 
     def set_proposer(self, proposer_name: str) -> None:
         if not isinstance(proposer_name, str) or not proposer_name:
-            raise ValueError(f"proposer_name (a non-empty string) must be "
-                             f"provided.")
+            raise ValueError("proposer_name (a non-empty string) must be "
+                             "provided.")
         self.proposer_name = proposer_name
 
     def __repr__(self) -> str:
