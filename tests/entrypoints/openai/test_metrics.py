@@ -1,7 +1,12 @@
+import subprocess
+import sys
+import tempfile
+import time
 from http import HTTPStatus
 
 import openai
 import pytest
+import pytest_asyncio
 import requests
 from prometheus_client.parser import text_string_to_metric_families
 from transformers import AutoTokenizer
@@ -31,11 +36,17 @@ def default_server_args():
                     "--enable-chunked-prefill",
                     "--disable-frontend-multiprocessing",
                 ])
-def client(default_server_args, request):
+def server(default_server_args, request):
     if request.param:
         default_server_args.append(request.param)
     with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
-        yield remote_server.get_async_client()
+        yield remote_server
+
+
+@pytest_asyncio.fixture
+async def client(server):
+    async with server.get_async_client() as cl:
+        yield cl
 
 
 _PROMPT = "Hello my name is Robert and I love magic"
@@ -177,3 +188,48 @@ async def test_metrics_exist(client: openai.AsyncOpenAI):
 
     for metric in EXPECTED_METRICS:
         assert metric in response.text
+
+
+def test_metrics_exist_run_batch():
+    input_batch = """{"custom_id": "request-0", "method": "POST", "url": "/v1/embeddings", "body": {"model": "intfloat/e5-mistral-7b-instruct", "input": "You are a helpful assistant."}}"""  # noqa: E501
+
+    base_url = "0.0.0.0"
+    port = "8001"
+    server_url = f"http://{base_url}:{port}"
+
+    with tempfile.NamedTemporaryFile(
+            "w") as input_file, tempfile.NamedTemporaryFile(
+                "r") as output_file:
+        input_file.write(input_batch)
+        input_file.flush()
+        proc = subprocess.Popen([
+            sys.executable,
+            "-m",
+            "vllm.entrypoints.openai.run_batch",
+            "-i",
+            input_file.name,
+            "-o",
+            output_file.name,
+            "--model",
+            "intfloat/e5-mistral-7b-instruct",
+            "--enable-metrics",
+            "--url",
+            base_url,
+            "--port",
+            port,
+        ], )
+
+        def is_server_up(url):
+            try:
+                response = requests.get(url)
+                return response.status_code == 200
+            except requests.ConnectionError:
+                return False
+
+        while not is_server_up(server_url):
+            time.sleep(1)
+
+        response = requests.get(server_url + "/metrics")
+        assert response.status_code == HTTPStatus.OK
+
+        proc.wait()

@@ -7,8 +7,14 @@ from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 
+# Success string used for RPC instructions.
 VLLM_RPC_SUCCESS_STR = "SUCCESS"
-VLLM_RPC_HEALTHY_STR = "HEALTHY"
+
+# Minimum value of ZMQ.SOCKET_LIMIT to run mp.
+VLLM_RPC_SOCKET_LIMIT_CUTOFF = 2000
+
+# HWM is set to Infinity.
+VLLM_RPC_ZMQ_HWM = 0
 
 
 @dataclass
@@ -34,8 +40,10 @@ class RPCUtilityRequest(Enum):
     GET_SCHEDULER_CONFIG = 5
     GET_LORA_CONFIG = 6
     DO_LOG_STATS = 7
-    CHECK_HEALTH = 8
+    IS_SERVER_HEALTHY = 8
     IS_TRACING_ENABLED = 9
+    START_PROFILE = 10
+    STOP_PROFILE = 11
 
 
 RPC_REQUEST_TYPE = Union[RPCGenerateRequest, RPCAbortRequest,

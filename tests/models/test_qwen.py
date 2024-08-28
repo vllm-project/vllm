@@ -26,7 +26,7 @@ def test_text_only_qwen_model(
     # for qwen-vl is still unsupported in VLLM. In the near-future, the
     # implementation and this test will be extended to consider
     # visual inputs as well.
-    with hf_runner(model, dtype=dtype, is_vision_model=False) as hf_model:
+    with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts,
             max_tokens,

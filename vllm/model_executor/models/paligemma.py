@@ -16,7 +16,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.gemma import GemmaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import cached_get_tokenizer
+from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .interfaces import SupportsMultiModal
@@ -185,6 +185,10 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal):
             if not isinstance(pixel_values, torch.Tensor):
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
+
+            # Remove the N dimension until multiple images are supported.
+            pixel_values = pixel_values.squeeze(1)
+
             return PaliGemmaImagePixelInputs(
                 type="pixel_values",
                 data=self._validate_pixel_values(pixel_values),
@@ -194,6 +198,10 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal):
             if not isinstance(image_embeds, torch.Tensor):
                 raise ValueError("Incorrect type of image embeddings. "
                                  f"Got type: {type(image_embeds)}")
+
+            # Remove the N dimension until multiple images are supported.
+            image_embeds = image_embeds.squeeze(1)
+
             return PaliGemmaImageEmbeddingInputs(
                 type="image_embeds",
                 data=image_embeds,

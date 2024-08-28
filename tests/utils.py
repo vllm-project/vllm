@@ -16,7 +16,9 @@ from typing_extensions import ParamSpec
 
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
+from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.cli_args import make_arg_parser
+from vllm.model_executor.model_loader.loader import DefaultModelLoader
 from vllm.platforms import current_platform
 from vllm.utils import FlexibleArgumentParser, get_open_port, is_hip
 
@@ -56,29 +58,40 @@ VLLM_PATH = Path(__file__).parent.parent
 
 class RemoteOpenAIServer:
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
-    MAX_START_WAIT_S = 240  # wait for server to start for 240 seconds
 
-    def __init__(
-        self,
-        model: str,
-        cli_args: List[str],
-        *,
-        env_dict: Optional[Dict[str, str]] = None,
-        auto_port: bool = True,
-    ) -> None:
+    def __init__(self,
+                 model: str,
+                 vllm_serve_args: List[str],
+                 *,
+                 env_dict: Optional[Dict[str, str]] = None,
+                 auto_port: bool = True,
+                 max_wait_seconds: Optional[float] = None) -> None:
         if auto_port:
-            if "-p" in cli_args or "--port" in cli_args:
-                raise ValueError("You have manually specified the port"
+            if "-p" in vllm_serve_args or "--port" in vllm_serve_args:
+                raise ValueError("You have manually specified the port "
                                  "when `auto_port=True`.")
 
-            cli_args = cli_args + ["--port", str(get_open_port())]
+            # Don't mutate the input args
+            vllm_serve_args = vllm_serve_args + [
+                "--port", str(get_open_port())
+            ]
 
         parser = FlexibleArgumentParser(
             description="vLLM's remote OpenAI server.")
         parser = make_arg_parser(parser)
-        args = parser.parse_args(cli_args)
+        args = parser.parse_args(["--model", model, *vllm_serve_args])
         self.host = str(args.host or 'localhost')
         self.port = int(args.port)
+
+        # download the model before starting the server to avoid timeout
+        is_local = os.path.isdir(model)
+        if not is_local:
+            engine_args = AsyncEngineArgs.from_cli_args(args)
+            engine_config = engine_args.create_engine_config()
+            dummy_loader = DefaultModelLoader(engine_config.load_config)
+            dummy_loader._prepare_weights(engine_config.model_config.model,
+                                          engine_config.model_config.revision,
+                                          fall_back_to_pt=True)
 
         env = os.environ.copy()
         # the current process might initialize cuda,
@@ -86,12 +99,15 @@ class RemoteOpenAIServer:
         env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
         if env_dict is not None:
             env.update(env_dict)
-        self.proc = subprocess.Popen(["vllm", "serve"] + [model] + cli_args,
-                                     env=env,
-                                     stdout=sys.stdout,
-                                     stderr=sys.stderr)
+        self.proc = subprocess.Popen(
+            ["vllm", "serve", model, *vllm_serve_args],
+            env=env,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
+        max_wait_seconds = max_wait_seconds or 240
         self._wait_for_server(url=self.url_for("health"),
-                              timeout=self.MAX_START_WAIT_S)
+                              timeout=max_wait_seconds)
 
     def __enter__(self):
         return self
@@ -138,6 +154,7 @@ class RemoteOpenAIServer:
         return openai.AsyncOpenAI(
             base_url=self.url_for("v1"),
             api_key=self.DUMMY_API_KEY,
+            max_retries=0,
         )
 
 
@@ -145,7 +162,8 @@ def compare_two_settings(model: str,
                          arg1: List[str],
                          arg2: List[str],
                          env1: Optional[Dict[str, str]] = None,
-                         env2: Optional[Dict[str, str]] = None):
+                         env2: Optional[Dict[str, str]] = None,
+                         max_wait_seconds: Optional[float] = None) -> None:
     """
     Launch API server with two different sets of arguments/environments
     and compare the results of the API calls.
@@ -164,7 +182,10 @@ def compare_two_settings(model: str,
     token_ids = tokenizer(prompt)["input_ids"]
     results = []
     for args, env in ((arg1, env1), (arg2, env2)):
-        with RemoteOpenAIServer(model, args, env_dict=env) as server:
+        with RemoteOpenAIServer(model,
+                                args,
+                                env_dict=env,
+                                max_wait_seconds=max_wait_seconds) as server:
             client = server.get_client()
 
             # test models list
