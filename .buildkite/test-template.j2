@@ -1,5 +1,5 @@
 {% set docker_image = "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT" %}
-{% set docker_image_amd = "rocmshared/vllm-ci:$BUILDKITE_COMMIT" %}
+{% set docker_image_amd = "rocm/vllm-ci:$BUILDKITE_COMMIT" %}
 {% set default_working_dir = "vllm/tests" %}
 {% set hf_home = "/root/.cache/huggingface" %}
 
@@ -9,9 +9,6 @@ steps:
     commands:
       - "docker build --build-arg max_jobs=16 --tag {{ docker_image_amd }} -f Dockerfile.rocm --progress plain ."
       - "docker push {{ docker_image_amd }}"
-    plugins:
-      - docker-login#v3.0.0:
-          username: rocm
     key: "amd-build"
     env:
       DOCKER_BUILDKIT: "1"

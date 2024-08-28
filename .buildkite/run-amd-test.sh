@@ -57,9 +57,9 @@ remove_docker_container() {
 trap remove_docker_container EXIT
 
 echo "--- Running container"
-
+echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
 docker run \
-        --device /dev/kfd --device /dev/dri \
+        --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
         --network host \
         --rm \
         -e HF_TOKEN \
