@@ -36,8 +36,8 @@ from vllm.model_executor.models.persimmon import PersimmonForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.base import MultiModalInputs
-from vllm.multimodal.image import (cached_get_image_processor,
-                                   cached_get_tokenizer)
+from vllm.multimodal.image import cached_get_image_processor
+from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
                            SamplerOutput, SequenceData)
 
@@ -249,6 +249,9 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal):
         image_patches = kwargs.pop("image_patches", None)
 
         if isinstance(image_patches, torch.Tensor):
+            # Remove the N dimension until multiple images are supported.
+            image_patches = image_patches.squeeze(1)
+
             expected_feature_size = self.image_feature_size
             if image_patches.size(-1) != expected_feature_size:
                 raise ValueError(
