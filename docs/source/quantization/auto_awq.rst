@@ -19,27 +19,31 @@ You can quantize your own models by installing AutoAWQ or picking one of the `40
 
     $ pip install autoawq
 
-After installing AutoAWQ, you are ready to quantize a model. Here is an example of how to quantize Vicuna 7B v1.5:
+After installing AutoAWQ, you are ready to quantize a model. Here is an example of how to quantize `mistralai/Mistral-7B-Instruct-v0.2`:
 
 .. code-block:: python
 
     from awq import AutoAWQForCausalLM
     from transformers import AutoTokenizer
-
-    model_path = 'lmsys/vicuna-7b-v1.5'
-    quant_path = 'vicuna-7b-v1.5-awq'
+    
+    model_path = 'mistralai/Mistral-7B-Instruct-v0.2'
+    quant_path = 'mistral-instruct-v0.2-awq'
     quant_config = { "zero_point": True, "q_group_size": 128, "w_bit": 4, "version": "GEMM" }
-
+    
     # Load model
-    model = AutoAWQForCausalLM.from_pretrained(model_path, **{"low_cpu_mem_usage": True})
+    model = AutoAWQForCausalLM.from_pretrained(
+        model_path, **{"low_cpu_mem_usage": True, "use_cache": False}
+    )
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-
+    
     # Quantize
     model.quantize(tokenizer, quant_config=quant_config)
-
+    
     # Save quantized model
     model.save_quantized(quant_path)
     tokenizer.save_pretrained(quant_path)
+    
+    print(f'Model is quantized and saved at "{quant_path}"')
 
 To run an AWQ model with vLLM, you can use `TheBloke/Llama-2-7b-Chat-AWQ <https://huggingface.co/TheBloke/Llama-2-7b-Chat-AWQ>`_ with the following command:
 
