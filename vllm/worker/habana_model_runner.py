@@ -258,19 +258,17 @@ class PreparePromptMetadata(NamedTuple):
 
     @classmethod
     def empty(cls):
-        return PreparePromptMetadata(
-            input_tokens=[],
-            input_positions=[],
-            attn_metadata=None,
-            seq_lens=[],
-            query_lens=[],
-            lora_index_mapping=[],
-            lora_prompt_mapping=[],
-            lora_requests=set(),
-            multi_modal_input=None,
-            slot_mapping=[],
-            mask = None
-        )
+        return PreparePromptMetadata(input_tokens=[],
+                                     input_positions=[],
+                                     attn_metadata=None,
+                                     seq_lens=[],
+                                     query_lens=[],
+                                     lora_index_mapping=[],
+                                     lora_prompt_mapping=[],
+                                     lora_requests=set(),
+                                     multi_modal_input=None,
+                                     slot_mapping=[],
+                                     mask=None)
 
 
 class PrepareDecodeMetadata(NamedTuple):
@@ -637,6 +635,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         if len(seq_group_metadata_list) == 0:
             return PreparePromptMetadata.empty()
         mask = None
+        counter = 0
 
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
@@ -751,10 +750,12 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         if self.lora_config:
             mask = torch.zeros(len(seq_group_metadata_list) * max_prompt_len,
-                                      (self.lora_config.max_loras + 1) * self.lora_config.max_lora_rank,
-                                      dtype=self.lora_config.lora_dtype)
-            ones = torch.ones(max_prompt_len, self.lora_config.max_lora_rank, dtype=self.lora_config.lora_dtype)
-            counter = 0
+                               (self.lora_config.max_loras + 1) *
+                               self.lora_config.max_lora_rank,
+                               dtype=self.lora_config.lora_dtype)
+            ones = torch.ones(max_prompt_len,
+                              self.lora_config.max_lora_rank,
+                              dtype=self.lora_config.lora_dtype)
         for seq_group_metadata, context_len in zip(seq_group_metadata_list,
                                                    context_lens):
             lora_id = seq_group_metadata.lora_int_id
@@ -773,7 +774,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 [lora_id] *
                 (max_prompt_len - context_len
                  if seq_group_metadata.sampling_params.prompt_logprobs else 1))
-            
+
         if mask is not None:
             mask = mask.to('hpu')
 
@@ -861,13 +862,16 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         if len(seq_group_metadata_list) == 0:
             return PrepareDecodeMetadata.empty()
         mask = None
+        counter = 0
 
         if self.lora_config:
             mask = torch.zeros(len(seq_group_metadata_list),
-                                      (self.lora_config.max_loras + 1) * self.lora_config.max_lora_rank,
-                                      dtype=self.lora_config.lora_dtype)
-            ones = torch.ones(1, self.lora_config.max_lora_rank, dtype=self.lora_config.lora_dtype)
-            counter = 0
+                               (self.lora_config.max_loras + 1) *
+                               self.lora_config.max_lora_rank,
+                               dtype=self.lora_config.lora_dtype)
+            ones = torch.ones(1,
+                              self.lora_config.max_lora_rank,
+                              dtype=self.lora_config.lora_dtype)
 
         for seq_group_metadata in seq_group_metadata_list:
             assert not seq_group_metadata.is_prompt
@@ -1109,18 +1113,17 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         attn_metadata = prefill_attn_metadata if \
             prefill_attn_metadata is not None else decode_attn_metadata
 
-        return self._model_input_cls(
-            input_tokens=input_tokens,
-            seq_lens=seq_lens,
-            query_lens=query_lens,
-            input_positions=input_positions,
-            attn_metadata=attn_metadata,
-            lora_requests=lora_requests,
-            lora_mapping=lora_mapping,
-            multi_modal_kwargs=multi_modal_input,
-            real_batch_size=real_batch_size,
-            batch_size_padded=batch_size_padded,
-            mask=mask), sampling_metadata
+        return self._model_input_cls(input_tokens=input_tokens,
+                                     seq_lens=seq_lens,
+                                     query_lens=query_lens,
+                                     input_positions=input_positions,
+                                     attn_metadata=attn_metadata,
+                                     lora_requests=lora_requests,
+                                     lora_mapping=lora_mapping,
+                                     multi_modal_kwargs=multi_modal_input,
+                                     real_batch_size=real_batch_size,
+                                     batch_size_padded=batch_size_padded,
+                                     mask=mask), sampling_metadata
 
     def _seq_len(self, attn_metadata):
         if attn_metadata.num_prefills != 0:
@@ -1655,7 +1658,8 @@ class HabanaModelRunner(
             "positions": input_positions,
             "kv_caches": kv_caches,
             "attn_metadata": self.trim_attn_metadata(attn_metadata),
-            "intermediate_tensors": intermediate_tensors
+            "intermediate_tensors": intermediate_tensors,
+            "mask": model_input.mask
         }
         if multi_modal_input is not None:
             execute_model_kwargs.update(multi_modal_input)
@@ -1663,11 +1667,6 @@ class HabanaModelRunner(
             execute_model_kwargs.update({
                 "bypass_hpu_graphs": not use_graphs,
                 "warmup_mode": warmup_mode
-            })
-
-        if model_input.mask is not None:
-            execute_model_kwargs.update({
-                "mask": model_input.mask
             })
 
         htorch.core.mark_step()
