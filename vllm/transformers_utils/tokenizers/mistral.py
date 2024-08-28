@@ -61,6 +61,7 @@ class MistralTokenizer:
         # the following attributes are set to fit VLLM's design
         self.is_fast = True
         self.chat_template = True
+        self.bos_token_id = None
         self.all_special_ids: List[Any] = []
         self.all_special_tokens: List[Any] = []
         self.all_special_tokens_extended: List[Any] = []
