@@ -131,6 +131,7 @@ class LLM:
         max_context_len_to_capture: Optional[int] = None,
         max_seq_len_to_capture: int = 8192,
         disable_custom_all_reduce: bool = False,
+        disable_async_output_proc: bool = False,
         **kwargs,
     ) -> None:
         '''
@@ -172,6 +173,7 @@ class LLM:
             max_context_len_to_capture=max_context_len_to_capture,
             max_seq_len_to_capture=max_seq_len_to_capture,
             disable_custom_all_reduce=disable_custom_all_reduce,
+            disable_async_output_proc=disable_async_output_proc,
             **kwargs,
         )
         self.llm_engine = LLMEngine.from_engine_args(
@@ -390,15 +392,21 @@ class LLM:
         conversations, _ = parse_chat_messages(messages, model_config,
                                                tokenizer)
 
-        prompts = apply_chat_template(
+        prompt = apply_chat_template(
             tokenizer,
             conversations,
             chat_template=chat_template,
             add_generation_prompt=add_generation_prompt)
 
+        inputs: PromptInputs
+        if isinstance(prompt, list) and isinstance(prompt[0], int):
+            inputs = TokensPrompt(prompt_token_ids=prompt)
+        else:
+            inputs = TextPrompt(prompt=prompt)
+
         return self.generate(
-            prompts,
-            sampling_params,
+            inputs,
+            sampling_params=sampling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
         )
@@ -605,7 +613,6 @@ class LLM:
             inputs = [inputs]
 
         num_requests = len(inputs)
-
         if isinstance(params, list) and len(params) != num_requests:
             raise ValueError("The lengths of prompts and params "
                              "must be the same.")
@@ -680,6 +687,10 @@ class LLM:
                 postfix=(f"est. speed input: {0:.2f} toks/s, "
                          f"output: {0:.2f} toks/s"),
             )
+
+        # In the loop below, only finished outputs are used
+        self.llm_engine.step_return_finished_only = True
+
         # Run the engine.
         outputs: List[Union[RequestOutput, EmbeddingRequestOutput]] = []
         total_in_toks = 0
@@ -702,6 +713,10 @@ class LLM:
                                 f"est. speed input: {in_spd:.2f} toks/s, "
                                 f"output: {out_spd:.2f} toks/s")
                         pbar.update(1)
+
+        # Restore original behavior
+        self.llm_engine.step_return_finished_only = False
+
         if use_tqdm:
             pbar.close()
         # Sort the outputs by request ID.
