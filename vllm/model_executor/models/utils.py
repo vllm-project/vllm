@@ -248,8 +248,8 @@ def make_empty_intermediate_tensors_factory(keys: List[str],
 
     def make_empty_intermediate_tensors(
             batch_size: int, dtype: torch.dtype,
-            device: torch.device) -> IntermediateTensors:
-        return IntermediateTensors({
+            device: torch.device) -> NestedTensors:
+        return NestedTensors({
             key: torch.zeros((batch_size, hidden_size),
                              dtype=dtype,
                              device=device)
