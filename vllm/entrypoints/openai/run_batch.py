@@ -1,26 +1,29 @@
-import argparse
 import asyncio
-import sys
 from io import StringIO
+from typing import Awaitable, Callable, List
 
 import aiohttp
+from prometheus_client import start_http_server
 
-import vllm
 from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
 from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.entrypoints.logger import RequestLogger, logger
+# yapf: disable
 from vllm.entrypoints.openai.protocol import (BatchRequestInput,
                                               BatchRequestOutput,
-                                              ChatCompletionResponse)
+                                              BatchResponseData,
+                                              ChatCompletionResponse,
+                                              EmbeddingResponse, ErrorResponse)
+# yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
-from vllm.logger import init_logger
+from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import random_uuid
-
-logger = init_logger(__name__)
+from vllm.utils import FlexibleArgumentParser, random_uuid
+from vllm.version import __version__ as VLLM_VERSION
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(
+    parser = FlexibleArgumentParser(
         description="vLLM OpenAI-Compatible batch runner.")
     parser.add_argument(
         "-i",
@@ -43,9 +46,35 @@ def parse_args():
                         type=nullable_str,
                         default="assistant",
                         help="The role name to return if "
-                        "`request.add_generation_prompt=true`.")
+                        "`request.add_generation_prompt=True`.")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
+
+    parser.add_argument('--max-log-len',
+                        type=int,
+                        default=None,
+                        help='Max number of prompt characters or prompt '
+                        'ID numbers being printed in log.'
+                        '\n\nDefault: Unlimited')
+
+    parser.add_argument("--enable-metrics",
+                        action="store_true",
+                        help="Enable Prometheus metrics")
+    parser.add_argument(
+        "--url",
+        type=str,
+        default="0.0.0.0",
+        help="URL to the Prometheus metrics server "
+        "(only needed if enable-metrics is set).",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Port number for the Prometheus metrics server "
+        "(only needed if enable-metrics is set).",
+    )
+
     return parser.parse_args()
 
 
@@ -55,7 +84,7 @@ async def read_file(path_or_url: str) -> str:
                    session.get(path_or_url) as resp:
             return await resp.text()
     else:
-        with open(path_or_url, "r") as f:
+        with open(path_or_url, "r", encoding="utf-8") as f:
             return f.read()
 
 
@@ -68,28 +97,34 @@ async def write_file(path_or_url: str, data: str) -> None:
         # We should make this async, but as long as this is always run as a
         # standalone program, blocking the event loop won't effect performance
         # in this particular case.
-        with open(path_or_url, "w") as f:
+        with open(path_or_url, "w", encoding="utf-8") as f:
             f.write(data)
 
 
-async def run_request(chat_serving: OpenAIServingChat,
+async def run_request(serving_engine_func: Callable,
                       request: BatchRequestInput) -> BatchRequestOutput:
-    chat_request = request.body
-    chat_response = await chat_serving.create_chat_completion(chat_request)
-    if isinstance(chat_response, ChatCompletionResponse):
+    response = await serving_engine_func(request.body)
+
+    if isinstance(response, (ChatCompletionResponse, EmbeddingResponse)):
         batch_output = BatchRequestOutput(
             id=f"vllm-{random_uuid()}",
             custom_id=request.custom_id,
-            response=chat_response,
+            response=BatchResponseData(
+                body=response, request_id=f"vllm-batch-{random_uuid()}"),
             error=None,
         )
-    else:
+    elif isinstance(response, ErrorResponse):
         batch_output = BatchRequestOutput(
             id=f"vllm-{random_uuid()}",
             custom_id=request.custom_id,
-            response=None,
-            error=chat_response,
+            response=BatchResponseData(
+                status_code=response.code,
+                request_id=f"vllm-batch-{random_uuid()}"),
+            error=response,
         )
+    else:
+        raise ValueError("Request must not be sent in stream mode")
+
     return batch_output
 
 
@@ -106,18 +141,51 @@ async def main(args):
     # When using single vLLM without engine_use_ray
     model_config = await engine.get_model_config()
 
+    if args.disable_log_requests:
+        request_logger = None
+    else:
+        request_logger = RequestLogger(max_log_len=args.max_log_len)
+
+    # Create the openai serving objects.
     openai_serving_chat = OpenAIServingChat(
         engine,
         model_config,
         served_model_names,
         args.response_role,
+        lora_modules=None,
+        prompt_adapters=None,
+        request_logger=request_logger,
+        chat_template=None,
+    )
+    openai_serving_embedding = OpenAIServingEmbedding(
+        engine,
+        model_config,
+        served_model_names,
+        request_logger=request_logger,
     )
 
     # Submit all requests in the file to the engine "concurrently".
-    response_futures = []
+    response_futures: List[Awaitable[BatchRequestOutput]] = []
     for request_json in (await read_file(args.input_file)).strip().split("\n"):
+        # Skip empty lines.
+        request_json = request_json.strip()
+        if not request_json:
+            continue
+
         request = BatchRequestInput.model_validate_json(request_json)
-        response_futures.append(run_request(openai_serving_chat, request))
+
+        # Determine the type of request and run it.
+        if request.url == "/v1/chat/completions":
+            response_futures.append(
+                run_request(openai_serving_chat.create_chat_completion,
+                            request))
+        elif request.url == "/v1/embeddings":
+            response_futures.append(
+                run_request(openai_serving_embedding.create_embedding,
+                            request))
+        else:
+            raise ValueError("Only /v1/chat/completions and /v1/embeddings are"
+                             "supported in the batch endpoint.")
 
     responses = await asyncio.gather(*response_futures)
 
@@ -128,14 +196,19 @@ async def main(args):
     output_buffer.seek(0)
     await write_file(args.output_file, output_buffer.read().strip())
 
-    # Temporary workaround for https://github.com/vllm-project/vllm/issues/4789
-    sys.exit(0)
-
 
 if __name__ == "__main__":
     args = parse_args()
 
-    logger.info("vLLM API server version %s", vllm.__version__)
+    logger.info("vLLM batch processing API version %s", VLLM_VERSION)
     logger.info("args: %s", args)
+
+    # Start the Prometheus metrics server. LLMEngine uses the Prometheus client
+    # to publish metrics at the /metrics endpoint.
+    if args.enable_metrics:
+        logger.info("Prometheus metrics enabled")
+        start_http_server(port=args.port, addr=args.url)
+    else:
+        logger.info("Prometheus metrics disabled")
 
     asyncio.run(main(args))

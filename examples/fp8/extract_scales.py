@@ -2,7 +2,7 @@ import argparse
 import glob
 import json
 import os
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -19,7 +19,7 @@ def _prepare_hf_weights(
     quantized_model_dir: str,
     load_format: str = "auto",
     fall_back_to_pt: bool = True,
-) -> Tuple[str, List[str], bool]:
+) -> Tuple[List[str], bool]:
     if not os.path.isdir(quantized_model_dir):
         raise FileNotFoundError(
             f"The quantized model directory `{quantized_model_dir}` "
@@ -94,7 +94,7 @@ def _hf_tensorfile_iterator(filename: str, load_format: str,
 
 
 def _kv_scales_extractor(
-        hf_tensor_files: Iterable[str],
+        hf_tensor_files: List[str],
         use_safetensors: bool,
         rank_keyword: str = "rank",
         expected_tp_size: Optional[int] = None) -> Dict[int, Dict[int, float]]:
@@ -115,7 +115,7 @@ def _kv_scales_extractor(
     for char in rank_keyword:
         assert not char.isdecimal(
         ), f"Rank keyword {rank_keyword} contains a numeric character!"
-    rank_scales_map = {}
+    rank_scales_map: Dict[int, Dict[int, float]] = {}
     for tensor_file in hf_tensor_files:
         try:
             rank_idx = tensor_file.find(rank_keyword)
@@ -141,7 +141,7 @@ def _kv_scales_extractor(
             raise
 
         if rank not in rank_scales_map:
-            layer_scales_map = {}
+            layer_scales_map: Dict[int, float] = {}
             rank_scales_map[rank] = layer_scales_map
         else:
             raise RuntimeError(
@@ -222,7 +222,7 @@ def _metadata_extractor(quantized_model_dir: str,
             "does not exist.")
     metadata_files = glob.glob(os.path.join(quantized_model_dir, "*.json"))
 
-    result = {}
+    result: Dict[str, Any] = {}
     for file in metadata_files:
         with open(file) as f:
             try:
@@ -327,7 +327,7 @@ if __name__ == "__main__":
         "--quantization-param-path <filename>). This is only used "
         "if the KV cache dtype is FP8 and on ROCm (AMD GPU).")
     parser.add_argument(
-        "--quantized_model",
+        "--quantized-model",
         help="Specify the directory containing a single quantized HF model. "
         "It is expected that the quantization format is FP8_E4M3, for use "
         "on ROCm (AMD GPU).",
@@ -339,18 +339,18 @@ if __name__ == "__main__":
         choices=["auto", "safetensors", "npz", "pt"],
         default="auto")
     parser.add_argument(
-        "--output_dir",
+        "--output-dir",
         help="Optionally specify the output directory. By default the "
         "KV cache scaling factors will be saved in the model directory, "
         "however you can override this behavior here.",
         default=None)
     parser.add_argument(
-        "--output_name",
+        "--output-name",
         help="Optionally specify the output filename.",
         # TODO: Change this once additional scaling factors are enabled
         default="kv_cache_scales.json")
     parser.add_argument(
-        "--tp_size",
+        "--tp-size",
         help="Optionally specify the tensor-parallel (TP) size that the "
         "quantized model should correspond to. If specified, during KV "
         "cache scaling factor extraction the observed TP size will be "

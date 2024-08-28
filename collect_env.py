@@ -64,6 +64,10 @@ DEFAULT_CONDA_PATTERNS = {
     "triton",
     "optree",
     "nccl",
+    "transformers",
+    "zmq",
+    "nvidia",
+    "pynvml",
 }
 
 DEFAULT_PIP_PATTERNS = {
@@ -75,6 +79,10 @@ DEFAULT_PIP_PATTERNS = {
     "optree",
     "onnx",
     "nccl",
+    "transformers",
+    "zmq",
+    "nvidia",
+    "pynvml",
 }
 
 
@@ -261,8 +269,9 @@ def get_neuron_sdk_version(run_lambda):
 def get_vllm_version():
     try:
         import vllm
-        return vllm.__version__
-    except ImportError:
+        return vllm.__version__ + "@" + vllm.__commit__
+    except Exception:
+        # old version of vllm does not have __commit__
         return 'N/A'
 
 
@@ -600,6 +609,11 @@ Versions of relevant libraries:
 {pip_packages}
 {conda_packages}
 """.strip()
+
+# both the above code and the following code use `strip()` to
+# remove leading/trailing whitespaces, so we need to add a newline
+# in between to separate the two sections
+env_info_fmt += "\n"
 
 env_info_fmt += """
 ROCM Version: {rocm_version}

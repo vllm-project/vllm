@@ -51,7 +51,7 @@ def test_auto_prefix_caching(model: str, block_size: int, max_num_seqs: int,
         max_input_length=None,
     )
 
-    hashes = []
+    hashes: List[List[List[int]]] = []
 
     for prefix in prefixes:
         for lora_int_id in concurrent_lora_int_ids:

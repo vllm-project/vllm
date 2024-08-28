@@ -2,6 +2,7 @@ from typing import List, Tuple
 
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.sequence import Sequence, SequenceGroup
+from vllm.utils import Device
 
 
 class EmbeddingModelBlockSpaceManager(BlockSpaceManager):
@@ -46,8 +47,7 @@ class EmbeddingModelBlockSpaceManager(BlockSpaceManager):
                     num_lookahead_slots: int) -> AllocStatus:
         return AllocStatus.OK
 
-    def swap_in(self, seq_group: SequenceGroup,
-                num_lookahead_slots: int) -> List[Tuple[int, int]]:
+    def swap_in(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
         return None  # type: ignore
 
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:
@@ -77,8 +77,12 @@ class EmbeddingModelBlockSpaceManager(BlockSpaceManager):
         pass
 
     def get_common_computed_block_ids(self,
-                                      seq_group: SequenceGroup) -> List[int]:
-        return None  # type: ignore
+                                      seq_group: List[Sequence]) -> List[int]:
+        return []
 
-    def mark_blocks_as_computed(self, seq_group: SequenceGroup):
+    def mark_blocks_as_computed(self, seq_group: SequenceGroup,
+                                token_chunk_size: int):
         pass
+
+    def get_prefix_cache_hit_rate(self, device: Device) -> float:
+        return -1

@@ -5,7 +5,7 @@
 macro (find_python_from_executable EXECUTABLE SUPPORTED_VERSIONS)
   file(REAL_PATH ${EXECUTABLE} EXECUTABLE)
   set(Python_EXECUTABLE ${EXECUTABLE})
-  find_package(Python COMPONENTS Interpreter Development.Module)
+  find_package(Python COMPONENTS Interpreter Development.Module Development.SABIModule)
   if (NOT Python_FOUND)
     message(FATAL_ERROR "Unable to find python matching: ${EXECUTABLE}.")
   endif()
@@ -171,7 +171,7 @@ macro(override_gpu_arches GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
 
     if(NOT ${GPU_ARCHES})
       message(FATAL_ERROR
-        "None of the detected ROCm architectures: ${CMAKE_HIP_ARCHITECTURES} is"
+        "None of the detected ROCm architectures: ${HIP_ARCHITECTURES} is"
         " supported. Supported ROCm architectures are: ${_GPU_SUPPORTED_ARCHES_LIST}.")
     endif()
 
@@ -181,7 +181,7 @@ macro(override_gpu_arches GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
     #
     # The torch cmake setup hardcodes the detected architecture flags in
     # `CMAKE_CUDA_FLAGS`.  Since `CMAKE_CUDA_FLAGS` is a "global" variable, it
-    # can't modified on a per-target basis, e.g. for the `punica` extension.
+    # can't modified on a per-target basis.
     # So, all the `-gencode` flags need to be extracted and removed from
     # `CMAKE_CUDA_FLAGS` for processing so they can be passed by another method.
     # Since it's not possible to use `target_compiler_options` for adding target
@@ -301,6 +301,7 @@ endmacro()
 # INCLUDE_DIRECTORIES <dirs> - Extra include directories.
 # LIBRARIES <libraries>      - Extra link libraries.
 # WITH_SOABI                 - Generate library with python SOABI suffix name.
+# USE_SABI <version>         - Use python stable api <version>
 #
 # Note: optimization level/debug info is set via cmake build type.
 #
@@ -308,7 +309,7 @@ function (define_gpu_extension_target GPU_MOD_NAME)
   cmake_parse_arguments(PARSE_ARGV 1
     GPU
     "WITH_SOABI"
-    "DESTINATION;LANGUAGE"
+    "DESTINATION;LANGUAGE;USE_SABI"
     "SOURCES;ARCHITECTURES;COMPILE_FLAGS;INCLUDE_DIRECTORIES;LIBRARIES")
 
   # Add hipify preprocessing step when building with HIP/ROCm.
@@ -322,7 +323,11 @@ function (define_gpu_extension_target GPU_MOD_NAME)
     set(GPU_WITH_SOABI)
   endif()
 
-  Python_add_library(${GPU_MOD_NAME} MODULE "${GPU_SOURCES}" ${GPU_WITH_SOABI})
+  if (GPU_USE_SABI)
+    Python_add_library(${GPU_MOD_NAME} MODULE USE_SABI ${GPU_USE_SABI} ${GPU_WITH_SOABI} "${GPU_SOURCES}")
+  else()
+    Python_add_library(${GPU_MOD_NAME} MODULE ${GPU_WITH_SOABI} "${GPU_SOURCES}")
+  endif()
 
   if (GPU_LANGUAGE STREQUAL "HIP")
     # Make this target dependent on the hipify preprocessor step.

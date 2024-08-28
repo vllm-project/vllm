@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from hipbsolidxgemm import hipb_create_extension, hipb_mm
 from rocsolidxgemm import rocb_create_extension, rocb_mm
 
-from vllm import _custom_C
+from vllm import _custom_ops as ops
 from vllm.envs import VLLM_USE_ROCM_SKINNY_GEMM
 from vllm.utils import is_hip
 
@@ -66,14 +66,14 @@ class TunedGemm:
                               weights.shape[0],
                               dtype=inp_view.dtype,
                               device='cuda')
-            _custom_C.wvSpltK(weights, inp_view, out, n, self.cu_count)
+            ops.wvSpltK(weights, inp_view, out, n, self.cu_count)
             return out
         elif m % 4 == 0 and n == 1 and k <= 8192:
             out = torch.empty(inp_view.shape[0],
                               weights.shape[0],
                               dtype=inp_view.dtype,
                               device='cuda')
-            _custom_C.LLMM1(weights, inp_view, out, 4)
+            ops.LLMM1(weights, inp_view, out, 4)
             return out
         else:
             return None

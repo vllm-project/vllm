@@ -2,13 +2,18 @@
 import copy
 from enum import IntEnum
 from functools import cached_property
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Union
 
+import msgspec
 import torch
-from pydantic import Field
 from typing_extensions import Annotated
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 _SAMPLING_EPS = 1e-5
+_MAX_TEMP = 1e-2
 
 
 class SamplingType(IntEnum):
@@ -28,7 +33,11 @@ first argument, and returns a modified tensor of logits
 to sample from."""
 
 
-class SamplingParams:
+class SamplingParams(
+        msgspec.Struct,
+        omit_defaults=True,  # type: ignore[call-arg]
+        # required for @cached_property.
+        dict=True):  # type: ignore[call-arg]
     """Sampling parameters for text generation.
 
     Overall, we follow the sampling parameters from the OpenAI text completion
@@ -88,11 +97,12 @@ class SamplingParams:
         min_tokens: Minimum number of tokens to generate per output sequence
             before EOS or stop_token_ids can be generated
         logprobs: Number of log probabilities to return per output token.
-            Note that the implementation follows the OpenAI API: The return
-            result includes the log probabilities on the `logprobs` most likely
-            tokens, as well the chosen tokens. The API will always return the
-            log probability of the sampled token, so there  may be up to
-            `logprobs+1` elements in the response.
+            When set to None, no probability is returned. If set to a non-None
+            value, the result includes the log probabilities of the specified
+            number of most likely tokens, as well as the chosen tokens.
+            Note that the implementation follows the OpenAI API: The API will
+            always return the log probability of the sampled token, so there
+            may be up to `logprobs+1` elements in the response.
         prompt_logprobs: Number of log probabilities to return per prompt token.
         detokenize: Whether to detokenize the output. Defaults to True.
         skip_special_tokens: Whether to skip special tokens in the output.
@@ -106,15 +116,52 @@ class SamplingParams:
             (i.e., no truncation).
     """
 
-    def __init__(
-        self,
-        n: int = 1,
+    n: int = 1
+    best_of: Optional[int] = None
+    presence_penalty: float = 0.0
+    frequency_penalty: float = 0.0
+    repetition_penalty: float = 1.0
+    temperature: float = 1.0
+    top_p: float = 1.0
+    top_k: int = -1
+    min_p: float = 0.0
+    seed: Optional[int] = None
+    use_beam_search: bool = False
+    length_penalty: float = 1.0
+    early_stopping: Union[bool, str] = False
+    stop: Optional[Union[str, List[str]]] = None
+    stop_token_ids: Optional[List[int]] = None
+    ignore_eos: bool = False
+    max_tokens: Optional[int] = 16
+    min_tokens: int = 0
+    logprobs: Optional[int] = None
+    prompt_logprobs: Optional[int] = None
+    # NOTE: This parameter is only exposed at the engine level for now.
+    # It is not exposed in the OpenAI API server, as the OpenAI API does
+    # not support returning only a list of token IDs.
+    detokenize: bool = True
+    skip_special_tokens: bool = True
+    spaces_between_special_tokens: bool = True
+    # Optional[List[LogitsProcessor]] type. We use Any here because
+    # Optional[List[LogitsProcessor]] type is not supported by msgspec.
+    logits_processors: Optional[Any] = None
+    include_stop_str_in_output: bool = False
+    truncate_prompt_tokens: Optional[Annotated[int, msgspec.Meta(ge=1)]] = None
+
+    # The below fields are not supposed to be used as an input.
+    # They are set in post_init.
+    output_text_buffer_length: int = 0
+    _all_stop_token_ids: Set[int] = msgspec.field(default_factory=set)
+
+    @staticmethod
+    def from_optional(
+        n: Optional[int] = 1,
         best_of: Optional[int] = None,
-        presence_penalty: float = 0.0,
-        frequency_penalty: float = 0.0,
-        repetition_penalty: float = 1.0,
-        temperature: float = 1.0,
-        top_p: float = 1.0,
+        presence_penalty: Optional[float] = 0.0,
+        frequency_penalty: Optional[float] = 0.0,
+        repetition_penalty: Optional[float] = 1.0,
+        temperature: Optional[float] = 1.0,
+        top_p: Optional[float] = 1.0,
         top_k: int = -1,
         min_p: float = 0.0,
         seed: Optional[int] = None,
@@ -133,54 +180,71 @@ class SamplingParams:
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
         logits_processors: Optional[List[LogitsProcessor]] = None,
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
-    ) -> None:
-        self.n = n
-        self.best_of = best_of if best_of is not None else n
-        self.presence_penalty = presence_penalty
-        self.frequency_penalty = frequency_penalty
-        self.repetition_penalty = repetition_penalty
-        self.temperature = temperature
-        self.top_p = top_p
-        self.top_k = top_k
-        self.min_p = min_p
-        if seed == -1:
+        truncate_prompt_tokens: Optional[Annotated[int,
+                                                   msgspec.Meta(ge=1)]] = None,
+    ) -> "SamplingParams":
+        return SamplingParams(
+            n=1 if n is None else n,
+            best_of=best_of,
+            presence_penalty=0.0
+            if presence_penalty is None else presence_penalty,
+            frequency_penalty=0.0
+            if frequency_penalty is None else frequency_penalty,
+            repetition_penalty=1.0
+            if repetition_penalty is None else repetition_penalty,
+            temperature=1.0 if temperature is None else temperature,
+            top_p=1.0 if top_p is None else top_p,
+            top_k=top_k,
+            min_p=min_p,
+            seed=seed,
+            use_beam_search=use_beam_search,
+            length_penalty=length_penalty,
+            early_stopping=early_stopping,
+            stop=stop,
+            stop_token_ids=stop_token_ids,
+            include_stop_str_in_output=include_stop_str_in_output,
+            ignore_eos=ignore_eos,
+            max_tokens=max_tokens,
+            min_tokens=min_tokens,
+            logprobs=logprobs,
+            prompt_logprobs=prompt_logprobs,
+            detokenize=detokenize,
+            skip_special_tokens=skip_special_tokens,
+            spaces_between_special_tokens=spaces_between_special_tokens,
+            logits_processors=logits_processors,
+            truncate_prompt_tokens=truncate_prompt_tokens,
+        )
+
+    def __post_init__(self) -> None:
+        self.best_of = self.best_of or self.n
+        if 0 < self.temperature < _MAX_TEMP:
+            logger.warning(
+                "temperature %s is less than %s, which may cause numerical "
+                "errors nan or inf in tensors. We have maxed it out to %s.",
+                self.temperature, _MAX_TEMP, _MAX_TEMP)
+            self.temperature = max(self.temperature, _MAX_TEMP)
+        if self.seed == -1:
             self.seed = None
         else:
-            self.seed = seed
-        self.use_beam_search = use_beam_search
-        self.length_penalty = length_penalty
-        self.early_stopping = early_stopping
-        if stop is None:
+            self.seed = self.seed
+        if self.stop is None:
             self.stop = []
-        elif isinstance(stop, str):
-            self.stop = [stop]
+        elif isinstance(self.stop, str):
+            self.stop = [self.stop]
         else:
-            self.stop = list(stop)
-        if stop_token_ids is None:
+            self.stop = list(self.stop)
+        if self.stop_token_ids is None:
             self.stop_token_ids = []
         else:
-            self.stop_token_ids = list(stop_token_ids)
-        self.ignore_eos = ignore_eos
-        self.max_tokens = max_tokens
-        self.min_tokens = min_tokens
-        self.logprobs = logprobs
-        self.prompt_logprobs = prompt_logprobs
-        # NOTE: This parameter is only exposed at the engine level for now.
-        # It is not exposed in the OpenAI API server, as the OpenAI API does
-        # not support returning only a list of token IDs.
-        self.detokenize = detokenize
-        self.skip_special_tokens = skip_special_tokens
-        self.spaces_between_special_tokens = spaces_between_special_tokens
-        self.logits_processors = logits_processors
-        self.include_stop_str_in_output = include_stop_str_in_output
-        self.truncate_prompt_tokens = truncate_prompt_tokens
+            self.stop_token_ids = list(self.stop_token_ids)
+        self.logprobs = 1 if self.logprobs is True else self.logprobs
+        self.prompt_logprobs = (1 if self.prompt_logprobs is True else
+                                self.prompt_logprobs)
+
         # Number of characters to hold back for stop string evaluation
         # until sequence is finished.
-        if self.stop and not include_stop_str_in_output:
+        if self.stop and not self.include_stop_str_in_output:
             self.output_text_buffer_length = max(len(s) for s in self.stop) - 1
-        else:
-            self.output_text_buffer_length = 0
 
         self._verify_args()
         if self.use_beam_search:
@@ -194,11 +258,12 @@ class SamplingParams:
                 self.min_p = 0.0
                 self._verify_greedy_sampling()
         # eos_token_id is added to this by the engine
-        self.all_stop_token_ids = set(self.stop_token_ids)
+        self._all_stop_token_ids = set(self.stop_token_ids)
 
     def _verify_args(self) -> None:
         if self.n < 1:
             raise ValueError(f"n must be at least 1, got {self.n}.")
+        assert isinstance(self.best_of, int)
         if self.best_of < self.n:
             raise ValueError(f"best_of must be greater than or equal to n, "
                              f"got n={self.n} and best_of={self.best_of}.")
@@ -219,6 +284,9 @@ class SamplingParams:
         if self.top_k < -1 or self.top_k == 0:
             raise ValueError(f"top_k must be -1 (disable), or at least 1, "
                              f"got {self.top_k}.")
+        if not isinstance(self.top_k, int):
+            raise TypeError(
+                f"top_k must be an integer, got {type(self.top_k).__name__}")
         if not 0.0 <= self.min_p <= 1.0:
             raise ValueError("min_p must be in [0, 1], got "
                              f"{self.min_p}.")
@@ -242,6 +310,7 @@ class SamplingParams:
                 and self.truncate_prompt_tokens < 1):
             raise ValueError(f"truncate_prompt_tokens must be >= 1, "
                              f"got {self.truncate_prompt_tokens}")
+        assert isinstance(self.stop, list)
         if any(not stop_str for stop_str in self.stop):
             raise ValueError("stop cannot contain an empty string.")
         if self.stop and not self.detokenize:
@@ -275,22 +344,36 @@ class SamplingParams:
                 "default value of 1.0 when not using beam search.")
 
     def _verify_greedy_sampling(self) -> None:
+        assert isinstance(self.best_of, int)
         if self.best_of > 1:
             raise ValueError("best_of must be 1 when using greedy sampling."
                              f"Got {self.best_of}.")
 
     def update_from_generation_config(
-            self, generation_config: Dict[str, Any]) -> None:
+            self,
+            generation_config: Dict[str, Any],
+            model_eos_token_id: Optional[int] = None) -> None:
         """Update if there are non-default values from generation_config"""
+
+        if model_eos_token_id is not None:
+            # Add the eos token id into the sampling_params to support
+            # min_tokens processing.
+            self._all_stop_token_ids.add(model_eos_token_id)
+
         # Update eos_token_id for generation
-        if (not self.ignore_eos) and (eos_ids :=
-                                      generation_config.get("eos_token_id")):
+        if (eos_ids := generation_config.get("eos_token_id")) is not None:
             # it can be either int or list of int
-            if isinstance(eos_ids, int):
-                eos_ids = [eos_ids]
-            original_stop_token_ids = set(self.stop_token_ids)
-            original_stop_token_ids.update(eos_ids)
-            self.stop_token_ids = list(original_stop_token_ids)
+            eos_ids = {eos_ids} if isinstance(eos_ids, int) else set(eos_ids)
+            if model_eos_token_id is not None:
+                # We don't need to include the primary eos_token_id in
+                # stop_token_ids since it's handled separately for stopping
+                # purposes.
+                eos_ids.discard(model_eos_token_id)
+            if eos_ids:
+                self._all_stop_token_ids.update(eos_ids)
+                if not self.ignore_eos:
+                    eos_ids.update(self.stop_token_ids)
+                    self.stop_token_ids = list(eos_ids)
 
     @cached_property
     def sampling_type(self) -> SamplingType:
@@ -301,6 +384,10 @@ class SamplingParams:
         if self.seed is not None:
             return SamplingType.RANDOM_SEED
         return SamplingType.RANDOM
+
+    @property
+    def all_stop_token_ids(self) -> Set[int]:
+        return self._all_stop_token_ids
 
     def clone(self) -> "SamplingParams":
         """Deep copy excluding LogitsProcessor objects.

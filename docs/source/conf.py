@@ -66,7 +66,21 @@ html_theme_options = {
     'path_to_docs': 'docs/source',
     'repository_url': 'https://github.com/vllm-project/vllm',
     'use_repository_button': True,
+    'use_edit_page_button': True,
 }
+html_static_path = ["_static"]
+html_js_files = ["custom.js"]
+
+# see https://docs.readthedocs.io/en/stable/reference/environment-variables.html # noqa
+READTHEDOCS_VERSION_TYPE = os.environ.get('READTHEDOCS_VERSION_TYPE')
+if READTHEDOCS_VERSION_TYPE == "tag":
+    # remove the warning banner if the version is a tagged release
+    header_file = os.path.join(os.path.dirname(__file__),
+                               "_templates/sections/header.html")
+    # The file might be removed already if the build is triggered multiple times
+    # (readthedocs build both HTML and PDF versions separately)
+    if os.path.exists(header_file):
+        os.remove(header_file)
 
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
@@ -82,17 +96,26 @@ def setup(app):
 
 # Mock out external dependencies here, otherwise the autodoc pages may be blank.
 autodoc_mock_imports = [
+    "aiohttp",
+    "compressed_tensors",
     "cpuinfo",
     "torch",
     "transformers",
     "psutil",
     "prometheus_client",
     "sentencepiece",
-    "vllm.cuda_utils",
     "vllm._C",
+    "PIL",
     "numpy",
+    'triton',
     "tqdm",
     "tensorizer",
+    "pynvml",
+    "outlines",
+    "librosa",
+    "soundfile",
+    "gguf",
+    "lark",
 ]
 
 for mock_target in autodoc_mock_imports:
@@ -116,14 +139,16 @@ class MockedClassDocumenter(autodoc.ClassDocumenter):
 autodoc.ClassDocumenter = MockedClassDocumenter
 
 intersphinx_mapping = {
-    'python': ('https://docs.python.org/3', None),
-    'typing_extensions':
-    ('https://typing-extensions.readthedocs.io/en/latest', None),
-    'numpy': ('https://numpy.org/doc/stable', None),
-    'torch': ('https://pytorch.org/docs/stable', None),
-    'psutil': ('https://psutil.readthedocs.io/en/stable', None),
+    "python": ("https://docs.python.org/3", None),
+    "typing_extensions":
+    ("https://typing-extensions.readthedocs.io/en/latest", None),
+    "pillow": ("https://pillow.readthedocs.io/en/stable", None),
+    "numpy": ("https://numpy.org/doc/stable", None),
+    "torch": ("https://pytorch.org/docs/stable", None),
+    "psutil": ("https://psutil.readthedocs.io/en/stable", None),
 }
 
 autodoc_preserve_defaults = True
+autodoc_warningiserror = True
 
 navigation_with_keys = False

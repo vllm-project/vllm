@@ -1,7 +1,7 @@
 LLM Inputs
 ==========
 
-.. autodata:: vllm.inputs.PromptStrictInputs
+.. autodata:: vllm.inputs.PromptInputs
 
 .. autoclass:: vllm.inputs.TextPrompt
     :show-inheritance:

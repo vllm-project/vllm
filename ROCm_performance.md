@@ -53,8 +53,3 @@ python3 gradlib/gradlib/gemm_tuner.py --input_file /tmp/fp8_shapes.csv --tuned_f
 where `/tmp/tuned_fp8_16` will be used by our fp8 gemm linear layer.
 
 Now, when running inference with fp8, we are using the tuned gemm for best performance.
-
-## NCCL Performance environment variable
-
-For MI300x, setting environment variable NCCL_MIN_NCHANNELS=112 is expected to improve performance.
-
