@@ -152,7 +152,7 @@ CPU Backend Considerations
 
   * Tensor Parallel for a latency constraints deployment: a Megatron-LM's parallel algorithm will be used to shard the model, based on the NUMA nodes (e.g. TP = 2 for a two NUMA node system).
   * Data Parallel for better throughput: the idea is to launch LLM serving endpoint on each NUMA node, also with one additional load balancer to dispatch the requests to those endpoints. 
-* On Ray based vLLM deployment, each Ray cluster will have components for monitoring, statistics and logging. It's highly recommend to turn off the unnecessary features to introduce less context switches for the inference threads.  As there are several components cannot be turned off, we recommend to use one CPU core for these components.  
+* On Ray based vLLM deployment, each Ray cluster will have components for monitoring, statistics and logging. It's highly recommend to turn off unnecessary features to introduce less context switches for the inference threads.  As there are several components that cannot be turned off, we recommend using one CPU core for these components.  
 
 ... code-block:: console
 
