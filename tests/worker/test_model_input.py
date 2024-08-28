@@ -60,6 +60,22 @@ class MockAttentionBackend(AttentionBackend):
     ) -> None:
         pass
 
+    @staticmethod
+    def swap_out_to_local_file(
+        src_kv_cache: torch.Tensor,
+        dst_kv_cache: Tuple[str, str],
+        src_to_dst: torch.Tensor,
+    ) -> None:
+        pass
+
+    @staticmethod
+    def swap_in_form_local_file(
+        src_kv_cache: Tuple[str, str],
+        dst_kv_cache: torch.Tensor,
+        src_to_dst: torch.Tensor,
+    ) -> None:
+        pass
+
 
 def test_model_runner_input():
     sampling_metadata = SamplingMetadata(

@@ -4,9 +4,31 @@
 
 #include <map>
 #include <vector>
+#include <string>
+
+class FileSwapperParam {
+ public:
+  FileSwapperParam(char* cache_ptr, const std::string& file_name,
+                   int64_t file_offset, int64_t size)
+      : cache_ptr(cache_ptr),
+        file_name(file_name),
+        file_offset(file_offset),
+        size(size) {}
+
+  char* cache_ptr;
+  std::string file_name;
+  int64_t file_offset;
+  int64_t size;
+};
 
 void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
                  const torch::Tensor& block_mapping);
+
+void swap_out_to_local_file(torch::Tensor& src, std::string file_name,
+                            const torch::Tensor& block_mapping);
+
+void swap_in_from_local_file(std::string src, torch::Tensor& dst,
+                             const torch::Tensor& block_mapping);
 
 // Note: the key_caches and value_caches vectors are constant but
 // not the Tensors they contain. The vectors need to be const refs

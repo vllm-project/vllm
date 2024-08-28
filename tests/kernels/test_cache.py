@@ -27,6 +27,9 @@ CUDA_DEVICES = [
 # We assume fp8 is always enabled for testing.
 KV_CACHE_DTYPE = ["auto", "fp8"]
 
+# Local file storing kv cache
+LOCAL_FILE = [("./test_key.txt", "./test_value.txt")]
+
 
 @pytest.mark.parametrize("num_mappings", NUM_MAPPINGS)
 @pytest.mark.parametrize("num_layers", NUM_LAYERS)
@@ -301,6 +304,88 @@ def test_reshape_and_cache_flash(
     else:
         torch.testing.assert_close(key_cache, cloned_key_cache)
         torch.testing.assert_close(value_cache, cloned_value_cache)
+
+
+@pytest.mark.parametrize("num_mappings", NUM_MAPPINGS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
+@pytest.mark.parametrize("local_file", LOCAL_FILE)
+@torch.inference_mode()
+def test_file_swapper(
+    kv_cache_factory,
+    num_mappings: int,
+    num_heads: int,
+    head_size: int,
+    block_size: int,
+    num_blocks: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+    kv_cache_dtype: str,
+    local_file: Tuple[str, str],
+) -> None:
+    if kv_cache_dtype == "fp8":
+        pytest.skip()
+    if kv_cache_dtype == "fp8" and head_size % 16:
+        pytest.skip()
+    random.seed(seed)
+    torch.random.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+
+    src_blocks = random.sample(range(num_blocks), num_mappings)
+    dst_blocks = random.sample(range(num_blocks), num_mappings)
+    block_mapping = list(zip(src_blocks, dst_blocks))
+    block_mapping_tensor = torch.tensor(block_mapping,
+                                        dtype=torch.int64,
+                                        device="cpu").view(-1, 2)
+
+    # Create the KV caches on the cuda device.
+    src_key_caches, src_value_caches = kv_cache_factory(
+        num_blocks, block_size, 1, num_heads, head_size, kv_cache_dtype, dtype,
+        seed, "cuda:0")
+    src_key_test = torch.zeros(src_key_caches[0].shape, dtype=dtype).cuda()
+    src_value_test = torch.zeros(src_value_caches[0].shape, dtype=dtype).cuda()
+
+    # Create local file.
+    num_elements_key = src_key_caches[0].numel()
+    element_size_key = src_key_caches[0].element_size()
+    total_bytes_key = num_elements_key * element_size_key
+
+    num_elements_value = src_value_caches[0].numel()
+    element_size_value = src_value_caches[0].element_size()
+    total_bytes_value = num_elements_value * element_size_value
+    with open(local_file[0], 'wb') as file:
+        file.write(b'0' * total_bytes_key)
+
+    with open(local_file[1], 'wb') as file:
+        file.write(b'0' * total_bytes_value)
+
+    # Call the swap_out_to_local_file kernel.
+    ops.swap_out_to_local_file(src_key_caches[0], local_file[0],
+                               block_mapping_tensor)
+    ops.swap_out_to_local_file(src_value_caches[0], local_file[1],
+                               block_mapping_tensor)
+    torch.cuda.synchronize()
+    block_mapping_tensor[:, [0, 1]] = block_mapping_tensor[:, [1, 0]]
+
+    # Call the swap_in_from_local_file kernel.
+    ops.swap_in_from_local_file(local_file[0], src_key_test,
+                                block_mapping_tensor)
+    ops.swap_in_from_local_file(local_file[1], src_value_test,
+                                block_mapping_tensor)
+    torch.cuda.synchronize()
+
+    for src, _ in block_mapping:
+        torch.testing.assert_close(src_key_caches[0][src], src_key_test[src])
+        torch.testing.assert_close(src_value_caches[0][src],
+                                   src_value_test[src])
 
 
 @pytest.mark.parametrize("direction", COPYING_DIRECTION)
