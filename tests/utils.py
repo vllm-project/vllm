@@ -441,6 +441,7 @@ async def completions_with_server_args(
     model_name: str,
     server_cli_args: List[str],
     num_logprobs: Optional[int],
+    max_wait_seconds: int = 240,
 ) -> Completion:
     '''Construct a remote OpenAI server, obtain an async client to the
     server & invoke the completions API to obtain completions.
@@ -450,13 +451,17 @@ async def completions_with_server_args(
       model_name: model to spin up on the vLLM server
       server_cli_args: CLI args for starting the server
       num_logprobs: Number of logprobs to report (or `None`)
+      max_wait_seconds: timeout interval for bringing up server.
+                        Default: 240sec
 
     Returns:
       OpenAI Completion instance
     '''
 
     outputs = None
-    with RemoteOpenAIServer(model_name, server_cli_args) as server:
+    with RemoteOpenAIServer(model_name,
+                            server_cli_args,
+                            max_wait_seconds=max_wait_seconds) as server:
         client = server.get_async_client()
         outputs = await client.completions.create(model=model_name,
                                                   prompt=prompts,

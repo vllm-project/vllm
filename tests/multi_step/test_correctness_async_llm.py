@@ -86,10 +86,22 @@ async def test_multi_step(example_prompts, model: str, tp_size: int,
         str(pp_size),
     ]
 
+    # Spin up client/server & issue completion API requests.
+    # Default `max_wait_seconds` is 240 but was empirically
+    # was raised 3x to 720 *just for this test* due to 
+    # observed timeouts in GHA CI
     ref_completions = await completions_with_server_args(
-        prompts, model, server_args + distributed_args, num_logprobs)
+        prompts,
+        model,
+        server_args + distributed_args,
+        num_logprobs,
+        max_wait_seconds=3 * 240)
     test_completions = await completions_with_server_args(
-        prompts, model, ms_server_args + distributed_args, num_logprobs)
+        prompts,
+        model,
+        ms_server_args + distributed_args,
+        num_logprobs,
+        max_wait_seconds=3 * 240)
 
     # Assert multi-step scheduling produces identical tokens
     # to single-step scheduling.
