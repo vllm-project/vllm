@@ -1215,13 +1215,10 @@ class LLMEngine:
 
         # Organize outputs by [sequence group][step] instead of
         # [step][sequence group].
-        logger.error(f"output: %s", output)
-        logger.error(f"output.hidden_states: %s", output[0].hidden_states.shape)
         output_by_sequence_group = create_output_by_sequence_group(
             output, 
             num_seq_groups=len(scheduled_seq_groups),
             return_hidden_states=self.model_config.return_hidden_states)
-        logger.error("output_by_sequence_group: %s", output_by_sequence_group)
         # Update the scheduled sequence groups with the model outputs.
         for scheduled_seq_group, outputs, seq_group_meta in zip(
                 scheduled_seq_groups, output_by_sequence_group,
@@ -1251,7 +1248,6 @@ class LLMEngine:
             self.output_processor.process_prompt_logprob(seq_group, outputs)
             if self.model_config.return_hidden_states:
                 self.output_processor.process_hidden_states(seq_group, outputs)
-                logger.error("seq_group.prompt_hidden_states: %s", seq_group.prompt_hidden_states.shape)
             if seq_group_meta.do_sample:
                 self.output_processor.process_outputs(seq_group, outputs)
 

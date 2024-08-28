@@ -1,11 +1,8 @@
 from typing import List
 from typing import Sequence as GenericSequence
 from typing import Union
-from logging import getLogger
 
 from vllm.sequence import PoolerOutput, SamplerOutput, SequenceGroupOutput
-
-logger = getLogger(__name__)
 
 def create_output_by_sequence_group(
         outputs: GenericSequence[Union[SamplerOutput, PoolerOutput]],
@@ -18,11 +15,10 @@ def create_output_by_sequence_group(
         [] for _ in range(num_seq_groups)
     ]
     for step in outputs:
-        logger.info(f"Processing step {step}")
         for i, sequence_group_output in enumerate(step):
-            if return_hidden_states and isinstance(outputs, SamplerOutput):
-                sequence_group_output.prompt_hidden_states = step.prompt_hidden_states
-                # `SamplerOutput.hidden_states` are of the shape [n_seqs, hidden_size]
+            if return_hidden_states and isinstance(step, SamplerOutput):
+                sequence_group_output.prompt_hidden_states = step.prefill_hidden_states
+                # `SamplerOutput.hidden_states` are of the shape [n_seqs, hidden_size].
                 sequence_group_output.hidden_state = step.hidden_states[i, :]
 
             output_by_sequence_group[i].append(sequence_group_output)
