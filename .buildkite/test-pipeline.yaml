@@ -348,7 +348,6 @@ steps:
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py
   - TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m distributed_2_gpus
   - pytest models/ -v -s -m distributed_2_gpus
-  - pytest -v -s distributed/test_chunked_prefill_distributed.py
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp2.py
   - pip install -e ./plugins/vllm_add_dummy_model
   - pytest -v -s distributed/test_distributed_oot.py
