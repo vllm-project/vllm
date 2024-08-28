@@ -260,7 +260,7 @@ def test_flashinfer_prefill_with_paged_kv(seq_lens: List[Tuple[int, int]],
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("soft_cap", [None,])
+@pytest.mark.parametrize("soft_cap", [None, 30.0, 50.0])
 def test_flashinfer_prefill_with_paged_fp8_kv(
         seq_lens: List[Tuple[int, int]], num_heads: Tuple[int, int],
         head_size: int, dtype: torch.dtype, block_size: int,
