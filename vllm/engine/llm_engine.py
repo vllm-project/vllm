@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import (TYPE_CHECKING, Any, ClassVar, Deque, Dict, Iterable, List,
                     Mapping, Optional)
 from typing import Sequence as GenericSequence
-from typing import Set, Type, Union
+from typing import Set, Tuple, Type, Union
 
 import torch
 from typing_extensions import TypeVar
