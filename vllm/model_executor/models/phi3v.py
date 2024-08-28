@@ -82,7 +82,7 @@ class Phi3VImagePixelInputs(TypedDict):
     in which case the data is passed as a list instead of a batched tensor.
     """
 
-    image_sizes: Union[torch.Tensor, List[torch.Tensor]]
+    image_sizes: torch.Tensor
     """
     Shape: `(batch_size * num_images, 2)`
 
