@@ -4,7 +4,7 @@
 # Copyright (c) Alibaba Cloud.
 # LICENSE: https://huggingface.co/Qwen/Qwen-7B/blob/main/LICENSE
 """Inference-only QWen model compatible with HuggingFace weights."""
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Mapping
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Mapping, TypedDict, Literal, Union
 
 import torch
 from torch import nn
@@ -64,6 +64,31 @@ from torch.nn.init import trunc_normal_
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 
+
+
+class QwenImagePixelInputs(TypedDict):
+    type: Literal["pixel_values"]
+    data: torch.Tensor
+    """
+    Shape: `(# images, 3, image_size, image_size)`
+
+    Note that image_size is the value in the vision config to which we resize
+    the image to in the normalization transform. Currently multi-image support
+    can only be leveraged by passing image embeddings directly.
+    """
+
+
+class QwenImageEmbeddingInputs(TypedDict):
+    type: Literal["image_embeds"]
+    data: torch.Tensor
+    """Shape: `(# images, 256, hidden_size)`
+
+    `hidden_size` must match the hidden size of the language model backbone
+    and is stored in the visual config of the model if we have one.
+    """
+
+
+QwenImageInputs = Union[QwenImagePixelInputs, QwenImageEmbeddingInputs]
 
 def get_abs_pos(abs_pos, tgt_size):
     # abs_pos: L, C
@@ -626,22 +651,29 @@ class QWenModel(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
-        pixel_values: Optional[torch.Tensor]=None,
+        pixel_values: Optional[QwenImageInputs],
     ) -> torch.Tensor:
-        img_pos, images  = None, None
-        # If pixel values are provided, this is a visual model, because filter in the input processor
+        img_pos = None
+        # If pixel / visual embeddings are provided, this is a visual model since we filter inputs
         if pixel_values is not None:
-            images = self.visual(pixel_values)
+            if pixel_values["type"] != "image_embeds":
+                image_embeds = self.visual(pixel_values["data"])
+            else:
+                image_embeds = pixel_values["data"]
+
+            # features should be of shape (# images, 256, hidden_dim)
             img_pos = self.visual.get_image_positions(input_ids)
-            assert img_pos is not None # TODO - compare with image / batch len
+            if img_pos.shape[0] != image_embeds.shape[0]:
+                raise ValueError(f"Number of placeholders: {img_pos.shape[0]} "
+                                f"does not match the number of images {image_embeds.shape[0]}.")
 
         if get_pp_group().is_first_rank:
             hidden_states = self.wte(input_ids)
-            # TODO - make sure batch size etc is properly handled,
-            # refactor to use common multimodal embedding merging utils
-            if images is not None and img_pos is not None:
+            # Merge the image embeddings into the hidden states if actually have
+            # visual features and the corresponding image tokens
+            if img_pos is not None:
                 for idx, (img_bos, img_eos) in enumerate(img_pos):
-                    hidden_states[img_bos + 1 : img_eos] = images[idx]
+                    hidden_states[img_bos + 1 : img_eos] = image_embeds[idx]
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -679,6 +711,7 @@ def get_image_text(image_num: int, padding: bool) -> str:
 
 def input_processor_for_qwen(ctx: InputContext, llm_inputs: LLMInputs):
     multi_modal_data = llm_inputs.get("multi_modal_data")
+
     # Only process images if we have multimodal data and a visual config
     hf_config = ctx.get_hf_config()
     if multi_modal_data is None or "image" not in multi_modal_data or not hasattr(hf_config, "visual"):
@@ -689,20 +722,22 @@ def input_processor_for_qwen(ctx: InputContext, llm_inputs: LLMInputs):
     model_config = ctx.model_config
     tokenizer = cached_get_tokenizer(model_config.tokenizer, trust_remote_code=True)
     image_data = multi_modal_data["image"]
+    if isinstance(image_data, torch.Tensor):
+        print("Processing image embed of shape {}".format(image_data.shape))
+    else:
+        print("Processing image embed of type {}".format(type(image_data)))
+
 
     if prompt is None:
         prompt = tokenizer.decode(prompt_token_ids)
-
-    if not isinstance(image_data, Image.Image):
-        raise NotImplementedError("Image supported not yet implemented for directly provided image features yet")
 
     # Replace the image tag with the image prompt with no img pads. We currently do this in
     # two steps to sidestep some tokenization substitution stuff with URLs behind handled as bytes
     # that do not like existing image pads strings, but it would be nice to find a better way to
     # handle it.
+    # TODO - handle multi-image embeddings
     image_prompt_without_padding = get_image_text(0, padding=False)
     image_prompt_with_padding = get_image_text(0, padding=True)
-
     new_prompt_no_img_pads = prompt.replace('<image>', image_prompt_without_padding, 1)
     new_prompt_with_img_pads = prompt.replace('<image>', image_prompt_with_padding, 1)
     new_prompt_token_ids = tokenizer.encode(new_prompt_no_img_pads)
@@ -722,26 +757,50 @@ def input_mapper_for_qwen(ctx: InputContext, data: object):
     model_config = ctx.model_config
     tokenizer = cached_get_tokenizer(model_config.tokenizer,
                                      trust_remote_code=True)
-    image_pair_tok = tokenizer.encode(IMG_START+IMG_END, add_special_tokens=False, return_tensors="pt").squeeze()
+
+    image_pair_tok = tokenizer.encode(
+        IMG_START+IMG_END,
+        add_special_tokens=False,
+        return_tensors="pt").squeeze()
     image_start_id = image_pair_tok[0]
     image_end_id = image_pair_tok[-1]
-    assert (image_start_id + 1) == image_end_id
-    assert len(image_pair_tok) == (MAX_QWEN_IMG_TOKENS + 2)
+    if (image_start_id + 1) != image_end_id:
+        raise ValueError(f"Found image end ID {image_end_id}, but expected ID {IMG_START} + 1")
+    if len(image_pair_tok) != (MAX_QWEN_IMG_TOKENS + 2):
+        raise ValueError(
+            f"Expected image context length of {MAX_QWEN_IMG_TOKENS}, but got {image_pair_tok - 2}"
+        )
 
-    # Apply the normalization transform to the PIL Image
     hf_config = ctx.get_hf_config()
     image_size = hf_config.visual["image_size"]
-    transform = build_normalization_transform(image_size)
-    transformed_images = [transform(data)]
+    img_emb_size = hf_config.visual["output_dim"]
 
+    if isinstance(data, torch.Tensor):
+        # It's expected that our values have already been processed
+        # by the visual transformer; shape is expected to be:
+        # (# images, 256, hidden_size)
+        if len(data.shape) == 2:
+            # Assume only one image embed was provided; unsqueeze the extra dim
+            data = data.unsqueeze(0)
+        if len(data.shape) != 3 or data.shape[1] != MAX_QWEN_IMG_TOKENS or data.shape[2] != img_emb_size:
+            raise ValueError("Expected img_embeds to be a tensor of shape"
+                f"[# images, {MAX_QWEN_IMG_TOKENS}, {img_emb_size}], but received "
+                f"shape [{pixel_values.shape}]")
+        pixel_values = data
+            
+    else:
+        transform = build_normalization_transform(image_size)
+        # TODO - handle multiple image inputs once the API is solidified
+        transformed_images = [transform(data)]
+        pixel_values = torch.stack(transformed_images, dim=0)
     return MultiModalInputs({
-        "pixel_values":  torch.stack(transformed_images, dim=0)
+        "pixel_values":  pixel_values
     })
 
 def build_normalization_transform(image_size):
-    # Currently, normalized image tensors are of shape: (batch, 3, image_size, image_size),
-    # which is usually [1, 3, 448, 448], where batch is single dimension since we don't handle
-    # multiimage inputs yet.
+    """Builds a normalization transform which can be applied to one or more input images
+    from which we want to extract visual features.
+    """
     mean = (0.48145466, 0.4578275, 0.40821073)
     std = (0.26862954, 0.26130258, 0.27577711)
     return transforms.Compose([
@@ -812,6 +871,20 @@ class QWenLMHeadModel(nn.Module, SupportsMultiModal):
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
+    def _get_image_input_type(self, pixel_values: Optional[torch.Tensor]) -> Optional[QwenImageInputs]:
+        if pixel_values is not None and self.transformer.visual is not None:
+            if len(pixel_values.shape) == 3 and pixel_values.shape[1] == MAX_QWEN_IMG_TOKENS and pixel_values.shape[2] == self.config.visual["output_dim"]:
+                return QwenImageEmbeddingInputs(
+                    type="image_embeds",
+                    data=pixel_values,
+                )
+            else:
+                # if we don't have the right embedding shape, assume we need to process still
+                return QwenImagePixelInputs(
+                    type="pixel_values",
+                    data=pixel_values,
+                )
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -819,8 +892,9 @@ class QWenLMHeadModel(nn.Module, SupportsMultiModal):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
-        pixel_values = None,
+        pixel_values: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
+        pixel_values = self._get_image_input_type(pixel_values)
         hidden_states = self.transformer(input_ids, positions, kv_caches,
                                          attn_metadata, intermediate_tensors, pixel_values)
         return hidden_states
