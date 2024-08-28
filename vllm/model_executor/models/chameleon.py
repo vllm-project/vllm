@@ -946,6 +946,9 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal):
             raise ValueError("Incorrect type of pixel values. "
                              f"Got type: {type(pixel_values)}")
 
+        # Remove the N dimension until multiple images are supported.
+        pixel_values = pixel_values.squeeze(1)
+
         return ChameleonImagePixelInputs(
             type="pixel_values",
             data=self._validate_pixel_values(pixel_values),

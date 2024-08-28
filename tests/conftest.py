@@ -42,6 +42,10 @@ _TEST_DIR = os.path.dirname(__file__)
 _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
 _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
 
+PromptImageInput = Union[List[Image.Image], List[List[Image.Image]]]
+PromptAudioInput = Union[List[Tuple[np.ndarray, int]],
+                         List[List[Tuple[np.ndarray, int]]]]
+
 
 def _read_prompts(filename: str) -> List[str]:
     with open(filename, "r") as f:
@@ -162,7 +166,7 @@ def example_encoder_decoder_prompts(
     decoder prompt) tuple.
 
     Returns:
-    
+
     * Encoder prompt list
     * Decoder prompt list (reverse of encoder prompt list)
     '''
@@ -579,8 +583,7 @@ class VllmRunner:
         self,
         prompts: List[str],
         sampling_params: SamplingParams,
-        images: Optional[Union[List[Image.Image],
-                               List[List[Image.Image]]]] = None,
+        images: Optional[PromptImageInput] = None,
     ) -> List[Tuple[List[List[int]], List[str]]]:
         if images is not None:
             assert len(prompts) == len(images)
@@ -626,10 +629,8 @@ class VllmRunner:
         self,
         prompts: List[str],
         sampling_params: SamplingParams,
-        images: Optional[Union[List[Image.Image],
-                               List[List[Image.Image]]]] = None,
-        audios: Optional[Union[List[Tuple[np.ndarray, int]],
-                               List[List[Tuple[np.ndarray, int]]]]] = None
+        images: Optional[PromptImageInput] = None,
+        audios: Optional[PromptAudioInput] = None,
     ) -> Union[List[TokensTextLogprobs],
                List[TokensTextLogprobsPromptLogprobs]]:
         assert sampling_params.logprobs is not None
@@ -693,10 +694,8 @@ class VllmRunner:
         max_tokens: int,
         num_logprobs: int,
         num_prompt_logprobs: Optional[int] = None,
-        images: Optional[Union[List[Image.Image],
-                               List[List[Image.Image]]]] = None,
-        audios: Optional[Union[List[Tuple[np.ndarray, int]],
-                               List[List[Tuple[np.ndarray, int]]]]] = None,
+        images: Optional[PromptImageInput] = None,
+        audios: Optional[PromptAudioInput] = None,
         stop_token_ids: Optional[List[int]] = None,
     ) -> Union[List[TokensTextLogprobs],
                List[TokensTextLogprobsPromptLogprobs]]:
