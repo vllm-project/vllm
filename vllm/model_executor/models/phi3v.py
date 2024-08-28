@@ -44,7 +44,7 @@ from vllm.utils import is_list_of
 
 from .clip import dummy_image_for_clip, dummy_seq_data_for_clip
 from .interfaces import SupportsMultiModal
-from .utils import merge_multimodal_embeddings
+from .utils import flatten_bn, merge_multimodal_embeddings
 
 logger = init_logger(__name__)
 
@@ -75,15 +75,16 @@ class Phi3VImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     data: Union[torch.Tensor, List[torch.Tensor]]
     """
-    Shape: `(batch_size, 1 + num_patches, num_channels, height, width)`
+    Shape:
+    `(batch_size * num_images, 1 + num_patches, num_channels, height, width)`
 
-    Note that `num_patches` may be different for each batch, in which case
-    the data is passed as a list instead of a batched tensor.
+    Note that `num_patches` may be different per batch and image,
+    in which case the data is passed as a list instead of a batched tensor.
     """
 
     image_sizes: torch.Tensor
     """
-    Shape: `(batch_size, 2)`
+    Shape: `(batch_size * num_images, 2)`
 
     This should be in `(height, width)` format.
     """
@@ -92,7 +93,7 @@ class Phi3VImagePixelInputs(TypedDict):
 class Phi3VImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
     data: Union[torch.Tensor, List[torch.Tensor]]
-    """Shape: `(batch_size, image_feature_size, hidden_size)`
+    """Shape: `(batch_size * num_images, image_feature_size, hidden_size)`
 
     `hidden_size` must match the hidden size of language model backbone.
     """
@@ -511,10 +512,19 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal):
         self.sampler = Sampler()
 
     def _validate_image_sizes(self, data: torch.Tensor) -> torch.Tensor:
-        if list(data.shape[1:]) != [2]:
-            raise ValueError(
-                f"The expected shape of image sizes is batch dimension plus "
-                f"{[2]}. You supplied {tuple(data.shape)}.")
+        expected_dims = (2, )
+
+        def _validate_shape(d: torch.Tensor):
+            actual_dims = tuple(d.shape)
+
+            if actual_dims != expected_dims:
+                expected_expr = str(expected_dims)
+                raise ValueError(
+                    f"The expected shape of image sizes per image per batch "
+                    f"is {expected_expr}. You supplied {tuple(d.shape)}.")
+
+        for d in data:
+            _validate_shape(d)
 
         return data
 
@@ -531,7 +541,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal):
             if actual_dims != expected_dims:
                 expected_expr = ("num_patches", *map(str, expected_dims))
                 raise ValueError(
-                    "The expected shape of pixel values in each batch element "
+                    "The expected shape of pixel values per image per batch "
                     f"is {expected_expr}. You supplied {tuple(d.shape)}.")
 
         for d in data:
@@ -556,30 +566,24 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal):
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
 
-            if not isinstance(image_sizes, torch.Tensor):
+            if not isinstance(image_sizes, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of image sizes. "
                                  f"Got type: {type(image_sizes)}")
 
-            # Merge the B and N dimensions.
-            if isinstance(pixel_values, torch.Tensor):
-                pixel_values = pixel_values.flatten(0, 1)
-            else:
-                pixel_values = torch.cat(pixel_values)
-
-            image_sizes = image_sizes.flatten(0, 1)
-
             return Phi3VImagePixelInputs(
                 type="pixel_values",
-                data=self._validate_pixel_values(pixel_values),
-                image_sizes=self._validate_image_sizes(image_sizes))
+                data=self._validate_pixel_values(flatten_bn(pixel_values)),
+                image_sizes=self._validate_image_sizes(
+                    flatten_bn(image_sizes, concat=True)))
 
         if image_embeds is not None:
             if not isinstance(image_embeds, torch.Tensor):
                 raise ValueError("Incorrect type of image embeddings. "
                                  f"Got type: {type(image_embeds)}")
+
             return Phi3VImageEmbeddingInputs(
                 type="image_embeds",
-                data=image_embeds,
+                data=flatten_bn(image_embeds),
             )
 
         raise AssertionError("This line should be unreachable.")
