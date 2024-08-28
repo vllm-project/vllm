@@ -6,8 +6,8 @@ import time
 import warnings
 import weakref
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type,
-                    TypeVar, Union)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set,
+                    Tuple, Type, TypeVar, Union)
 
 import numpy as np
 import torch
@@ -44,7 +44,8 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import (IntermediateTensors, SamplerOutput,
                            SequenceGroupMetadata)
 from vllm.utils import (CudaMemoryProfiler, PyObjectCache, async_tensor_h2d,
-                        flatten_2d_lists, is_hip, is_pin_memory_available)
+                        flatten_2d_lists, is_hip, is_pin_memory_available,
+                        supports_dynamo)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
     _add_attn_metadata_broadcastable_dict,
@@ -90,6 +91,7 @@ class ModelInputForGPU(ModelRunnerInputBase):
     request_ids_to_seq_ids: Optional[Dict[str, List[int]]] = None
     finished_requests_ids: Optional[List[str]] = None
     virtual_engine: int = 0
+    async_callback: Optional[Callable] = None
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
@@ -499,23 +501,48 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                             and self.sliding_window is None
                             and inter_data.is_prompt)
         inter_data.prefix_cache_hit = prefix_cache_hit
-        if self.chunked_prefill_enabled and prefix_cache_hit:
-            raise RuntimeError(
-                "chunked prefill cannot be used with prefix caching now.")
 
-        # If prefix cache is hit, advance context length to bypass
-        # hit blocks. Accordingly, input tokens, position and query length
-        # have to be updated.
-        if prefix_cache_hit:
-            assert computed_block_nums is not None
-            context_len = len(computed_block_nums) * self.block_size
+        if not prefix_cache_hit:
+            return
+
+        assert computed_block_nums is not None
+        # The cache hit prompt tokens in this sequence. Note that
+        # this may be larger than the sequence length if chunked
+        # prefill is enabled.
+        prefix_cache_len = len(computed_block_nums) * self.block_size
+        # The number of so far computed prompt tokens in this sequence.
+        context_len = inter_data.context_lens[seq_idx]
+        # The total number of prompt tokens in this sequence.
+        # When chunked prefill is enabled, this is the token number of
+        # computed chunks + current chunk.
+        seq_len = inter_data.seq_lens[seq_idx]
+        if prefix_cache_len <= context_len:
+            # We already passed the cache hit region,
+            # so do normal computation.
+            pass
+        elif context_len < prefix_cache_len < seq_len:
+            # Partial hit. Compute the missing part.
+            uncomputed_start = prefix_cache_len - context_len
             inter_data.input_tokens[seq_idx] = inter_data.input_tokens[
-                seq_idx][context_len:]
+                seq_idx][uncomputed_start:]
             inter_data.input_positions[seq_idx] = inter_data.input_positions[
-                seq_idx][context_len:]
+                seq_idx][uncomputed_start:]
+            context_len = prefix_cache_len
+
             inter_data.context_lens[seq_idx] = context_len
             inter_data.query_lens[
                 seq_idx] = inter_data.seq_lens[seq_idx] - context_len
+        elif seq_len <= prefix_cache_len:
+            # Full hit. Only compute the last token to avoid
+            # erroneous behavior. FIXME: Ideally we should directly
+            # mark all tokens as computed in the scheduler and do not
+            # schedule this sequence, so this case should not happen.
+            inter_data.input_tokens[seq_idx] = inter_data.input_tokens[
+                seq_idx][-1:]
+            inter_data.input_positions[seq_idx] = inter_data.input_positions[
+                seq_idx][-1:]
+            inter_data.query_lens[seq_idx] = 1
+            inter_data.context_lens[seq_idx] = inter_data.seq_lens[seq_idx] - 1
 
     def _compute_for_sliding_window(self, inter_data: InterDataForSeqGroup,
                                     seq_idx: int,
@@ -945,7 +972,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     "provided. Defaulting to scaling factors of 1.0. "
                     "This may lead to less accurate results!")
 
-        if envs.VLLM_TEST_DYNAMO_GRAPH_CAPTURE:
+        if envs.VLLM_TEST_DYNAMO_GRAPH_CAPTURE and supports_dynamo():
             self.model = torch.compile(self.model,
                                        fullgraph=True,
                                        backend="eager")
@@ -1096,6 +1123,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 device=self.device)
         self.execute_model(model_input, kv_caches, intermediate_tensors)
         torch.cuda.synchronize()
+
+        # reset and discard the guard and compiled bytecode for profiling runs
+        torch._dynamo.reset()
+
         return
 
     def remove_all_loras(self):
@@ -1327,7 +1358,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         virtual_engine: int = 0,
-        finished_requests_ids: Optional[List[str]] = None
+        finished_requests_ids: Optional[List[str]] = None,
     ) -> ModelInputForGPUWithSamplingMetadata:
         """Prepare the model input based on a given sequence group, including
         metadata for the sampling step.
@@ -1450,6 +1481,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
         if not self.is_driver_worker:
             return []
+
+        if model_input.async_callback is not None:
+            model_input.async_callback()
 
         # Sample the next token.
         output: SamplerOutput = self.model.sample(
