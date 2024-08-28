@@ -71,7 +71,7 @@ class MultiProposerWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
         seq_ids_with_bonus_token_in_last_step: Set[int],
     ) -> SpeculativeProposals:
         """Produce speculations given an input batch of sequences. Ideally, we
-        recieve and process all sequences in the same batch with one specified
+        receive and process all sequences in the same batch with one specified
         proposer. However, if multiple proposers are specified, we currently
         use the proposer with the lowest proposal latency for the whole batch.
         """
@@ -232,7 +232,7 @@ class MultiProposerWorker(ProposerWorkerBase, LoraNotSupportedWorkerBase):
 
         all_proposals: Dict[str, SpeculativeProposals] = {}
 
-        # Although we use ThreadPoolExecutor to get_spec_proposals concurently,
+        # Although we use ThreadPoolExecutor to get_spec_proposals for now,
         # we still need to wait for the slowest proposer to finish on each
         # batch for further scoring.
         # TODO: Fix this when there are multiple scorer instances available for

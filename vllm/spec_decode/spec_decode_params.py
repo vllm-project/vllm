@@ -1,4 +1,4 @@
-"""Parameters for speculative deocding."""
+"""Parameters for speculative decoding."""
 import copy
 
 
