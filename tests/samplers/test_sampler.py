@@ -418,6 +418,7 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
                 prompt_len = seq_data.get_prompt_len()
                 seq_lens.append(prompt_len)
 
+                assert sgm.sampling_params is not None
                 if sgm.sampling_params.prompt_logprobs:
                     # with prompt_logprobs each token in the prompt has a row in
                     # logits
@@ -533,6 +534,8 @@ def test_sampler_mixed(seed: int, device: str):
 
         for i, (sequence_output, metadata) in enumerate(
                 zip(sampler_output, seq_group_metadata_list)):
+            assert metadata.sampling_params is not None
+
             if metadata.sampling_params.use_beam_search:
                 continue
 
@@ -550,6 +553,8 @@ def test_sampler_mixed(seed: int, device: str):
             assert expected_tokens_item is not None
 
             for n, nth_output in enumerate(sequence_output.samples):
+                assert metadata.sampling_params is not None
+
                 if (metadata.sampling_params.temperature == 0
                         or metadata.sampling_params.seed is not None):
                     # Ensure exact matches for greedy or random with seed

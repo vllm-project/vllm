@@ -883,7 +883,7 @@ class SequenceGroupMetadata(
     request_id: str
     is_prompt: bool
     seq_data: Dict[int, SequenceData]
-    sampling_params: SamplingParams
+    sampling_params: Optional[SamplingParams]
     block_tables: Dict[int, List[int]]
     do_sample: bool = True
     pooling_params: Optional[PoolingParams] = None

@@ -19,7 +19,9 @@ class AudioAsset:
 
         audio_path = get_vllm_public_assets(filename=f"{self.name}.ogg",
                                             s3_prefix=ASSET_DIR)
-        return librosa.load(audio_path, sr=None)
+        y, sr = librosa.load(audio_path, sr=None)
+        assert isinstance(sr, int)
+        return y, sr
 
     @property
     def url(self) -> str:
