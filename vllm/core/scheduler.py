@@ -1,6 +1,5 @@
 import enum
 import os
-import pprint
 import random
 import time
 from collections import deque
@@ -134,8 +133,8 @@ class SchedulerOutputs:
 
     def __post_init__(self):
         # Swap in and swap out should never happen at the same time.
-        #TODO[PAN]: Must check whether the swapin and swapout are asynchronous
-        # assert not (self.blocks_to_swap_in and self.blocks_to_swap_out)
+        # NOTE: Right now the correctness depends on transmission order
+        # swap out -> copy -> swap in and they have to be sync.
 
         self.num_loras: int = len(self.lora_requests)
         if self.num_loras > 0:
@@ -527,14 +526,13 @@ class Scheduler:
 
         if (blocks_to_swap_in != [] or blocks_to_swap_out != []
                 or blocks_to_copy != []):
-            print("Running: ")
-            print("Seq ID: ",
-                  [seq.seq_group.seqs for seq in decode_seq_groups] +
-                  [seq.seq_group.seqs for seq in prefill_seq_groups])
-            print("Swap_in: ", blocks_to_swap_in)
-            print("Swap_out: ", blocks_to_swap_out)
-            print("Copy: ", blocks_to_copy)
-            #pprint.pprint(self.block_manager.block_tables)
+            logger.debug("Running: ")
+            logger.debug("Seq ID: %s",
+                         [seq.seq_group.seqs for seq in decode_seq_groups] +
+                         [seq.seq_group.seqs for seq in prefill_seq_groups])
+            logger.debug("Swap_in: %s", blocks_to_swap_in)
+            logger.debug("Swap_out: %s", blocks_to_swap_out)
+            logger.debug("Copy: %s", blocks_to_copy)
 
         return SchedulerRunningOutputs(
             decode_seq_groups=decode_seq_groups,
@@ -650,14 +648,13 @@ class Scheduler:
 
         if (blocks_to_swap_in != [] or blocks_to_swap_out != []
                 or blocks_to_copy != []):
-            print("Swapped In: ")
-            print("Seq ID: ",
-                  [seq.seq_group.seqs for seq in decode_seq_groups] +
-                  [seq.seq_group.seqs for seq in prefill_seq_groups])
-            print("Swap_in: ", blocks_to_swap_in)
-            print("Swap_out: ", blocks_to_swap_out)
-            print("Copy: ", blocks_to_copy)
-            pprint.pprint(self.block_manager.block_tables)
+            logger.debug("Swapped In: ")
+            logger.debug("Seq ID: %s",
+                         [seq.seq_group.seqs for seq in decode_seq_groups] +
+                         [seq.seq_group.seqs for seq in prefill_seq_groups])
+            logger.debug("Swap_in: %s", blocks_to_swap_in)
+            logger.debug("Swap_out: ", blocks_to_swap_out)
+            logger.debug("Copy: ", blocks_to_copy)
 
         return SchedulerSwappedInOutputs(
             decode_seq_groups=decode_seq_groups,
@@ -795,9 +792,7 @@ class Scheduler:
                 self.block_manager.adjust_swap(sg_swap_in, sg_swap_out,
                                                blocks_swap_in, blocks_swap_out,
                                                blocks_copy)
-            #if swap_in is not [] or swap_out is not []:
-            #    print("Swap in: ", swap_in)
-            #    print("Swap out: ", swap_out)
+
             seq_groups.append(
                 ScheduledSequenceGroup(seq_group=seq_group,
                                        token_chunk_size=num_new_tokens))
@@ -809,15 +804,13 @@ class Scheduler:
         if len(seq_groups) > 0:
             self.prev_prompt = True
 
-        #NOTE: address swap out and swap in issue across requests
-
         if blocks_swap_in != [] or blocks_swap_out != [] or blocks_copy != []:
-            print("Prefill: ")
-            print("Seq ID: ", [seq.seq_group.seqs for seq in seq_groups])
-            print("Swap_in: ", blocks_swap_in)
-            print("Swap_out: ", blocks_swap_out)
-            print("Copy: ", blocks_copy)
-            #pprint.pprint(self.block_manager.block_tables)
+            logger.debug("Prefill: ")
+            logger.debug("Seq ID: %s",
+                         [seq.seq_group.seqs for seq in seq_groups])
+            logger.debug("Swap_in: %s", blocks_swap_in)
+            logger.debug("Swap_out: %s", blocks_swap_out)
+            logger.debug("Copy: %s", blocks_copy)
 
         return SchedulerPrefillOutputs(
             seq_groups=seq_groups,
@@ -981,14 +974,6 @@ class Scheduler:
                                            prefills.blocks_to_swap_out,
                                            blocks_to_swap_in,
                                            blocks_to_swap_out, blocks_to_copy)
-        print("Chunked prefill: ")
-        print("Running: ", running_scheduled.blocks_to_swap_in,
-              running_scheduled.blocks_to_swap_out)
-        print("Swapped in: ", swapped_in.blocks_to_swap_in,
-              swapped_in.blocks_to_swap_out)
-        print("Prefill: ", prefills.blocks_to_swap_in,
-              prefills.blocks_to_swap_out)
-        print("Total: ", blocks_to_swap_in, blocks_to_swap_out)
 
         assert (budget.num_batched_tokens <=
                 self.scheduler_config.max_num_batched_tokens)
@@ -1223,14 +1208,14 @@ class Scheduler:
         else:
             preemption_mode = PreemptionMode.RECOMPUTE
 
-        #if self.num_cumulative_preemption % 50 == 0:
-        logger.warning(
-            "Sequence group %s is preempted by %s mode because there is "
-            "not enough KV cache space. This can affect the end-to-end "
-            "performance. Increase gpu_memory_utilization or "
-            "tensor_parallel_size to provide more KV cache memory. "
-            "total_num_cumulative_preemption=%d", seq_group.request_id,
-            preemption_mode, self.num_cumulative_preemption + 1)
+        if self.num_cumulative_preemption % 50 == 0:
+            logger.warning(
+                "Sequence group %s is preempted by %s mode because there is "
+                "not enough KV cache space. This can affect the end-to-end "
+                "performance. Increase gpu_memory_utilization or "
+                "tensor_parallel_size to provide more KV cache memory. "
+                "total_num_cumulative_preemption=%d", seq_group.request_id,
+                preemption_mode, self.num_cumulative_preemption + 1)
         self.num_cumulative_preemption += 1
 
         if preemption_mode == PreemptionMode.RECOMPUTE:
@@ -1259,13 +1244,14 @@ class Scheduler:
     ) -> None:
         self._swap_out(seq_group, blocks_to_swap_out)
 
-    def _swap_in(self, seq_group: SequenceGroup,
-                 blocks_to_swap_in: List[Tuple[int, int]],
-                 blocks_to_swap_out: List[Tuple[int, int]],
-                 blocks_to_copy: List[Tuple[int, int], ]) -> None:
+    def _swap_in(
+        self,
+        seq_group: SequenceGroup,
+        blocks_to_swap_in: List[Tuple[int, int]],
+        blocks_to_swap_out: List[Tuple[int, int]],
+        blocks_to_copy: List[Tuple[int, int]],
+    ) -> None:
         mapping, swap_out = self.block_manager.swap_in(seq_group)
-        print("_swap_in: ", [seq.seq_id for seq in seq_group.seqs])
-        print(mapping, swap_out)
         self.block_manager.adjust_swap(mapping, swap_out, blocks_to_swap_in,
                                        blocks_to_swap_out, blocks_to_copy)
         for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
