@@ -35,7 +35,9 @@ from vllm.multimodal.image import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors, SequenceData
 
 from .utils import is_pp_missing_parameter, make_layers
+from vllm.logger import init_logger
 
+logger = init_logger(__name__)
 IMG_START = "<img>"
 IMG_END = "</img>"
 IMG_PAD = "<imgpad>"
@@ -605,7 +607,7 @@ class QWenModel(nn.Module):
             lambda prefix: QWenBlock(config, cache_config, quant_config),
             prefix=f"{prefix}.h")
         self.ln_f = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
-        self.visual = VisionTransformer(**config.visual)
+        self.visual = VisionTransformer(**config.visual) if hasattr(config, "visual") else None
 
     def forward(
         self,
@@ -617,6 +619,7 @@ class QWenModel(nn.Module):
         pixel_values: Optional[torch.Tensor]=None,
     ) -> torch.Tensor:
         img_pos, images  = None, None
+        # If pixel values are provided, this is a visual model, because filter in the input processor
         if pixel_values is not None:
             images = self.visual(pixel_values)
             img_pos = get_image_positions(input_ids)
@@ -676,8 +679,11 @@ def get_image_text(image_num: int, padding: bool) -> str:
 
 def input_processor_for_qwen(ctx: InputContext, llm_inputs: LLMInputs):
     multi_modal_data = llm_inputs.get("multi_modal_data")
-    if multi_modal_data is None or "image" not in multi_modal_data:
+    # Only process images if we have multimodal data and a visual config
+    hf_config = ctx.get_hf_config()
+    if multi_modal_data is None or "image" not in multi_modal_data or not hasattr(hf_config, "visual"):
         return llm_inputs
+
     prompt = llm_inputs.get("prompt")
     prompt_token_ids = llm_inputs["prompt_token_ids"]
     model_config = ctx.model_config
@@ -706,6 +712,13 @@ def input_processor_for_qwen(ctx: InputContext, llm_inputs: LLMInputs):
                      multi_modal_data=multi_modal_data)
 
 def input_mapper_for_qwen(ctx: InputContext, data: object):
+    # Early exit if we have provided an image to a language only Qwen model
+    hf_config = ctx.get_hf_config()
+    if not hasattr(hf_config, "visual"):
+        logger.warning("Images were provided but this model has no visual config; "
+                        "multimodal inputs will not be forwarded to the model.")
+        return MultiModalInputs()
+
     model_config = ctx.model_config
     tokenizer = cached_get_tokenizer(model_config.tokenizer,
                                      trust_remote_code=True)
@@ -748,19 +761,17 @@ def dummy_data_for_qwen(ctx: InputContext, seq_len: int,
     # The presence of a visual config indicates this is a multimodal model.
     # If we don't have it, the model is considered an LLM for warmup purposes.
     if not hasattr(hf_config, "visual"):
-        print("Using text data to warmup")
         seq_data = SequenceData([0] * seq_len)
         mm_data = None
         return seq_data, mm_data
 
-    # We have a visual component! Use images to warm up
+    # We have a visual component - use images to warm up
     num_images = mm_counts["image"]
     image_feature_size = MAX_QWEN_IMG_TOKENS
     model_config = ctx.model_config
-
-    print("Using multimodal data to warmup")
     tokenizer = cached_get_tokenizer(model_config.tokenizer,
                                      trust_remote_code=True)
+
     # Encode an image pair for each image. During the encoding, qwen tokenizers will add
     # image pads between the start/end. We leave this to the tokenizer, because we need
     # to rely on the number of added pads at inference time.
