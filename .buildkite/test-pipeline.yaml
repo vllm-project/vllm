@@ -173,6 +173,7 @@ steps:
   - vllm/
   commands:
     - pytest -v -s ./compile/test_full_graph.py
+    - pytest -v -s ./compile/test_wrapper.py
 
 
 - label: Vision Language Models Test # 42min
