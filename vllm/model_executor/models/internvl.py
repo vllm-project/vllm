@@ -42,19 +42,16 @@ IMAGENET_STD = (0.229, 0.224, 0.225)
 
 class InternVLImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
-    data: Union[torch.Tensor, List[torch.Tensor]]
+    data: torch.Tensor
     """
     Shape:
-    `(batch_size * num_images, 1 + num_patches, num_channels, height, width)`
-
-    Note that `num_patches` may be different per batch and image,
-    in which case the data is passed as a list instead of a batched tensor.
+    `(batch_size * num_images * (1 + num_patches), num_channels, height, width)`
     """
 
 
 class InternVLImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
-    data: Union[torch.Tensor, List[torch.Tensor]]
+    data: torch.Tensor
     """Shape: `(batch_size * num_images, image_feature_size, hidden_size)`
 
     `hidden_size` must match the hidden size of language model backbone.
@@ -358,7 +355,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
             x = x.permute(0, 2, 1, 3).contiguous()
         return x
 
-    def extract_feature(self, pixel_values):
+    def extract_feature(self, pixel_values: torch.Tensor) -> torch.Tensor:
         vit_embeds = self.vision_model(pixel_values=pixel_values)
         vit_embeds = vit_embeds[:, 1:, :]
 
@@ -371,9 +368,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
         vit_embeds = self.mlp1(vit_embeds)
         return vit_embeds
 
-    def _validate_pixel_values(
-        self, data: Union[torch.Tensor, List[torch.Tensor]]
-    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+    def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
 
         h = w = self.config.vision_config.image_size
         expected_dims = (3, h, w)
@@ -382,10 +377,11 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
             actual_dims = tuple(d.shape)
 
             if actual_dims != expected_dims:
-                expected_expr = ("num_patches", *map(str, expected_dims))
+                expected_expr = str(expected_dims)
                 raise ValueError(
                     "The expected shape of pixel values per image per batch "
-                    f"is {expected_expr}. You supplied {tuple(d.shape)}.")
+                    f" per patch is {expected_expr}. "
+                    f"You supplied {tuple(d.shape)}.")
 
         for d in data:
             _validate_shape(d)
@@ -420,7 +416,8 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
 
             return InternVLImagePixelInputs(
                 type="pixel_values",
-                data=self._validate_pixel_values(flatten_bn(pixel_values)),
+                data=self._validate_pixel_values(
+                    flatten_bn(pixel_values, concat=True).flatten(0, 1)),
             )
 
         raise AssertionError("This line should be unreachable.")
