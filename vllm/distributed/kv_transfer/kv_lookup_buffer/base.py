@@ -4,10 +4,12 @@ from typing import Optional
 import torch
 
 
-class KV_Database(ABC):
+class KVLookupBufferBase(ABC):
     
     @abstractmethod
-    def insert(self, input_tokens, kv, roi):
+    def insert(self,
+               input_tokens: torch.Tensor,
+               kv: torch.Tensor, roi) -> None:
         raise NotImplementedError
     
     @abstractmethod
