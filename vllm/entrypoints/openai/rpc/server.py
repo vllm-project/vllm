@@ -8,6 +8,7 @@ import uvloop
 import zmq
 import zmq.asyncio
 from typing_extensions import Never
+from zmq import Frame  # type: ignore[attr-defined]
 from zmq.asyncio import Socket
 
 from vllm import AsyncEngineArgs, AsyncLLMEngine
@@ -150,10 +151,10 @@ class AsyncEngineRPCServer:
         ))
 
     def _make_handler_coro(self, identity,
-                           message) -> Coroutine[Any, Any, Never]:
+                           message: Frame) -> Coroutine[Any, Any, Never]:
         """Route the zmq message to the handler coroutine."""
 
-        request = cloudpickle.loads(message)
+        request = cloudpickle.loads(message.buffer)
 
         if isinstance(request, RPCGenerateRequest):
             return self.generate(identity, request)
@@ -194,7 +195,7 @@ class AsyncEngineRPCServer:
         running_tasks = set()
         while True:
             # Wait for a request.
-            identity, message = await self.socket.recv_multipart()
+            identity, message = await self.socket.recv_multipart(copy=False)
 
             # Process the request async.
             task = asyncio.create_task(
