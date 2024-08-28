@@ -8,15 +8,11 @@ from vllm.engine.llm_engine import LLMEngine
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 
-logger = getLogger(__name__)
-
 @pytest.mark.parametrize("model", ["facebook/opt-125m"])
 def test_return_hidden_states(model: str):
     # This test checks if stepping the LLM successfully runs iterations
-    # and returns hidden states for each request which are as expected. 
-
-
-    engine_args = EngineArgs(model=model, return_hidden_states=True)
+    # and returns hidden states for each request. 
+    engine_args = EngineArgs(model=model, return_hidden_states=True, enforce_eager=True)
 
     engine = LLMEngine.from_engine_args(engine_args)
     tokenizer = engine.tokenizer.tokenizer
@@ -32,7 +28,8 @@ def test_return_hidden_states(model: str):
         "decoration.")
     prompt2b = (
         " Please only recommend resources that build cars capable of "
-        "super-sonic speeds.")
+        "supersonic speeds.")
+
     prompt_2a_tokens = tokenizer(prompt2a)['input_ids']
     prompt_2b_tokens = tokenizer(prompt2b)['input_ids']
     assert len(prompt_2a_tokens) > len(prompt_2b_tokens)
@@ -49,19 +46,31 @@ def test_return_hidden_states(model: str):
     # Ensure the prompt hidden states match numerically what we would expect.
     assert torch.equal(request1_out.prompt_hidden_states[:len(prompt1_tokens)],
                        request2_out.prompt_hidden_states[:len(prompt1_tokens)])
-    assert (request1_out.prompt_hidden_states.shape[0] 
-            > request2_out.prompt_hidden_states.shape[0])
-    # Ensure hidden states are returned.
+    assert not torch.equal(
+        request1_out.prompt_hidden_states[len(prompt1_tokens):],
+        request2_out.prompt_hidden_states[len(prompt1_tokens):])
+    # Minus 1 for the additional stop tokens added when the sequences are tokenized seprately.
+    assert request1_out.prompt_hidden_states.shape[0] == (len(prompt1_tokens) + len(prompt_2a_tokens) - 1)
+    assert request2_out.prompt_hidden_states.shape[0] == (len(prompt1_tokens) + len(prompt_2b_tokens) - 1)
+    # Ensure hidden states are returned from step 1.
     assert (request1_out.outputs[0].hidden_states is not None
             and request2_out.outputs[0].hidden_states is not None)
-    # Ensure hidden states match numerically what we would expect.
-    assert (request1_out.outputs[0].token_ids[0]
-            == request2_out.outputs[0].token_ids[0])
+    # Ensure step 1 hidden states match numerically what we would expect.
+    assert not torch.equal(
+        request1_out.outputs[0].hidden_states,
+        request2_out.outputs[0].hidden_states)
+    request1_step1_hidden_states = request1_out.outputs[0].hidden_states.clone()
+    request2_step1_hidden_states = request2_out.outputs[0].hidden_states.clone()
 
     step2_out = engine.step()
     assert isinstance(step2_out, list)
     assert isinstance(step2_out[0], RequestOutput)
-    assert step2_out[0].prompt_hidden_states is not None
-    assert torch.equal(step1_out[0].prompt_hidden_states,
-                       step2_out[0].prompt_hidden_states)
-    assert step2_out[0].outputs[0].hidden_states is not None
+    request1_out, request2_out = step2_out
+    assert (isinstance(request1_out, RequestOutput) 
+        and isinstance(request2_out, RequestOutput))
+    # Ensure hidden states are being accumulated.
+    assert (request1_out.outputs[0].hidden_states is not None
+            and request2_out.outputs[0].hidden_states is not None)
+    # Ensure hidden states are being accumulated correctly.
+    assert request1_out.outputs[0].hidden_states.shape[0] > request1_step1_hidden_states.shape[0]
+    assert request2_out.outputs[0].hidden_states.shape[0] > request2_step1_hidden_states.shape[0]

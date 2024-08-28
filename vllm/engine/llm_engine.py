@@ -1217,7 +1217,7 @@ class LLMEngine:
         # [step][sequence group].
         output_by_sequence_group = create_output_by_sequence_group(
             output, 
-            num_seq_groups=len(scheduled_seq_groups),
+            scheduled_seq_groups=scheduled_seq_groups,
             return_hidden_states=self.model_config.return_hidden_states)
         # Update the scheduled sequence groups with the model outputs.
         for scheduled_seq_group, outputs, seq_group_meta in zip(
