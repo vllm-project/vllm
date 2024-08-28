@@ -246,9 +246,8 @@ def is_pp_missing_parameter(name: str, model: torch.nn.Module) -> bool:
 def make_empty_intermediate_tensors_factory(keys: List[str],
                                             hidden_size: int) -> Callable:
 
-    def make_empty_intermediate_tensors(
-            batch_size: int, dtype: torch.dtype,
-            device: torch.device) -> NestedTensors:
+    def make_empty_intermediate_tensors(batch_size: int, dtype: torch.dtype,
+                                        device: torch.device) -> NestedTensors:
         return NestedTensors({
             key: torch.zeros((batch_size, hidden_size),
                              dtype=dtype,
