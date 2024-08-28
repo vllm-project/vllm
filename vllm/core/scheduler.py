@@ -302,7 +302,7 @@ class Scheduler:
         cache_config: CacheConfig,
         lora_config: Optional[LoRAConfig],
         pipeline_parallel_size: int = 1,
-        output_proc_callback_fn: Optional[Callable] = None,
+        output_proc_callback: Optional[Callable] = None,
     ) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
@@ -376,8 +376,8 @@ class Scheduler:
         # iterations. I.e. since the output processing is lagged one step,
         # we cannot reuse the cached objects immediately when the schedule()
         # is called again, but only when schedule() is called the second time.
-        self.output_proc_callback_fn = output_proc_callback_fn
-        self.use_async_output_proc = self.output_proc_callback_fn is not None
+        self.output_proc_callback = output_proc_callback
+        self.use_async_output_proc = self.output_proc_callback is not None
         self.num_cache_iters = 2 if self.use_async_output_proc else 1
 
         self.cache_id = 0
@@ -573,8 +573,8 @@ class Scheduler:
                     seq_group):
                 tmp = self.running
                 self.running = orig_running
-                assert self.output_proc_callback_fn is not None
-                self.output_proc_callback_fn(is_async=True)
+                assert self.output_proc_callback is not None
+                self.output_proc_callback()
                 self.running = tmp
 
             while not self._can_append_slots(seq_group):
@@ -1091,7 +1091,6 @@ class Scheduler:
         no_beam_search = seq_group.sampling_params is None or (
             seq_group.sampling_params.best_of == 1
             and not seq_group.sampling_params.use_beam_search)
-
         return no_beam_search
 
     def schedule(
