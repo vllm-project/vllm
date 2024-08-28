@@ -163,25 +163,32 @@ A variety of speculative models of this type are available on HF hub:
 
 Lossless guarantees of Speculative Decoding in vLLM
 ---------------------------------------------------
-In vLLM, speculative decoding aims to enhance inference efficiency while maintaining accuracy. This section addresses the lossless guarantees of speculative decoding, breaking down the guarantees into three key areas:
+In vLLM, speculative decoding aims to enhance inference efficiency while maintaining accuracy. This section addresses the lossless guarantees of 
+speculative decoding, breaking down the guarantees into three key areas:
 
 1. **Theoretical Losslessness**
    - Speculative decoding is theoretically lossless up to the precision limits of hardware numerics. Floating-point errors might 
-   cause slight variations in output distributions, as discussed in *Accelerating Large Language Model Decoding with Speculative Sampling*.
+   cause slight variations in output distributions, as discussed 
+   in `Accelerating Large Language Model Decoding with Speculative Sampling <https://arxiv.org/pdf/2302.01318>`_
 
 2. **vLLM Algorithmic Losslessness**
    - vLLM’s implementation of speculative decoding is algorithmically validated to be lossless when the
    temperature parameter (`temp`) is set to 0. Key tests include:
+
     - **Rejection Sampler Convergence**: Ensures that samples from vLLM’s rejection sampler align with the target 
-    distribution. `View Test Code <https://github.com/vllm-project/vllm/blob/47b65a5/vllm/tests/samplers/test_rejection_sampler.py>`_
+     distribution. `View Test Code <https://github.com/vllm-project/vllm/blob/47b65a550866c7ffbd076ecb74106714838ce7da/tests/samplers/test_rejection_sampler.py#L252>`_
+
     - **Greedy Sampling Equality**: Confirms that greedy sampling with speculative decoding matches greedy sampling
-     without it. `View Test Code <https://github.com/vllm-project/vllm/tree/b67ae00cdbbe1a58ffc8ff170f0c8d79044a684a/tests/spec_decode/e2e>`_
+     without it. This verifies that vLLM's speculative decoding framework, when integrated with the vLLM forward pass and the vLLM rejection sampler, 
+     provides a lossless guarantee.  Almost all of the tests in `this directory <https://github.com/vllm-project/vllm/tree/b67ae00cdbbe1a58ffc8ff170f0c8d79044a684a/tests/spec_decode/e2e>`_
+     verify this property using `this assertion implementation <https://github.com/vllm-project/vllm/blob/b67ae00cdbbe1a58ffc8ff170f0c8d79044a684a/tests/spec_decode/e2e/conftest.py#L291>`_
 
 3. **vLLM Logprob Stability**
    - vLLM currently does not guarantee stable log probabilities (logprobs) across different batch sizes, which might 
    cause small variations in output probabilities. 
    This issue may stem from non-deterministic behaviors in batched operations or numerical instability in Torch operations. 
-   `See Test Code and Discussion <https://github.com/vllm-project/vllm/blob/47b65a5/vllm/tests/spec_decode/e2e/test_multistep_correctness.py>`_
+   `See Test Code and Discussion <https://github.com/vllm-project/vllm/blob/47b65a5/vllm/tests/spec_decode/e2e/test_multistep_correctness.py>`_ as explained
+   `here in the Numerical Accuracy section <https://pytorch.org/docs/stable/notes/numerical_accuracy.html#batched-computations-or-slice-computations>`_
 
 **Conclusion
 
@@ -189,6 +196,7 @@ While vLLM strives to ensure losslessness in speculative decoding, variations in
 can occur due to following factors:
 
 - **Floating-Point Precision**: Differences in hardware numerical precision may lead to slight discrepancies in the output distribution.
+
 - **Batch Size and Numerical Stability**: Changes in batch size may cause variations in logprobs and output probabilities, potentially due to
 non-deterministic behavior in batched operations or numerical instability.
 
