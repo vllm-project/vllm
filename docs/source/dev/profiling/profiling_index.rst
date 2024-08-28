@@ -24,13 +24,25 @@ Traces can be visualized using https://ui.perfetto.dev/.
    Set the env variable VLLM_RPC_GET_DATA_TIMEOUT_MS to a big number before you start the server. Say something like 30 minutes.
    ``export VLLM_RPC_GET_DATA_TIMEOUT_MS=1800000``
   
-Example commands:
+Example commands and usage:
+===========================
+
+Offline Inference:
+------------------
+
+Source https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_with_profiler.py.
+
+.. literalinclude:: ../../../../examples/offline_inference_with_profiler.py
+    :language: python
+    :linenos:
+
 
 OpenAI Server:
+--------------
 
 .. code-block:: bash
 
-    VLLM_TORCH_PROFILER_DIR=/mnt/traces/ python -m vllm.entrypoints.openai.api_server --model meta-llama/Meta-Llama-3-70B 
+    VLLM_TORCH_PROFILER_DIR=./vllm_profile python -m vllm.entrypoints.openai.api_server --model meta-llama/Meta-Llama-3-70B 
 
 benchmark_serving.py:
 
