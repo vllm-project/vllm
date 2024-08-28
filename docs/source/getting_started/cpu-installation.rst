@@ -148,7 +148,7 @@ CPU Backend Considerations
 
 * Decouple the HTTP serving components from the inference components. In a GPU backend configuration, the HTTP serving and tokenization tasks operate on the CPU, while inference runs on the GPU, which typically does not pose a problem. However, in a CPU-based setup, the HTTP serving and tokenization can cause significant context switching and reduced cache efficiency. Therefore, it is strongly recommended to segregate these two components for improved performance.
 
-* Like the GPU backend, vLLM on CPU backend also supports tensor-parallel inference and serving. On CPU based vLLM deployment with NUMA enabled, the memory access performance may largely impacted by the topology(details). The typical optimized deployments are to enable Tensor Parallel or Data Parallel on such platform:  
+* Like the GPU backend, vLLM CPU backend also supports tensor-parallel inference and serving. On CPU based vLLM deployment with NUMA enabled, the memory access performance may be largely impacted by the topology (details). Two optimizations are to enable Tensor Parallel or Data Parallel:  
 
   * Tensor Parallel for a latency constraints deployment: a Megatron-LM's parallel algorithm will used to shard the model, based on the NUMA nodes, e.g. TP = 2 for a two NUMA node system. 
   * Data Parallel for better throughput: the idea is to launch LLM serving endpoint on each NUMA node, also with one additional load balancer to dispatch the requests to those endpoints. 
