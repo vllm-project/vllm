@@ -50,7 +50,7 @@ class LlavaNextImagePixelInputs(TypedDict):
     Shape:
     `(batch_size * num_images, 1 + num_patches, num_channels, height, width)`
 
-    Note that `num_patches` may be different for per batch and image,
+    Note that `num_patches` may be different per batch and image,
     in which case the data is passed as a list instead of a batched tensor.
     """
 
@@ -318,11 +318,11 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
     def _validate_image_sizes(
         self, data: Union[torch.Tensor, List[torch.Tensor]]
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
-        expected_dims = (2,)
+        expected_dims = (2, )
 
         def _validate_shape(d: torch.Tensor):
             actual_dims = tuple(d.shape)
-    
+
             if actual_dims != expected_dims:
                 expected_expr = str(expected_dims)
                 raise ValueError(

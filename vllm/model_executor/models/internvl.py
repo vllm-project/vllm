@@ -47,7 +47,7 @@ class InternVLImagePixelInputs(TypedDict):
     Shape:
     `(batch_size * num_images, 1 + num_patches, num_channels, height, width)`
 
-    Note that `num_patches` may be different for per batch and image,
+    Note that `num_patches` may be different per batch and image,
     in which case the data is passed as a list instead of a batched tensor.
     """
 
