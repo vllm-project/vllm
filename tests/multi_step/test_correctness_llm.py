@@ -34,6 +34,31 @@ def test_multi_step_llm(
     num_prompts: int,
     num_logprobs: Optional[int],
 ) -> None:
+    """Test vLLM engine with multi-step scheduling via sync LLM Engine.
+
+    Set up a HuggingFace (HF) transformers model as a ground-truth reference.
+
+    Prompt them with the same example prompts.
+
+    Validate:
+    * Generated tokens match
+    * Generated logprobs are all very close
+
+    Args:
+      hf_runner: HF transformers model runner fixture
+      vllm_runner: vLLM model runner fixture
+      example_prompts: test fixture providing example prompts
+      model: model under test (same for single- and multi-step engines)
+      dtype: tensor datatype for engine to utilize
+      tp_size: degree of tensor-parallelism
+      max_tokens: the maximum number of tokens to generate
+      enforce_eager
+      num_scheduler_steps: for multi-step scheduling, GPU-side steps per
+                           GPU -> CPU output transfer
+      num_prompts: number of example prompts under test
+      num_logprobs: corresponds to the `logprobs` argument to the OpenAI
+                    completions endpoint; `None` -> no logprobs
+    """
 
     prompts = example_prompts
     if len(prompts) < num_prompts:
