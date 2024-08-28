@@ -30,48 +30,31 @@ from torch import nn
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
-from vllm.distributed import (
-    get_pp_group,
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
+from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (
-    MergedColumnParallelLinear,
-    QKVParallelLinear,
-    RowParallelLinear,
-)
+from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
+                                               QKVParallelLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig,
-)
+    QuantizationConfig)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
-    get_compressed_tensors_cache_scale,
-)
+    get_compressed_tensors_cache_scale)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
-    ParallelLMHead,
-    VocabParallelEmbedding,
-)
+    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    kv_cache_scales_loader,
-    maybe_remap_kv_scale_name,
-)
+    default_weight_loader, kv_cache_scales_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.transformers_utils.configs.exaone import ExaoneConfig
 from vllm.utils import is_hip
 
-from vllm.model_executor.models.interfaces import SupportsLoRA
-from vllm.model_executor.models.utils import (
-    PPMissingLayer,
-    is_pp_missing_parameter,
-    make_layers,
-)
+from .interfaces import SupportsLoRA
+from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
 
 
 class ExaoneGatedMLP(nn.Module):
