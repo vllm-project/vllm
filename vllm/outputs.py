@@ -53,7 +53,7 @@ class CompletionOutput:
                 f"finish_reason={self.finish_reason}, "
                 f"stop_reason={self.stop_reason}, "
                 "hidden_states="
-                f"Tensor({self.hidden_states.shape}))" 
+                f"Tensor({self.hidden_states.shape}))"
                 if self.hidden_states is not None else "None)")
 
 
@@ -157,7 +157,8 @@ class RequestOutput:
                 seq.output_logprobs if include_logprobs else None,
                 SequenceStatus.get_finished_reason(seq.status),
                 seq.stop_reason,
-                hidden_states=seq.hidden_states) for seq in top_n_seqs]
+                hidden_states=seq.hidden_states) for seq in top_n_seqs
+        ]
 
         # Every sequence in the sequence group should have the same prompt.
         prompt = seq_group.prompt
@@ -193,7 +194,7 @@ class RequestOutput:
                 f"metrics={self.metrics}, "
                 f"lora_request={self.lora_request})"
                 "prompt_hidden_states="
-                f"Tensor({self.prompt_hidden_states.shape}))" 
+                f"Tensor({self.prompt_hidden_states.shape}))"
                 if self.prompt_hidden_states is not None else "None)")
 
 
