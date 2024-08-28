@@ -350,8 +350,11 @@ class _AsyncLLMEngine(LLMEngine):
                 last_sampled_token_ids=last_sampled_token_ids)
 
             if allow_async_output_proc:
-                execute_model_req.async_callback = self.async_callback[
-                    virtual_engine]
+                async_callback = self.async_callback_multi_step[
+                    virtual_engine] if use_async_and_multi_step \
+                    else self.async_callback[virtual_engine]
+
+                execute_model_req.async_callback = async_callback
                 execute_model_req.use_async_and_multi_step = \
                     use_async_and_multi_step
 

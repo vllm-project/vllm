@@ -1262,12 +1262,6 @@ class HiddenStates(msgspec.Struct, array_like=True,
             [self.hidden_states, self.second_last_token_hidden_states])[index]
 
 
-@dataclass
-class AsyncCallbackData:
-    func: Callable
-    kw_args: Dict[str, Any]
-
-
 class ExecuteModelRequest(
         msgspec.Struct,
         array_like=True,  # type: ignore[call-arg]

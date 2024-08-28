@@ -1,6 +1,7 @@
 import dataclasses
+import functools
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union
 
 try:
     from vllm.attention.backends.flash_attn import FlashAttentionMetadata
@@ -14,9 +15,9 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
-from vllm.sequence import (AsyncCallbackData, CompletionSequenceGroupOutput,
-                           IntermediateTensors, Logprob, SamplerOutput,
-                           SequenceGroupMetadata, SequenceOutput)
+from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
+                           Logprob, SamplerOutput, SequenceGroupMetadata,
+                           SequenceOutput)
 from vllm.worker.model_runner import (GPUModelRunnerBase,
                                       ModelInputForGPUWithSamplingMetadata)
 from vllm.worker.model_runner_base import (
@@ -217,28 +218,18 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         return model_input
 
     def _async_process_outputs(self, model_input: StatefulModelInput,
-                               output_proc_callback: AsyncCallbackData):
-        output_proc_fn = output_proc_callback.func
-        output_proc_kw_args = output_proc_callback.kw_args
-        virtual_engine = output_proc_kw_args["virtual_engine"]
-
+                               output_proc_callback: Callable):
         for model_output in model_input.cached_outputs:
             if not model_output.pythonized:
                 model_output.maybe_pythonize(model_input, self._copy_stream,
                                              self.pinned_sampled_token_ids)
                 if model_output.pythonized:
-                    output_proc_fn(virtual_engine=virtual_engine,
-                                   is_async=False,
-                                   sampler_output=model_output.sampler_output)
+                    output_proc_callback(
+                        sampler_output=model_output.sampler_output)
 
     def _final_process_outputs(self, model_input: StatefulModelInput,
-                               output_proc_callback: AsyncCallbackData):
+                               output_proc_callback: Optional[Callable]):
         assert model_input.frozen_model_input is not None
-
-        if output_proc_callback is not None:
-            output_proc_fn = output_proc_callback.func
-            output_proc_kw_args = output_proc_callback.kw_args
-            virtual_engine = output_proc_kw_args["virtual_engine"]
 
         outputs = []
         for output_id in range(len(model_input.cached_outputs)):
@@ -250,10 +241,9 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
                                  self.pinned_sampled_token_ids)
 
                 if model_input.frozen_model_input.use_async_and_multi_step:
-                    output_proc_fn(virtual_engine=virtual_engine,
-                                   is_async=False,
-                                   sampler_output=output.sampler_output,
-                                   is_last_output=is_last_output)
+                    assert output_proc_callback is not None
+                    output_proc_callback(sampler_output=output.sampler_output,
+                                         is_last_output=is_last_output)
 
             outputs.append(output.sampler_output)
 
@@ -318,11 +308,11 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         output_proc_callback = None
         if frozen_model_input.use_async_and_multi_step:
             output_proc_callback = frozen_model_input.async_callback
-            async_callback = AsyncCallbackData(
-                self._async_process_outputs, {
-                    "model_input": model_input,
-                    "output_proc_callback": output_proc_callback
-                })
+            assert output_proc_callback is not None
+            async_callback = functools.partial(
+                self._async_process_outputs,
+                model_input=model_input,
+                output_proc_callback=output_proc_callback)
 
             frozen_model_input = dataclasses.replace(  # type: ignore
                 model_input.frozen_model_input,
