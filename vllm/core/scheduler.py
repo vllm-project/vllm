@@ -1361,8 +1361,10 @@ class Scheduler:
 
         if preemption_mode == PreemptionMode.RECOMPUTE:
             self._preempt_by_recompute(seq_group)
+            seq_group.accumulate_preempt_recompute_count()
         elif preemption_mode == PreemptionMode.SWAP:
             self._preempt_by_swap(seq_group, blocks_to_swap_out)
+            seq_group.accumulate_preempt_swap_count()
         else:
             raise AssertionError("Invalid preemption mode.")
         return preemption_mode
@@ -1408,6 +1410,7 @@ class Scheduler:
                 "the swap space to avoid this error.")
         mapping = self.block_manager.swap_out(seq_group)
         blocks_to_swap_out.extend(mapping)
+        seq_group.accumulate_preempt_swap_block_count(len(mapping))
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             seq.status = SequenceStatus.SWAPPED
 
