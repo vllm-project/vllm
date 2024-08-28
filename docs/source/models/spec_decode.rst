@@ -196,8 +196,8 @@ can occur due to following factors:
 
 - **Floating-Point Precision**: Differences in hardware numerical precision may lead to slight discrepancies in the output distribution.
 
-- **Batch Size and Numerical Stability**: Changes in batch size may cause variations in logprobs and output probabilities, potentially due to
-non-deterministic behavior in batched operations or numerical instability.
+- **Batch Size and Numerical Stability**: Changes in batch size may cause variations in logprobs and output probabilities, potentially
+due to non-deterministic behavior in batched operations or numerical instability.
 
 For stable generation across different runs, using request-seeds is recommended, although it may affect latency. For more information,
 refer to `Bugfix #6034 <https://github.com/vllm-project/vllm/issues/6034>`_.
