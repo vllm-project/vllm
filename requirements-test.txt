@@ -11,7 +11,7 @@ pytest-shard
 
 # testing utils
 awscli
-einops # required for MPT and qwen-vl
+einops # required for MPT, qwen-vl and Mamba
 httpx
 peft
 requests
