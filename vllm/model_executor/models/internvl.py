@@ -244,6 +244,8 @@ def input_mapper_for_internvl(ctx: InputContext, data: object):
                                      min_num,
                                      max_num,
                                      use_thumbnail=use_thumbnail)
+        # Add an N dimension for number of images per prompt (currently 1).
+        data = data.unsqueeze(0)
     model_config = ctx.model_config
     tokenizer = cached_get_tokenizer(model_config.tokenizer,
                                      trust_remote_code=True)
@@ -410,6 +412,10 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
             if not isinstance(image_embeds, torch.Tensor):
                 raise ValueError("Incorrect type of image embeddings. "
                                  f"Got type: {type(image_embeds)}")
+
+            # Flatten the B and N dimensions
+            image_embeds = image_embeds.flatten(0, 2)
+
             return InternVLImageEmbeddingInputs(
                 type="image_embeds",
                 data=image_embeds,
@@ -421,6 +427,9 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
             if not isinstance(pixel_values, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
+
+            # Flatten the B and N dimensions
+            pixel_values = pixel_values.flatten(0, 2)
 
             return InternVLImagePixelInputs(
                 type="pixel_values",
