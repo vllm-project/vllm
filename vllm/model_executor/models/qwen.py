@@ -375,6 +375,7 @@ class VisionTransformer(nn.Module):
             mlp_ratio: float,
             n_queries: int = 256,
             output_dim: int = 512,
+            image_start_id: int = 151857,
             **kwargs
     ):
         super().__init__()
@@ -410,6 +411,8 @@ class VisionTransformer(nn.Module):
         )
         self.ln_post = norm_layer(output_dim)
         self.proj = nn.Parameter((output_dim** -0.5) * torch.randn(output_dim, output_dim))
+        self.image_start_id = image_start_id
+        self.image_end_id = image_start_id + 1
 
     def forward(self, x: torch.Tensor):
         x = x.to(
@@ -435,6 +438,13 @@ class VisionTransformer(nn.Module):
         x = x @ self.proj
 
         return x
+
+    def get_image_positions(self, input_ids):
+        if torch.any(input_ids == self.image_start_id):
+            bos_pos = torch.where(input_ids == self.image_start_id)
+            eos_pos = torch.where(input_ids == self.image_end_id)
+            return torch.stack((bos_pos[0], eos_pos[0]), dim=1)
+        return None
 
 
 class QWenMLP(nn.Module):
@@ -622,7 +632,7 @@ class QWenModel(nn.Module):
         # If pixel values are provided, this is a visual model, because filter in the input processor
         if pixel_values is not None:
             images = self.visual(pixel_values)
-            img_pos = get_image_positions(input_ids)
+            img_pos = self.visual.get_image_positions(input_ids)
             assert img_pos is not None # TODO - compare with image / batch len
 
         if get_pp_group().is_first_rank:
@@ -653,16 +663,6 @@ class QWenModel(nn.Module):
             })
         hidden_states, _ = self.ln_f(hidden_states, residual)
         return hidden_states
-
-def get_image_positions(input_ids, image_start_id=151857):
-    # HACK - hardcoded IDs for now to test qwen-vl/chat
-    image_pad_id = image_start_id + 2
-    image_end_id = image_start_id + 1
-    if torch.any(input_ids == image_start_id):
-        bos_pos = torch.where(input_ids == image_start_id)
-        eos_pos = torch.where(input_ids == image_end_id)
-        return torch.stack((bos_pos[0], eos_pos[0]), dim=1)
-    return None
 
 
 def get_image_text(image_num: int, padding: bool) -> str:
