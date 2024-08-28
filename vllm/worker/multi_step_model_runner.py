@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, Tuple
 
 try:
     from vllm.attention.backends.flash_attn import FlashAttentionMetadata
@@ -26,6 +26,8 @@ from vllm.worker.model_runner_base import (
     _init_attn_metadata_from_tensor_dict,
     _init_frozen_model_input_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
+from vllm.attention.backends.utils import compute_slot_mapping
+from vllm.utils import async_tensor_h2d
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -124,6 +126,11 @@ class StatefulModelInput(BroadcastableModelInput):
     num_seqs: int = -1
     num_queries: int = -1
 
+    # multi-step chunked prefill tokens and slot mapping
+    prefill_steps_tokens: Optional[torch.Tensor] = None
+    prefill_steps_slot_mapping: Optional[torch.Tensor] = None
+
+
     # Multi-Step + Chunked-Prefill related args.
     # When the initially scheduled sequences have both prefill and decode
     # sequences, the first iteration of the multi-step processes with all
@@ -149,22 +156,6 @@ class StatefulModelInput(BroadcastableModelInput):
     # empty outputs.
     num_empty_prefill_step_outputs: int = 0
 
-    def forget_prefills(self):
-        ## Update state to forget prefills
-        assert self.frozen_model_input is not None
-        assert self.frozen_model_input.attn_metadata is not None
-        num_prefills = self.frozen_model_input.attn_metadata.num_prefills
-        if num_prefills == 0:
-            return
-        self.num_seqs -= num_prefills
-        self.num_queries -= num_prefills
-
-        self.num_empty_prefill_step_outputs = num_prefills
-        self.frozen_model_input = \
-              ModelInputForGPUWithSamplingMetadata.without_prefills(
-                    self.frozen_model_input,
-                    self.sampling_metadata_decodes)
-
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         assert self.frozen_model_input is not None
         tensor_dict = self.frozen_model_input.as_broadcastable_tensor_dict()
@@ -180,6 +171,8 @@ class StatefulModelInput(BroadcastableModelInput):
             'is_first_multi_step': self.is_first_multi_step,
             'num_seqs': self.num_seqs,
             'num_queries': self.num_queries,
+            'prefill_steps_tokens': self.prefill_steps_tokens,
+            'prefill_steps_slot_mapping': self.prefill_steps_slot_mapping,
             'num_empty_prefill_step_outputs':
             self.num_empty_prefill_step_outputs,
         }
@@ -268,54 +261,84 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         ))
         return model_input
 
+    def make_prefill_steps_data(self, seq_group_metadata_list: List[SequenceGroupMetadata]) -> \
+          Tuple[torch.Tensor, torch.Tensor]:
+        # for multi step chunked prefill propagation - get the,
+        # 1. Prefill tokens required for steps 1 to n
+        # 2. Prefill slot mapping required for steps 1 to n
+
+        token_chunk_size = self.scheduler_config.multi_step_chunked_prefill_max_token_chunk
+        # filter prompt seqs
+        prefill_sgml = [sgml for sgml in seq_group_metadata_list if sgml.is_prompt]
+        if len(prefill_sgml) == 0:
+            # No prefills
+            return (None, None)
+
+        num_multi_step = prefill_sgml[0].state.num_steps
+        assert all([sgml.state.num_steps == num_multi_step for sgml in prefill_sgml])
+        if num_multi_step == 1:
+            # Single step - we dont need to advance prefills
+            return (None, None)
+
+        # Populate input_tokens
+        input_tokens = []
+        seq_lens = [sgml.seq_data[0].get_num_computed_tokens()
+                                for sgml in prefill_sgml]
+
+        # the 0th step is already computed
+        input_token_offsets = [x + token_chunk_size for x in seq_lens]
+        # because the 0th step data is already computed - start from 1
+        for _ in range(1, num_multi_step):  
+            for idx, sgml in enumerate(prefill_sgml):
+                offt = input_token_offsets[idx]
+                input_tokens.extend(sgml.seq_data[0].get_token_ids()[offt:offt + token_chunk_size])
+                input_token_offsets[idx] += token_chunk_size
+        assert len(input_tokens) == token_chunk_size * (num_multi_step - 1)
+
+        # Populate slot mapping
+        input_slot_mapping = []
+        for step_idx in range(1, num_multi_step):  
+            for idx, sgml in enumerate(prefill_sgml):
+                # TODO (varun) : Is the calculation of sgml_context_len and sgml_seq_len valid ?
+                # Are there any nuances we are missing ?
+                sgml_context_len = seq_lens[idx] + (token_chunk_size * step_idx)
+                sgml_seq_len = sgml_context_len + token_chunk_size
+                part_slot_mapping = []
+                compute_slot_mapping(is_profile_run = False,
+                                     slot_mapping = part_slot_mapping,
+                                     context_len = sgml_context_len,
+                                     seq_len = sgml_seq_len, 
+                                     block_size = self.block_size,
+                                     block_tables = sgml.block_tables)
+                input_slot_mapping.extend(part_slot_mapping)
+        assert len(input_slot_mapping) == token_chunk_size * (num_multi_step - 1)
+
+        # Async transfer to GPU
+        prefill_input_tokens = async_tensor_h2d(input_tokens, torch.long,
+                                                self.device, self.pin_memory)
+        prefill_slot_mapping = async_tensor_h2d(input_slot_mapping, torch.long,
+                                                self.device, self.pin_memory)
+
+        return prefill_input_tokens, prefill_slot_mapping
+
     def prepare_model_input(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         virtual_engine: int = 0,
         finished_requests_ids: Optional[List[str]] = None
     ) -> StatefulModelInput:
-        frozen_model_input = self._base_model_runner.prepare_model_input(
+        frozen_model_input: ModelInputForGPUWithSamplingMetadata = self._base_model_runner.prepare_model_input(
             seq_group_metadata_list, virtual_engine, finished_requests_ids)
 
-        num_prompts = len(
-            [None for sg in seq_group_metadata_list if sg.is_prompt])
-        num_decodes = len(seq_group_metadata_list) - num_prompts
-        is_prompts_scheduled_with_decodes = num_prompts > 0 and num_decodes > 0
-
-        sampling_metadata_decodes = None
-        if (is_prompts_scheduled_with_decodes and  # noqa SIM102
-                not envs.VLLM_MULTI_STEP_CHUNKED_PREFILL_SINGLE_STEP_POLICY):
-            # Prompt sequences and decode sequences are scheduled together and
-            # we are forcing single-step model execution. In this case,
-            # we run both the prompt and the decode sequences together in the
-            # first step and run only the decode sequences in rest of the
-            # steps.
-            # Construct a sampling_metadata with just the decode sequences that
-            # can be used for decode-exclusive steps.
-            # Note that this creates a new set of sampling GPU tensors that are
-            # potentially redundant. However, the tensor sizes are manageable
-            # and attempting to reuse/slice the existing tensors is non-trivial.
-
-            # Sampling metadata is only required for the final pp group
-            if get_pp_group().is_last_rank:
-                generators = self.get_generators(finished_requests_ids)
-                if num_prompts != 0:
-                    sampling_metadata_decodes = SamplingMetadata.prepare(
-                        seq_group_metadata_list[num_prompts:],
-                        frozen_model_input.seq_lens[num_prompts:],
-                        frozen_model_input.query_lens[num_prompts:],
-                        self.device,
-                        self.pin_memory,
-                        generators,
-                        # TODO (varun) : Fix sampling metadata cache impl
-                        None)
-                    sampling_metadata_decodes.skip_sampler_cpu_output = (True)
+        prefill_steps_tokens, prefill_slot_mapping = self.make_prefill_steps_data(seq_group_metadata_list) 
 
         model_input = StatefulModelInput(
             frozen_model_input=frozen_model_input,
             num_seqs=len(frozen_model_input.seq_lens),
             num_queries=len(frozen_model_input.query_lens),
-            sampling_metadata_decodes=sampling_metadata_decodes)
+            prefill_steps_tokens = prefill_steps_tokens,
+            prefill_steps_slot_mapping = prefill_slot_mapping,
+            sampling_metadata_decodes=None)
         return model_input
 
     @torch.inference_mode()
@@ -371,9 +394,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
             # might clobber enqueued forwards. (prevents CPU from running too
             # far ahead if needed)
             model_input.wait_previous_step()
-
-            # Forget prefills, if any
-            model_input.forget_prefills()
+            # Update prefill tokens and slot mappings
             model_input = self._advance_step(
                 model_input, model_input.cached_outputs[-1].sampler_output)
 
@@ -449,20 +470,41 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
 
         num_seqs = model_input.num_seqs
         num_queries = model_input.num_queries
+        num_prefill_tokens = model_input.frozen_model_input.attn_metadata.num_prefill_tokens
+        num_prefills = model_input.frozen_model_input.attn_metadata.num_prefills
+        token_chunk_size: Optional[int]= \
+            self.scheduler_config.multi_step_chunked_prefill_max_token_chunk \
+                if self.scheduler_config.chunked_prefill_enabled else None
+
         assert num_seqs > 0
         assert num_queries > 0
         assert num_seqs >= num_queries
 
         attn_metadata = frozen_model_input.attn_metadata
         assert isinstance(attn_metadata, FlashAttentionMetadata)
-        attn_metadata.advance_step(num_seqs, num_queries)
+        attn_metadata.advance_step(num_seqs, num_queries, token_chunk_size)
+
+        prefill_step_offset = token_chunk_size * (model_input.current_step - 1) \
+              if self.scheduler_config.chunked_prefill_enabled else 0
+
+        if model_input.prefill_steps_tokens is not None:
+            assert num_prefill_tokens > 0
+            assert model_input.prefill_steps_slot_mapping is not None
+            assert model_input.prefill_steps_tokens.shape[0] >= prefill_step_offset + num_prefill_tokens
+            assert model_input.prefill_steps_slot_mapping.shape[0] >= prefill_step_offset + num_prefill_tokens
+        if num_prefill_tokens > 0:
+            assert model_input.prefill_steps_tokens is not None and \
+                        model_input.prefill_steps_slot_mapping is not None
 
         # Update GPU tensors
         assert model_input.cached_outputs[-1].sampled_token_ids is not None
         ops.advance_step(
+            num_prefill_tokens = num_prefill_tokens,
+            num_prefills = num_prefills,
             num_seqs=num_seqs,
             num_queries=num_queries,
             block_size=self.block_size,
+            token_chunk_size = token_chunk_size if token_chunk_size is not None else 0,
             input_tokens=frozen_model_input.input_tokens,
             # The last step might have computed prefill + decode
             # and this step might be just decodes.
@@ -471,7 +513,12 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
             input_positions=frozen_model_input.input_positions,
             seq_lens=attn_metadata.seq_lens_tensor,
             slot_mapping=attn_metadata.slot_mapping,
-            block_tables=attn_metadata.block_tables)
+            block_tables=attn_metadata.block_tables,
+            context_lens = attn_metadata.context_lens_tensor,
+            prefill_steps_tokens = model_input.prefill_steps_tokens[prefill_step_offset:]
+                if model_input.prefill_steps_tokens is not None else None,
+            prefill_steps_slot_mapping = model_input.prefill_steps_slot_mapping[prefill_step_offset:]
+                if model_input.prefill_steps_slot_mapping is not None else None)
 
         if frozen_model_input.seq_lens is not None:
             for i in range(num_queries):

@@ -35,7 +35,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import print_warning_once
 
 logger = init_logger(__name__)
-ENGINE_ITERATION_TIMEOUT_S = envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
+ENGINE_ITERATION_TIMEOUT_S = 1000000 #envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
 
 
 class AsyncEngineDeadError(RuntimeError):
@@ -376,34 +376,7 @@ class _AsyncLLMEngine(LLMEngine):
                 or not seq_group_metadata_list):
             return None
 
-        # Get the remaining steps of the last sequence. This is motivated,
-        # by a few assumptions that are generally true.
-        # 1. The sequences in seq_group_metadata_list is always sorted by
-        #    "prefills-then-decodes".
-        # 2. All the prefill sequences have the same number of num_steps.
-        # 3. All the decode sequences have the same number of num_steps.
-        # 4. The num_steps of the decode_sequences >= num_steps of the
-        #    prefill sequences.
-
-        remaining_steps = seq_group_metadata_list[-1].state.remaining_steps
-
-        if self.scheduler_config.chunked_prefill_enabled:
-            # When chunked prefill is enabled, the prompt and decode sequences
-            # may be scheduled together.
-            #
-            # The decode sequences should have `remaining_steps` steps to go.
-            # The prefill sequences's remaining_step is 1 when they are
-            # scheduled initially. After the first step their remaining_step
-            # becomes 0.
-            if any([sgml.state.remaining_steps not in [0, 1, remaining_steps] \
-                            for sgml in seq_group_metadata_list]):
-                raise AssertionError(
-                    "Running sequences violate assumptions about "
-                    "remaining_step counts.")
-        else:
-            # In the normal case, the sequences in seq_group_metadata_list are
-            # either all prefills or all decodes and there for all sequences
-            # must have the same number of remaining_steps.
+        remaining_steps = seq_group_metadata_list[0].state.remaining_steps
             if any([
                     seq_group.state.remaining_steps != remaining_steps
                     for seq_group in seq_group_metadata_list[1:]

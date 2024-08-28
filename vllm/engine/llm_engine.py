@@ -1203,6 +1203,8 @@ class LLMEngine:
         for scheduled_seq_group, outputs, seq_group_meta in zip(
                 scheduled_seq_groups, output_by_sequence_group,
                 seq_group_metadata_list):
+            if seq_group_meta.is_prompt:
+                print ("Updating prompt stuff !! ")
             seq_group = scheduled_seq_group.seq_group
             seq_group.update_num_computed_tokens(
                 scheduled_seq_group.token_chunk_size)

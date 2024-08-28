@@ -61,6 +61,7 @@ if TYPE_CHECKING:
     VLLM_PLUGINS: Optional[List[str]] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
     VLLM_MULTI_STEP_CHUNKED_PREFILL_SINGLE_STEP_POLICY: bool = False
+    VLLM_MULTI_STEP_CHUNKED_PREFILL_MAX_TOKEN_CHUNK: int = 4
 
 
 def get_default_cache_root():
@@ -412,6 +413,9 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: os.environ.get(
         "VLLM_MULTI_STEP_CHUNKED_PREFILL_SINGLE_STEP_POLICY", "False").lower(
         ) in ("true", "1"),
+
+    "VLLM_MULTI_STEP_CHUNKED_PREFILL_MAX_TOKEN_CHUNK":
+    lambda: int(os.getenv("VLLM_MULTI_STEP_CHUNKED_PREFILL_MAX_TOKEN_CHUNK", "4")),
 }
 
 # end-env-vars-definition
