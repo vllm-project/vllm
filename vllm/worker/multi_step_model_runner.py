@@ -219,6 +219,9 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
 
     def _async_process_outputs(self, model_input: StatefulModelInput,
                                output_proc_callback: Callable):
+        # Proceed with pythonization and output_proc in order. 
+        # Stop on the first one that fails to pythonize
+        cont = True
         for model_output in model_input.cached_outputs:
             if not model_output.pythonized:
                 model_output.maybe_pythonize(model_input, self._copy_stream,
@@ -226,6 +229,11 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
                 if model_output.pythonized:
                     output_proc_callback(
                         sampler_output=model_output.sampler_output)
+                else:
+                    cont = False
+
+            if not cont:
+                break
 
     def _final_process_outputs(self, model_input: StatefulModelInput,
                                output_proc_callback: Optional[Callable]):
