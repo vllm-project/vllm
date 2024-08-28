@@ -501,23 +501,48 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                             and self.sliding_window is None
                             and inter_data.is_prompt)
         inter_data.prefix_cache_hit = prefix_cache_hit
-        if self.chunked_prefill_enabled and prefix_cache_hit:
-            raise RuntimeError(
-                "chunked prefill cannot be used with prefix caching now.")
 
-        # If prefix cache is hit, advance context length to bypass
-        # hit blocks. Accordingly, input tokens, position and query length
-        # have to be updated.
-        if prefix_cache_hit:
-            assert computed_block_nums is not None
-            context_len = len(computed_block_nums) * self.block_size
+        if not prefix_cache_hit:
+            return
+
+        assert computed_block_nums is not None
+        # The cache hit prompt tokens in this sequence. Note that
+        # this may be larger than the sequence length if chunked
+        # prefill is enabled.
+        prefix_cache_len = len(computed_block_nums) * self.block_size
+        # The number of so far computed prompt tokens in this sequence.
+        context_len = inter_data.context_lens[seq_idx]
+        # The total number of prompt tokens in this sequence.
+        # When chunked prefill is enabled, this is the token number of
+        # computed chunks + current chunk.
+        seq_len = inter_data.seq_lens[seq_idx]
+        if prefix_cache_len <= context_len:
+            # We already passed the cache hit region,
+            # so do normal computation.
+            pass
+        elif context_len < prefix_cache_len < seq_len:
+            # Partial hit. Compute the missing part.
+            uncomputed_start = prefix_cache_len - context_len
             inter_data.input_tokens[seq_idx] = inter_data.input_tokens[
-                seq_idx][context_len:]
+                seq_idx][uncomputed_start:]
             inter_data.input_positions[seq_idx] = inter_data.input_positions[
-                seq_idx][context_len:]
+                seq_idx][uncomputed_start:]
+            context_len = prefix_cache_len
+
             inter_data.context_lens[seq_idx] = context_len
             inter_data.query_lens[
                 seq_idx] = inter_data.seq_lens[seq_idx] - context_len
+        elif seq_len <= prefix_cache_len:
+            # Full hit. Only compute the last token to avoid
+            # erroneous behavior. FIXME: Ideally we should directly
+            # mark all tokens as computed in the scheduler and do not
+            # schedule this sequence, so this case should not happen.
+            inter_data.input_tokens[seq_idx] = inter_data.input_tokens[
+                seq_idx][-1:]
+            inter_data.input_positions[seq_idx] = inter_data.input_positions[
+                seq_idx][-1:]
+            inter_data.query_lens[seq_idx] = 1
+            inter_data.context_lens[seq_idx] = inter_data.seq_lens[seq_idx] - 1
 
     def _compute_for_sliding_window(self, inter_data: InterDataForSeqGroup,
                                     seq_idx: int,
