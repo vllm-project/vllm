@@ -115,8 +115,9 @@ class SqueezeLLMLinearMethod(QuantizeMethodBase):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # required by torch.compile
         layer.qweight = Parameter(layer.qweight.data, requires_grad=False)
-        layer.lookup_table = Parameter(layer.lookup_table.data, requires_grad=False)
-        
+        layer.lookup_table = Parameter(layer.lookup_table.data,
+                                       requires_grad=False)
+
     def apply(self,
               layer: torch.nn.Module,
               x: torch.Tensor,
