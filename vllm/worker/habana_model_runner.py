@@ -230,10 +230,11 @@ class HpuModelAdapter():
                                                       input_ids.size(1),
                                                       input_ids.device,
                                                       torch.bfloat16)
+        decode.mask = kwargs.pop('mask')
         hidden_states = self.model(*args, **kwargs)
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
         hidden_states = hidden_states.index_select(0, selected_token_indices)
-        return hidden_states
+        return hidden_states, decode.mask
 
     def compute_logits(self, *args, **kwargs):
         return self.model.compute_logits(*args, **kwargs)
@@ -253,6 +254,7 @@ class PreparePromptMetadata(NamedTuple):
     lora_requests: Set[LoRARequest]
     multi_modal_input: Optional[torch.Tensor]
     slot_mapping: List[List[int]]
+    mask: Optional[torch.Tensor]
 
     @classmethod
     def empty(cls):
@@ -267,6 +269,7 @@ class PreparePromptMetadata(NamedTuple):
             lora_requests=set(),
             multi_modal_input=None,
             slot_mapping=[],
+            mask = None
         )
 
 
@@ -278,6 +281,7 @@ class PrepareDecodeMetadata(NamedTuple):
     lora_prompt_mapping: List[List[int]]
     lora_requests: Set[LoRARequest]
     slot_mapping: List[List[int]]
+    mask: Optional[torch.Tensor]
 
     @classmethod
     def empty(cls):
@@ -289,6 +293,7 @@ class PrepareDecodeMetadata(NamedTuple):
             lora_prompt_mapping=[],
             lora_requests=set(),
             slot_mapping=[],
+            mask=None,
         )
 
 
@@ -324,6 +329,7 @@ class ModelInputForHPU(ModelRunnerInputBase):
     real_batch_size: Optional[int] = None
     batch_size_padded: Optional[int] = None
     virtual_engine: int = 0
+    mask: Optional[torch.Tensor] = None
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
@@ -334,7 +340,8 @@ class ModelInputForHPU(ModelRunnerInputBase):
             "multi_modal_kwargs": self.multi_modal_kwargs,
             "real_batch_size": self.real_batch_size,
             "batch_size_padded": self.batch_size_padded,
-            "virtual_engine": self.virtual_engine
+            "virtual_engine": self.virtual_engine,
+            "mask": mask
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
         return tensor_dict
@@ -368,6 +375,7 @@ class ModelInputForHPUWithSamplingMetadata(ModelInputForHPU):
             "lora_requests": self.lora_requests,
             "lora_mapping": self.lora_mapping,
             "multi_modal_kwargs": self.multi_modal_kwargs,
+            "mask": self.mask
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
         _add_sampling_metadata_broadcastable_dict(tensor_dict,
@@ -628,7 +636,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         if len(seq_group_metadata_list) == 0:
             return PreparePromptMetadata.empty()
-        decode.mask = None
+        mask = None
 
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
@@ -742,7 +750,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             self.block_size)
 
         if self.lora_config:
-            decode.mask = torch.zeros(len(seq_group_metadata_list) * max_prompt_len,
+            mask = torch.zeros(len(seq_group_metadata_list) * max_prompt_len,
                                       (self.lora_config.max_loras + 1) * self.lora_config.max_lora_rank,
                                       dtype=self.lora_config.lora_dtype)
             ones = torch.ones(max_prompt_len, self.lora_config.max_lora_rank, dtype=self.lora_config.lora_dtype)
@@ -757,7 +765,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 end_row = start_row + max_prompt_len
                 start_col = (lora_id - 1) * self.lora_config.max_lora_rank
                 end_col = start_col + self.lora_config.max_lora_rank
-                decode.mask[start_row:end_row, start_col:end_col] = ones
+                mask[start_row:end_row, start_col:end_col] = ones
             counter = counter + 1
 
             lora_index_mapping += [lora_id] * (max_prompt_len - context_len)
@@ -766,8 +774,8 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 (max_prompt_len - context_len
                  if seq_group_metadata.sampling_params.prompt_logprobs else 1))
             
-        if decode.mask is not None:
-            decode.mask = decode.mask.to('hpu')
+        if mask is not None:
+            mask = mask.to('hpu')
 
         input_tokens = make_tensor_with_pad(input_tokens,
                                             max_len=max_prompt_len,
@@ -834,6 +842,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             lora_requests=lora_requests,
             multi_modal_input=multi_modal_input,
             slot_mapping=slot_mapping,
+            mask=mask,
         )
 
     def _prepare_decode(
@@ -851,10 +860,10 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         if len(seq_group_metadata_list) == 0:
             return PrepareDecodeMetadata.empty()
-        decode.mask = None
+        mask = None
 
         if self.lora_config:
-            decode.mask = torch.zeros(len(seq_group_metadata_list),
+            mask = torch.zeros(len(seq_group_metadata_list),
                                       (self.lora_config.max_loras + 1) * self.lora_config.max_lora_rank,
                                       dtype=self.lora_config.lora_dtype)
             ones = torch.ones(1, self.lora_config.max_lora_rank, dtype=self.lora_config.lora_dtype)
@@ -871,7 +880,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 lora_requests.add(seq_group_metadata.lora_request)
                 start_pos = (lora_id - 1) * self.lora_config.max_lora_rank
                 end_pos = start_pos + self.lora_config.max_lora_rank
-                decode.mask[counter, start_pos:end_pos] = ones
+                mask[counter, start_pos:end_pos] = ones
             counter = counter + 1
 
             for seq_id in seq_ids:
@@ -901,8 +910,8 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     block_table = block_table[-sliding_window_blocks:]
                 block_tables.append(block_table)
 
-        if decode.mask is not None:
-            decode.mask = decode.mask.to('hpu')
+        if mask is not None:
+            mask = mask.to('hpu')
         input_tokens = torch.tensor(input_tokens,
                                     dtype=torch.long,
                                     device=self.device)
@@ -948,6 +957,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             lora_prompt_mapping=lora_prompt_mapping,
             lora_requests=lora_requests,
             slot_mapping=slot_mapping,
+            mask=mask,
         )
 
     def prepare_input_tensors(
@@ -1002,6 +1012,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             lora_requests,
             multi_modal_input,
             slot_mapping,
+            mask,
         ) = self._prepare_prompt(prefill_reqs)
         (
             decode_input_tokens,
@@ -1011,6 +1022,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             decode_lora_prompt_mapping,
             decode_lora_requests,
             decode_slot_mapping,
+            decode_mask,
         ) = self._prepare_decode(decode_reqs)
         sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list,
                                                      seq_lens, query_lens,
@@ -1037,6 +1049,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             lora_index_mapping = decode_lora_index_mapping
             lora_prompt_mapping = decode_lora_prompt_mapping
             lora_requests = decode_lora_requests
+            mask = decode_mask
 
         # FIXME: We need to adjust selected_token_indices to accommodate
         # for padding
@@ -1106,7 +1119,8 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             lora_mapping=lora_mapping,
             multi_modal_kwargs=multi_modal_input,
             real_batch_size=real_batch_size,
-            batch_size_padded=batch_size_padded), sampling_metadata
+            batch_size_padded=batch_size_padded,
+            mask=mask), sampling_metadata
 
     def _seq_len(self, attn_metadata):
         if attn_metadata.num_prefills != 0:
@@ -1651,6 +1665,11 @@ class HabanaModelRunner(
                 "warmup_mode": warmup_mode
             })
 
+        if model_input.mask is not None:
+            execute_model_kwargs.update({
+                "mask": model_input.mask
+            })
+
         htorch.core.mark_step()
         if self.is_driver_worker:
             model_event_name = ("model_"
@@ -1661,7 +1680,7 @@ class HabanaModelRunner(
         else:
             model_event_name = 'model_executable'
         with self.profiler.record_event('internal', model_event_name):
-            hidden_states = self.model.forward(
+            hidden_states, _ = self.model.forward(
                 **execute_model_kwargs,
                 selected_token_indices=sampling_metadata.selected_token_indices
             )
