@@ -300,6 +300,20 @@ def awq_marlin_repack(b_q_weight: torch.Tensor, size_k: int, size_n: int,
     return torch.ops._C.awq_marlin_repack(b_q_weight, size_k, size_n, num_bits)
 
 
+def gptq_marlin_moe_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
+                           size_k: int, size_n: int,
+                           num_bits: int) -> torch.Tensor:
+    num_experts = b_q_weight.shape[0]
+    assert size_k % 16 == 0
+    output = torch.empty((num_experts, size_k // 16, size_n * 2),
+                         device=b_q_weight.device,
+                         dtype=b_q_weight.dtype)
+    for e in range(num_experts):
+        output[e] = torch.ops._C.gptq_marlin_repack(b_q_weight[e], perm[e],
+                                                    size_k, size_n, num_bits)
+    return output
+
+
 def gptq_marlin_gemm(a: torch.Tensor,
                      b_q_weight: torch.Tensor,
                      b_scales: torch.Tensor,
@@ -327,6 +341,32 @@ def fp8_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                     size_k: int) -> torch.Tensor:
     return torch.ops._C.fp8_marlin_gemm(a, b_q_weight, b_scales, workspace,
                                         num_bits, size_m, size_n, size_k)
+
+
+# machete
+def machete_supported_schedules(b_type: ScalarType) -> List[str]:
+    return torch.ops._C.machete_supported_schedules(b_type)
+
+
+def machete_gemm(
+    a: torch.Tensor,
+    b_q: torch.Tensor,  # Should be the tensor returned by machete_prepack_B
+    b_type: ScalarType,
+    b_scales: Optional[torch.Tensor] = None,
+    b_zeros: Optional[torch.Tensor] = None,
+    b_group_size: Optional[int] = None,
+    c: Optional[torch.Tensor] = None,
+    alpha: Optional[float] = None,
+    beta: Optional[float] = None,
+    schedule: Optional[str] = None,
+) -> torch.Tensor:
+    return torch.ops._C.machete_gemm(a, b_q, b_type, b_scales, b_zeros,
+                                     b_group_size, c, alpha, beta, schedule)
+
+
+def machete_prepack_B(b_q_weight: torch.Tensor,
+                      b_type: ScalarType) -> torch.Tensor:
+    return torch.ops._C.machete_prepack_B(b_q_weight, b_type)
 
 
 # fp8

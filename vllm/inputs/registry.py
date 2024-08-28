@@ -2,8 +2,8 @@ import functools
 from array import array
 from collections import UserDict
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Callable, Dict, Mapping, Optional, Protocol,
-                    Tuple, Type)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, Mapping, Optional,
+                    Protocol, Tuple, Type)
 
 from torch import nn
 from transformers import PretrainedConfig
@@ -54,6 +54,13 @@ class InputContext:
                             f"found type: {type(hf_config)}")
 
         return hf_config
+
+    def get_hf_image_processor_config(self) -> Dict[str, Any]:
+        """
+        Get the HuggingFace image processor configuration of the model.
+        """
+
+        return self.model_config.hf_image_processor_config
 
 
 N = TypeVar("N", bound=Type[nn.Module])

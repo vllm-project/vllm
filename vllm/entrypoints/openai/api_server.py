@@ -8,13 +8,14 @@ import tempfile
 from argparse import Namespace
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import AsyncIterator, Set
+from typing import AsyncIterator, Optional, Set
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Mount
+from typing_extensions import assert_never
 
 import vllm.envs as envs
 from vllm.config import ModelConfig
@@ -29,14 +30,16 @@ from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ChatCompletionResponse,
                                               CompletionRequest,
+                                              CompletionResponse,
                                               DetokenizeRequest,
                                               DetokenizeResponse,
-                                              EmbeddingRequest, ErrorResponse,
+                                              EmbeddingRequest,
+                                              EmbeddingResponse, ErrorResponse,
                                               TokenizeRequest,
                                               TokenizeResponse)
+# yapf: enable
 from vllm.entrypoints.openai.rpc.client import AsyncEngineRPCClient
 from vllm.entrypoints.openai.rpc.server import run_rpc_server
-# yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
@@ -57,6 +60,7 @@ openai_serving_embedding: OpenAIServingEmbedding
 openai_serving_tokenization: OpenAIServingTokenization
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
 
+# Cannot use __name__ (https://github.com/vllm-project/vllm/pull/4765)
 logger = init_logger('vllm.entrypoints.openai.api_server')
 
 _running_tasks: Set[asyncio.Task] = set()
@@ -90,7 +94,16 @@ async def lifespan(app: FastAPI):
 
 
 @asynccontextmanager
-async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
+async def build_async_engine_client(
+        args: Namespace) -> AsyncIterator[Optional[AsyncEngineClient]]:
+    """
+    Create AsyncEngineClient, either:
+        - in-process using the AsyncLLMEngine Directly
+        - multiprocess using AsyncLLMEngine RPC
+
+    Returns the Client or None if the creation failed.
+    """
+
     # Context manager to handle async_engine_client lifecycle
     # Ensures everything is shutdown and cleaned up on error/exit
     global engine_args
@@ -131,6 +144,12 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
         logger.info("Multiprocessing frontend to use %s for RPC Path.",
                     rpc_path)
 
+        # Build RPCClient, which conforms to AsyncEngineClient Protocol.
+        # NOTE: Actually, this is not true yet. We still need to support
+        # embedding models via RPC (see TODO above)
+        rpc_client = AsyncEngineRPCClient(rpc_path)
+        async_engine_client = rpc_client  # type: ignore
+
         # Start RPCServer in separate process (holds the AsyncLLMEngine).
         context = multiprocessing.get_context("spawn")
         # the current process might have CUDA context,
@@ -141,19 +160,19 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
         rpc_server_process.start()
         logger.info("Started engine process with PID %d",
                     rpc_server_process.pid)
-        # Build RPCClient, which conforms to AsyncEngineClient Protocol.
-        async_engine_client = AsyncEngineRPCClient(rpc_path)
 
         try:
             while True:
                 try:
-                    await async_engine_client.setup()
+                    await rpc_client.setup()
                     break
-                except TimeoutError as e:
+                except TimeoutError:
                     if not rpc_server_process.is_alive():
-                        raise RuntimeError(
-                            "The server process died before "
-                            "responding to the readiness probe") from e
+                        logger.error(
+                            "RPCServer process died before responding "
+                            "to readiness probe")
+                        yield None
+                        return
 
             yield async_engine_client
         finally:
@@ -161,7 +180,7 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
             rpc_server_process.terminate()
 
             # Close all open connections to the backend
-            async_engine_client.close()
+            rpc_client.close()
 
             # Wait for server process to join
             rpc_server_process.join()
@@ -216,9 +235,10 @@ async def tokenize(request: TokenizeRequest):
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
-    else:
-        assert isinstance(generator, TokenizeResponse)
+    elif isinstance(generator, TokenizeResponse):
         return JSONResponse(content=generator.model_dump())
+
+    assert_never(generator)
 
 
 @router.post("/detokenize")
@@ -227,9 +247,10 @@ async def detokenize(request: DetokenizeRequest):
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
-    else:
-        assert isinstance(generator, DetokenizeResponse)
+    elif isinstance(generator, DetokenizeResponse):
         return JSONResponse(content=generator.model_dump())
+
+    assert_never(generator)
 
 
 @router.get("/v1/models")
@@ -252,12 +273,10 @@ async def create_chat_completion(request: ChatCompletionRequest,
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
-    if request.stream:
-        return StreamingResponse(content=generator,
-                                 media_type="text/event-stream")
-    else:
-        assert isinstance(generator, ChatCompletionResponse)
+    elif isinstance(generator, ChatCompletionResponse):
         return JSONResponse(content=generator.model_dump())
+
+    return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
 @router.post("/v1/completions")
@@ -267,11 +286,10 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
-    if request.stream:
-        return StreamingResponse(content=generator,
-                                 media_type="text/event-stream")
-    else:
+    elif isinstance(generator, CompletionResponse):
         return JSONResponse(content=generator.model_dump())
+
+    return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
 @router.post("/v1/embeddings")
@@ -281,8 +299,30 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
-    else:
+    elif isinstance(generator, EmbeddingResponse):
         return JSONResponse(content=generator.model_dump())
+
+    assert_never(generator)
+
+
+if envs.VLLM_TORCH_PROFILER_DIR:
+    logger.warning(
+        "Torch Profiler is enabled in the API server. This should ONLY be "
+        "used for local development!")
+
+    @router.post("/start_profile")
+    async def start_profile():
+        logger.info("Starting profiler...")
+        await async_engine_client.start_profile()
+        logger.info("Profiler started.")
+        return Response(status_code=200)
+
+    @router.post("/stop_profile")
+    async def stop_profile():
+        logger.info("Stopping profiler...")
+        await async_engine_client.stop_profile()
+        logger.info("Profiler stopped.")
+        return Response(status_code=200)
 
 
 def build_app(args: Namespace) -> FastAPI:
@@ -401,6 +441,10 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     logger.info("args: %s", args)
 
     async with build_async_engine_client(args) as async_engine_client:
+        # If None, creation of the client failed and we exit.
+        if async_engine_client is None:
+            return
+
         app = await init_app(async_engine_client, args)
 
         shutdown_task = await serve_http(

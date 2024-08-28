@@ -19,6 +19,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors, SamplerOutput
+from vllm.utils import is_list_of
 
 from .clip import (CLIPVisionModel, dummy_image_for_clip,
                    dummy_seq_data_for_clip, get_clip_image_feature_size,
@@ -223,6 +224,13 @@ def input_processor_for_llava_next(ctx: InputContext, llm_inputs: LLMInputs):
             input_height=height,
             input_width=width,
         )
+    elif is_list_of(image_data, Image.Image):
+        image_feature_size = [
+            get_llava_next_image_feature_size(hf_config,
+                                              input_height=img.height,
+                                              input_width=img.width)
+            for img in image_data
+        ]
     elif isinstance(image_data, torch.Tensor):
         image_feature_size = image_data.shape[0]
     else:
@@ -353,6 +361,14 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
                 raise ValueError("Incorrect type of image sizes. "
                                  f"Got type: {type(image_sizes)}")
 
+            # Remove the N dimension until multiple images are supported.
+            if isinstance(pixel_values, torch.Tensor):
+                pixel_values = pixel_values.squeeze(1)
+            else:
+                pixel_values = [t.squeeze(0) for t in pixel_values]
+
+            image_sizes = image_sizes.squeeze(1)
+
             return LlavaNextImagePixelInputs(
                 type="pixel_values",
                 data=self._validate_pixel_values(pixel_values),
@@ -363,6 +379,9 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
             if not isinstance(image_embeds, torch.Tensor):
                 raise ValueError("Incorrect type of image embeds. "
                                  f"Got type: {type(image_embeds)}")
+
+            # Remove the N dimension until multiple images are supported.
+            image_embeds = image_embeds.squeeze(1)
 
             return LlavaNextImageEmbeddingInputs(
                 type="image_embeds",
@@ -425,7 +444,10 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
                     self.config.image_grid_pinpoints,
                     self.config.vision_config.image_size,
                 )
-                other_patch_embeds = other_patch_embeds \
+                num_patches = num_patch_height * num_patch_width
+
+                # Image patches might be padded for batch processing
+                other_patch_embeds = other_patch_embeds[:num_patches] \
                     .view(num_patch_height, num_patch_width, height, width, -1)
 
                 if "unpad" in strategy:
@@ -496,7 +518,6 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
         self,
         image_input: LlavaNextImageInputs,
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
-
         if image_input["type"] == "image_embeds":
             return [image_input["data"]]
 

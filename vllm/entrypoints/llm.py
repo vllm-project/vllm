@@ -1,8 +1,7 @@
 from contextlib import contextmanager
 from typing import ClassVar, List, Optional, Sequence, Union, cast, overload
 
-from tqdm.auto import tqdm
-from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+from tqdm import tqdm
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
@@ -20,7 +19,9 @@ from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-from vllm.transformers_utils.tokenizer import get_cached_tokenizer
+from vllm.transformers_utils.tokenizer import (AnyTokenizer,
+                                               get_cached_tokenizer)
+from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, deprecate_kwargs
 
@@ -122,12 +123,13 @@ class LLM:
         tokenizer_revision: Optional[str] = None,
         seed: int = 0,
         gpu_memory_utilization: float = 0.9,
-        swap_space: int = 4,
+        swap_space: float = 4,
         cpu_offload_gb: float = 0,
         enforce_eager: Optional[bool] = None,
         max_context_len_to_capture: Optional[int] = None,
         max_seq_len_to_capture: int = 8192,
         disable_custom_all_reduce: bool = False,
+        disable_async_output_proc: bool = False,
         **kwargs,
     ) -> None:
         '''
@@ -169,28 +171,26 @@ class LLM:
             max_context_len_to_capture=max_context_len_to_capture,
             max_seq_len_to_capture=max_seq_len_to_capture,
             disable_custom_all_reduce=disable_custom_all_reduce,
+            disable_async_output_proc=disable_async_output_proc,
             **kwargs,
         )
         self.llm_engine = LLMEngine.from_engine_args(
             engine_args, usage_context=UsageContext.LLM_CLASS)
         self.request_counter = Counter()
 
-    def get_tokenizer(
-            self) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
-        return self.llm_engine.tokenizer.tokenizer
+    def get_tokenizer(self) -> AnyTokenizer:
+        return self.llm_engine.get_tokenizer_group(TokenizerGroup).tokenizer
 
-    def set_tokenizer(
-        self,
-        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
-    ) -> None:
+    def set_tokenizer(self, tokenizer: AnyTokenizer) -> None:
+        tokenizer_group = self.llm_engine.get_tokenizer_group(TokenizerGroup)
+
         # While CachedTokenizer is dynamic, have no choice but
         # compare class name. Misjudgment will arise from
         # user-defined tokenizer started with 'Cached'
         if tokenizer.__class__.__name__.startswith("Cached"):
-            self.llm_engine.tokenizer.tokenizer = tokenizer
+            tokenizer_group.tokenizer = tokenizer
         else:
-            self.llm_engine.tokenizer.tokenizer = get_cached_tokenizer(
-                tokenizer)
+            tokenizer_group.tokenizer = get_cached_tokenizer(tokenizer)
 
     @overload  # LEGACY: single (prompt + optional token ids)
     def generate(
@@ -355,7 +355,7 @@ class LLM:
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
         chat_template: Optional[str] = None,
-        add_generation_template: bool = True,
+        add_generation_prompt: bool = True,
     ) -> List[RequestOutput]:
         """
         Generates responses for chat messages.
@@ -376,7 +376,7 @@ class LLM:
             lora_request: LoRA request to use for generation, if any.
             chat_template: The template to use for structuring the chat.
               If not provided, the model's default chat template will be used.
-            add_generation_template: If True, adds a generation template 
+            add_generation_prompt: If True, adds a generation template
                 to each message.
 
         Returns:
@@ -390,15 +390,21 @@ class LLM:
         conversations, _ = parse_chat_messages(messages, model_config,
                                                tokenizer)
 
-        prompts = apply_chat_template(
+        prompt = apply_chat_template(
             tokenizer,
             conversations,
             chat_template=chat_template,
-            add_generation_template=add_generation_template)
+            add_generation_prompt=add_generation_prompt)
+
+        inputs: PromptInputs
+        if isinstance(prompt, list) and isinstance(prompt[0], int):
+            inputs = TokensPrompt(prompt_token_ids=prompt)
+        else:
+            inputs = TextPrompt(prompt=prompt)
 
         return self.generate(
-            prompts,
-            sampling_params,
+            inputs,
+            sampling_params=sampling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
         )
@@ -578,6 +584,8 @@ class LLM:
 
         inputs: List[PromptInputs] = []
         for i in range(num_requests):
+            item: PromptInputs
+
             if prompts is not None:
                 item = TextPrompt(prompt=prompts[i])
             elif prompt_token_ids is not None:
@@ -603,7 +611,6 @@ class LLM:
             inputs = [inputs]
 
         num_requests = len(inputs)
-
         if isinstance(params, list) and len(params) != num_requests:
             raise ValueError("The lengths of prompts and params "
                              "must be the same.")
@@ -635,7 +642,7 @@ class LLM:
         self,
         inputs: PromptInputs,
         params: Union[SamplingParams, PoolingParams],
-        lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
+        lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> None:
         request_id = str(next(self.request_counter))
@@ -678,6 +685,10 @@ class LLM:
                 postfix=(f"est. speed input: {0:.2f} toks/s, "
                          f"output: {0:.2f} toks/s"),
             )
+
+        # In the loop below, only finished outputs are used
+        self.llm_engine.step_return_finished_only = True
+
         # Run the engine.
         outputs: List[Union[RequestOutput, EmbeddingRequestOutput]] = []
         total_in_toks = 0
@@ -700,6 +711,10 @@ class LLM:
                                 f"est. speed input: {in_spd:.2f} toks/s, "
                                 f"output: {out_spd:.2f} toks/s")
                         pbar.update(1)
+
+        # Restore original behavior
+        self.llm_engine.step_return_finished_only = False
+
         if use_tqdm:
             pbar.close()
         # Sort the outputs by request ID.
