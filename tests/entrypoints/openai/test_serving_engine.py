@@ -1,4 +1,3 @@
-import asyncio
 from http import HTTPStatus
 from unittest.mock import MagicMock
 
@@ -17,10 +16,15 @@ MODEL_NAME = "meta-llama/Llama-2-7b"
 async def _async_serving_engine_init():
     mock_engine_client = MagicMock(spec=AsyncEngineClient)
     mock_model_config = MagicMock(spec=ModelConfig)
+    # Set the max_model_len attribute to avoid missing attribute
+    mock_model_config.max_model_len = 2048
 
     serving_engine = OpenAIServing(mock_engine_client,
                                    mock_model_config,
-                                   served_model_names=[MODEL_NAME])
+                                   served_model_names=[MODEL_NAME],
+                                   lora_modules=None,
+                                   prompt_adapters=None,
+                                   request_logger=None)
     return serving_engine
 
 

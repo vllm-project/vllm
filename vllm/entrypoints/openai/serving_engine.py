@@ -34,6 +34,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import LogitsProcessor, SamplingParams
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.utils import AtomicCounter
 
 logger = init_logger(__name__)
 
@@ -80,6 +81,7 @@ class OpenAIServing:
 
         self.served_model_names = served_model_names
 
+        self.lora_id_counter = AtomicCounter(0)
         self.lora_requests = []
         if lora_modules is not None:
             self.lora_requests = [
@@ -457,7 +459,7 @@ class OpenAIServing:
             return error_check_ret
 
         lora_name, lora_path = request.lora_name, request.lora_path
-        unique_id = len(self.lora_requests) + 1
+        unique_id = self.lora_id_counter.inc(1)
         self.lora_requests.append(
             LoRARequest(lora_name=lora_name,
                         lora_int_id=unique_id,
