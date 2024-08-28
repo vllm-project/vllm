@@ -273,11 +273,20 @@ class CustomAllreduce:
                 self.register_graph_buffers()
 
     def _get_ipc_meta(self, inp: torch.Tensor):
-        data = inp.untyped_storage()._share_cuda_()
-        shard_data = (
-            data[1],  # ipc handle to base ptr
-            data[3],  # offset of base ptr
-        )
+        if is_hip():
+            # _share_cuda_() doesn't accept meta buffer not allocated from
+            # PyTorch cache allocator, use direct HIP call to get IPC handle
+            handle = custom_ar.get_meta_buffer_ipc_handle(inp)
+            shard_data = (
+                bytes(handle),  # ipc handle to base ptr
+                0,  # offset of base ptr
+            )
+        else:
+            data = inp.untyped_storage()._share_cuda_()
+            shard_data = (
+                data[1],  # ipc handle to base ptr
+                data[3],  # offset of base ptr
+            )
         return self._gather_ipc_meta(shard_data)
 
     def _gather_ipc_meta(self, shard_data):
