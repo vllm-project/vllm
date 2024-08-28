@@ -211,7 +211,6 @@ async def build_async_engine_client_from_engine_args(
 
 
 router = APIRouter()
-lora_adapter_router = APIRouter()
 
 
 def mount_metrics(app: FastAPI):
@@ -322,6 +321,7 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
 
     assert_never(generator)
 
+
 if envs.VLLM_TORCH_PROFILER_DIR:
     logger.warning(
         "Torch Profiler is enabled in the API server. This should ONLY be "
@@ -342,41 +342,43 @@ if envs.VLLM_TORCH_PROFILER_DIR:
         return Response(status_code=200)
 
 
-# TODO(jiaxin.shan): protect endpoint and make it visible to operators only
-@lora_adapter_router.post("/v1/load_lora_adapter")
-async def load_lora_adapter(request: LoadLoraAdapterRequest):
-    response = await openai_serving_chat.load_lora_adapter(request)
-    if isinstance(response, ErrorResponse):
-        return JSONResponse(content=response.model_dump(),
-                            status_code=response.code)
+if envs.VLLM_ALLOW_RUNTIME_LORA_LOADING:
+    logger.warning(
+        "Lora dynamic loading & unloading is enabled in the API server. "
+        "This should ONLY be used for local development!")
 
-    response = await openai_serving_completion.load_lora_adapter(request)
-    if isinstance(response, ErrorResponse):
-        return JSONResponse(content=response.model_dump(),
-                            status_code=response.code)
+    @router.post("/v1/load_lora_adapter")
+    async def load_lora_adapter(request: LoadLoraAdapterRequest):
+        response = await openai_serving_chat.load_lora_adapter(request)
+        if isinstance(response, ErrorResponse):
+            return JSONResponse(content=response.model_dump(),
+                                status_code=response.code)
 
-    return Response(status_code=200)
+        response = await openai_serving_completion.load_lora_adapter(request)
+        if isinstance(response, ErrorResponse):
+            return JSONResponse(content=response.model_dump(),
+                                status_code=response.code)
 
+        return Response(status_code=200)
 
-@lora_adapter_router.post("/v1/unload_lora_adapter")
-async def unload_lora_adapter(request: UnloadLoraAdapterRequest):
-    response = await openai_serving_chat.unload_lora_adapter(request)
-    if isinstance(response, ErrorResponse):
-        return JSONResponse(content=response.model_dump(),
-                            status_code=response.code)
+    @router.post("/v1/unload_lora_adapter")
+    async def unload_lora_adapter(request: UnloadLoraAdapterRequest):
+        response = await openai_serving_chat.unload_lora_adapter(request)
+        if isinstance(response, ErrorResponse):
+            return JSONResponse(content=response.model_dump(),
+                                status_code=response.code)
 
-    response = await openai_serving_completion.unload_lora_adapter(request)
-    if isinstance(response, ErrorResponse):
-        return JSONResponse(content=response.model_dump(),
-                            status_code=response.code)
+        response = await openai_serving_completion.unload_lora_adapter(request)
+        if isinstance(response, ErrorResponse):
+            return JSONResponse(content=response.model_dump(),
+                                status_code=response.code)
 
-    return Response(status_code=200)
+        return Response(status_code=200)
+
 
 def build_app(args: Namespace) -> FastAPI:
     app = FastAPI(lifespan=lifespan)
     app.include_router(router)
-    if args.enable_lora_router:
-        app.include_router(lora_adapter_router)
 
     app.root_path = args.root_path
 

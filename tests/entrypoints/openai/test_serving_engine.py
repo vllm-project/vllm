@@ -26,7 +26,7 @@ async def _async_serving_engine_init():
 
 @pytest.mark.asyncio
 async def test_load_lora_adapter_success():
-    serving_engine = asyncio.run(_async_serving_engine_init())
+    serving_engine = await _async_serving_engine_init()
     request = LoadLoraAdapterRequest(lora_name="adapter",
                                      lora_path="/path/to/adapter2")
     response = await serving_engine.load_lora_adapter(request)
@@ -37,7 +37,7 @@ async def test_load_lora_adapter_success():
 
 @pytest.mark.asyncio
 async def test_load_lora_adapter_missing_fields():
-    serving_engine = asyncio.run(_async_serving_engine_init())
+    serving_engine = await _async_serving_engine_init()
     request = LoadLoraAdapterRequest(lora_name="", lora_path="")
     response = await serving_engine.load_lora_adapter(request)
     assert isinstance(response, ErrorResponse)
@@ -48,7 +48,7 @@ async def test_load_lora_adapter_missing_fields():
 
 @pytest.mark.asyncio
 async def test_load_lora_adapter_duplicate():
-    serving_engine = asyncio.run(_async_serving_engine_init())
+    serving_engine = await _async_serving_engine_init()
     request = LoadLoraAdapterRequest(lora_name="adapter1",
                                      lora_path="/path/to/adapter1")
     response = await serving_engine.load_lora_adapter(request)
@@ -66,7 +66,7 @@ async def test_load_lora_adapter_duplicate():
 
 @pytest.mark.asyncio
 async def test_unload_lora_adapter_success():
-    serving_engine = asyncio.run(_async_serving_engine_init())
+    serving_engine = await _async_serving_engine_init()
     request = LoadLoraAdapterRequest(lora_name="adapter1",
                                      lora_path="/path/to/adapter1")
     response = await serving_engine.load_lora_adapter(request)
@@ -80,7 +80,8 @@ async def test_unload_lora_adapter_success():
 
 
 @pytest.mark.asyncio
-async def test_unload_lora_adapter_missing_fields(serving_engine):
+async def test_unload_lora_adapter_missing_fields():
+    serving_engine = await _async_serving_engine_init()
     request = UnloadLoraAdapterRequest(lora_name="", lora_int_id=None)
     response = await serving_engine.unload_lora_adapter(request)
     assert isinstance(response, ErrorResponse)
@@ -89,7 +90,8 @@ async def test_unload_lora_adapter_missing_fields(serving_engine):
 
 
 @pytest.mark.asyncio
-async def test_unload_lora_adapter_not_found(serving_engine):
+async def test_unload_lora_adapter_not_found():
+    serving_engine = await _async_serving_engine_init()
     request = UnloadLoraAdapterRequest(lora_name="nonexistent_adapter")
     response = await serving_engine.unload_lora_adapter(request)
     assert isinstance(response, ErrorResponse)
