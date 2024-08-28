@@ -723,23 +723,33 @@ def input_processor_for_qwen(ctx: InputContext, llm_inputs: LLMInputs):
     tokenizer = cached_get_tokenizer(model_config.tokenizer, trust_remote_code=True)
     image_data = multi_modal_data["image"]
     if isinstance(image_data, torch.Tensor):
-        print("Processing image embed of shape {}".format(image_data.shape))
+        if len(image_data.shape) < 2 or len(image_data.shape) > 3:
+            raise ValueError(
+                f"Expected image embeds to be have 3 dimensions but got {len(image_data.shape)}"
+            )
+        num_images = 1 if len(image_data.shape) == 2 else image_data.shape[0]
     else:
-        print("Processing image embed of type {}".format(type(image_data)))
+        num_images = 1
 
 
     if prompt is None:
         prompt = tokenizer.decode(prompt_token_ids)
 
-    # Replace the image tag with the image prompt with no img pads. We currently do this in
-    # two steps to sidestep some tokenization substitution stuff with URLs behind handled as bytes
-    # that do not like existing image pads strings, but it would be nice to find a better way to
-    # handle it.
-    # TODO - handle multi-image embeddings
-    image_prompt_without_padding = get_image_text(0, padding=False)
-    image_prompt_with_padding = get_image_text(0, padding=True)
-    new_prompt_no_img_pads = prompt.replace('<image>', image_prompt_without_padding, 1)
-    new_prompt_with_img_pads = prompt.replace('<image>', image_prompt_with_padding, 1)
+    # Iteratively replace image tags for every image that we expect
+    num_img_tags = prompt.count("<image>")
+
+    if num_img_tags != num_images:
+        logger.warning("Number of <image> tokens does not match the number of provided images!")
+
+    # Only replace as many image tags as we are going to be able to process correctly
+    # Sequentially replace image tags; padding shenanigans are mostly to sidestep
+    # url encoding logic in the tokenizer
+    new_prompt_no_img_pads = new_prompt_with_img_pads = prompt
+    for img_num in range(min(num_images, num_img_tags)):
+        image_prompt_without_padding = get_image_text(img_num, padding=False)
+        image_prompt_with_padding = get_image_text(img_num, padding=True)
+        new_prompt_no_img_pads = new_prompt_no_img_pads.replace('<image>', image_prompt_without_padding, 1)
+        new_prompt_with_img_pads = new_prompt_with_img_pads.replace('<image>', image_prompt_with_padding, 1)
     new_prompt_token_ids = tokenizer.encode(new_prompt_no_img_pads)
 
     return LLMInputs(prompt=new_prompt_with_img_pads,
@@ -783,7 +793,7 @@ def input_mapper_for_qwen(ctx: InputContext, data: object):
             # Assume only one image embed was provided; unsqueeze the extra dim
             data = data.unsqueeze(0)
         if len(data.shape) != 3 or data.shape[1] != MAX_QWEN_IMG_TOKENS or data.shape[2] != img_emb_size:
-            raise ValueError("Expected img_embeds to be a tensor of shape"
+            raise ValueError("Expected image embeds to be a tensor of shape"
                 f"[# images, {MAX_QWEN_IMG_TOKENS}, {img_emb_size}], but received "
                 f"shape [{pixel_values.shape}]")
         pixel_values = data
