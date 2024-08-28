@@ -10,6 +10,11 @@ import time
 import threading
 
 
+# if the tensor is only one-element and only contains this number
+# this means that the sended object is None.
+NONE_INT = -150886311
+
+
 class BrokenPipeException(Exception):
     def __init__(self, message):
         self.message = message
@@ -52,13 +57,14 @@ class TorchDistributedPipe(KVPipeBase, GroupCoordinator):
 
         self.kv_sending_thread = None
         self.buffer_size = 0
-        self.buffer_size_lock = threading.lock()
+        self.buffer_size_lock = threading.Lock()
 
-        self.nan_tensor = torch.tensor(['nan'])
+        self.none_tensor = torch.tensor([NONE_INT]).to(self.device)
         self.broken = False
         
         
     def send_tensor_wrapper(self, tensor: torch.Tensor) -> None:
+        print('Sending ', tensor)
         """Wrapper for send_tensor_dict"""
         tensor_size = tensor['tensor'].element_size() * tensor['tensor'].numel()
         self.send_tensor_dict({'tensor': tensor}, self.target_rank_for_send)
@@ -82,7 +88,7 @@ class TorchDistributedPipe(KVPipeBase, GroupCoordinator):
             self.kv_sending_thread = ThreadPoolExecutor(max_workers=1)
 
         if tensor is None:
-            tensor = self.nan_tensor
+            tensor = self.none_tensor
             tensor_size = 0
         else:
             tensor_size = tensor.element_size() * tensor.numel()
@@ -100,7 +106,7 @@ class TorchDistributedPipe(KVPipeBase, GroupCoordinator):
         """Receives a tensor from the src rank. Blocking."""
         
         tensor = self.recv_tensor_dict(self.target_rank_for_recv)['tensor']
-        if tensor.isnan().item():
+        if tensor.numel() == 1 and tensor.item() == 150886311:
             return None
         else:
             return tensor
