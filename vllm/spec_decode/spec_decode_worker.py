@@ -177,7 +177,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
             if len(worker_list.keys()) > 1:
                 proposer_worker = MultiProposerWorker(**draft_worker_kwargs,
-                                                       worker_list=worker_list)
+                                                      worker_list=worker_list)
 
         logger.info("Configuring SpecDecodeWorker with proposer=%s",
                     type(proposer_worker))
