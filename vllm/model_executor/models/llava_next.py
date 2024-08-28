@@ -29,7 +29,7 @@ from .llava import LlavaMultiModalProjector
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_siglip_image_feature_size,
                      get_siglip_patch_grid_length, input_processor_for_siglip)
-from .utils import (filter_weights, init_vllm_registered_model,
+from .utils import (filter_weights, flatten_bn, init_vllm_registered_model,
                     merge_multimodal_embeddings)
 
 logger = init_logger(__name__)
@@ -47,15 +47,16 @@ class LlavaNextImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     data: Union[torch.Tensor, List[torch.Tensor]]
     """
-    Shape: `(batch_size, 1 + num_patches, num_channels, height, width)`
+    Shape:
+    `(batch_size * num_images, 1 + num_patches, num_channels, height, width)`
 
-    Note that `num_patches` may be different for each batch, in which case
-    the data is passed as a list instead of a batched tensor.
+    Note that `num_patches` may be different per batch and image,
+    in which case the data is passed as a list instead of a batched tensor.
     """
 
     image_sizes: NotRequired[torch.Tensor]
     """
-    Shape: `(batch_size, 2)`
+    Shape: `(batch_size * num_images, 2)`
 
     This should be in `(height, width)` format.
     """
@@ -64,7 +65,7 @@ class LlavaNextImagePixelInputs(TypedDict):
 class LlavaNextImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
     data: torch.Tensor
-    """Shape: `(batch_size, image_feature_size, hidden_size)`
+    """Shape: `(batch_size * num_images, image_feature_size, hidden_size)`
 
     `hidden_size` must match the hidden size of language model backbone.
     """
@@ -315,10 +316,19 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
             torch.empty(config.text_config.hidden_size))
 
     def _validate_image_sizes(self, data: torch.Tensor) -> torch.Tensor:
-        if list(data.shape[1:]) != [2]:
-            raise ValueError(
-                f"The expected image sizes shape is batch dimension plus "
-                f"{[2]}. You supplied {data.shape}.")
+        expected_dims = (2, )
+
+        def _validate_shape(d: torch.Tensor):
+            actual_dims = tuple(d.shape)
+
+            if actual_dims != expected_dims:
+                expected_expr = str(expected_dims)
+                raise ValueError(
+                    f"The expected shape of image sizes per image per batch "
+                    f"is {expected_expr}. You supplied {tuple(d.shape)}.")
+
+        for d in data:
+            _validate_shape(d)
 
         return data
 
@@ -335,7 +345,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
             if actual_dims != expected_dims:
                 expected_expr = ("num_patches", *map(str, expected_dims))
                 raise ValueError(
-                    "The expected shape of pixel values in each batch element "
+                    "The expected shape of pixel values per image per batch "
                     f"is {expected_expr}. You supplied {tuple(d.shape)}.")
 
         for d in data:
@@ -357,22 +367,15 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
 
-            if not isinstance(image_sizes, torch.Tensor):
+            if not isinstance(image_sizes, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of image sizes. "
                                  f"Got type: {type(image_sizes)}")
 
-            # Remove the N dimension until multiple images are supported.
-            if isinstance(pixel_values, torch.Tensor):
-                pixel_values = pixel_values.squeeze(1)
-            else:
-                pixel_values = [t.squeeze(0) for t in pixel_values]
-
-            image_sizes = image_sizes.squeeze(1)
-
             return LlavaNextImagePixelInputs(
                 type="pixel_values",
-                data=self._validate_pixel_values(pixel_values),
-                image_sizes=self._validate_image_sizes(image_sizes),
+                data=self._validate_pixel_values(flatten_bn(pixel_values)),
+                image_sizes=self._validate_image_sizes(
+                    flatten_bn(image_sizes, concat=True)),
             )
 
         if image_embeds is not None:
@@ -380,12 +383,9 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
                 raise ValueError("Incorrect type of image embeds. "
                                  f"Got type: {type(image_embeds)}")
 
-            # Remove the N dimension until multiple images are supported.
-            image_embeds = image_embeds.squeeze(1)
-
             return LlavaNextImageEmbeddingInputs(
                 type="image_embeds",
-                data=image_embeds,
+                data=flatten_bn(image_embeds),
             )
 
         raise AssertionError("This line should be unreachable.")
