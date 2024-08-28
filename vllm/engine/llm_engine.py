@@ -1468,7 +1468,7 @@ class LLMEngine:
                 "as performance will be severely degraded otherwise.")
 
         # For llm_engine, there is no pipeline parallel support, so the engine
-        # used is always 0
+        # used is always 0.
         virtual_engine = 0
 
         # These are cached outputs from previous iterations. None if on first
