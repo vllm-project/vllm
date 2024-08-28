@@ -1,4 +1,5 @@
 import os
+
 from vllm import LLM, SamplingParams
 
 # enable torch profiler, can also be set on cmd line
