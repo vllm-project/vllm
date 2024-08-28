@@ -472,6 +472,13 @@ class LLMEngine:
                 initialize_ray_cluster(engine_config.parallel_config)
                 from vllm.executor.ray_xpu_executor import RayXPUExecutor
                 executor_class = RayXPUExecutor
+            elif distributed_executor_backend == "mp":
+                # FIXME(kunshang):
+                # spawn needs calling `if __name__ == '__main__':``
+                # fork is not supported for xpu start new process.
+                logger.error(
+                    "Both start methods (spawn and fork) have issue "
+                    "on XPU if you use mp backend, Please try ray instead.")
             else:
                 from vllm.executor.xpu_executor import XPUExecutor
                 executor_class = XPUExecutor

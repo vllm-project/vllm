@@ -296,6 +296,11 @@ set(VLLM_MOE_EXT_SRC
   "csrc/moe/torch_bindings.cpp"
   "csrc/moe/topk_softmax_kernels.cu")
 
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  list(APPEND VLLM_MOE_EXT_SRC
+      "csrc/moe/marlin_moe_ops.cu")
+endif()
+
 define_gpu_extension_target(
   _moe_C
   DESTINATION vllm
