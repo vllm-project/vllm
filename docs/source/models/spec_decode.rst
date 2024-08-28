@@ -187,7 +187,7 @@ speculative decoding, breaking down the guarantees into three key areas:
    - vLLM currently does not guarantee stable log probabilities (logprobs) across different batch sizes, which might 
    cause small variations in output probabilities. 
    This issue may stem from non-deterministic behaviors in batched operations or numerical instability in Torch operations. 
-   as explained in the `*Numerical Accuracy section* <https://pytorch.org/docs/stable/notes/numerical_accuracy.html#batched-computations-or-slice-computations>`_
+   as explained in the `Numerical Accuracy section <https://pytorch.org/docs/stable/notes/numerical_accuracy.html#batched-computations-or-slice-computations>`_
 
 **Conclusion**
 
