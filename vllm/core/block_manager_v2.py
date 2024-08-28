@@ -290,7 +290,8 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             self._last_access_blocks_tracker.update_last_access(
                 seq.seq_id, now)
 
-    def mark_blocks_as_computed(self, seq_group: SequenceGroup):
+    def mark_blocks_as_computed(self, seq_group: SequenceGroup,
+                                token_chunk_size: int):
         # If prefix caching is enabled, mark immutable blocks as computed
         # right after they have been scheduled (for prefill). This assumes
         # the scheduler is synchronous so blocks are actually computed when

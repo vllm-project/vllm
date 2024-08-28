@@ -80,7 +80,8 @@ class EmbeddingModelBlockSpaceManager(BlockSpaceManager):
                                       seq_group: List[Sequence]) -> List[int]:
         return []
 
-    def mark_blocks_as_computed(self, seq_group: SequenceGroup):
+    def mark_blocks_as_computed(self, seq_group: SequenceGroup,
+                                token_chunk_size: int):
         pass
 
     def get_prefix_cache_hit_rate(self, device: Device) -> float:

@@ -595,3 +595,43 @@ def test_sliding_window_multi_seq():
 
     # assert all blocks are free now
     assert block_manager.get_num_free_gpu_blocks() == num_gpu_blocks
+
+
+def test_mark_blocks_as_computed_with_prefix_cache_and_chunked_prefill():
+    """When prefix cache and chunked prefill are enabled, the block manager
+    should only mark a chunk of blocks as computed instead of all blocks.
+    """
+
+    block_size = 4
+    num_cpu_blocks = 0
+    num_gpu_blocks = 16
+    block_manager = BlockSpaceManagerV1(block_size,
+                                        num_gpu_blocks,
+                                        num_cpu_blocks,
+                                        watermark=0,
+                                        enable_caching=True)
+
+    # Set prompt size to have num_gpu_blocks - 1 full blocks.
+    prompt_length = block_size * num_gpu_blocks - 1
+
+    # Allocate (reserve) all blocks.
+    _, seq_group = create_dummy_prompt("0",
+                                       prompt_length,
+                                       block_size=block_size)
+    block_manager.allocate(seq_group)
+    assert seq_group.seqs[0].n_blocks == num_gpu_blocks
+
+    # 1st chunk: Compute 2 and half blocks. Should mark 2 blocks as computed.
+    token_chunk_size = int(block_size * 2.5)
+    block_manager.mark_blocks_as_computed(seq_group, token_chunk_size)
+    computed_blocks = block_manager.get_all_computed_blocks(seq_group.seqs[0])
+    assert len(computed_blocks) == 2
+
+    # Actual computed tokens.
+    seq_group.seqs[0].data.update_num_computed_tokens(token_chunk_size)
+
+    # 2nd chunk: Complete 3rd block and additional 4 blocks.
+    token_chunk_size = int(block_size * 4.5)
+    block_manager.mark_blocks_as_computed(seq_group, token_chunk_size)
+    computed_blocks = block_manager.get_all_computed_blocks(seq_group.seqs[0])
+    assert len(computed_blocks) == 7
