@@ -12,8 +12,7 @@ MODELS = [
 
 
 @pytest.mark.parametrize("model", MODELS)
-# @pytest.mark.parametrize("dtype", ["bfloat16"])
-@pytest.mark.parametrize("dtype", ["float"])
+@pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models(
@@ -33,8 +32,6 @@ def test_models(
     with vllm_runner(model, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
-    # print("hf_outputs  ", hf_outputs)
-    # print("vllm_outputs", vllm_outputs)
     check_logprobs_close(
         outputs_0_lst=hf_outputs,
         outputs_1_lst=vllm_outputs,
