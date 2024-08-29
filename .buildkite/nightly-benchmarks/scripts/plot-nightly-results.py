@@ -81,7 +81,7 @@ def main(args):
     #         results = results + json.loads(f.read())
     
     results = []
-    for step in [0,1,10]:
+    for step in [0,1,10,11,12]:
         
         with open(results_folder / f"step{step}.txt", "r") as f:
             temp_results = json.loads(f.read())
@@ -104,7 +104,7 @@ def main(args):
     # plot results
     fig, axes = plt.subplots(3, 3, figsize=(20, 16))
     fig.subplots_adjust(hspace=1)
-    methods = [0,1,10]
+    methods = [0,1,10,11,12]
     for i, model in enumerate(["llama8B", "llama70B", "mixtral8x7B"]):
         for j, metric in enumerate(["Tput", "TPOT", "TTFT"]):
             
@@ -124,12 +124,20 @@ def main(args):
             inf_qps_results = []
             for k, method in enumerate(methods):
                 mean, std = get_perf_w_std(df, method, model, metric)
+                if method == 0:
+                    label = "1 month ago"
+                elif method == 11:
+                    label = "10-step w/ zmq"
+                elif method == 12:
+                    label = "1-step w/ zmq"
+                else:
+                    label = f"{method}-step"
                 ax.errorbar(range(len(mean)),
                             mean, 
                             yerr=std, 
                             capsize=10, 
                             capthick=4,
-                            label="1 month ago" if method == 0 else f"now {method}-step",
+                            label=label,
                             lw=4,)
             #     inf_qps_results.append(mean[-2])
             # print((inf_qps_results[0] - inf_qps_results[1]) / inf_qps_results[1])
