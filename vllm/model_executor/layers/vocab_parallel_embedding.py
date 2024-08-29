@@ -352,7 +352,7 @@ class VocabParallelEmbedding(torch.nn.Module):
             return
         elif isinstance(param, UninitializedParameter):
             shape = list(loaded_weight.shape)
-            if output_dim:
+            if output_dim is not None:
                 shape[output_dim] = shape[output_dim] // self.tp_size
             param.materialize(tuple(shape), dtype=loaded_weight.dtype)
 
