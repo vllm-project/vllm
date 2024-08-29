@@ -19,7 +19,8 @@ from vllm import FastSyncLLM as LLM
 from vllm import envs
 from vllm.config import EngineConfig
 from vllm.engine.arg_utils import EngineArgs
-from vllm.entrypoints.chat_utils import _parse_chat_message_content, load_chat_template
+from vllm.entrypoints.chat_utils import (_parse_chat_message_content,
+                                         load_chat_template)
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest, ChatCompletionResponse,

@@ -6,10 +6,9 @@ from vllm import envs
 from vllm.distributed.communication_op import broadcast_tensor_dict
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
-from vllm.entrypoints.openai.serving_engine import TextTokensPrompt
 from vllm.executor.multiproc_gpu_executor import MultiprocessingGPUExecutor
 from vllm.executor.ray_gpu_executor import RayGPUExecutor
-from vllm.inputs.data import PromptInputs
+from vllm.inputs.data import PromptInputs, TokensPrompt
 from vllm.logger import init_logger
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
@@ -46,7 +45,7 @@ class FastSyncLLM:
         request_id: str,
     ) -> None:
         if isinstance(inputs, list):
-            inputs = TextTokensPrompt(prompt_token_ids=inputs)
+            inputs = TokensPrompt(prompt_token_ids=inputs)
         self.llm_engine.add_request(request_id, inputs, params)
 
     def _poll_requests(self):

@@ -17,4 +17,6 @@ if HAS_TRITON:
         "fused_experts",
         "get_config_file_name",
         "grouped_topk",
+        "invoke_fused_moe_kernel",
+        "moe_align_block_size",
     ]

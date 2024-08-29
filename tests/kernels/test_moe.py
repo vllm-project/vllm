@@ -97,11 +97,13 @@ def test_mixtral_moe(dtype: torch.dtype):
 
     # pad the weight if using padding
     if envs.VLLM_MOE_PADDING:
-        w13_weight = F.pad(vllm_moe.experts.w13_weight, (0, 128), "constant", 0)
+        w13_weight = F.pad(vllm_moe.experts.w13_weight, (0, 128), "constant",
+                           0)
         torch.cuda.empty_cache()
         w2_weight = F.pad(vllm_moe.experts.w2_weight, (0, 128), "constant", 0)
         torch.cuda.empty_cache()
-        vllm_moe.experts.w13_weight = Parameter(w13_weight, requires_grad=False)
+        vllm_moe.experts.w13_weight = Parameter(w13_weight,
+                                                requires_grad=False)
         vllm_moe.experts.w2_weight = Parameter(w2_weight, requires_grad=False)
 
     # Run forward passes for both MoE blocks

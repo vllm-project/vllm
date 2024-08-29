@@ -12,15 +12,14 @@ from vllm.distributed.device_communicators.custom_all_reduce_utils import (
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import cuda_device_count_stateless
-from vllm.utils import is_hip
+from vllm.utils import cuda_device_count_stateless, is_hip
 
 try:
     if is_hip():
         from amdsmi import (AmdSmiException, amdsmi_get_processor_handles,
                             amdsmi_init, amdsmi_shut_down,
                             amdsmi_topo_get_link_type)
-    else:    
+    else:
         import pynvml
 
     @contextmanager
@@ -36,8 +35,7 @@ try:
                 pynvml.nvmlInit()
                 yield
             finally:
-                pynvml.nvmlShutdown()    
-
+                pynvml.nvmlShutdown()
 
 except ImportError:
     # For AMD GPUs
@@ -192,7 +190,8 @@ class CustomAllreduce:
         if current_platform.is_cuda():
             from vllm.platforms.cuda import CudaPlatform
             cuda_platform: CudaPlatform = current_platform
-            full_nvlink = cuda_platform.is_full_nvlink(physical_device_ids, world_size)
+            full_nvlink = cuda_platform.is_full_nvlink(physical_device_ids,
+                                                       world_size)
         else:
             full_nvlink = _is_full_nvlink(physical_device_ids, world_size)
         if world_size > 2 and not full_nvlink:
@@ -219,8 +218,7 @@ class CustomAllreduce:
         # allreduce results.
         if is_hip():
             # meta data buffers need to be "uncached" for signal on MI200
-            self.meta = ops.allocate_meta_buffer(ops.meta_size() +
-                                                       max_size)
+            self.meta = ops.allocate_meta_buffer(ops.meta_size() + max_size)
         else:
             self.meta = torch.zeros(ops.meta_size() + max_size,
                                     dtype=torch.uint8,

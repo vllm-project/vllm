@@ -5,11 +5,10 @@ from typing import List, Optional, Tuple, Union
 import torch
 
 import vllm.envs as envs
-from vllm.utils import is_hip
-
 from vllm._core_ext import ScalarType
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils import is_hip
 
 logger = init_logger(__name__)
 
