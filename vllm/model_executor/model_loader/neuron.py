@@ -1,7 +1,7 @@
 """Utilities for selecting and loading neuron models."""
 import importlib
 import os
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -109,6 +109,17 @@ def _get_model_architecture(config: PretrainedConfig) -> str:
         f"{list(_NEURON_SUPPORTED_MODELS.keys())}")
 
 
+def _get_buckets(env: str, default_value: List[int]) -> List[int]:
+    env_value = os.getenv(env)
+    if env_value is None:
+        return default_value
+    buckets_remove_empty = filter(
+        lambda x: x is not None and len(x.strip()) > 0, env_value.split(","))
+    buckets_int = map(int, buckets_remove_empty)
+    buckets_list = list(buckets_int)
+    return buckets_list
+
+
 def get_neuron_model(model_config: ModelConfig,
                      parallel_config: ParallelConfig,
                      scheduler_config: SchedulerConfig) -> nn.Module:
@@ -123,14 +134,18 @@ def get_neuron_model(model_config: ModelConfig,
     neuron_config = NeuronConfig(
         continuous_batching=continuous_batching_config)
 
+    context_length_estimates = _get_buckets("NEURON_CONTEXT_LENGTH_BUCKETS",
+                                            [scheduler_config.max_model_len])
+    n_positions = _get_buckets("NEURON_TOKEN_GEN_BUCKETS",
+                               [scheduler_config.max_model_len])
+
     # Load the weights from the cached or downloaded files.
-    model.load_weights(
-        model_config.model,
-        tp_degree=parallel_config.tensor_parallel_size,
-        amp=TORCH_DTYPE_TO_NEURON_AMP[model_config.dtype],
-        neuron_config=neuron_config,
-        context_length_estimate=[scheduler_config.max_model_len],
-        n_positions=[scheduler_config.max_model_len],
-        batch_size=scheduler_config.max_num_seqs)
+    model.load_weights(model_config.model,
+                       tp_degree=parallel_config.tensor_parallel_size,
+                       amp=TORCH_DTYPE_TO_NEURON_AMP[model_config.dtype],
+                       neuron_config=neuron_config,
+                       context_length_estimate=context_length_estimates,
+                       n_positions=n_positions,
+                       batch_size=scheduler_config.max_num_seqs)
 
     return model.eval()
