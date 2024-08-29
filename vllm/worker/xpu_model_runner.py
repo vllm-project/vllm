@@ -12,6 +12,7 @@ from vllm.attention import get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
+from vllm.distributed import get_pp_group
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
@@ -439,9 +440,11 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
                     "Setting it to the minimum value of 1.", expr)
                 max_num_seqs = 1
 
+        batch_size = 0
         for group_id in range(max_num_seqs):
             seq_len = (max_num_batched_tokens // max_num_seqs +
                        (group_id < max_num_batched_tokens % max_num_seqs))
+            batch_size += seq_len
 
             seq_data, dummy_multi_modal_data = self.input_registry \
                 .dummy_data_for_profiling(self.model_config,
@@ -465,7 +468,13 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
         finished_requests_ids = [seq.request_id for seq in seqs]
         model_input = self.prepare_model_input(
             seqs, finished_requests_ids=finished_requests_ids)
-        self.execute_model(model_input, kv_caches)
+        intermediate_tensors = None
+        if not get_pp_group().is_first_rank:
+            intermediate_tensors = self.model.make_empty_intermediate_tensors(
+                batch_size=batch_size,
+                dtype=self.model_config.dtype,
+                device=self.device)
+        self.execute_model(model_input, kv_caches, intermediate_tensors)
         torch.xpu.synchronize()
         return
 
@@ -537,7 +546,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
                 and self.observability_config.collect_model_forward_time):
             model_forward_start_time = time.time()
 
-        hidden_states = model_executable(
+        hidden_or_intermediate_states = model_executable(
             input_ids=model_input.input_tokens,
             positions=model_input.input_positions,
             kv_caches=kv_caches,
@@ -545,12 +554,16 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
             intermediate_tensors=intermediate_tensors,
             **MultiModalInputs.as_kwargs(model_input.multi_modal_kwargs or {},
                                          device=self.device))
+        # Compute the logits in the last pipeline stage.
+        if not get_pp_group().is_last_rank:
+            return hidden_or_intermediate_states
+
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
             model_forward_end_time = time.time()
 
         # Compute the logits.
-        logits = self.model.compute_logits(hidden_states,
+        logits = self.model.compute_logits(hidden_or_intermediate_states,
                                            model_input.sampling_metadata)
 
         # Only perform sampling in the driver worker.
