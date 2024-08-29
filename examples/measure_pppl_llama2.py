@@ -23,8 +23,7 @@ Quick correctness validation tips:
 Running llama-2-7b model 
 ( 
     ./vllm/examples/measure_pppl_llama2.py 
-    --model=/data/models/llama-2-7b-chat-hf 
-    --data=./vllm/tests/prompts/wiki.test.raw 
+    --model=meta-llama/Llama-2-7b-chat-hf 
     --context-size=1024 
     --sample-size=512
 )
@@ -33,8 +32,7 @@ should result in PPL ~ 6.524227946419175
 Running llama-2-7b model 
 ( 
     ./vllm/examples/measure_pppl_llama2.py 
-    --model=/data/models/llama-2-7b-chat-hf 
-    --data=./vllm/tests/prompts/wiki.test.raw 
+    --model=meta-llama/Llama-2-7b-chat-hf 
     --context-size=1024 
     --sample-size=512
     --patch-size=1
@@ -46,6 +44,8 @@ should result in PPL ~ PPL=3.8968611189957523
 import argparse
 import datetime
 import math
+import os
+from huggingface_hub import hf_hub_download
 
 from transformers import LlamaTokenizer
 
@@ -56,9 +56,17 @@ logger = init_logger(__name__)
 
 
 def get_wikitext2_text(tokenizer):
-    with open(args.data) as f:
+    hf_hub_download(
+      repo_id='alexei-v-ivanov-amd/wiki',
+      repo_type="dataset",
+      filename='wiki.test.raw',
+      local_dir='./'
+    )
+    with open('./wiki.test.raw') as f:
         test_text = "\n".join(line.strip() for line in f)
         test_enc = tokenizer(test_text)
+
+    os.remove('./wiki.test.raw')
 
     return test_enc, test_text
 
