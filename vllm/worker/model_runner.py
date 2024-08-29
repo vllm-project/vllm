@@ -92,6 +92,7 @@ class ModelInputForGPU(ModelRunnerInputBase):
     finished_requests_ids: Optional[List[str]] = None
     virtual_engine: int = 0
     async_callback: Optional[Callable] = None
+    use_async_and_multi_step: bool = False
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
@@ -1123,10 +1124,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 device=self.device)
         self.execute_model(model_input, kv_caches, intermediate_tensors)
         torch.cuda.synchronize()
-
-        # reset and discard the guard and compiled bytecode for profiling runs
-        torch._dynamo.reset()
-
         return
 
     def remove_all_loras(self):
