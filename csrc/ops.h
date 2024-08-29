@@ -217,7 +217,6 @@ at::Tensor causal_conv1d_fwd(const at::Tensor& x, const at::Tensor& weight,
                              const c10::optional<at::Tensor>& final_states_out_,
                              bool silu_activation);
 
-#ifndef USE_ROCM
 using fptr_t = int64_t;
 fptr_t init_custom_ar(torch::Tensor& meta, torch::Tensor& rank_data,
                       const std::vector<std::string>& handles,
