@@ -157,6 +157,10 @@ def apply_fp8_linear(
 
         if per_tensor_weights and per_tensor_activations:
             # Fused GEMM_DQ
+            global TORCH_SCALED_MM_SCALE_RESULT
+            if TORCH_SCALED_MM_SCALE_RESULT.device != weight.device:
+                TORCH_SCALED_MM_SCALE_RESULT = TORCH_SCALED_MM_SCALE_RESULT.to(
+                    weight.device)
             output = torch._scaled_mm(
                 qinput,
                 weight,
@@ -165,11 +169,11 @@ def apply_fp8_linear(
                 scale_b=weight_scale,
                 scale_result=TORCH_SCALED_MM_SCALE_RESULT,
                 bias=bias)
-            # Since in torch 2.5, scaled_mm only returns single value
-            # This should be removed when vllm-nvidia also moves to 2.5
-            if is_hip():
-                return torch.narrow(output, 0, 0, input.shape[0])
-            return torch.narrow(output[0], 0, 0, input.shape[0])
+            # A fix for discrepancy in scaled_mm which returns tuple for torch < 2.5
+            # and a single value in torch >= 2.5
+            if type(output) is tuple and len(output) == 2:
+                return torch.narrow(output[0], 0, 0, input.shape[0])
+            return torch.narrow(output, 0, 0, input.shape[0])
 
         else:
             # Fallback for channelwise case, where we use unfused DQ
