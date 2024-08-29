@@ -1,9 +1,9 @@
 [
     {
         "test_name": "llama8B_tp1_sharegpt",
-        "qps_list": [2,4,8,16,"inf"],
+        "qps_list": ["inf"],
         "common_parameters": {
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "model": "meta-llama/Meta-Llama-3-8B-Instruct",
             "tp": 1,
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
@@ -35,106 +35,16 @@
         "vllm_055_server_parameters": {
             "disable_log_stats": "",
             "disable_log_requests": "",
-            "max_model_len": "20000"
+            "max_model_len": "20000",
+            "gpu_memory_utilization": 0.95
         },
         "vllm_055_client_parameters": {
         },
         "sglang_server_parameters": {
-            "disable_radix_cache": ""
+            "disable_radix_cache": "",
+            "enable_torch_compile": ""
         },
         "sglang_client_parameters": {
         }
-    },
-    {
-        "test_name": "llama70B_tp4_sharegpt",
-        "qps_list": [2,4,8,16,"inf"],
-        "common_parameters": {
-            "model": "meta-llama/Meta-Llama-3.1-70B-Instruct",
-            "tp": 4,
-            "dataset_name": "sharegpt",
-            "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
-            "num_prompts": 500,
-            "port": 8000,
-            "reuse_server": false
-        },
-        "lmdeploy_server_parameters": {
-        },
-        "lmdeploy_client_parameters": {
-        },
-        "tgi_server_parameters": {
-        },
-        "tgi_client_parameters": {
-            "endpoint": "/generate_stream"
-        },
-        "trt_server_parameters": {
-            "model_type": "llama",
-            "model_dtype": "float16",
-            "max_batch_size": 2048,
-            "max_input_len": 4096,
-            "max_seq_len": 6144,
-            "max_num_tokens": 16384,
-            "trt_llm_version": "v0.11.0"
-        },
-        "trt_client_parameters": {
-            "endpoint": "/v2/models/ensemble/generate_stream"
-        },
-        "vllm_055_server_parameters": {
-            "disable_log_stats": "",
-            "disable_log_requests": "",
-            "max_model_len": "20000"
-        },
-        "vllm_055_client_parameters": {
-        },
-        "sglang_server_parameters": {
-            "disable_radix_cache": ""
-        },
-        "sglang_client_parameters": {
-        }
-    },
-    {
-        "test_name": "mixtral8x7B_tp2_sharegpt",
-        "qps_list": [2,4,8,16,"inf"],
-        "common_parameters": {
-            "model": "mistralai/Mixtral-8x7B-Instruct-v0.1",
-            "tp": 2,
-            "dataset_name": "sharegpt",
-            "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
-            "num_prompts": 500,
-            "port": 8000,
-            "reuse_server": false
-        },
-        "lmdeploy_server_parameters": {
-        },
-        "lmdeploy_client_parameters": {
-        },
-        "tgi_server_parameters": {
-        },
-        "tgi_client_parameters": {
-            "endpoint": "/generate_stream"
-        },
-        "trt_server_parameters": {
-            "model_type": "llama",
-            "model_dtype": "float16",
-            "max_batch_size": 2048,
-            "max_input_len": 4096,
-            "max_seq_len": 6144,
-            "max_num_tokens": 16384,
-            "trt_llm_version": "v0.11.0"
-        },
-        "trt_client_parameters": {
-            "endpoint": "/v2/models/ensemble/generate_stream"
-        },
-        "vllm_055_server_parameters": {
-            "disable_log_stats": "",
-            "disable_log_requests": "",
-            "max_model_len": "20000"
-        },
-        "vllm_055_client_parameters": {
-        },
-        "sglang_server_parameters": {
-            "disable_radix_cache": ""
-        },
-        "sglang_client_parameters": {
-        }
-    }
+    } 
 ]
