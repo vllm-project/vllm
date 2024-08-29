@@ -1219,8 +1219,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         start_time = time.perf_counter()
 
         # Prepare dummy inputs. These will be reused for all batch sizes.
-        max_batch_size = _get_max_graph_batch_size(
-            self.scheduler_config.max_num_seqs)
+        max_batch_size = self.max_batchsize_to_capture
         input_tokens = torch.zeros(max_batch_size, dtype=torch.long).cuda()
         input_positions = torch.zeros(max_batch_size, dtype=torch.long).cuda()
 
