@@ -142,6 +142,7 @@ class FlashInferState(AttentionState):
                                           device=self.runner.device)
         self._graph_block_tables = torch.from_numpy(
             self.runner.graph_block_tables).to(device=self.runner.device)
+        self._num_orig_input_tokens_tensor = torch.zeros(max_batch_size, dtype=torch.int32, device=self.runner.device)
         self._graph_decode_workspace_buffer = self._get_workspace_buffer()
         self._graph_indices_buffer = torch.empty(
             max_batch_size * self.runner.cache_config.num_gpu_blocks,
@@ -162,6 +163,7 @@ class FlashInferState(AttentionState):
         del self._graph_indptr_buffer
         del self._graph_last_page_len_buffer
         del self._graph_decode_wrapper
+        del self._num_orig_input_tokens_tensor
 
     def graph_clone(self, batch_size: int):
         assert self._is_graph_capturing
@@ -211,6 +213,7 @@ class FlashInferState(AttentionState):
             slot_mapping=self._graph_slot_mapping[:batch_size],
             num_prefill_tokens=0,
             num_decode_tokens=batch_size,
+            num_orig_input_tokens_tensor=self._num_orig_input_tokens_tensor[:batch_size],
             max_prefill_seq_len=0,
             block_tables=self._graph_block_tables,
             paged_kv_indptr=paged_kv_indptr_tensor_host,
@@ -234,9 +237,12 @@ class FlashInferState(AttentionState):
     def get_graph_input_buffers(self, attn_metadata):
         return {
             "slot_mapping": attn_metadata.slot_mapping,
+            "num_orig_input_tokens_tensor": attn_metadata.num_orig_input_tokens_tensor,
         }
 
     def prepare_graph_input_buffers(self, input_buffers, attn_metadata):
+        input_buffers["num_orig_input_tokens_tensor"].copy_(
+               attn_metadata.num_orig_input_tokens_tensor, non_blocking=True)
         return
 
     def begin_forward(self, model_input):
@@ -582,6 +588,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                      dim=0,
                      dtype=query_start_loc.dtype,
                      out=query_start_loc[1:])
+        
+        num_orig_input_tokens_tensor = torch.tensor(num_orig_input_tokens_list, dtype=torch.long, device=device)
 
         if len(self.paged_kv_indptr) > 0:
             paged_kv_indices_tensor = torch.tensor(self.paged_kv_indices,
@@ -609,6 +617,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             slot_mapping=slot_mapping_tensor,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
+            num_orig_input_tokens_tensor=num_orig_input_tokens_tensor,
             max_prefill_seq_len=max_prefill_seq_len,
             block_tables=block_tables,
             paged_kv_indptr=paged_kv_indptr_tensor,
