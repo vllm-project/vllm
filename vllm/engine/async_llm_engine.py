@@ -171,6 +171,7 @@ class RequestTracker:
 
         if verbose and finished:
             logger.info("Finished request %s.", request_id)
+            logger.info("Metrics: %s", request_output.metrics)
 
     def process_exception(self,
                           request_id: str,
