@@ -70,6 +70,10 @@ class BenchmarkMetrics:
     median_itl_ms: float
     std_itl_ms: float
     p99_itl_ms: float
+    mean_latency_ms: float
+    median_latency_ms: float
+    std_latency_ms: float
+    p99_latency_ms: float
 
 
 def sample_sharegpt_requests(
@@ -287,6 +291,14 @@ def calculate_metrics(
         median_itl_ms=np.median(itls or 0) * 1000,
         std_itl_ms=np.std(itls or 0) * 1000,
         p99_itl_ms=np.percentile(itls or 0, 99) * 1000,
+        mean_latency_ms=np.mean([output.latency
+                                 for output in outputs] or 0) * 1000,
+        median_latency_ms=np.median([output.latency
+                                     for output in outputs] or 0) * 1000,
+        std_latency_ms=np.std([output.latency
+                               for output in outputs] or 0) * 1000,
+        p99_latency_ms=np.percentile([output.latency
+                                      for output in outputs] or 0, 99) * 1000,
     )
 
     return metrics, actual_output_lens
@@ -414,6 +426,10 @@ async def benchmark(
         "median_itl_ms": metrics.median_itl_ms,
         "std_itl_ms": metrics.std_itl_ms,
         "p99_itl_ms": metrics.p99_itl_ms,
+        "mean_latency_ms": metrics.mean_latency_ms,
+        "median_latency_ms": metrics.median_latency_ms,
+        "std_latency_ms": metrics.std_latency_ms,
+        "p99_latency_ms": metrics.p99_latency_ms,
         "input_lens": [output.prompt_len for output in outputs],
         "output_lens": actual_output_lens,
         "ttfts": [output.ttft for output in outputs],
@@ -544,8 +560,8 @@ def main(args: argparse.Namespace):
                     )
 
         # Traffic
-        result_json["request_rate"] = (
-            args.request_rate if args.request_rate < float("inf") else "inf")
+        result_json["request_rate"] = (args.request_rate if args.request_rate
+                                       < float("inf") else "inf")
 
         # Merge with benchmark result
         result_json = {**result_json, **benchmark_result}
@@ -729,8 +745,7 @@ if __name__ == "__main__":
         "--ignore-eos",
         action="store_true",
         help="Set ignore_eos flag when sending the benchmark request."
-        "Warning: ignore_eos is not supported in deepspeed_mii and tgi."
-    )
+        "Warning: ignore_eos is not supported in deepspeed_mii and tgi.")
 
     args = parser.parse_args()
     main(args)
