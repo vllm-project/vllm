@@ -391,6 +391,42 @@ try:
                                b_type: ScalarType) -> torch.Tensor:
         return torch.empty_like(b_q_weight)
 
+    @torch.library.register_fake("_C::causal_conv1d_fwd")
+    def causal_conv1d_fwd_fake(x: torch.Tensor, weight: torch.Tensor,
+                               bias_: Optional[torch.Tensor],
+                               seq_idx_: Optional[torch.Tensor],
+                               initial_states_: Optional[torch.Tensor],
+                               final_states_out_: Optional[torch.Tensor],
+                               silu_activation: bool) -> torch.Tensor:
+        return torch.empty_like(x)
+
+    @torch.library.register_fake("_C::causal_conv1d_update")
+    def causal_conv1d_update_fake(x: torch.Tensor, conv_state: torch.Tensor,
+                                  weight: torch.Tensor,
+                                  bias_: Optional[torch.Tensor],
+                                  silu_activation: bool) -> torch.Tensor:
+        return torch.empty_like(x)
+
+    @torch.library.register_fake("_C::selective_scan_fwd")
+    def selective_scan_fwd_fake(
+            u: torch.Tensor, delta: torch.Tensor, A: torch.Tensor,
+            B: torch.Tensor, C: torch.Tensor, D_: Optional[torch.Tensor],
+            z_: Optional[torch.Tensor], delta_bias_: Optional[torch.Tensor],
+            delta_softplus: bool, index_: Optional[torch.Tensor],
+            x: Optional[torch.Tensor]) -> List[torch.Tensor]:
+        a = torch.empty_like(u)
+        if x is not None:
+            b = x
+        else:
+            b = torch.empty((u.size(0), u.size(1), A.size(1)),
+                            dtype=u.dtype,
+                            device=u.device)
+        if z_ is not None:
+            c = torch.empty_like(z_)
+            return [a, b, c]
+        else:
+            return [a, b]
+
 except Exception:
     pass
 

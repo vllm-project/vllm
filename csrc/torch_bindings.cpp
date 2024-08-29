@@ -261,7 +261,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor! A, Tensor! B, Tensor! C,"
       "Tensor? D_, Tensor? z_, Tensor? delta_bias_,"
       "bool delta_softplus,"
-      "Tensor? index_, Tensor? x) -> Tensor[]");
+      "Tensor? index_, Tensor(a! -> *)? x) -> Tensor(a)[]");
   ops.impl("selective_scan_fwd", torch::kCUDA, &selective_scan_fwd);
 
   ops.def(
