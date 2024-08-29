@@ -6,13 +6,13 @@ import torch
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata,
                                               AttentionMetadataBuilder)
+from vllm.attention.backends.utils import CommonAttentionState
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUBuilder
 
-# Placeholder attention backend for models like Mamba that don't have attention.
-# Mainly exists to sidestep get_attn_backend.
-# The attention metadata is still needed for Mamba.
+# Placeholder attention backend for models like Mamba and embedding models that
+# lack attention.
 
 
 class PlaceholderAttentionBackend(AttentionBackend):
@@ -33,6 +33,10 @@ class PlaceholderAttentionBackend(AttentionBackend):
     @staticmethod
     def get_metadata_cls() -> Type["PlaceholderAttentionMetadata"]:
         return PlaceholderAttentionMetadata
+
+    @staticmethod
+    def get_state_cls() -> Type["CommonAttentionState"]:
+        return CommonAttentionState
 
     @staticmethod
     def get_kv_cache_shape(
@@ -118,11 +122,15 @@ class PlaceholderAttentionMetadata(AttentionMetadata):
         assert self.context_lens_tensor is not None
         assert self.seq_start_loc is not None
 
+        # Placeholders
+        slot_mapping = torch.empty(0)
+        block_tables = torch.empty(0)
+
         self._cached_prefill_metadata = PlaceholderAttentionMetadata(
             num_prefills=self.num_prefills,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=0,
-            slot_mapping=None,
+            slot_mapping=slot_mapping,
             seq_lens=self.seq_lens[:self.num_prefills],
             seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
             max_query_len=self.max_query_len,
@@ -131,7 +139,7 @@ class PlaceholderAttentionMetadata(AttentionMetadata):
             query_start_loc=self.query_start_loc[:self.num_prefills + 1],
             seq_start_loc=self.seq_start_loc[:self.num_prefills + 1],
             context_lens_tensor=self.context_lens_tensor[:self.num_prefills],
-            block_tables=None,
+            block_tables=block_tables,
             use_cuda_graph=False,
         )
         return self._cached_prefill_metadata
@@ -145,11 +153,15 @@ class PlaceholderAttentionMetadata(AttentionMetadata):
             return self._cached_decode_metadata
         assert self.seq_lens_tensor is not None
 
+        # Placeholders
+        slot_mapping = torch.empty(0)
+        block_tables = torch.empty(0)
+
         self._cached_decode_metadata = PlaceholderAttentionMetadata(
             num_prefills=0,
             num_prefill_tokens=0,
             num_decode_tokens=self.num_decode_tokens,
-            slot_mapping=None,
+            slot_mapping=slot_mapping,
             seq_lens=None,
             seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
             max_query_len=None,
@@ -158,7 +170,7 @@ class PlaceholderAttentionMetadata(AttentionMetadata):
             query_start_loc=None,
             seq_start_loc=None,
             context_lens_tensor=None,
-            block_tables=None,
+            block_tables=block_tables,
             use_cuda_graph=self.use_cuda_graph,
         )
         return self._cached_decode_metadata
@@ -266,9 +278,13 @@ class PlaceholderAttentionMetadataBuilder(
                      dtype=query_start_loc.dtype,
                      out=query_start_loc[1:])
 
+        # Placeholders
+        slot_mapping = torch.empty(0)
+        block_tables = torch.empty(0)
+
         return PlaceholderAttentionMetadata(
             num_prefills=self.num_prefills,
-            slot_mapping=None,
+            slot_mapping=slot_mapping,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
             seq_lens=seq_lens,
@@ -279,7 +295,7 @@ class PlaceholderAttentionMetadataBuilder(
             query_start_loc=query_start_loc,
             seq_start_loc=seq_start_loc,
             context_lens_tensor=context_lens_tensor,
-            block_tables=None,
+            block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
         )
 

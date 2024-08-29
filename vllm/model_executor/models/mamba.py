@@ -440,10 +440,9 @@ class MambaForCausalLM(nn.Module, HasInnerState):
             max_batch_size = (_get_graph_batch_size(
                 self.scheduler_config.max_num_seqs) if self.scheduler_config
                               else max(_BATCH_SIZES_TO_CAPTURE) + 2)
-            self.mamba_cache = MambaCacheManager(self.lm_head.weight.dtype,
-                                                self.config.num_hidden_layers,
-                                                max_batch_size,
-                                                *self._get_mamba_cache_shape())
+            self.mamba_cache = MambaCacheManager(
+                self.lm_head.weight.dtype, self.config.num_hidden_layers,
+                max_batch_size, *self._get_mamba_cache_shape())
 
         if "seqlen_agnostic_capture_inputs" not in kwargs:
             # We get here only on Prefill/Eager mode runs
@@ -471,7 +470,8 @@ class MambaForCausalLM(nn.Module, HasInnerState):
 
         return hidden_states
 
-    def _get_mamba_cache_shape(self) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+    def _get_mamba_cache_shape(
+            self) -> Tuple[Tuple[int, int], Tuple[int, int]]:
         world_size = get_tensor_model_parallel_world_size()
         conv_state_shape = (
             self.config.intermediate_size // world_size,

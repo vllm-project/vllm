@@ -89,14 +89,12 @@ def get_global_forced_attn_backend() -> Optional[_Backend]:
 
 @lru_cache(maxsize=None)
 def get_attn_backend(
-    num_heads: int,
     head_size: int,
-    num_kv_heads: int,
     sliding_window: Optional[int],
     dtype: torch.dtype,
     kv_cache_dtype: Optional[str],
     block_size: int,
-    is_attention_free: bool,  #TODO: pass in from all users 
+    is_attention_free: bool,
     is_blocksparse: bool = False,
 ) -> Type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
@@ -107,9 +105,8 @@ def get_attn_backend(
             BlocksparseFlashAttentionBackend)
         return BlocksparseFlashAttentionBackend
 
-    backend = which_attn_to_use(num_heads, head_size, num_kv_heads,
-                                sliding_window, dtype, kv_cache_dtype,
-                                block_size, is_attention_free)
+    backend = which_attn_to_use(head_size, sliding_window, dtype,
+                                kv_cache_dtype, block_size, is_attention_free)
     if backend == _Backend.FLASH_ATTN:
         from vllm.attention.backends.flash_attn import (  # noqa: F401
             FlashAttentionBackend)
@@ -157,9 +154,7 @@ def get_attn_backend(
 
 
 def which_attn_to_use(
-    num_heads: int,
     head_size: int,
-    num_kv_heads: int,
     sliding_window: Optional[int],
     dtype: torch.dtype,
     kv_cache_dtype: Optional[str],

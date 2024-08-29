@@ -1,14 +1,12 @@
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import torch
-
-from vllm.distributed import get_tensor_model_parallel_world_size
 
 
 class MambaCacheManager:
 
     def __init__(self, dtype, num_mamba_layers, max_batch_size,
-                           conv_state_shape, temporal_state_shape):
+                 conv_state_shape, temporal_state_shape):
 
         conv_state = torch.empty(size=(num_mamba_layers, max_batch_size) +
                                  conv_state_shape,

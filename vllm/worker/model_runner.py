@@ -17,7 +17,6 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.abstract import AttentionState
-from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
@@ -864,23 +863,16 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.graph_block_tables = np.zeros(
             (max(_BATCH_SIZES_TO_CAPTURE), self.get_max_block_per_batch()),
             dtype=np.int32)
-        num_attn_heads = self.model_config.get_num_attention_heads(
-            self.parallel_config)
         self.attn_backend = get_attn_backend(
-            num_attn_heads,
             self.model_config.get_head_size(),
-            self.model_config.get_num_kv_heads(self.parallel_config),
             self.model_config.get_sliding_window(),
             self.model_config.dtype,
             self.kv_cache_dtype,
             self.block_size,
             self.model_config.is_attention_free(),
-        ) if num_attn_heads else None
-        if self.attn_backend:
-            self.attn_state = self.attn_backend.get_state_cls()(
-                weakref.proxy(self))
-        else:
-            self.attn_state = CommonAttentionState(weakref.proxy(self))
+        )
+        self.attn_state = self.attn_backend.get_state_cls()(
+            weakref.proxy(self))
 
         # Multi-modal data support
         self.input_registry = input_registry
@@ -1635,21 +1627,10 @@ class CUDAGraphRunner:
         # Copy the input tensors to the input buffers.
         self.input_buffers["input_ids"].copy_(input_ids, non_blocking=True)
         self.input_buffers["positions"].copy_(positions, non_blocking=True)
-"""
+
         if self.backend_name != "No attention":
             self.input_buffers["slot_mapping"].copy_(
                 attn_metadata.slot_mapping, non_blocking=True)
-        if self.backend_name != "flashinfer":
-            self.input_buffers["seq_lens_tensor"].copy_(
-                attn_metadata.decode_metadata.seq_lens_tensor,
-                non_blocking=True)
-            if self.backend_name != "No attention":
-                self.input_buffers["block_tables"].copy_(
-                    attn_metadata.decode_metadata.block_tables,
-                    non_blocking=True)
-"""
-        self.input_buffers["slot_mapping"].copy_(attn_metadata.slot_mapping,
-                                                 non_blocking=True)
         self.attn_state.prepare_graph_input_buffers(self.input_buffers,
                                                     attn_metadata)
         if "seqlen_agnostic_capture_inputs" in self.input_buffers:

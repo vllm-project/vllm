@@ -616,10 +616,9 @@ class JambaForCausalLM(nn.Module, HasInnerState):
             num_mamba_layers = sum(
                 [layer_type == "mamba" for layer_type in layers_type])
 
-            self.mamba_cache = MambaCacheManager(self.lm_head.weight.dtype,
-                                                num_mamba_layers,
-                                                max_batch_size,
-                                                *self._get_mamba_cache_shape())
+            self.mamba_cache = MambaCacheManager(
+                self.lm_head.weight.dtype, num_mamba_layers, max_batch_size,
+                *self._get_mamba_cache_shape())
 
         if "seqlen_agnostic_capture_inputs" not in kwargs:
             # We get here only on Prefill/Eager mode runs
@@ -645,7 +644,8 @@ class JambaForCausalLM(nn.Module, HasInnerState):
                                    mamba_cache_tensors[1])
         return hidden_states
 
-    def _get_mamba_cache_shape(self) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+    def _get_mamba_cache_shape(
+            self) -> Tuple[Tuple[int, int], Tuple[int, int]]:
         world_size = get_tensor_model_parallel_world_size()
         hidden_size = self.config.hidden_size
         conv_state_shape = (
