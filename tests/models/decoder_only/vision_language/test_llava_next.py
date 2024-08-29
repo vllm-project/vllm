@@ -301,7 +301,7 @@ def test_models_multiple_image_inputs(hf_runner, vllm_runner, image_assets,
     ],
 )
 @pytest.mark.parametrize("dtype", ["half"])
-@pytest.mark.parametrize("max_tokens", [5])
+@pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models_distributed(hf_runner, vllm_runner, image_assets, model,
                             distributed_executor_backend, size_factors, dtype,

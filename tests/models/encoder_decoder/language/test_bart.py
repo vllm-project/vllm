@@ -196,7 +196,7 @@ if not is_cpu():
     @pytest.mark.parametrize("distributed_executor_backend", ["ray", "mp"])
     @pytest.mark.parametrize("model", ["facebook/bart-large-cnn"])
     @pytest.mark.parametrize("dtype", ["float"])
-    @pytest.mark.parametrize("max_tokens", [5])
+    @pytest.mark.parametrize("max_tokens", [64])
     @pytest.mark.parametrize("num_logprobs", [5])
     @pytest.mark.parametrize("decoder_prompt_type", [DecoderPromptType.CUSTOM])
     def test_models_distributed(hf_runner, vllm_runner,
