@@ -154,6 +154,12 @@ override_gpu_arches(VLLM_GPU_ARCHES
   "${${VLLM_GPU_LANG}_SUPPORTED_ARCHS}")
 
 #
+# Setting up debug flags for pleasant debug experience.
+#
+set(CMAKE_${VLLM_GPU_LANG}_FLAGS_DEBUG "${CMAKE_${VLLM_GPU_LANG}_FLAGS_DEBUG} -O0 -ggdb3")
+set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0 -ggdb3")
+
+#
 # Query torch for additional GPU compilation flags for the given
 # `VLLM_GPU_LANG`.
 # The final set of arches is stored in `VLLM_GPU_FLAGS`.

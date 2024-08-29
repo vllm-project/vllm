@@ -25,8 +25,8 @@ ARG ARG_PYTORCH_ROCM_ARCH="gfx90a;gfx942"
 ENV PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH}
 
 # Install some basic utilities
-RUN apt-get update && apt-get install python3 python3-pip -
-RUN apt-get update && apt-get install -y \
+RUN apt-get update -q -y && apt-get install -q -y python3 python3-pip
+RUN apt-get update -q -y && apt-get install -q -y \
     sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev
 
 ENV LLVM_SYMBOLIZER_PATH=/opt/rocm/llvm/bin/llvm-symbolizer
