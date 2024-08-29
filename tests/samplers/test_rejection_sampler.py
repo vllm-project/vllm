@@ -218,8 +218,16 @@ def test_deterministic_when_seeded(k: int, vocab_size: int, batch_size: int,
 @pytest.mark.parametrize("batch_size", [1, 8, 32, 128])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
-def test_nonflashinfer_backend(k: int, vocab_size: int, batch_size: int,
-                               device: str):
+def test_compare_nonflashinfer_backend(k: int, vocab_size: int,
+                                       batch_size: int, device: str):
+
+    def get_seeded_seqs():
+        seeded_mask = torch.rand(batch_size, dtype=torch.float32) <= 1.0
+        return {
+            i: torch.Generator(device=device).manual_seed(i)
+            for i in range(batch_size) if seeded_mask[i]
+        }
+
     """
     Test the flashinfer and nonflashinfer backend generate 
     the same output metrics.
@@ -240,34 +248,25 @@ def test_nonflashinfer_backend(k: int, vocab_size: int, batch_size: int,
                                     size=(batch_size, k),
                                     dtype=torch.int64)
 
-    seeded_mask = torch.rand(batch_size, dtype=torch.float32) <= 1.0
-    seeded_seqs = {
-        i: torch.Generator(device=device).manual_seed(i)
-        for i in range(batch_size) if seeded_mask[i]
-    }
+    num_accepted_tokens = []
+    num_emitted_tokens = []
+    num_draft_tokens = []
+    for use_flashinfer in [True, False]:
+        rejection_sampler = RejectionSampler(disable_bonus_tokens=False,
+                                             use_flashinfer=use_flashinfer)
+        rejection_sampler.init_gpu_tensors(device=device)
+        # We use seeded sequences to ensure the same tokens are accepted
+        # for both flashinfer and nonflashinfer backends.
+        seeded_seqs = get_seeded_seqs()
+        rejection_sampler(target_probs, bonus_token_ids, draft_probs,
+                          draft_token_ids, seeded_seqs)
+        num_accepted_tokens.append(rejection_sampler.num_accepted_tokens)
+        num_emitted_tokens.append(rejection_sampler.num_emitted_tokens)
+        num_draft_tokens.append(rejection_sampler.num_draft_tokens)
 
-    flashinfer_rejection_sampler = RejectionSampler(disable_bonus_tokens=False,
-                                                    use_flashinfer=True)
-    flashinfer_rejection_sampler.init_gpu_tensors(device=device)
-    flashinfer_rejection_sampler(target_probs, bonus_token_ids, draft_probs,
-                                 draft_token_ids, seeded_seqs)
-
-    seeded_seqs = {
-        i: torch.Generator(device=device).manual_seed(i)
-        for i in range(batch_size) if seeded_mask[i]
-    }
-    nonflashinfer_rejection_sampler = RejectionSampler(
-        disable_bonus_tokens=False, use_flashinfer=False)
-    nonflashinfer_rejection_sampler.init_gpu_tensors(device=device)
-    nonflashinfer_rejection_sampler(target_probs, bonus_token_ids, draft_probs,
-                                    draft_token_ids, seeded_seqs)
-
-    assert torch.all(flashinfer_rejection_sampler.num_accepted_tokens ==
-                     nonflashinfer_rejection_sampler.num_accepted_tokens)
-    assert torch.all(flashinfer_rejection_sampler.num_emitted_tokens ==
-                     nonflashinfer_rejection_sampler.num_emitted_tokens)
-    assert flashinfer_rejection_sampler.num_draft_tokens == \
-        nonflashinfer_rejection_sampler.num_draft_tokens
+    assert num_accepted_tokens[0] == num_accepted_tokens[1]
+    assert num_emitted_tokens[0] == num_emitted_tokens[1]
+    assert num_draft_tokens[0] == num_draft_tokens[1]
 
 
 @pytest.mark.parametrize("above_or_below_vocab_range", ["above", "below"])
@@ -359,7 +358,6 @@ def test_rejection_sampling_approximates_target_distribution(
     """
     torch.set_default_device("cpu")
     set_random_seed(seed)
-
     helper = _CorrectnessTestHelper(
         vocab_size=10,
         rejection_sampler=RejectionSampler(disable_bonus_tokens=False,
