@@ -124,6 +124,10 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
                 token_id=output_token_id,
                 logprobs=output_logprob,
             )
+            # TODO (Varun) : move  this outside the loop ? 
+            # We need it here so maybe_stop_sequence can limit on
+            # the sampling_params.max_token arg
+            seq.data.update_num_computed_tokens(1)
 
             new_char_count = 0
             if sampling_params.detokenize:

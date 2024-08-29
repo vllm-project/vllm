@@ -94,7 +94,6 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
                 assert (len(model_output) == 1
                         ), "composing multistep workers not supported"
                 model_output = model_output[0]
-
                 self._append_new_tokens(
                     model_output, expanded_request.seq_group_metadata_list)
                 model_outputs.append(model_output)

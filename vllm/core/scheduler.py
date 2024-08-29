@@ -14,7 +14,7 @@ from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta,
-                           SequenceStatus)
+                           SequenceStatus, SequenceStage)
 from vllm.utils import Device, PyObjectCache
 
 logger = init_logger(__name__)
@@ -1037,7 +1037,7 @@ class Scheduler:
             if any([sg.token_chunk_size < max_token_chunk_size for sg in prefill_seq_groups]):
                 return 1
 
-            prefill_num_uncomputed = [psg.get_num_uncomputed_tokens() for psg in prefill_seq_groups] 
+            prefill_num_uncomputed = [psg.seq_group.get_num_uncomputed_tokens() for psg in prefill_seq_groups] 
             # we floor because, the processing the last 
             import math
             max_steps = [int(math.ceil(float(x) / float(max_token_chunk_size))) \
@@ -1055,7 +1055,7 @@ class Scheduler:
         if scheduler_outputs.num_prefill_groups == 0:
             return scheduler_outputs
 
-        prefill_seq_groups = [ sg.seq_group for sg in scheduler_outputs.scheduled_seq_groups if sg.seq_group.is_prefill()]
+        prefill_seq_groups: List[ScheduledSequenceGroup] = [ sg for sg in scheduler_outputs.scheduled_seq_groups if sg.seq_group.is_prefill()]
         max_prefill_steps = get_max_prefill_chunk_steps(prefill_seq_groups, self.scheduler_config.multi_step_chunked_prefill_max_token_chunk) 
         assert max_prefill_steps >= 1
         max_prefill_steps = min(max_prefill_steps, self.scheduler_config.num_scheduler_steps)
@@ -1063,6 +1063,7 @@ class Scheduler:
         # update all the sequence to run only until max_scheduled_prefill_chunk_steps
         # We curtail the decodes intentionally so the decodes runs are not inefficient.
         for sg in scheduler_outputs.scheduled_seq_groups:
+            #sg.seq_group.init_multi_step(1)
             sg.seq_group.init_multi_step(max_prefill_steps)
 
         return scheduler_outputs
@@ -1100,7 +1101,7 @@ class Scheduler:
         scheduler_start_time = time.perf_counter()
         scheduler_outputs = self._schedule()
         now = time.time()
-
+            
         if not self.cache_config.enable_prefix_caching:
             common_computed_block_nums = []
 
@@ -1219,6 +1220,23 @@ class Scheduler:
                     seq_group.metrics.scheduler_time += scheduler_time
                 else:
                     seq_group.metrics.scheduler_time = scheduler_time
+
+
+        ## debug
+        print ("Scheduler :: \n")
+        for idx, sg in enumerate(scheduler_outputs.scheduled_seq_groups):
+            assert len(sg.seq_group.seqs_dict) == 1
+            sgml = seq_group_metadata_list[idx]
+            seq_id = list(sg.seq_group.seqs_dict.keys())[0]
+            num_uncomputed = sg.seq_group.get_num_uncomputed_tokens()
+            num_computed = sg.seq_group.seqs[0].data._num_computed_tokens
+            prompt_ids = sg.seq_group.prompt_token_ids
+            num_steps = sg.seq_group.state.num_steps
+            stage = sg.seq_group.seqs[0].data.stage 
+            stage = "prefill" if stage == SequenceStage.PREFILL else "decode"
+            token_chunk_size = sg.token_chunk_size
+            print (f"    - id {seq_id} | #steps {num_steps} | stage {stage} | token-chunk {token_chunk_size} | do-sample {sgml.do_sample} -> #prompts {len(prompt_ids)} -> #computed {num_computed}")
+            print("\n")
 
         return seq_group_metadata_list, scheduler_outputs
 
@@ -1414,9 +1432,7 @@ class Scheduler:
         # If number of seq > 1, it means it is doing beam search in a
         # decode phase. Do not chunk in that case.
         if enable_chunking and len(seqs) == 1:
+            num_new_tokens = min(num_new_tokens, budget.remaining_token_budget())
             num_new_tokens = min(self.scheduler_config.multi_step_chunked_prefill_max_token_chunk,
-                                 min(num_new_tokens,
-                                     budget.remaining_token_budget()))
-            #num_new_tokens = min(num_new_tokens,
-            #                         budget.remaining_token_budget())
+                                 num_new_tokens) if self.scheduler_config.is_multi_step else num_new_tokens
         return num_new_tokens

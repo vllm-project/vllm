@@ -389,6 +389,7 @@ class FlashAttentionMetadata(AttentionMetadata):
         assert self.block_tables.shape[0] == num_seqs
 
         has_prefills: bool = self.num_prefills > 0
+        has_decodes: bool = num_seqs - self.num_prefills > 0  
 
         if has_prefills:
             assert self.slot_mapping.shape == (num_seqs - self.num_prefills + self.num_prefill_tokens, )
@@ -409,10 +410,13 @@ class FlashAttentionMetadata(AttentionMetadata):
         for i in range(self.num_prefills, num_queries):
             self.seq_lens[i] += 1
 
-        self.max_decode_seq_len = max(self.seq_lens[self.num_prefills:])
+        self.max_decode_seq_len = max(self.seq_lens[self.num_prefills:]) if has_decodes else 0
         self.max_prefill_seq_len = max(self.seq_lens[:self.num_prefills]) if has_prefills else 0
         self.max_query_len = token_chunk_size if has_prefills else 1
 
+        # Trigger recompute
+        self._cached_decode_metadata = None
+        self._cached_prefill_metadata = None
 
 class FlashAttentionMetadataBuilder(
         AttentionMetadataBuilder[FlashAttentionMetadata]):

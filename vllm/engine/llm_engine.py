@@ -1203,11 +1203,17 @@ class LLMEngine:
         for scheduled_seq_group, outputs, seq_group_meta in zip(
                 scheduled_seq_groups, output_by_sequence_group,
                 seq_group_metadata_list):
-            if seq_group_meta.is_prompt:
-                print ("Updating prompt stuff !! ")
             seq_group = scheduled_seq_group.seq_group
-            seq_group.update_num_computed_tokens(
-                scheduled_seq_group.token_chunk_size)
+
+            if self.scheduler_config.is_multi_step:
+                if seq_group_meta.is_prompt:
+                    # multi step prefill updates
+                    seq_group.update_num_computed_tokens(
+                        scheduled_seq_group.token_chunk_size * seq_group_meta.state.num_steps)
+            else:
+                # TODO (varun) : Is this required ?
+                seq_group.update_num_computed_tokens(scheduled_seq_group.token_chunk_size)
+
             if output is not None and len(output) > 0:
                 for o in output:
                     if (isinstance(o, SamplerOutput)
@@ -1232,6 +1238,7 @@ class LLMEngine:
             if seq_group_meta.do_sample:
                 self.output_processor.process_outputs(seq_group, outputs)
 
+                
         # Free the finished sequence groups.
         for scheduler in self.scheduler:
             scheduler.free_finished_seq_groups()

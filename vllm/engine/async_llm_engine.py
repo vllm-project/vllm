@@ -377,11 +377,11 @@ class _AsyncLLMEngine(LLMEngine):
             return None
 
         remaining_steps = seq_group_metadata_list[0].state.remaining_steps
-            if any([
-                    seq_group.state.remaining_steps != remaining_steps
-                    for seq_group in seq_group_metadata_list[1:]
-            ]):
-                raise AssertionError(("All running sequence groups should "
+        if any([
+                seq_group.state.remaining_steps != remaining_steps
+                for seq_group in seq_group_metadata_list[1:]
+        ]):
+            raise AssertionError(("All running sequence groups should "
                                       "have the same remaining steps."))
 
         return remaining_steps

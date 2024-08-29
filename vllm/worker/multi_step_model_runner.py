@@ -282,23 +282,33 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
 
         # Populate input_tokens
         input_tokens = []
-        seq_lens = [sgml.seq_data[0].get_num_computed_tokens()
-                                for sgml in prefill_sgml]
+        
+        #seq_lens = [sgml.seq_data[0].get_num_computed_tokens()
+        #                        for sgml in prefill_sgml]
+        # Assert that we only have one sequence in every seq-group.
+        # i.e. dont support beam search.
+        assert all([len(sgml.seq_data) == 1 for sgml in prefill_sgml])
+        seq_ids = [list(sgml.seq_data.keys())[0] for sgml in prefill_sgml] 
+
+        seq_lens = [sgml.seq_data[seq_id].get_num_computed_tokens()
+                                for seq_id, sgml in zip(seq_ids, prefill_sgml)]
 
         # the 0th step is already computed
         input_token_offsets = [x + token_chunk_size for x in seq_lens]
         # because the 0th step data is already computed - start from 1
         for _ in range(1, num_multi_step):  
-            for idx, sgml in enumerate(prefill_sgml):
+            for idx, seq_id_sgml in enumerate(zip(seq_ids, prefill_sgml)):
+                seq_id, sgml = seq_id_sgml
                 offt = input_token_offsets[idx]
-                input_tokens.extend(sgml.seq_data[0].get_token_ids()[offt:offt + token_chunk_size])
+                input_tokens.extend(sgml.seq_data[seq_id].get_token_ids()[offt:offt + token_chunk_size])
                 input_token_offsets[idx] += token_chunk_size
-        assert len(input_tokens) == token_chunk_size * (num_multi_step - 1)
+        assert len(input_tokens) == token_chunk_size * len(prefill_sgml) * (num_multi_step - 1)
 
         # Populate slot mapping
         input_slot_mapping = []
         for step_idx in range(1, num_multi_step):  
-            for idx, sgml in enumerate(prefill_sgml):
+            for idx, seq_id_sgml in enumerate(zip(seq_ids, prefill_sgml)):
+                seq_id, sgml = seq_id_sgml
                 # TODO (varun) : Is the calculation of sgml_context_len and sgml_seq_len valid ?
                 # Are there any nuances we are missing ?
                 sgml_context_len = seq_lens[idx] + (token_chunk_size * step_idx)
@@ -306,12 +316,14 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
                 part_slot_mapping = []
                 compute_slot_mapping(is_profile_run = False,
                                      slot_mapping = part_slot_mapping,
+                                     seq_id = seq_id,
                                      context_len = sgml_context_len,
                                      seq_len = sgml_seq_len, 
+                                     start_idx = 0, # TODO (Varun) : Assert that sliding window is none
                                      block_size = self.block_size,
                                      block_tables = sgml.block_tables)
                 input_slot_mapping.extend(part_slot_mapping)
-        assert len(input_slot_mapping) == token_chunk_size * (num_multi_step - 1)
+        assert len(input_slot_mapping) == token_chunk_size * len(prefill_sgml) * (num_multi_step - 1)
 
         # Async transfer to GPU
         prefill_input_tokens = async_tensor_h2d(input_tokens, torch.long,
@@ -484,11 +496,12 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         assert isinstance(attn_metadata, FlashAttentionMetadata)
         attn_metadata.advance_step(num_seqs, num_queries, token_chunk_size)
 
-        prefill_step_offset = token_chunk_size * (model_input.current_step - 1) \
+        prefill_step_offset = num_prefill_tokens * (model_input.current_step - 1) \
               if self.scheduler_config.chunked_prefill_enabled else 0
 
         if model_input.prefill_steps_tokens is not None:
             assert num_prefill_tokens > 0
+            assert attn_metadata.context_lens_tensor is not None
             assert model_input.prefill_steps_slot_mapping is not None
             assert model_input.prefill_steps_tokens.shape[0] >= prefill_step_offset + num_prefill_tokens
             assert model_input.prefill_steps_slot_mapping.shape[0] >= prefill_step_offset + num_prefill_tokens
@@ -506,14 +519,12 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
             block_size=self.block_size,
             token_chunk_size = token_chunk_size if token_chunk_size is not None else 0,
             input_tokens=frozen_model_input.input_tokens,
-            # The last step might have computed prefill + decode
-            # and this step might be just decodes.
-            sampled_token_ids=model_input.cached_outputs[-1].
-            sampled_token_ids[-num_seqs:],
+            sampled_token_ids=model_input.cached_outputs[-1].sampled_token_ids,
             input_positions=frozen_model_input.input_positions,
             seq_lens=attn_metadata.seq_lens_tensor,
             slot_mapping=attn_metadata.slot_mapping,
             block_tables=attn_metadata.block_tables,
+            seq_start_loc=attn_metadata.seq_start_loc,
             context_lens = attn_metadata.context_lens_tensor,
             prefill_steps_tokens = model_input.prefill_steps_tokens[prefill_step_offset:]
                 if model_input.prefill_steps_tokens is not None else None,

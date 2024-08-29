@@ -47,9 +47,11 @@ __device__ void update_decode(int const cur_query_id,
 __device__ void update_prefill(int const cur_query_id,
                                int* seq_lens_ptr,
                                int* context_lens_ptr,
+                               int* seq_start_loc,
                                int const token_chunk_size) {
   seq_lens_ptr[cur_query_id] += token_chunk_size;
   context_lens_ptr[cur_query_id] += token_chunk_size;
+  seq_start_loc[cur_query_id + 1] += (cur_query_id + 1) * token_chunk_size;
 }
 
 template <int const num_threads>
@@ -65,6 +67,7 @@ __global__ void advance_step_kernel(int num_prefill_tokens,
                                     int* seq_lens_ptr, long* slot_mapping_ptr,
                                     int const* block_tables_ptr,
                                     int64_t const block_tables_stride,
+                                    int* seq_start_loc,
                                     int* context_lens_ptr = nullptr,
                                     long const* prefill_steps_tokens = nullptr,
                                     long const* prefill_steps_slot_mapping = nullptr) {
@@ -100,6 +103,7 @@ __global__ void advance_step_kernel(int num_prefill_tokens,
     update_prefill(cur_query_id,
                    seq_lens_ptr,
                    context_lens_ptr,
+                   seq_start_loc,
                    token_chunk_size);
   } else {
     // decode update
@@ -180,9 +184,10 @@ void advance_step(int const num_prefill_tokens,
                   torch::Tensor& seq_lens,           // type: int
                   torch::Tensor& slot_mapping,       // type: long
                   torch::Tensor& block_tables,       // type: int
-                  c10::optional<torch::Tensor>& context_lens, // type: int
-                  c10::optional<torch::Tensor> const& prefill_steps_tokens, // type long
-                  c10::optional<torch::Tensor> const& prefill_steps_slot_mapping) { // type long 
+                  torch::Tensor& seq_start_loc, // type: int
+                  c10::optional<torch::Tensor> context_lens, // type: int
+                  c10::optional<torch::Tensor>const& prefill_steps_tokens, // type long
+                  c10::optional<torch::Tensor>const& prefill_steps_slot_mapping) { // type long 
 
   if (logging) {
     printf("advance_step:\n");
@@ -202,15 +207,19 @@ void advance_step(int const num_prefill_tokens,
     TORCH_CHECK(prefill_steps_slot_mapping.has_value());
   }
 
+  int const num_decode_tokens = num_seqs - num_prefills;
+  int const expected_num_input_tokens = num_prefill_tokens + num_decode_tokens;
+
   // Verify all tensors
-  verify_tensor("input_tokens", input_tokens, num_seqs, -1, at::kLong);
-  verify_tensor("sampled_token_ids", sampled_token_ids, num_queries, 1,
+  verify_tensor("input_tokens", input_tokens, expected_num_input_tokens, -1, at::kLong);
+  verify_tensor("sampled_token_ids", sampled_token_ids, num_queries - num_prefills, 1,
                 at::kLong);
-  verify_tensor("input_positions", input_positions, num_seqs, -1, at::kLong);
+  verify_tensor("input_positions", input_positions, expected_num_input_tokens, -1, at::kLong);
   verify_tensor("seq_lens", seq_lens, num_seqs, -1, at::kInt);
-  verify_tensor("slot_mapping", slot_mapping, num_seqs, -1, at::kLong);
+  verify_tensor("slot_mapping", slot_mapping, expected_num_input_tokens, -1, at::kLong);
   verify_tensor("block_tables", block_tables, num_seqs, -1, at::kInt);
   if (num_prefills > 0) {
+    verify_tensor("seq_start_loc", seq_start_loc, num_seqs + 1, -1, at::kInt);
     verify_tensor("context_lens", context_lens.value(), num_seqs, -1, at::kInt);
     verify_tensor_ge("prefill_steps_tokens", prefill_steps_tokens.value(), num_prefill_tokens, -1, at::kLong);
     verify_tensor_ge("prefill_steps_slot_mapping", prefill_steps_slot_mapping.value(), num_prefill_tokens, -1, at::kLong);
@@ -236,6 +245,7 @@ void advance_step(int const num_prefill_tokens,
       reinterpret_cast<long*>(slot_mapping.data_ptr()),
       reinterpret_cast<int const*>(block_tables.data_ptr()),
       block_tables.stride(0),
+      reinterpret_cast<int *>(seq_start_loc.data_ptr()),
       context_lens.has_value() ? reinterpret_cast<int*>(context_lens->data_ptr()) : nullptr,
       prefill_steps_tokens.has_value() ? reinterpret_cast<long const*>(prefill_steps_tokens->data_ptr()) : nullptr,
       prefill_steps_slot_mapping.has_value() ? reinterpret_cast<long const*>(prefill_steps_slot_mapping->data_ptr()) : nullptr);
@@ -252,12 +262,16 @@ void advance_step(int64_t num_prefill_tokens,
                   torch::Tensor& input_tokens, torch::Tensor& sampled_token_ids,
                   torch::Tensor& input_positions, torch::Tensor& seq_lens,
                   torch::Tensor& slot_mapping, torch::Tensor& block_tables,
-                  c10::optional<torch::Tensor>& context_lens,
-                  c10::optional<torch::Tensor> const& prefill_steps_tokens,
-                  c10::optional<torch::Tensor> const& prefill_steps_slot_mapping) {
+                  // TODO varun : make this a reference
+                  torch::Tensor& seq_start_loc,
+                  c10::optional<torch::Tensor> context_lens,
+                  c10::optional<torch::Tensor>const& prefill_steps_tokens,
+                  c10::optional<torch::Tensor>const& prefill_steps_slot_mapping) {
   prepare_inputs::advance_step(num_prefill_tokens, num_prefills, num_seqs, num_queries, block_size, token_chunk_size,
                                input_tokens,
                                sampled_token_ids, input_positions, seq_lens,
-                               slot_mapping, block_tables, context_lens, prefill_steps_tokens,
+                               slot_mapping, block_tables,
+                               seq_start_loc,
+                               context_lens, prefill_steps_tokens,
                                prefill_steps_slot_mapping);
 }
