@@ -174,7 +174,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         def simple_reinit(self):
             self.input_tokens[0].clear()  # type: ignore
             self.input_positions[0].clear()  # type: ignore
-            self.mrope_input_positions = None   # type: ignore
+            self.mrope_input_positions = None  # type: ignore
             self.seq_lens[0] = 0  # type: ignore
             self.orig_seq_lens[0] = 0  # type: ignore
             self.query_lens[0] = 0  # type: ignore
@@ -731,7 +731,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             # prefix caching and there is no decode request.
             return self.model_input_cls()
 
-        mrope_input_positions = None
+        mrope_input_positions: Optional[List[List[int]]] = None
         if any(inter_data.mrope_input_positions is not None
                for inter_data in self.inter_data_list):
             mrope_input_positions = [[] for _ in range(3)]

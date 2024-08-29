@@ -860,9 +860,9 @@ class MRotaryEmbedding(RotaryEmbedding):
     ) -> Tuple[List[List[int]], int]:
         """Get mrope input positions and delta value."""
 
-        if torch.is_tensor(image_grid_thw):
+        if isinstance(image_grid_thw, torch.Tensor):
             image_grid_thw = image_grid_thw.tolist()
-        if torch.is_tensor(video_grid_thw):
+        if isinstance(video_grid_thw, torch.Tensor):
             video_grid_thw = video_grid_thw.tolist()
 
         input_tokens_tensor = torch.tensor(input_tokens)
@@ -989,7 +989,7 @@ def get_rope(
         # The correct one should be "longrope" but keep "su" here
         # for backward compatible
         if scaling_type not in {"su", "longrope"}:
-            scaling_factor = rope_scaling.get("factor")
+            scaling_factor = rope_scaling.get("factor", 1.0)
         if scaling_type == "llama3":
             low_freq_factor = rope_scaling["low_freq_factor"]
             high_freq_factor = rope_scaling["high_freq_factor"]

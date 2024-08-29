@@ -64,7 +64,6 @@ from vllm.transformers_utils.processor import get_processor
 
 logger = init_logger(__name__)
 
-
 # === Vision Inputs === #
 
 
@@ -88,6 +87,7 @@ class Qwen2VLVideoInputs(TypedDict):
     
     This should be in `(grid_t, grid_h, grid_w)` format.
     """
+
 
 # === Vision Encoder === #
 
@@ -128,12 +128,10 @@ def rotate_half(x: torch.Tensor, interleaved: bool = False) -> torch.Tensor:
                          two=2)
 
 
-def apply_rotary_emb_torch(
-    x: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
-    interleaved: bool = False
-) -> torch.Tensor:
+def apply_rotary_emb_torch(x: torch.Tensor,
+                           cos: torch.Tensor,
+                           sin: torch.Tensor,
+                           interleaved: bool = False) -> torch.Tensor:
     """
     x: (batch_size, seqlen, nheads, headdim)
     cos, sin: (seqlen, rotary_dim / 2) or (batch_size, seqlen, rotary_dim / 2)
@@ -155,7 +153,8 @@ def apply_rotary_emb_torch(
     )
 
 
-def apply_rotary_pos_emb_vision(t: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
+def apply_rotary_pos_emb_vision(t: torch.Tensor,
+                                freqs: torch.Tensor) -> torch.Tensor:
     t_ = t.float()
     cos = freqs.cos()
     sin = freqs.sin()
@@ -629,11 +628,9 @@ def input_processor_for_qwen2_vl(ctx: InputContext,
 
 
 def merge_multimodal_embeddings_for_qwen2_vl(
-    input_ids: torch.Tensor,
-    inputs_embeds: torch.Tensor,
-    multimodal_embeddings: torch.Tensor,
-    placeholder_token_id: int
-) -> torch.Tensor:
+        input_ids: torch.Tensor, inputs_embeds: torch.Tensor,
+        multimodal_embeddings: torch.Tensor,
+        placeholder_token_id: int) -> torch.Tensor:
     mask = (input_ids == placeholder_token_id)
     inputs_embeds[mask, :] = multimodal_embeddings
     return inputs_embeds
@@ -694,10 +691,8 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
             raise ValueError("Incorrect type of image grid_thw. "
                              f"Got type: {type(image_grid_thw)}")
 
-        return Qwen2VLImageInputs(
-            pixel_values=pixel_values,
-            image_grid_thw=image_grid_thw
-        )
+        return Qwen2VLImageInputs(pixel_values=pixel_values,
+                                  image_grid_thw=image_grid_thw)
 
     def _parse_and_validate_video_input(
             self, **kwargs: object) -> Optional[Qwen2VLVideoInputs]:
@@ -720,15 +715,19 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
             video_grid_thw=video_grid_thw,
         )
 
-    def _process_image_input(self, image_input: Qwen2VLImageInputs) -> torch.Tensor:
-        pixel_values = image_input.pixel_values.type(self.visual.dtype)
-        image_embeds = self.visual(pixel_values, grid_thw=image_input.image_grid_thw)
+    def _process_image_input(self,
+                             image_input: Qwen2VLImageInputs) -> torch.Tensor:
+        pixel_values = image_input["pixel_values"].type(self.visual.dtype)
+        image_embeds = self.visual(pixel_values,
+                                   grid_thw=image_input["image_grid_thw"])
         return image_embeds
 
-    def _process_video_input(self, video_input: Qwen2VLVideoInputs) -> torch.Tensor:
-        pixel_values_videos = video_input.pixel_values_videos.type(
+    def _process_video_input(self,
+                             video_input: Qwen2VLVideoInputs) -> torch.Tensor:
+        pixel_values_videos = video_input["pixel_values_videos"].type(
             self.visual.dtype)
-        video_embeds = self.visual(pixel_values_videos, grid_thw=video_input.video_grid_thw)
+        video_embeds = self.visual(pixel_values_videos,
+                                   grid_thw=video_input["video_grid_thw"])
         return video_embeds
 
     def _merge_multimodal_embeddings(
@@ -779,13 +778,19 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
             if image_input is not None:
                 image_embeds = self._process_image_input(image_input)
                 inputs_embeds = merge_multimodal_embeddings_for_qwen2_vl(
-                    input_ids, inputs_embeds, image_embeds, placeholder_token_id=self.config.image_token_id,
+                    input_ids,
+                    inputs_embeds,
+                    image_embeds,
+                    placeholder_token_id=self.config.image_token_id,
                 )
 
             if video_input is not None:
                 video_embeds = self._process_video_input(video_input)
                 inputs_embeds = merge_multimodal_embeddings_for_qwen2_vl(
-                    input_ids, inputs_embeds, video_embeds, placeholder_token_id=self.config.video_token_id,
+                    input_ids,
+                    inputs_embeds,
+                    video_embeds,
+                    placeholder_token_id=self.config.video_token_id,
                 )
 
             input_ids = None
