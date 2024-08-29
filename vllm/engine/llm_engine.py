@@ -1269,13 +1269,13 @@ class LLMEngine:
         assert len(seq_group_metadata_list) == len(
             scheduler_outputs.scheduled_seq_groups)
 
-        # Organize outputs by [step][sequence group] instead of
-        # [sequence group][step].
-        output_by_sequence_group = create_output_by_sequence_group(
-            output,
-            scheduled_seq_groups=scheduled_seq_groups,
+        # Organize outputs by [sequence group][step] instead of
+        # [step][sequence group].
+        outputs_by_sequence_group = create_output_by_sequence_group(
+            outputs,
+            scheduled_seq_groups=scheduler_outputs.scheduled_seq_groups,
             return_hidden_states=self.model_config.return_hidden_states)
-
+        
         finished_before: List[int] = []
         for i, seq_group_meta in enumerate(seq_group_metadata_list):
             scheduled_seq_group = scheduler_outputs.scheduled_seq_groups[i]
@@ -1284,11 +1284,8 @@ class LLMEngine:
             if seq_group.is_finished():
                 finished_before.append(i)
                 continue
-
-            if len(outputs) > 1:
-                output = outputs_by_sequence_group[i]
-            else:
-                output = [outputs_by_sequence_group[0][i]]
+            
+            output = outputs_by_sequence_group[i]
 
             if not is_async:
                 seq_group.update_num_computed_tokens(
@@ -1315,9 +1312,8 @@ class LLMEngine:
                 self._process_sequence_group_outputs(seq_group, output)
                 continue
 
-            self.output_processor.process_prompt_logprob(seq_group, outputs)
             if self.model_config.return_hidden_states:
-                self.output_processor.process_hidden_states(seq_group, outputs)
+                self.output_processor.process_hidden_states(seq_group, output)
 
             self.output_processor.process_prompt_logprob(seq_group, output)
 
