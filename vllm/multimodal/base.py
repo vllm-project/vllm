@@ -79,21 +79,15 @@ class MultiModalInputs(_MultiModalInputsBase):
         if len(inputs_list) == 0:
             return {}
 
-        keys = inputs_list[0].keys()
-
         item_lists: Dict[str, List[NestedTensors]] = defaultdict(list)
 
         for inputs in inputs_list:
-            if inputs.keys() != keys:
-                msg = f"Inputs do not share the same keys ({keys})"
-                raise ValueError(msg)
+            # For models that supports multiple modalities (e.g. Qwen2-VL),
+            # different modalities will return different data keys,
+            # so batch() should skip the same key check.
 
             for k, v in inputs.items():
-                # For models that supports multiple modalities (e.g. Qwen2-VL),
-                # input mapper will set values of unused modality keys to None,
-                # and batching procedure should skip them.
-                if v is not None:
-                    item_lists[k].append(v)
+                item_lists[k].append(v)
 
         return {
             k: MultiModalInputs._try_stack(item_list)

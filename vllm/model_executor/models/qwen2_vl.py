@@ -26,7 +26,7 @@
 from array import array
 from collections.abc import Mapping
 from functools import partial, lru_cache
-from typing import Tuple, Optional, List, Iterable, Type
+from typing import Tuple, Optional, List, Iterable, Type, TypedDict
 
 import torch
 import torch.nn as nn
@@ -46,6 +46,7 @@ from vllm.distributed import utils as dist_utils
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
+from vllm.model_executor.layers.activation import QuickGELU
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -59,24 +60,36 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict, MultiModalI
 from vllm.multimodal.base import MultiModalData
 from vllm.multimodal.image import cached_get_image_processor
 from vllm.sequence import SequenceData, SamplerOutput, IntermediateTensors, VLLM_TOKEN_ID_ARRAY_TYPE
+from vllm.transformers_utils.processor import get_processor
 
 logger = init_logger(__name__)
 
+
+# === Vision Inputs === #
+
+
+class Qwen2VLImageInputs(TypedDict):
+    pixel_values: torch.Tensor
+    """Shape: `(num_patches, num_channels * patch_size * patch_size)`"""
+
+    image_grid_thw: torch.Tensor
+    """Shape: `(num_images, 3)`
+    
+    This should be in `(grid_t, grid_h, grid_w)` format.
+    """
+
+
+class Qwen2VLVideoInputs(TypedDict):
+    pixel_values_videos: torch.Tensor
+    """Shape: `(num_patches, num_channels * temporal_patch_size * patch_size * patch_size)`"""
+
+    video_grid_thw: torch.Tensor
+    """Shape: `(num_videos, 3)`
+    
+    This should be in `(grid_t, grid_h, grid_w)` format.
+    """
+
 # === Vision Encoder === #
-
-
-def quick_gelu(x: torch.Tensor) -> torch.Tensor:
-    return x * torch.sigmoid(1.702 * x)
-
-
-class QuickGELU(nn.Module):
-    """Applies the Gaussian Error Linear Units function."""
-
-    def __init__(self) -> None:
-        super(QuickGELU, self).__init__()
-
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return quick_gelu(input)
 
 
 class Qwen2VisionMLP(nn.Module):
@@ -104,7 +117,7 @@ class Qwen2VisionMLP(nn.Module):
         return x
 
 
-def rotate_half(x, interleaved=False):
+def rotate_half(x: torch.Tensor, interleaved: bool = False) -> torch.Tensor:
     if not interleaved:
         x1, x2 = x.chunk(2, dim=-1)
         return torch.cat((-x2, x1), dim=-1)
@@ -115,7 +128,12 @@ def rotate_half(x, interleaved=False):
                          two=2)
 
 
-def apply_rotary_emb_torch(x, cos, sin, interleaved=False):
+def apply_rotary_emb_torch(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    interleaved: bool = False
+) -> torch.Tensor:
     """
     x: (batch_size, seqlen, nheads, headdim)
     cos, sin: (seqlen, rotary_dim / 2) or (batch_size, seqlen, rotary_dim / 2)
@@ -137,8 +155,7 @@ def apply_rotary_emb_torch(x, cos, sin, interleaved=False):
     )
 
 
-def apply_rotary_pos_emb_vision(t: torch.Tensor,
-                                freqs: torch.Tensor) -> torch.Tensor:
+def apply_rotary_pos_emb_vision(t: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
     t_ = t.float()
     cos = freqs.cos()
     sin = freqs.sin()
@@ -394,10 +411,12 @@ class Qwen2VisionTransformer(nn.Module):
             quant_config=quant_config,
         )
 
-    def get_dtype(self) -> torch.dtype:
+    @property
+    def dtype(self) -> torch.dtype:
         return self.blocks[0].mlp.fc2.weight.dtype
 
-    def get_device(self) -> torch.device:
+    @property
+    def device(self) -> torch.device:
         return self.blocks[0].mlp.fc2.weight.device
 
     def rot_pos_emb(self, grid_thw):
@@ -431,7 +450,7 @@ class Qwen2VisionTransformer(nn.Module):
         grid_thw: torch.Tensor,
     ) -> torch.Tensor:
         # patchify
-        x = x.to(device=self.get_device(), dtype=self.get_dtype())
+        x = x.to(device=self.device, dtype=self.dtype)
         x = self.patch_embed(x)
 
         # compute position embedding
@@ -454,45 +473,6 @@ class Qwen2VisionTransformer(nn.Module):
 
 
 # === Vision input helpers === #
-
-
-def get_processor(
-    processor_name: str,
-    *args,
-    trust_remote_code: bool = False,
-    **kwargs,
-):
-    """Gets a processor for the given model name via HuggingFace.
-
-    Derived from `vllm.transformers_utils.image_processor.get_image_processor`.
-    """
-    # don't put this import at the top level
-    # it will call torch.cuda.device_count()
-    from transformers import AutoProcessor
-
-    try:
-        processor = AutoProcessor.from_pretrained(
-            processor_name,
-            *args,
-            trust_remote_code=trust_remote_code,
-            **kwargs)
-    except ValueError as e:
-        # If the error pertains to the processor class not existing or not
-        # currently being imported, suggest using the --trust-remote-code flag.
-        # Unlike AutoTokenizer, AutoImageProcessor does not separate such errors
-        if not trust_remote_code:
-            err_msg = (
-                "Failed to load the processor. If the processor is "
-                "a custom processor not yet available in the HuggingFace "
-                "transformers library, consider setting "
-                "`trust_remote_code=True` in LLM or using the "
-                "`--trust-remote-code` flag in the CLI.")
-            raise RuntimeError(err_msg) from e
-        else:
-            raise e
-
-    return processor
-
 
 cached_get_processor = lru_cache(get_processor)
 
@@ -527,10 +507,6 @@ def mm_input_mapper_for_qwen2_vl(
     except Exception:
         logger.error("Failed to process image (%s)", data)
         raise
-
-    # Ensure different modalities will return a batch_data with same keys, avoid error in `MultiModalInputs.batch()`.
-    for key in ['pixel_values', 'image_grid_thw', 'pixel_values_videos', 'video_grid_thw']:
-        batch_data.setdefault(key, None)
 
     return MultiModalInputs(batch_data)
 
@@ -652,6 +628,17 @@ def input_processor_for_qwen2_vl(ctx: InputContext,
     )
 
 
+def merge_multimodal_embeddings_for_qwen2_vl(
+    input_ids: torch.Tensor,
+    inputs_embeds: torch.Tensor,
+    multimodal_embeddings: torch.Tensor,
+    placeholder_token_id: int
+) -> torch.Tensor:
+    mask = (input_ids == placeholder_token_id)
+    inputs_embeds[mask, :] = multimodal_embeddings
+    return inputs_embeds
+
+
 @MULTIMODAL_REGISTRY.register_image_input_mapper(
     image_input_mapper_for_qwen2_vl)
 @MULTIMODAL_REGISTRY.register_input_mapper("video",
@@ -691,6 +678,70 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
+    def _parse_and_validate_image_input(
+            self, **kwargs: object) -> Optional[Qwen2VLImageInputs]:
+        pixel_values = kwargs.pop("pixel_values", None)
+        image_grid_thw = kwargs.pop("image_grid_thw", None)
+
+        if pixel_values is None:
+            return None
+
+        if not isinstance(pixel_values, torch.Tensor):
+            raise ValueError("Incorrect type of image pixel values. "
+                             f"Got type: {type(pixel_values)}")
+
+        if not isinstance(image_grid_thw, torch.Tensor):
+            raise ValueError("Incorrect type of image grid_thw. "
+                             f"Got type: {type(image_grid_thw)}")
+
+        return Qwen2VLImageInputs(
+            pixel_values=pixel_values,
+            image_grid_thw=image_grid_thw
+        )
+
+    def _parse_and_validate_video_input(
+            self, **kwargs: object) -> Optional[Qwen2VLVideoInputs]:
+        pixel_values_videos = kwargs.pop("pixel_values_videos", None)
+        video_grid_thw = kwargs.pop("video_grid_thw", None)
+
+        if pixel_values_videos is None:
+            return None
+
+        if not isinstance(pixel_values_videos, torch.Tensor):
+            raise ValueError("Incorrect type of video pixel values. "
+                             f"Got type: {type(pixel_values_videos)}")
+
+        if not isinstance(video_grid_thw, torch.Tensor):
+            raise ValueError("Incorrect type of video grid_thw. "
+                             f"Got type: {type(video_grid_thw)}")
+
+        return Qwen2VLVideoInputs(
+            pixel_values_videos=pixel_values_videos,
+            video_grid_thw=video_grid_thw,
+        )
+
+    def _process_image_input(self, image_input: Qwen2VLImageInputs) -> torch.Tensor:
+        pixel_values = image_input.pixel_values.type(self.visual.dtype)
+        image_embeds = self.visual(pixel_values, grid_thw=image_input.image_grid_thw)
+        return image_embeds
+
+    def _process_video_input(self, video_input: Qwen2VLVideoInputs) -> torch.Tensor:
+        pixel_values_videos = video_input.pixel_values_videos.type(
+            self.visual.dtype)
+        video_embeds = self.visual(pixel_values_videos, grid_thw=video_input.video_grid_thw)
+        return video_embeds
+
+    def _merge_multimodal_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        input_embeds: torch.Tensor,
+        image_embeds: Optional[torch.Tensor],
+        video_embeds: Optional[torch.Tensor],
+        image_placeholder_token_id: int,
+        video_placeholder_token_id: int,
+    ) -> torch.Tensor:
+        pass
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -711,47 +762,42 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
             pixel_values_videos: Pixel values of videos to be fed to a model. `None` if no videos are passed.
             video_grid_thw: Tensor `(n_videos, 3)` of video 3D grid in LLM. `None` if no videos are passed.
         """
-        pixel_values: torch.Tensor = kwargs.get('pixel_values', None)
-        image_grid_thw: torch.Tensor = kwargs.get('image_grid_thw', None)
-        pixel_values_videos: torch.Tensor = kwargs.get('pixel_values_videos',
-                                                      None)
-        video_grid_thw: torch.Tensor = kwargs.get('video_grid_thw', None)
 
-        no_vision = pixel_values is None and pixel_values_videos is None
+        image_input = self._parse_and_validate_image_input(**kwargs)
+        video_input = self._parse_and_validate_video_input(**kwargs)
 
-        if no_vision:
+        if image_input is None and video_input is None:
             inputs_embeds = None
         else:
-            inputs_embeds = self.model.embed_tokens(input_ids)
-
             if getattr(self.config, "rope_scaling", {}).get("type",
                                                             None) == "mrope":
                 assert positions.ndim == 2 and positions.size(0) == 3, \
                     f"multimodal section rotary embedding requires (3, seq_len) positions, but got {positions.size()}"
 
-            if pixel_values is not None:
-                pixel_values = pixel_values.type(self.visual.get_dtype())
-                image_embeds = self.visual(pixel_values,
-                                           grid_thw=image_grid_thw)
-                image_mask = (input_ids == self.config.image_token_id)
-                inputs_embeds[image_mask, :] = image_embeds
-            if pixel_values_videos is not None:
-                pixel_values_videos = pixel_values_videos.type(
-                    self.visual.get_dtype())
-                video_embeds = self.visual(pixel_values_videos,
-                                           grid_thw=video_grid_thw)
-                video_mask = (input_ids == self.config.video_token_id)
-                inputs_embeds[video_mask, :] = video_embeds
+            inputs_embeds = self.model.embed_tokens(input_ids)
+
+            if image_input is not None:
+                image_embeds = self._process_image_input(image_input)
+                inputs_embeds = merge_multimodal_embeddings_for_qwen2_vl(
+                    input_ids, inputs_embeds, image_embeds, placeholder_token_id=self.config.image_token_id,
+                )
+
+            if video_input is not None:
+                video_embeds = self._process_video_input(video_input)
+                inputs_embeds = merge_multimodal_embeddings_for_qwen2_vl(
+                    input_ids, inputs_embeds, video_embeds, placeholder_token_id=self.config.video_token_id,
+                )
+
             input_ids = None
 
-        result = self.model(
+        hidden_states = self.model(
             input_ids=input_ids,
             positions=positions,
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
             inputs_embeds=inputs_embeds,
         )
-        return result
+        return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
