@@ -29,6 +29,7 @@ from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata, SamplingMetadataCache
+from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models.interfaces import (supports_lora,
@@ -496,8 +497,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             if inter_data.mrope_input_positions is None:
                 inter_data.mrope_input_positions = [None] * inter_data.n_seqs
 
-            from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
-
             inter_data.mrope_input_positions[
                 seq_idx] = MRotaryEmbedding.get_next_input_positions(
                     seq_data.mrope_position_delta,
@@ -653,12 +652,11 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         if self.runner.model_is_mrope:
             image_grid_thw = mm_kwargs.get("image_grid_thw", None)
             video_grid_thw = mm_kwargs.get("video_grid_thw", None)
-            assert image_grid_thw is not None or video_grid_thw is not None, \
-                "mrope embedding type requires multi-modal input mapper returns 'image_grid_thw' or 'video_grid_thw'."
+            assert image_grid_thw is not None or video_grid_thw is not None, (
+                "mrope embedding type requires multi-modal input mapper "
+                "returns 'image_grid_thw' or 'video_grid_thw'.")
 
             hf_config = self.runner.model_config.hf_config
-
-            from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 
             inter_data.mrope_input_positions = [None] * inter_data.n_seqs
             for seq_idx in range(inter_data.n_seqs):
@@ -666,18 +664,19 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                     inter_data.seq_ids[seq_idx]]
                 token_ids = seq_data.get_token_ids()
 
-                mrope_input_positions, mrope_position_delta = MRotaryEmbedding.get_input_positions(
-                    token_ids,
-                    image_grid_thw=image_grid_thw,
-                    video_grid_thw=video_grid_thw,
-                    image_token_id=hf_config.image_token_id,
-                    video_token_id=hf_config.video_token_id,
-                    vision_start_token_id=hf_config.vision_start_token_id,
-                    vision_end_token_id=hf_config.vision_end_token_id,
-                    spatial_merge_size=hf_config.vision_config.
-                    spatial_merge_size,
-                    context_len=inter_data.context_lens[seq_idx],
-                )
+                mrope_input_positions, mrope_position_delta = \
+                    MRotaryEmbedding.get_input_positions(
+                        token_ids,
+                        image_grid_thw=image_grid_thw,
+                        video_grid_thw=video_grid_thw,
+                        image_token_id=hf_config.image_token_id,
+                        video_token_id=hf_config.video_token_id,
+                        vision_start_token_id=hf_config.vision_start_token_id,
+                        vision_end_token_id=hf_config.vision_end_token_id,
+                        spatial_merge_size=hf_config.vision_config.
+                        spatial_merge_size,
+                        context_len=inter_data.context_lens[seq_idx],
+                    )
 
                 seq_data.mrope_position_delta = mrope_position_delta
                 inter_data.mrope_input_positions[
@@ -737,12 +736,13 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             mrope_input_positions = [[] for _ in range(3)]
             for idx in range(3):
                 for inter_data in self.inter_data_list:
-                    if inter_data.mrope_input_positions is None:
+                    msections = inter_data.mrope_input_positions
+                    if msections is None:
                         for _seq_input_positions in inter_data.input_positions:
                             mrope_input_positions[idx].extend(
                                 _seq_input_positions)
                     else:
-                        for _seq_mrope_input_positions in inter_data.mrope_input_positions:
+                        for _seq_mrope_input_positions in msections:
                             mrope_input_positions[idx].extend(
                                 _seq_mrope_input_positions[idx])
             input_positions = None

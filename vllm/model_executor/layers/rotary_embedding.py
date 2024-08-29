@@ -904,7 +904,8 @@ class MRotaryEmbedding(RotaryEmbedding):
                 video_index += 1
                 remain_videos -= 1
                 ed = ed_video
-            llm_grid_t, llm_grid_h, llm_grid_w = t, h // spatial_merge_size, w // spatial_merge_size
+            llm_grid_t, llm_grid_h, llm_grid_w = \
+                t, h // spatial_merge_size, w // spatial_merge_size
             text_len = ed - st
 
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(
