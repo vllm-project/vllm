@@ -2,11 +2,11 @@
 
 Run `pytest tests/models/test_granite.py`.
 """
+import importlib.metadata
+
 import pytest
 
 from .utils import check_logprobs_close
-
-import importlib.metadata
 
 TRANSFORMERS_VERSION = tuple(
     map(int,
