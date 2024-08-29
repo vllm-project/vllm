@@ -56,12 +56,10 @@ logger = init_logger(__name__)
 
 
 def get_wikitext2_text(tokenizer):
-    hf_hub_download(
-      repo_id='alexei-v-ivanov-amd/wiki',
-      repo_type="dataset",
-      filename='wiki.test.raw',
-      local_dir='./'
-    )
+    hf_hub_download(repo_id='alexei-v-ivanov-amd/wiki',
+                    repo_type="dataset",
+                    filename='wiki.test.raw',
+                    local_dir='./')
     with open('./wiki.test.raw') as f:
         test_text = "\n".join(line.strip() for line in f)
         test_enc = tokenizer(test_text)
