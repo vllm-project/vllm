@@ -10,7 +10,8 @@
 
 namespace prepare_inputs {
 
-__device__ void update_decode(int const cur_query_id, long* input_tokens_ptr,
+__device__ void update_decode(int const cur_query_id,
+                              long* input_tokens_ptr,
                               long* input_positions_ptr, int* seq_lens_ptr,
                               long* slot_mapping_ptr,
                               int const* block_tables_ptr,
@@ -91,7 +92,7 @@ __global__ void advance_step_kernel(
                    token_chunk_size);
   } else {
     // decode update
-    update_decode(cur_query_id, input_tokens_ptr, input_positions_ptr,
+    update_decode(cur_query_id, num_prefill_tokens, input_tokens_ptr, input_positions_ptr,
                   seq_lens_ptr, slot_mapping_ptr, block_tables_ptr,
                   sampled_token_ids_ptr, block_tables_stride, block_size);
   }
@@ -178,6 +179,12 @@ void advance_step(
     TORCH_CHECK(context_lens.has_value());
     TORCH_CHECK(prefill_steps_tokens.has_value());
     TORCH_CHECK(prefill_steps_slot_mapping.has_value());
+  } else {
+    TORCH_CHECK(num_prefill_tokens == 0);
+    TORCH_CHECK(token_chunk_size == 0)
+    TORCH_CHECK(!context_lens.has_value());
+    TORCH_CHECK(!prefill_steps_tokens.has_value());
+    TORCH_CHECK(!prefill_steps_slot_mapping.has_value());
   }
 
   int const num_decode_tokens = num_seqs - num_prefills;
