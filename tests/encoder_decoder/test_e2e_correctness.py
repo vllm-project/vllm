@@ -51,9 +51,10 @@ if not is_cpu():
     ) -> None:
         '''
         End-to-End (E2E) test for the encoder-decoder framework. 
-        This test evaluates the encoder-decoder functionality using the BART model.
-        We compare the outputs of the Hugging Face and vLLM implementations
-        to ensure that both implementations produce consistent and correct results.
+        This test evaluates the encoder-decoder functionality using the BART
+        model. We compare the outputs of the Hugging Face and vLLM
+        implementations to ensure that both implementations produce consistent
+        and correct results.
         '''
         test_case_prompts = example_encoder_decoder_prompts[
             decoder_prompt_type]
