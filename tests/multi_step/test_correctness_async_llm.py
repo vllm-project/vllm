@@ -47,10 +47,12 @@ async def completions_with_server_args(prompts: List[str], model_name: str,
 @pytest.mark.parametrize("eager_mode", [False, True])
 @pytest.mark.parametrize("num_scheduler_steps", NUM_SCHEDULER_STEPS)
 @pytest.mark.parametrize("num_prompts", NUM_PROMPTS)
+@pytest.mark.parametrize("is_async", [False, True])
 @pytest.mark.asyncio
 async def test_multi_step(example_prompts, model: str, tp_size: int,
                           pp_size: int, eager_mode: int,
-                          num_scheduler_steps: int, num_prompts: int):
+                          num_scheduler_steps: int, num_prompts: int,
+                          is_async: bool):
 
     prompts = example_prompts
     if len(prompts) < num_prompts:
@@ -62,9 +64,9 @@ async def test_multi_step(example_prompts, model: str, tp_size: int,
     ms_server_args = DEFAULT_SERVER_ARGS + \
         ["--num-scheduler-steps", f"{num_scheduler_steps}"]
 
-    # Disable output proc callback as its not supported
-    # with multi-step right now
-    ms_server_args += ["--disable-async-output-proc"]
+    if not is_async:
+        ms_server_args += ["--disable-async-output-proc"]
+
     if eager_mode:
         ms_server_args.append("--enforce-eager")
 
