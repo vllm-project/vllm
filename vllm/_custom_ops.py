@@ -160,21 +160,27 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
+            #prefill_input_positions_update = model_input.prefill_input_positions_update,
+            #prefill_seq_start_loc_update = model_input.prefill_seq_start_loc_update)
 def advance_step(num_prefill_tokens: int, num_prefills: int, num_seqs: int,
-                 num_queries: int, block_size: int, token_chunk_size: int,
+                 num_queries: int, block_size: int,
                  input_tokens: torch.Tensor, sampled_token_ids: torch.Tensor,
                  input_positions: torch.Tensor, seq_lens: torch.Tensor,
                  slot_mapping: torch.Tensor, block_tables: torch.Tensor,
                  seq_start_loc: torch.Tensor,
                  context_lens: Optional[torch.Tensor],
                  prefill_steps_tokens: Optional[torch.Tensor],
-                 prefill_steps_slot_mapping: Optional[torch.Tensor]) -> None:
+                 prefill_steps_slot_mapping: Optional[torch.Tensor],
+                 prefill_input_positions_update : Optional[torch.Tensor],
+                 prefill_seq_start_loc_update: Optional[torch.Tensor],
+                 prefill_token_chunk_sizes: Optional[torch.Tensor]) -> None:
     """Advance a step on GPU for existing inputs for a multi-step runner"""
     return torch.ops._C.advance_step(
         num_prefill_tokens, num_prefills, num_seqs, num_queries, block_size,
-        token_chunk_size, input_tokens, sampled_token_ids, input_positions,
+        input_tokens, sampled_token_ids, input_positions,
         seq_lens, slot_mapping, block_tables, seq_start_loc, context_lens,
-        prefill_steps_tokens, prefill_steps_slot_mapping)
+        prefill_steps_tokens, prefill_steps_slot_mapping,
+        prefill_input_positions_update, prefill_seq_start_loc_update, prefill_token_chunk_sizes)
 
 
 # quantization ops

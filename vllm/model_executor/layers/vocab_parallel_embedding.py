@@ -40,6 +40,7 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
 
     def embedding(self, layer: torch.nn.Module,
                   input_: torch.Tensor) -> torch.Tensor:
+        #print (f"input range [{input_.min()} {input_.max()}]")
         return F.embedding(input_, layer.weight)
 
 

@@ -358,7 +358,7 @@ class FlashAttentionMetadata(AttentionMetadata):
     def advance_step(self,
                      num_seqs: int,
                      num_queries: int,
-                     token_chunk_size: Optional[int] = None):
+                     prefill_token_chunk_sizes: Optional[List[int]] = None):
         """
         Update metadata in-place to advance one decode step.
         """
@@ -395,7 +395,9 @@ class FlashAttentionMetadata(AttentionMetadata):
         if has_prefills:
             assert self.slot_mapping.shape == (num_seqs - self.num_prefills +
                                                self.num_prefill_tokens, )
-            assert token_chunk_size is not None
+            assert prefill_token_chunk_sizes is not None
+            assert sum(prefill_token_chunk_sizes) == self.num_prefill_tokens
+            assert len(prefill_token_chunk_sizes) == self.num_prefills
             assert self.num_decode_tokens == num_seqs - self.num_prefills
         else:
             assert self.num_prefills == 0
@@ -408,9 +410,9 @@ class FlashAttentionMetadata(AttentionMetadata):
         # Update query lengths. Note that we update only queries and not seqs,
         # since tensors may be padded due to captured cuda graph batch size
         if has_prefills:
-            assert token_chunk_size is not None
-            for i in range(self.num_prefills):
-                self.seq_lens[i] += token_chunk_size
+            assert prefill_token_chunk_sizes is not None
+            for idx, tcs in enumerate(prefill_token_chunk_sizes):
+                self.seq_lens[idx] += tcs 
         for i in range(self.num_prefills, num_queries):
             self.seq_lens[i] += 1
 
@@ -418,7 +420,7 @@ class FlashAttentionMetadata(AttentionMetadata):
             self.seq_lens[self.num_prefills:]) if has_decodes else 0
         self.max_prefill_seq_len = max(
             self.seq_lens[:self.num_prefills]) if has_prefills else 0
-        self.max_query_len = token_chunk_size if has_prefills else 1
+        self.max_query_len = max(prefill_token_chunk_sizes) if has_prefills else 1
 
         # Trigger recompute
         self._cached_decode_metadata = None
