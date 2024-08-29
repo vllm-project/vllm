@@ -685,10 +685,11 @@ class FlashInferImpl(AttentionImpl):
                 v_scale,
             )
             # The FlashInfer api requires data to be in fp8_e4m3 or fp8_e5m2
-            # to process the cache in fp8
-            torch_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
-                self.kv_cache_dtype)
-            kv_cache = kv_cache.view(torch_dtype)
+            # to process the cache when the kv_cache_dtype is fp8
+            if self.kv_cache_dtype in ["fp8", "fp8_e4m3", "fp8_e5m2"]:
+                torch_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
+                    self.kv_cache_dtype)
+                kv_cache = kv_cache.view(torch_dtype)
 
         query = query.contiguous(
         )  # Flashinfer requires query to be contiguous
