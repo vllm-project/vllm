@@ -351,7 +351,10 @@ class VocabParallelEmbedding(torch.nn.Module):
             param.weight_type = loaded_weight.item()
             return
         elif isinstance(param, UninitializedParameter):
-            param.materialize(loaded_weight.shape, dtype=loaded_weight.dtype)
+            shape = list(loaded_weight.shape)
+            if output_dim is not None:
+                shape[output_dim] = shape[output_dim] // self.tp_size
+            param.materialize(tuple(shape), dtype=loaded_weight.dtype)
 
         # If parameter does not have output dim, then it should
         # be copied onto all gpus (e.g. g_idx for act_order gptq).
