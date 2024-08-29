@@ -471,6 +471,13 @@ class MambaForCausalLM(nn.Module, HasInnerState):
 
         return hidden_states
 
+    def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
+        return self.mamba_cache.copy_inputs_before_cuda_graphs(
+            input_buffers, **kwargs)
+
+    def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
+        return self.mamba_cache.get_seqlen_agnostic_capture_inputs(batch_size)
+
     def _get_mamba_cache_shape(
             self) -> Tuple[Tuple[int, int], Tuple[int, int]]:
         world_size = get_tensor_model_parallel_world_size()
@@ -483,13 +490,6 @@ class MambaForCausalLM(nn.Module, HasInnerState):
             self.config.state_size,
         )
         return conv_state_shape, temporal_state_shape
-
-    def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
-        return self.mamba_cache.copy_inputs_before_cuda_graphs(
-            input_buffers, **kwargs)
-
-    def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
-        return self.mamba_cache.get_seqlen_agnostic_capture_inputs(batch_size)
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:

@@ -311,9 +311,6 @@ class LLMEngine:
         )
 
         if not self.model_config.embedding_mode:
-            # For all decoders including attention-free models like mamba,
-            # this must call _initialize_kv_caches, as this is where model
-            # warmup and CUDA graphs creation happens.
             self._initialize_kv_caches()
 
         # If usage stat is enabled, collect relevant info.
