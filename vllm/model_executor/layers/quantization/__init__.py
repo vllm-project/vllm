@@ -11,10 +11,10 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsConfig)
 from vllm.model_executor.layers.quantization.deepspeedfp import (
     DeepSpeedFPConfig)
-from vllm.model_executor.layers.quantization.experts_int8 import (
-    ExpertsInt8Config)
 from vllm.model_executor.layers.quantization.fbgemm_fp8 import FBGEMMFp8Config
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.layers.quantization.fused_moe.experts_int8 import (
+    ExpertsInt8Config)
 from vllm.model_executor.layers.quantization.gguf import GGUFConfig
 from vllm.model_executor.layers.quantization.gptq import GPTQConfig
 from vllm.model_executor.layers.quantization.gptq_marlin import (
@@ -23,7 +23,6 @@ from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
     GPTQMarlin24Config)
 from vllm.model_executor.layers.quantization.marlin import MarlinConfig
 from vllm.model_executor.layers.quantization.qqq import QQQConfig
-from vllm.model_executor.layers.quantization.squeezellm import SqueezeLLMConfig
 from vllm.model_executor.layers.quantization.tpu_int8 import Int8TpuConfig
 
 QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
@@ -41,7 +40,6 @@ QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "gptq_marlin": GPTQMarlinConfig,
     "awq_marlin": AWQMarlinConfig,
     "gptq": GPTQConfig,
-    "squeezellm": SqueezeLLMConfig,
     "compressed-tensors": CompressedTensorsConfig,
     "bitsandbytes": BitsAndBytesConfig,
     "qqq": QQQConfig,

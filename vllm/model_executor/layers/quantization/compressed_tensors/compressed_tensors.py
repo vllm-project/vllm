@@ -19,7 +19,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     CompressionFormat, QuantizationArgs, QuantizationStrategy,
     QuantizationType, find_matched_target, is_activation_quantization_format,
     should_ignore_layer)
-from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.quantization.kv_cache.kv_cache import (
+    BaseKVCacheMethod)
 from vllm.platforms import current_platform
 
 __all__ = ["CompressedTensorsLinearMethod"]
