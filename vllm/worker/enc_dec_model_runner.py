@@ -209,6 +209,9 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         if not self.is_driver_worker:
             return []
 
+        if model_input.async_callback is not None:
+            model_input.async_callback()
+
         # Sample the next token.
         output: SamplerOutput = self.model.sample(
             logits=logits,

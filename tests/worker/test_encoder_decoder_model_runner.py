@@ -81,7 +81,7 @@ def test_empty_seq_group():
                     "unsupported for encoder/ "
                     "decoder models")
 @pytest.mark.parametrize("batch_size", BATCH_SIZES)
-def test_prepare_prompt(batch_size, ):
+def test_prepare_prompt(batch_size):
     '''
     Test the ability of the encoder/decoder model runner subclass to
     produce prefill-phase model inputs & attention metadata.
@@ -273,7 +273,7 @@ def test_prepare_prompt(batch_size, ):
                     "unsupported for encoder/ "
                     "decoder models")
 @pytest.mark.parametrize("batch_size", BATCH_SIZES)
-def test_prepare_decode(batch_size, ):
+def test_prepare_decode(batch_size):
     '''
     Test the ability of the encoder/decoder model runner subclass to
     produce decode-phase model inputs & attention metadata.
