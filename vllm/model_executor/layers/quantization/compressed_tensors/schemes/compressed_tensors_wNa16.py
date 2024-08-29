@@ -3,6 +3,7 @@ from typing import Callable, List, Optional
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
@@ -21,6 +22,8 @@ WNA16_SUPPORTED_TYPES_MAP = {
     8: scalar_types.uint8b128,
 }
 WNA16_SUPPORTED_BITS = list(WNA16_SUPPORTED_TYPES_MAP.keys())
+
+logger = init_logger(__name__)
 
 
 class CompressedTensorsWNA16(CompressedTensorsScheme):
@@ -50,6 +53,9 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         if actorder and self.group_size == -1:
             # In this case, actorder == True is the same as actorder == False
             # (since we have only one group per output channel)
+            logger.warning(
+                "Model must be quantized with group_size > 0 in order to use "
+                "activation ordering")
             actorder = False
         self.actorder = actorder
 
