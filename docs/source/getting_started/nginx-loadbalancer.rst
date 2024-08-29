@@ -40,9 +40,9 @@ Create a file named ``nginx.conf``. Note that you can add as many servers as you
         server vllm0:8000 max_fails=3 fail_timeout=10000s;
         server vllm1:8000 max_fails=3 fail_timeout=10000s;
     }     
-    server {                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          server {
+    server {
         listen 80;
-        location / {                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         location / {
+        location / {
             proxy_pass http://backend;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
