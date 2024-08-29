@@ -1,3 +1,4 @@
+import dataclasses
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -61,6 +62,13 @@ class MultiStepWorker(Worker):
                     execute_model_req.seq_group_metadata_list,
                     execute_model_req.virtual_engine,
                     execute_model_req.finished_requests_ids))
+
+            if execute_model_req.async_callback:
+                model_input.frozen_model_input = dataclasses.replace(  # type: ignore
+                    model_input.frozen_model_input,
+                    async_callback=execute_model_req.async_callback,
+                    use_async_and_multi_step=execute_model_req.
+                    use_async_and_multi_step)
         else:
             # on subsequent steps we reuse the worker input and model input
             multi_step_state = self.multi_step_states[virtual_engine]
