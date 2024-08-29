@@ -155,6 +155,7 @@ def get_attn_backend(
         return RWKVFlashAttentionBackend
     else:
         raise ValueError("Invalid attention backend.")
+        
 
 
 def which_attn_to_use(
@@ -172,7 +173,7 @@ def which_attn_to_use(
 
     if useLinear:
         print("Using Linear Attention")
-        return _Backend.LINEAR
+    return _Backend.LINEAR
 
     # Check whether a particular choice of backend was
     # previously forced.

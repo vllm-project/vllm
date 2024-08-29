@@ -34,9 +34,10 @@ class RWKV5Config(PretrainedConfig):
         print("RWKV5Config", kwargs)
         # exit()
         if(kwargs.get("num_attention_heads", False)):
-            
+            print(kwargs)
             kwargs["num_attention_heads"] = kwargs["attention_hidden_size"] // kwargs["head_size"]
             kwargs["num_kv_heads"] = kwargs["num_attention_heads"]
+        
         super().__init__(**kwargs)
 
     @property

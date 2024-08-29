@@ -44,7 +44,7 @@ class RWKVFlashAttentionBackend(AttentionBackend):
     ) -> Tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        return (min(num_blocks,16),block_size, num_kv_heads, head_size, head_size+2)
+        return (min(num_blocks,16),block_size,  head_size+2, num_kv_heads, head_size)
 
     @staticmethod
     def swap_blocks(

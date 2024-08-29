@@ -26,7 +26,7 @@ from transformers import RwkvConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.attention.backends.rwkv5linear_attn import LinearFlashAttentionMetadata
 from vllm.config import CacheConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank, tensor_model_parallel_all_gather
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear, MergedColumnParallelLinear,
                                                QKVParallelLinear,
@@ -72,7 +72,7 @@ class RWKVAttention(nn.Module):
         self.time_mix_gate = nn.Parameter(torch.zeros(1,1,self.hidden_size))
         self.time_decay = nn.Parameter(torch.zeros(self.num_heads, self.head_dim))
         self.time_faaaa = nn.Parameter(torch.zeros(self.num_heads, self.head_dim))
-        self.ln_x = nn.GroupNorm(self.num_heads,self.hidden_size)
+        self.ln_x = nn.GroupNorm(self.num_heads,self.hidden_size//tensor_model_parallel_world_size)
         self.head_size_divisor = 8
 
     def forward(
@@ -92,16 +92,16 @@ class RWKVAttention(nn.Module):
 
         if(attn_metadata.num_decode_tokens > 0):
             if kv_cache != None:
-                state = kv_cache[blocknum,blockidx,:,:,0]
-                kv_cache[blocknum,blockidx,:,:,0] = x.reshape_as(state)
-                state = state.reshape_as(x)
+                state = kv_cache[blocknum,blockidx,0,:]
+                kv_cache[blocknum,blockidx,0,:] = x.chunk(get_tensor_model_parallel_world_size(),-1)[get_tensor_model_parallel_rank()].reshape_as(state)
+                state = tensor_model_parallel_all_gather(state.reshape(-1,x.shape[-1]//get_tensor_model_parallel_world_size()))
         else:
             ott = torch.arange(x.shape[0]).to(x.device)
             ott = ott-1
             state = x[ott]
             state[position_ids==0]*=0 # for start of sequence
             if(kv_cache != None):
-                kv_cache[blocknum[ott[position_ids==0]],blockidx[ott[position_ids==0]],:,:,0] = x[ott[position_ids==0]-1].reshape_as(kv_cache[blocknum[ott[position_ids==0]],blockidx[ott[position_ids==0]],:,:,0])
+                kv_cache[blocknum[ott[position_ids==0]],blockidx[ott[position_ids==0]],0,:] = x[ott[position_ids==0]-1].chunk(get_tensor_model_parallel_world_size(),-1)[get_tensor_model_parallel_rank()].reshape_as(kv_cache[blocknum[ott[position_ids==0]],blockidx[ott[position_ids==0]],0,:])
                 state = state.reshape_as(x)
 
         # state[position_ids.query_start_loc] = cache
@@ -141,7 +141,7 @@ class RWKVAttention(nn.Module):
         
         if(attn_metadata.num_prefill_tokens != 0):
         # print(kv_cache.shape if kv_cache != None else None)
-            s = kv_cache[blocknum,blockidx,:,:,2:] if kv_cache != None else torch.zeros(1,self.num_heads, self.head_dim, self.head_dim, device=at.device, dtype=at.dtype)
+            s = kv_cache[blocknum,blockidx,2:,:].transpose(-3,-2) if kv_cache != None else torch.zeros(1,self.num_heads, self.head_dim, self.head_dim, device=at.device, dtype=at.dtype)
             # print(kv_cache.shape if kv_cache != None else None)
             for t in range(T):
                 print(out[t].shape, r[t].shape, s.shape)
@@ -150,14 +150,14 @@ class RWKVAttention(nn.Module):
                 s[0] += at[t]
             
             if(kv_cache != None):
-                kv_cache[blocknum,blockidx,:,:,2:] = s
+                kv_cache[blocknum,blockidx,2:,:,] = s.transpose(-3,-2)
 
         else:
             # print(kv_cache.shape if kv_cache != None else None)
        
             
             for t in range(T):
-                s = kv_cache[blocknum[t],blockidx[t],:,:,2:] if kv_cache != None else torch.zeros(self.num_heads, self.head_dim, self.head_dim, device=at.device, dtype=at.dtype)
+                s = kv_cache[blocknum[t],blockidx[t],2:,:,].transpose(-3,-2) if kv_cache != None else torch.zeros(self.num_heads, self.head_dim, self.head_dim, device=at.device, dtype=at.dtype)
             
                 # print(out[t].shape, r[t].shape, s.shape)
                 out[t] += r[t] @ s
@@ -165,8 +165,8 @@ class RWKVAttention(nn.Module):
                 s += at[t]
             
                 if(kv_cache != None):
-                    kv_cache[blocknum[t],blockidx[t],:,:,2:] = s
-        out = out.view(-1, self.hidden_size)
+                    kv_cache[blocknum[t],blockidx[t],2:,:,] = s.transpose(-3,-2)
+        out = out.view(-1, self.num_heads * self.head_dim)
         out = self.ln_x(out/self.head_size_divisor)
         hidden_states, _ = self.output(out*g)
 
@@ -201,7 +201,7 @@ class RWKVMLP(nn.Module):
             bias=True,
             quant_config=quant_config
         )
-        self.receptance = RowParallelLinear(
+        self.receptance = ColumnParallelLinear(
             hidden_size,
             hidden_size,
             bias=True,
@@ -217,16 +217,16 @@ class RWKVMLP(nn.Module):
         blockidx = blockidx.to(x.device)
         if(attn_metadata.num_decode_tokens > 0):
             if kv_cache != None:
-                state = kv_cache[blocknum,blockidx,:,:,1]
-                kv_cache[blocknum,blockidx,:,:,1] = x.reshape_as(state)
-                state = state.reshape_as(x)
+                state = kv_cache[blocknum,blockidx,1,:,:]
+                kv_cache[blocknum,blockidx,1,:] = x.chunk(get_tensor_model_parallel_world_size(),-1)[get_tensor_model_parallel_rank()].reshape_as(state)
+                state = tensor_model_parallel_all_gather(state.reshape(-1,x.shape[-1]//get_tensor_model_parallel_world_size()))
         else:
             ott = torch.arange(x.shape[0]).to(x.device)
             ott = ott-1
             state = x[ott]
             state[position_ids==0]*=0 # for start of sequence
             if kv_cache != None:
-                kv_cache[blocknum[ott[position_ids==0]],blockidx[ott[position_ids==0]],:,:,1] = x[ott[position_ids==0]-1].reshape_as(kv_cache[blocknum[ott[position_ids==0]],blockidx[ott[position_ids==0]],:,:,1])
+                kv_cache[blocknum[ott[position_ids==0]],blockidx[ott[position_ids==0]],1,:] = x[ott[position_ids==0]-1].chunk(get_tensor_model_parallel_world_size(),-1)[get_tensor_model_parallel_rank()].reshape_as(kv_cache[blocknum[ott[position_ids==0]],blockidx[ott[position_ids==0]],1,:])
                 state = state.reshape_as(x)
 
         xx =  state - x
@@ -238,7 +238,7 @@ class RWKVMLP(nn.Module):
         kv,_ = self.value(k)
         rr,_ = self.receptance(xr)
 
-        return torch.sigmoid(rr) * kv
+        return tensor_model_parallel_all_gather(torch.sigmoid(rr)) * kv
 
 
 class RWKVBlock(nn.Module):
@@ -389,7 +389,9 @@ class Rwkv5ForCausalLM(nn.Module):
             if not name.startswith("rwkv."):
                 name = "rwkv." + name
 
-            
+            if("time_decay" in name or "time_faaaa" in name or "ln_x" in name):
+                print("Splitting:" + name)
+                loaded_weight = loaded_weight.chunk(get_tensor_model_parallel_world_size(),0)[get_tensor_model_parallel_rank()]
             param = params_dict[name]
             
             weight_loader = getattr(param, "weight_loader",
