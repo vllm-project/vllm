@@ -43,8 +43,8 @@ def get_sampled_token_logprobs(
                                        sampled_token_ids, ]
     expanded_selected_logprobs = selected_logprobs.unsqueeze(-1).expand(
         -1, -1, vocab_size)
-    sampled_token_ids_ranks = (logprob_tensor >=
-                               expanded_selected_logprobs).sum(-1)
+    sampled_token_ids_ranks = (logprob_tensor >
+                               expanded_selected_logprobs).sum(-1).add_(1)
 
     return sampled_token_ids_ranks, selected_logprobs
 
