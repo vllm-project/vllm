@@ -211,11 +211,6 @@ def awq_dequantize(qweight: torch.Tensor, scales: torch.Tensor,
         from vllm.model_executor.layers.quantization.awq_triton import (
             awq_dequantize_triton)
         return awq_dequantize_triton(qweight, scales, zeros)
-    if is_hip():
-        return torch.zeros(qweight.shape[0],
-                           8 * qweight.shape[1],
-                           device=qweight.device,
-                           dtype=torch.float16)
     return torch.ops._C.awq_dequantize(qweight, scales, zeros, split_k_iters,
                                        thx, thy)
 
@@ -226,10 +221,6 @@ def awq_gemm(input: torch.Tensor, qweight: torch.Tensor, qzeros: torch.Tensor,
         from vllm.model_executor.layers.quantization.awq_triton import (
             awq_gemm_triton)
         return awq_gemm_triton(input, qweight, qzeros, scales, split_k_iters)
-    if is_hip():
-        return torch.zeros((input.shape[0], qweight.shape[1] * 8),
-                           device=qweight.device,
-                           dtype=torch.float16)
     return torch.ops._C.awq_gemm(input, qweight, qzeros, scales, split_k_iters)
 
 
