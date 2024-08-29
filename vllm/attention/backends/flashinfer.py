@@ -90,7 +90,7 @@ class FlashInferBackend(AttentionBackend):
         elif kv_cache_dtype == "fp8_e5m2":
             return torch.float8_e5m2
         else:
-            return ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
+            raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
 
 
 class FlashInferState(AttentionState):
