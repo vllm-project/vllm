@@ -122,14 +122,13 @@ class MixtralMoE(nn.Module):
         self.hidden_size = hidden_size
         self.params_dtype = params_dtype
         # Gate always runs at half / full precision for now.
-        self.gate = ReplicatedLinear(
-            hidden_size,
-            num_experts,
-            bias=False,
-            quant_config=None,
-            params_dtype=params_dtype,
-            prefix=f"{prefix}.gate",
-        )
+
+        self.gate = ReplicatedLinear(hidden_size,
+                                     num_experts,
+                                     bias=False,
+                                     params_dtype=params_dtype,
+                                     quant_config=None,
+                                     prefix=f"{prefix}.gate")
 
         self.use_fused_moe = use_fused_moe
         if self.use_fused_moe:
@@ -580,7 +579,7 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
                             name,
                             shard_id=shard_id,
                             expert_id=expert_id,
-                            is_quantized=True,
+                            # is_quantized=True,
                         )
                         break
                     else:

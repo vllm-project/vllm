@@ -4,6 +4,7 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 
+import vllm.envs as envs
 from vllm._core_ext import ScalarType
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -177,12 +178,20 @@ def advance_step(num_seqs: int, num_queries: int, block_size: int,
 def awq_dequantize(qweight: torch.Tensor, scales: torch.Tensor,
                    zeros: torch.Tensor, split_k_iters: int, thx: int,
                    thy: int) -> torch.Tensor:
+    if envs.VLLM_USE_TRITON_AWQ:
+        from vllm.model_executor.layers.quantization.awq_triton import (
+            awq_dequantize_triton)
+        return awq_dequantize_triton(qweight, scales, zeros)
     return torch.ops._C.awq_dequantize(qweight, scales, zeros, split_k_iters,
                                        thx, thy)
 
 
 def awq_gemm(input: torch.Tensor, qweight: torch.Tensor, qzeros: torch.Tensor,
              scales: torch.Tensor, split_k_iters: int) -> torch.Tensor:
+    if envs.VLLM_USE_TRITON_AWQ:
+        from vllm.model_executor.layers.quantization.awq_triton import (
+            awq_gemm_triton)
+        return awq_gemm_triton(input, qweight, qzeros, scales, split_k_iters)
     return torch.ops._C.awq_gemm(input, qweight, qzeros, scales, split_k_iters)
 
 

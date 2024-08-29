@@ -29,6 +29,10 @@ class AsyncEngineClient(Protocol):
     def errored(self) -> bool:
         ...
 
+    @property
+    def limit_concurrency(self) -> Optional[int]:
+        """Maximum number of concurrently running requests."""
+
     def generate(
         self,
         inputs: PromptInputs,
@@ -86,4 +90,12 @@ class AsyncEngineClient(Protocol):
 
     async def check_health(self) -> None:
         """Raise if unhealthy"""
+        ...
+
+    async def start_profile(self) -> None:
+        """Start profiling the engine"""
+        ...
+
+    async def stop_profile(self) -> None:
+        """Start profiling the engine"""
         ...
