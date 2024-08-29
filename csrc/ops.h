@@ -210,10 +210,10 @@ at::Tensor causal_conv1d_update(
     const c10::optional<at::Tensor>& conv_state_indices);
 
 at::Tensor causal_conv1d_fwd(const at::Tensor& x, const at::Tensor& weight,
-                             const c10::optional<at::Tensor>& bias,
-                             const c10::optional<at::Tensor>& seq_id_,
-                             const c10::optional<at::Tensor>& initial_states,
-                             const c10::optional<at::Tensor>& final_states_ou_,
+                             const c10::optional<at::Tensor>& bias_,
+                             const c10::optional<at::Tensor>& seq_idx_,
+                             const c10::optional<at::Tensor>& initial_states_,
+                             const c10::optional<at::Tensor>& final_states_out_,
                              bool silu_activation);
 
 #ifndef USE_ROCM
