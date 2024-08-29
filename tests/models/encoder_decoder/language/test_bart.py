@@ -116,6 +116,30 @@ if not is_cpu():
         token during the process of validating the vLLM decoded output.
         '''
 
+        # NOTE: take care of the order. run vLLM first, and then run HF.
+        # vLLM needs a fresh new process without cuda initialization.
+        # if we run HF first, the cuda initialization will be done and it
+        # will hurt multiprocessing backend with fork method (the default).
+
+        # Note: currently encoder/decoder models are only compatible with
+        # enforce_eager=True. Normally this is not a problem because
+        # for encoder/decoder models vLLM will
+        # default to enforce_eager=True if enforce_eager
+        # is left unspecified. However, the
+        # VllmRunner test fixture (which wraps around the LLM class) defaults to
+        # enforce_eager=False (a behavior which a number of already-exisitng
+        # decoder-only unit tests expect), so when testing an encoder/decoder
+        # model we must explicitly specify enforce_eager=True in the VllmRunner
+        # constructor.
+        with vllm_runner(
+                model,
+                dtype=dtype,
+                tensor_parallel_size=tensor_parallel_size,
+                distributed_executor_backend=distributed_executor_backend,
+                enforce_eager=True) as vllm_model:
+            vllm_outputs = vllm_model.generate_encoder_decoder_greedy_logprobs(
+                prompts, max_tokens, num_logprobs)
+
         # Configuration settings for HF baseline
         hf_kwargs = {
             "top_k": None,
@@ -137,25 +161,6 @@ if not is_cpu():
                     num_logprobs,
                     **hf_kwargs,
                 ))
-
-        # Note: currently encoder/decoder models are only compatible with
-        # enforce_eager=True. Normally this is not a problem because
-        # for encoder/decoder models vLLM will
-        # default to enforce_eager=True if enforce_eager
-        # is left unspecified. However, the
-        # VllmRunner test fixture (which wraps around the LLM class) defaults to
-        # enforce_eager=False (a behavior which a number of already-exisitng
-        # decoder-only unit tests expect), so when testing an encoder/decoder
-        # model we must explicitly specify enforce_eager=True in the VllmRunner
-        # constructor.
-        with vllm_runner(
-                model,
-                dtype=dtype,
-                tensor_parallel_size=tensor_parallel_size,
-                distributed_executor_backend=distributed_executor_backend,
-                enforce_eager=True) as vllm_model:
-            vllm_outputs = vllm_model.generate_encoder_decoder_greedy_logprobs(
-                prompts, max_tokens, num_logprobs)
 
         hf_skip_tokens = (1 if decoder_prompt_type == DecoderPromptType.NONE
                           else 0)
