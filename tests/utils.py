@@ -447,14 +447,6 @@ def multi_gpu_test(*, num_gpus: int):
     )
 
     def wrapper(f: Callable[_P, None]) -> Callable[_P, None]:
-
-        @test_selector
-        @test_skipif
-        @fork_new_process_for_each_test
-        @functools.wraps(f)
-        def wrapped(*args: _P.args, **kwargs: _P.kwargs) -> None:
-            return f(*args, **kwargs)
-
-        return wrapped
+        return test_selector(test_skipif(fork_new_process_for_each_test(f)))
 
     return wrapper
