@@ -1961,10 +1961,9 @@ class LLMEngine:
 
             if len(prompt_ids) > max_prompt_len:
                 raise ValueError(
-                    "The prompt with multimodal tokens (total length "
-                    f"{len(prompt_ids)}) is too long to fit into the model "
-                    f"(context length {max_prompt_len}). Make sure that "
-                    "`max_model_len` is no smaller than the number of "
-                    "multimodal tokens. For images, the number of multimodal "
-                    "tokens depends on the number of images passed to the same "
-                    "prompt, and possibly the aspect ratio of each image.")
+                    f"The prompt (total length {len(prompt_ids)}) is too long "
+                    f"to fit into the model (context length {max_prompt_len}). "
+                    "Make sure that `max_model_len` is no smaller than the "
+                    "number of text tokens plus multimodal tokens. For images, "
+                    "the number of multimodal tokens depends on the number of "
+                    "input images, and possibly also their aspect ratios.")
