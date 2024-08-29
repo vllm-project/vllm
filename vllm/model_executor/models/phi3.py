@@ -5,19 +5,18 @@
 from typing import Optional
 
 import torch
+from transformers import Phi3Config
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
-from vllm.distributed import (get_pp_group)
+from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-
-from .utils import make_layers
-
 from vllm.model_executor.models.llama import (LlamaAttention,
                                               LlamaDecoderLayer,
                                               LlamaForCausalLM, LlamaModel)
-from transformers import Phi3Config
+
+from .utils import make_layers
 
 
 class Phi3Attention(LlamaAttention):
