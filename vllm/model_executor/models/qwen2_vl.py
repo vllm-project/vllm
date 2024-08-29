@@ -26,7 +26,7 @@
 from array import array
 from collections.abc import Mapping
 from functools import lru_cache, partial
-from typing import Iterable, List, Optional, Tuple, Type, TypedDict
+from typing import Iterable, List, Optional, Tuple, Type, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -690,6 +690,23 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
+    def _validate_and_reshape_mm_tensor(self,
+                                        mm_input: Union[torch.Tensor,
+                                                        List[torch.Tensor]],
+                                        name: str) -> torch.Tensor:
+        if not isinstance(mm_input, (torch.Tensor, list)):
+            raise ValueError(f"Incorrect type of {name}. "
+                             f"Got type: {type(mm_input)}")
+        if isinstance(mm_input, torch.Tensor):
+            if mm_input.ndim == 2:
+                return mm_input
+            if mm_input.ndim != 3:
+                raise ValueError(f"{name} should be 2D or batched 3D tensor. "
+                                 f"Got ndim: {mm_input.ndim}")
+            return torch.concat(list(mm_input))
+        else:
+            return torch.concat(mm_input)
+
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[Qwen2VLImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
@@ -698,13 +715,14 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
         if pixel_values is None:
             return None
 
-        if not isinstance(pixel_values, torch.Tensor):
+        pixel_values = self._validate_and_reshape_mm_tensor(
+            pixel_values, "image pixel values")
+        image_grid_thw = self._validate_and_reshape_mm_tensor(
+            image_grid_thw, "image grid_thw")
+
+        if not isinstance(pixel_values, (torch.Tensor, list)):
             raise ValueError("Incorrect type of image pixel values. "
                              f"Got type: {type(pixel_values)}")
-
-        if not isinstance(image_grid_thw, torch.Tensor):
-            raise ValueError("Incorrect type of image grid_thw. "
-                             f"Got type: {type(image_grid_thw)}")
 
         return Qwen2VLImageInputs(pixel_values=pixel_values,
                                   image_grid_thw=image_grid_thw)
@@ -717,13 +735,10 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
         if pixel_values_videos is None:
             return None
 
-        if not isinstance(pixel_values_videos, torch.Tensor):
-            raise ValueError("Incorrect type of video pixel values. "
-                             f"Got type: {type(pixel_values_videos)}")
-
-        if not isinstance(video_grid_thw, torch.Tensor):
-            raise ValueError("Incorrect type of video grid_thw. "
-                             f"Got type: {type(video_grid_thw)}")
+        pixel_values_videos = self._validate_and_reshape_mm_tensor(
+            pixel_values_videos, "video pixel values")
+        video_grid_thw = self._validate_and_reshape_mm_tensor(
+            video_grid_thw, "video grid_thw")
 
         return Qwen2VLVideoInputs(
             pixel_values_videos=pixel_values_videos,
