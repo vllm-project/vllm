@@ -8,6 +8,7 @@ import torch
 from vllm._ipex_ops import ipex_ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
+from vllm.attention.backends.utils import CommonAttentionState
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 
@@ -27,6 +28,10 @@ class IpexAttnBackend(AttentionBackend):
     @staticmethod
     def get_metadata_cls() -> Type["IpexAttnMetadata"]:
         return IpexAttnMetadata
+
+    @staticmethod
+    def get_state_cls() -> Type["CommonAttentionState"]:
+        return CommonAttentionState
 
     @staticmethod
     def get_kv_cache_shape(
@@ -117,6 +122,14 @@ def _make_attention_mask(
         mask[:, start:end, start:end] = sub_mask
         start += prompt_len
     return mask
+
+
+def use_sdp_causal(head_dim, query_states):
+    return (
+        head_dim in [-1, 64, 80, 96, 128]           # for now
+        and query_states.device.type == "xpu"       # GPU
+        and query_states.dtype in [torch.float, torch.half]     # fp32/fp16
+    )
 
 
 class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
@@ -277,38 +290,74 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                 #                           return_softmax=False,
                 #                           gen_=None)
 
-                query = query.unsqueeze(0)
-                key = key.unsqueeze(0)
-                value = value.unsqueeze(0)
-                query = query.movedim(1, query.dim() - 2)
-                key = key.movedim(1, key.dim() - 2)
-                value = value.movedim(1, value.dim() - 2)
+                # query = query.unsqueeze(0)
+                # key = key.unsqueeze(0)
+                # value = value.unsqueeze(0)
+                # query = query.movedim(1, query.dim() - 2)
+                # key = key.movedim(1, key.dim() - 2)
+                # value = value.movedim(1, value.dim() - 2)
 
                 mask = _make_attention_mask(attn_metadata.attn_bias,
                                             attn_metadata.seq_lens,
                                             sum(attn_metadata.seq_lens),
                                             query.dtype).to(query.device)
+
                 import os
                 should_split_qkv = os.getenv("IPEX_LLM_SPLIT_QKV", None)
                 if should_split_qkv is None:
-                    out = torch.nn.functional.scaled_dot_product_attention(
-                        query,
-                        key,
-                        value,
-                        attn_mask=mask,
-                        dropout_p=0.0,
-                        is_causal=False,
-                        scale=self.scale).movedim(query.dim() - 2, 1).contiguous()
+                    if use_sdp_causal(self.head_size, query):
+                        # print("using xe_addons.sdp_causal")
+                        query = query.unsqueeze(0)
+                        key = key.unsqueeze(0)
+                        value = value.unsqueeze(0)
+                        query = query.movedim(1, query.dim() - 2).contiguous()
+                        key = key.movedim(1, key.dim() - 2).contiguous()
+                        value = value.movedim(1, value.dim() - 2).contiguous()
+                        mask = mask.unsqueeze(0)
+                        # mask = mask.movedim(1, mask.dim() - 2).contiguous()
+                        import xe_addons
+                        out = xe_addons.sdp_causal(query, key, value, mask)
+                        out = out.movedim(out.dim() - 2, 1).contiguous()
+                    else:
+                        # print("using scaled_dot_product_attention")
+                        query = query.unsqueeze(0)
+                        key = key.unsqueeze(0)
+                        value = value.unsqueeze(0)
+                        query = query.movedim(1, query.dim() - 2)
+                        key = key.movedim(1, key.dim() - 2)
+                        value = value.movedim(1, value.dim() - 2)
+
+                        out = torch.nn.functional.scaled_dot_product_attention(
+                            query,
+                            key,
+                            value,
+                            attn_mask=mask,
+                            dropout_p=0.0,
+                            is_causal=False,
+                            scale=self.scale).movedim(query.dim() - 2, 1).contiguous()
                 else:
                     out = []
-                    block_size = 2
-                    query_split = torch.split(query, block_size, dim=1)
-                    key_split = torch.split(key, block_size, dim=1)
-                    value_split = torch.split(value, block_size, dim=1)
-                    for q, k, v in zip(query_split, key_split, value_split):
-                        out_split = torch.nn.functional.scaled_dot_product_attention(
-                            q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=False, scale=self.scale)
-                        out.append(out_split)
+                    print(self.head_size)
+                    if use_sdp_causal(self.head_size, query):
+                        # print("using xe_addons.sdp_causal")
+                        import xe_addons
+                        block_size = 2
+                        query_split = torch.split(query, block_size, dim=1)
+                        key_split = torch.split(key, block_size, dim=1)
+                        value_split = torch.split(value, block_size, dim=1)
+                        for q, k, v in zip(query_split, key_split, value_split):
+                            out_split = xe_addons.sdp_causal(q, k, v, mask)
+                            out.append(out_split)
+                    else:
+                        # print("using scaled_dot_product_attention")
+                        block_size = 2
+                        query_split = torch.split(query, block_size, dim=1)
+                        key_split = torch.split(key, block_size, dim=1)
+                        value_split = torch.split(value, block_size, dim=1)
+                        for q, k, v in zip(query_split, key_split, value_split):
+                            out_split = torch.nn.functional.scaled_dot_product_attention(
+                                q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=False, scale=self.scale)
+                            out.append(out_split)
                     out = torch.cat(out, dim=1).movedim(query.dim() - 2, 1).contiguous()
                 output = out.view_as(query).to(query.dtype)
             else:
