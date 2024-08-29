@@ -250,7 +250,7 @@ run_serving_tests() {
         sonnet_prefix_len=$(echo "$common_params" | jq -r '.sonnet_prefix_len')
 
         client_command="python3 benchmark_serving.py \
-          --backend $CURRENT_LLM_SERVING_ENGINE \
+          --backend $backend \
           --tokenizer /tokenizer_cache \
           --model $model \
           --dataset-name $dataset_name \

@@ -36,8 +36,7 @@ def get_perf(df, method, model, metric):
     
     for qps in [2,4,8,16,"inf"]:
         target = df['Test name'].str.contains(model)
-        # target = target & df['Engine'].str.contains(method)
-        target = target & (df['step'] == method)
+        target = target & df['Engine'].str.contains(method)
         target = target & df['Test name'].str.contains("qps_" + str(qps))
         filtered_df = df[target]
 
@@ -76,27 +75,29 @@ def main(args):
     results = []
 
     # collect results
-    # for test_file in results_folder.glob("*_nightly_results.json"):
-    #     with open(test_file, "r") as f:
-    #         results = results + json.loads(f.read())
+    for test_file in results_folder.glob("*_nightly_results.json"):
+        with open(test_file, "r") as f:
+            results = results + json.loads(f.read())
     
-    results = []
-    for step in [0,1,10,11,12]:
+    # results = []
+    # for step in [0,1,10,11,12]:
         
-        with open(results_folder / f"step{step}.txt", "r") as f:
-            temp_results = json.loads(f.read())
-            # print(len(temp_results))
-            for i in temp_results:
-                i['step'] = step
-            results = results + temp_results
-        print(len(results))
+    #     with open(results_folder / f"step{step}.txt", "r") as f:
+    #         temp_results = json.loads(f.read())
+    #         # print(len(temp_results))
+    #         for i in temp_results:
+    #             i['step'] = step
+    #         results = results + temp_results
+    #     print(len(results))
             
     # generate markdown table
     df = pd.DataFrame.from_dict(results)
     # print(df)
     df = df[df["Test name"].str.contains(args.dataset)]
+    table = tabulate(df, headers='keys', tablefmt='pipe', showindex=False)
+    with open(f"nightly_results_{args.dataset}.md", "w") as f:
+        f.write(table)
     
-    (df['step'] == 4).mean()
 
     plt.rcParams.update({'font.size': 18})
     plt.set_cmap("cividis")
@@ -104,7 +105,8 @@ def main(args):
     # plot results
     fig, axes = plt.subplots(3, 3, figsize=(20, 16))
     fig.subplots_adjust(hspace=1)
-    methods = [0,1,10,11,12]
+    # methods = [0,1,10,11,12]
+    methods = ['vllm', 'trt', 'sglang', 'lmdeploy']
     for i, model in enumerate(["llama8B", "llama70B", "mixtral8x7B"]):
         for j, metric in enumerate(["Tput", "TPOT", "TTFT"]):
             
@@ -124,14 +126,7 @@ def main(args):
             inf_qps_results = []
             for k, method in enumerate(methods):
                 mean, std = get_perf_w_std(df, method, model, metric)
-                if method == 0:
-                    label = "1 month ago"
-                elif method == 11:
-                    label = "10-step w/ zmq"
-                elif method == 12:
-                    label = "1-step w/ zmq"
-                else:
-                    label = f"{method}-step"
+                label = method
                 ax.errorbar(range(len(mean)),
                             mean, 
                             yerr=std, 
