@@ -63,7 +63,7 @@ EXPECTED_STRS_MAP = {
 def test_models(example_prompts, model_name, kv_cache_dtype, backend) -> None:
     # Note that the golden strings may not work for FLASHINFER Backend.
     # The intention is to test the path
-    os.environ["VLLM_ATTENTION_BACKEND"] = backend 
+    os.environ["VLLM_ATTENTION_BACKEND"] = backend
     model = LLM(model=model_name,
                 max_model_len=MAX_MODEL_LEN,
                 trust_remote_code=True,
