@@ -187,7 +187,8 @@ ENV HF_HUB_OFFLINE=1 \
     # see: https://github.com/vllm-project/vllm/pull/7080
     VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
     VLLM_USAGE_SOURCE=production-docker-image \
-    VLLM_WORKER_MULTIPROC_METHOD=fork
+    VLLM_WORKER_MULTIPROC_METHOD=fork \
+    VLLM_NO_USAGE_STATS=1
 
 # setup non-root user for OpenShift
 RUN umask 002 \
