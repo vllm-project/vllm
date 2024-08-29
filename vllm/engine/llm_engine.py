@@ -1256,12 +1256,18 @@ class LLMEngine:
         """Apply the model output to the sequences in the scheduled seq groups.
 
         virtual_engine: The engine id to operate on
+        
         is_async: Indicates whether this postprocessor runs in 
             parallel with the GPU forward pass and is processing 
             tokens from the previous step. If this is true, then
             no tokens need to be appended since it is already done
             externally (before the next schedule() call)
         
+        sampler_output: Used with multi-step execution to provide 
+            sampler_output of each step
+        is_last_output: Used with multi-step execution to indicate
+            the last step (of each multi-step group)
+            
         Returns RequestOutputs that can be returned to the client.
         """
         now = time.time()
