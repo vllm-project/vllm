@@ -1617,7 +1617,10 @@ class CUDAGraphRunner:
                 intermediate_tensors=intermediate_inputs,
                 **kwargs,
             )
+        # Wait for the warm up operations to finish before proceeding with
+        # Graph Capture.
         torch.cuda.synchronize()
+        # Capture the graph.
         self._graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self._graph, pool=memory_pool, stream=stream):
             output_hidden_or_intermediate_states = self.model(

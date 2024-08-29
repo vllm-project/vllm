@@ -1,4 +1,4 @@
-"""Compare the outputs of HF and vLLM for BART models using greedy sampling.
+"""E2E tests to verify the correctness of the encoder-decoder framework
 
 Run `pytest tests/encoder_decoder/test_e2e_correctness.py`.
 """
@@ -50,10 +50,10 @@ if not is_cpu():
         enforce_eager: bool,
     ) -> None:
         '''
-        E2E test for encoder decoder framework. In this test we use the BART
-        model to test the encoder decoder framework e2e. We compare the output
-        of the huggingface implementation to that of the vLLM implementation
-        to verify the correctness of the encoder decoder framework. 
+        End-to-End (E2E) test for the encoder-decoder framework. 
+        This test evaluates the encoder-decoder functionality using the BART model.
+        We compare the outputs of the Hugging Face and vLLM implementations
+        to ensure that both implementations produce consistent and correct results.
         '''
         test_case_prompts = example_encoder_decoder_prompts[
             decoder_prompt_type]
