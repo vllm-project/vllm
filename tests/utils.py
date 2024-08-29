@@ -451,6 +451,7 @@ def multi_gpu_test(*, num_gpus: int):
         @test_selector
         @test_skipif
         @fork_new_process_for_each_test
+        @functools.wraps(f)
         def wrapped(*args: _P.args, **kwargs: _P.kwargs) -> None:
             return f(*args, **kwargs)
 
