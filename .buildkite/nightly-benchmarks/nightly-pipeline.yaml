@@ -52,59 +52,32 @@ steps:
   #               <<: *common_container_settings
 
 
-  # - label: "A100 sglang benchmark"
-  #   priority: 100
-  #   agents:
-  #     queue: A100
-  #   plugins:
-  #     - kubernetes:
-  #         podSpec:
-  #           <<: *common_pod_spec
-  #           containers:
-  #             - image: lmsysorg/sglang:v0.2.12-cu118
-  #               <<: *common_container_settings
+  - label: "A100 sglang benchmark"
+    priority: 100
+    agents:
+      queue: A100
+    plugins:
+      - kubernetes:
+          podSpec:
+            <<: *common_pod_spec
+            containers:
+              - image: lmsysorg/sglang:v0.2.12-cu118
+                <<: *common_container_settings
 
-  # - label: "A100 lmdeploy benchmark"
-  #   priority: 100
-  #   agents:
-  #     queue: A100
-  #   plugins:
-  #     - kubernetes:
-  #         podSpec:
-  #           <<: *common_pod_spec
-  #           containers:
-  #             - image: openmmlab/lmdeploy:v0.5.3-cu11
-  #               <<: *common_container_settings
+  - label: "A100 lmdeploy benchmark"
+    priority: 100
+    agents:
+      queue: A100
+    plugins:
+      - kubernetes:
+          podSpec:
+            <<: *common_pod_spec
+            containers:
+              - image: openmmlab/lmdeploy:v0.5.3-cu11
+                <<: *common_container_settings
 
 
-  # - label: "A100 vllm 0.5.5 benchmark step 2"
-  #   priority: 100
-  #   agents:
-  #     queue: A100
-  #   plugins:
-  #     - kubernetes:
-  #         podSpec:
-  #           <<: *common_pod_spec
-  #           containers:
-  #             - image: vllm/vllm-openai:v0.5.5
-  #               <<: *common_container_settings
-  #               env:
-  #                 - name: VLLM_USAGE_SOURCE
-  #                   value: ci-test
-  #                 - name: HF_HOME
-  #                   value: /root/.cache/huggingface
-  #                 - name: VLLM_SOURCE_CODE_LOC
-  #                   value: /workspace/build/buildkite/vllm/performance-benchmark
-  #                 - name: HF_TOKEN
-  #                   valueFrom:
-  #                     secretKeyRef:
-  #                       name: hf-token-secret
-  #                       key: token
-  #                 - name: NUM_SCHEDULER_STEPS
-  #                   value: "2"
-                  
-
-  - label: "A100 vllm zmq benchmark step 1"
+  - label: "A100 vllm step 10 (latest zmq docker)"
     priority: 100
     agents:
       queue: A100
@@ -128,60 +101,8 @@ steps:
                         name: hf-token-secret
                         key: token
                   - name: NUM_SCHEDULER_STEPS
-                    value: "1"
+                    value: "10"
 
-  # - label: "A100 vllm 0.5.5 benchmark step 7"
-  #   priority: 100
-  #   agents:
-  #     queue: A100
-  #   plugins:
-  #     - kubernetes:
-  #         podSpec:
-  #           <<: *common_pod_spec
-  #           containers:
-  #             - image: vllm/vllm-openai:v0.5.5
-  #               <<: *common_container_settings
-  #               env:
-  #                 - name: VLLM_USAGE_SOURCE
-  #                   value: ci-test
-  #                 - name: HF_HOME
-  #                   value: /root/.cache/huggingface
-  #                 - name: VLLM_SOURCE_CODE_LOC
-  #                   value: /workspace/build/buildkite/vllm/performance-benchmark
-  #                 - name: HF_TOKEN
-  #                   valueFrom:
-  #                     secretKeyRef:
-  #                       name: hf-token-secret
-  #                       key: token
-  #                 - name: NUM_SCHEDULER_STEPS
-  #                   value: "7"
-
-  # - label: "A100 vllm 0.5.5 benchmark step 10"
-  #   priority: 100
-  #   agents:
-  #     queue: A100
-  #   plugins:
-  #     - kubernetes:
-  #         podSpec:
-  #           <<: *common_pod_spec
-  #           containers:
-  #             - image: vllm/vllm-openai:v0.5.5
-  #               <<: *common_container_settings
-  #               env:
-  #                 - name: VLLM_USAGE_SOURCE
-  #                   value: ci-test
-  #                 - name: HF_HOME
-  #                   value: /root/.cache/huggingface
-  #                 - name: VLLM_SOURCE_CODE_LOC
-  #                   value: /workspace/build/buildkite/vllm/performance-benchmark
-  #                 - name: HF_TOKEN
-  #                   valueFrom:
-  #                     secretKeyRef:
-  #                       name: hf-token-secret
-  #                       key: token
-  #                 - name: NUM_SCHEDULER_STEPS
-  #                   value: "10"
-        
 
   # - label: "A100 tgi benchmark"
   #   priority: 100
