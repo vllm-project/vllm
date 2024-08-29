@@ -16,7 +16,9 @@ from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.entrypoints.openai.rpc import (VLLM_RPC_SUCCESS_STR,
                                          VLLM_RPC_ZMQ_HWM, RPCAbortRequest,
-                                         RPCGenerateRequest, RPCUtilityRequest)
+                                         RPCGenerateRequest,
+                                         RPCOutputStreamRequest,
+                                         RPCUtilityRequest)
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 
@@ -102,9 +104,27 @@ class AsyncEngineRPCServer:
             result = e
         await self.socket.send_multipart((identity, pickle.dumps(result)))
 
+    async def stream_outputs(self, identity):
+        # This runs indefinitely
+        #TODO handle shutdown
+        async for outputs in self.engine.global_output_generator():
+            # Trim down contents to be equivalent to deltas (other PR for this)
+            # for output in outputs:
+            #     output.prompt = None
+            #     output.prompt_token_ids = None
+            #     output.prompt_logprobs = None
+            #     for o in output.outputs:
+            #         o.token_ids = [0]
+            #         o.text = " word"
+
+            await self.socket.send_multipart((identity, pickle.dumps(outputs)),
+                                             copy=False)
+
     async def generate(self, identity, generate_request: RPCGenerateRequest):
+        # Empty result to indicate success
+        result = b''
         try:
-            results_generator = self.engine.generate(
+            await self.engine.generate(
                 generate_request.inputs,
                 sampling_params=generate_request.sampling_params,
                 request_id=generate_request.request_id,
@@ -112,13 +132,10 @@ class AsyncEngineRPCServer:
                 trace_headers=generate_request.trace_headers,
                 prompt_adapter_request=generate_request.prompt_adapter_request)
 
-            async for request_output in results_generator:
-                await self.socket.send_multipart(
-                    (identity, pickle.dumps(request_output)), copy=False)
-
         except Exception as e:
-            await self.socket.send_multipart((identity, pickle.dumps(e)),
-                                             copy=False)
+            result = pickle.dumps(e)
+
+        await self.socket.send_multipart((identity, result), copy=False)
 
     async def check_health(self, identity):
         try:
@@ -155,6 +172,9 @@ class AsyncEngineRPCServer:
         """Route the zmq message to the handler coroutine."""
 
         request = cloudpickle.loads(message.buffer)
+
+        if isinstance(request, RPCOutputStreamRequest):
+            return self.stream_outputs(identity)
 
         if isinstance(request, RPCGenerateRequest):
             return self.generate(identity, request)

@@ -1,12 +1,14 @@
 import asyncio
 import pickle
 from contextlib import contextmanager, suppress
-from typing import Any, AsyncGenerator, Iterator, Mapping, Optional
+from typing import (Any, AsyncGenerator, Dict, Iterator, Mapping, Optional,
+                    Union)
 from uuid import uuid4
 
 import cloudpickle
 import zmq
 import zmq.asyncio
+from zmq import Frame  # type: ignore[attr-defined]
 from zmq.asyncio import Socket
 
 from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
@@ -16,7 +18,9 @@ from vllm.entrypoints.openai.rpc import (RPC_REQUEST_TYPE,
                                          VLLM_RPC_SOCKET_LIMIT_CUTOFF,
                                          VLLM_RPC_SUCCESS_STR,
                                          VLLM_RPC_ZMQ_HWM, RPCAbortRequest,
-                                         RPCGenerateRequest, RPCUtilityRequest)
+                                         RPCGenerateRequest,
+                                         RPCOutputStreamRequest,
+                                         RPCUtilityRequest)
 # yapf: enable
 from vllm.envs import VLLM_RPC_GET_DATA_TIMEOUT_MS
 from vllm.inputs import PromptInputs
@@ -141,11 +145,36 @@ class AsyncEngineRPCClient:
         # 1 for generate(), 1 for abort(), do_log_stats(), check_health()
         self.limit_concurrency = socket_limit // 2 - 2
 
+        self.output_queues: Dict[str, asyncio.Queue] = {}
+
+        self.output_handler = asyncio.create_task(self.run_output_handler())
+
     async def run_proxy(self, socket_from: Socket, socket_to: Socket):
         """Background task that runs a proxy"""
         while True:
             frames = await socket_from.recv_multipart(copy=False)
             await socket_to.send_multipart(frames, copy=False)
+
+    async def run_output_handler(self):
+        with self.to_proxy_socket() as socket:
+            await socket.send_multipart(
+                (cloudpickle.dumps(RPCOutputStreamRequest()), ))
+
+            # Stream back the results from the RPC Server.
+            while True:
+                message: Frame = await socket.recv(copy=False)
+                request_outputs = pickle.loads(message.buffer)
+
+                for output in request_outputs:
+                    if isinstance(output, tuple):
+                        # Exception case
+                        request_id, output = output
+                    else:
+                        request_id = output.request_id
+
+                    queue = self.output_queues.get(request_id)
+                    if queue is not None:
+                        queue.put_nowait(output)
 
     async def setup(self):
         """Setup the client before it starts sending server requests."""
@@ -379,6 +408,9 @@ class AsyncEngineRPCClient:
     ) -> AsyncGenerator[RequestOutput, None]:
         """Send an RPCGenerateRequest to the RPCServer and stream responses."""
 
+        queue: asyncio.Queue[Union[RequestOutput,
+                                   BaseException]] = asyncio.Queue()
+        self.output_queues[request_id] = queue
         finished = False
         try:
             with self.to_proxy_socket() as socket:
@@ -392,29 +424,30 @@ class AsyncEngineRPCClient:
                         trace_headers=trace_headers,
                         prompt_adapter_request=prompt_adapter_request)), ))
 
-                # Stream back the results from the RPC Server.
-                while not finished:
-                    message = await socket.recv(copy=False)
-                    request_output = pickle.loads(message.buffer)
+                ack: Frame = await socket.recv(copy=False)
+                if len(ack.buffer) != 0:
+                    exception = pickle.loads(ack.buffer)
+                    raise exception
 
-                    if isinstance(request_output, Exception):
-                        # On exception, check if the server is still healthy
-                        # possibly setting the `errored` property.
-                        if not self._errored:
-                            try:
-                                await self.check_health(socket=socket)
-                            except Exception as e:
-                                self._errored = True
-                                logger.exception(repr(e))
+            while not finished:
+                request_output = await queue.get()
+                if isinstance(request_output, BaseException):
+                    finished = True
+                    # On exception, check if the server is still healthy
+                    # possibly setting the `errored` property.
+                    if not self._errored:
+                        try:
+                            await self.check_health(socket=socket)
+                        except Exception as e:
+                            self._errored = True
+                            logger.exception(repr(e))
+                    raise request_output
 
-                        # NB: do before raising here so that the flag is set
-                        # by the time the caller receives this exception
-                        raise request_output
-
-                    finished = request_output.finished
-                    yield request_output
+                finished = request_output.finished
+                yield request_output
 
         finally:
+            self.output_queues.pop(request_id)
             # Request was canceled by the client.
             if not finished and not self._errored:
                 await self.abort(request_id)

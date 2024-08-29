@@ -47,7 +47,6 @@ def _log_task_completion(task: asyncio.Task,
     there is an exception.
     """
 
-    exception = None
     try:
         return_value = task.result()
         raise AssertionError(
@@ -80,8 +79,7 @@ class AsyncStream:
         self._queue: asyncio.Queue = asyncio.Queue()
         self._finished = False
 
-    def put(self, item: Union[RequestOutput, EmbeddingRequestOutput,
-                              Exception]) -> None:
+    def put(self, item: Union[RequestOutput, EmbeddingRequestOutput]) -> None:
         if not self._finished:
             self._queue.put_nowait(item)
 
@@ -123,10 +121,11 @@ class AsyncStream:
 class RequestTracker:
     """Synchronous abstraction for tracking requests."""
 
-    def __init__(self) -> None:
+    def __init__(self, per_request_streams: bool = True) -> None:
+        self._per_request_streams = per_request_streams
         self._request_streams: Dict[str, AsyncStream] = {}
         self._aborted_requests: asyncio.Queue[str] = asyncio.Queue()
-        self._new_requests: asyncio.Queue[Tuple[AsyncStream,
+        self._new_requests: asyncio.Queue[Tuple[Optional[AsyncStream],
                                                 dict]] = asyncio.Queue()
         self.new_requests_event = asyncio.Event()
 
@@ -186,14 +185,15 @@ class RequestTracker:
                     request_id: str,
                     *,
                     verbose: bool = False,
-                    **engine_add_request_kwargs) -> AsyncStream:
+                    **engine_add_request_kwargs) -> Optional[AsyncStream]:
         """Add a request to be sent to the engine on the next background
         loop iteration."""
         if request_id in self._request_streams:
             raise KeyError(f"Request {request_id} already exists.")
 
         abort_request = partial(self.abort_request, verbose=verbose)
-        stream = AsyncStream(request_id, abort_request)
+        stream = AsyncStream(request_id, abort_request) \
+            if self._per_request_streams else None
         self._new_requests.put_nowait((stream, {
             "request_id": request_id,
             **engine_add_request_kwargs
@@ -234,13 +234,15 @@ class RequestTracker:
 
         while not self._new_requests.empty():
             stream, new_request = self._new_requests.get_nowait()
-            request_id = stream.request_id
+            request_id = new_request["request_id"]
             if request_id in finished_requests:
                 # The request has already been aborted.
-                stream.finish(asyncio.CancelledError)
+                if stream is not None:
+                    stream.finish(asyncio.CancelledError)
                 finished_requests.discard(request_id)
             else:
-                self._request_streams[request_id] = stream
+                if stream is not None:
+                    self._request_streams[request_id] = stream
                 new_requests.append(new_request)
 
         return new_requests, finished_requests
@@ -639,7 +641,34 @@ class AsyncLLMEngine:
         self._errored_with: Optional[BaseException] = None
 
         # Lazy initialized fields
-        self._request_tracker: RequestTracker
+        self._request_tracker: RequestTracker = None  # type: ignore[assignment]
+
+        self._global_queue: Optional[asyncio.Queue] = None
+
+    async def global_output_generator(
+        self
+    ) -> AsyncGenerator[List[Union[RequestOutput, EmbeddingRequestOutput,
+                                   Tuple[str, BaseException]]], None]:
+        """Returns a single generator that streams outputs from all
+        requests.
+
+        Must be called at most once prior to processing any requests,
+        and if used, generate() will return None rather than a per-request
+        stream.
+        """
+        if self._global_queue is not None:
+            raise RuntimeError(
+                "global_output_generator can only be called once")
+        if self._request_tracker is not None:
+            raise RuntimeError(
+                "global_output_generator must be called before processing "
+                "any requests")
+
+        self._global_queue = asyncio.Queue()
+
+        # This runs until the engine is shut down
+        while True:
+            yield await self._global_queue.get()
 
     @classmethod
     def _get_executor_cls(
@@ -763,6 +792,11 @@ class AsyncLLMEngine:
     def _error_callback(self, exc: Exception) -> None:
         self.set_errored(exc)
         self._request_tracker.propagate_exception(exc)
+        if self._global_queue is not None:
+            #TODO clean this up
+            for request_id in tuple(
+                    self._request_tracker._request_streams.keys()):
+                self._global_queue.put_nowait((request_id, exc))
 
     async def get_tokenizer(
         self,
@@ -783,7 +817,8 @@ class AsyncLLMEngine:
         if self.is_running:
             raise RuntimeError("Background loop is already running.")
         # Initialize the RequestTracker here so it uses the right event loop.
-        self._request_tracker = RequestTracker()
+        per_request_streams = self._global_queue is None
+        self._request_tracker = RequestTracker(per_request_streams)
 
         self._background_loop_unshielded = asyncio.get_event_loop(
         ).create_task(self.run_engine_loop())
@@ -844,11 +879,14 @@ class AsyncLLMEngine:
                     await self.engine.add_request_async(**new_request)
             except ValueError as e:
                 # TODO: use a vLLM specific error for failed validation
+                request_id = new_request["request_id"]
                 self._request_tracker.process_exception(
-                    new_request["request_id"],
+                    request_id,
                     e,
                     verbose=self.log_requests,
                 )
+                if self._global_queue is not None:
+                    self._global_queue.put_nowait((request_id, e))
 
         if aborted_requests:
             await self._engine_abort(aborted_requests)
@@ -859,13 +897,18 @@ class AsyncLLMEngine:
             request_outputs = await self.engine.step_async(virtual_engine)
 
         # Put the outputs into the corresponding streams.
-        finished = True
+        all_finished = True
         for request_output in request_outputs:
-            self._request_tracker.process_request_output(
-                request_output, verbose=self.log_requests)
-            finished = finished and request_output.finished
+            finished = request_output.finished
+            if finished or self._global_queue is None:
+                self._request_tracker.process_request_output(
+                    request_output, verbose=self.log_requests)
+            all_finished = all_finished and finished
 
-        return not finished
+        if self._global_queue is not None:
+            self._global_queue.put_nowait(request_outputs)
+
+        return not all_finished
 
     async def _engine_abort(self, request_ids: Iterable[str]):
         if self.engine_use_ray:
@@ -950,8 +993,9 @@ class AsyncLLMEngine:
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None
-    ) -> AsyncGenerator[Union[RequestOutput, EmbeddingRequestOutput], None]:
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+    ) -> Optional[AsyncGenerator[Union[RequestOutput, EmbeddingRequestOutput],
+                                 None]]:
         if not self.is_running:
             if self.start_engine_loop:
                 self.start_background_loop()
@@ -972,7 +1016,7 @@ class AsyncLLMEngine:
             trace_headers=trace_headers,
             prompt_adapter_request=prompt_adapter_request)
 
-        return stream.generator()
+        return stream.generator() if stream is not None else None
 
     async def generate(
         self,
@@ -982,7 +1026,7 @@ class AsyncLLMEngine:
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None
-    ) -> AsyncGenerator[RequestOutput, None]:
+    ) -> Optional[AsyncGenerator[RequestOutput, None]]:
         """Generate outputs for a request.
 
         Generate outputs for a request. This method is a coroutine. It adds the
@@ -1003,6 +1047,9 @@ class AsyncLLMEngine:
         Yields:
             The output `RequestOutput` objects from the LLMEngine
             for the request.
+
+            Unless a global output generator is being used, in which case
+            this methods will return None.
 
         Details:
             - If the engine is not running, start the background loop,
@@ -1047,15 +1094,22 @@ class AsyncLLMEngine:
             >>> # Process and return the final output
             >>> ...
         """
-        async for output in await self.add_request(
-                request_id,
-                inputs,
-                sampling_params,
-                lora_request=lora_request,
-                trace_headers=trace_headers,
-                prompt_adapter_request=prompt_adapter_request,
-        ):
-            yield LLMEngine.validate_output(output, RequestOutput)
+        maybe_generator = await self.add_request(
+            request_id,
+            inputs,
+            sampling_params,
+            lora_request=lora_request,
+            trace_headers=trace_headers,
+            prompt_adapter_request=prompt_adapter_request,
+        )
+        if maybe_generator is None or not LLMEngine.DO_VALIDATE_OUTPUT:
+            return maybe_generator
+
+        async def validating_generator():
+            async for output in maybe_generator:
+                yield LLMEngine.validate_output(output, RequestOutput)
+
+        return validating_generator()
 
     async def encode(
         self,
@@ -1125,13 +1179,15 @@ class AsyncLLMEngine:
             >>> # Process and return the final output
             >>> ...
         """
-        async for output in await self.add_request(
-                request_id,
-                inputs,
-                pooling_params,
-                lora_request=lora_request,
-                trace_headers=trace_headers,
-        ):
+        generator = await self.add_request(
+            request_id,
+            inputs,
+            pooling_params,
+            lora_request=lora_request,
+            trace_headers=trace_headers,
+        )
+        assert generator is not None
+        async for output in generator:
             yield LLMEngine.validate_output(output, EmbeddingRequestOutput)
 
     async def abort(self, request_id: str) -> None:
@@ -1164,6 +1220,9 @@ class AsyncLLMEngine:
         self._request_tracker.abort_request(request_id,
                                             exception=asyncio.CancelledError,
                                             verbose=self.log_requests)
+
+        if self._global_queue is not None:
+            self._global_queue.put_nowait((request_id, asyncio.CancelledError))
 
     async def get_model_config(self) -> ModelConfig:
         """Get the model configuration of the vLLM engine."""

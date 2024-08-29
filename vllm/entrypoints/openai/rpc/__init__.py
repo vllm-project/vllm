@@ -18,6 +18,11 @@ VLLM_RPC_ZMQ_HWM = 0
 
 
 @dataclass
+class RPCOutputStreamRequest:
+    pass
+
+
+@dataclass
 class RPCGenerateRequest:
     inputs: PromptInputs
     sampling_params: SamplingParams
