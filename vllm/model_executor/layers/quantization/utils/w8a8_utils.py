@@ -169,8 +169,8 @@ def apply_fp8_linear(
                 scale_b=weight_scale,
                 scale_result=TORCH_SCALED_MM_SCALE_RESULT,
                 bias=bias)
-            # A fix for discrepancy in scaled_mm which returns tuple for torch < 2.5
-            # and a single value in torch >= 2.5
+            # A fix for discrepancy in scaled_mm which returns tuple
+            # for torch < 2.5 and a single value in torch >= 2.5
             if type(output) is tuple and len(output) == 2:
                 return torch.narrow(output[0], 0, 0, input.shape[0])
             return torch.narrow(output, 0, 0, input.shape[0])
