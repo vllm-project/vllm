@@ -1966,4 +1966,4 @@ class LLMEngine:
                     "Make sure that `max_model_len` is no smaller than the "
                     "number of text tokens plus multimodal tokens. For image "
                     "inputs, the number of image tokens depends on the number "
-                    "of input images, and possibly also their aspect ratios.")
+                    "of images, and possibly their aspect ratios as well.")
