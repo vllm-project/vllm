@@ -50,7 +50,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, kv_cache_scales_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
-from vllm.transformers_utils.configs.exaone import ExaoneConfig
+from vllm.transformers_utils.configs import ExaoneConfig
 from vllm.utils import is_hip
 
 from .interfaces import SupportsLoRA
