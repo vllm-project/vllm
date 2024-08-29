@@ -19,7 +19,6 @@ if not is_cpu():
     from ..conftest import DecoderPromptType
     from ..models.utils import check_logprobs_close
 
-
     def vllm_to_hf_output(
         vllm_output: Tuple[List[int], str, Optional[SampleLogprobs]],
         decoder_prompt_type: DecoderPromptType,
@@ -33,7 +32,6 @@ if not is_cpu():
 
         return output_ids, hf_output_str, out_logprobs
 
-    
     @pytest.mark.parametrize("model", ["facebook/bart-large-cnn"])
     @pytest.mark.parametrize("dtype", ["bfloat16"])
     @pytest.mark.parametrize("max_tokens", [128])

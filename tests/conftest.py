@@ -703,8 +703,6 @@ class VllmRunner:
                                                 use_beam_search=False,
                                                 max_tokens=max_tokens,
                                                 logprobs=num_logprobs)
-        print('max tokens 123 ' + str(max_tokens))
-        print('greedy_logprobs_params ' + str(greedy_logprobs_params))
         '''
         Greedy logprobs generation for vLLM encoder/decoder models
         '''
