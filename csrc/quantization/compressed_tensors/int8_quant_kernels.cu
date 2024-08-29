@@ -14,9 +14,9 @@
 
 static inline __device__ int8_t float_to_int8_rn(float x) {
 #ifdef USE_ROCM
-  static const float i8_min =
+  static const auto i8_min =
       static_cast<float>(std::numeric_limits<int8_t>::min());
-  static const float i8_max =
+  static const auto i8_max =
       static_cast<float>(std::numeric_limits<int8_t>::max());
   // round
   float dst = std::nearbyint(x);
@@ -33,9 +33,9 @@ static inline __device__ int8_t float_to_int8_rn(float x) {
 
 static inline __device__ int32_t float_to_int32_rn(float x) {
 #ifdef USE_ROCM
-  static const float i32_min =
+  static const auto i32_min =
       static_cast<float>(std::numeric_limits<int32_t>::min());
-  static const float i32_max =
+  static const auto i32_max =
       static_cast<float>(std::numeric_limits<int32_t>::max());
   // round
   float dst = std::nearbyint(x);
@@ -52,9 +52,9 @@ static inline __device__ int32_t float_to_int32_rn(float x) {
 
 static inline __device__ int8_t int32_to_int8(int32_t x) {
 #ifdef USE_ROCM
-  static const float i8_min =
+  static const auto i8_min =
       static_cast<int32_t>(std::numeric_limits<int8_t>::min());
-  static const float i8_max =
+  static const auto i8_max =
       static_cast<int32_t>(std::numeric_limits<int8_t>::max());
 
   // saturate
