@@ -30,15 +30,11 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
     uses_ray: bool = False
 
     def _init_executor(self) -> None:
+        self._check_executor_parameters()
+
         # Create the parallel GPU workers.
         world_size = self.parallel_config.world_size
         tensor_parallel_size = self.parallel_config.tensor_parallel_size
-
-        # Set CUDA_VISIBLE_DEVICES for the driver, inherited by workers
-        if "CUDA_VISIBLE_DEVICES" not in os.environ:
-            update_environment_variables({
-                "CUDA_VISIBLE_DEVICES": (",".join(map(str, range(world_size))))
-            })
 
         # Ensure that VLLM_INSTANCE_ID is set, to be inherited by workers
         os.environ["VLLM_INSTANCE_ID"] = get_vllm_instance_id()
@@ -67,16 +63,6 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
         # workaround for https://github.com/vllm-project/vllm/issues/6103
         if world_size > 1:
             maybe_set_triton_cache_manager()
-
-        cuda_device_count = cuda_device_count_stateless()
-        # Use confusing message for more common TP-only case.
-        assert tensor_parallel_size <= cuda_device_count, (
-            f"please set tensor_parallel_size ({tensor_parallel_size}) "
-            f"to less than max local gpu count ({cuda_device_count})")
-
-        assert world_size <= cuda_device_count, (
-            f"please ensure that world_size ({world_size}) "
-            f"is less than than max local gpu count ({cuda_device_count})")
 
         # Multiprocessing-based executor does not support multi-node setting.
         # Since it only works for single node, we can use the loopback address
@@ -138,6 +124,26 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
         self._run_workers("load_model",
                           max_concurrent_workers=self.parallel_config.
                           max_parallel_loading_workers)
+
+    def _check_executor_parameters(self):
+        world_size = self.parallel_config.world_size
+        tensor_parallel_size = self.parallel_config.tensor_parallel_size
+
+        # Set CUDA_VISIBLE_DEVICES for the driver, inherited by workers
+        if "CUDA_VISIBLE_DEVICES" not in os.environ:
+            update_environment_variables({
+                "CUDA_VISIBLE_DEVICES": (",".join(map(str, range(world_size))))
+            })
+
+        cuda_device_count = cuda_device_count_stateless()
+        # Use confusing message for more common TP-only case.
+        assert tensor_parallel_size <= cuda_device_count, (
+            f"please set tensor_parallel_size ({tensor_parallel_size}) "
+            f"to less than max local gpu count ({cuda_device_count})")
+
+        assert world_size <= cuda_device_count, (
+            f"please ensure that world_size ({world_size}) "
+            f"is less than than max local gpu count ({cuda_device_count})")
 
     def shutdown(self):
         if (worker_monitor := getattr(self, "worker_monitor",

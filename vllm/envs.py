@@ -196,6 +196,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Internal flag to enable Dynamo graph capture
     "VLLM_TEST_DYNAMO_GRAPH_CAPTURE":
     lambda: int(os.environ.get("VLLM_TEST_DYNAMO_GRAPH_CAPTURE", "0")),
+    "VLLM_DYNAMO_USE_CUSTOM_DISPATCHER":
+    lambda:
+    (os.environ.get("VLLM_DYNAMO_USE_CUSTOM_DISPATCHER", "True").lower() in
+     ("true", "1")),
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
@@ -400,6 +404,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_TORCH_PROFILER_DIR":
     lambda: (None if os.getenv("VLLM_TORCH_PROFILER_DIR", None) is None else os
              .path.expanduser(os.getenv("VLLM_TORCH_PROFILER_DIR", "."))),
+
+    # If set, vLLM will use Triton implementations of AWQ.
+    "VLLM_USE_TRITON_AWQ":
+    lambda: bool(int(os.getenv("VLLM_USE_TRITON_AWQ", "0"))),
 }
 
 # end-env-vars-definition
