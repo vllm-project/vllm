@@ -104,7 +104,7 @@ steps:
   #                   value: "2"
                   
 
-  - label: "A100 vllm async output benchmark step 10"
+  - label: "A100 vllm zmq benchmark step 10"
     priority: 100
     agents:
       queue: A100
@@ -113,7 +113,7 @@ steps:
           podSpec:
             <<: *common_pod_spec
             containers:
-              - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:e26b18b35efc6b03f2b2c72221ccd71dbcf6a374
+              - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:b021def7c15662534f4ebdf9b923ff1b5b39adc5
                 <<: *common_container_settings
                 env:
                   - name: VLLM_USAGE_SOURCE
