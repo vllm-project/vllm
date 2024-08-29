@@ -10,7 +10,7 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
     
     def __init__(self, pipe):
         
-        self.tokens_roi_kv_buffer = deque()
+        self.buffer = deque()
         
         self.buffer_size = 0
         self.buffer_lock = threading.Lock()
@@ -35,11 +35,13 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
             return True
         
         
-        if tokens_sender == tokens_recver[:tokens_sender.shape[0]]:
+        min_length = min(len(tokens_sender), len(tokens_receiver))
+        if tokens_sender[:min_length] == tokens_recver[:min_length]:
             # drastically simplified
-            # accept a match as long as 
-            
+            # common prefix matching
             return True
+        
+        return None
 
             
     def _send_tensor_and_dec_size(self, tensor: Optional[torch.Tensor]) -> None:
@@ -49,15 +51,14 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
         tensor = tensor.clone()
         self.pipe.send_tensor(tensor)
         
-    def _add_to_buffer(self, input_tokens, roi, kv):
+    def _add_to_buffer(self, input_tokens, roi, key, value, hidden):
         
         self.buffer_size += input_tokens.element_size() * input_tokens.numel()
         self.buffer_size += roi.element_size() * roi.numel()
-        self.buffer_size += kv.element_size() * kv.numel()
-        self.tokens_roi_kv_buffer.append((input_tokens, roi, kv))
-        
-        
-        
+        self.buffer_size += key.element_size() * key.numel()
+        self.buffer_size += value.element_size() * value.numel()
+        self.buffer_size += hidden.element_size() * hidden.numel()
+        self.buffer.append([input_tokens, roi, kv, hidden])
         
         
     def drop_select_handler(self):
@@ -81,17 +82,15 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
                     # need to clone the tensor
                     # in case the tensor is freed before sending finishes
                     matched_item = self.tokens_roi_kv_buffer[matched_idx]
-                    self._send_tensor_and_dec_size(matched_item[0].clone())
-                    self._send_tensor_and_dec_size(matched_item[1].clone())
-                    self._send_tensor_and_dec_size(matched_item[2].clone())
+                    for tensor in matched_item:
+                        self._send_tensor_and_dec_size(tensor.clone())
                     del self.tokens_roi_kv_buffer[matched_idx]
                     
                 else:
                     # no match, just send None
-                    self.pipe.send_tensor(None)
-                    self.pipe.send_tensor(None)
-                    self.pipe.send_tensor(None)
-
+                    for _ in range(5):
+                        self.pipe.send_tensor(None)
+                        
         
     def drop_select(self, input_tokens, roi):
         
@@ -103,12 +102,17 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
         
         input_tokens = self.pipe.recv_tensor()
         roi = self.pipe.recv_tensor()
-        kv = self.pipe.recv_tensor()
+        key = self.pipe.recv_tensor()
+        value = self.pipe.recv_tensor()
+        hidden = self.pipe.recv_tensor()
         
-        return [input_tokens, roi, kv]
+        return [input_tokens, roi, key, value, hidden]
         
     
-    def insert(self, input_tokens, roi, kv) -> None:
+    def insert(self, input_tokens, roi, key, value, hidden) -> None:
+        
+        with self.buffer_lock:
+            self._add_to_buffer(input_tokens, roi, key, value, hidden)
         
         # when calling the insert, the current process is a sender
         # need to launch the request handler and start listening to request.
@@ -117,6 +121,4 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
                 target=self.drop_select_handler)
             self.request_handling_thread.start()
             
-        with self.buffer_lock:
-            self._add_to_buffer(input_tokens, roi, kv)
             
