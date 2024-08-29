@@ -412,7 +412,7 @@ class FlashAttentionMetadata(AttentionMetadata):
         if has_prefills:
             assert prefill_token_chunk_sizes is not None
             for idx, tcs in enumerate(prefill_token_chunk_sizes):
-                self.seq_lens[idx] += tcs 
+                self.seq_lens[idx] += tcs
         for i in range(self.num_prefills, num_queries):
             self.seq_lens[i] += 1
 
@@ -420,7 +420,12 @@ class FlashAttentionMetadata(AttentionMetadata):
             self.seq_lens[self.num_prefills:]) if has_decodes else 0
         self.max_prefill_seq_len = max(
             self.seq_lens[:self.num_prefills]) if has_prefills else 0
-        self.max_query_len = max(prefill_token_chunk_sizes) if has_prefills else 1
+
+        if has_prefills:
+            assert prefill_token_chunk_sizes is not None
+            self.max_query_len = max(prefill_token_chunk_sizes)
+        else:
+            self.max_query_len = 1
 
         # Trigger recompute
         self._cached_decode_metadata = None

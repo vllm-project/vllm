@@ -1245,27 +1245,26 @@ class Scheduler:
                     seq_group.metrics.scheduler_time = scheduler_time
 
         ## debug
-        from vllm.sequence import SequenceStage
-        print("Scheduler :: \n")
-        for idx, sg in enumerate(scheduler_outputs.scheduled_seq_groups):
-            assert len(sg.seq_group.seqs_dict) == 1
-            sgml = seq_group_metadata_list[idx]
-            seq_id = list(sg.seq_group.seqs_dict.keys())[0]
-            num_uncomputed = sg.seq_group.get_num_uncomputed_tokens()
-            num_computed = sg.seq_group.seqs[0].data._num_computed_tokens
-            prompt_ids = sg.seq_group.prompt_token_ids
-            num_steps = sg.seq_group.state.num_steps
-            stage = sg.seq_group.seqs[0].data.stage
-            stage = "prefill" if stage == SequenceStage.PREFILL else "decode"
-            token_chunk_size = sg.token_chunk_size
-            print(
-                (f"    - id {seq_id} |"
-                 f" steps {num_steps} |"
-                 f" stage {stage} |"
-                 f" token-chunk {token_chunk_size} |"
-                 f" do-sample {sgml.do_sample} ->"
-                 f" #prompts {len(prompt_ids)} ->"
-                 f" #computed {num_computed}\n"))
+        #from vllm.sequence import SequenceStage
+        #print("Scheduler :: \n")
+        #for idx, sg in enumerate(scheduler_outputs.scheduled_seq_groups):
+        #    assert len(sg.seq_group.seqs_dict) == 1
+        #    sgml = seq_group_metadata_list[idx]
+        #    seq_id = list(sg.seq_group.seqs_dict.keys())[0]
+        #    num_uncomputed = sg.seq_group.get_num_uncomputed_tokens()
+        #    num_computed = sg.seq_group.seqs[0].data._num_computed_tokens
+        #    prompt_ids = sg.seq_group.prompt_token_ids
+        #    num_steps = sg.seq_group.state.num_steps
+        #    stage = sg.seq_group.seqs[0].data.stage
+        #    stage = "prefill" if stage == SequenceStage.PREFILL else "decode"
+        #    token_chunk_size = sg.token_chunk_size
+        #    print((f"    - id {seq_id} |"
+        #           f" steps {num_steps} |"
+        #           f" stage {stage} |"
+        #           f" token-chunk {token_chunk_size} |"
+        #           f" do-sample {sgml.do_sample} ->"
+        #           f" #prompts {len(prompt_ids)} ->"
+        #           f" #computed {num_computed}\n"))
 
         return seq_group_metadata_list, scheduler_outputs
 
