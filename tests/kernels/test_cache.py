@@ -4,7 +4,7 @@ from typing import List, Tuple
 import pytest
 import torch
 
-from tests.kernels.utils import opcheck
+from tests.kernels.utils import DEFAULT_OPCHECK_TEST_UTILS, opcheck
 from vllm import _custom_ops as ops
 
 COPYING_DIRECTION = [('cuda', 'cpu'), ('cuda', 'cuda'), ('cpu', 'cuda')]
@@ -91,6 +91,7 @@ def test_copy_blocks(
 
     opcheck(torch.ops._C_cache_ops.copy_blocks,
             (key_caches, value_caches, block_mapping_tensor),
+            test_utils=DEFAULT_OPCHECK_TEST_UTILS,
             cond=(head_size == HEAD_SIZES[0]))
     ops.copy_blocks(key_caches, value_caches, block_mapping_tensor)
 
