@@ -21,6 +21,7 @@ try:
     from ray._private.state import available_resources_per_node
     from ray.util import placement_group_table
     from ray.util.placement_group import PlacementGroup
+    from ray._private.accelerators import TPUAcceleratorManager
 
     class RayWorkerWrapper(WorkerWrapperBase):
         """Ray wrapper for vllm.worker.Worker, allowing Worker to be
@@ -47,9 +48,9 @@ try:
             return node_id, gpu_ids
 
         def execute_model_spmd(
-            self, req_or_tuple: Union[bytes,
-                                      Tuple[bytes,
-                                            Optional[IntermediateTensors]]]
+            self,
+            req_or_tuple: Union[bytes, Tuple[bytes,
+                                             Optional[IntermediateTensors]]],
         ) -> bytes:
             """Execute model in SPMD fashion: used only when SPMD worker and
             compiled DAG are both enabled.
@@ -71,6 +72,7 @@ try:
             # on a background thread, so we need to reset torch's current
             # device.
             import torch
+
             if not self.compiled_dag_cuda_device_set:
                 torch.cuda.set_device(self.worker.device)
                 self.compiled_dag_cuda_device_set = True
@@ -227,9 +229,11 @@ def initialize_ray_cluster(
 
     # Connect to a ray cluster.
     if is_hip() or is_xpu():
-        ray.init(address=ray_address,
-                 ignore_reinit_error=True,
-                 num_gpus=parallel_config.world_size)
+        ray.init(
+            address=ray_address,
+            ignore_reinit_error=True,
+            num_gpus=parallel_config.world_size,
+        )
     else:
         ray.init(address=ray_address, ignore_reinit_error=True)
 
@@ -295,3 +299,27 @@ def initialize_ray_cluster(
     _verify_bundles(current_placement_group, parallel_config, device_str)
     # Set the placement group in the parallel config
     parallel_config.placement_group = current_placement_group
+
+
+def get_num_tpu_nodes():
+    cluster_resources = ray.cluster_resources()
+    total_tpus = int(cluster_resources["TPU"])
+    tpus_per_node = TPUAcceleratorManager.get_current_node_num_accelerators()
+    assert total_tpus % tpus_per_node == 0
+    return total_tpus // tpus_per_node
+
+
+def get_num_nodes_in_placement_group():
+    pg_table = ray.util.placement_group_table()
+    current_pg = ray.util.get_current_placement_group()
+    num_nodes = 0
+
+    if current_pg:
+        nodes_in_pg = set()
+        for pg_key, pg in pg_table.items():
+            if pg_key == current_pg.id.hex():
+                for _, node in pg["bundles_to_node_id"].items():
+                    nodes_in_pg.add(node)
+        num_nodes = len(nodes_in_pg)
+
+    return num_nodes

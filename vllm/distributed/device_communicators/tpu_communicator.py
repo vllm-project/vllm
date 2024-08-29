@@ -10,8 +10,9 @@ if current_platform.is_tpu():
     import ray
     import torch_xla.core.xla_model as xm
     import torch_xla.runtime as xr
-    from ray._private.accelerators import TPUAcceleratorManager
     from torch_xla._internal import pjrt
+
+    from vllm.executor import ray_utils
 
 
 class TpuCommunicator:
@@ -34,22 +35,10 @@ class TpuCommunicator:
         # nodes is computed by the total number of TPUs divided by the
         # number of TPU accelerators per node, to account for clusters
         # with both CPUs and TPUs.
-        cluster_resources = ray.cluster_resources()
-        total_tpus = int(cluster_resources["TPU"])
-        tpus_per_node = (
-            TPUAcceleratorManager.get_current_node_num_accelerators())
-        num_nodes = total_tpus // tpus_per_node
-
-        pg_table = ray.util.placement_group_table()
-        current_pg = ray.util.get_current_placement_group()
-
-        if current_pg:
-            nodes_in_pg = set()
-            for pg_key, pg in pg_table.items():
-                if pg_key == current_pg.id.hex():
-                    for _, node in pg["bundles_to_node_id"].items():
-                        nodes_in_pg.add(node)
-            num_nodes = len(nodes_in_pg)
+        num_nodes = ray_utils.get_num_tpu_nodes()
+        num_nodes_in_pg = ray_utils.get_num_nodes_in_placement_group()
+        if num_nodes_in_pg:
+            num_nodes = num_nodes_in_pg
 
         local_world_size = global_world_size // num_nodes
         local_rank = global_rank % local_world_size
