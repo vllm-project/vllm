@@ -23,27 +23,26 @@ def stress_test(my_rank, pipe):
     
     tensors = []
     
-    if my_rank == 0:    
-        for i in tqdm(range(2000)):
-            mean = random.randint(1, 10)
-            std = random.randint(1, 10)
-            size = [random.randint(900, 1000), random.randint(900, 1000)]
-            x = torch.normal(mean * 1.0, std * 1.0, size=size).to(pipe.device)
-            
-            # 5% probability of sending a None
-            if random.randint(1, 100) < 5:
-                tensors.append(None)
-                tensors.append(None)
-                tensors.append(None)
-            else:
-                tensors.append(x)
-                tensors.append(x.mean())
-                tensors.append(x.std())
+    for i in tqdm(range(2000)):
+        mean = random.randint(1, 10)
+        std = random.randint(1, 10)
+        size = [random.randint(900, 1000), random.randint(900, 1000)]
+        x = torch.normal(mean * 1.0, std * 1.0, size=size).to(pipe.device)
+        
+        # 5% probability of sending a None
+        if random.randint(1, 100) < 5:
+            tensors.append(None)
+            tensors.append(None)
+            tensors.append(None)
+        else:
+            tensors.append(x)
+            tensors.append(x.mean())
+            tensors.append(x.std())
         
     torch.distributed.barrier()
     
     for i in tqdm(range(2000)):
-        if my_rank == 0:
+        if my_rank == int((i % 10) > 3):
             pipe.send_tensor(tensors[3*i])
             pipe.send_tensor(tensors[3*i+1])
             pipe.send_tensor(tensors[3*i+2])
