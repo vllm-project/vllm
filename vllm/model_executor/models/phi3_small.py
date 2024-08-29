@@ -242,7 +242,11 @@ class Phi3SmallSelfAttention(nn.Module):
 
         q, k =  self.rotary_emb(positions, q, k) \
             if getattr(self.config, "rope_scaling", None) is None \
-            else self.rotary_emb(positions, q, k, num_orig_input_tokens_tensor=attn_metadata.num_orig_input_tokens_tensor)
+            else self.rotary_emb(
+                positions,
+                q,
+                k,
+                num_orig_input_tokens_tensor=attn_metadata.num_orig_input_tokens_tensor)
 
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata=attn_metadata)
         output, _ = self.dense(attn_output)

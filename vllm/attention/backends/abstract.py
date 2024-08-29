@@ -103,7 +103,8 @@ class AttentionMetadata:
     # in block 0, and 1st slot in block 1, respectively.
     slot_mapping: torch.Tensor
 
-    # Number of original input tokens (without any decoding). Some model (phi3-) need this info to decide model settings
+    # Number of original input tokens (without any decoding).
+    # Some model (phi3-) need this info to decide model settings
     num_orig_input_tokens_tensor: Optional[torch.Tensor]
 
     @property

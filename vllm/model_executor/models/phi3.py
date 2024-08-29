@@ -14,7 +14,9 @@ from vllm.model_executor.layers.quantization.base_config import (
 
 from .utils import make_layers
 
-from vllm.model_executor.models.llama import LlamaAttention, LlamaDecoderLayer, LlamaForCausalLM, LlamaModel
+from vllm.model_executor.models.llama import (LlamaAttention,
+                                              LlamaDecoderLayer,
+                                              LlamaForCausalLM, LlamaModel)
 from transformers import Phi3Config
 
 
@@ -54,7 +56,11 @@ class Phi3Attention(LlamaAttention):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k =  self.rotary_emb(positions, q, k) \
             if self.rope_scaling is None \
-            else self.rotary_emb(positions, q, k, num_orig_input_tokens_tensor=attn_metadata.num_orig_input_tokens_tensor)
+            else self.rotary_emb(
+                positions,
+                q,
+                k,
+                num_orig_input_tokens_tensor=attn_metadata.num_orig_input_tokens_tensor)
 
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
@@ -160,6 +166,5 @@ class Phi3ForCausalLM(LlamaForCausalLM):
                                lora_config=lora_config,
                                prefix="model")
 
-        if get_pp_group().is_last_rank:
-            if config.tie_word_embeddings:
-                self.lm_head.weight = self.model.embed_tokens.weight
+        if get_pp_group().is_last_rank and config.tie_word_embeddings:
+            self.lm_head.weight = self.model.embed_tokens.weight
