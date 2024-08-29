@@ -64,9 +64,8 @@ class TorchDistributedPipe(KVPipeBase, GroupCoordinator):
         
         
     def send_tensor_wrapper(self, tensor: torch.Tensor) -> None:
-        print('Sending ', tensor)
         """Wrapper for send_tensor_dict"""
-        tensor_size = tensor['tensor'].element_size() * tensor['tensor'].numel()
+        tensor_size = tensor.element_size() * tensor.numel()
         self.send_tensor_dict({'tensor': tensor}, self.target_rank_for_send)
         
         with self.buffer_size_lock:
@@ -106,7 +105,7 @@ class TorchDistributedPipe(KVPipeBase, GroupCoordinator):
         """Receives a tensor from the src rank. Blocking."""
         
         tensor = self.recv_tensor_dict(self.target_rank_for_recv)['tensor']
-        if tensor.numel() == 1 and tensor.item() == 150886311:
+        if tensor.numel() == 1 and tensor.item() == NONE_INT:
             return None
         else:
             return tensor
