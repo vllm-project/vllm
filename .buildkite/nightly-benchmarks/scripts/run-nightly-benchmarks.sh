@@ -323,7 +323,6 @@ prepare_dataset() {
 main() {
 
   # check if the environment variable is successfully injected from yaml
-  echo $NUM_SCHEDULER_STEPS
 
   check_gpus
   check_hf_token

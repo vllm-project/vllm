@@ -207,7 +207,6 @@ launch_vllm_server() {
         -tp $tp \
         --model $model \
         --port $port \
-        --num-scheduler-steps $NUM_SCHEDULER_STEPS \
         $server_args"
   fi
 
