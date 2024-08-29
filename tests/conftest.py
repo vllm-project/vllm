@@ -253,20 +253,14 @@ class HfRunner:
             trust_remote_code=True,
         )
 
-        try:
-            # don't put this import at the top level
-            # it will call torch.cuda.device_count()
-            from transformers import AutoProcessor  # noqa: F401
-            self.processor = AutoProcessor.from_pretrained(
-                model_name,
-                torch_dtype=torch_dtype,
-                trust_remote_code=True,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Unable to auto-load HuggingFace processor for model (%s). "
-                "Using tokenizer instead. Reason: %s", model_name, exc)
-            self.processor = self.tokenizer
+        # don't put this import at the top level
+        # it will call torch.cuda.device_count()
+        from transformers import AutoProcessor  # noqa: F401
+        self.processor = AutoProcessor.from_pretrained(
+            model_name,
+            torch_dtype=torch_dtype,
+            trust_remote_code=True,
+        )
 
         self.postprocess_inputs = postprocess_inputs
 
