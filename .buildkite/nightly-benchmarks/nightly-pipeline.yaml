@@ -104,7 +104,7 @@ steps:
   #                   value: "2"
                   
 
-  - label: "A100 vllm zmq benchmark step 10"
+  - label: "A100 vllm zmq benchmark step 1"
     priority: 100
     agents:
       queue: A100
@@ -128,7 +128,7 @@ steps:
                         name: hf-token-secret
                         key: token
                   - name: NUM_SCHEDULER_STEPS
-                    value: "10"
+                    value: "1"
 
   # - label: "A100 vllm 0.5.5 benchmark step 7"
   #   priority: 100
