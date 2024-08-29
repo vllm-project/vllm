@@ -313,8 +313,8 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
             model_input = self._advance_step(
                 model_input, model_input.cached_outputs[-1].sampler_output)
 
-        if (frozen_model_input.use_async_and_multi_step
-                and model_input.is_first_multi_step):
+        output_proc_callback = None
+        if frozen_model_input.use_async_and_multi_step:
             output_proc_callback = frozen_model_input.async_callback
             assert output_proc_callback is not None
             async_callback = functools.partial(
@@ -326,7 +326,6 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
                 model_input.frozen_model_input,
                 async_callback=async_callback)
             assert frozen_model_input is not None
-            model_input.frozen_model_input = frozen_model_input
 
         # Execute the model
         output = self._base_model_runner.execute_model(frozen_model_input,
@@ -375,10 +374,6 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
 
         # Pythonize the output and block if needed since it is the last step
         if model_input.is_last_step:
-            assert model_input.frozen_model_input is not None
-            async_callback = model_input.frozen_model_input.async_callback  # type: ignore
-            output_proc_callback = async_callback.keywords[
-                "output_proc_callback"] if async_callback is not None else None
             outputs = self._final_process_outputs(model_input,
                                                   output_proc_callback)
             return outputs
