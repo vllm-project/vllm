@@ -128,7 +128,7 @@ def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
 
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("distributed_executor_backend", ["ray", "mp"])
-@pytest.mark.parametrize("model", models)
+@pytest.mark.parametrize("model", ["facebook/chameleon-7b"])
 @pytest.mark.parametrize(
     "size_factors",
     [

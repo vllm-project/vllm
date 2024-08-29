@@ -286,7 +286,7 @@ def test_models_multiple_image_inputs(hf_runner, vllm_runner, image_assets,
 
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("distributed_executor_backend", ["ray", "mp"])
-@pytest.mark.parametrize("model", models)
+@pytest.mark.parametrize("model", ["llava-hf/llava-v1.6-mistral-7b-hf"])
 @pytest.mark.parametrize(
     "size_factors",
     [
