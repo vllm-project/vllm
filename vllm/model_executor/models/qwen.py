@@ -770,7 +770,7 @@ def input_processor_for_qwen(ctx: InputContext, llm_inputs: LLMInputs):
     # correctly. Sequentially replace image tags; padding shenanigans are
     # mostly to sidestep url encoding logic in the tokenizer
     new_prompt_no_img_pads = new_prompt_with_img_pads = prompt
-    for img_num in range(min(num_images, num_img_tags)):
+    for img_num in range(1, min(num_images, num_img_tags) + 1):
         image_prompt_without_padding = get_image_text(img_num, padding=False)
         image_prompt_with_padding = get_image_text(img_num, padding=True)
         new_prompt_no_img_pads = new_prompt_no_img_pads.replace(
