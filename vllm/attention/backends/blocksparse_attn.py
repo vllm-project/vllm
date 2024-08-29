@@ -220,6 +220,8 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
             query_start_loc=self.query_start_loc[:self.num_prefills + 1],
             seq_start_loc=self.seq_start_loc[:self.num_prefills + 1],
             context_lens_tensor=self.context_lens_tensor[:self.num_prefills],
+            num_orig_input_tokens_tensor = (None if self.num_orig_input_tokens_tensor is None else
+                               self.num_orig_input_tokens_tensor[:self.num_prefills]),
             block_tables=self.block_tables[:self.num_prefills],
             use_cuda_graph=False,
         )
@@ -248,6 +250,8 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
             query_start_loc=None,
             seq_start_loc=None,
             context_lens_tensor=None,
+            num_orig_input_tokens_tensor = (None if self.num_orig_input_tokens_tensor is None else
+                               self.num_orig_input_tokens_tensor[:self.num_prefills]),
             block_tables=self.block_tables[self.num_prefills:],
             use_cuda_graph=self.use_cuda_graph,
         )

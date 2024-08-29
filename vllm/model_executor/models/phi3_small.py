@@ -240,7 +240,10 @@ class Phi3SmallSelfAttention(nn.Module):
         k = k.reshape(-1, self.head_dim * self.num_kv_heads_per_partion)
         v = v.reshape(-1, self.head_dim * self.num_kv_heads_per_partion)
 
-        q, k = self.rotary_emb(positions, q, k)
+        q, k =  self.rotary_emb(positions, q, k) \
+            if getattr(self.config, "rope_scaling", None) is None \
+            else self.rotary_emb(positions, q, k, num_orig_input_tokens_tensor=attn_metadata.num_orig_input_tokens_tensor)
+
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata=attn_metadata)
         output, _ = self.dense(attn_output)
 
