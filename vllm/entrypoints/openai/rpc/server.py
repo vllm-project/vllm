@@ -1,4 +1,5 @@
 import asyncio
+import pickle
 import signal
 from typing import Any, Coroutine, Union
 
@@ -7,6 +8,8 @@ import uvloop
 import zmq
 import zmq.asyncio
 from typing_extensions import Never
+from zmq import Frame  # type: ignore[attr-defined]
+from zmq.asyncio import Socket
 
 from vllm import AsyncEngineArgs, AsyncLLMEngine
 from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
@@ -35,7 +38,7 @@ class AsyncEngineRPCServer:
         self.context = zmq.asyncio.Context()
 
         # Init socket.
-        self.socket = self.context.socket(zmq.constants.DEALER)
+        self.socket: Socket = self.context.socket(zmq.constants.DEALER)
         self.socket.set_hwm(VLLM_RPC_ZMQ_HWM)
         self.socket.connect(rpc_path)
 
@@ -63,30 +66,31 @@ class AsyncEngineRPCServer:
             else:
                 raise ValueError("Unknown Config Request: %s", request)
 
-            await self.socket.send_multipart(
-                [identity, cloudpickle.dumps(config)])
+            await self.socket.send_multipart((identity, pickle.dumps(config)),
+                                             copy=False)
 
         except Exception as e:
-            await self.socket.send_multipart([identity, cloudpickle.dumps(e)])
+            await self.socket.send_multipart((identity, pickle.dumps(e)),
+                                             copy=False)
 
     async def is_tracing_enabled(self, identity):
         """Send the is_tracing_enabled flag"""
         tracing_flag = await self.engine.is_tracing_enabled()
 
         await self.socket.send_multipart(
-            [identity, cloudpickle.dumps(tracing_flag)])
+            (identity, pickle.dumps(tracing_flag)))
 
     async def do_log_stats(self, identity):
         """Log stats and confirm success."""
         await self.engine.do_log_stats()
 
         await self.socket.send_multipart(
-            [identity, cloudpickle.dumps(VLLM_RPC_SUCCESS_STR)])
+            (identity, pickle.dumps(VLLM_RPC_SUCCESS_STR)))
 
     async def is_server_ready(self, identity):
         """Notify the client that we are ready."""
         await self.socket.send_multipart(
-            [identity, cloudpickle.dumps(VLLM_RPC_SUCCESS_STR)])
+            (identity, pickle.dumps(VLLM_RPC_SUCCESS_STR)))
 
     async def abort(self, identity, request: RPCAbortRequest):
         """Abort request and notify the client of success."""
@@ -96,7 +100,7 @@ class AsyncEngineRPCServer:
             result: Union[str, Exception] = VLLM_RPC_SUCCESS_STR
         except Exception as e:
             result = e
-        await self.socket.send_multipart([identity, cloudpickle.dumps(result)])
+        await self.socket.send_multipart((identity, pickle.dumps(result)))
 
     async def generate(self, identity, generate_request: RPCGenerateRequest):
         try:
@@ -110,45 +114,47 @@ class AsyncEngineRPCServer:
 
             async for request_output in results_generator:
                 await self.socket.send_multipart(
-                    [identity, cloudpickle.dumps(request_output)])
+                    (identity, pickle.dumps(request_output)), copy=False)
 
         except Exception as e:
-            await self.socket.send_multipart([identity, cloudpickle.dumps(e)])
+            await self.socket.send_multipart((identity, pickle.dumps(e)),
+                                             copy=False)
 
     async def check_health(self, identity):
         try:
             await self.engine.check_health()
             await self.socket.send_multipart(
-                [identity, cloudpickle.dumps(VLLM_RPC_SUCCESS_STR)])
+                (identity, pickle.dumps(VLLM_RPC_SUCCESS_STR)))
 
         except Exception as e:
-            await self.socket.send_multipart([identity, cloudpickle.dumps(e)])
+            await self.socket.send_multipart((identity, pickle.dumps(e)),
+                                             copy=False)
 
     async def start_profile(self, identity):
         logger.info("Starting profiler...")
         await self.engine.start_profile()
         logger.info("Profiler started.")
 
-        await self.socket.send_multipart([
+        await self.socket.send_multipart((
             identity,
-            cloudpickle.dumps(VLLM_RPC_SUCCESS_STR),
-        ])
+            pickle.dumps(VLLM_RPC_SUCCESS_STR),
+        ))
 
     async def stop_profile(self, identity):
         logger.info("Stopping profiler...")
         await self.engine.stop_profile()
         logger.info("Profiler stopped.")
 
-        await self.socket.send_multipart([
+        await self.socket.send_multipart((
             identity,
-            cloudpickle.dumps(VLLM_RPC_SUCCESS_STR),
-        ])
+            pickle.dumps(VLLM_RPC_SUCCESS_STR),
+        ))
 
     def _make_handler_coro(self, identity,
-                           message) -> Coroutine[Any, Any, Never]:
+                           message: Frame) -> Coroutine[Any, Any, Never]:
         """Route the zmq message to the handler coroutine."""
 
-        request = cloudpickle.loads(message)
+        request = cloudpickle.loads(message.buffer)
 
         if isinstance(request, RPCGenerateRequest):
             return self.generate(identity, request)
@@ -189,7 +195,7 @@ class AsyncEngineRPCServer:
         running_tasks = set()
         while True:
             # Wait for a request.
-            identity, message = await self.socket.recv_multipart()
+            identity, message = await self.socket.recv_multipart(copy=False)
 
             # Process the request async.
             task = asyncio.create_task(
