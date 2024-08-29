@@ -228,7 +228,7 @@ def which_attn_to_use(
                 "Cannot use FlashAttention-2 backend for FP8 KV cache.")
             logger.warning(
                 "Please use FlashInfer backend with FP8 KV Cache for "
-                "better performance by set environment "
+                "better performance by setting environment variable  "
                 "VLLM_ATTENTION_BACKEND=FLASHINFER")
             selected_backend = _Backend.XFORMERS
         elif block_size % 16 != 0:
