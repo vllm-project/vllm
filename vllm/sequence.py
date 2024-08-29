@@ -11,11 +11,11 @@ from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Mapping,
 import msgspec
 import torch
 
+from vllm.control_vectors.request import ControlVectorRequest
 from vllm.inputs.parse import is_valid_encoder_decoder_llm_inputs
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.control_vectors.request import ControlVectorRequest
 from vllm.sampling_params import SamplingParams
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
@@ -934,7 +934,8 @@ class SequenceGroupMetadata(
 
     @property
     def control_vector_id(self) -> int:
-        return self.control_vector_request.adapter_id if self.control_vector_request else 0
+        return self.control_vector_request.adapter_id \
+            if self.control_vector_request else 0
 
     def apply_delta(self,
                     sequence_group_metadata_delta: SequenceGroupMetadataDelta):

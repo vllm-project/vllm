@@ -13,17 +13,18 @@ import numpy as np
 import torch
 import torch.distributed
 import torch.nn as nn
-import gguf
 
 import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.abstract import AttentionState
 from vllm.attention.backends.utils import CommonAttentionState
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ObservabilityConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig,
-                         ControlVectorConfig)
-
+from vllm.config import (CacheConfig, ControlVectorConfig, DeviceConfig,
+                         LoadConfig, LoRAConfig, ModelConfig,
+                         ObservabilityConfig, ParallelConfig,
+                         PromptAdapterConfig, SchedulerConfig)
+from vllm.control_vectors.request import ControlVectorRequest
+from vllm.control_vectors.worker_manager import (  # noqa: E501
+    LRUCacheWorkerControlVectorManager)
 from vllm.distributed import get_pp_group
 from vllm.distributed.parallel_state import graph_capture
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
@@ -31,8 +32,6 @@ from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
-from vllm.control_vectors.request import ControlVectorRequest
-from vllm.control_vectors.worker_manager import LRUCacheWorkerControlVectorManager
 from vllm.model_executor import SamplingMetadata, SamplingMetadataCache
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -423,7 +422,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         self.enable_lora = self.runner.lora_config is not None
         self.enable_prompt_adapter = (self.runner.prompt_adapter_config
                                       is not None)
-        self.enable_control_vector = self.runner.control_vector_config is not None
+        self.enable_control_vector = (self.runner.control_vector_config
+                                      is not None)
         self.multi_modal_input_mapper = self.runner.multi_modal_input_mapper
         self.finished_requests_ids = finished_requests_ids
         self.decode_only = True
@@ -610,7 +610,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
     ):
         if not self.enable_control_vector:
             return
-        inter_data.control_vector_request = seq_group_metadata.control_vector_request
+        inter_data.control_vector_request = seq_group_metadata.control_vector_request  # noqa: E501
 
     def _compute_multi_modal_input(self, inter_data: InterDataForSeqGroup,
                                    seq_group_metadata: SequenceGroupMetadata):
@@ -951,7 +951,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         if self.control_vector_config:
             self.control_vector_manager = LRUCacheWorkerControlVectorManager(
                 self.device, self.control_vector_config)
-            self.model = self.control_vector_manager.create_control_vector_manager(
+            self.model = self.control_vector_manager.create_control_vector_manager(  # noqa: E501
                 self.model)
 
         if self.kv_cache_dtype == "fp8" and is_hip():
@@ -1215,6 +1215,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         if not self.control_vector_manager:
             raise RuntimeError("Control Vector is not enabled.")
         return self.control_vector_manager.add_adapter(control_vector_request)
+
+    def remove_control_vector(self, control_vector_id: int) -> bool:
+        if not self.control_vector_manager:
+            raise RuntimeError("Control Vector is not enabled.")
+        return self.control_vector_manager.remove_adapter(control_vector_id)
 
     @torch.inference_mode()
     def capture_model(self, kv_caches: List[List[torch.Tensor]]) -> None:

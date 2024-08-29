@@ -9,9 +9,9 @@ from vllm.adapter_commons.utils import (add_adapter_worker,
                                         set_active_adapters_worker)
 from vllm.adapter_commons.worker_manager import AbstractWorkerManager
 from vllm.config import ControlVectorConfig
-from vllm.control_vectors.models import (LRUCacheControlVectorModelManager,
-                                         ControlVectorModel,
+from vllm.control_vectors.models import (ControlVectorModel,
                                          ControlVectorModelManager,
+                                         LRUCacheControlVectorModelManager,
                                          create_cv_manager)
 from vllm.control_vectors.request import ControlVectorRequest
 
@@ -81,13 +81,8 @@ class WorkerControlVectorManager(AbstractWorkerManager):
         return self._adapter_manager.pin_adapter(adapter_id)
 
     def set_active_adapters(self, requests: Set[Any]) -> None:
-        assert len(
-            requests
-        ) <= 1, "Currently, we do not support more than 1 control vectors at one time"
-        if requests:
-            mapping = [req.adapter_id for req in requests][0]
-        else:
-            mapping = None
+        assert len(requests) <= 1, "No more than 1 control vector at a time"
+        mapping = requests[0].adapter_id if requests else None
         set_active_adapters_worker(requests, mapping, self._apply_adapters,
                                    self._adapter_manager.set_adapter_mapping)
 

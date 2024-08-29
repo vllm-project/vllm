@@ -7,10 +7,12 @@ import torch
 import torch.distributed
 
 import vllm.envs as envs
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ObservabilityConfig, ParallelConfig,
+from vllm.config import (CacheConfig, ControlVectorConfig, DeviceConfig,
+                         LoadConfig, LoRAConfig, ModelConfig,
+                         ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig, ControlVectorConfig)
+                         SpeculativeConfig)
+from vllm.control_vectors.request import ControlVectorRequest
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
@@ -20,7 +22,6 @@ from vllm.model_executor import set_random_seed
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.control_vectors.request import ControlVectorRequest
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SamplerOutput, SequenceGroupMetadata,
                            SequenceGroupMetadataDelta)

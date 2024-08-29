@@ -3,6 +3,7 @@ from typing import ClassVar, List, Optional, Sequence, Union, cast, overload
 
 from tqdm import tqdm
 
+from vllm.control_vectors.request import ControlVectorRequest
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
@@ -18,7 +19,6 @@ from vllm.model_executor.guided_decoding.guided_fields import LLMGuidedOptions
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.control_vectors.request import ControlVectorRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import (AnyTokenizer,
                                                get_cached_tokenizer)

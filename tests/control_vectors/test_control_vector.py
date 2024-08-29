@@ -10,17 +10,15 @@ def do_sample(engine):
     prompt_text = "Finish the sentence. Life is good because:"  # noqa: E501
 
     # first prompt with a control vector and second without.
-    prompts = [
-        (prompt_text,
-         SamplingParams(temperature=0.0, max_tokens=100,
-                        stop=["[/assistant]"]),
-         ControlVectorRequest("chaotic", 1, cv_path,
-                              1.0)),
-        (prompt_text,
-         SamplingParams(temperature=0.0, max_tokens=100,
-                        stop=["[/assistant]"]),
-         None)
-    ]
+    prompts = [(prompt_text,
+                SamplingParams(temperature=0.0,
+                               max_tokens=100,
+                               stop=["[/assistant]"]),
+                ControlVectorRequest("chaotic", 1, cv_path, 1.0)),
+               (prompt_text,
+                SamplingParams(temperature=0.0,
+                               max_tokens=100,
+                               stop=["[/assistant]"]), None)]
 
     request_id = 0
     results = set()
@@ -40,9 +38,9 @@ def do_sample(engine):
                 results.add(request_output.outputs[0].text)
     return results
 
+
 def test_cv_adapter():
-    engine_args = EngineArgs(model=MODEL_PATH,
-                             enable_control_vector=True)
+    engine_args = EngineArgs(model=MODEL_PATH, enable_control_vector=True)
     engine = LLMEngine.from_engine_args(engine_args)
     result = do_sample(engine)
     assert len(result) == 2

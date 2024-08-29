@@ -1547,7 +1547,7 @@ class ControlVectorConfig:
 
     def __post_init__(self):
         if self.max_control_vectors < 1:
-            raise ValueError(f"max_control_vectors must be >= 1")
+            raise ValueError("max_control_vectors must be >= 1")
 
 
 @dataclass

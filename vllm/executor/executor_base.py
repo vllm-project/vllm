@@ -1,13 +1,14 @@
 from abc import ABC, abstractmethod
 from typing import List, Optional, Set, Tuple
 
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ObservabilityConfig, ParallelConfig,
+from vllm.config import (CacheConfig, ControlVectorConfig, DeviceConfig,
+                         LoadConfig, LoRAConfig, ModelConfig,
+                         ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig, ControlVectorConfig)
+                         SpeculativeConfig)
+from vllm.control_vectors.request import ControlVectorRequest
 from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.control_vectors.request import ControlVectorRequest
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 
 

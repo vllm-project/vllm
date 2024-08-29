@@ -11,11 +11,12 @@ import torch
 from typing_extensions import TypeVar, assert_never
 
 import vllm.envs as envs
-from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
-                         EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
-                         ObservabilityConfig, ParallelConfig,
+from vllm.config import (CacheConfig, ControlVectorConfig, DecodingConfig,
+                         DeviceConfig, EngineConfig, LoadConfig, LoRAConfig,
+                         ModelConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig, ControlVectorConfig)
+                         SpeculativeConfig)
+from vllm.control_vectors.request import ControlVectorRequest
 from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
                                  SchedulerOutputs)
 from vllm.engine.arg_utils import EngineArgs
@@ -37,7 +38,6 @@ from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
                           RequestOutputFactory)
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.control_vectors.request import ControlVectorRequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
                            SamplerOutput, Sequence, SequenceGroup,
