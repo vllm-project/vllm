@@ -405,6 +405,8 @@ class ModelConfig:
             raise ValueError(
                 "BitAndBytes quantization with TP or PP is not supported yet.")
 
+        # Remove the constraint after the bitsandbytes issue is fixed:
+        # https://github.com/bitsandbytes-foundation/bitsandbytes/issues/1308
         if self.quantization == "bitsandbytes" and self.enforce_eager is False:
             logger.warning("CUDA graph is not supported on BitAndBytes yet, "
                            "fallback to the eager mode.")
