@@ -660,7 +660,10 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                             max_decode_seq_len: int) -> bool:
         return (self.decode_only and not self.runner.model_config.enforce_eager
                 and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
-                and max_decode_seq_len <= self.runner.max_seq_len_to_capture)
+                # graphs are only captured to support up to max_num_seqs
+                and batch_size <= _get_graph_batch_size(
+                    self.scheduler_config.max_num_seqs) and
+                max_decode_seq_len <= self.runner.max_seq_len_to_capture)
 
     def build(self) -> ModelInputForGPU:
         """Finalize the builder intermediate data and
