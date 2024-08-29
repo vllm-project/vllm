@@ -31,7 +31,7 @@ Build the container:
 Create Simple Nginx Config file
 ------------
 
-Create a file named ``nginx.conf``. Note that you can add as many servers as you'd like. In the below example we'll start with two. To add more, add another ``server vllmN:8000 max_fails=3 fail_timeout=10000s;`` entry to ``upstream backend``.
+Create a file named ``nginx_conf/nginx.conf``. Note that you can add as many servers as you'd like. In the below example we'll start with two. To add more, add another ``server vllmN:8000 max_fails=3 fail_timeout=10000s;`` entry to ``upstream backend``.
 
 .. code-block:: console
 
@@ -92,4 +92,3 @@ Launch Nginx
 .. code-block:: console
 
     docker run -itd -p 8000:80 -v ./nginx_conf/:/etc/nginx/conf.d/ --name nginx-lb nginx-lb:latest 
-    
