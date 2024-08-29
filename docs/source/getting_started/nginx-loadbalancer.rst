@@ -62,9 +62,10 @@ Build vLLM Container
 Create vLLM Launch Script For Use Inside Each Container
 ------------
 
-Call the script ``vllm_start.sh``
+Call the script ``vllm_start_script/vllm_start.sh``
 
 .. code-block:: console
+
     export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:/usr/local/lib/libiomp5.so:$LD_PRELOAD 
     export RAY_worker_niceness=0
     export KMP_BLOCKTIME=1
@@ -73,7 +74,7 @@ Call the script ``vllm_start.sh``
     export KMP_FORKJOIN_BARRIER_PATTERN=dist,dist
     export KMP_PLAIN_BARRIER_PATTERN=dist,dist
     export KMP_REDUCTION_BARRIER_PATTERN=dist,dist
-    svrcmd="cd benchmarks && VLLM_CPU_KVCACHE_SPACE=40 VLLM_CPU_OMP_THREADS_BIND=\"$CPU_BIND\" python3 -m vllm.entrypoints.openai.api_server --model $MODEL  --dtype=bfloat16 --device cpu --disable-log-stats -tp=1 --distributed-executor-backend mp"
+    svrcmd="cd benchmarks && VLLM_CPU_KVCACHE_SPACE=40 VLLM_CPU_OMP_THREADS_BIND=\"$CPU_BIND\" python3 -m vllm.entrypoints.openai.api_server --model $MODEL  --dtype=bfloat16 --device cpu --disable-log-stats"
     eval $svrcmd
 
 Launch vLLM Containers
@@ -82,23 +83,13 @@ Launch vLLM Containers
 .. code-block:: console
 
     model=meta-llama/Llama-2-7b-hf
-    docker run -itd --privileged --ipc host --cap-add=SYS_ADMIN --shm-size=10.24gb -e CPU_BIND=0-47  -e MODEL=$model -v ./:/workspace/ -p 8081:8000 --name vllm0 vllm bash /workspace/vllm_start.sh
-    docker run -itd --privileged --ipc host --cap-add=SYS_ADMIN --shm-size=10.24gb -e CPU_BIND=48-95 -e MODEL=$model -v ./:/workspace/ -p 8082:8000 --name vllm1 vllm bash /workspace/vllm_start.sh
+    docker run -itd --privileged --ipc host --cap-add=SYS_ADMIN --shm-size=10.24gb -e CPU_BIND=0-47  -e MODEL=$model -v ./vllm_start_script/:/workspace/vllm_start_script/ -p 8081:8000 --name vllm0 vllm bash /workspace/vllm_start_script/vllm_start.sh
+    docker run -itd --privileged --ipc host --cap-add=SYS_ADMIN --shm-size=10.24gb -e CPU_BIND=48-95 -e MODEL=$model -v ./vllm_start_script/:/workspace/vllm_start_script/ -p 8082:8000 --name vllm1 vllm bash /workspace/vllm_start_script/vllm_start.sh
 
 Launch Nginx
 ------------
 
 .. code-block:: console
 
-    docker run -itd -p 8000:80 -v ./nginx_conf/:/etc/nginx/conf.d/ nginx-lb:latest 
-
-Testing With Llmperf
-------------
-
-.. code-block:: console
-
-    python token_benchmark_ray.py \
-        --model meta-llama/Llama-2-7b-hf \
-        --results-dir "result_outputs" \
-        --llm-api openai \
-        --additional-sampling-params '{}' \
+    docker run -itd -p 8000:80 -v ./nginx_conf/:/etc/nginx/conf.d/ --name nginx-lb nginx-lb:latest 
+    
