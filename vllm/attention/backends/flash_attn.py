@@ -355,8 +355,10 @@ class FlashAttentionMetadata(AttentionMetadata):
             if m.block_tables is not None else None,
             use_cuda_graph=False)
 
-    def advance_step(self, num_seqs: int, num_queries: int,
-                    token_chunk_size: Optional[int] = None):
+    def advance_step(self,
+                     num_seqs: int,
+                     num_queries: int,
+                     token_chunk_size: Optional[int] = None):
         """
         Update metadata in-place to advance one decode step.
         """
@@ -370,7 +372,6 @@ class FlashAttentionMetadata(AttentionMetadata):
         if num_seqs != num_queries:
             assert num_seqs > num_queries
             assert self.use_cuda_graph
-
 
         assert self.seq_lens is not None
         assert len(self.seq_lens) == num_seqs
@@ -389,10 +390,11 @@ class FlashAttentionMetadata(AttentionMetadata):
         assert self.block_tables.shape[0] == num_seqs
 
         has_prefills: bool = self.num_prefills > 0
-        has_decodes: bool = num_seqs - self.num_prefills > 0  
+        has_decodes: bool = num_seqs - self.num_prefills > 0
 
         if has_prefills:
-            assert self.slot_mapping.shape == (num_seqs - self.num_prefills + self.num_prefill_tokens, )
+            assert self.slot_mapping.shape == (num_seqs - self.num_prefills +
+                                               self.num_prefill_tokens, )
             assert token_chunk_size is not None
             assert self.num_decode_tokens == num_seqs - self.num_prefills
         else:
@@ -405,18 +407,23 @@ class FlashAttentionMetadata(AttentionMetadata):
 
         # Update query lengths. Note that we update only queries and not seqs,
         # since tensors may be padded due to captured cuda graph batch size
-        for i in range(self.num_prefills):
-            self.seq_lens[i] += token_chunk_size
+        if has_prefills:
+            assert token_chunk_size is not None
+            for i in range(self.num_prefills):
+                self.seq_lens[i] += token_chunk_size
         for i in range(self.num_prefills, num_queries):
             self.seq_lens[i] += 1
 
-        self.max_decode_seq_len = max(self.seq_lens[self.num_prefills:]) if has_decodes else 0
-        self.max_prefill_seq_len = max(self.seq_lens[:self.num_prefills]) if has_prefills else 0
+        self.max_decode_seq_len = max(
+            self.seq_lens[self.num_prefills:]) if has_decodes else 0
+        self.max_prefill_seq_len = max(
+            self.seq_lens[:self.num_prefills]) if has_prefills else 0
         self.max_query_len = token_chunk_size if has_prefills else 1
 
         # Trigger recompute
         self._cached_decode_metadata = None
         self._cached_prefill_metadata = None
+
 
 class FlashAttentionMetadataBuilder(
         AttentionMetadataBuilder[FlashAttentionMetadata]):

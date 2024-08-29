@@ -1209,10 +1209,12 @@ class LLMEngine:
                 if seq_group_meta.is_prompt:
                     # multi step prefill updates
                     seq_group.update_num_computed_tokens(
-                        scheduled_seq_group.token_chunk_size * seq_group_meta.state.num_steps)
+                        scheduled_seq_group.token_chunk_size *
+                        seq_group_meta.state.num_steps)
             else:
                 # TODO (varun) : Is this required ?
-                seq_group.update_num_computed_tokens(scheduled_seq_group.token_chunk_size)
+                seq_group.update_num_computed_tokens(
+                    scheduled_seq_group.token_chunk_size)
 
             if output is not None and len(output) > 0:
                 for o in output:
@@ -1238,7 +1240,6 @@ class LLMEngine:
             if seq_group_meta.do_sample:
                 self.output_processor.process_outputs(seq_group, outputs)
 
-                
         # Free the finished sequence groups.
         for scheduler in self.scheduler:
             scheduler.free_finished_seq_groups()

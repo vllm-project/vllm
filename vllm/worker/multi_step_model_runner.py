@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 try:
     from vllm.attention.backends.flash_attn import FlashAttentionMetadata
@@ -10,8 +10,8 @@ except ModuleNotFoundError:
 
 import torch
 
-import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.attention.backends.utils import compute_slot_mapping
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
@@ -19,6 +19,7 @@ from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
                            Logprob, SamplerOutput, SequenceGroupMetadata,
                            SequenceOutput)
+from vllm.utils import async_tensor_h2d
 from vllm.worker.model_runner import (GPUModelRunnerBase,
                                       ModelInputForGPUWithSamplingMetadata)
 from vllm.worker.model_runner_base import (
@@ -26,8 +27,6 @@ from vllm.worker.model_runner_base import (
     _init_attn_metadata_from_tensor_dict,
     _init_frozen_model_input_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
-from vllm.attention.backends.utils import compute_slot_mapping
-from vllm.utils import async_tensor_h2d
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -129,7 +128,6 @@ class StatefulModelInput(BroadcastableModelInput):
     # multi-step chunked prefill tokens and slot mapping
     prefill_steps_tokens: Optional[torch.Tensor] = None
     prefill_steps_slot_mapping: Optional[torch.Tensor] = None
-
 
     # Multi-Step + Chunked-Prefill related args.
     # When the initially scheduled sequences have both prefill and decode
@@ -261,69 +259,85 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         ))
         return model_input
 
-    def make_prefill_steps_data(self, seq_group_metadata_list: List[SequenceGroupMetadata]) -> \
+    def make_prefill_steps_data(
+            self,
+            seq_group_metadata_list: List[SequenceGroupMetadata]) -> \
           Tuple[torch.Tensor, torch.Tensor]:
         # for multi step chunked prefill propagation - get the,
         # 1. Prefill tokens required for steps 1 to n
         # 2. Prefill slot mapping required for steps 1 to n
 
-        token_chunk_size = self.scheduler_config.multi_step_chunked_prefill_max_token_chunk
+        token_chunk_size = \
+            self.scheduler_config.multi_step_chunked_prefill_max_token_chunk
         # filter prompt seqs
-        prefill_sgml = [sgml for sgml in seq_group_metadata_list if sgml.is_prompt]
+        prefill_sgml = [
+            sgml for sgml in seq_group_metadata_list if sgml.is_prompt
+        ]
         if len(prefill_sgml) == 0:
             # No prefills
             return (None, None)
 
         num_multi_step = prefill_sgml[0].state.num_steps
-        assert all([sgml.state.num_steps == num_multi_step for sgml in prefill_sgml])
+        assert all(
+            [sgml.state.num_steps == num_multi_step for sgml in prefill_sgml])
         if num_multi_step == 1:
             # Single step - we dont need to advance prefills
             return (None, None)
 
         # Populate input_tokens
         input_tokens = []
-        
+
         #seq_lens = [sgml.seq_data[0].get_num_computed_tokens()
         #                        for sgml in prefill_sgml]
         # Assert that we only have one sequence in every seq-group.
         # i.e. dont support beam search.
         assert all([len(sgml.seq_data) == 1 for sgml in prefill_sgml])
-        seq_ids = [list(sgml.seq_data.keys())[0] for sgml in prefill_sgml] 
+        seq_ids = [list(sgml.seq_data.keys())[0] for sgml in prefill_sgml]
 
-        seq_lens = [sgml.seq_data[seq_id].get_num_computed_tokens()
-                                for seq_id, sgml in zip(seq_ids, prefill_sgml)]
+        seq_lens = [
+            sgml.seq_data[seq_id].get_num_computed_tokens()
+            for seq_id, sgml in zip(seq_ids, prefill_sgml)
+        ]
 
         # the 0th step is already computed
         input_token_offsets = [x + token_chunk_size for x in seq_lens]
         # because the 0th step data is already computed - start from 1
-        for _ in range(1, num_multi_step):  
+        for _ in range(1, num_multi_step):
             for idx, seq_id_sgml in enumerate(zip(seq_ids, prefill_sgml)):
                 seq_id, sgml = seq_id_sgml
                 offt = input_token_offsets[idx]
-                input_tokens.extend(sgml.seq_data[seq_id].get_token_ids()[offt:offt + token_chunk_size])
+                input_tokens.extend(
+                    sgml.seq_data[seq_id].get_token_ids()[offt:offt +
+                                                          token_chunk_size])
                 input_token_offsets[idx] += token_chunk_size
-        assert len(input_tokens) == token_chunk_size * len(prefill_sgml) * (num_multi_step - 1)
+        assert len(input_tokens) == token_chunk_size * len(prefill_sgml) * (
+            num_multi_step - 1)
 
         # Populate slot mapping
         input_slot_mapping = []
-        for step_idx in range(1, num_multi_step):  
+        for step_idx in range(1, num_multi_step):
             for idx, seq_id_sgml in enumerate(zip(seq_ids, prefill_sgml)):
                 seq_id, sgml = seq_id_sgml
-                # TODO (varun) : Is the calculation of sgml_context_len and sgml_seq_len valid ?
+                # TODO (varun) : Is the calculation of sgml_context_len and
+                # sgml_seq_len valid ?
                 # Are there any nuances we are missing ?
-                sgml_context_len = seq_lens[idx] + (token_chunk_size * step_idx)
+                sgml_context_len = seq_lens[idx] + (token_chunk_size *
+                                                    step_idx)
                 sgml_seq_len = sgml_context_len + token_chunk_size
-                part_slot_mapping = []
-                compute_slot_mapping(is_profile_run = False,
-                                     slot_mapping = part_slot_mapping,
-                                     seq_id = seq_id,
-                                     context_len = sgml_context_len,
-                                     seq_len = sgml_seq_len, 
-                                     start_idx = 0, # TODO (Varun) : Assert that sliding window is none
-                                     block_size = self.block_size,
-                                     block_tables = sgml.block_tables)
+                part_slot_mapping: List[int] = []
+                compute_slot_mapping(
+                    is_profile_run=False,
+                    slot_mapping=part_slot_mapping,
+                    seq_id=seq_id,
+                    context_len=sgml_context_len,
+                    seq_len=sgml_seq_len,
+                    start_idx=
+                    0,  # TODO (Varun) : Assert that sliding window is none
+                    block_size=self.block_size,
+                    block_tables=sgml.block_tables)
                 input_slot_mapping.extend(part_slot_mapping)
-        assert len(input_slot_mapping) == token_chunk_size * len(prefill_sgml) * (num_multi_step - 1)
+        assert len(input_slot_mapping) == token_chunk_size * len(
+            prefill_sgml) * (num_multi_step - 1)
 
         # Async transfer to GPU
         prefill_input_tokens = async_tensor_h2d(input_tokens, torch.long,
@@ -339,17 +353,21 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         virtual_engine: int = 0,
         finished_requests_ids: Optional[List[str]] = None
     ) -> StatefulModelInput:
-        frozen_model_input: ModelInputForGPUWithSamplingMetadata = self._base_model_runner.prepare_model_input(
+        frozen_model_input: ModelInputForGPUWithSamplingMetadata = \
+              self._base_model_runner.prepare_model_input(
             seq_group_metadata_list, virtual_engine, finished_requests_ids)
 
-        prefill_steps_tokens, prefill_slot_mapping = self.make_prefill_steps_data(seq_group_metadata_list) 
+        prefill_steps_tokens, prefill_slot_mapping = \
+              self.make_prefill_steps_data(seq_group_metadata_list)
 
+        assert frozen_model_input.seq_lens is not None
+        assert frozen_model_input.query_lens is not None
         model_input = StatefulModelInput(
             frozen_model_input=frozen_model_input,
             num_seqs=len(frozen_model_input.seq_lens),
             num_queries=len(frozen_model_input.query_lens),
-            prefill_steps_tokens = prefill_steps_tokens,
-            prefill_steps_slot_mapping = prefill_slot_mapping,
+            prefill_steps_tokens=prefill_steps_tokens,
+            prefill_steps_slot_mapping=prefill_slot_mapping,
             sampling_metadata_decodes=None)
         return model_input
 
@@ -482,8 +500,8 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
 
         num_seqs = model_input.num_seqs
         num_queries = model_input.num_queries
-        num_prefill_tokens = model_input.frozen_model_input.attn_metadata.num_prefill_tokens
-        num_prefills = model_input.frozen_model_input.attn_metadata.num_prefills
+        num_prefill_tokens = frozen_model_input.attn_metadata.num_prefill_tokens
+        num_prefills = frozen_model_input.attn_metadata.num_prefills
         token_chunk_size: Optional[int]= \
             self.scheduler_config.multi_step_chunked_prefill_max_token_chunk \
                 if self.scheduler_config.chunked_prefill_enabled else None
@@ -496,15 +514,18 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         assert isinstance(attn_metadata, FlashAttentionMetadata)
         attn_metadata.advance_step(num_seqs, num_queries, token_chunk_size)
 
-        prefill_step_offset = num_prefill_tokens * (model_input.current_step - 1) \
+        prefill_step_offset = \
+            num_prefill_tokens * (model_input.current_step - 1) \
               if self.scheduler_config.chunked_prefill_enabled else 0
 
         if model_input.prefill_steps_tokens is not None:
             assert num_prefill_tokens > 0
             assert attn_metadata.context_lens_tensor is not None
             assert model_input.prefill_steps_slot_mapping is not None
-            assert model_input.prefill_steps_tokens.shape[0] >= prefill_step_offset + num_prefill_tokens
-            assert model_input.prefill_steps_slot_mapping.shape[0] >= prefill_step_offset + num_prefill_tokens
+            assert model_input.prefill_steps_tokens.shape[
+                0] >= prefill_step_offset + num_prefill_tokens
+            assert model_input.prefill_steps_slot_mapping.shape[
+                0] >= prefill_step_offset + num_prefill_tokens
         if num_prefill_tokens > 0:
             assert model_input.prefill_steps_tokens is not None and \
                         model_input.prefill_steps_slot_mapping is not None
@@ -512,12 +533,13 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         # Update GPU tensors
         assert model_input.cached_outputs[-1].sampled_token_ids is not None
         ops.advance_step(
-            num_prefill_tokens = num_prefill_tokens,
-            num_prefills = num_prefills,
+            num_prefill_tokens=num_prefill_tokens,
+            num_prefills=num_prefills,
             num_seqs=num_seqs,
             num_queries=num_queries,
             block_size=self.block_size,
-            token_chunk_size = token_chunk_size if token_chunk_size is not None else 0,
+            token_chunk_size=token_chunk_size
+            if token_chunk_size is not None else 0,
             input_tokens=frozen_model_input.input_tokens,
             sampled_token_ids=model_input.cached_outputs[-1].sampled_token_ids,
             input_positions=frozen_model_input.input_positions,
@@ -525,11 +547,13 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
             slot_mapping=attn_metadata.slot_mapping,
             block_tables=attn_metadata.block_tables,
             seq_start_loc=attn_metadata.seq_start_loc,
-            context_lens = attn_metadata.context_lens_tensor,
-            prefill_steps_tokens = model_input.prefill_steps_tokens[prefill_step_offset:]
-                if model_input.prefill_steps_tokens is not None else None,
-            prefill_steps_slot_mapping = model_input.prefill_steps_slot_mapping[prefill_step_offset:]
-                if model_input.prefill_steps_slot_mapping is not None else None)
+            context_lens=attn_metadata.context_lens_tensor,
+            prefill_steps_tokens=model_input.
+            prefill_steps_tokens[prefill_step_offset:]
+            if model_input.prefill_steps_tokens is not None else None,
+            prefill_steps_slot_mapping=model_input.
+            prefill_steps_slot_mapping[prefill_step_offset:]
+            if model_input.prefill_steps_slot_mapping is not None else None)
 
         if frozen_model_input.seq_lens is not None:
             for i in range(num_queries):

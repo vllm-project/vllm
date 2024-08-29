@@ -14,7 +14,7 @@ from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta,
-                           SequenceStatus, SequenceStage)
+                           SequenceStatus)
 from vllm.utils import Device, PyObjectCache
 
 logger = init_logger(__name__)
@@ -1009,22 +1009,29 @@ class Scheduler:
 
         if self.scheduler_config.is_multi_step:
             # multi step scheduler outputs
-            scheduler_outputs = self._make_multi_step_scheduler_outputs(scheduler_outputs)
-        
+            scheduler_outputs = self._make_multi_step_scheduler_outputs(
+                scheduler_outputs)
+
         return scheduler_outputs
 
-    def _make_multi_step_scheduler_outputs(self, scheduler_outputs: SchedulerOutputs):
+    def _make_multi_step_scheduler_outputs(
+            self, scheduler_outputs: SchedulerOutputs):
         """
-        Given a set of scheduler outputs, determine if the prefill sequences in the list
-        have more chunks that could be processed in the multi-step.
+        Given a set of scheduler outputs, determine if the prefill sequences
+        in the list have more chunks that could be processed in the multi-step.
         """
         assert self.scheduler_config.is_multi_step
         # dont support beam search
-        assert all([len(sg.seq_group.seqs) == 1 for sg in scheduler_outputs.scheduled_seq_groups])
+        assert all([
+            len(sg.seq_group.seqs) == 1
+            for sg in scheduler_outputs.scheduled_seq_groups
+        ])
 
         if envs.VLLM_MULTI_STEP_CHUNKED_PREFILL_SINGLE_STEP_POLICY:
-            has_prefills = len([None for sg in scheduler_outputs.scheduled_seq_groups
-                            if sg.seq_group.is_prefill()])
+            has_prefills = len([
+                None for sg in scheduler_outputs.scheduled_seq_groups
+                if sg.seq_group.is_prefill()
+            ])
             if has_prefills:
                 for sg in scheduler_outputs.scheduled_seq_groups:
                     sg.seq_group.init_multi_step(1)
@@ -1032,36 +1039,52 @@ class Scheduler:
 
         ## Default policy
 
-        def get_max_prefill_chunk_steps(prefill_seq_groups : Iterable[ScheduledSequenceGroup],
-                                        max_token_chunk_size: int):
-            if any([sg.token_chunk_size < max_token_chunk_size for sg in prefill_seq_groups]):
+        def get_max_prefill_chunk_steps(
+                prefill_seq_groups: Iterable[ScheduledSequenceGroup],
+                max_token_chunk_size: int):
+            if any([
+                    sg.token_chunk_size < max_token_chunk_size
+                    for sg in prefill_seq_groups
+            ]):
                 return 1
 
-            prefill_num_uncomputed = [psg.seq_group.get_num_uncomputed_tokens() for psg in prefill_seq_groups] 
-            # we floor because, the processing the last 
+            prefill_num_uncomputed = [
+                psg.seq_group.get_num_uncomputed_tokens()
+                for psg in prefill_seq_groups
+            ]
+            # we floor because, the processing the last
             import math
-            max_steps = [int(math.ceil(float(x) / float(max_token_chunk_size))) \
+            max_steps = \
+                [int(math.ceil(float(x) / float(max_token_chunk_size))) \
                                 for x in prefill_num_uncomputed]
 
             max_steps = [
                 int(math.ceil(float(x) / float(max_token_chunk_size)))
-                    for x in prefill_num_uncomputed]
-            # ignore the last chunk as it would require ouptut sampling.
+                for x in prefill_num_uncomputed
+            ]
+            # ignore the last chunk as it would require output sampling.
             max_steps = [max(1, x - 1) for x in max_steps]
             max_prefill_chunk_steps = min(max_steps)
-            return max_prefill_chunk_steps 
+            return max_prefill_chunk_steps
 
         # If it is all decode dont do anything. multi-step is all-set !!
         if scheduler_outputs.num_prefill_groups == 0:
             return scheduler_outputs
 
-        prefill_seq_groups: List[ScheduledSequenceGroup] = [ sg for sg in scheduler_outputs.scheduled_seq_groups if sg.seq_group.is_prefill()]
-        max_prefill_steps = get_max_prefill_chunk_steps(prefill_seq_groups, self.scheduler_config.multi_step_chunked_prefill_max_token_chunk) 
+        prefill_seq_groups: List[ScheduledSequenceGroup] = [
+            sg for sg in scheduler_outputs.scheduled_seq_groups
+            if sg.seq_group.is_prefill()
+        ]
+        max_prefill_steps = get_max_prefill_chunk_steps(
+            prefill_seq_groups,
+            self.scheduler_config.multi_step_chunked_prefill_max_token_chunk)
         assert max_prefill_steps >= 1
-        max_prefill_steps = min(max_prefill_steps, self.scheduler_config.num_scheduler_steps)
+        max_prefill_steps = min(max_prefill_steps,
+                                self.scheduler_config.num_scheduler_steps)
 
-        # update all the sequence to run only until max_scheduled_prefill_chunk_steps
-        # We curtail the decodes intentionally so the decodes runs are not inefficient.
+        # update all the sequence to run only until
+        # max_scheduled_prefill_chunk_steps. We curtail the decodes
+        # intentionally so the decodes runs are not inefficient.
         for sg in scheduler_outputs.scheduled_seq_groups:
             #sg.seq_group.init_multi_step(1)
             sg.seq_group.init_multi_step(max_prefill_steps)
@@ -1101,7 +1124,7 @@ class Scheduler:
         scheduler_start_time = time.perf_counter()
         scheduler_outputs = self._schedule()
         now = time.time()
-            
+
         if not self.cache_config.enable_prefix_caching:
             common_computed_block_nums = []
 
@@ -1221,22 +1244,28 @@ class Scheduler:
                 else:
                     seq_group.metrics.scheduler_time = scheduler_time
 
-
         ## debug
-        print ("Scheduler :: \n")
-        for idx, sg in enumerate(scheduler_outputs.scheduled_seq_groups):
-            assert len(sg.seq_group.seqs_dict) == 1
-            sgml = seq_group_metadata_list[idx]
-            seq_id = list(sg.seq_group.seqs_dict.keys())[0]
-            num_uncomputed = sg.seq_group.get_num_uncomputed_tokens()
-            num_computed = sg.seq_group.seqs[0].data._num_computed_tokens
-            prompt_ids = sg.seq_group.prompt_token_ids
-            num_steps = sg.seq_group.state.num_steps
-            stage = sg.seq_group.seqs[0].data.stage 
-            stage = "prefill" if stage == SequenceStage.PREFILL else "decode"
-            token_chunk_size = sg.token_chunk_size
-            print (f"    - id {seq_id} | #steps {num_steps} | stage {stage} | token-chunk {token_chunk_size} | do-sample {sgml.do_sample} -> #prompts {len(prompt_ids)} -> #computed {num_computed}")
-            print("\n")
+        #from vllm.sequence import SequenceStage
+        #print("Scheduler :: \n")
+        #for idx, sg in enumerate(scheduler_outputs.scheduled_seq_groups):
+        #    assert len(sg.seq_group.seqs_dict) == 1
+        #    sgml = seq_group_metadata_list[idx]
+        #    seq_id = list(sg.seq_group.seqs_dict.keys())[0]
+        #    num_uncomputed = sg.seq_group.get_num_uncomputed_tokens()
+        #    num_computed = sg.seq_group.seqs[0].data._num_computed_tokens
+        #    prompt_ids = sg.seq_group.prompt_token_ids
+        #    num_steps = sg.seq_group.state.num_steps
+        #    stage = sg.seq_group.seqs[0].data.stage
+        #    stage = "prefill" if stage == SequenceStage.PREFILL else "decode"
+        #    token_chunk_size = sg.token_chunk_size
+        #    print(
+        #        (f"    - id {seq_id} |"
+        #         f" steps {num_steps} |"
+        #         f" stage {stage} |"
+        #         f" token-chunk {token_chunk_size} |"
+        #         f" do-sample {sgml.do_sample} ->"
+        #         f" #prompts {len(prompt_ids)} ->"
+        #         f" #computed {num_computed}\n"))
 
         return seq_group_metadata_list, scheduler_outputs
 
@@ -1432,7 +1461,10 @@ class Scheduler:
         # If number of seq > 1, it means it is doing beam search in a
         # decode phase. Do not chunk in that case.
         if enable_chunking and len(seqs) == 1:
-            num_new_tokens = min(num_new_tokens, budget.remaining_token_budget())
-            num_new_tokens = min(self.scheduler_config.multi_step_chunked_prefill_max_token_chunk,
-                                 num_new_tokens) if self.scheduler_config.is_multi_step else num_new_tokens
+            num_new_tokens = min(num_new_tokens,
+                                 budget.remaining_token_budget())
+            num_new_tokens = min(
+                self.scheduler_config.
+                multi_step_chunked_prefill_max_token_chunk, num_new_tokens
+            ) if self.scheduler_config.is_multi_step else num_new_tokens
         return num_new_tokens

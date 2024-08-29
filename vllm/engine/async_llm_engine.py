@@ -35,7 +35,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import print_warning_once
 
 logger = init_logger(__name__)
-ENGINE_ITERATION_TIMEOUT_S = 1000000 #envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
+ENGINE_ITERATION_TIMEOUT_S = 1000000  #envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
 
 
 class AsyncEngineDeadError(RuntimeError):
@@ -382,7 +382,7 @@ class _AsyncLLMEngine(LLMEngine):
                 for seq_group in seq_group_metadata_list[1:]
         ]):
             raise AssertionError(("All running sequence groups should "
-                                      "have the same remaining steps."))
+                                  "have the same remaining steps."))
 
         return remaining_steps
 

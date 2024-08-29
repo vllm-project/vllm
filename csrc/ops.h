@@ -54,17 +54,15 @@ void gelu_fast(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_quick(torch::Tensor& out, torch::Tensor& input);
 
-void advance_step(int64_t num_prefill_tokens,
-                  int64_t num_prefills,
-                  int64_t num_seqs, int64_t num_queries, int64_t block_size,
-                  int64_t token_chunk_size,
-                  torch::Tensor& input_tokens, torch::Tensor& sampled_token_ids,
-                  torch::Tensor& input_positions, torch::Tensor& seq_lens,
-                  torch::Tensor& slot_mapping, torch::Tensor& block_tables,
-                  torch::Tensor& seq_start_loc,
-                  c10::optional<torch::Tensor> context_lens,
-                  c10::optional<torch::Tensor> const& prefill_steps_tokens,
-                  c10::optional<torch::Tensor> const& prefill_steps_slot_mapping);
+void advance_step(
+    int64_t num_prefill_tokens, int64_t num_prefills, int64_t num_seqs,
+    int64_t num_queries, int64_t block_size, int64_t token_chunk_size,
+    torch::Tensor& input_tokens, torch::Tensor& sampled_token_ids,
+    torch::Tensor& input_positions, torch::Tensor& seq_lens,
+    torch::Tensor& slot_mapping, torch::Tensor& block_tables,
+    torch::Tensor& seq_start_loc, c10::optional<torch::Tensor> context_lens,
+    c10::optional<torch::Tensor> const& prefill_steps_tokens,
+    c10::optional<torch::Tensor> const& prefill_steps_slot_mapping);
 
 #ifndef USE_ROCM
 torch::Tensor aqlm_gemm(const torch::Tensor& input, const torch::Tensor& codes,

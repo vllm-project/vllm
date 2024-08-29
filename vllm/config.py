@@ -923,7 +923,9 @@ class SchedulerConfig:
         self.num_scheduler_steps = num_scheduler_steps
         self.send_delta_data = send_delta_data
         # get from env
-        self.multi_step_chunked_prefill_max_token_chunk: int = envs.VLLM_MULTI_STEP_CHUNKED_PREFILL_MAX_TOKEN_CHUNK
+        # TODO (varun) : Is there a better way ?
+        self.multi_step_chunked_prefill_max_token_chunk: int = \
+            envs.VLLM_MULTI_STEP_CHUNKED_PREFILL_MAX_TOKEN_CHUNK
         self._verify_args()
 
     def _verify_args(self) -> None:
