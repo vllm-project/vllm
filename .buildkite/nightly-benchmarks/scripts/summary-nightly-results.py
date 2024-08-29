@@ -21,6 +21,8 @@ serving_column_mapping = {
     # "std_itl_ms": "Std ITL (ms)",
     "mean_tpot_ms": "Mean TPOT (ms)",
     "std_tpot_ms": "Std TPOT (ms)",
+    "mean_latency_ms": "Mean Latency (ms)",
+    "std_latency_ms": "Std Latency (ms)",
     "input_throughput": "Input Tput (tok/s)",
     "output_throughput": "Output Tput (tok/s)",
     "total_input_tokens": "Total input tokens",
