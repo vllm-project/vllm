@@ -77,18 +77,25 @@ Call the script ``vllm_start_script/vllm_start.sh``
     svrcmd="cd benchmarks && VLLM_CPU_KVCACHE_SPACE=40 VLLM_CPU_OMP_THREADS_BIND=\"$CPU_BIND\" python3 -m vllm.entrypoints.openai.api_server --model $MODEL  --dtype=bfloat16 --device cpu --disable-log-stats"
     eval $svrcmd
 
+Create Docker Network
+------------
+
+.. code-block:: console
+
+    docker network create vllm_nginx
+
 Launch vLLM Containers
 ------------
 
 .. code-block:: console
 
     model=meta-llama/Llama-2-7b-hf
-    docker run -itd --privileged --ipc host --cap-add=SYS_ADMIN --shm-size=10.24gb -e CPU_BIND=0-47  -e MODEL=$model -v ./vllm_start_script/:/workspace/vllm_start_script/ -p 8081:8000 --name vllm0 vllm bash /workspace/vllm_start_script/vllm_start.sh
-    docker run -itd --privileged --ipc host --cap-add=SYS_ADMIN --shm-size=10.24gb -e CPU_BIND=48-95 -e MODEL=$model -v ./vllm_start_script/:/workspace/vllm_start_script/ -p 8082:8000 --name vllm1 vllm bash /workspace/vllm_start_script/vllm_start.sh
+    docker run -itd --privileged --ipc host --network vllm_nginx --cap-add=SYS_ADMIN --shm-size=10.24gb -e CPU_BIND=0-47  -e MODEL=$model -v ./vllm_start_script/:/workspace/vllm_start_script/ -p 8081:8000 --name vllm0 vllm bash /workspace/vllm_start_script/vllm_start.sh
+    docker run -itd --privileged --ipc host --network vllm_nginx --cap-add=SYS_ADMIN --shm-size=10.24gb -e CPU_BIND=48-95 -e MODEL=$model -v ./vllm_start_script/:/workspace/vllm_start_script/ -p 8082:8000 --name vllm1 vllm bash /workspace/vllm_start_script/vllm_start.sh
 
 Launch Nginx
 ------------
 
 .. code-block:: console
 
-    docker run -itd -p 8000:80 -v ./nginx_conf/:/etc/nginx/conf.d/ --name nginx-lb nginx-lb:latest 
+    docker run -itd -p 8000:80 --network vllm_nginx -v ./nginx_conf/:/etc/nginx/conf.d/ --name nginx-lb nginx-lb:latest 
