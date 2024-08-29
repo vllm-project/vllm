@@ -35,7 +35,6 @@
         "vllm_055_server_parameters": {
             "disable_log_stats": "",
             "disable_log_requests": "",
-            "max_model_len": "20000",
             "gpu_memory_utilization": 0.95
         },
         "vllm_055_client_parameters": {
