@@ -450,8 +450,8 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         super().__init__()
-        # TODO keep the fused mixtral_quant codepath around as long as we don't
-        # support all quant_types
+        # TODO keep the unfused mixtral_quant-like codepath around as long as
+        # we don't support all quant_types
         self.is_compressed = isinstance(quant_config, CompressedTensorsConfig)
         self.use_fused_moe = (
             self.is_compressed
