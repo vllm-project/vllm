@@ -83,11 +83,6 @@ class LogitsProcessor(nn.Module):
         logits = lm_head.linear_method.apply(lm_head,
                                              hidden_states,
                                              bias=embedding_bias)
-
-        # FIXME(Isotr0py): This will break normal tp, we have to find a better way to handle this
-        if lm_head.tp_size > 1:
-            logits = logits[..., :self.org_vocab_size//lm_head.tp_size]
-
         if self.use_gather:
             # None may be returned for rank > 0
             logits = tensor_model_parallel_gather(logits)
