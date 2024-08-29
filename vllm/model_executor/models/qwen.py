@@ -49,15 +49,18 @@ from vllm.sequence import IntermediateTensors, SequenceData
 from .utils import is_pp_missing_parameter, make_layers
 
 logger = init_logger(__name__)
+
+# NOTE: Qwen models have a few other special tags, e.g., ref, bbox, quad;
+# for the time being, these tags are not considered as special at encoding
+# time. This may change as VLLMs multimodal API changes in the future.
 IMG_START = "<img>"
 IMG_END = "</img>"
 IMG_PAD = "<imgpad>"
-# Qwen models have a few other special tags, e.g., ref, bbox, quad;
-# for the time being, these tags are not considered as special at encoding
-# time. This may change as VLLMs multimodal API changes in the future.
-
-# Qwen images are encoded into a fixed context of 256
+# Image context is fixed at 256 for all images
 MAX_QWEN_IMG_TOKENS = 256
+# Image normalization params
+CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
+CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
 
 
 class QwenImagePixelInputs(TypedDict):
@@ -85,6 +88,11 @@ class QwenImageEmbeddingInputs(TypedDict):
 QwenImageInputs = Union[QwenImagePixelInputs, QwenImageEmbeddingInputs]
 
 
+### Visual Transformer def / helpers
+# These are only used if the model has a visual component in its config.
+# The visual components and helpers have all been copied and adapted from
+# the implementations in qwen-vl / qwen-vl-chat unless otherwise stated.
+# TODO - visual component is not currently using VLLM parallel implementations.
 def get_abs_pos(abs_pos, tgt_size):
     # abs_pos: L, C
     # tgt_size: M
@@ -101,10 +109,10 @@ def get_abs_pos(abs_pos, tgt_size):
             mode="bicubic",
             align_corners=False,
         ).permute(0, 2, 3, 1).flatten(0, 2).to(dtype=dtype)
-    else:
-        return abs_pos
+    return abs_pos
 
 
+# sin/cos positional embedding helpers are copied from:
 # https://github.com/facebookresearch/mae/blob/efb2a8062c206524e35e47d04501ed4f544c0ae8/util/pos_embed.py#L20
 def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False):
     """
@@ -239,7 +247,8 @@ class VisualAttention(nn.Module):
         self.hidden_size_per_partition = embed_dim
 
         # Strided linear layer.
-        assert self._qkv_same_embed_dim, 'Only Support SelfAttention Currently'
+        assert self._qkv_same_embed_dim, \
+                'Visual Attention implementation only supports self-attention'
         self.in_proj = nn.Linear(embed_dim, 3 * embed_dim)
         self.out_proj = nn.Linear(embed_dim, embed_dim)
         self.norm_factor = math.sqrt(self.hidden_size_per_attention_head)
@@ -248,8 +257,8 @@ class VisualAttention(nn.Module):
         # query/key/value: [sq, b, h]
         sq, b, _ = query.size()
 
-        assert torch.allclose(query,
-                              key), 'Only Support Self-Attention Currently'
+        assert torch.allclose(query, key), \
+                'Visual Attention implementation only supports self-attention'
         sk = sq
         mixed_x_layer = self.in_proj(query)
 
@@ -480,7 +489,15 @@ class VisionTransformer(nn.Module):
 
         return x
 
-    def get_image_positions(self, input_ids):
+    def get_image_positions(self,
+                            input_ids: torch.Tensor) -> Optional[torch.Tensor]:
+        """Given the input IDs, extracts start/stop points corresponding to
+        images.
+
+        args:
+        Returns:
+            Optional torch tensor corresponding to start/stop pairs of images.
+        """
         if torch.any(input_ids == self.image_start_id):
             bos_pos = torch.where(input_ids == self.image_start_id)
             eos_pos = torch.where(input_ids == self.image_end_id)
@@ -720,10 +737,13 @@ def get_image_text(image_num: int, padding: bool) -> str:
     """Retrieves a placeholder text that when tokenized, will be expanded with
     image pads.
 
-    NOTE: The reason that the reason we don't directly encode the imagepadding
-    here is that it will break the re-encoding of the tokens tokenizer,
-    because the contents between the start / end are treated as bytes
-    containing a URL that then get padded up to the image context size.
+    Args:
+        image_num: The number of the image that we want a text prompt for.
+            Images should be indexed starting at 1.
+        padding: Whether or not padding should be manually added.
+
+    Returns:
+        Text placeholder prompt for the image being considered.
     """
     image_start = f"Picture {image_num}: {IMG_START}"
     image_end = f"{IMG_END}\n"
@@ -733,6 +753,19 @@ def get_image_text(image_num: int, padding: bool) -> str:
 
 
 def input_processor_for_qwen(ctx: InputContext, llm_inputs: LLMInputs):
+    """Processes the inputs, which may or may not be multimodal.
+    Multimodal inputs will only be processed if the model has a "visual"
+    component in its model config, otherwise they'll be ignored.
+
+    Args:
+        ctx: Context of the loaded model.
+        llm_inputs: LLM inputs which may have a multi_modal_data attribute.
+
+    Returns:
+        If the model is language only or not multimodal inputs were provided,
+        returns llm_inputs unmodified. Otherwise, processes the multimodal
+        images / image embeddings and adds the fixed-length image placeholders.
+    """
     multi_modal_data = llm_inputs.get("multi_modal_data")
 
     # Only process images if we have multimodal data and a visual config
@@ -754,12 +787,14 @@ def input_processor_for_qwen(ctx: InputContext, llm_inputs: LLMInputs):
                 f"Expected img embeds to be have 3 dimensions, got {num_dims}")
         num_images = 1 if num_dims == 2 else image_data.shape[0]
     else:
+        # TODO - handle multiple image inputs once the API is solidified
         num_images = 1
 
     if prompt is None:
         prompt = tokenizer.decode(prompt_token_ids)
 
     # Iteratively replace image tags for every image that we expect
+    # Currently we only allow multiple images input as embeddings.
     num_img_tags = prompt.count("<image>")
 
     if num_img_tags != num_images:
@@ -785,6 +820,17 @@ def input_processor_for_qwen(ctx: InputContext, llm_inputs: LLMInputs):
 
 
 def input_mapper_for_qwen(ctx: InputContext, data: object):
+    """Maps the input data to its MultiModalInputs (if any).
+
+    Args:
+        ctx: Context of the loaded model.
+        data: data potentially containing image/image embeddings to be mapped
+            to pixel_values in .forward() for a visual QWenLMHeadModel model.
+
+    Returns:
+        MultiModalInputs containing the stacked normalized images tensor or
+        image embeddings.
+    """
     # Early exit if we have provided an image to a language only Qwen model
     hf_config = ctx.get_hf_config()
     if not hasattr(hf_config, "visual"):
@@ -837,22 +883,39 @@ def input_mapper_for_qwen(ctx: InputContext, data: object):
     return MultiModalInputs({"pixel_values": pixel_values})
 
 
-def build_normalization_transform(image_size):
+def build_normalization_transform(image_size: int) -> transforms.Compose:
     """Builds a normalization transform which can be applied to one or
     more input images from which we want to extract visual features.
+
+    Args:
+        image_size: size of the image to be processed for visual embeddings.
+    
+    Returns:
+        Callable transform for normalizing and resizing one RGB image.
     """
-    mean = (0.48145466, 0.4578275, 0.40821073)
-    std = (0.26862954, 0.26130258, 0.27577711)
     return transforms.Compose([
         transforms.Resize((image_size, image_size),
                           interpolation=InterpolationMode.BICUBIC),
         transforms.ToTensor(),
-        transforms.Normalize(mean=mean, std=std),
+        transforms.Normalize(mean=CLIP_MEAN, std=CLIP_STD),
     ])
 
 
 def dummy_data_for_qwen(ctx: InputContext, seq_len: int,
                         mm_counts: Mapping[str, int]):
+    """Build dummy data for warming up Qwen models; this will only contain text
+    matching the defaults for VLLM unless the model has a visual config.
+
+    Args:
+        ctx: Context of the loaded model.
+        seq_len: Number of tokens in the text sequence. If this is a visual
+            model, sequence length will be ignored, and the input sequence 
+            will be determined by the number of images.
+        mm_counts: multimodal data counts.
+    
+    Returns:
+        Tuple containing sequential and multimodal data.
+    """
     hf_config = ctx.get_hf_config()
 
     # The presence of a visual config indicates this is a multimodal model.
@@ -868,21 +931,26 @@ def dummy_data_for_qwen(ctx: InputContext, seq_len: int,
     tokenizer = cached_get_tokenizer(model_config.tokenizer,
                                      trust_remote_code=True)
 
-    # Encode an image pair for each image. During the encoding, qwen tokenizers
-    # will add image pads between the start/end. We leave this to the
-    # tokenizer, because we need to rely on the number of added pads at
-    # inference time.
-    seq_data = SequenceData(
-        tokenizer.encode((IMG_START + IMG_END) * num_images,
-                         add_special_tokens=False,
-                         return_tensors="pt")[0].tolist())
-    assert seq_data.get_len() == ((2 + MAX_QWEN_IMG_TOKENS) * num_images)
+    # Build the image prompts with no imgpads; the tokenizer will add img pads
+    image_prompt = ''.join(
+        [get_image_text(idx, False) for idx in range(1, num_images + 1)])
+    toks = tokenizer.encode(image_prompt,
+                            add_special_tokens=False,
+                            return_tensors="pt")[0].tolist()
+
+    # Make sure we actually get the fixed context size per tok padding
+    num_pads = toks.count(tokenizer.encode(IMG_PAD)[0])
+    if num_pads != (num_images * MAX_QWEN_IMG_TOKENS):
+        raise ValueError(
+            f"Tokenized dummy data should encode {MAX_QWEN_IMG_TOKENS} pads"
+            f" per image, but got {num_pads} pads for {num_images} image(s)"
+            " in total. Are you using a qwen tokenizer?")
 
     # Build the input images; width/height doesn't actually matter here since
     # the data will get resized and the # of tokens per image is constant
     image = Image.new("RGB", (224, 224), color=0)
     mm_data = {"image": image if num_images == 1 else [image] * num_images}
-    return seq_data, mm_data
+    return SequenceData(toks), mm_data
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_qwen)
@@ -914,6 +982,16 @@ class QWenLMHeadModel(nn.Module, SupportsMultiModal):
     def _get_image_input_type(
             self,
             pixel_values: Optional[torch.Tensor]) -> Optional[QwenImageInputs]:
+        """Determines if the provided pixel_values are normalized pixel values
+        or image embeddings.
+
+        Args:
+            pixel_values: Optional data to processed into visual embeddings.
+
+        Returns:
+            None of the QwenImageInputs type used to determine whether or not
+            the visual transformer needs to process the pixel_values.
+        """
         if pixel_values is not None and self.transformer.visual is not None:
             if len(pixel_values.shape) == 3 and pixel_values.shape[
                     1] == MAX_QWEN_IMG_TOKENS and pixel_values.shape[
