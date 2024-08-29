@@ -88,13 +88,13 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
                                                    2 * intermediate_size,
                                                    dtype=torch.float32),
                                        requires_grad=False)
-        layer.register_parameter("w13_scale", w13_scale)
+        layer.register_parameter("w13_weight_scale", w13_scale)
 
         w2_scale = torch.nn.Parameter(torch.zeros(num_experts,
                                                   hidden_size,
                                                   dtype=torch.float32),
                                       requires_grad=False)
-        layer.register_parameter("w2_scale", w2_scale)
+        layer.register_parameter("w2_weight_scale", w2_scale)
 
     def apply(self,
               layer: torch.nn.Module,
