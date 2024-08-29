@@ -1618,7 +1618,7 @@ class CUDAGraphRunner:
                 **kwargs,
             )
         # Wait for the warm up operations to finish before proceeding with
-        # Graph Capture.
+        # Graph Capture
         torch.cuda.synchronize()
         # Capture the graph.
         self._graph = torch.cuda.CUDAGraph()
