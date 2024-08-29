@@ -268,7 +268,8 @@ class Qwen2VisionBlock(nn.Module):
                                   act_layer=act_layer,
                                   quant_config=quant_config)
 
-    def forward(self, x, cu_seqlens, rotary_pos_emb) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, cu_seqlens: torch.Tensor,
+                rotary_pos_emb: torch.Tensor) -> torch.Tensor:
         x = x + self.attn(self.norm1(x),
                           cu_seqlens=cu_seqlens,
                           rotary_pos_emb=rotary_pos_emb)
@@ -430,7 +431,7 @@ class Qwen2VisionTransformer(nn.Module):
     def device(self) -> torch.device:
         return self.blocks[0].mlp.fc2.weight.device
 
-    def rot_pos_emb(self, grid_thw):
+    def rot_pos_emb(self, grid_thw: torch.Tensor) -> torch.Tensor:
         pos_ids = []
         for t, h, w in grid_thw:
             hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
@@ -486,8 +487,6 @@ class Qwen2VisionTransformer(nn.Module):
 # === Vision input helpers === #
 
 cached_get_processor = lru_cache(get_processor)
-
-MAX_TEMPORAL_IMAGE_NUM = 10
 
 
 def mm_input_mapper_for_qwen2_vl(
