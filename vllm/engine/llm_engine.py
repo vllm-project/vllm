@@ -1275,7 +1275,7 @@ class LLMEngine:
             outputs,
             scheduled_seq_groups=scheduler_outputs.scheduled_seq_groups,
             return_hidden_states=self.model_config.return_hidden_states)
-        
+
         finished_before: List[int] = []
         for i, seq_group_meta in enumerate(seq_group_metadata_list):
             scheduled_seq_group = scheduler_outputs.scheduled_seq_groups[i]
@@ -1284,7 +1284,7 @@ class LLMEngine:
             if seq_group.is_finished():
                 finished_before.append(i)
                 continue
-            
+
             output = outputs_by_sequence_group[i]
 
             if not is_async:
