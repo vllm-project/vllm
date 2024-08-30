@@ -18,7 +18,6 @@ PG_WAIT_TIMEOUT = 1800
 
 try:
     import ray
-    from ray._private.accelerators import TPUAcceleratorManager
     from ray._private.state import available_resources_per_node
     from ray.util import placement_group_table
     from ray.util.placement_group import PlacementGroup
@@ -48,9 +47,9 @@ try:
             return node_id, gpu_ids
 
         def execute_model_spmd(
-            self,
-            req_or_tuple: Union[bytes, Tuple[bytes,
-                                             Optional[IntermediateTensors]]],
+            self, req_or_tuple: Union[bytes,
+                                      Tuple[bytes,
+                                            Optional[IntermediateTensors]]]
         ) -> bytes:
             """Execute model in SPMD fashion: used only when SPMD worker and
             compiled DAG are both enabled.
@@ -72,7 +71,6 @@ try:
             # on a background thread, so we need to reset torch's current
             # device.
             import torch
-
             if not self.compiled_dag_cuda_device_set:
                 torch.cuda.set_device(self.worker.device)
                 self.compiled_dag_cuda_device_set = True
@@ -87,7 +85,7 @@ try:
 
             return output
 
-        def override_env_vars(self, vars):
+        def override_env_vars(self, vars: Dict[str, str]):
             os.environ.update(vars)
 
     ray_import_err = None
@@ -110,19 +108,16 @@ def assert_ray_available():
                          "`pip install ray`.") from ray_import_err
 
 
-def _verify_bundles(
-    placement_group: "PlacementGroup",
-    parallel_config: ParallelConfig,
-    device_str: str,
-):
+def _verify_bundles(placement_group: "PlacementGroup",
+                    parallel_config: ParallelConfig, device_str: str):
     """Verify a given placement group has bundles located in the right place.
 
     There are 2 rules.
     - Warn if all tensor parallel workers cannot fit in a single node.
     - Fail if driver node is not included in a placement group.
     """
-    assert (ray.is_initialized(
-    )), "Ray is not initialized although distributed-executor-backend is ray."
+    assert ray.is_initialized(), (
+        "Ray is not initialized although distributed-executor-backend is ray.")
     pg_data = placement_group_table(placement_group)
     # bundle_idx -> node_id
     bundle_to_node_ids = pg_data["bundles_to_node_id"]
@@ -154,13 +149,8 @@ def _verify_bundles(
                 "unless you have fast interconnect across nodes, like "
                 "Infiniband. To resolve this issue, make sure you have more "
                 "than %d GPUs available at each node.",
-                parallel_config.tensor_parallel_size,
-                device_str,
-                len(bundles),
-                device_str,
-                node_id,
-                parallel_config.tensor_parallel_size,
-            )
+                parallel_config.tensor_parallel_size, device_str, len(bundles),
+                device_str, node_id, parallel_config.tensor_parallel_size)
 
 
 def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
@@ -189,9 +179,7 @@ def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
             "Waiting for creating a placement group of specs for "
             "%d seconds. specs=%s. Check "
             "`ray status` to see if you have enough resources.",
-            int(time.time() - s),
-            placement_group_specs,
-        )
+            int(time.time() - s), placement_group_specs)
 
     try:
         ray.get(pg_ready_ref, timeout=0)
@@ -216,9 +204,7 @@ def _wait_until_pg_removed(current_placement_group: "PlacementGroup"):
         wait_interval *= 2
         logger.info(
             "Waiting for removing a placement group of specs for "
-            "%d seconds.",
-            int(time.time() - s),
-        )
+            "%d seconds.", int(time.time() - s))
         time.sleep(wait_interval)
 
 
@@ -241,11 +227,9 @@ def initialize_ray_cluster(
 
     # Connect to a ray cluster.
     if is_hip() or is_xpu():
-        ray.init(
-            address=ray_address,
-            ignore_reinit_error=True,
-            num_gpus=parallel_config.world_size,
-        )
+        ray.init(address=ray_address,
+                 ignore_reinit_error=True,
+                 num_gpus=parallel_config.world_size)
     else:
         ray.init(address=ray_address, ignore_reinit_error=True)
 
@@ -282,9 +266,9 @@ def initialize_ray_cluster(
                 f"The number of required {device_str}s exceeds the total "
                 f"number of available {device_str}s in the placement group.")
         # Create a new placement group
-        placement_group_specs: List[Dict[str, float]] = [{
+        placement_group_specs: List[Dict[str, float]] = ([{
             device_str: 1.0
-        } for _ in range(parallel_config.world_size)]
+        } for _ in range(parallel_config.world_size)])
 
         # vLLM engine is also a worker to execute model with an accelerator,
         # so it requires to have the device in a current node. Check if
@@ -313,7 +297,8 @@ def initialize_ray_cluster(
     parallel_config.placement_group = current_placement_group
 
 
-def get_num_tpu_nodes():
+def get_num_tpu_nodes() -> int:
+    from ray._private.accelerators import TPUAcceleratorManager
     cluster_resources = ray.cluster_resources()
     total_tpus = int(cluster_resources["TPU"])
     tpus_per_node = TPUAcceleratorManager.get_current_node_num_accelerators()
@@ -321,7 +306,7 @@ def get_num_tpu_nodes():
     return total_tpus // tpus_per_node
 
 
-def get_num_nodes_in_placement_group():
+def get_num_nodes_in_placement_group() -> int:
     pg_table = ray.util.placement_group_table()
     current_pg = ray.util.get_current_placement_group()
     num_nodes = 0
