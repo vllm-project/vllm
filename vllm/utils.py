@@ -1116,7 +1116,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
     def _pull_args_from_config(args: List[str]) -> List[str]:
         """
             method to pull arguments specified in the config file
-            into the commandline args variable.
+            into the command-line args variable.
             
             The arguments in config file will be inserted between 
             the argument list.
