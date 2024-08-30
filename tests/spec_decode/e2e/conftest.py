@@ -58,10 +58,6 @@ class AsyncLLM:
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
 
-        # Needed to engine_use_ray works as a deprecated feature,
-        # otherwise the following constructor will raise an exception
-        os.environ["VLLM_ALLOW_ENGINE_USE_RAY"] = "1"
-
         engine_args = AsyncEngineArgs(
             model=model,
             tokenizer=tokenizer,
@@ -81,7 +77,6 @@ class AsyncLLM:
             # For now use ray for the distributed back-end, since
             # we rely on the use of engine_use_ray=True to avoid
             # reinitializing CUDA in the same process (driver worker)
-            engine_use_ray=True,
             distributed_executor_backend="ray",
             disable_custom_all_reduce=disable_custom_all_reduce,
             **kwargs,
