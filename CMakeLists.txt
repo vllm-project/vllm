@@ -236,6 +236,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
           "-gencode arch=compute_90a,code=sm_90a")
   endif()
 
+
   #
   # Machete kernels
 
@@ -293,6 +294,12 @@ define_gpu_extension_target(
   INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
   USE_SABI 3
   WITH_SOABI)
+
+# If CUTLASS is compiled on NVCC >= 12.5, it by default uses 
+# cudaGetDriverEntryPointByVersion as a wrapper to avoid directly calling the 
+# driver API. This causes problems when linking with earlier versions of CUDA.
+# Setting this variable sidesteps the issue by calling the driver directly.
+target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 
 #
 # _moe_C extension
