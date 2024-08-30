@@ -138,6 +138,8 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[int] = []
         input_positions: List[int] = []
+        # The number of original input tokens of each sequence
+        num_orig_input_tokens_list: List[int] = []
         slot_mapping: List[int] = []
         seq_lens: List[int] = []
         multi_modal_inputs_list: List[MultiModalInputs] = []
@@ -160,6 +162,8 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
             input_positions.extend(list(range(computed_len, seq_len)))
+            num_orig_input_tokens_list.extend([seq_data.get_prompt_len()] *
+                                              (seq_len - computed_len))
 
             mm_data = seq_group_metadata.multi_modal_data
             if mm_data:
@@ -196,6 +200,9 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
         input_positions = torch.tensor(input_positions,
                                        dtype=torch.long,
                                        device=self.device)  # type: ignore
+        num_orig_input_tokens_tensor = torch.tensor(
+            num_orig_input_tokens_list, dtype=torch.long,
+            device=self.device)  # type: ignore
         slot_mapping = torch.tensor(slot_mapping,
                                     dtype=torch.long,
                                     device=self.device)  # type: ignore
@@ -204,6 +211,7 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
             is_prompt=True,
             seq_lens=seq_lens,
             seq_lens_tensor=torch.tensor([]),
+            num_orig_input_tokens_tensor=num_orig_input_tokens_tensor,
             max_decode_seq_len=0,
             num_prefills=len(seq_lens),
             num_prefill_tokens=num_prompt_tokens,
@@ -224,6 +232,8 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[int] = []
         input_positions: List[int] = []
+        # The number of original input tokens of each sequence
+        num_orig_input_tokens_list: List[int] = []
         slot_mapping: List[int] = []
         seq_lens: List[int] = []
         block_tables: List[List[int]] = []
@@ -242,6 +252,7 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
                 seq_len = seq_data.get_len()
                 position = seq_len - 1
                 input_positions.append(position)
+                num_orig_input_tokens_list.append(seq_data.get_prompt_len())
 
                 seq_len = seq_len if self.sliding_window is None else min(
                     seq_len, self.sliding_window)
@@ -267,6 +278,9 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
         input_positions = torch.tensor(input_positions,
                                        dtype=torch.long,
                                        device=self.device)
+        num_orig_input_tokens_tensor = torch.tensor(
+            num_orig_input_tokens_list, dtype=torch.long,
+            device=self.device)  # type: ignore
         slot_mapping = torch.tensor(slot_mapping,
                                     dtype=torch.long,
                                     device=self.device)
@@ -291,6 +305,7 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
             num_decode_tokens=len(input_tokens),
             num_prefills=0,
             block_tables=block_tables,
+            num_orig_input_tokens_tensor=num_orig_input_tokens_tensor,
         )
         return (
             input_tokens,
