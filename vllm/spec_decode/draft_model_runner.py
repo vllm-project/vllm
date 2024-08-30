@@ -3,6 +3,7 @@ from typing import List, Optional
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.sampler import SamplerOutput
 
 try:
     from vllm.attention.backends.flash_attn import FlashAttentionMetadata
@@ -16,8 +17,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          PromptAdapterConfig, SchedulerConfig)
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalInputs
-from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
-                           SamplerOutput)
+from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.worker.model_runner import (ModelInputForGPUWithSamplingMetadata,
                                       ModelRunner)
 

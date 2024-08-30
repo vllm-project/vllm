@@ -2,9 +2,10 @@ from array import array
 
 import pytest
 
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE,
-                           CompletionSequenceGroupOutput, SamplerOutput,
-                           SequenceData, SequenceOutput)
+                           CompletionSequenceGroupOutput, SequenceData,
+                           SequenceOutput)
 
 from .core.utils import create_dummy_prompt
 

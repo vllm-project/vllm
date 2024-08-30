@@ -7,8 +7,9 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.utils import set_random_seed
-from vllm.sequence import ExecuteModelRequest, SamplerOutput, SequenceOutput
+from vllm.sequence import ExecuteModelRequest, SequenceOutput
 from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.metrics import (AsyncMetricsCollector,
                                       SpecDecodeWorkerMetrics)
