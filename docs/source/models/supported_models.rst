@@ -147,6 +147,10 @@ Decoder-only Language Models
     - Phi-3-Small
     - :code:`microsoft/Phi-3-small-8k-instruct`, :code:`microsoft/Phi-3-small-128k-instruct`, etc.
     -
+  * - :code:`PhiMoEForCausalLM`
+    - Phi-3.5-MoE
+    - :code:`microsoft/Phi-3.5-MoE-instruct`, etc.
+    -
   * - :code:`PersimmonForCausalLM`
     - Persimmon
     - :code:`adept/persimmon-8b-base`, :code:`adept/persimmon-8b-chat`, etc.
