@@ -41,29 +41,29 @@ steps:
 
 
 
-  # - label: "A100 sglang benchmark"
-  #   priority: 100
-  #   agents:
-  #     queue: A100
-  #   plugins:
-  #     - kubernetes:
-  #         podSpec:
-  #           <<: *common_pod_spec
-  #           containers:
-  #             - image: lmsysorg/sglang:v0.2.12-cu118
-  #               <<: *common_container_settings
+  - label: "A100 sglang benchmark"
+    priority: 100
+    agents:
+      queue: A100
+    plugins:
+      - kubernetes:
+          podSpec:
+            <<: *common_pod_spec
+            containers:
+              - image: lmsysorg/sglang:v0.2.12-cu118
+                <<: *common_container_settings
 
-  # - label: "A100 lmdeploy benchmark"
-  #   priority: 100
-  #   agents:
-  #     queue: A100
-  #   plugins:
-  #     - kubernetes:
-  #         podSpec:
-  #           <<: *common_pod_spec
-  #           containers:
-  #             - image: openmmlab/lmdeploy:v0.5.3-cu11
-  #               <<: *common_container_settings
+  - label: "A100 lmdeploy benchmark"
+    priority: 100
+    agents:
+      queue: A100
+    plugins:
+      - kubernetes:
+          podSpec:
+            <<: *common_pod_spec
+            containers:
+              - image: openmmlab/lmdeploy:v0.5.3-cu11
+                <<: *common_container_settings
 
 
   - label: "A100 vllm step 10 (latest zmq+async)"
@@ -79,17 +79,17 @@ steps:
                 <<: *common_container_settings
 
   
-  # - label: "A100 trt benchmark"
-  #   priority: 100
-  #   agents:
-  #     queue: A100
-  #   plugins:
-  #     - kubernetes:
-  #         podSpec:
-  #           <<: *common_pod_spec
-  #           containers:
-  #             - image: nvcr.io/nvidia/tritonserver:24.07-trtllm-python-py3
-  #               <<: *common_container_settings
+  - label: "A100 trt benchmark"
+    priority: 100
+    agents:
+      queue: A100
+    plugins:
+      - kubernetes:
+          podSpec:
+            <<: *common_pod_spec
+            containers:
+              - image: nvcr.io/nvidia/tritonserver:24.07-trtllm-python-py3
+                <<: *common_container_settings
 
 
   # - label: "A100 tgi benchmark"
