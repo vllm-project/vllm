@@ -180,21 +180,24 @@ class Resampler(nn.Module):
                  grid_size,
                  embed_dim,
                  num_heads,
+                 device,
+                 dtype,
                  kv_dim=None,
                  norm_layer=nn.LayerNorm):
         super().__init__()
         self.num_queries = grid_size**2
         self.embed_dim = embed_dim
         self.num_heads = num_heads
-
+        # NOTE - we need to directly initialize the device / dtype since we
+        # init this parameter out of a numpy array, so it defaults to CPU
+        # even though the model itself is initialized in a torch device context
+        # manager by default.
         self.pos_embed = nn.Parameter(
-            # TODO - fix the hacks for device / dtype here & in the
-            # positional embedding retrieval
-            torch.from_numpy(get_2d_sincos_pos_embed(embed_dim, grid_size)
-                             ).half().to("cuda"), ).requires_grad_(False)
+            torch.from_numpy(get_2d_sincos_pos_embed(embed_dim, grid_size)).to(
+                dtype=dtype, device=device).requires_grad_(False))
 
         self.query = nn.Parameter(
-            torch.zeros(self.num_queries, embed_dim).to("cuda"))
+            torch.zeros(self.num_queries, embed_dim).to(device))
         trunc_normal_(self.query, std=.02)
 
         if kv_dim is not None and kv_dim != embed_dim:
@@ -454,6 +457,8 @@ class VisionTransformer(nn.Module):
             grid_size=int(math.sqrt(n_queries)),
             embed_dim=output_dim,
             num_heads=output_dim // 128,
+            device=self.positional_embedding.device,
+            dtype=self.positional_embedding.dtype,
             kv_dim=width,
             norm_layer=norm_layer,
         )
