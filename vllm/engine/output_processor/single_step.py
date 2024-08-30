@@ -69,9 +69,10 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
             seq_group.prompt_hidden_states = output.prompt_hidden_states
         # Each output contains the hidden state from the last decode step,
         # so they need to be accumulated on the sequence.
-        seq.hidden_states = (torch.cat([
-            seq.hidden_states, output.hidden_state
-        ]) if seq.hidden_states is not None else output.hidden_state)
+        seq.hidden_states = (torch.cat(
+            [seq.hidden_states, output.hidden_state.unsqueeze(0)]) 
+            if seq.hidden_states is not None 
+            else output.hidden_state.unsqueeze(0))
 
     def process_prompt_logprob(self, seq_group: SequenceGroup,
                                outputs: List[SequenceGroupOutput]) -> None:
