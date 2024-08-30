@@ -172,7 +172,7 @@ speculative decoding, breaking down the guarantees into three key areas:
    in `Accelerating Large Language Model Decoding with Speculative Sampling <https://arxiv.org/pdf/2302.01318>`_
 
 2. **Algorithmic Losslessness**
-   - vLLM’s implementation of speculative decoding is algorithmically validated to be lossless. Key tests include:
+   - vLLM’s implementation of speculative decoding is algorithmically validated to be lossless. Key validation tests include:
 
     - **Rejection Sampler Convergence**: Ensures that samples from vLLM’s rejection sampler align with the target 
       distribution. `View Test Code <https://github.com/vllm-project/vllm/blob/47b65a550866c7ffbd076ecb74106714838ce7da/tests/samplers/test_rejection_sampler.py#L252>`_
@@ -183,7 +183,7 @@ speculative decoding, breaking down the guarantees into three key areas:
       verify this property using `this assertion implementation <https://github.com/vllm-project/vllm/blob/b67ae00cdbbe1a58ffc8ff170f0c8d79044a684a/tests/spec_decode/e2e/conftest.py#L291>`_
 
 3. **vLLM Logprob Stability**
-   - - vLLM does not currently guarantee stable token log probabilities (logprobs). This can result in different outputs for the 
+   - vLLM does not currently guarantee stable token log probabilities (logprobs). This can result in different outputs for the 
    same request across runs. For more details, see the FAQ section 
    titled *Can the output of a prompt vary across runs in vLLM?* in the `FAQs <../serving/faq.rst>`_.
 
