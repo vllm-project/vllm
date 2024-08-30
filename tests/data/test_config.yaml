@@ -1,0 +1,2 @@
+port: 12312
+tensor_parallel_size: 2
