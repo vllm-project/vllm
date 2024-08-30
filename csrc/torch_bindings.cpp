@@ -361,6 +361,12 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "Tensor block_mapping) -> ()");
   cache_ops.impl("copy_blocks", torch::kCUDA, &copy_blocks);
 
+  // Copy the cache blocks of one attention layer from src to dst
+  cache_ops.def(
+      "copy_blocks_one_layer(Tensor key_cache, Tensor value_cache, Tensor "
+      "block_mapping) -> ()");
+  cache_ops.impl("copy_blocks_one_layer", torch::kCUDA, &copy_blocks_one_layer);
+
   // Reshape the key and value tensors and cache them.
   cache_ops.def(
       "reshape_and_cache(Tensor key, Tensor value,"

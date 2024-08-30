@@ -204,6 +204,10 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         """
         raise NotImplementedError
 
+    @property
+    def enable_layered_transfer(self) -> bool:
+        return False
+
     @abstractmethod
     def prepare_worker_input(
             self, execute_model_req: ExecuteModelRequest) -> WorkerInput:
@@ -307,6 +311,22 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         model_input, worker_input, kwargs = inputs
         num_steps = worker_input.num_steps
 
+        # Update model_input here because otherwise we broadcast full kv cache
+        if self.enable_layered_transfer:
+            virtual_engine = worker_input.virtual_engine
+            self.model_runner.add_kv_cache_for_layered_transfer(
+                model_input,
+                worker_input.blocks_to_swap_in,
+                worker_input.blocks_to_swap_out,
+                worker_input.blocks_to_copy,
+                gpu_caches=self.kv_cache[virtual_engine]
+                if self.kv_cache is not None else None,
+                cpu_caches=self.cache_engine[virtual_engine].cpu_cache if
+                (hasattr(self, "cache_engine")
+                 and self.cache_engine is not None) else None,
+            )
+
+        # For profiling and tracing
         self.execute_worker(worker_input)
 
         # If there is no input, we don't need to execute the model.

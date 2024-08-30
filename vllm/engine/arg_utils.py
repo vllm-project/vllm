@@ -93,6 +93,7 @@ class EngineArgs:
     block_size: int = 16
     enable_prefix_caching: bool = False
     enable_memory_tiering: bool = False
+    enable_layered_transfer: bool = False
     disable_sliding_window: bool = False
     use_v2_block_manager: bool = False
     swap_space: float = 4  # GiB
@@ -353,6 +354,11 @@ class EngineArgs:
             action='store_true',
             help='Enable memory tiering when the block manager '
             'evicts blocks from HBM.')
+        parser.add_argument(
+            '--enable-layered-transfer',
+            action='store_true',
+            help='Enable layer-by-layer transfer for KV cache blocks '
+            'only support for GPU now. ')
         parser.add_argument('--disable-sliding-window',
                             action='store_true',
                             help='Disables sliding window, '
@@ -866,6 +872,7 @@ class EngineArgs:
             sliding_window=model_config.get_sliding_window(),
             enable_prefix_caching=self.enable_prefix_caching,
             enable_memory_tiering=self.enable_memory_tiering,
+            enable_layered_transfer=self.enable_layered_transfer,
             cpu_offload_gb=self.cpu_offload_gb,
         )
         parallel_config = ParallelConfig(
@@ -928,6 +935,11 @@ class EngineArgs:
         if self.use_v2_block_manager and self.enable_memory_tiering:
             raise ValueError(
                 "Block Manager V2 does not support memory tiering yet")
+
+        if (self.enable_layered_transfer
+                and not device_config.device_type == "cuda"):
+            raise ValueError(
+                "Layered KV cache transfer only supports CUDA GPUs for now")
 
         speculative_config = SpeculativeConfig.maybe_create_spec_config(
             target_model_config=model_config,

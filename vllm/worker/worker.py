@@ -292,6 +292,10 @@ class Worker(LocalOrDistributedWorkerBase):
     def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
         return self.gpu_cache
 
+    @property
+    def enable_layered_transfer(self) -> bool:
+        return self.cache_config.enable_layered_transfer
+
     @torch.inference_mode()
     def prepare_worker_input(
             self, execute_model_req: ExecuteModelRequest) -> WorkerInput:
@@ -334,20 +338,28 @@ class Worker(LocalOrDistributedWorkerBase):
         # Issue cache operations.
         if (worker_input.blocks_to_swap_out is not None
                 and worker_input.blocks_to_swap_out.numel() > 0):
-            self.cache_engine[virtual_engine].swap_out(
-                worker_input.blocks_to_swap_out)
-        #    self.cache_engine[virtual_engine].swap_out_one_layer(
-        #        worker_input.blocks_to_swap_out, 0)
-        #NOTE: We leave copy for now because it should not be the common case
+            if self.cache_config.enable_layered_transfer:
+                self.cache_engine[virtual_engine].swap_out_one_layer(
+                    worker_input.blocks_to_swap_out, 0)
+            else:
+                self.cache_engine[virtual_engine].swap_out(
+                    worker_input.blocks_to_swap_out)
         if (worker_input.blocks_to_copy is not None
                 and worker_input.blocks_to_copy.numel() > 0):
-            self.cache_engine[virtual_engine].copy(worker_input.blocks_to_copy)
+            if self.cache_config.enable_layered_transfer:
+                self.cache_engine[virtual_engine].copy_one_layer(
+                    worker_input.blocks_to_copy, 0)
+            else:
+                self.cache_engine[virtual_engine].copy(
+                    worker_input.blocks_to_copy)
         if (worker_input.blocks_to_swap_in is not None
                 and worker_input.blocks_to_swap_in.numel() > 0):
-            self.cache_engine[virtual_engine].swap_in(
-                worker_input.blocks_to_swap_in)
-        #    self.cache_engine[virtual_engine].swap_in_one_layer(
-        #        worker_input.blocks_to_swap_in, 0)
+            if self.cache_config.enable_layered_transfer:
+                self.cache_engine[virtual_engine].swap_in_one_layer(
+                    worker_input.blocks_to_swap_in, 0)
+            else:
+                self.cache_engine[virtual_engine].swap_in(
+                    worker_input.blocks_to_swap_in)
 
     def _get_cached_seq_group_metadata(
             self,

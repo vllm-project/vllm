@@ -25,14 +25,23 @@ from .conftest import get_token_ids_from_llm_generator
     "use_v2_block_manager": False
 }])
 @pytest.mark.parametrize("test_llm_kwargs", [{
+    "use_v2_block_manager": False,
+    "preemption_mode": "swap",
+    "enable_layered_transfer": True
+}, {
+    "use_v2_block_manager": True,
+    "preemption_mode": "swap",
+    "enable_layered_transfer": True
+}, {
+    "use_v2_block_manager": False,
+    "preemption_mode": "swap",
+    "enable_layered_transfer": False
+}, {
     "use_v2_block_manager": True,
     "preemption_mode": "swap"
 }, {
     "use_v2_block_manager": True,
     "preemption_mode": "recompute"
-}, {
-    "use_v2_block_manager": False,
-    "preemption_mode": "swap",
 }])
 @pytest.mark.parametrize("batch_size", [10])
 @pytest.mark.parametrize("seed", [1])
@@ -105,6 +114,18 @@ def test_v1_v2_greedy_equality_with_preemption(baseline_llm_generator,
     "use_v2_block_manager": False
 }])
 @pytest.mark.parametrize("test_llm_kwargs", [{
+    "use_v2_block_manager": False,
+    "preemption_mode": "swap",
+    "enable_layered_transfer": True
+}, {
+    "use_v2_block_manager": True,
+    "preemption_mode": "swap",
+    "enable_layered_transfer": True
+}, {
+    "use_v2_block_manager": False,
+    "preemption_mode": "recompute",
+    "enable_layered_transfer": True,
+}, {
     "use_v2_block_manager": True,
     "preemption_mode": "swap"
 }, {
@@ -357,6 +378,14 @@ def test_chunked_prefill_block_manager_v2(baseline_llm_generator,
     "use_v2_block_manager": False
 }])
 @pytest.mark.parametrize("test_llm_kwargs", [{
+    "use_v2_block_manager": False,
+    "preemption_mode": "swap",
+    "enable_layered_transfer": True
+}, {
+    "use_v2_block_manager": True,
+    "preemption_mode": "swap",
+    "enable_layered_transfer": True
+}, {
     "use_v2_block_manager": True,
     "preemption_mode": "swap"
 }, {
@@ -439,6 +468,14 @@ def test_v1_v2_greedy_equality_prefix_caching_enabled_with_preemption(
 }])
 @pytest.mark.parametrize("test_llm_kwargs", [{
     "enable_prefix_caching": True,
+    "preemption_mode": "swap",
+    "enable_layered_transfer": True
+}, {
+    "enable_prefix_caching": True,
+    "preemption_mode": "recompute",
+    "enable_layered_transfer": True
+}, {
+    "enable_prefix_caching": True,
     "preemption_mode": "swap"
 }, {
     "enable_prefix_caching": True,
@@ -519,6 +556,16 @@ def test_auto_prefix_caching_with_preemption(baseline_llm_generator,
                              "enable_memory_tiering": False,
                          }])
 @pytest.mark.parametrize("test_llm_kwargs", [{
+    "enable_prefix_caching": True,
+    "preemption_mode": "swap",
+    "enable_memory_tiering": True,
+    "enable_layered_transfer": True
+}, {
+    "enable_prefix_caching": True,
+    "preemption_mode": "recompute",
+    "enable_memory_tiering": True,
+    "enable_layered_transfer": True
+}, {
     "enable_prefix_caching": True,
     "preemption_mode": "swap",
     "enable_memory_tiering": True,
