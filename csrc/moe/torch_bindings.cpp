@@ -19,7 +19,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "int moe_block_size, bool replicate_input, bool apply_weights)"
       " -> Tensor");
   m.impl("marlin_gemm_moe", torch::kCUDA, &marlin_gemm_moe);
-}
 #endif
+}
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
