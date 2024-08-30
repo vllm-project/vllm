@@ -36,7 +36,7 @@ class TpuCommunicator:
         # with both CPUs and TPUs.
         num_nodes = ray_utils.get_num_tpu_nodes()
         num_nodes_in_pg = ray_utils.get_num_nodes_in_placement_group()
-        if num_nodes_in_pg:
+        if num_nodes_in_pg > 0:
             num_nodes = num_nodes_in_pg
 
         local_world_size = global_world_size // num_nodes
