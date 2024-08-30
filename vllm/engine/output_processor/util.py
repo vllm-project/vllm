@@ -35,11 +35,11 @@ def create_output_by_sequence_group(
                     seq_group_end = seq_group_offset + seq_group_input_length
                     sequence_group_output.prompt_hidden_states = (
                         step.prefill_hidden_states[
-                            seq_group_offset:seq_group_end].clone())
+                            seq_group_offset:seq_group_end].clone().cpu())
                     input_lengths.append(seq_group_input_length)
                 # `SamplerOutput.hidden_states` are shape [n_seqs, hidden_size].
                 sequence_group_output.hidden_state = (
-                    step.hidden_states[i, :].clone())
+                    step.hidden_states[i, :].clone().cpu().unsqueeze(0))
 
             output_by_sequence_group[i].append(sequence_group_output)
 
