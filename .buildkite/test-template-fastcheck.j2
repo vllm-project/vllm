@@ -1,0 +1,24 @@
+{% set default_num_gpu = 1 %}
+steps:
+    -   label: Test
+        agents:
+            queue: kubernetes
+        plugins:
+            -   kubernetes:
+                    podSpec:
+                        volumes:
+                            -   name: dshm
+                                emptyDir:
+                                    medium: Memory
+                        containers:
+                            -   image: alpine:3.12
+                                command: ["bash"]
+                                args:
+                                - '-c'
+                                - "'echo Hello World'"
+                                resources:
+                                    requests:
+                                        nvidia.com/gpu: "{{ step.num_gpus or default_num_gpu }}"
+                                    limits:
+                                        nvidia.com/gpu: "{{ step.num_gpus or default_num_gpu }}"
+    
