@@ -1114,39 +1114,38 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
 
     @staticmethod
     def _pull_args_from_config(args: List[str]) -> List[str]:
-        """
-            method to pull arguments specified in the config file
-            into the command-line args variable.
-            
-            The arguments in config file will be inserted between 
-            the argument list.
-            
-            example:
-            ```yaml
-                port: 12323
-                tensor-parallel-size: 4
-            ```
-            ```python
-            $: vllm {serve,chat,complete} "facebook/opt-12B" \
-                --config config.yaml -tp 2
-            $: args = [
-                "serve,chat,complete",
-                "facebook/opt-12B", 
-                '--config', 'config.yaml', 
-                '-tp', '2'
+        """Method to pull arguments specified in the config file
+        into the command-line args variable.
+        
+        The arguments in config file will be inserted between 
+        the argument list.
+        
+        example:
+        ```yaml
+            port: 12323
+            tensor-parallel-size: 4
+        ```
+        ```python
+        $: vllm {serve,chat,complete} "facebook/opt-12B" \
+            --config config.yaml -tp 2
+        $: args = [
+            "serve,chat,complete",
+            "facebook/opt-12B", 
+            '--config', 'config.yaml', 
+            '-tp', '2'
+        ]
+        $: args = [
+            "serve,chat,complete",
+            "facebook/opt-12B", 
+            '--port', '12323', 
+            '--tensor-parallel-size', '4', 
+            '-tp', '2'
             ]
-            $: args = [
-                "serve,chat,complete",
-                "facebook/opt-12B", 
-                '--port', '12323', 
-                '--tensor-parallel-size', '4', 
-                '-tp', '2'
-                ]
-            ```
+        ```
 
-            Please note how the config args are inserted after the sub command.
-            this way the order of priorities is maintained when these are args 
-            parsed by super().
+        Please note how the config args are inserted after the sub command.
+        this way the order of priorities is maintained when these are args 
+        parsed by super().
         """
         assert args.count(
             '--config') <= 1, "More than one config file specified!"
@@ -1157,11 +1156,6 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
                              Please check your command-line arguments.")
 
         file_path = args[index + 1]
-        extension: str = file_path.split('.')[-1]
-        if extension not in {'yaml', 'yml'}:
-            raise ValueError(
-                "Config file must be of a yaml/yml type.\
-                              %s supplied", extension)
 
         config_args = FlexibleArgumentParser._load_config_file(file_path)
 
@@ -1176,22 +1170,27 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
 
     @staticmethod
     def _load_config_file(file_path: str) -> List[str]:
+        """Loads a yaml file and returns the key value pairs as a 
+        flattened list with argparse like pattern
+        ```yaml
+            port: 12323
+            tensor-parallel-size: 4
+        ```
+        returns:
+            processed_args: list[str] = [
+                '--port': '12323',
+                '--tensor-parallel-size': '4'
+            ]
+        
         """
-            loads a yaml file and returns the key value pairs as a 
-            flattened list with argparse like pattern
-            ```yaml
-                port: 12323
-                tensor-parallel-size: 4
-            ```
-            returns:
-                processed_args: list[str] = [
-                    '--port': '12323',
-                    '--tensor-parallel-size': '4'
-                ]
-            
-        """
-        # only expecting a flat dictionary of atomic types
 
+        extension: str = file_path.split('.')[-1]
+        if extension not in ('yaml', 'yml'):
+            raise ValueError(
+                "Config file must be of a yaml/yml type.\
+                              %s supplied", extension)
+
+        # only expecting a flat dictionary of atomic types
         processed_args: List[str] = []
 
         config: Dict[str, Union[int, str]] = {}
