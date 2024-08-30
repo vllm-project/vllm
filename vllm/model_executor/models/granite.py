@@ -235,7 +235,6 @@ class GraniteDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
-        residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         residual = hidden_states
@@ -252,7 +251,7 @@ class GraniteDecoderLayer(nn.Module):
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states * self.residual_multiplier
-        return hidden_states, residual
+        return hidden_states
 
 
 class GraniteModel(nn.Module):
@@ -321,12 +320,11 @@ class GraniteModel(nn.Module):
 
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
-            hidden_states, residual = layer(
+            hidden_states = layer(
                 positions,
                 hidden_states,
                 kv_caches[i - self.start_layer],
                 attn_metadata,
-                residual,
             )
 
         if not get_pp_group().is_last_rank:
@@ -335,7 +333,7 @@ class GraniteModel(nn.Module):
                 "residual": residual
             })
 
-        hidden_states, _ = self.norm(hidden_states, residual)
+        hidden_states = self.norm(hidden_states)
         return hidden_states
 
 
