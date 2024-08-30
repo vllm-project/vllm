@@ -34,7 +34,7 @@ def get_perf(df, method, model, metric):
     
     means = []
     
-    for qps in [2,4,8,16,"inf"]:
+    for qps in [2,4,8,16,32,"inf"]:
         target = df['Test name'].str.contains(model)
         target = target & df['Engine'].str.contains(method)
         target = target & df['Test name'].str.contains("qps_" + str(qps))
@@ -103,11 +103,11 @@ def main(args):
     plt.set_cmap("cividis")
 
     # plot results
-    fig, axes = plt.subplots(3, 3, figsize=(20, 16))
+    fig, axes = plt.subplots(2, 3, figsize=(20, 10))
     fig.subplots_adjust(hspace=1)
     # methods = [0,1,10,11,12]
     methods = ['vllm', 'trt', 'sglang', 'lmdeploy']
-    for i, model in enumerate(["llama8B", "llama70B", "mixtral8x7B"]):
+    for i, model in enumerate(["llama8B", "llama70B"]):
         for j, metric in enumerate(["Tput", "TPOT", "TTFT"]):
             
             ax = axes[i, j]
@@ -137,10 +137,10 @@ def main(args):
             #     inf_qps_results.append(mean[-2])
             # print((inf_qps_results[0] - inf_qps_results[1]) / inf_qps_results[1])
             ax.set_ylim(bottom=0)
-            if metric == "TTFT":
-                ax.set_ylim(0, 500)
+            # if metric == "TTFT":
+            #     ax.set_ylim(0, 500)
             ax.set_xticks(range(len(mean)))
-            ax.set_xticklabels(["2", "4", "8", "16", "inf"])
+            ax.set_xticklabels(["2", "4", "8", "16", "32", "inf"])
 
             ax.legend()
 

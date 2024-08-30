@@ -102,10 +102,10 @@ def main(args):
     plt.set_cmap("cividis")
 
     # plot results
-    fig, axes = plt.subplots(3, 3, figsize=(20, 16))
+    fig, axes = plt.subplots(2, 3, figsize=(20, 10))
     fig.subplots_adjust(hspace=1)
-    methods = [0,1,10,11,12]
-    for i, model in enumerate(["llama8B", "llama70B", "mixtral8x7B"]):
+    methods = [0,11,12]
+    for i, model in enumerate(["llama8B", "llama70B"]):
         for j, metric in enumerate(["Tput", "TPOT", "TTFT"]):
             
             ax = axes[i, j]
@@ -127,9 +127,10 @@ def main(args):
                 if method == 0:
                     label = "1 month ago"
                 elif method == 11:
-                    label = "10-step w/ zmq"
+                    label = "Current (10-step)"
                 elif method == 12:
-                    label = "1-step w/ zmq"
+                    # label = "1-step w/ zmq"
+                    label = "Current"
                 else:
                     label = f"{method}-step"
                 ax.errorbar(range(len(mean)),
