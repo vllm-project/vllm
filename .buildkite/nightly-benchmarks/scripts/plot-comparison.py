@@ -104,7 +104,7 @@ def main(args):
     # plot results
     fig, axes = plt.subplots(2, 3, figsize=(20, 10))
     fig.subplots_adjust(hspace=1)
-    methods = [0,11,12]
+    methods = [0,1,11]
     for i, model in enumerate(["llama8B", "llama70B"]):
         for j, metric in enumerate(["Tput", "TPOT", "TTFT"]):
             
@@ -130,6 +130,8 @@ def main(args):
                     label = "Current (10-step)"
                 elif method == 12:
                     # label = "1-step w/ zmq"
+                    label = "Current"
+                elif method == 1:
                     label = "Current"
                 else:
                     label = f"{method}-step"

@@ -41,42 +41,42 @@ steps:
 
 
 
-  # - label: "A100 sglang benchmark"
-  #   priority: 100
-  #   agents:
-  #     queue: A100
-  #   plugins:
-  #     - kubernetes:
-  #         podSpec:
-  #           <<: *common_pod_spec
-  #           containers:
-  #             - image: lmsysorg/sglang:v0.2.14.post2-cu118
-  #               <<: *common_container_settings
+  - label: "A100 sglang benchmark"
+    priority: 100
+    agents:
+      queue: A100
+    plugins:
+      - kubernetes:
+          podSpec:
+            <<: *common_pod_spec
+            containers:
+              - image: lmsysorg/sglang:v0.2.14.post2-cu118
+                <<: *common_container_settings
 
-  # - label: "A100 lmdeploy benchmark"
-  #   priority: 100
-  #   agents:
-  #     queue: A100
-  #   plugins:
-  #     - kubernetes:
-  #         podSpec:
-  #           <<: *common_pod_spec
-  #           containers:
-  #             - image: openmmlab/lmdeploy:v0.6.0a0-cu11
-  #               <<: *common_container_settings
+  - label: "A100 lmdeploy benchmark"
+    priority: 100
+    agents:
+      queue: A100
+    plugins:
+      - kubernetes:
+          podSpec:
+            <<: *common_pod_spec
+            containers:
+              - image: openmmlab/lmdeploy:v0.6.0a0-cu11
+                <<: *common_container_settings
 
 
-  # - label: "A100 vllm step 10 (latest zmq+async)"
-  #   priority: 100
-  #   agents:
-  #     queue: A100
-  #   plugins:
-  #     - kubernetes:
-  #         podSpec:
-  #           <<: *common_pod_spec
-  #           containers:
-  #             - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:4664ceaad6f99ec7824859d1ac31b29502565a98
-  #               <<: *common_container_settings
+  - label: "A100 vllm step 10 (latest zmq+async)"
+    priority: 100
+    agents:
+      queue: A100
+    plugins:
+      - kubernetes:
+          podSpec:
+            <<: *common_pod_spec
+            containers:
+              - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:4664ceaad6f99ec7824859d1ac31b29502565a98
+                <<: *common_container_settings
 
 
   - label: "A100 trt llama-8B"
@@ -104,8 +104,6 @@ steps:
                         key: token
                   - name: TEST_SELECTOR
                     value: "llama8B"
-
-  - wait
 
 
   - label: "A100 trt llama-70B"
