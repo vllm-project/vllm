@@ -49,7 +49,7 @@ class MacheteLinearKernel(MPLinearKernel):
             assert isinstance(x, BasevLLMParameter)
             permute_param_layout_(x, input_dim=0, output_dim=1, packed_dim=0)
             x.data = ops.machete_prepack_B(x.data.t().contiguous().t(),
-                                         self.config.weight_type)
+                                           self.config.weight_type)
             return x
 
         def transform_w_s(x):

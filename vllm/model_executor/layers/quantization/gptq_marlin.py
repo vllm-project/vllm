@@ -11,10 +11,11 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     apply_gptq_marlin_linear, check_marlin_supported, marlin_is_k_full,
     marlin_make_empty_g_idx, marlin_make_workspace, marlin_permute_scales,
-    marlin_repeat_scales_on_all_ranks, marlin_sort_g_idx, replace_tensor,
+    marlin_repeat_scales_on_all_ranks, marlin_sort_g_idx,
     verify_marlin_supported, verify_marlin_supports_shape)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
@@ -297,7 +298,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         if self.quant_config.desc_act:
             g_idx, g_idx_sort_indices = marlin_sort_g_idx(layer.g_idx)
             layer.g_idx_sort_indices = g_idx_sort_indices
-            replace_tensor(layer, "g_idx", g_idx)
+            replace_parameter(layer, "g_idx", g_idx)
         else:
             layer.g_idx = marlin_make_empty_g_idx(device)
             layer.g_idx_sort_indices = marlin_make_empty_g_idx(device)
@@ -312,7 +313,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             size_k=layer.input_size_per_partition,
             size_n=layer.output_size_per_partition,
             num_bits=self.quant_config.quant_type.size_bits)
-        replace_tensor(layer, "qweight", marlin_qweight)
+        replace_parameter(layer, "qweight", marlin_qweight)
 
         # Permute scales from autogptq format to marlin format.
         marlin_scales = marlin_permute_scales(
@@ -321,7 +322,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
                     layer.input_size_per_partition),
             size_n=layer.output_size_per_partition,
             group_size=self.quant_config.group_size)
-        replace_tensor(layer, "scales", marlin_scales)
+        replace_parameter(layer, "scales", marlin_scales)
 
     def apply(
         self,

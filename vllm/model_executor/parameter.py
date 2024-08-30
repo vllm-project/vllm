@@ -328,12 +328,8 @@ class PackedvLLMParameter(ModelWeightParameter):
             marlin_tile_size=self.marlin_tile_size)
 
 
-def permute_param_layout_(
-    param: BasevLLMParameter, 
-    input_dim: int, 
-    output_dim: int, 
-    **kwargs
-) -> BasevLLMParameter:
+def permute_param_layout_(param: BasevLLMParameter, input_dim: int,
+                          output_dim: int, **kwargs) -> BasevLLMParameter:
     """
     Permute a parameter's layout to the specified input and output dimensions, 
     useful for forcing the parameter into a known layout, for example, if I need
@@ -344,7 +340,7 @@ def permute_param_layout_(
     to ensure x is in the correct layout (permuting it to the correct layout if 
     required, asserting if it cannot get it to the correct layout)
     """
-    
+
     curr_input_dim = getattr(param, "input_dim", None)
     curr_output_dim = getattr(param, "output_dim", None)
 
@@ -352,7 +348,7 @@ def permute_param_layout_(
         assert param.data.dim() == 2,\
             "permute_param_layout_ only supports 2D parameters where either "\
             "input_dim or output_dim is not set"
-    
+
     # if one of the dimensions is not set, set it to the opposite of the other
     #  we can only do this since we asserted the parameter is 2D above
     if curr_input_dim is None:
@@ -363,9 +359,9 @@ def permute_param_layout_(
         assert curr_input_dim is not None,\
             "either input or output dim must be set"
         curr_output_dim = (curr_input_dim + 1) % 2
-    
+
     # create permutation from the current layout to the layout with
-    # self.input_dim at input_dim and self.output_dim at output_dim preserving 
+    # self.input_dim at input_dim and self.output_dim at output_dim preserving
     # other dimensions
     perm = [
         i for i in range(param.data.dim())
@@ -373,7 +369,7 @@ def permute_param_layout_(
     ]
     perm.insert(input_dim, curr_input_dim)
     perm.insert(output_dim, curr_output_dim)
-    
+
     if "packed_dim" in kwargs:
         assert hasattr(param, "packed_dim") and\
             param.packed_dim == perm[kwargs["packed_dim"]],\
@@ -386,7 +382,7 @@ def permute_param_layout_(
         param._output_dim = output_dim
     if "packed_dim" in kwargs and hasattr(param, "_packed_dim"):
         param._packed_dim = kwargs["packed_dim"]
-    
+
     return param
 
 
