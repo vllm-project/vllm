@@ -2019,7 +2019,7 @@ class LLMEngine:
         if prompt_ids is None or len(prompt_ids) == 0:
             raise ValueError("Prompt cannot be empty")
 
-        if self.model_config.multimodal_config is not None:
+        if self.model_config.is_multimodal_model:
             max_prompt_len = self.model_config.max_model_len
 
             if len(prompt_ids) > max_prompt_len:
@@ -2030,3 +2030,7 @@ class LLMEngine:
                     "number of text tokens plus multimodal tokens. For image "
                     "inputs, the number of image tokens depends on the number "
                     "of images, and possibly their aspect ratios as well.")
+
+            # TODO: Find out how many placeholder tokens are there so we can
+            # check that chunked prefill does not truncate them
+            # max_batch_len = self.scheduler_config.max_num_batched_tokens
