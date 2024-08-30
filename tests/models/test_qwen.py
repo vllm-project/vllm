@@ -5,13 +5,17 @@ import pytest
 from ..conftest import HfRunner, VllmRunner
 from .utils import check_logprobs_close
 
-models = ["qwen/qwen-vl"]
+text_only_models = [
+    "Qwen/Qwen-7B-Chat" # Has no visual component
+]
 
-
+# Text only tests; the primary purpose of this test is to ensure that we can
+# load Qwen models, e.g., Qwen/Qwen-7B-Chat, that do not have a visual config,
+# without any problems.
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
-@pytest.mark.parametrize("model", models)
+@pytest.mark.parametrize("model", text_only_models)
 def test_text_only_qwen_model(
     hf_runner: Type[HfRunner],
     vllm_runner: Type[VllmRunner],
