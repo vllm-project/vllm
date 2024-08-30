@@ -336,8 +336,7 @@ steps:
   commands:
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep -q 'Same node test passed'
   - TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m distributed_2_gpus
-  - pytest models/ -v -s -m distributed_2_gpus --ignore=models/decoder_only/vision_language/test_chameleon.py
-  - pytest models/decoder_only/vision_language/test_chameleon.py -v -s -m distributed_2_gpus # Needs to be run separately to avoid CUDA reinitialization error
+  - for f in models/*/*/*.py; do if grep -q "@multi_gpu_test" $f; then pytest $f -v -s -m distributed_2_gpus; fi; done  # Run model tests on each individual file to avoid CUDA reinitialization errors
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp2.py
   - pip install -e ./plugins/vllm_add_dummy_model
   - pytest -v -s distributed/test_distributed_oot.py
