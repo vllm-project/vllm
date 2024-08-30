@@ -41,45 +41,45 @@ steps:
 
 
 
-  - label: "A100 sglang benchmark"
-    priority: 100
-    agents:
-      queue: A100
-    plugins:
-      - kubernetes:
-          podSpec:
-            <<: *common_pod_spec
-            containers:
-              - image: lmsysorg/sglang:v0.2.12-cu118
-                <<: *common_container_settings
+  # - label: "A100 sglang benchmark"
+  #   priority: 100
+  #   agents:
+  #     queue: A100
+  #   plugins:
+  #     - kubernetes:
+  #         podSpec:
+  #           <<: *common_pod_spec
+  #           containers:
+  #             - image: lmsysorg/sglang:v0.2.14.post2-cu118
+  #               <<: *common_container_settings
 
-  - label: "A100 lmdeploy benchmark"
-    priority: 100
-    agents:
-      queue: A100
-    plugins:
-      - kubernetes:
-          podSpec:
-            <<: *common_pod_spec
-            containers:
-              - image: openmmlab/lmdeploy:v0.5.3-cu11
-                <<: *common_container_settings
+  # - label: "A100 lmdeploy benchmark"
+  #   priority: 100
+  #   agents:
+  #     queue: A100
+  #   plugins:
+  #     - kubernetes:
+  #         podSpec:
+  #           <<: *common_pod_spec
+  #           containers:
+  #             - image: openmmlab/lmdeploy:v0.6.0a0-cu11
+  #               <<: *common_container_settings
 
 
-  - label: "A100 vllm step 10 (latest zmq+async)"
-    priority: 100
-    agents:
-      queue: A100
-    plugins:
-      - kubernetes:
-          podSpec:
-            <<: *common_pod_spec
-            containers:
-              - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:4664ceaad6f99ec7824859d1ac31b29502565a98
-                <<: *common_container_settings
+  # - label: "A100 vllm step 10 (latest zmq+async)"
+  #   priority: 100
+  #   agents:
+  #     queue: A100
+  #   plugins:
+  #     - kubernetes:
+  #         podSpec:
+  #           <<: *common_pod_spec
+  #           containers:
+  #             - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:4664ceaad6f99ec7824859d1ac31b29502565a98
+  #               <<: *common_container_settings
 
-  
-  - label: "A100 trt benchmark"
+
+  - label: "A100 trt llama-8B"
     priority: 100
     agents:
       queue: A100
@@ -90,6 +90,62 @@ steps:
             containers:
               - image: nvcr.io/nvidia/tritonserver:24.07-trtllm-python-py3
                 <<: *common_container_settings
+                env:
+                  - name: VLLM_USAGE_SOURCE
+                    value: ci-test
+                  - name: HF_HOME
+                    value: /root/.cache/huggingface
+                  - name: VLLM_SOURCE_CODE_LOC
+                    value: /workspace/build/buildkite/vllm/performance-benchmark
+                  - name: HF_TOKEN
+                    valueFrom:
+                      secretKeyRef:
+                        name: hf-token-secret
+                        key: token
+                  - name: TEST_SELECTOR
+                    value: "llama8B"
+
+  - wait
+
+
+  - label: "A100 trt llama-70B"
+    priority: 100
+    agents:
+      queue: A100
+    plugins:
+      - kubernetes:
+          podSpec:
+            <<: *common_pod_spec
+            containers:
+              - image: nvcr.io/nvidia/tritonserver:24.07-trtllm-python-py3
+                <<: *common_container_settings
+                env:
+                  - name: VLLM_USAGE_SOURCE
+                    value: ci-test
+                  - name: HF_HOME
+                    value: /root/.cache/huggingface
+                  - name: VLLM_SOURCE_CODE_LOC
+                    value: /workspace/build/buildkite/vllm/performance-benchmark
+                  - name: HF_TOKEN
+                    valueFrom:
+                      secretKeyRef:
+                        name: hf-token-secret
+                        key: token
+                  - name: TEST_SELECTOR
+                    value: "llama70B"
+
+  
+  # - label: "A100 trt benchmark"
+  #   priority: 100
+  #   agents:
+  #     queue: A100
+  #   plugins:
+  #     - kubernetes:
+  #         podSpec:
+  #           <<: *common_pod_spec
+  #           containers:
+  #             - image: nvcr.io/nvidia/tritonserver:24.07-trtllm-python-py3
+  #               <<: *common_container_settings
 
 
   # - label: "A100 tgi benchmark"
