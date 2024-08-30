@@ -40,4 +40,3 @@ def test_models(hf_runner, vllm_runner, image_assets,
         tensor_parallel_size=tensor_parallel_size,
         distributed_executor_backend=distributed_executor_backend,
     )
-	
