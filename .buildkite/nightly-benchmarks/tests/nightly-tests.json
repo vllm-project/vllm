@@ -12,7 +12,7 @@
             "sonnet_input_len": 2048,
             "sonnet_output_len": 128,
             "sonnet_prefix_len": 50,
-            "reuse_server": true
+            "reuse_server": false
         },
         "lmdeploy_server_parameters": {
         },
