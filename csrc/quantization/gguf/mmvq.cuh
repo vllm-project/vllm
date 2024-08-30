@@ -29,7 +29,11 @@ static __global__ void mul_mat_vec_q(const void * __restrict__ vx, const void * 
     // sum up partial sums and write back result
 #pragma unroll
     for (int mask = 16; mask > 0; mask >>= 1) {
+#ifndef USE_ROCM
         tmp += __shfl_xor_sync(0xffffffff, tmp, mask, 32);
+#else
+        tmp += __shfl_xor(tmp, mask, 32);
+#endif
     }
 
     if (threadIdx.x == 0) {

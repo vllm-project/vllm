@@ -159,6 +159,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // awq_marlin repack from AWQ.
   ops.def("awq_marlin_repack", &awq_marlin_repack);
   ops.impl("awq_marlin_repack", torch::kCUDA, &awq_marlin_repack);
+#endif
 
   // Dequantization for GGML.
   ops.def("ggml_dequantize", &ggml_dequantize);
@@ -172,6 +173,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("ggml_mul_mat_a8", &ggml_mul_mat_a8);
   ops.impl("ggml_mul_mat_a8", torch::kCUDA, &ggml_mul_mat_a8);
 
+#ifndef USE_ROCM
   // fp8_marlin Optimized Quantized GEMM for FP8 weight-only.
   ops.def("fp8_marlin_gemm", &fp8_marlin_gemm);
   ops.impl("fp8_marlin_gemm", torch::kCUDA, &fp8_marlin_gemm);
