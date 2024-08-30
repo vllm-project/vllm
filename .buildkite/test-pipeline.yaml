@@ -173,6 +173,7 @@ steps:
   - vllm/
   commands:
     - pytest -v -s ./compile/test_full_graph.py
+    - pytest -v -s ./compile/test_wrapper.py
 
 
 - label: Vision Language Models Test # 42min
@@ -233,12 +234,13 @@ steps:
   parallelism: 4
 
 - label: Tensorizer Test # 11min
+  mirror_hardwares: [amd]
   soft_fail: true
   source_file_dependencies:
   - vllm/model_executor/model_loader
   - tests/tensorizer_loader
   commands:
-    - apt-get install -y curl libsodium23
+    - apt-get update && apt-get install -y curl libsodium23
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s tensorizer_loader
 
