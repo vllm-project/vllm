@@ -267,7 +267,7 @@ class ModelConfig:
 
     def _verify_quantization(self) -> None:
         supported_quantization = [*QUANTIZATION_METHODS]
-        rocm_supported_quantization = ["gptq", "squeezellm", "fp8"]
+        rocm_supported_quantization = ["awq", "gptq", "squeezellm", "fp8"]
         optimized_quantization_methods = [
             "fp8", "marlin", "gptq_marlin_24", "gptq_marlin", "awq_marlin",
             "fbgemm_fp8", "compressed_tensors", "compressed-tensors",
@@ -322,6 +322,12 @@ class ModelConfig:
                     "%s quantization is not fully "
                     "optimized yet. The speed can be slower than "
                     "non-quantized models.", self.quantization)
+            if (self.quantization == "awq" and is_hip()
+                    and not envs.VLLM_USE_TRITON_AWQ):
+                logger.warning(
+                    "Using AWQ quantization with ROCm, but VLLM_USE_TRITON_AWQ"
+                    " is not set, enabling VLLM_USE_TRITON_AWQ.")
+                envs.VLLM_USE_TRITON_AWQ = True
 
     def _verify_cuda_graph(self) -> None:
         if self.max_seq_len_to_capture is None:
@@ -399,6 +405,8 @@ class ModelConfig:
             raise ValueError(
                 "BitAndBytes quantization with TP or PP is not supported yet.")
 
+        # Remove the constraint after the bitsandbytes issue is fixed:
+        # https://github.com/bitsandbytes-foundation/bitsandbytes/issues/1308
         if self.quantization == "bitsandbytes" and self.enforce_eager is False:
             logger.warning("CUDA graph is not supported on BitAndBytes yet, "
                            "fallback to the eager mode.")
