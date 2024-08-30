@@ -133,10 +133,8 @@ class RayTPUExecutor(TPUExecutor):
             "VLLM_TRACE_FUNCTION":
             str(envs.VLLM_TRACE_FUNCTION),
         }, ) for _ in worker_node_and_gpu_ids]
-        self._run_workers(
-            "update_environment_variables",
-            all_args=all_args_to_update_environment_variables,
-        )
+        self._run_workers("update_environment_variables",
+                          all_args=all_args_to_update_environment_variables)
 
         if len(node_workers) == 1:
             # in single node case, we don't need to get the IP address.
@@ -162,11 +160,9 @@ class RayTPUExecutor(TPUExecutor):
         self._run_workers("init_worker", all_kwargs=init_worker_all_kwargs)
 
         self._run_workers("init_device")
-        self._run_workers(
-            "load_model",
-            max_concurrent_workers=self.parallel_config.
-            max_parallel_loading_workers,
-        )
+        self._run_workers("load_model",
+                          max_concurrent_workers=self.parallel_config.
+                          max_parallel_loading_workers)
 
     def _driver_execute_model(
         self,
@@ -209,10 +205,10 @@ class RayTPUExecutor(TPUExecutor):
                 "max_concurrent_workers is not supported yet.")
 
         count = len(self.workers)
-        all_worker_args = (repeat(args, count) if all_args is None else islice(
-            all_args, 1, None))
-        all_worker_kwargs = (repeat(kwargs, count) if all_kwargs is None else
-                             islice(all_kwargs, 1, None))
+        all_worker_args = repeat(args, count) if all_args is None \
+            else islice(all_args, 1, None)
+        all_worker_kwargs = repeat(kwargs, count) if all_kwargs is None \
+            else islice(all_kwargs, 1, None)
 
         # Start the ray workers first.
         ray_worker_outputs = [
@@ -260,11 +256,9 @@ class RayTPUExecutor(TPUExecutor):
                     num_cpu_blocks)
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
-        self._run_workers(
-            "initialize_cache",
-            num_gpu_blocks=num_gpu_blocks,
-            num_cpu_blocks=num_cpu_blocks,
-        )
+        self._run_workers("initialize_cache",
+                          num_gpu_blocks=num_gpu_blocks,
+                          num_cpu_blocks=num_cpu_blocks)
 
     def execute_model(
         self,
@@ -274,8 +268,7 @@ class RayTPUExecutor(TPUExecutor):
             self.parallel_worker_tasks = self._run_workers(
                 "start_worker_execution_loop",
                 async_run_remote_workers_only=True,
-                **self.extra_execute_model_run_workers_kwargs,
-            )
+                **self.extra_execute_model_run_workers_kwargs)
 
         # Only the driver worker returns the sampling results.
         return self._driver_execute_model(execute_model_req)
