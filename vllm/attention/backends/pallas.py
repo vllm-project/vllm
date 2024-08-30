@@ -124,7 +124,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
 
         self.megacore_mode = None
         tpu_env = torch_xla.tpu.get_tpu_env()
-        tpu_type = tpu_env.get("TYPE") or tpu_env.get("ACCELERATOR_TYPE")
+        tpu_type = tpu_env.get("ACCELERATOR_TYPE", None) or tpu_env.get("TYPE")
+        assert tpu_type is not None
         tpu_type = tpu_type.lower()
 
         if "lite" not in tpu_type:
