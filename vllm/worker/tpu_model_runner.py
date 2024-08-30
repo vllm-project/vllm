@@ -1,6 +1,7 @@
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
+                    Type, Union)
 from unittest.mock import patch
 
 import numpy as np
@@ -14,11 +15,11 @@ from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispacther
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.logger import init_logger
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
-                           Logprob, SamplerOutput, SequenceGroupMetadata,
-                           SequenceOutput)
+                           Logprob, SequenceGroupMetadata, SequenceOutput)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase,
     _add_attn_metadata_broadcastable_dict,
@@ -51,6 +52,7 @@ class ModelInputForTPU(ModelRunnerInputBase):
     best_of: List[int]
     seq_groups: List[List[int]]
     virtual_engine: int = 0
+    async_callback: Optional[Callable] = None
 
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:
@@ -562,6 +564,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                     model_input.attn_metadata, model_input.input_lens[i:i + 1],
                     model_input.t[i:i + 1], model_input.p[i:i + 1],
                     model_input.num_samples, kv_caches)
+                if i == 0 and model_input.async_callback is not None:
+                    model_input.async_callback()
                 # Retrieve the outputs to CPU.
                 next_token_ids += output_token_ids.cpu().tolist()
                 start_idx = end_idx
@@ -572,6 +576,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 model_input.attn_metadata, model_input.input_lens,
                 model_input.t, model_input.p, model_input.num_samples,
                 kv_caches)
+            if model_input.async_callback is not None:
+                model_input.async_callback()
             # Retrieve the outputs to CPU.
             next_token_ids = output_token_ids.cpu().tolist()
 
