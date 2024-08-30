@@ -12,7 +12,8 @@ from openai.types.chat import (ChatCompletionAssistantMessageParam,
 from openai.types.chat import (
     ChatCompletionContentPartParam as OpenAIChatCompletionContentPartParam)
 from openai.types.chat import (ChatCompletionContentPartRefusalParam,
-                               ChatCompletionContentPartTextParam)
+                               ChatCompletionContentPartTextParam,
+                               )
 from openai.types.chat import (
     ChatCompletionMessageParam as OpenAIChatCompletionMessageParam)
 from openai.types.chat import (ChatCompletionMessageToolCallParam,
@@ -258,30 +259,25 @@ def _parse_chat_message_content(
 ) -> ChatMessageParseResult:
     role = message["role"]
     content = message.get("content")
-    tool_calls = message.get("tool_calls")
 
-    if content is None and not tool_calls:
-        result = ChatMessageParseResult(messages=[], mm_futures=[])
-    # assistant messages, or user messages, or system messages
-    elif (isinstance(content, str)
-          or (tool_calls is not None and
-              (isinstance(content, str) or content is None))):
-        messages = [ConversationMessage(role=role, content=content)]
-        result = ChatMessageParseResult(messages=messages, mm_futures=[])
+    if content is None:
+        content = []
+    elif isinstance(content, str):
+        content = [
+            ChatCompletionContentPartTextParam(type="text", text=content)
+        ]
 
-    else:
-        result = _parse_chat_message_content_parts(
-            role,
-            content,  # type: ignore
-            model_config,
-            tokenizer,
-        )
+    result = _parse_chat_message_content_parts(
+        role,
+        content,  # type: ignore
+        model_config,
+        tokenizer,
+    )
 
     for result_msg in result.messages:
         if role == 'assistant':
             parsed_msg = _AssistantParser(message)
-            if (function_call := parsed_msg.get("function_call")) is not None:
-                result_msg["name"] = function_call["name"]
+
             if "tool_calls" in parsed_msg:
                 result_msg["tool_calls"] = list(parsed_msg["tool_calls"])
         elif role == "tool":
