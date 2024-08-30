@@ -214,3 +214,20 @@ def test_models_distributed(hf_runner, vllm_runner, image_assets, model,
         tensor_parallel_size=2,
         distributed_executor_backend=distributed_executor_backend,
     )
+
+
+@pytest.mark.parametrize("model", models)
+def test_context_length_too_short(vllm_runner, image_assets, model):
+    images = [asset.pil_image for asset in image_assets]
+
+    with pytest.raises(ValueError, match="too long to fit into the model"):
+        vllm_model = vllm_runner(
+            model,
+            max_model_len=128,  # LLaVA has a feature size of 576
+            enforce_eager=True,
+        )
+
+        with vllm_model:
+            vllm_model.generate_greedy([HF_IMAGE_PROMPTS[0]],
+                                       max_tokens=1,
+                                       images=[images[0]])
