@@ -348,7 +348,14 @@ def bench(types: TypeConfig,
         best = None
         best_schedule = None
         schedules = ops.machete_supported_schedules(
-            types.act_type, types.weight_type, types.group_scale_type)
+            a_type=types.act_type, 
+            b_type=types.weight_type, 
+            group_scales_type=types.group_scale_type,
+            group_zeros_type=types.group_zero_type,
+            token_scales_type=types.token_scale_type,
+            channel_scales_type=types.channel_scale_type,
+            out_type=types.output_type)
+        print(schedules)
         for schedule in reversed(schedules):
             schedule_M = int(schedule.split("_")[0].split("x")[1])
 
@@ -357,8 +364,10 @@ def bench(types: TypeConfig,
                 continue
 
             res = bench_fns(label, sub_label, "machete_best", [
-                machete_create_bench_fn(bt, schedule=schedule) 
-                for bt in benchmark_tensors])
+                machete_create_bench_fn(
+                    bt, out_type=types.output_type, schedule=schedule)
+                for bt in benchmark_tensors
+            ])
 
             results_row = {
                 "M": m,
