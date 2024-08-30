@@ -1,7 +1,8 @@
 from typing import List, Optional, Tuple, Type
 
 import pytest
-from transformers import AutoConfig, AutoTokenizer, BatchEncoding
+from transformers import (AutoConfig, AutoModelForVision2Seq, AutoTokenizer,
+                          BatchEncoding)
 
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
@@ -124,7 +125,7 @@ def run_test(
     with hf_runner(model,
                    dtype=dtype,
                    postprocess_inputs=process,
-                   is_vision_model=True) as hf_model:
+                   auto_cls=AutoModelForVision2Seq) as hf_model:
         hf_outputs_per_image = [
             hf_model.generate_greedy_logprobs_limit(prompts,
                                                     max_tokens,
@@ -178,3 +179,20 @@ def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
         num_logprobs=num_logprobs,
         tensor_parallel_size=1,
     )
+
+
+@pytest.mark.parametrize("model", models)
+def test_context_length_too_short(vllm_runner, image_assets, model):
+    images = [asset.pil_image for asset in image_assets]
+
+    with pytest.raises(ValueError, match="too long to fit into the model"):
+        vllm_model = vllm_runner(
+            model,
+            max_model_len=128,  # LLaVA has a feature size of 576
+            enforce_eager=True,
+        )
+
+        with vllm_model:
+            vllm_model.generate_greedy([HF_IMAGE_PROMPTS[0]],
+                                       max_tokens=1,
+                                       images=[images[0]])

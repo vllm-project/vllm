@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     VLLM_LOGGING_CONFIG_PATH: Optional[str] = None
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
+    VLLM_USE_FLASHINFER_SAMPLER: bool = False
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
@@ -55,8 +56,10 @@ if TYPE_CHECKING:
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_TEST_FORCE_FP8_MARLIN: bool = False
+    VLLM_RPC_GET_DATA_TIMEOUT_MS: int = 5000
     VLLM_ALLOW_ENGINE_USE_RAY: bool = False
     VLLM_PLUGINS: Optional[List[str]] = None
+    VLLM_TORCH_PROFILER_DIR: Optional[str] = None
 
 
 def get_default_cache_root():
@@ -135,7 +138,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
             os.path.join(get_default_cache_root(), "vllm"),
         )),
 
-    # used in distributed environment to determine the master address
+    # used in distributed environment to determine the ip address
+    # of the current node, when the node has multiple network interfaces.
+    # If you are using multi-node inference, you should set this differently
+    # on each node.
     'VLLM_HOST_IP':
     lambda: os.getenv('VLLM_HOST_IP', "") or os.getenv("HOST_IP", ""),
 
@@ -190,6 +196,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Internal flag to enable Dynamo graph capture
     "VLLM_TEST_DYNAMO_GRAPH_CAPTURE":
     lambda: int(os.environ.get("VLLM_TEST_DYNAMO_GRAPH_CAPTURE", "0")),
+    "VLLM_DYNAMO_USE_CUSTOM_DISPATCHER":
+    lambda:
+    (os.environ.get("VLLM_DYNAMO_USE_CUSTOM_DISPATCHER", "True").lower() in
+     ("true", "1")),
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
@@ -255,6 +265,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # - "FLASHINFER": use flashinfer
     "VLLM_ATTENTION_BACKEND":
     lambda: os.getenv("VLLM_ATTENTION_BACKEND", None),
+
+    # If set, vllm will use flashinfer sampler
+    "VLLM_USE_FLASHINFER_SAMPLER":
+    lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_SAMPLER", "0"))),
 
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION":
@@ -338,7 +352,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
             os.path.join(get_default_cache_root(), "vllm", "xla_cache"),
         )),
     "VLLM_FUSED_MOE_CHUNK_SIZE":
-    lambda: int(os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", "65536")),
+    lambda: int(os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", "32768")),
 
     # If set, vllm will skip the deprecation warnings.
     "VLLM_NO_DEPRECATION_WARNING":
@@ -365,6 +379,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     (os.environ.get("VLLM_TEST_FORCE_FP8_MARLIN", "0").strip().lower() in
      ("1", "true")),
 
+    # Time in ms for the zmq client to wait for a response from the backend
+    # server for simple data operations
+    "VLLM_RPC_GET_DATA_TIMEOUT_MS":
+    lambda: int(os.getenv("VLLM_RPC_GET_DATA_TIMEOUT_MS", "5000")),
+
     # If set, allow running the engine as a separate ray actor,
     # which is a deprecated feature soon to be removed.
     # See https://github.com/vllm-project/vllm/issues/7045
@@ -379,6 +398,16 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_PLUGINS":
     lambda: None if "VLLM_PLUGINS" not in os.environ else os.environ[
         "VLLM_PLUGINS"].split(","),
+
+    # Enables torch profiler if set. Path to the directory where torch profiler
+    # traces are saved. Note that it must be an absolute path.
+    "VLLM_TORCH_PROFILER_DIR":
+    lambda: (None if os.getenv("VLLM_TORCH_PROFILER_DIR", None) is None else os
+             .path.expanduser(os.getenv("VLLM_TORCH_PROFILER_DIR", "."))),
+
+    # If set, vLLM will use Triton implementations of AWQ.
+    "VLLM_USE_TRITON_AWQ":
+    lambda: bool(int(os.getenv("VLLM_USE_TRITON_AWQ", "0"))),
 }
 
 # end-env-vars-definition

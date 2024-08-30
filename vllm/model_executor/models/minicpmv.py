@@ -23,6 +23,7 @@
 """Inference-only MiniCPM-V model compatible with HuggingFace weights."""
 import math
 import re
+from array import array
 from functools import partial
 from typing import (Any, Callable, Iterable, List, Mapping, Optional, Tuple,
                     TypedDict, Union)
@@ -43,7 +44,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -53,9 +54,10 @@ from vllm.model_executor.models.minicpm import MiniCPMModel
 from vllm.model_executor.models.qwen2 import Qwen2Model
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import (cached_get_image_processor,
-                                   cached_get_tokenizer)
-from vllm.sequence import IntermediateTensors, SamplerOutput, SequenceData
+from vllm.multimodal.image import cached_get_image_processor
+from vllm.multimodal.utils import cached_get_tokenizer
+from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
+                           SequenceData)
 
 from .idefics2_vision_model import Idefics2VisionTransformer
 
@@ -408,7 +410,7 @@ def get_max_minicpmv_image_tokens(ctx: InputContext):
 
 
 def dummy_seq_data_for_minicpmv(seq_len: int, num_images: int):
-    token_ids = [0] * seq_len
+    token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE, [0]) * seq_len
     return SequenceData(token_ids)
 
 
@@ -494,6 +496,10 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
+        # All MiniCPM-V models disable `tie_word_embeddings` but
+        # `PretrainedConfig.tie_word_embeddings` defaults to True; we cannot
+        # check `tie_word_embeddings` until vLLM integrate MiniCPM-V model
+        # and config class
         self.config = config
         self.multimodal_config = multimodal_config
 
@@ -588,9 +594,14 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
 
         pixel_values_flat: List[torch.Tensor] = []
         tgt_sizes_flat: List[torch.Tensor] = []
-        for b in range(len(pixel_values)):
-            pixel_values_flat += pixel_values[b]
-            tgt_sizes_flat += tgt_sizes[b]
+        for pixel_b, tgt_b in zip(pixel_values, tgt_sizes):
+            if len(pixel_b) != len(tgt_b):
+                raise ValueError("Inconsistent N lengths, found: "
+                                 f"{len(pixel_b)} vs {len(tgt_b)}")
+
+            for pixel_n, tgt_n in zip(pixel_b, tgt_b):
+                pixel_values_flat += pixel_n
+                tgt_sizes_flat += tgt_n
 
         # NOTE: Input IDs does not contain image tokens during memory profiling,
         # so we allow it to be empty

@@ -4,6 +4,7 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 
+import vllm.envs as envs
 from vllm._core_ext import ScalarType
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -177,12 +178,20 @@ def advance_step(num_seqs: int, num_queries: int, block_size: int,
 def awq_dequantize(qweight: torch.Tensor, scales: torch.Tensor,
                    zeros: torch.Tensor, split_k_iters: int, thx: int,
                    thy: int) -> torch.Tensor:
+    if envs.VLLM_USE_TRITON_AWQ:
+        from vllm.model_executor.layers.quantization.awq_triton import (
+            awq_dequantize_triton)
+        return awq_dequantize_triton(qweight, scales, zeros)
     return torch.ops._C.awq_dequantize(qweight, scales, zeros, split_k_iters,
                                        thx, thy)
 
 
 def awq_gemm(input: torch.Tensor, qweight: torch.Tensor, qzeros: torch.Tensor,
              scales: torch.Tensor, split_k_iters: int) -> torch.Tensor:
+    if envs.VLLM_USE_TRITON_AWQ:
+        from vllm.model_executor.layers.quantization.awq_triton import (
+            awq_gemm_triton)
+        return awq_gemm_triton(input, qweight, qzeros, scales, split_k_iters)
     return torch.ops._C.awq_gemm(input, qweight, qzeros, scales, split_k_iters)
 
 
@@ -300,6 +309,20 @@ def awq_marlin_repack(b_q_weight: torch.Tensor, size_k: int, size_n: int,
     return torch.ops._C.awq_marlin_repack(b_q_weight, size_k, size_n, num_bits)
 
 
+def gptq_marlin_moe_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
+                           size_k: int, size_n: int,
+                           num_bits: int) -> torch.Tensor:
+    num_experts = b_q_weight.shape[0]
+    assert size_k % 16 == 0
+    output = torch.empty((num_experts, size_k // 16, size_n * 2),
+                         device=b_q_weight.device,
+                         dtype=b_q_weight.dtype)
+    for e in range(num_experts):
+        output[e] = torch.ops._C.gptq_marlin_repack(b_q_weight[e], perm[e],
+                                                    size_k, size_n, num_bits)
+    return output
+
+
 def gptq_marlin_gemm(a: torch.Tensor,
                      b_q_weight: torch.Tensor,
                      b_scales: torch.Tensor,
@@ -327,6 +350,32 @@ def fp8_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                     size_k: int) -> torch.Tensor:
     return torch.ops._C.fp8_marlin_gemm(a, b_q_weight, b_scales, workspace,
                                         num_bits, size_m, size_n, size_k)
+
+
+# machete
+def machete_supported_schedules(b_type: ScalarType) -> List[str]:
+    return torch.ops._C.machete_supported_schedules(b_type)
+
+
+def machete_gemm(
+    a: torch.Tensor,
+    b_q: torch.Tensor,  # Should be the tensor returned by machete_prepack_B
+    b_type: ScalarType,
+    b_scales: Optional[torch.Tensor] = None,
+    b_zeros: Optional[torch.Tensor] = None,
+    b_group_size: Optional[int] = None,
+    c: Optional[torch.Tensor] = None,
+    alpha: Optional[float] = None,
+    beta: Optional[float] = None,
+    schedule: Optional[str] = None,
+) -> torch.Tensor:
+    return torch.ops._C.machete_gemm(a, b_q, b_type, b_scales, b_zeros,
+                                     b_group_size, c, alpha, beta, schedule)
+
+
+def machete_prepack_B(b_q_weight: torch.Tensor,
+                      b_type: ScalarType) -> torch.Tensor:
+    return torch.ops._C.machete_prepack_B(b_q_weight, b_type)
 
 
 # fp8
@@ -449,6 +498,36 @@ def ggml_mul_mat_a8(
     row: int,
 ) -> torch.Tensor:
     return torch.ops._C.ggml_mul_mat_a8(W, X, quant_type, row)
+
+
+# mamba
+def causal_conv1d_fwd(x: torch.Tensor, weight: torch.Tensor,
+                      bias_: Optional[torch.Tensor],
+                      seq_idx_: Optional[torch.Tensor],
+                      initial_states_: Optional[torch.Tensor],
+                      final_states_out_: Optional[torch.Tensor],
+                      silu_activation: bool) -> torch.Tensor:
+    return torch.ops._C.causal_conv1d_fwd(x, weight, bias_, seq_idx_,
+                                          initial_states_, final_states_out_,
+                                          silu_activation)
+
+
+def causal_conv1d_update(x: torch.Tensor, conv_state: torch.Tensor,
+                         weight: torch.Tensor, bias_: Optional[torch.Tensor],
+                         silu_activation: bool) -> torch.Tensor:
+    return torch.ops._C.causal_conv1d_update(x, conv_state, weight, bias_,
+                                             silu_activation)
+
+
+def selective_scan_fwd(u: torch.Tensor, delta: torch.Tensor, A: torch.Tensor,
+                       B: torch.Tensor, C: torch.Tensor,
+                       D_: Optional[torch.Tensor], z_: Optional[torch.Tensor],
+                       delta_bias_: Optional[torch.Tensor],
+                       delta_softplus: bool, index_: Optional[torch.Tensor],
+                       x: Optional[torch.Tensor]) -> List[torch.Tensor]:
+    return torch.ops._C.selective_scan_fwd(u, delta, A, B, C, D_, z_,
+                                           delta_bias_, delta_softplus, index_,
+                                           x)
 
 
 # moe
