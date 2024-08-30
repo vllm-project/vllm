@@ -613,55 +613,43 @@ def fp8_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
 
 
 # machete
-def machete_catch_unsupported(fn):
-
-    @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
-        try:
-            return fn(*args, **kwargs)
-        except RuntimeError as e:
-            if "Unsupported schedule" in str(e):
-                logger.warning(
-                    "Unsupported schedule in Machete, falling back to default")
-                return fn(*args, schedule="default", **kwargs)
-            else:
-                raise e
-
-    return wrapper
-
-
 def machete_supported_schedules(
         a_type: torch.dtype,
         b_type: ScalarType,
-        scales_type: Optional[torch.dtype],
-        zeros_type: Optional[torch.dtype] = None,
+        group_scales_type: Optional[torch.dtype],
+        group_zeros_type: Optional[torch.dtype] = None,
+        channel_scales_type: Optional[torch.dtype] = None,
+        token_scales_type: Optional[torch.dtype] = None,
         out_type: Optional[torch.dtype] = None) -> List[str]:
     return torch.ops._C.machete_supported_schedules(a_type, b_type,
-                                                    scales_type, zeros_type,
+                                                    group_scales_type, 
+                                                    group_zeros_type,
+                                                    channel_scales_type,
+                                                    token_scales_type,
                                                     out_type)
 
 
-def machete_gemm(
+def machete_mm(
     a: torch.Tensor,
     b_q: torch.Tensor,  # Should be the tensor returned by machete_prepack_B
     b_type: ScalarType,
-    b_scales: Optional[torch.Tensor] = None,
-    b_zeros: Optional[torch.Tensor] = None,
-    b_group_size: Optional[int] = None,
     out_type: Optional[torch.dtype] = None,
-    c: Optional[torch.Tensor] = None,
-    alpha: Optional[float] = None,
-    beta: Optional[float] = None,
-    schedule: Optional[str] = None,
+    b_group_scales: Optional[torch.Tensor] = None,
+    b_group_zeros: Optional[torch.Tensor] = None,
+    b_group_size: Optional[int] = None,
+    b_channel_scales: Optional[torch.Tensor] = None,
+    b_token_scales: Optional[torch.Tensor] = None,
+    schedule: Optional[str] = None
 ) -> torch.Tensor:
-    return torch.ops._C.machete_gemm(a, b_q, b_type, out_type, b_scales,
-                                     b_zeros, b_group_size, c, alpha, beta,
-                                     schedule)
+    return torch.ops._C.machete_mm(a, b_q, b_type, out_type, b_group_scales,
+                                   b_group_zeros, b_group_size,
+                                   b_channel_scales, b_token_scales, schedule)
 
 
 def machete_prepack_B(b_q_weight: torch.Tensor, a_type: torch.dtype,
-                      b_type: ScalarType) -> torch.Tensor:
-    return torch.ops._C.machete_prepack_B(b_q_weight, a_type, b_type)
+                      b_type: ScalarType,
+                      group_scales_type: Optional[torch.dtype]) -> torch.Tensor:
+    return torch.ops._C.machete_prepack_B(b_q_weight, a_type, b_type, group_scales_type)
 
 
 if hasattr(torch.ops._C, "permute_cols"):

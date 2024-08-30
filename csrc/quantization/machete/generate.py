@@ -4,7 +4,7 @@ import os
 import shutil
 from collections.abc import Iterable
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from functools import reduce
 from typing import List, Optional, Tuple, Union
 
@@ -36,15 +36,15 @@ namespace machete {
 {% for impl_config in impl_configs %}
 {% set type_sig = gen_type_sig(impl_config.types) -%}
 {% for s in impl_config.schedules %}
-extern torch::Tensor impl_{{type_sig}}_sch_{{gen_sch_sig(s)}}(PyTorchArguments);
+extern torch::Tensor impl_{{type_sig}}_sch_{{gen_sch_sig(s)}}(MMArgs);
 {%- endfor %}
 
-torch::Tensor gemm_dispatch_{{type_sig}}(PyTorchArguments args) {
+torch::Tensor mm_dispatch_{{type_sig}}(MMArgs args) {
   [[maybe_unused]] auto M = args.A.size(0);
   [[maybe_unused]] auto N = args.B.size(1);
   [[maybe_unused]] auto K = args.A.size(1);
     
-  if (!args.schedule) {
+  if (!args.maybe_schedule) {
     {%- for cond, s in impl_config.heuristic %}
     {%if cond is not none%}if ({{cond}})
     {%- else %}else
@@ -53,34 +53,52 @@ torch::Tensor gemm_dispatch_{{type_sig}}(PyTorchArguments args) {
   }
 
   {%- for s in impl_config.schedules %}
-  if (*args.schedule == "{{ gen_sch_sig(s) }}")
+  if (*args.maybe_schedule == "{{ gen_sch_sig(s) }}")
     return impl_{{type_sig}}_sch_{{ gen_sch_sig(s) }}(args);
   {%- endfor %}
   TORCH_CHECK_NOT_IMPLEMENTED(false, "machete_gemm(..) is not implemented for "
-                                     "schedule = ", *args.schedule);
+                                     "schedule = ", *args.maybe_schedule);
 }
 {%- endfor %}
 
-torch::Tensor gemm_dispatch(PyTorchArguments args) {
-  auto out_type = args.out_type.value_or(args.A.scalar_type());
+
+static inline std::optional<at::ScalarType> maybe_scalartype(
+    c10::optional<at::Tensor> const& t) {
+    if (!t) {
+      return std::nullopt;
+    } else {
+      return t->scalar_type();
+    };
+}
+
+torch::Tensor mm_dispatch(MMArgs args) {
+  auto out_type = args.maybe_out_type.value_or(args.A.scalar_type());
   auto a_type = args.A.scalar_type();
+  auto maybe_g_scales_type = maybe_scalartype(args.maybe_group_scales);
+  auto maybe_g_zeros_type = maybe_scalartype(args.maybe_group_zeros);
+  auto maybe_ch_scales_type = maybe_scalartype(args.maybe_channel_scales);
+  auto maybe_tok_scales_type = maybe_scalartype(args.maybe_token_scales);
 
   {% for impl_config in impl_configs %}
   {% set t = impl_config.types -%}
   {% set type_sig = gen_type_sig(t) -%}
-  {% set with_scales = t.b_scale != void -%}
-  {% set with_zeropoints = t.b_zeropoint != void -%}
-  if (a_type == {{TorchTypeTag[t.a]}}
-      && args.btype == {{VLLMScalarTypeTag[t.b]}}
-      && out_type == {{TorchTypeTag[t.d]}}
-      && {%if with_scales%}args.scales
-      && args.scales->scalar_type() == {{TorchTypeTag[t.b_scale]}}
-      {%- else %}!args.scales{%endif%}
-      && {%if with_zeropoints%}args.zeros
-      && args.zeros->scalar_type() == {{TorchTypeTag[t.b_zeropoint]}}
-      {%- else %}!args.zeros{%endif%}
+  if (args.btype == {{VLLMScalarTypeTag[t.b]}}
+      && a_type == {{TorchTypeTag[t.a]}}
+      && out_type == {{TorchTypeTag[t.out]}}
+      && {%if t.b_group_scale != void -%}
+      maybe_g_scales_type == {{TorchTypeTag[t.b_group_scale]}}
+      {%- else %}!maybe_g_scales_type{%endif%}
+      && {%if t.b_group_zeropoint != void -%}
+      maybe_g_zeros_type == {{TorchTypeTag[t.b_group_zeropoint]}}
+      {%- else %}!maybe_g_zeros_type{%endif%}
+      && {%if t.b_channel_scale != void -%}
+      maybe_ch_scales_type == {{TorchTypeTag[t.b_channel_scale]}}
+      {%- else %}!maybe_ch_scales_type{%endif%}
+      && {%if t.b_token_scale != void -%}
+      maybe_tok_scales_type == {{TorchTypeTag[t.b_token_scale]}}
+      {%- else %}!maybe_tok_scales_type{%endif%}
   ) {
-      return gemm_dispatch_{{type_sig}}(args);
+      return mm_dispatch_{{type_sig}}(args);
   }
   {%- endfor %}
   
@@ -89,48 +107,38 @@ torch::Tensor gemm_dispatch(PyTorchArguments args) {
     "a_type=", args.A.scalar_type(),
     ", b_type=", args.btype.str(),
     ", out_type=", out_type,
-    ", with_scales=", args.scales.has_value()
-        ? toString(args.scales->scalar_type()) : "None",
-    ", with_zeropoints=", args.zeros.has_value()
-        ? toString(args.zeros->scalar_type()) : "None"
+    ", with_group_scale_type=", maybe_g_scales_type
+        ? toString(*maybe_g_scales_type) : "None",
+    ", with_group_zeropoint_type=", maybe_g_zeros_type
+        ? toString(*maybe_g_zeros_type) : "None",
+    ", with_channel_scale_type=", maybe_ch_scales_type
+        ? toString(*maybe_ch_scales_type) : "None",
+    ", with_token_scale_type=", maybe_tok_scales_type
+        ? toString(*maybe_tok_scales_type) : "None",
     "; implemented types are: \\n",
     {%- for impl_config in impl_configs %}
     {% set t = impl_config.types -%}
-    {% set with_scales = t.b_scale != void -%}
-    {% set with_zeropoints = t.b_zeropoint != void -%}
-    "\\ta_type=", {{TorchTypeTag[t.a]}}, 
-    ", b_type=", {{VLLMScalarTypeTag[t.b]}}.str(), 
-    ", out_type=", {{TorchTypeTag[t.d]}},
-    ", with_scales=", {%if with_scales%}{{TorchTypeTag[t.b_scale]}}
-                      {%-else%}"None"{%endif%},
-    ", with_zeropoints=", {%if with_zeropoints%}{{TorchTypeTag[t.b_zeropoint]}}
-                          {%-else%}"None"{%endif%},
-    "\\n",{%- endfor %}
+    "\\t{{gen_type_option_name(t)}}\\n",
+    {%- endfor %}
     "");
 }
 
 std::vector<std::string> supported_schedules_dispatch(
-    at::ScalarType a_type,
-    vllm::ScalarType b_type,
-    c10::optional<at::ScalarType> maybe_scales_type,
-    c10::optional<at::ScalarType> maybe_zeros_type,
-    c10::optional<at::ScalarType> maybe_out_type
-) {
-    auto out_type = maybe_out_type.value_or(a_type);
+    SupportedSchedulesArgs args) {
+    auto out_type = args.maybe_out_type.value_or(args.a_type);
+    
     {% for impl_config in impl_configs %}
     {% set t = impl_config.types -%}
     {% set schs = impl_config.schedules -%}
-    {% set with_scales = t.b_scale != void -%}
-    {% set with_zeropoints = t.b_zeropoint != void -%}
-    if (a_type == {{TorchTypeTag[t.a]}}
-        && b_type == {{VLLMScalarTypeTag[t.b]}}
-        && out_type == {{TorchTypeTag[t.d]}}
-        && {%if with_scales%}maybe_scales_type
-        && *maybe_scales_type == {{TorchTypeTag[t.b_scale]}}
-        {%- else %}!scales_type{%endif%}
-        && {%if with_zeropoints%}maybe_zeros_type
-        && *maybe_zeros_type == {{TorchTypeTag[t.b_zeropoint]}}
-        {%- else %}!maybe_zeros_type{%endif%}
+    if (args.b_type == {{VLLMScalarTypeTag[t.b]}}
+        && args.a_type == {{TorchTypeTag[t.a]}}
+        && out_type == {{TorchTypeTag[t.out]}}
+        && {%if t.b_group_scale != void -%}
+        args.maybe_group_scales_type == {{TorchTypeTag[t.b_group_scale]}}
+        {%- else %}!args.maybe_group_scales_type{%endif%}
+        && {%if t.b_group_zeropoint != void-%}
+        args.maybe_group_zeros_type == {{TorchTypeTag[t.b_group_zeropoint]}}
+        {%- else %}!args.maybe_group_zeros_type{%endif%}
     ) {
         return {
             {%- for s in impl_config.schedules %}
@@ -175,17 +183,19 @@ template<typename Sch>
 using Kernel_{{type_sig}} = MacheteKernelTemplate<
   {{DataTypeTag[t.a]}},  // ElementA
   {{DataTypeTag[t.b]}},  // ElementB
-  {{DataTypeTag[t.d]}},  // ElementD
+  {{DataTypeTag[t.out]}},  // ElementD
   {{DataTypeTag[t.accumulator]}}, // Accumulator
-  {{DataTypeTag[t.b_scale]}}, // Scales
-  {{DataTypeTag[t.b_zeropoint]}}, // Zeropoints
+  {{DataTypeTag[t.b_group_scale]}}, // GroupScaleT
+  {{DataTypeTag[t.b_group_zeropoint]}}, // GroupZeroT
+  {{DataTypeTag[t.b_channel_scale]}}, // ChannelScaleT
+  {{DataTypeTag[t.b_token_scale]}}, // TokenScaleT
   cutlass::gemm::KernelTmaWarpSpecializedCooperativeMixedInput,
   Sch>;
 
 {% for sch in schs %}
 {% set sch_sig = gen_sch_sig(sch) -%}
 torch::Tensor 
-impl_{{type_sig}}_sch_{{sch_sig}}(PyTorchArguments args) {
+impl_{{type_sig}}_sch_{{sch_sig}}(MMArgs args) {
   return run_impl<Kernel_{{type_sig}}<sch_{{sch_sig}}>>(args);
 }
 {%- endfor %}
@@ -199,29 +209,31 @@ PREPACK_TEMPLATE = """
 
 namespace machete {
 
-torch::Tensor prepack_B_dispatch(torch::Tensor B, at::ScalarType const& atype,
-                                 vllm::ScalarType const& btype) {
-                                   
+torch::Tensor prepack_B_dispatch(PrepackBArgs args) {
+  auto convert_type = args.maybe_group_scales_type.value_or(args.a_type);
   {%- for t in types %}
-  {% set btype = unsigned_type_with_bitwidth(t.b_num_bits) %}
-  if (atype == {{TorchTypeTag[t.a]}} &&
-      btype.size_bits() == {{t.b_num_bits}}) {
+  {% set b_type = unsigned_type_with_bitwidth(t.b_num_bits) %}
+  if (args.a_type == {{TorchTypeTag[t.a]}}
+      && args.b_type.size_bits() == {{t.b_num_bits}} 
+      && convert_type == {{TorchTypeTag[t.convert]}}) {
     return prepack_impl<
       PrepackedLayoutBTemplate<
         {{DataTypeTag[t.a]}}, // ElementA
-        {{DataTypeTag[btype]}}, // ElementB
+        {{DataTypeTag[b_type]}}, // ElementB
         {{DataTypeTag[t.convert]}}, // ElementConvert
         {{DataTypeTag[t.accumulator]}}, // Accumulator
         cutlass::layout::ColumnMajor,
         cutlass::gemm::KernelTmaWarpSpecializedCooperativeMixedInput>
-    >(B); 
+    >(args.B); 
   }
   {%- endfor %}
   
   TORCH_CHECK_NOT_IMPLEMENTED(false, 
     "prepack_B_dispatch(..) is not implemented for "
-    "atype = ", atype,
-    ", btype = ", btype.str());
+    "atype = ", args.a_type,
+    ", btype = ", args.b_type.str(),
+    ", with_group_scales_type= ", args.maybe_group_scales_type ? 
+        toString(*args.maybe_group_scales_type) : "None");
 }
 
 }; // namespace machete
@@ -244,9 +256,11 @@ class ScheduleConfig:
 class TypeConfig:
     a: DataType
     b: Union[DataType, VLLMDataType]
-    b_scale: DataType
-    b_zeropoint: DataType
-    d: DataType
+    b_group_scale: DataType
+    b_group_zeropoint: DataType
+    b_channel_scale: DataType
+    b_token_scale: DataType
+    out: DataType
     accumulator: DataType
 
 
@@ -299,24 +313,13 @@ def generate_terse_sch_sig(schedule_config: ScheduleConfig) -> str:
 
 # unique type_name
 def generate_type_signature(kernel_types: TypeConfig):
-    a = VLLMDataTypeNames[kernel_types.a]
-    b = VLLMDataTypeNames[kernel_types.b]
-    d = VLLMDataTypeNames[kernel_types.d]
-    accumulator = VLLMDataTypeNames[kernel_types.accumulator]
-    element_scale = VLLMDataTypeNames[kernel_types.b_scale]
-    element_zeropoint = VLLMDataTypeNames[kernel_types.b_zeropoint]
+    return str("".join([VLLMDataTypeNames[getattr(kernel_types, field.name)] for field in fields(TypeConfig)]))
 
-    return (f"{a}{b}{d}"
-            f"{accumulator}{element_scale}{element_zeropoint}")
-
-
-# non-unique shorter type_name
-def generate_terse_type_signature(kernel_types: TypeConfig):
-    a = VLLMDataTypeNames[kernel_types.a]
-    b = VLLMDataTypeNames[kernel_types.b]
-
-    return f"{a}{b}"
-
+def generate_type_option_name(kernel_types: TypeConfig):
+    return ", ".join(
+        [f"{field.name.replace('b_', 'with_')+'_type'}={VLLMDataTypeNames[getattr(kernel_types, field.name)]}" 
+         for field in fields(TypeConfig)]
+    )
 
 def is_power_of_two(n):
     return (n != 0) and (n & (n - 1) == 0)
@@ -365,6 +368,7 @@ template_globals = {
     "gen_type_sig": generate_type_signature,
     "unique_schedules": unique_schedules,
     "unsigned_type_with_bitwidth": unsigned_type_with_bitwidth,
+    "gen_type_option_name": generate_type_option_name
 }
 
 
@@ -387,21 +391,26 @@ def create_sources(impl_configs: List[ImplConfig], num_impl_files=8):
         mm_dispatch_template.render(impl_configs=impl_configs),
     ))
 
-    prepack_types = [
-        PrepackTypeConfig(
-            a=impl_config.types.a,
-            b_num_bits=VLLMDataTypeSize[impl_config.types.b],
-            convert=impl_config.types.b_scale if impl_config.types.b_scale
-            == DataType.void else impl_config.types.b_scale,
-            accumulator=impl_config.types.accumulator,
-        ) for impl_config in impl_configs
-    ]
+    prepack_types = []
+    for impl_config in impl_configs:
+        convert_type = impl_config.types.a \
+             if impl_config.types.b_group_scale == DataType.void \
+             else impl_config.types.b_group_scale
+        prepack_types.append(
+            PrepackTypeConfig(
+                a=impl_config.types.a,
+                b_num_bits=VLLMDataTypeSize[impl_config.types.b],
+                convert=convert_type,
+                accumulator=impl_config.types.accumulator,
+        ))
 
     def prepacked_type_key(prepack_type: PrepackTypeConfig):
         # For now we we can just use the first accumulator type seen since
         # the tensor core shapes/layouts don't vary based on accumulator
         # type so we can generate less code this way
-        return (prepack_type.a, prepack_type.b_num_bits, prepack_type.convert)
+        return (prepack_type.a, 
+                prepack_type.b_num_bits, 
+                prepack_type.convert)
 
     unique_prepack_types = []
     prepack_types_seen = set()
@@ -602,9 +611,11 @@ def generate():
     GPTQ_kernel_types = list((TypeConfig(
         a=a,
         b=b,
-        b_scale=a,
-        b_zeropoint=DataType.void,
-        d=a,
+        b_group_scale=a,
+        b_group_zeropoint=DataType.void,
+        b_channel_scale=DataType.void,
+        b_token_scale=DataType.void,
+        out=a,
         accumulator=DataType.f32,
     ) for b in (VLLMDataType.u4b8, VLLMDataType.u8b128)
                               for a in (DataType.f16, DataType.bf16)))
@@ -618,9 +629,11 @@ def generate():
     AWQ_kernel_types = list((TypeConfig(
         a=a,
         b=b,
-        b_scale=a,
-        b_zeropoint=a,
-        d=a,
+        b_group_scale=a,
+        b_group_zeropoint=a,
+        b_channel_scale=DataType.void,
+        b_token_scale=DataType.void,
+        out=a,
         accumulator=DataType.f32,
     ) for b in (DataType.u4, DataType.u8)
                              for a in (DataType.f16, DataType.bf16)))
@@ -635,19 +648,23 @@ def generate():
         *(TypeConfig(
             a=DataType.s8,
             b=VLLMDataType.u4b8,
-            b_scale=DataType.f16,
-            b_zeropoint=DataType.void,
-            d=d,
+            b_group_scale=b_group_scale,
+            b_group_zeropoint=DataType.void,
+            b_channel_scale=DataType.f32,
+            b_token_scale=DataType.f32,
+            out=DataType.f16,
             accumulator=DataType.s32,
-        ) for d in (DataType.s32, DataType.f16)),
+        ) for b_group_scale in (DataType.f16, DataType.void)),
         *(TypeConfig(
             a=DataType.e4m3,
             b=VLLMDataType.u4b8,
-            b_scale=DataType.f16,
-            b_zeropoint=DataType.void,
-            d=d,
+            b_group_scale=b_group_scale,
+            b_group_zeropoint=DataType.void,
+            b_channel_scale=DataType.f32,
+            b_token_scale=DataType.f32,
+            out=DataType.f16,
             accumulator=DataType.f32,
-        ) for d in (DataType.f32, DataType.f16)),
+        ) for b_group_scale in (DataType.f16, DataType.void)),
     ]
 
     impl_configs += [

@@ -49,17 +49,24 @@ struct PrepackedLayoutBTemplate {
   using MmaType = ElementA_;
   using ElementA = ElementA_;
   using ElementB = ElementB_;
-  using ElementAccumulator =
-      AccumulatorT;  // Element type for internal accumulation
+  using ElementAccumulator = AccumulatorT;
   using ElementMma = MmaType;
 
-  // Only use interleaved layouts for subbyte weights, prmt instructions makes
-  // non-interleaved layouts for 8bit+ weights efficient enough we don't need
-  // iterleaved layouts
+  // Interleave for 4bit bit types when we are not upconverting to fp8 or int8,
+  // in those cases case we use a LUT using prmt instructions to upconvert and
+  // is more efficient if the data is not interleaved For 8bit+ prmt
+  // instructions makes non-interleaved layouts efficient enough we don't need
+  // iterleaved layouts (and can reuse more of the existing cutlass converts)
+  static constexpr bool should_interleave =
+      sizeof_bits_v<ElementB> <= 4 &&
+      !std::is_same_v<ElementConvert_, cutlass::float_e4m3_t> &&
+      !std::is_same_v<ElementConvert_, int8_t>;
+
+  // Only use interleaved layouts for subbyte weights,
   using IlvdBlkLayout = std::conditional_t<
       std::is_same_v<IlvBlkLayout_, IlvBlkLayoutAuto>,
       std::conditional_t<
-          sizeof_bits_v<ElementB> <= 4,
+          should_interleave,
           decltype(get_interleaved_blk_layout<
                    ElementB, sizeof_bits_v<ElementConvert_>, 32>()),
           void>,

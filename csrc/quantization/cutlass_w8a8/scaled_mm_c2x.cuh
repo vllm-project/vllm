@@ -21,7 +21,7 @@
 #include "cutlass/epilogue/threadblock/fusion/visitors.hpp"
 #include "cutlass/gemm/kernel/default_gemm_universal_with_visitor.h"
 
-#include "broadcast_load_epilogue_c2x.hpp"
+#include "cutlass_extensions/broadcast_load_epilogue_c2x.hpp"
 #include "common.hpp"
 // clang-format on
 

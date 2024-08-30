@@ -6,6 +6,13 @@
 
 namespace machete {
 
+struct PrepackBArgs {
+  torch::Tensor const& B;
+  at::ScalarType a_type;
+  vllm::ScalarType b_type;
+  c10::optional<at::ScalarType> maybe_group_scales_type;
+};
+
 template <typename PrepackedLayoutB>
 torch::Tensor prepack_impl(torch::Tensor const B) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(B));
@@ -62,7 +69,6 @@ torch::Tensor prepack_impl(torch::Tensor const B) {
   return D;
 };
 
-torch::Tensor prepack_B_dispatch(torch::Tensor B, at::ScalarType const& atype,
-                                 vllm::ScalarType const& btype);
+torch::Tensor prepack_B_dispatch(PrepackBArgs args);
 
 };  // namespace machete

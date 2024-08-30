@@ -21,6 +21,8 @@
 
 #include "cutlass_extensions/cute_utils.cuh"
 #include "cutlass_extensions/vllm_numeric_conversion.cuh"
+#include "cutlass_extensions/broadcast_load_epilogue_c3x.hpp"
+#include "cutlass_extensions/torch_utils.hpp"
 #include "machete_collective_builder.cuh"
 #include "machete_prepacked_layout.cuh"
 #include "machete_interleaving_utils.cuh"
@@ -28,6 +30,89 @@
 namespace machete {
 
 using namespace cute;
+
+template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
+struct ScaledEpilogueBase {
+ protected:
+  using Accum = cutlass::epilogue::fusion::Sm90AccFetch;
+
+  template <typename T>
+  using ColOrScalarLoad = cutlass::epilogue::fusion::Sm90ColOrScalarBroadcast<
+      0 /*Stages*/, typename EpilogueDescriptor::TileShape, T,
+      Stride<Int<1>, Int<0>, Int<0>>>;
+
+  template <typename T>
+  using RowOrScalarLoad = cutlass::epilogue::fusion::Sm90RowOrScalarBroadcast<
+      0 /*Stages*/, typename EpilogueDescriptor::TileShape, T,
+      Stride<Int<0>, Int<1>, Int<0>>>;
+
+  // Don't want to support nullptr by default
+  template <typename T, bool EnableNullPtr = false>
+  using ColLoad = cutlass::epilogue::fusion::Sm90ColBroadcast<
+      0 /*Stages*/, typename EpilogueDescriptor::TileShape, T,
+      Stride<Int<1>, Int<0>, Int<0>>, 128 / sizeof_bits_v<T>, EnableNullPtr>;
+
+  // Don't want to support nullptr by default
+  template <typename T, bool EnableNullPtr = false>
+  using RowLoad = cutlass::epilogue::fusion::Sm90RowBroadcast<
+      0 /*Stages*/, typename EpilogueDescriptor::TileShape, T,
+      Stride<Int<0>, Int<1>, Int<0>>, 128 / sizeof_bits_v<T>, EnableNullPtr>;
+
+  // This utility function constructs the arguments for the load descriptors
+  // from a tensor. It can handle both row and column, as well as row/column or
+  // scalar cases.
+  template <typename Descriptor, typename T>
+  static auto args_from_tensor(torch::Tensor const& tensor) {
+    using Arguments = typename Descriptor::Arguments;
+    auto* data_ptr = static_cast<T*>(tensor.data_ptr());
+    if constexpr (std::is_same_v<Descriptor, ColOrScalarLoad<T>> ||
+                  std::is_same_v<Descriptor, RowOrScalarLoad<T>>) {
+      return Arguments{data_ptr, tensor.numel() != 1};
+    } else {
+      static_assert(!std::is_same_v<Descriptor, ColLoad<T, true>> &&
+                    !std::is_same_v<Descriptor, RowLoad<T, true>>);
+      return Arguments{data_ptr};
+    }
+  }
+};
+
+template <typename ElementAcc, typename ElementScale, typename ElementD,
+          typename EpilogueDescriptor>
+struct ScaledEpilogue
+    : private ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor> {
+ private:
+  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor>;
+  using Accum = typename SUPER::Accum;
+  using ScaleA = typename SUPER::template ColOrScalarLoad<ElementScale>;
+  using ScaleB = typename SUPER::template RowOrScalarLoad<ElementScale>;
+
+  using Compute0 = cutlass::epilogue::fusion::Sm90Compute<
+      cutlass::multiplies, ElementScale, ElementScale,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+  using EVTCompute0 =
+      cutlass::epilogue::fusion::Sm90EVT<Compute0, ScaleB, Accum>;
+
+  using Compute1 = cutlass::epilogue::fusion::Sm90Compute<
+      cutlass::multiplies, ElementD, ElementScale,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+ public:
+  using EVTCompute =
+      cutlass::epilogue::fusion::Sm90EVT<Compute1, ScaleA, EVTCompute0>;
+  using ArgumentType = typename EVTCompute::Arguments;
+
+  static ArgumentType prepare_args(torch::Tensor const& a_scales,
+                                   torch::Tensor const& b_scales) {
+    auto a_args =
+        SUPER::template args_from_tensor<ScaleA, ElementScale>(a_scales);
+    auto b_args =
+        SUPER::template args_from_tensor<ScaleB, ElementScale>(b_scales);
+
+    typename EVTCompute0::Arguments evt0_args{b_args};
+    return ArgumentType{a_args, evt0_args};
+  }
+};
 
 // NOTE This kernel computes D = alpha * A * B + beta * C by computing
 //   D^t = alpha * B^t * A^t + beta * C^t, this is because the wgmma
@@ -37,33 +122,42 @@ using namespace cute;
 //   W is quantized, in this situation or right-hand operand is quantized so
 //   we compute the transpose to move it to the left-hand side.
 template <typename ElementA_, typename ElementB_, typename ElementD_,
-          typename AccumulatorT, typename ScaleT, typename ZeroT,
-          class KernelSchedule, typename ScheduleConfig>
+          typename AccumulatorT, typename GroupScaleT, typename GroupZeroT,
+          typename ChannelScaleT, typename TokenScaleT, class KernelSchedule,
+          typename ScheduleConfig>
 struct MacheteKernelTemplate {
   static constexpr bool with_C = false;  // not ever used
-  static constexpr bool with_scales = !std::is_same_v<ScaleT, void>;
-  static constexpr bool with_zeropoints = !std::is_same_v<ZeroT, void>;
+  static constexpr bool with_group_scales = !std::is_same_v<GroupScaleT, void>;
+  static constexpr bool with_group_zeropoints =
+      !std::is_same_v<GroupZeroT, void>;
+  static constexpr bool with_channel_scales =
+      !std::is_same_v<ChannelScaleT, void>;
+  static constexpr bool with_token_scales = !std::is_same_v<TokenScaleT, void>;
 
   using MmaType = ElementA_;
   using ElementA = ElementA_;
   using ElementB = ElementB_;
   using ElementD = ElementD_;
   using ElementC = cute::conditional_t<with_C, ElementD, void>;
-  // if !with_scales or !with_zeropoints, we use dummy values so we can
-  //   still construct the kernel
-  using ElementZ = cute::conditional_t<with_zeropoints, ZeroT, MmaType>;
-  using ElementS = cute::conditional_t<with_scales, ScaleT, MmaType>;
-
-  using ElementConvert = cute::conditional_t<with_scales, ScaleT, MmaType>;
-  using ElementAccumulator =
-      AccumulatorT;  // Element type for internal accumulation
+  using ElementAccumulator = AccumulatorT;
   using ElementCompute = AccumulatorT;  // For Epilogue
+  // Use dummy values when we don't have scales or zeropoints
+  using ElementZGroup =
+      cute::conditional_t<with_group_zeropoints, GroupZeroT, MmaType>;
+  using ElementSGroup =
+      cute::conditional_t<with_group_scales, GroupScaleT, MmaType>;
+  using ElementConvertGroup =
+      cute::conditional_t<with_group_scales, GroupScaleT, MmaType>;
+  using ElementSChannel =
+      cute::conditional_t<with_channel_scales, ChannelScaleT, AccumulatorT>;
+  using ElementSToken =
+      cute::conditional_t<with_token_scales, TokenScaleT, AccumulatorT>;
 
   using BTypeTuple = cute::conditional_t<
-      with_scales,
-      cute::conditional_t<with_zeropoints,
-                          cute::tuple<ElementB, ElementS, ElementZ>,
-                          cute::tuple<ElementB, ElementS>>,
+      with_group_scales,
+      cute::conditional_t<with_group_zeropoints,
+                          cute::tuple<ElementB, ElementSGroup, ElementZGroup>,
+                          cute::tuple<ElementB, ElementSGroup>>,
       ElementB>;
 
   using LayoutA = cutlass::layout::RowMajor;
@@ -77,8 +171,8 @@ struct MacheteKernelTemplate {
   using StrideA = cutlass::detail::TagToStrideA_t<LayoutA>;
   using StrideC = cutlass::detail::TagToStrideA_t<LayoutC>;
   using StrideD = cutlass::detail::TagToStrideA_t<LayoutD>;
-  using StrideS = cutlass::detail::TagToStrideA_t<LayoutScale>;
-  using StrideZ = StrideS;
+  using StrideSGroup = cutlass::detail::TagToStrideA_t<LayoutScale>;
+  using StrideZGroup = StrideSGroup;
 
   using LayoutA_Transpose =
       typename cutlass::layout::LayoutTranspose<LayoutA>::type;
@@ -91,7 +185,7 @@ struct MacheteKernelTemplate {
   using OperatorClass = cutlass::arch::OpClassTensorOp;
 
   using PrepackedLayoutB =
-      PrepackedLayoutBTemplate<ElementA_, ElementB_, ElementConvert,
+      PrepackedLayoutBTemplate<ElementA_, ElementB_, ElementConvertGroup,
                                AccumulatorT, LayoutA_Transpose, KernelSchedule>;
 
   static int constexpr TileShapeK =
@@ -109,12 +203,33 @@ struct MacheteKernelTemplate {
   using EpilogueTileType = typename ScheduleConfig::EpilogueTileType;
   using TileScheduler = typename ScheduleConfig::TileScheduler;
 
+  static_assert(
+      (!with_channel_scales && !with_token_scales) ||
+          ((with_channel_scales && with_token_scales) &&
+           std::is_same_v<ElementSChannel, ElementSToken>),
+      "Currently token and channel scales (if present) must be the same type");
+
+  using EpilogueDescriptor =
+      cutlass::epilogue::collective::detail::EpilogueDescriptor<
+          TileShape, cutlass::epilogue::collective::EpilogueTileAuto, ElementD,
+          ElementD, EpilogueSchedule>;
+
+  using ChTokScalesEpilogue =
+      ScaledEpilogue<ElementAccumulator, ElementSChannel, ElementD,
+                     EpilogueDescriptor>;
+  using EVTCompute =
+      std::conditional_t<with_channel_scales || with_token_scales,
+                         typename ChTokScalesEpilogue::EVTCompute,
+                         cutlass::epilogue::fusion::Sm90EVT<
+                             cutlass::epilogue::fusion::Sm90AccFetch>>;
+
+  // EVTCompute
   using CollectiveEpilogue =
       typename cutlass::epilogue::collective::CollectiveBuilder<
           ArchTag, OperatorClass, TileShape, ClusterShape, EpilogueTileType,
-          ElementAccumulator, ElementAccumulator, ElementC, LayoutC_Transpose,
-          AlignmentC, ElementD, LayoutD_Transpose, AlignmentD,
-          EpilogueSchedule>::CollectiveOp;
+          ElementAccumulator, ElementSChannel, ElementC, LayoutC_Transpose,
+          AlignmentC, ElementD, LayoutD_Transpose, AlignmentD, EpilogueSchedule,
+          EVTCompute>::CollectiveOp;
 
   using CollectiveMainloop =
       typename cutlass::gemm::collective::VLLMCollectiveBuilder<
@@ -137,26 +252,44 @@ struct MacheteKernelTemplate {
   using MainloopArguments = typename GemmKernel::MainloopArguments;
   using EpilogueArguments = typename GemmKernel::EpilogueArguments;
 
-  template <typename ShapeA, typename ShapeC, typename ShapeD, typename ShapeS,
-            typename ShapeZ>
   static Arguments create_arguments(
       cudaStream_t stream,
-      ElementA const* A_ptr,  // A is an MxK matrix
-      Layout<ShapeA, StrideA> const& layout_A,
-      ElementB const* B_ptr,  // B is an KxN prepacked matrix
-      ElementD* D_ptr,        // D is an MxN matrix
-      Layout<ShapeD, StrideD> const& layout_D,
-      ElementC const* C_ptr,  // C is an MxN matrix
-      std::optional<Layout<ShapeC, StrideC>> const& layout_C,
-      ElementS const* S_ptr,  // S is an scale_KxN matrix
-      std::optional<Layout<ShapeS, StrideS>> const& layout_S,
-      ElementZ const* Z_ptr,  // Z is an scale_KxN matrix
-      std::optional<Layout<ShapeZ, StrideZ>> const& layout_Z,
-      ElementCompute alpha, ElementCompute beta,
-      std::optional<int> maybe_group_size) {
-    static_assert(!with_zeropoints || with_scales);
+      torch::Tensor const& A,  // MxK matrix
+      torch::Tensor const& B,  // KxN prepacked matrix
+      torch::Tensor& D,        // MxN matrix
+      c10::optional<torch::Tensor> const& maybe_g_scales,  // scale_KxN matrix
+      c10::optional<torch::Tensor> const& maybe_g_zeros,   // scale_KxN matrix
+      c10::optional<int64_t> maybe_group_size,
+      c10::optional<torch::Tensor> const& maybe_ch_scales,   // len N vector
+      c10::optional<torch::Tensor> const& maybe_tok_scales)  // len M vector
+  {
+    static_assert(!with_group_zeropoints || with_group_scales);
 
-    int M = size<0>(layout_A), N = size<1>(layout_D), K = size<1>(layout_A);
+    int M = A.size(0), N = B.size(1), K = A.size(1);
+    TORCH_CHECK(D.size(0) == M && D.size(1) == N);
+
+    auto layout_A = make_cute_layout<StrideA>(A, "A");
+    auto layout_D = make_cute_layout<StrideD>(D, "D");
+    auto layout_S_group =
+        maybe_make_cute_layout<StrideSGroup>(maybe_g_scales, "group_scales");
+    auto layout_Z_group =
+        maybe_make_cute_layout<StrideZGroup>(maybe_g_zeros, "group_zeros");
+    int64_t numel_S_channel = maybe_ch_scales ? maybe_ch_scales->numel() : 0;
+    int64_t numel_S_token = maybe_tok_scales ? maybe_tok_scales->numel() : 0;
+
+    auto unwrap = [](auto const& t) {
+      return t ? t->const_data_ptr() : nullptr;
+    };
+    auto A_ptr = static_cast<ElementA const*>(A.const_data_ptr());
+    auto B_ptr = static_cast<ElementB const*>(B.const_data_ptr());
+    auto D_ptr = static_cast<ElementD*>(D.mutable_data_ptr());
+    auto S_group_ptr =
+        static_cast<ElementSGroup const*>(unwrap(maybe_g_scales));
+    auto Z_group_ptr = static_cast<ElementZGroup const*>(unwrap(maybe_g_zeros));
+    auto S_channel_ptr =
+        static_cast<ElementSChannel const*>(unwrap(maybe_ch_scales));
+    auto S_token_ptr =
+        static_cast<ElementSToken const*>(unwrap(maybe_tok_scales));
 
     int const group_size =
         maybe_group_size == -1 ? K : maybe_group_size.value_or(K);
@@ -165,26 +298,27 @@ struct MacheteKernelTemplate {
     TORCH_CHECK(size<0>(layout_A) == M && size<1>(layout_A) == K);
     TORCH_CHECK(size<0>(layout_D) == M && size<1>(layout_D) == N);
 
-    if constexpr (with_C) {
-      TORCH_CHECK(C_ptr && layout_C);
+    if constexpr (with_group_scales) {
+      TORCH_CHECK(S_group_ptr && layout_S_group);
+      TORCH_CHECK((size<0>(*layout_S_group) == scale_k &&
+                   size<1>(*layout_S_group) == N));
     } else {
-      TORCH_CHECK(!C_ptr, "C not supported");
+      TORCH_CHECK(!S_group_ptr, "Scales not supported");
     }
 
-    if constexpr (with_scales) {
-      TORCH_CHECK(S_ptr && layout_S);
-      TORCH_CHECK((size<0>(*layout_S) == scale_k && size<1>(*layout_S) == N));
-    } else {
-      TORCH_CHECK(!S_ptr, "Scales not supported");
-    }
-
-    if constexpr (with_zeropoints) {
-      TORCH_CHECK(Z_ptr && layout_Z);
-      TORCH_CHECK((size<0>(*layout_Z) == scale_k && size<1>(*layout_Z) == N));
-      TORCH_CHECK(layout_S && *layout_Z == *layout_S,
+    if constexpr (with_group_zeropoints) {
+      TORCH_CHECK(Z_group_ptr && layout_Z_group);
+      TORCH_CHECK((size<0>(*layout_Z_group) == scale_k &&
+                   size<1>(*layout_Z_group) == N));
+      TORCH_CHECK(layout_S_group && *layout_Z_group == *layout_S_group,
                   "Scales and zeros must have the same layout");
     } else {
-      TORCH_CHECK(!Z_ptr, "Zeropoints not supported");
+      TORCH_CHECK(!Z_group_ptr, "Zeropoints not supported");
+    }
+
+    if constexpr (with_channel_scales || with_token_scales) {
+      TORCH_CHECK(maybe_ch_scales->numel() == N &&
+                  maybe_tok_scales->numel() == M);
     }
 
     // Transpose A and D
@@ -192,24 +326,33 @@ struct MacheteKernelTemplate {
     //  for B (which is At)
     auto stride_At = layout_A.stride();
     auto stride_Dt = permute_layout<1, 0, 2>(layout_D).stride();
-    auto stride_Ct = stride_Dt;
-    if (layout_C) {
-      stride_Ct = permute_layout<1, 0, 2>(*layout_C).stride();
-    }
 
     MainloopArguments mainloop_arguments{};
-    EpilogueArguments epilogue_arguments{
-        {alpha, beta}, C_ptr, stride_Ct, D_ptr, stride_Dt};
+    // {Accum, C, C_layout, D, D}
+    EpilogueArguments epilogue_arguments{};
 
-    if constexpr (with_scales && with_zeropoints) {
-      auto stride_S = permute_layout<1, 0, 2>(*layout_S).stride();
-      mainloop_arguments =
-          MainloopArguments{B_ptr, _StrideB{}, A_ptr,      stride_At,
-                            S_ptr, stride_S,   group_size, Z_ptr};
-    } else if constexpr (with_scales) {
-      auto stride_S = permute_layout<1, 0, 2>(*layout_S).stride();
+    if constexpr (with_channel_scales || with_token_scales) {
+      epilogue_arguments =
+          EpilogueArguments{ChTokScalesEpilogue::prepare_args(
+                                *maybe_ch_scales, *maybe_tok_scales),
+                            nullptr,
+                            {},
+                            D_ptr,
+                            stride_Dt};
+    } else {
+      epilogue_arguments = EpilogueArguments{{}, nullptr, {}, D_ptr, stride_Dt};
+    }
+
+    if constexpr (with_group_scales && with_group_zeropoints) {
+      auto stride_S_group = permute_layout<1, 0, 2>(*layout_S_group).stride();
       mainloop_arguments = MainloopArguments{
-          B_ptr, _StrideB{}, A_ptr, stride_At, S_ptr, stride_S, group_size};
+          B_ptr,       _StrideB{},     A_ptr,      stride_At,
+          S_group_ptr, stride_S_group, group_size, Z_group_ptr};
+    } else if constexpr (with_group_scales) {
+      auto stride_S_group = permute_layout<1, 0, 2>(*layout_S_group).stride();
+      mainloop_arguments =
+          MainloopArguments{B_ptr,       _StrideB{},     A_ptr,     stride_At,
+                            S_group_ptr, stride_S_group, group_size};
     } else {
       mainloop_arguments =
           MainloopArguments{B_ptr, _StrideB{}, A_ptr, stride_At};
