@@ -51,6 +51,10 @@ Decoder-only Language Models
     - DeciLM
     - :code:`Deci/DeciLM-7B`, :code:`Deci/DeciLM-7B-instruct`, etc.
     -
+  * - :code:`ExaoneForCausalLM`
+    - EXAONE-3
+    - :code:`LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct`, etc.
+    - ✅︎
   * - :code:`FalconForCausalLM`
     - Falcon
     - :code:`tiiuae/falcon-7b`, :code:`tiiuae/falcon-40b`, :code:`tiiuae/falcon-rw-7b`, etc.
