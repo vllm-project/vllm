@@ -49,7 +49,7 @@ from vllm.sequence import (IntermediateTensors,
                            SequenceData,
                            VLLM_TOKEN_ID_ARRAY_TYPE)
 
-from .utils import is_pp_missing_parameter, make_layers
+from .utils import flatten_bn, is_pp_missing_parameter, make_layers
 
 logger = init_logger(__name__)
 
@@ -70,7 +70,7 @@ class QwenImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     data: torch.Tensor
     """
-    Shape: `(# images, 3, image_size, image_size)`
+    Shape: `(batch_size * num_images, 3, image_size, image_size)`
 
     Note that image_size is the value in the vision config to which we resize
     the image to in the normalization transform. Currently multi-image support
@@ -81,7 +81,7 @@ class QwenImagePixelInputs(TypedDict):
 class QwenImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
     data: torch.Tensor
-    """Shape: `(# images, 256, hidden_size)`
+    """Shape: `(batch_size * num_images, 256, hidden_size)`
 
     `hidden_size` must match the hidden size of the language model backbone
     and is stored in the visual config of the model if we have one.
@@ -1001,6 +1001,7 @@ class QWenLMHeadModel(nn.Module, SupportsMultiModal):
             the visual transformer needs to process the pixel_values.
         """
         if pixel_values is not None and self.transformer.visual is not None:
+            pixel_values = flatten_bn(pixel_values)
             if len(pixel_values.shape) == 3 and pixel_values.shape[
                     1] == MAX_QWEN_IMG_TOKENS and pixel_values.shape[
                         2] == self.config.visual["output_dim"]:
