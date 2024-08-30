@@ -12,8 +12,7 @@ from openai.types.chat import (ChatCompletionAssistantMessageParam,
 from openai.types.chat import (
     ChatCompletionContentPartParam as OpenAIChatCompletionContentPartParam)
 from openai.types.chat import (ChatCompletionContentPartRefusalParam,
-                               ChatCompletionContentPartTextParam,
-                               )
+                               ChatCompletionContentPartTextParam)
 from openai.types.chat import (
     ChatCompletionMessageParam as OpenAIChatCompletionMessageParam)
 from openai.types.chat import (ChatCompletionMessageToolCallParam,
