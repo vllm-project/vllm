@@ -1,5 +1,4 @@
 import asyncio
-import os
 from asyncio import CancelledError
 from dataclasses import dataclass
 from typing import Optional

@@ -30,7 +30,6 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import ExecuteModelRequest
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import print_warning_once
 
 logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
@@ -882,8 +881,7 @@ class AsyncLLMEngine:
                     result = task.result()
                     virtual_engine = requests_in_progress.index(task)
                     has_unfinished_requests = (
-                        self.engine.
-                        has_unfinished_requests_for_virtual_engine(
+                        self.engine.has_unfinished_requests_for_virtual_engine(
                             virtual_engine))
                     if result or has_unfinished_requests:
                         requests_in_progress[virtual_engine] = (
