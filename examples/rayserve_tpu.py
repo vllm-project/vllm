@@ -1,8 +1,9 @@
 """
-This example runs a LLM using RayServe and vLLM on TPUs.
+This example runs a LLM using RayServe and vLLM on TPUs. It can support
+single or multi-host inference.
 
 To run this example, run:
-  serve run vllm.examples.rayserve_tpu:build_app
+  serve run examples.rayserve_tpu:build_app
 """
 
 import json
