@@ -5,10 +5,9 @@ from typing import Any, Dict, Optional
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    fused_topk, moe_align_block_size, try_get_optimal_moe_config)
 from vllm.scalar_type import scalar_types
-
-from .fused_moe import (fused_topk, moe_align_block_size,
-                        try_get_optimal_moe_config)
 
 
 def single_moe_marlin(
