@@ -675,7 +675,9 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
         self.visual = Qwen2VisionTransformer(
             config.vision_config,
             norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-            quant_config=quant_config,
+
+            # NOTE: Qwen2-VL does not support any quantization method now.
+            quant_config=None,
         )
 
         self.model = Qwen2Model(config, cache_config, quant_config)
@@ -898,7 +900,11 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
                                                        head_size)
                     loaded_weight = loaded_weight.transpose(0, 1)
                     loaded_weight = loaded_weight.reshape(-1)
-                param = params_dict[name]
+                try:
+                    param = params_dict[name]
+                except KeyError:
+                    print(params_dict.keys())
+                    raise
 
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
