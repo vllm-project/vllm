@@ -60,6 +60,7 @@ class SequenceStatus(enum.IntEnum):
     FINISHED_LENGTH_CAPPED = 4
     FINISHED_ABORTED = 5
     FINISHED_IGNORED = 6
+    FINISHED_REPEATED = 7
 
     @staticmethod
     def is_finished(status: "SequenceStatus") -> bool:
@@ -78,6 +79,10 @@ class SequenceStatus(enum.IntEnum):
             # are longer than the model's length cap. Therefore, the stop
             # reason should also be "length" as in OpenAI API.
             finish_reason = "length"
+        elif status == SequenceStatus.FINISHED_REPEATED:
+            # The repeated sequences are the generated sequences appeared
+            # ngram repeated.
+            finish_reason = "ngram_repeat"
         else:
             finish_reason = None
         return finish_reason
@@ -872,7 +877,7 @@ class SequenceGroupMetadata(
         state: Internal state tied to this sequence group.
         multi_modal_data: Multi modal data.
         encoder_seq_data: Optional sequence data for encoder prompt
-                          (SequenceGroup.encoder_seq). Should be None 
+                          (SequenceGroup.encoder_seq). Should be None
                           unless you are working with an encoder/decoder
                           model.
         cross_block_table: Optional cross-attention block table associated
