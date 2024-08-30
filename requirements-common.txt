@@ -27,3 +27,4 @@ soundfile # Required for audio processing
 gguf == 0.9.1
 importlib_metadata
 mistral_common >= 1.3.4
+pyyaml
