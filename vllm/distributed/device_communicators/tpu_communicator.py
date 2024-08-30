@@ -7,7 +7,6 @@ from torch.distributed import ProcessGroup
 from vllm.platforms import current_platform
 
 if current_platform.is_tpu():
-    import ray
     import torch_xla.core.xla_model as xm
     import torch_xla.runtime as xr
     from torch_xla._internal import pjrt
