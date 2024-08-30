@@ -172,8 +172,7 @@ speculative decoding, breaking down the guarantees into three key areas:
    in `Accelerating Large Language Model Decoding with Speculative Sampling <https://arxiv.org/pdf/2302.01318>`_
 
 2. **Algorithmic Losslessness**
-   - vLLM’s implementation of speculative decoding is algorithmically validated to be lossless when the
-   temperature parameter (`temp`) is set to 0. Key tests include:
+   - vLLM’s implementation of speculative decoding is algorithmically validated to be lossless. Key tests include:
 
     - **Rejection Sampler Convergence**: Ensures that samples from vLLM’s rejection sampler align with the target 
       distribution. `View Test Code <https://github.com/vllm-project/vllm/blob/47b65a550866c7ffbd076ecb74106714838ce7da/tests/samplers/test_rejection_sampler.py#L252>`_
@@ -184,10 +183,10 @@ speculative decoding, breaking down the guarantees into three key areas:
       verify this property using `this assertion implementation <https://github.com/vllm-project/vllm/blob/b67ae00cdbbe1a58ffc8ff170f0c8d79044a684a/tests/spec_decode/e2e/conftest.py#L291>`_
 
 3. **vLLM Logprob Stability**
-   - vLLM currently does not guarantee stable log probabilities (logprobs) across different batch sizes, which might 
-   cause small variations in output probabilities. 
-   This issue may stem from non-deterministic behaviors in batched operations or numerical instability in Torch operations. 
-   as explained in the `Numerical Accuracy section <https://pytorch.org/docs/stable/notes/numerical_accuracy.html#batched-computations-or-slice-computations>`_
+   - - vLLM does not currently guarantee stable token log probabilities (logprobs). This can result in different outputs for the 
+   same request across runs. For more details, see the FAQ section 
+   titled *Can the output of a prompt vary across runs in vLLM?* in the `FAQs <../serving/faq.rst>`.
+
 
 **Conclusion**
 
@@ -199,8 +198,9 @@ can occur due to following factors:
 - **Batch Size and Numerical Stability**: Changes in batch size may cause variations in logprobs and output probabilities, potentially 
   due to non-deterministic behavior in batched operations or numerical instability.
 
-For stable generation across different runs, using request-seeds is recommended, although it may affect latency. For more information,
-refer to `Bugfix #6034 <https://github.com/vllm-project/vllm/issues/6034>`_.
+**Mitigation Strategies**
+
+For mitigation strategies, please refer to the FAQ entry *Can the output of a prompt vary across runs in vLLM?* in the `FAQs <../serving/faq.rst>`.
 
 Resources for vLLM contributors
 -------------------------------
