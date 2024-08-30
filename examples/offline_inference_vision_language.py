@@ -11,6 +11,8 @@ from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.utils import FlexibleArgumentParser
 
+from functools import partial
+
 # Input image and question
 image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
 question = "What is the content of this image?"
@@ -158,6 +160,10 @@ def run_blip2(question):
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
+def run_llama(question, size: str):
+    checkpoint_dir = "/data/zhang-chen/llama/checkpoints" # update checkpoint path here
+    llm = LLM(model=f"{checkpoint_dir}/Meta-Llama-3.2-{size}-Vision-Early/") # update checkpoint path here
+    raise NotImplementedError
 
 model_example_map = {
     "llava": run_llava,
@@ -169,6 +175,8 @@ model_example_map = {
     "minicpmv": run_minicpmv,
     "blip-2": run_blip2,
     "internvl_chat": run_internvl,
+    "llama-3.2-11b": partial(run_llama, size="11B"),
+    "llama-3.2-90b": partial(run_llama, size="90B"),
 }
 
 
