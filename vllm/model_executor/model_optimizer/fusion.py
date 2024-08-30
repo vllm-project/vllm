@@ -64,6 +64,10 @@ def fuse_graph_nodes(cc: CodeCache, sub: SubGraph):
     kwargs: Dict[torch.fx.Node, Dict[str, torch.fx.Argument]] = dict()
 
     for n in sub.nodes:
+        # XXXXXX remove debugging code
+        if False and n.name == 'output_160':
+            print(f"sorted {sub.nodes}\n{sub.tabular()}")
+
         if not is_simple_call(n):
             continue
 
@@ -278,6 +282,7 @@ def pointwise_fusion(cc: CodeCache,
     fg = FlowGraph(mod)
 
     logger.debug("FlowGraph:\n%s", fg.dump())
+    #print(f"FlowGraph:\n{fg.dump()}")
     #print(f"FlowGraph (dot):\n{fg.to_dot('orig')}")
 
     ShapeProp(mod).propagate(*example_inputs)

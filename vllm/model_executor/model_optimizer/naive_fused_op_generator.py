@@ -393,7 +393,7 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
                     first_arg = 1
 
                 # First check is total hack here
-                if fn == 'size':
+                if fn == 'size' and len(n.args) == 1:
                     call_str = call_str + "sizes("
                 elif node_function_target(n).startswith("torch.ops._C"):
                     call_str = call_str + f"{self.sanitize(fn, '::')}.call("

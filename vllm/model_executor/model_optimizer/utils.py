@@ -361,8 +361,8 @@ def dump_inputs_users(
     return tabulate(entries, headers=headers)
 
 
-def gather_all_input_nodes(
-    nodes: List[torch.fx.Node],
+def gather_all_input_nodes_old(
+    mod: torch.fx.GraphModule,
     do_renames: bool = True
 ) -> Tuple[OrderedDict[torch.fx.Node, List[torch.fx.Node]], OrderedDict[
         torch.fx.Node, OrderedDict[torch.fx.Node, None]]]:
@@ -393,6 +393,8 @@ def gather_all_input_nodes(
                                             None]] = OrderedDict()
     renames: Dict[torch.fx.Node, torch.fx.Node] = dict()
 
+    nodes: List[torch.fx.Node] = list(mod.graph.nodes)
+
     def process_arg(n: torch.fx.Node, arg: torch.fx.node.Argument):
         if isinstance(arg, tuple):
             for sub_arg in arg:
@@ -409,18 +411,21 @@ def gather_all_input_nodes(
             all_input_nodes[n][i] = renames[inp] if inp in renames else inp
 
     def rename_users(n: torch.fx.Node):
+        todel = []
         for user in all_node_users[n]:
             if user in renames:
-                del all_node_users[n][user]
-                all_node_users[n][user] = None
+                todel.append(user)
+
+        for user in todel:
+            del all_node_users[n][user]
+            all_node_users[n][user] = None
 
     #
     # populate maps up front
     #
     for n in nodes:
         all_input_nodes[n] = n.all_input_nodes
-        all_node_users[n] = OrderedDict(
-            sorted(n.users.items(), key=lambda kv: kv[0].name))
+        all_node_users[n] = OrderedDict(n.users)
 
     #
     # process each node
@@ -441,6 +446,114 @@ def gather_all_input_nodes(
                 all_node_users[inp][n] = None
 
     logger.debug(dump_inputs_users(nodes, all_input_nodes, all_node_users))
+
+    # This is a hack!!!!
+    for n in nodes:
+        for p in all_input_nodes[n]:
+            if n not in all_node_users[p]:
+                #print(f"{n} not in users of {p}!")
+                all_node_users[p][n] = None
+        for s in all_node_users[n]:
+            if n not in all_input_nodes[s]:
+                #print(f"{n} not in inputs of {s}!")
+                all_input_nodes[s].append(n)
+
+
+    # Make sure everything is sorted
+    for n in nodes:
+        all_input_nodes[n] = list(sorted(all_input_nodes[n]))
+        all_node_users[n] = OrderedDict(sorted(all_node_users[n].items(), key=lambda kv: kv[0].name))
+
+    return all_input_nodes, all_node_users
+
+
+def gather_all_input_nodes(
+    mod: torch.fx.GraphModule,
+    do_renames: bool = True
+) -> Tuple[OrderedDict[torch.fx.Node, List[torch.fx.Node]], OrderedDict[
+        torch.fx.Node, OrderedDict[torch.fx.Node, None]]]:
+    """
+    Collect all def/use information for each node in 'nodes'.  This is different
+    than node.all_input_nodes and node.users since it handles in-place
+    functions.  It is assumed that any mutable input in an in-place function is
+    also an output.
+
+    Note: this will include Node kwargs
+    """
+
+    # Assure that the graph is toposorted
+    #mod.graph.lint()
+
+    all_input_nodes: OrderedDict[torch.fx.Node,
+                                 List[torch.fx.Node]] = OrderedDict()
+    all_node_users: OrderedDict[torch.fx.Node,
+                                OrderedDict[torch.fx.Node,
+                                            None]] = OrderedDict()
+    renames: Dict[torch.fx.Node, torch.fx.Node] = dict()
+
+    def process_arg(arg: torch.fx.node.Argument, fn):
+        if isinstance(arg, tuple):
+            for sub_arg in arg:
+                process_arg(sub_arg, fn)
+            return
+
+        if not isinstance(arg, torch.fx.Node):
+            return
+
+        fn(arg)
+
+    def delete_rename(arg):
+        if arg in renames:
+            del renames[arg]
+
+    def add_rename(arg):
+        renames[arg] = n
+
+    def add_renamed_user(n, arg):
+        if arg in renames:
+            renamed_arg = renames[arg]
+            all_node_users[renamed_arg][n] = None
+
+    #
+    # process each node
+    #
+    # just do outputs then make symmetric inputs
+    # for nullary targets, tie to mutable args?  or add a mapping?
+    for n in mod.graph.nodes:
+        all_input_nodes[n] = list()
+        all_node_users[n] = n.users
+
+        if not do_renames:
+            continue
+
+        mutable_args = mutable_function_args(n)
+
+        # Add this node as a user for all mutable args.
+        for arg in n.all_input_nodes:
+            process_arg(arg, lambda arg: add_renamed_user(n, arg))
+
+        # erase_renames(mutable_args)
+        for marg in mutable_args:
+            arg = nth_arg_or_kwarg(n, marg)
+            process_arg(arg, delete_rename)
+
+        # all mutable args need to be renamed as the lhs of current node
+        for marg in mutable_args:
+            arg = nth_arg_or_kwarg(n, marg)
+            process_arg(arg, add_rename)
+
+    # Make inputs symmetric with users
+    for n in mod.graph.nodes:
+        for s in all_node_users[n]:
+            all_input_nodes[s].append(n)
+
+    logger.debug(dump_inputs_users(mod.graph.nodes, all_input_nodes, all_node_users))
+    #print(dump_inputs_users(mod.graph.nodes, all_input_nodes, all_node_users))
+
+    # Make sure everything is sorted
+    for n in mod.graph.nodes:
+        all_input_nodes[n] = list(sorted(all_input_nodes[n]))
+        all_node_users[n] = OrderedDict(sorted(all_node_users[n].items(), key=lambda kv: kv[0].name))
 
     return all_input_nodes, all_node_users
 
@@ -476,17 +589,17 @@ class FlowGraph:
         self.all_input_nodes, self.all_node_users = gather_all_input_nodes(
             self.module.graph.nodes, False)
 
-        self.preds: Dict[torch.fx.Node, Set[torch.fx.Node]] = dict()
-        self.succs: Dict[torch.fx.Node, Set[torch.fx.Node]] = dict()
+        self.preds: Dict[torch.fx.Node, OrderedDict[torch.fx.Node, None]] = {}
+        self.succs: Dict[torch.fx.Node, OrderedDict[torch.fx.Node, None]] = {}
         for n in self.module.graph.nodes:
-            self.succs[n] = set(self.all_renamed_node_users[n].keys())
-            self.preds[n] = set(self.all_renamed_input_nodes[n])
+            self.succs[n] = OrderedDict(self.all_renamed_node_users[n])
+            self.preds[n] = OrderedDict.fromkeys(self.all_renamed_input_nodes[n])
 
-    def successors(self, n: torch.fx.Node) -> Set[torch.fx.Node]:
-        return self.succs[n]
+    def successors(self, n: torch.fx.Node): # -> Set[torch.fx.Node]:
+        return self.succs[n].keys()
 
-    def predecessors(self, n: torch.fx.Node) -> Set[torch.fx.Node]:
-        return self.preds[n]
+    def predecessors(self, n: torch.fx.Node): # -> Set[torch.fx.Node]:
+        return self.preds[n].keys()
 
     def dfs_visit(self,
                   fn: Callable,
@@ -528,7 +641,8 @@ class FlowGraph:
 
     def to_dot(self,
                name: str = "my_graph",
-               hilite: Optional[List[List[torch.fx.Node]]] = None) -> str:
+               hilite: Optional[List[List[torch.fx.Node]]] = None,
+               orig: bool = False) -> str:
         import pydot
 
         def make_label(n: torch.fx.Node) -> str:
@@ -562,7 +676,8 @@ class FlowGraph:
                            label=make_label(n)))
 
         for n in self.module.graph.nodes:
-            for s in self.successors(n):
+            succs = self.successors(n) if not orig else n.users.keys()
+            for s in succs:
                 graph.add_edge(pydot.Edge(n.name, s.name))
 
         return str(graph)
@@ -608,7 +723,7 @@ class SubGraph:
 
         for n in self.nodes:
             new_inputs = [
-                inp for inp in all_input_nodes[n] if not self.in_subgraph(inp)
+                inp for inp in self.all_renamed_input_nodes[n] if not self.in_subgraph(inp)
             ]
             for inp in new_inputs:
                 if inp not in inputs:
@@ -616,7 +731,7 @@ class SubGraph:
 
             if any([
                     user
-                    for user in all_node_users[n] if not self.in_subgraph(user)
+                    for user in self.all_renamed_node_users[n] if not self.in_subgraph(user)
             ]) and n not in outputs:
                 outputs.append(n)
 
@@ -627,24 +742,42 @@ class SubGraph:
         in_degree = dict()
         worklist: deque = deque()
 
+        # XXXXXX remove debugging code
+        debug = False and any([n.name == 'output_160' for n in self.nodes])
+
         all_input_nodes, all_node_users = (self.all_renamed_input_nodes,
                                            self.all_renamed_node_users)
 
         for n in sorted(self.nodes, key=lambda n: n.name):
+            # This count is not right....
+            # users/inputs not symmetric for nullary nodes
             count = len(
                 [inp for inp in all_input_nodes[n] if self.in_subgraph(inp)])
             in_degree[n] = count
             if count == 0:
                 worklist.append(n)
 
+        if debug:
+            print(f"count={count}")
+            print(f"in_degree={in_degree}")
+            print(f"worklist={worklist}")
+            nl="  \n"
+            print(f"inputs={nl}{nl.join([str((x,y)) for x,y in all_input_nodes.items() if self.in_subgraph(x)])}")
+            print(f"outputs={nl}{nl.join([str((x,y)) for x,y in all_node_users.items() if self.in_subgraph(x)])}")
+            print(f"in_subgraph={[str((n.name, self.in_subgraph(n))) for n in self.nodes]}")
+
         while len(worklist) > 0:
             n = worklist.popleft()
             order.append(n)
+            if debug:
+                print(f"n, worklist={n}, {worklist}, {order}, {in_degree}")
 
             for u in all_node_users[n]:
                 if not self.in_subgraph(u):
                     continue
                 in_degree[u] = in_degree[u] - 1
+                if debug:
+                    print(f"   dec {u} = {in_degree[u]}")
                 if in_degree[u] == 0:
                     worklist.append(u)
 
@@ -653,6 +786,10 @@ class SubGraph:
             self.nodes), f"cycle found: ({order}) != ({self.nodes})"
 
         self.nodes = order
+
+        if False and debug:
+            print(f"order = {order}")
+            exit(-1)
 
     def build(self, nodes: List[torch.fx.Node]):
         """
