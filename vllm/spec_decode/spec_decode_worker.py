@@ -13,7 +13,8 @@ from vllm.model_executor.layers.spec_decode_base_sampler import (
     SpecDecodeBaseSampler, SpecDecodeStochasticBaseSampler)
 from vllm.model_executor.layers.typical_acceptance_sampler import (
     TypicalAcceptanceSampler)
-from vllm.sequence import (CompletionSequenceGroupOutput, ExecuteModelRequest,
+from vllm.sequence import (VLLM_INVALID_TOKEN_ID,
+                           CompletionSequenceGroupOutput, ExecuteModelRequest,
                            HiddenStates, SequenceGroupMetadata,
                            get_all_seq_ids, get_all_seq_ids_and_request_ids)
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
@@ -32,7 +33,6 @@ from vllm.spec_decode.util import (Timer, create_sequence_group_output,
                                    get_all_num_logprobs,
                                    get_sampled_token_logprobs, nvtx_range,
                                    split_batch_by_proposal_len)
-from vllm.transformers_utils.detokenizer import INVALID_TOKEN_ID
 from vllm.worker.worker import Worker
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
 
@@ -458,7 +458,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         seq_ids = get_all_seq_ids(execute_model_req.seq_group_metadata_list)
         # ignore slots for prompt tokens that are filled with INVALID_TOKEN_ID
         sampled_token_ids_list = (sampler_output.sampled_token_ids[torch.where(
-            sampler_output.sampled_token_ids - INVALID_TOKEN_ID)[0]] \
+            sampler_output.sampled_token_ids - VLLM_INVALID_TOKEN_ID)[0]] \
             if any(seq.is_prompt
                 for seq in execute_model_req.seq_group_metadata_list) else \
                 sampler_output.sampled_token_ids).tolist()
@@ -496,8 +496,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             # remove hidden_states for prompt tokens
             if any(seq.is_prompt
                    for seq in execute_model_req.seq_group_metadata_list):
-                hidden_states = hidden_states[torch.where(
-                    sampler_output.sampled_token_ids - INVALID_TOKEN_ID)[0]]
+                hidden_states = hidden_states[
+                    torch.where(sampler_output.sampled_token_ids -
+                                VLLM_INVALID_TOKEN_ID)[0]]
             if self.previous_hidden_states is None:
                 self.previous_hidden_states = HiddenStates(
                     hidden_states, execute_model_req.seq_group_metadata_list)

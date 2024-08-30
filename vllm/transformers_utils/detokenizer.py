@@ -1,12 +1,10 @@
 from typing import Dict, List, Optional, Tuple
 
-from vllm.sequence import Logprob, SamplingParams, Sequence, SequenceGroup
+from vllm.sequence import (VLLM_INVALID_TOKEN_ID, Logprob, SamplingParams,
+                           Sequence, SequenceGroup)
 
 from .tokenizer import AnyTokenizer
 from .tokenizer_group import BaseTokenizerGroup
-
-# Used eg. for marking rejected tokens in spec decoding.
-INVALID_TOKEN_ID = -1
 
 
 class Detokenizer:
@@ -61,7 +59,7 @@ class Detokenizer:
                 continue
             for token_id, sample_logprob in prompt_logprobs_for_token.items():
                 if (sample_logprob.decoded_token is None
-                        and token_id != INVALID_TOKEN_ID):
+                        and token_id != VLLM_INVALID_TOKEN_ID):
                     prompt_token_ids_with_token = (
                         prompt_token_ids[:token_position] + [token_id])
                     (new_tokens, new_text, new_prefix_offset,
@@ -143,7 +141,7 @@ class Detokenizer:
                     continue
 
                 if (sample_logprob.decoded_token is None
-                        and token_id != INVALID_TOKEN_ID):
+                        and token_id != VLLM_INVALID_TOKEN_ID):
                     all_input_ids_with_logprob = previous_tokens + [token_id]
                     (_, new_text, _, _) = detokenize_incrementally(
                         tokenizer=tokenizer,
