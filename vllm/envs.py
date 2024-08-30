@@ -352,7 +352,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
             os.path.join(get_default_cache_root(), "vllm", "xla_cache"),
         )),
     "VLLM_FUSED_MOE_CHUNK_SIZE":
-    lambda: int(os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", "65536")),
+    lambda: int(os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", "32768")),
 
     # If set, vllm will skip the deprecation warnings.
     "VLLM_NO_DEPRECATION_WARNING":
