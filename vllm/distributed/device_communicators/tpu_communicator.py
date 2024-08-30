@@ -43,6 +43,10 @@ class TpuCommunicator:
         local_rank = global_rank % local_world_size
 
         # Ensure environment variables are set for multihost deployments.
+        # On GKE, this is needed for libtpu and TPU driver to know which TPU
+        # chip is actually visible. Otherwise the TPU driver will fail to
+        # initialize because the number of devices would be different from
+        # the number of visible worker addresses.
         os.environ["CLOUD_TPU_TASK_ID"] = str(global_rank)
         os.environ["TPU_VISIBLE_CHIPS"] = str(local_rank)
 
