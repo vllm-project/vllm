@@ -39,7 +39,7 @@ def assert_enc_dec_mr_supported_scenario(
         raise NotImplementedError(
             STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_PP'])
 
-    if enc_dec_mr.model_config.multimodal_config is not None:
+    if enc_dec_mr.model_config.is_multimodal_model:
         raise NotImplementedError(
             STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_MM'])
 
