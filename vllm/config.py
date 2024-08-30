@@ -571,7 +571,7 @@ class ModelConfig:
     def is_embedding_model(self) -> bool:
         """Extract the embedding model flag."""
         return self.embedding_mode
-    
+
     @property
     def is_multimodal_model(self) -> bool:
         return self.multimodal_config is not None
@@ -979,7 +979,7 @@ class SchedulerConfig:
                     max_num_batched_tokens,
                     _MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
                 )
-    
+
         self.max_num_batched_tokens = max_num_batched_tokens
 
         if enable_chunked_prefill:
