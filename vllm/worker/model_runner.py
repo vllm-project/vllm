@@ -480,7 +480,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         inter_data.orig_seq_lens[seq_idx] = seq_len
         inter_data.context_lens[seq_idx] = context_len
 
-        if isinstance(tokens, list) and isinstance(tokens[0], list) == True:
+        if isinstance(tokens, list) or hasattr(self.runner.model_config.hf_config, "num_output_head"):
             inter_data.input_tokens[seq_idx].extend(tokens)
         else:
             inter_data.input_tokens[seq_idx].append(tokens)
@@ -699,7 +699,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         # Tokens and positions.
         if cuda_graph_pad_size:
-            if isinstance(input_tokens[0], list):
+            if hasattr(self.runner.model_config.hf_config, "num_output_head"):
                 num_head = len(input_tokens[0])
                 input_tokens.extend(itertools.repeat([0] * num_head, cuda_graph_pad_size))
             else:
