@@ -5,9 +5,10 @@
 # LICENSE: https://huggingface.co/Qwen/Qwen-7B/blob/main/LICENSE
 """Inference-only QWen model compatible with HuggingFace weights."""
 
-import math
+from array import array
 from collections import OrderedDict
 from functools import partial
+import math
 from typing import (Any, Callable, Dict, Iterable, List, Literal, Mapping,
                     Optional, Tuple, TypedDict, Union)
 
@@ -43,8 +44,10 @@ from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.base import MultiModalInputs
-from vllm.multimodal.image import cached_get_tokenizer
-from vllm.sequence import IntermediateTensors, SequenceData
+from vllm.multimodal.utils import cached_get_tokenizer
+from vllm.sequence import (IntermediateTensors,
+                           SequenceData,
+                           VLLM_TOKEN_ID_ARRAY_TYPE)
 
 from .utils import is_pp_missing_parameter, make_layers
 
@@ -926,7 +929,7 @@ def dummy_data_for_qwen(ctx: InputContext, seq_len: int,
     # The presence of a visual config indicates this is a multimodal model.
     # If we don't have it, the model is considered an LLM for warmup purposes.
     if not hasattr(hf_config, "visual"):
-        seq_data = SequenceData([0] * seq_len)
+        seq_data = SequenceData(array(VLLM_TOKEN_ID_ARRAY_TYPE, [0] * seq_len))
         mm_data = None
         return seq_data, mm_data
 
@@ -955,7 +958,7 @@ def dummy_data_for_qwen(ctx: InputContext, seq_len: int,
     # the data will get resized and the # of tokens per image is constant
     image = Image.new("RGB", (224, 224), color=0)
     mm_data = {"image": image if num_images == 1 else [image] * num_images}
-    return SequenceData(toks), mm_data
+    return SequenceData(array(VLLM_TOKEN_ID_ARRAY_TYPE, toks)), mm_data
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_qwen)
