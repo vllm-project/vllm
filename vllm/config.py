@@ -1309,8 +1309,7 @@ class SpeculativeConfig:
         This is mostly a copy of the target parallel config, except the tp_size.
         """
         if speculative_draft_tensor_parallel_size is None:
-            if draft_hf_config.model_type == "mlp_speculator" or \
-                    cpu_draft_worker:
+            if draft_hf_config.model_type == "mlp_speculator":
                 speculative_draft_tensor_parallel_size = 1
                 if target_parallel_config.tensor_parallel_size > 1:
                     logger.warning(
