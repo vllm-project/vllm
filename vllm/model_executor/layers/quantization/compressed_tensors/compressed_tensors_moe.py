@@ -269,19 +269,21 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         custom_routing_function: Optional[Callable] = None,
     ) -> torch.Tensor:
 
-        from vllm.model_executor.layers.fused_moe.fused_moe import (
-            fused_marlin_moe)
+        from vllm.model_executor.layers.fused_moe.fused_moe_marlin import (
+            fused_moe_marlin)
 
-        return fused_marlin_moe(x,
-                                layer.w13_weight_packed,
-                                layer.w2_weight_packed,
-                                router_logits,
-                                layer.w13_g_idx,
-                                layer.w2_g_idx,
-                                layer.w13_g_idx_sort_indices,
-                                layer.w2_g_idx_sort_indices,
-                                top_k,
-                                custom_routing_function,
-                                renormalize=renormalize,
-                                w1_scale=layer.w13_weight_scale,
-                                w2_scale=layer.w2_weight_scale)
+        return fused_moe_marlin(
+            x,
+            layer.w13_weight_packed,
+            layer.w2_weight_packed,
+            router_logits,
+            layer.w13_g_idx,
+            layer.w2_g_idx,
+            layer.w13_g_idx_sort_indices,
+            layer.w2_g_idx_sort_indices,
+            top_k,
+            renormalize=renormalize,
+            w1_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            num_bits=self.num_bits,
+        )
