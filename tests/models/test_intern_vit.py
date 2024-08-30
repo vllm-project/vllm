@@ -6,8 +6,6 @@ import torch.nn as nn
 from huggingface_hub import snapshot_download
 from transformers import AutoConfig, AutoModel, CLIPImageProcessor
 
-from vllm.model_executor.models.intern_vit import InternVisionModel
-
 from ..conftest import _ImageAssets, cleanup
 
 pytestmark = pytest.mark.vlm
@@ -49,6 +47,7 @@ def run_intern_vit_test(
         for pixel_value in pixel_values
     ]
 
+    from vllm.model_executor.models.intern_vit import InternVisionModel
     vllm_model = InternVisionModel(config)
     vllm_model.load_weights(hf_model.state_dict().items())
 

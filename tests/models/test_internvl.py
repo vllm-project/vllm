@@ -6,9 +6,6 @@ import torch
 from PIL.Image import Image
 from transformers import AutoConfig
 
-from vllm.model_executor.models.internvl import (IMG_CONTEXT, IMG_END,
-                                                 IMG_START,
-                                                 image_to_pixel_values)
 from vllm.multimodal.utils import rescale_image_size
 from vllm.utils import is_cpu
 
@@ -31,35 +28,6 @@ models = [
     # See: https://huggingface.co/OpenGVLab/InternVL2-4B/discussions/3
     # "OpenGVLab/InternVL2-4B",
 ]
-
-
-class InternVLProcessor:
-    """A simple processor for InternVL2 HF model which misses a processor."""
-
-    def __init__(self, hf_runner: HfRunner):
-        self.num_image_token = hf_runner.model.num_image_token
-        self.tokenizer = hf_runner.tokenizer
-        self.dtype = hf_runner.model.dtype
-
-        self.config = AutoConfig.from_pretrained(hf_runner.model_name)
-        self.vision_config = self.config.vision_config
-        self.use_thumbnail = self.config.use_thumbnail
-        self.min_num = self.config.min_dynamic_patch
-        self.max_num = self.config.max_dynamic_patch
-        self.image_size = self.vision_config.image_size
-
-    def __call__(self, text: str, images: Image, **kwargs):
-        pixel_values = image_to_pixel_values(images, self.image_size,
-                                             self.min_num, self.max_num,
-                                             self.use_thumbnail).to(self.dtype)
-        num_patches_list = [pixel_values.shape[0]]
-        for num_patches in num_patches_list:
-            context_tokens = IMG_CONTEXT * self.num_image_token * num_patches
-            image_tokens = IMG_START + context_tokens + IMG_END
-            text = text.replace('<image>', image_tokens, 1)
-        prompt = self.tokenizer(text, return_tensors="pt")
-        prompt.update({"pixel_values": pixel_values})
-        return prompt
 
 
 # adapted from https://huggingface.co/OpenGVLab/InternVL2-1B/blob/main/modeling_internvl_chat.py
@@ -126,6 +94,37 @@ def run_test(
     # vLLM needs a fresh new process without cuda initialization.
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
+
+    class InternVLProcessor:
+        """A simple processor for InternVL2 which misses a processor."""
+
+        def __init__(self, hf_runner: HfRunner):
+            self.num_image_token = hf_runner.model.num_image_token
+            self.tokenizer = hf_runner.tokenizer
+            self.dtype = hf_runner.model.dtype
+
+            self.config = AutoConfig.from_pretrained(hf_runner.model_name)
+            self.vision_config = self.config.vision_config
+            self.use_thumbnail = self.config.use_thumbnail
+            self.min_num = self.config.min_dynamic_patch
+            self.max_num = self.config.max_dynamic_patch
+            self.image_size = self.vision_config.image_size
+
+        def __call__(self, text: str, images: Image, **kwargs):
+            from vllm.model_executor.models.internvl import (
+                IMG_CONTEXT, IMG_END, IMG_START, image_to_pixel_values)
+            pixel_values = image_to_pixel_values(
+                images, self.image_size, self.min_num, self.max_num,
+                self.use_thumbnail).to(self.dtype)
+            num_patches_list = [pixel_values.shape[0]]
+            for num_patches in num_patches_list:
+                context_tokens = IMG_CONTEXT * self.num_image_token \
+                    * num_patches
+                image_tokens = IMG_START + context_tokens + IMG_END
+                text = text.replace('<image>', image_tokens, 1)
+            prompt = self.tokenizer(text, return_tensors="pt")
+            prompt.update({"pixel_values": pixel_values})
+            return prompt
 
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model,

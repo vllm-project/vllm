@@ -714,8 +714,7 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal):
             use_default_weight_loading = False
             if "vision" in name:
                 if self.vision_model is not None:
-                    # We only do sharding for language model and
-                    # not vision model for now.
+                    # BlipVisionModel does not need sharding
                     use_default_weight_loading = True
             else:
                 for (param_name, weight_name,
