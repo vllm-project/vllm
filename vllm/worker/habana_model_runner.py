@@ -448,7 +448,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         # Profiler stats
         self.profiler_counter_helper = HabanaProfilerCounterHelper()
-        self.seen_configs = set()
+        self.seen_configs: set = set()
         self._mem_margin: Optional[int] = None
         self._setup_buckets()
 
@@ -1567,7 +1567,8 @@ class HabanaModelRunner(
         self.seen_configs.add(cfg)
         if not seen and not warmup_mode:
             phase = 'prompt' if is_prompt else 'decode'
-            logger.warning(f'Configuration: ({phase}, {batch_size}, {seq_len}) was not warmed-up!')
+            logger.warning('Configuration: (', phase, ', ', batch_size, ', ',
+                           seq_len, ') was not warmed-up!')
 
     @torch.inference_mode()
     def execute_model(
@@ -1614,9 +1615,7 @@ class HabanaModelRunner(
         if multi_modal_input is not None:
             execute_model_kwargs.update(multi_modal_input)
         if htorch.utils.internal.is_lazy():
-            execute_model_kwargs.update({
-                "bypass_hpu_graphs": not use_graphs
-            })
+            execute_model_kwargs.update({"bypass_hpu_graphs": not use_graphs})
 
         htorch.core.mark_step()
         if self.is_driver_worker:
