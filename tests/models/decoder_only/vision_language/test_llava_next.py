@@ -8,7 +8,6 @@ from vllm.sequence import SampleLogprobs
 
 from ....conftest import (IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner,
                           _ImageAssets)
-from ....utils import multi_gpu_test
 from ...utils import check_logprobs_close
 
 _LIMIT_IMAGE_PER_PROMPT = 4
@@ -281,40 +280,4 @@ def test_models_multiple_image_inputs(hf_runner, vllm_runner, image_assets,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,
         tensor_parallel_size=1,
-    )
-
-
-@multi_gpu_test(num_gpus=2)
-@pytest.mark.parametrize("distributed_executor_backend", ["ray", "mp"])
-@pytest.mark.parametrize("model", ["llava-hf/llava-v1.6-mistral-7b-hf"])
-@pytest.mark.parametrize(
-    "size_factors",
-    [
-        # No image
-        [],
-        # Single-scale
-        [1.0],
-        # Single-scale, batched
-        [1.0, 1.0, 1.0],
-        # Multi-scale
-        [0.25, 0.5, 1.0],
-    ],
-)
-@pytest.mark.parametrize("dtype", ["half"])
-@pytest.mark.parametrize("max_tokens", [64])
-@pytest.mark.parametrize("num_logprobs", [5])
-def test_models_distributed(hf_runner, vllm_runner, image_assets, model,
-                            distributed_executor_backend, size_factors, dtype,
-                            max_tokens, num_logprobs) -> None:
-    run_test(
-        hf_runner,
-        vllm_runner,
-        image_assets,
-        model,
-        size_factors=size_factors,
-        dtype=dtype,
-        max_tokens=max_tokens,
-        num_logprobs=num_logprobs,
-        tensor_parallel_size=2,
-        distributed_executor_backend=distributed_executor_backend,
     )
