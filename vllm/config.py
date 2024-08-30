@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
+_MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 4096
 
 _PP_SUPPORTED_MODELS = [
     "AquilaModel",
@@ -571,6 +572,10 @@ class ModelConfig:
         """Extract the embedding model flag."""
         return self.embedding_mode
 
+    @property
+    def is_multimodal_model(self) -> bool:
+        return self.multimodal_config is not None
+
 
 class CacheConfig:
     """Configuration for the KV cache.
@@ -947,25 +952,36 @@ class SchedulerConfig:
                  num_lookahead_slots: int = 0,
                  delay_factor: float = 0.0,
                  enable_chunked_prefill: bool = False,
-                 embedding_mode: Optional[bool] = False,
+                 embedding_mode: bool = False,
+                 is_multimodal_model: bool = False,
                  preemption_mode: Optional[str] = None,
                  num_scheduler_steps: int = 1,
                  send_delta_data: bool = False) -> None:
-        if max_num_batched_tokens is not None:
-            self.max_num_batched_tokens = max_num_batched_tokens
-        else:
+        if max_num_batched_tokens is None:
             if enable_chunked_prefill:
                 # It is the values that have the best balance between ITL
                 # and TTFT on A100. Note it is not optimized for throughput.
-                self.max_num_batched_tokens = 512
-            elif embedding_mode:
-                # For embedding, choose specific value for higher throughput
-                self.max_num_batched_tokens = max(
-                    max_model_len, _EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS)
+                max_num_batched_tokens = 512
             else:
                 # If max_model_len is too short, use 2048 as the default value
                 # for higher throughput.
-                self.max_num_batched_tokens = max(max_model_len, 2048)
+                max_num_batched_tokens = max(max_model_len, 2048)
+
+            if embedding_mode:
+                # For embedding, choose specific value for higher throughput
+                max_num_batched_tokens = max(
+                    max_num_batched_tokens,
+                    _EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS,
+                )
+            if is_multimodal_model:
+                # The value needs to be at least the number of multimodal tokens
+                max_num_batched_tokens = max(
+                    max_num_batched_tokens,
+                    _MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
+                )
+
+        self.max_num_batched_tokens = max_num_batched_tokens
+
         if enable_chunked_prefill:
             logger.info(
                 "Chunked prefill is enabled with max_num_batched_tokens=%d.",
