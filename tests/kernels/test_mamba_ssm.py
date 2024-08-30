@@ -326,13 +326,9 @@ def test_selective_state_update(dim, dstate, has_z, itype):
 
 @pytest.mark.parametrize("itype",
                          [torch.float32, torch.float16, torch.bfloat16])
-# @pytest.mark.parametrize('itype', [torch.float16])
 @pytest.mark.parametrize("has_z", [False, True])
-# @pytest.mark.parametrize('has_z', [True])
 @pytest.mark.parametrize("dstate", [16, 32, 64])
-# @pytest.mark.parametrize("dstate", [16])
 @pytest.mark.parametrize("dim", [2048, 2048 + 16, 4096])
-# @pytest.mark.parametrize("dim", [2048])
 def test_selective_state_update_with_batch_indices(dim, dstate, has_z, itype):
     device = "cuda"
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (5e-3, 1e-2)
@@ -391,17 +387,11 @@ def test_selective_state_update_with_batch_indices(dim, dstate, has_z, itype):
 
 @pytest.mark.parametrize("itype",
                          [torch.float32, torch.float16, torch.bfloat16])
-#@pytest.mark.parametrize('itype', [torch.float32])
 @pytest.mark.parametrize("has_z", [False, True])
-# @pytest.mark.parametrize('has_z', [True])
 @pytest.mark.parametrize("tie_hdim", [False, True])
-# @pytest.mark.parametrize('tie_hdim', [True])
 @pytest.mark.parametrize("ngroups", [1, 2, 4])
-# @pytest.mark.parametrize("ngroups", [2])
 @pytest.mark.parametrize("dstate", [16, 32, 64])
-# @pytest.mark.parametrize("dstate", [16])
 @pytest.mark.parametrize("dim", [2048, 4096])
-# @pytest.mark.parametrize("dim", [2048])
 def test_selective_state_update_with_heads_with_batch_indices(
         dim, dstate, ngroups, has_z, tie_hdim, itype):
     device = "cuda"
