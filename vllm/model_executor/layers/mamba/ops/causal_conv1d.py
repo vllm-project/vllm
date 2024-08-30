@@ -79,7 +79,7 @@ def causal_conv1d_update(x: torch.Tensor,
     weight: (dim, width)
     bias: (dim,)
     conv_state_indices: (batch,), dtype int32
-        If None, the conv_state is a larger tensor along the batch dim, 
+        If not None, the conv_state is a larger tensor along the batch dim, 
         and we are selecting the batch coords specified by conv_state_indices.
         Useful for a continuous batching scenario.
 
