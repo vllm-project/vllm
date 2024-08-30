@@ -5,9 +5,10 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import (ExecuteModelRequest, HiddenStates, Logprob,
-                           SamplerOutput, get_all_seq_ids)
+                           get_all_seq_ids)
 from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.top1_proposer import Top1Proposer

@@ -31,6 +31,7 @@ from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.persimmon import PersimmonForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -39,7 +40,7 @@ from vllm.multimodal.base import MultiModalInputs
 from vllm.multimodal.image import cached_get_image_processor
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
-                           SamplerOutput, SequenceData)
+                           SequenceData)
 
 from .interfaces import SupportsMultiModal
 from .utils import merge_multimodal_embeddings

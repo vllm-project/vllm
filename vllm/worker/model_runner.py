@@ -29,6 +29,7 @@ from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata, SamplingMetadataCache
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models.interfaces import (supports_lora,
@@ -41,8 +42,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.prompt_adapter.worker_manager import (
     LRUCacheWorkerPromptAdapterManager)
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (IntermediateTensors, SamplerOutput,
-                           SequenceGroupMetadata)
+from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.utils import (CudaMemoryProfiler, PyObjectCache, async_tensor_h2d,
                         flatten_2d_lists, is_hip, is_pin_memory_available,
                         supports_dynamo)

@@ -8,12 +8,13 @@ from vllm.config import ParallelConfig, SpeculativeConfig
 from vllm.distributed.communication_op import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.layers.spec_decode_base_sampler import (
     SpecDecodeBaseSampler, SpecDecodeStochasticBaseSampler)
 from vllm.model_executor.layers.typical_acceptance_sampler import (
     TypicalAcceptanceSampler)
 from vllm.sequence import (CompletionSequenceGroupOutput, ExecuteModelRequest,
-                           HiddenStates, SamplerOutput, SequenceGroupMetadata,
+                           HiddenStates, SequenceGroupMetadata,
                            get_all_seq_ids, get_all_seq_ids_and_request_ids)
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
 from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner

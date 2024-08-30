@@ -11,8 +11,9 @@ from vllm.executor.multiproc_worker_utils import (ProcessWorkerWrapper,
                                                   ResultHandler, WorkerMonitor)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.sequence import ExecuteModelRequest
 from vllm.utils import (GiB_bytes, get_distributed_init_method, get_open_port,
                         get_vllm_instance_id, make_async)
 from vllm.worker.worker_base import WorkerWrapperBase

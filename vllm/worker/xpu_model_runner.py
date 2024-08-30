@@ -15,12 +15,12 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
 from vllm.distributed import get_pp_group
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalInputs, MultiModalRegistry)
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (IntermediateTensors, SamplerOutput,
-                           SequenceGroupMetadata)
+from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.utils import CudaMemoryProfiler, make_tensor_with_pad
 from vllm.worker.model_runner import AttentionMetadata, SamplingMetadata
 from vllm.worker.model_runner_base import (

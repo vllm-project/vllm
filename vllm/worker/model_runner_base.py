@@ -5,9 +5,9 @@ from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Type,
 
 import torch
 
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.platforms import current_platform
-from vllm.sequence import (IntermediateTensors, SamplerOutput,
-                           SequenceGroupMetadata)
+from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 
 if TYPE_CHECKING:
     from vllm.attention import AttentionMetadata

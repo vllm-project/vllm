@@ -1,10 +1,12 @@
 # Test the AsyncLLMEngine with multi-step-decoding
 
-from typing import List
+from typing import List, Optional
 
 import pytest
 
-from ..utils import RemoteOpenAIServer
+from ..models.utils import check_logprobs_close
+from ..utils import (completions_with_server_args, get_client_text_generations,
+                     get_client_text_logprob_generations)
 
 MODELS = [
     "JackFram/llama-160m",
@@ -23,22 +25,6 @@ DEFAULT_SERVER_ARGS: List[str] = [
 ]
 
 
-async def completions_with_server_args(prompts: List[str], model_name: str,
-                                       server_cli_args: List[str]):
-
-    outputs = None
-    with RemoteOpenAIServer(model_name, server_cli_args) as server:
-        async with server.get_async_client() as client:
-            outputs = await client.completions.create(model=model_name,
-                                                      prompt=prompts,
-                                                      temperature=0,
-                                                      stream=False,
-                                                      max_tokens=5)
-    assert outputs is not None
-
-    return outputs
-
-
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize(("tp_size, pp_size"), [
     (1, 1),
@@ -47,12 +33,43 @@ async def completions_with_server_args(prompts: List[str], model_name: str,
 @pytest.mark.parametrize("eager_mode", [False, True])
 @pytest.mark.parametrize("num_scheduler_steps", NUM_SCHEDULER_STEPS)
 @pytest.mark.parametrize("num_prompts", NUM_PROMPTS)
+@pytest.mark.parametrize("num_logprobs", [None, 5])
 @pytest.mark.parametrize("is_async", [False, True])
 @pytest.mark.asyncio
-async def test_multi_step(example_prompts, model: str, tp_size: int,
-                          pp_size: int, eager_mode: int,
-                          num_scheduler_steps: int, num_prompts: int,
-                          is_async: bool):
+async def test_multi_step(
+    example_prompts,
+    model: str,
+    tp_size: int,
+    pp_size: int,
+    eager_mode: int,
+    num_scheduler_steps: int,
+    num_prompts: int,
+    is_async: bool,
+    num_logprobs: Optional[int],
+) -> None:
+    """Test vLLM engine with multi-step scheduling in an OpenAI-protocol
+    client/server environment.
+
+    Set up an engine with single-step scheduling as a ground-truth reference.
+
+    Send a completions API request to both engines with the same prompts.
+
+    Validate:
+    * Generated tokens match
+    * Generated logprobs are all very close
+
+    Args:
+      example_prompts: test fixture providing example prompts
+      model: model under test (same for single- and multi-step engines)
+      tp_size: degree of tensor-parallelism
+      pp_size: degree of pipeline-parallelism
+      eager_mode
+      num_scheduler_steps: for multi-step scheduling, GPU-side steps per
+                           GPU -> CPU output transfer
+      num_prompts: number of example prompts under test
+      num_logprobs: corresponds to the `logprobs` argument to the OpenAI
+                    completions endpoint; `None` -> no logprobs
+    """
 
     prompts = example_prompts
     if len(prompts) < num_prompts:
@@ -77,14 +94,36 @@ async def test_multi_step(example_prompts, model: str, tp_size: int,
         str(pp_size),
     ]
 
+    # Spin up client/server & issue completion API requests.
+    # Default `max_wait_seconds` is 240 but was empirically
+    # was raised 3x to 720 *just for this test* due to
+    # observed timeouts in GHA CI
     ref_completions = await completions_with_server_args(
-        prompts, model, server_args + distributed_args)
+        prompts,
+        model,
+        server_args + distributed_args,
+        num_logprobs,
+        max_wait_seconds=3 * 240)
     test_completions = await completions_with_server_args(
-        prompts, model, ms_server_args + distributed_args)
+        prompts,
+        model,
+        ms_server_args + distributed_args,
+        num_logprobs,
+        max_wait_seconds=3 * 240)
 
-    def get_text_generations(completions):
-        return [x.text for x in completions.choices]
-
-    ref_generations = get_text_generations(ref_completions)
-    test_generations = get_text_generations(test_completions)
+    # Assert multi-step scheduling produces identical tokens
+    # to single-step scheduling.
+    ref_generations = get_client_text_generations(ref_completions)
+    test_generations = get_client_text_generations(test_completions)
     assert ref_generations == test_generations
+
+    # Assert multi-step scheduling produces nearly-identical logprobs
+    # to single-step scheduling.
+    ref_text_logprobs = get_client_text_logprob_generations(ref_completions)
+    test_text_logprobs = get_client_text_logprob_generations(test_completions)
+    check_logprobs_close(
+        outputs_0_lst=ref_text_logprobs,
+        outputs_1_lst=test_text_logprobs,
+        name_0="hf",
+        name_1="vllm",
+    )

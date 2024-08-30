@@ -5,12 +5,13 @@ import torch.nn as nn
 
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors, SamplerOutput
+from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.eagle import EAGLEConfig
 
 

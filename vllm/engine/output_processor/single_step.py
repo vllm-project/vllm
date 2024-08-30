@@ -15,6 +15,44 @@ from vllm.utils import Counter
 logger = init_logger(__name__)
 
 
+def single_step_process_prompt_logprob(
+        sg_output_proc: SequenceGroupOutputProcessor, seq_group: SequenceGroup,
+        output: SequenceGroupOutput) -> None:
+    """Process prompt logprobs associated with the :class:`SequenceGroupOutput`
+    for a given step.
+
+    Do nothing if the output has no prompt logprobs.
+
+    Account for the fact that transformers do not compute first-token logprobs.
+    
+    Args:
+      sg_output_proc: :class:`SequenceGroupOutputProcessor` instance
+      seq_group: the output is associated with this :class:`SequenceGroup`
+      output: the :class:`SequenceGroupOutput` for a single scheduler step
+    """
+    prompt_logprobs = output.prompt_logprobs
+
+    # If this is the first (or only) "chunk" of the prefill, we need
+    # to prepend None to the list of prompt logprobs. The reason for this
+    # is that for N prompt tokens, the Sampler will generate N-1 total
+    # prompt logprobs during prefill since the token at idx 0 will not
+    # have a logprob associated with it.
+    if prompt_logprobs is not None:
+        if not seq_group.prompt_logprobs:
+            prompt_logprobs = [None] + prompt_logprobs
+            seq_group.prompt_logprobs = []
+
+        assert hasattr(sg_output_proc, 'detokenizer')
+        if (seq_group.sampling_params.detokenize
+                and sg_output_proc.detokenizer):
+            sg_output_proc.detokenizer.decode_prompt_logprobs_inplace(
+                seq_group,
+                prompt_logprobs,
+                position_offset=len(seq_group.prompt_logprobs))
+
+        seq_group.prompt_logprobs.extend(prompt_logprobs)
+
+
 class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
     """SequenceGroupOutputProcessor which handles "output processing" logic,
     which happens after the model returns generated token ids and before
@@ -60,27 +98,16 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
 
     def process_prompt_logprob(self, seq_group: SequenceGroup,
                                outputs: List[SequenceGroupOutput]) -> None:
+        """Process prompt logprobs associated with one step of a single-step-
+        scheduled computation.
+        
+        Args:
+          seq_group: the output is associated with this :class:`SequenceGroup`
+          output: the :class:`SequenceGroupOutput` for a single scheduler step
+        """
         assert len(outputs) == 1, ("Single step should only has 1 output.")
         output = outputs[0]
-        prompt_logprobs = output.prompt_logprobs
-
-        # If this is the first (or only) "chunk" of the prefill, we need
-        # to prepend None to the list of prompt logprobs. The reason for this
-        # is that for N prompt tokens, the Sampler will generate N-1 total
-        # prompt logprobs during prefill since the token at idx 0 will not
-        # have a logprob associated with it.
-        if prompt_logprobs is not None:
-            if not seq_group.prompt_logprobs:
-                prompt_logprobs = [None] + prompt_logprobs
-                seq_group.prompt_logprobs = []
-
-            if seq_group.sampling_params.detokenize and self.detokenizer:
-                self.detokenizer.decode_prompt_logprobs_inplace(
-                    seq_group,
-                    prompt_logprobs,
-                    position_offset=len(seq_group.prompt_logprobs))
-
-            seq_group.prompt_logprobs.extend(prompt_logprobs)
+        single_step_process_prompt_logprob(self, seq_group, output)
 
     def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
                                         outputs: SequenceGroupOutput,

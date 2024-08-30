@@ -4,8 +4,9 @@ from typing import Dict, List, Set, Tuple
 
 import torch
 
-from vllm.sequence import (ExecuteModelRequest, HiddenStates, SamplerOutput,
-                           SequenceData, SequenceGroupMetadata)
+from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.sequence import (ExecuteModelRequest, HiddenStates, SequenceData,
+                           SequenceGroupMetadata)
 from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeProposer)
