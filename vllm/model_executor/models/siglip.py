@@ -279,7 +279,7 @@ class SiglipAttention(nn.Module):
                                                       value_states,
                                                       p=self.dropout,
                                                       scale=self.scale)
-        out = out.reshape(batch_size, q_len, -1).contiguous()
+        out = out.view(batch_size, q_len, -1)
         attn_output, _ = self.out_proj(out)
 
         return attn_output
