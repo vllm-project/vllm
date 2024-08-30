@@ -75,7 +75,7 @@ steps:
           podSpec:
             <<: *common_pod_spec
             containers:
-              - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:d78789ac16870809d64378105f200049cae95112
+              - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:4664ceaad6f99ec7824859d1ac31b29502565a98
                 <<: *common_container_settings
 
   
