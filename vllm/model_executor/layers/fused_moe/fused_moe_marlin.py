@@ -1,6 +1,6 @@
 """Fused MoE utilities for GPTQ."""
 import functools
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import torch
 
@@ -106,7 +106,8 @@ def fused_moe_marlin(
     rand_perm1: torch.Tensor,
     rand_perm2: torch.Tensor,
     topk: int,
-    renormalize: bool,
+    custom_routing_function: Optional[Callable] = None,
+    renormalize: bool = True,
     override_config: Optional[Dict[str, Any]] = None,
     use_fp8: bool = False,
     w1_scale: Optional[torch.Tensor] = None,
@@ -161,8 +162,12 @@ def fused_moe_marlin(
     E = w1.shape[0]
     N = w2.shape[1] * 16
 
-    topk_weights, topk_ids = fused_topk(hidden_states, gating_output, topk,
-                                        renormalize)
+    if custom_routing_function is None:
+        topk_weights, topk_ids = fused_topk(hidden_states, gating_output, topk,
+                                            renormalize)
+    else:
+        topk_weights, topk_ids = custom_routing_function(
+            hidden_states, gating_output, topk, renormalize)
 
     get_config_func = functools.partial(
         try_get_optimal_moe_config,
