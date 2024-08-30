@@ -61,12 +61,8 @@ def test_return_hidden_states(model: str):
     # Ensure step 1 hidden states match numerically what we would expect.
     assert not torch.equal(request1_out.outputs[0].hidden_states,
                            request2_out.outputs[0].hidden_states)
-    request1_hidden_states = (
-        request1_out.outputs[0].hidden_states.clone()
-    )
-    request2_hidden_states = (
-        request2_out.outputs[0].hidden_states.clone()
-    )
+    request1_hidden_states = (request1_out.outputs[0].hidden_states.clone())
+    request2_hidden_states = (request2_out.outputs[0].hidden_states.clone())
 
     step2_out = engine.step()
     assert isinstance(step2_out, list)
@@ -78,22 +74,14 @@ def test_return_hidden_states(model: str):
     assert (request1_out.outputs[0].hidden_states is not None
             and request2_out.outputs[0].hidden_states is not None)
     # Ensure hidden states are being accumulated correctly.
-    assert request1_out.outputs[0].hidden_states.shape[
-        0] == 2
-    assert torch.equal(
-        request1_hidden_states, 
-        request1_out.outputs[0].hidden_states[:1])
-    assert request2_out.outputs[0].hidden_states.shape[
-        0] == 2 
-    assert torch.equal(
-        request2_hidden_states, 
-        request2_out.outputs[0].hidden_states[:1])
-    request1_hidden_states = (
-        request1_out.outputs[0].hidden_states.clone()
-    )
-    request2_hidden_states = (
-        request2_out.outputs[0].hidden_states.clone()
-    )
+    assert request1_out.outputs[0].hidden_states.shape[0] == 2
+    assert torch.equal(request1_hidden_states,
+                       request1_out.outputs[0].hidden_states[:1])
+    assert request2_out.outputs[0].hidden_states.shape[0] == 2
+    assert torch.equal(request2_hidden_states,
+                       request2_out.outputs[0].hidden_states[:1])
+    request1_hidden_states = (request1_out.outputs[0].hidden_states.clone())
+    request2_hidden_states = (request2_out.outputs[0].hidden_states.clone())
     step3_out = engine.step()
     assert isinstance(step3_out, list)
     assert isinstance(step3_out[0], RequestOutput)
@@ -104,14 +92,9 @@ def test_return_hidden_states(model: str):
     assert (request1_out.outputs[0].hidden_states is not None
             and request2_out.outputs[0].hidden_states is not None)
     # Ensure hidden states are being accumulated correctly.
-    assert request1_out.outputs[0].hidden_states.shape[
-        0] == 3
-    assert torch.equal(
-            request1_hidden_states, 
-            request1_out.outputs[0].hidden_states[:2])
-    assert request2_out.outputs[0].hidden_states.shape[
-        0] == 3
-    assert torch.equal(
-            request2_hidden_states, 
-            request2_out.outputs[0].hidden_states[:2])
-
+    assert request1_out.outputs[0].hidden_states.shape[0] == 3
+    assert torch.equal(request1_hidden_states,
+                       request1_out.outputs[0].hidden_states[:2])
+    assert request2_out.outputs[0].hidden_states.shape[0] == 3
+    assert torch.equal(request2_hidden_states,
+                       request2_out.outputs[0].hidden_states[:2])
