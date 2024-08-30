@@ -181,6 +181,7 @@ class BlipAttention(nn.Module):
             self.embed_dim,
             self.head_dim,
             self.num_heads,
+            bias=config.qkv_bias,
             quant_config=quant_config,
         )
         self.projection = RowParallelLinear(
