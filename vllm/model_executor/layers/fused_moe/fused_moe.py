@@ -2,7 +2,7 @@
 import functools
 import json
 import os
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import torch
 import triton
@@ -446,7 +446,8 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
                      rand_perm1: torch.Tensor,
                      rand_perm2: torch.Tensor,
                      topk: int,
-                     renormalize: bool,
+                     custom_routing_function: Optional[Callable] = None,
+                     renormalize: bool = True,
                      override_config: Optional[Dict[str, Any]] = None,
                      use_fp8: bool = False,
                      w1_scale: Optional[torch.Tensor] = None,
@@ -497,8 +498,12 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
     E = w1.shape[0]
     N = w2.shape[1] * 16
 
-    topk_weights, topk_ids = fused_topk(hidden_states, gating_output, topk,
-                                        renormalize)
+    if custom_routing_function is None:
+        topk_weights, topk_ids = fused_topk(hidden_states, gating_output, topk,
+                                            renormalize)
+    else:
+        topk_weights, topk_ids = custom_routing_function(
+            hidden_states, gating_output, topk, renormalize)
 
     get_config_func = functools.partial(try_get_optimal_moe_config,
                                         w1.shape,
@@ -695,6 +700,7 @@ def fused_moe(
     use_grouped_topk: bool = False,
     num_expert_group: Optional[int] = None,
     topk_group: Optional[int] = None,
+    custom_routing_function: Optional[Callable] = None,
     use_fp8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     w1_scale: Optional[torch.Tensor] = None,
@@ -742,9 +748,12 @@ def fused_moe(
         topk_weights, topk_ids = grouped_topk(hidden_states, gating_output,
                                               topk, renormalize,
                                               num_expert_group, topk_group)
-    else:
+    elif custom_routing_function is None:
         topk_weights, topk_ids = fused_topk(hidden_states, gating_output, topk,
                                             renormalize)
+    else:
+        topk_weights, topk_ids = custom_routing_function(
+            hidden_states, gating_output, topk, renormalize)
 
     return fused_experts(hidden_states,
                          w1,

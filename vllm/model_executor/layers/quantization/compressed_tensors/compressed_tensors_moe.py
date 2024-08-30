@@ -1,6 +1,6 @@
 import enum
 from enum import Enum
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 import torch
 
@@ -256,15 +256,18 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         )
         replace_tensor("w2_weight_scale", marlin_w2_scales)
 
-    def apply(self,
-              layer: torch.nn.Module,
-              x: torch.Tensor,
-              router_logits: torch.Tensor,
-              top_k: int,
-              renormalize: bool = True,
-              use_grouped_topk: bool = False,
-              num_expert_group: Optional[int] = None,
-              topk_group: Optional[int] = None) -> torch.Tensor:
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        top_k: int,
+        renormalize: bool = True,
+        use_grouped_topk: bool = False,
+        num_expert_group: Optional[int] = None,
+        topk_group: Optional[int] = None,
+        custom_routing_function: Optional[Callable] = None,
+    ) -> torch.Tensor:
 
         from vllm.model_executor.layers.fused_moe.fused_moe import (
             fused_marlin_moe)
@@ -278,6 +281,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                                 layer.w13_g_idx_sort_indices,
                                 layer.w2_g_idx_sort_indices,
                                 top_k,
+                                custom_routing_function,
                                 renormalize=renormalize,
                                 w1_scale=layer.w13_weight_scale,
                                 w2_scale=layer.w2_weight_scale)
