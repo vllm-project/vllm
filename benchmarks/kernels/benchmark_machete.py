@@ -8,7 +8,6 @@ from itertools import product
 from typing import Callable, Iterable, List, Optional, Tuple, Dict
 from functools import partial
 from dataclasses import dataclass
-from functools import partial
 
 import pandas as pd
 import torch
@@ -42,6 +41,7 @@ def terse_type_name(dt):
         torch.float: "float",
         torch.int: "int",
     }[dt]
+
 
 @dataclass
 class BenchmarkTensors:
@@ -81,8 +81,8 @@ def cutlass_scaled_mm_create_bench_fn(bt: BenchmarkTensors) -> Callable:
     scale_a = torch.tensor(1.0, dtype=torch.float32, device=bt.a.device)
     scale_b = torch.tensor(1.0, dtype=torch.float32, device=bt.a.device)
     w_col_major = bt.w_ref.to(bt.a.dtype).t().contiguous().t()
-    return lambda: ops.cutlass_scaled_mm(bt.a, w_col_major,
-                   scale_a, scale_b, out_dtype=torch.float16)
+    return lambda: ops.cutlass_scaled_mm(
+        bt.a, w_col_major, scale_a, scale_b, out_dtype=torch.float16)
 
 
 def marlin_create_bench_fn(bt: BenchmarkTensors) -> Callable:
@@ -238,15 +238,16 @@ def bench(atype: torch.dtype,
     timers.append(
         bench_fns(
             label, sub_label, "torch.matmul (fp16)",
-            [torch_matmul_f16_create_bench_fn(bt) for bt in benchmark_tensors]))
-    
+            [torch_matmul_f16_create_bench_fn(bt)
+             for bt in benchmark_tensors]))
+
     if atype == torch.int8 or atype == torch.float8_e4m3fn:
         timers.append(
-            bench_fns(
-                label, sub_label, 
-                f"cutlass_scaled_mm ({terse_type_name(atype)})",
-                [cutlass_scaled_mm_create_bench_fn(bt)
-                 for bt in benchmark_tensors]))
+            bench_fns(label, sub_label,
+                      f"cutlass_scaled_mm ({terse_type_name(atype)})", [
+                          cutlass_scaled_mm_create_bench_fn(bt)
+                          for bt in benchmark_tensors
+                      ]))
 
     if benchmark_marlinv1 and atype != torch.float8_e4m3fn:
         timers.append(
@@ -416,7 +417,7 @@ def run_model_bench(args):
         args_dict = vars(args)
         args_dict.pop("func")
         pkl.dump({
-            "args": args_dict, 
+            "args": args_dict,
             "results": all_results,
         }, f)
 

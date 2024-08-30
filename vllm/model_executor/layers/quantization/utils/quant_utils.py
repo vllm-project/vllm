@@ -132,7 +132,8 @@ def quantize_weights(w: torch.Tensor,
     assert quant_type.is_integer(), \
         "Floating point quantization may work but has not been tested"
     assert not zero_points or group_size is not None, \
-        "to have group zero points, group_size must be provided (-1 group_size is channelwise)"
+        "to have group zero points, group_size must be provided "\
+        "(-1 group_size is channelwise)"
 
     orig_device = w.device
     orig_type = w.dtype
@@ -156,7 +157,7 @@ def quantize_weights(w: torch.Tensor,
     max_q_val = quant_type.max()
     min_q_val = quant_type.min()
 
-    w_s = torch.Tensor([1.0]).to(w.device) # unscaled case
+    w_s = torch.Tensor([1.0]).to(w.device)  # unscaled case
     maybe_w_zp = None
     if group_size is not None:
         if zero_points:

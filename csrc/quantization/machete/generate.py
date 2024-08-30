@@ -313,13 +313,19 @@ def generate_terse_sch_sig(schedule_config: ScheduleConfig) -> str:
 
 # unique type_name
 def generate_type_signature(kernel_types: TypeConfig):
-    return str("".join([VLLMDataTypeNames[getattr(kernel_types, field.name)] for field in fields(TypeConfig)]))
+    return str("".join([
+        VLLMDataTypeNames[getattr(kernel_types, field.name)]
+        for field in fields(TypeConfig)
+    ]))
+
 
 def generate_type_option_name(kernel_types: TypeConfig):
-    return ", ".join(
-        [f"{field.name.replace('b_', 'with_')+'_type'}={VLLMDataTypeNames[getattr(kernel_types, field.name)]}" 
-         for field in fields(TypeConfig)]
-    )
+    return ", ".join([
+        f"{field.name.replace('b_', 'with_')+'_type'}=" +
+        VLLMDataTypeNames[getattr(kernel_types, field.name)]
+        for field in fields(TypeConfig)
+    ])
+
 
 def is_power_of_two(n):
     return (n != 0) and (n & (n - 1) == 0)
@@ -402,15 +408,13 @@ def create_sources(impl_configs: List[ImplConfig], num_impl_files=8):
                 b_num_bits=VLLMDataTypeSize[impl_config.types.b],
                 convert=convert_type,
                 accumulator=impl_config.types.accumulator,
-        ))
+            ))
 
     def prepacked_type_key(prepack_type: PrepackTypeConfig):
         # For now we we can just use the first accumulator type seen since
         # the tensor core shapes/layouts don't vary based on accumulator
         # type so we can generate less code this way
-        return (prepack_type.a, 
-                prepack_type.b_num_bits, 
-                prepack_type.convert)
+        return (prepack_type.a, prepack_type.b_num_bits, prepack_type.convert)
 
     unique_prepack_types = []
     prepack_types_seen = set()

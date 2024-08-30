@@ -621,35 +621,33 @@ def machete_supported_schedules(
         channel_scales_type: Optional[torch.dtype] = None,
         token_scales_type: Optional[torch.dtype] = None,
         out_type: Optional[torch.dtype] = None) -> List[str]:
-    return torch.ops._C.machete_supported_schedules(a_type, b_type,
-                                                    group_scales_type, 
-                                                    group_zeros_type,
-                                                    channel_scales_type,
-                                                    token_scales_type,
-                                                    out_type)
+    return torch.ops._C.machete_supported_schedules(
+        a_type, b_type, group_scales_type, group_zeros_type,
+        channel_scales_type, token_scales_type, out_type)
 
 
 def machete_mm(
-    a: torch.Tensor,
-    b_q: torch.Tensor,  # Should be the tensor returned by machete_prepack_B
-    b_type: ScalarType,
-    out_type: Optional[torch.dtype] = None,
-    b_group_scales: Optional[torch.Tensor] = None,
-    b_group_zeros: Optional[torch.Tensor] = None,
-    b_group_size: Optional[int] = None,
-    b_channel_scales: Optional[torch.Tensor] = None,
-    b_token_scales: Optional[torch.Tensor] = None,
-    schedule: Optional[str] = None
-) -> torch.Tensor:
+        a: torch.Tensor,
+        b_q: torch.
+    Tensor,  # Should be the tensor returned by machete_prepack_B
+        b_type: ScalarType,
+        out_type: Optional[torch.dtype] = None,
+        b_group_scales: Optional[torch.Tensor] = None,
+        b_group_zeros: Optional[torch.Tensor] = None,
+        b_group_size: Optional[int] = None,
+        b_channel_scales: Optional[torch.Tensor] = None,
+        b_token_scales: Optional[torch.Tensor] = None,
+        schedule: Optional[str] = None) -> torch.Tensor:
     return torch.ops._C.machete_mm(a, b_q, b_type, out_type, b_group_scales,
                                    b_group_zeros, b_group_size,
                                    b_channel_scales, b_token_scales, schedule)
 
 
-def machete_prepack_B(b_q_weight: torch.Tensor, a_type: torch.dtype,
-                      b_type: ScalarType,
-                      group_scales_type: Optional[torch.dtype]) -> torch.Tensor:
-    return torch.ops._C.machete_prepack_B(b_q_weight, a_type, b_type, group_scales_type)
+def machete_prepack_B(
+        b_q_weight: torch.Tensor, a_type: torch.dtype, b_type: ScalarType,
+        group_scales_type: Optional[torch.dtype]) -> torch.Tensor:
+    return torch.ops._C.machete_prepack_B(b_q_weight, a_type, b_type,
+                                          group_scales_type)
 
 
 if hasattr(torch.ops._C, "permute_cols"):

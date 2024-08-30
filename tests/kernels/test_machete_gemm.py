@@ -4,13 +4,13 @@ Run `pytest tests/kernels/test_machete_mm.py`.
 """
 
 import math
+from dataclasses import dataclass, fields
 from typing import List, Optional, Tuple
 
 import pytest
 import torch
 
 from tests.kernels.utils import opcheck
-from dataclasses import dataclass, fields
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_rows, quantize_weights)
@@ -45,6 +45,7 @@ MNK_SHAPES = [
 
 GROUP_SIZES_TO_TEST: List[Optional[int]] = [128, -1]
 
+
 @dataclass
 class TypeConfig:
     act_type: torch.dtype
@@ -68,7 +69,7 @@ class Tensors:
     w_tok_s: Optional[torch.Tensor]
 
 
-# (Act Type, Weight Type, Output Type, Scale Type, ZeroPoints, 
+# (Act Type, Weight Type, Output Type, Scale Type, ZeroPoints,
 #  Ch Scales Type, Tok Scales Type)
 # NOTE: None "Scale Type" means the act type is floating point
 #       None "Output Type" means the output type is the same as the act type
@@ -76,45 +77,41 @@ TestTypeTuple = Tuple[List[torch.dtype], ScalarType, Optional[torch.dtype],
                       Optional[torch.dtype], bool]
 TEST_TYPES = [
     # GPTQ style
-    *(TypeConfig(
-        act_type=a_type,
-        weight_type=w_type,
-        output_type=None,
-        group_scale_type=a_type,
-        group_zero_type=None,
-        channel_scale_type=None,
-        token_scale_type=None)
+    *(TypeConfig(act_type=a_type,
+                 weight_type=w_type,
+                 output_type=None,
+                 group_scale_type=a_type,
+                 group_zero_type=None,
+                 channel_scale_type=None,
+                 token_scale_type=None)
       for w_type in [scalar_types.uint4b8, scalar_types.uint8b128]
       for a_type in [torch.float16, torch.bfloat16]),
     # AWQ style
-    *(TypeConfig(
-        act_type=a_type,
-        weight_type=w_type,
-        output_type=None,
-        group_scale_type=a_type,
-        group_zero_type=a_type,
-        channel_scale_type=None,
-        token_scale_type=None)
+    *(TypeConfig(act_type=a_type,
+                 weight_type=w_type,
+                 output_type=None,
+                 group_scale_type=a_type,
+                 group_zero_type=a_type,
+                 channel_scale_type=None,
+                 token_scale_type=None)
       for w_type in [scalar_types.uint4, scalar_types.uint8]
       for a_type in [torch.float16, torch.bfloat16]),
     # QQQ style
-    *(TypeConfig(
-        act_type=torch.int8,
-        weight_type=scalar_types.uint4b8,
-        output_type=torch.float16,
-        group_scale_type=group_scale_type,
-        group_zero_type=None,
-        channel_scale_type=torch.float,
-        token_scale_type=torch.float)
+    *(TypeConfig(act_type=torch.int8,
+                 weight_type=scalar_types.uint4b8,
+                 output_type=torch.float16,
+                 group_scale_type=group_scale_type,
+                 group_zero_type=None,
+                 channel_scale_type=torch.float,
+                 token_scale_type=torch.float)
       for group_scale_type in [None, torch.float16]),
-    *(TypeConfig(
-        act_type=torch.float8_e4m3fn,
-        weight_type=scalar_types.uint4b8,
-        output_type=torch.float16,
-        group_scale_type=group_scale_type,
-        group_zero_type=None,
-        channel_scale_type=torch.float,
-        token_scale_type=torch.float)
+    *(TypeConfig(act_type=torch.float8_e4m3fn,
+                 weight_type=scalar_types.uint4b8,
+                 output_type=torch.float16,
+                 group_scale_type=group_scale_type,
+                 group_zero_type=None,
+                 channel_scale_type=torch.float,
+                 token_scale_type=torch.float)
       for group_scale_type in [None, torch.float16]),
 ]
 
@@ -136,9 +133,10 @@ def maybe_convert_zeropoints(zps: Optional[torch.Tensor], s: torch.Tensor):
     return zps if zps is None else -1 * s * (zps.to(s.dtype))
 
 
-
-def group_size_valid(shape: Tuple[int, int, int], group_size: Optional[int]) -> bool:
+def group_size_valid(shape: Tuple[int, int, int],
+                     group_size: Optional[int]) -> bool:
     return group_size is None or group_size == -1 or group_size % shape[2] == 0
+
 
 def machete_quantize_and_pack(atype: torch.dtype,
                               w: torch.Tensor,
@@ -164,7 +162,7 @@ def machete_quantize_and_pack(atype: torch.dtype,
     return w_ref, w_q_machete, w_s, w_zp
 
 
-def create_test_tensors(shape: Tuple[int, int, int], 
+def create_test_tensors(shape: Tuple[int, int, int],
                         types: TypeConfig,
                         group_size: Optional[int],
                         subset_stride_factor: Optional[int] = None) -> Tensors:
@@ -173,11 +171,11 @@ def create_test_tensors(shape: Tuple[int, int, int],
 
     a = rand_data((m * factor, k * factor), types.act_type, scale=5)
     w = rand_data((k * factor, n * factor), types.act_type, scale=5)
-    
+
     if factor > 1:
         a = a[0:m, 0:k]
         w = w[0:k, 0:n]
-    
+
     if types.group_scale_type is not None:
         w = w.to(types.group_scale_type)
     if w.dtype.itemsize == 1:
@@ -193,22 +191,20 @@ def create_test_tensors(shape: Tuple[int, int, int],
 
     a_ref = a.to(torch.float32)
     w_ref = w_ref.to(torch.float32)
-    
+
     w_ch_s = None if types.channel_scale_type is None else\
         rand_data((n,), types.channel_scale_type)
     w_tok_s = None if types.token_scale_type is None else\
         rand_data((m,), types.token_scale_type)
 
-    return Tensors(
-        w_ref=w_ref,
-        a_ref=a_ref,
-        a=a,
-        w_q=w_q_packed,
-        w_g_s=w_s,
-        w_g_zp=maybe_convert_zeropoints(w_zp, w_s),
-        w_ch_s=w_ch_s,
-        w_tok_s=w_tok_s
-    )
+    return Tensors(w_ref=w_ref,
+                   a_ref=a_ref,
+                   a=a,
+                   w_q=w_q_packed,
+                   w_g_s=w_s,
+                   w_g_zp=maybe_convert_zeropoints(w_zp, w_s),
+                   w_ch_s=w_ch_s,
+                   w_tok_s=w_tok_s)
 
 
 # None stype means scales use the same dtype as a
@@ -218,11 +214,13 @@ def machete_mm_test_helper(types: TypeConfig,
                            schedule: Optional[str] = None):
     output_ref = torch.matmul(tensors.a_ref, tensors.w_ref)
     output_ref_type = output_ref.dtype
-    
+
     if tensors.w_ch_s is not None:
-        output_ref = (output_ref.to(tensors.w_ch_s.dtype) * tensors.w_ch_s.unsqueeze(0)).to(output_ref_type)
+        output_ref = (output_ref.to(tensors.w_ch_s.dtype) *
+                      tensors.w_ch_s.unsqueeze(0)).to(output_ref_type)
     if tensors.w_tok_s is not None:
-        output_ref = (output_ref.to(tensors.w_tok_s.dtype) * tensors.w_tok_s.unsqueeze(1)).to(output_ref_type)
+        output_ref = (output_ref.to(tensors.w_tok_s.dtype) *
+                      tensors.w_tok_s.unsqueeze(1)).to(output_ref_type)
 
     output = ops.machete_mm(
         a=tensors.a,
@@ -265,7 +263,7 @@ def test_machete_all_schedules(shape, types: TypeConfig):
     for group_size in group_sizes:
         if not group_size_valid(shape, group_size):
             continue
-        
+
         tensors = create_test_tensors(shape, types, group_size)
 
         print(f"MNK = {shape}")
@@ -295,9 +293,10 @@ def test_machete_heuristic(shape, types: TypeConfig):
     for group_size in group_sizes:
         if not group_size_valid(shape, group_size):
             continue
-        
+
         tensors = create_test_tensors(shape, types, group_size)
         machete_mm_test_helper(types, tensors, group_size)
+
 
 # Test working on other devices
 @pytest.mark.skipif(not IS_SUPPORTED_BY_GPU,
@@ -305,23 +304,22 @@ def test_machete_heuristic(shape, types: TypeConfig):
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_machete_devices(device: str):
     group_size = 128
-    
-    type_config = TypeConfig(
-        act_type=torch.float16,
-        weight_type=scalar_types.uint4b8,
-        output_type=None,
-        group_scale_type=torch.float16,
-        group_zero_type=None,
-        channel_scale_type=None,
-        token_scale_type=None)
+
+    type_config = TypeConfig(act_type=torch.float16,
+                             weight_type=scalar_types.uint4b8,
+                             output_type=None,
+                             group_scale_type=torch.float16,
+                             group_zero_type=None,
+                             channel_scale_type=None,
+                             token_scale_type=None)
 
     tensors = create_test_tensors((512, 4096, 4096), type_config, group_size)
-    
+
     for field in fields(Tensors):
         tensor = getattr(tensors, field.name)
         if isinstance(tensor, torch.Tensor):
             setattr(tensors, field.name, tensor.to(device))
-    
+
     machete_mm_test_helper(type_config, tensors, group_size)
 
 
@@ -330,19 +328,21 @@ def test_machete_devices(device: str):
                     reason="Machete is not supported on this GPU type.")
 def test_machete_subset():
     group_size = 128
-    
-    type_config = TypeConfig(
-        act_type=torch.float16,
-        weight_type=scalar_types.uint4b8,
-        output_type=None,
-        group_scale_type=torch.float16,
-        group_zero_type=None,
-        channel_scale_type=None,
-        token_scale_type=None)
 
-    tensors = create_test_tensors((512, 4096, 4096), type_config, group_size,
+    type_config = TypeConfig(act_type=torch.float16,
+                             weight_type=scalar_types.uint4b8,
+                             output_type=None,
+                             group_scale_type=torch.float16,
+                             group_zero_type=None,
+                             channel_scale_type=None,
+                             token_scale_type=None)
+
+    tensors = create_test_tensors((512, 4096, 4096),
+                                  type_config,
+                                  group_size,
                                   subset_stride_factor=2)
     machete_mm_test_helper(type_config, tensors, group_size)
+
 
 # Test to make sure cuda graphs work
 class MacheteLayer(torch.nn.Module):
