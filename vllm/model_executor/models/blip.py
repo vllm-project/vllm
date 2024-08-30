@@ -220,7 +220,7 @@ class BlipAttention(nn.Module):
                                                       value_states,
                                                       p=self.dropout,
                                                       scale=self.scale)
-        out = out.reshape(bsz, tgt_len, -1).contiguous()
+        out = out.view(bsz, tgt_len, -1)
         attn_output, _ = self.projection(out)
 
         return attn_output
