@@ -8,7 +8,7 @@ To run this example, run:
 
 import json
 import logging
-from typing import Dict, List, Optional
+from typing import Dict
 
 import ray
 from fastapi import FastAPI
