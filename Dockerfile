@@ -27,6 +27,10 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
 
+# Install uv for faster pip installs
+ADD --chmod=755 https://astral.sh/uv/install.sh /install.sh
+RUN /install.sh && rm /install.sh
+
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
 # this won't be needed for future versions of this docker image
@@ -40,7 +44,7 @@ COPY requirements-common.txt requirements-common.txt
 COPY requirements-adag.txt requirements-adag.txt
 COPY requirements-cuda.txt requirements-cuda.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install -r requirements-cuda.txt
+    /root/.cargo/bin/uv pip install --system -r requirements-cuda.txt
 
 
 # cuda arch list used by torch
@@ -58,7 +62,7 @@ FROM base AS build
 COPY requirements-build.txt requirements-build.txt
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install -r requirements-build.txt
+    /root/.cargo/bin/uv pip install --system -r requirements-build.txt
 
 # files and directories related to build wheels
 COPY csrc csrc
@@ -121,7 +125,7 @@ COPY requirements-lint.txt requirements-lint.txt
 COPY requirements-test.txt requirements-test.txt
 COPY requirements-dev.txt requirements-dev.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install -r requirements-dev.txt
+    /root/.cargo/bin/uv pip install --system -r requirements-dev.txt
 
 #################### DEV IMAGE ####################
 #################### vLLM installation IMAGE ####################
@@ -158,11 +162,11 @@ RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 # install vllm wheel first, so that torch etc will be installed
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install dist/*.whl --verbose
+    /root/.cargo/bin/uv pip install --system dist/*.whl --verbose
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     . /etc/environment && \
-    python3 -m pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.1.4/flashinfer-0.1.4+cu121torch2.4-cp${PYTHON_VERSION_STR}-cp${PYTHON_VERSION_STR}-linux_x86_64.whl
+    /root/.cargo/bin/uv pip install --system https://github.com/flashinfer-ai/flashinfer/releases/download/v0.1.4/flashinfer-0.1.4+cu121torch2.4-cp${PYTHON_VERSION_STR}-cp${PYTHON_VERSION_STR}-linux_x86_64.whl
 #################### vLLM installation IMAGE ####################
 
 
@@ -175,7 +179,7 @@ ADD . /vllm-workspace/
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install -r requirements-dev.txt
+    /root/.cargo/bin/uv pip install --system -r requirements-dev.txt
 
 # doc requires source code
 # we hide them inside `test_docs/` , so that this source code
@@ -192,7 +196,7 @@ FROM vllm-base AS vllm-openai
 
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install accelerate hf_transfer 'modelscope!=1.15.0'
+    /root/.cargo/bin/uv pip install --system accelerate hf_transfer 'modelscope!=1.15.0'
 
 ENV VLLM_USAGE_SOURCE production-docker-image
 
