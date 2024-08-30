@@ -28,12 +28,12 @@ async def completions_with_server_args(prompts: List[str], model_name: str,
 
     outputs = None
     with RemoteOpenAIServer(model_name, server_cli_args) as server:
-        client = server.get_async_client()
-        outputs = await client.completions.create(model=model_name,
-                                                  prompt=prompts,
-                                                  temperature=0,
-                                                  stream=False,
-                                                  max_tokens=5)
+        async with server.get_async_client() as client:
+            outputs = await client.completions.create(model=model_name,
+                                                      prompt=prompts,
+                                                      temperature=0,
+                                                      stream=False,
+                                                      max_tokens=5)
     assert outputs is not None
 
     return outputs
@@ -47,10 +47,12 @@ async def completions_with_server_args(prompts: List[str], model_name: str,
 @pytest.mark.parametrize("eager_mode", [False, True])
 @pytest.mark.parametrize("num_scheduler_steps", NUM_SCHEDULER_STEPS)
 @pytest.mark.parametrize("num_prompts", NUM_PROMPTS)
+@pytest.mark.parametrize("is_async", [False, True])
 @pytest.mark.asyncio
 async def test_multi_step(example_prompts, model: str, tp_size: int,
                           pp_size: int, eager_mode: int,
-                          num_scheduler_steps: int, num_prompts: int):
+                          num_scheduler_steps: int, num_prompts: int,
+                          is_async: bool):
 
     prompts = example_prompts
     if len(prompts) < num_prompts:
@@ -61,6 +63,9 @@ async def test_multi_step(example_prompts, model: str, tp_size: int,
     server_args = DEFAULT_SERVER_ARGS + ["--enforce-eager"]
     ms_server_args = DEFAULT_SERVER_ARGS + \
         ["--num-scheduler-steps", f"{num_scheduler_steps}"]
+
+    if not is_async:
+        ms_server_args += ["--disable-async-output-proc"]
 
     if eager_mode:
         ms_server_args.append("--enforce-eager")
