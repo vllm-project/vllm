@@ -18,7 +18,7 @@ steps:
                                 - "'echo Hello World'"
                                 resources:
                                     requests:
-                                        nvidia.com/gpu: "{{ step.num_gpus or default_num_gpu }}"
+                                        nvidia.com/gpu: 1
                                     limits:
-                                        nvidia.com/gpu: "{{ step.num_gpus or default_num_gpu }}"
+                                        nvidia.com/gpu: 1
     
