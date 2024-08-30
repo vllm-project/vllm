@@ -6,8 +6,9 @@ from ..conftest import HfRunner, VllmRunner
 from .utils import check_logprobs_close
 
 text_only_models = [
-    "Qwen/Qwen-7B-Chat" # Has no visual component
+    "Qwen/Qwen-7B-Chat"  # Has no visual component
 ]
+
 
 # Text only tests; the primary purpose of this test is to ensure that we can
 # load Qwen models, e.g., Qwen/Qwen-7B-Chat, that do not have a visual config,

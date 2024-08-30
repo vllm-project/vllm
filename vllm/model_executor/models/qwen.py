@@ -5,10 +5,10 @@
 # LICENSE: https://huggingface.co/Qwen/Qwen-7B/blob/main/LICENSE
 """Inference-only QWen model compatible with HuggingFace weights."""
 
+import math
 from array import array
 from collections import OrderedDict
 from functools import partial
-import math
 from typing import (Any, Callable, Dict, Iterable, List, Literal, Mapping,
                     Optional, Tuple, TypedDict, Union)
 
@@ -45,9 +45,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.base import MultiModalInputs
 from vllm.multimodal.utils import cached_get_tokenizer
-from vllm.sequence import (IntermediateTensors,
-                           SequenceData,
-                           VLLM_TOKEN_ID_ARRAY_TYPE)
+from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
+                           SequenceData)
 
 from .utils import flatten_bn, is_pp_missing_parameter, make_layers
 
