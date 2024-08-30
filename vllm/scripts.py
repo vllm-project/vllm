@@ -125,6 +125,15 @@ def main():
     serve_parser.add_argument("model_tag",
                               type=str,
                               help="The model tag to serve")
+    serve_parser.add_argument(
+        "--config",
+        type=str,
+        default='',
+        required=False,
+        help="Read CLI options from a config file."
+        "Must be a YAML with the following options:"
+        "https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html#command-line-arguments-for-the-server"
+    )
     serve_parser = make_arg_parser(serve_parser)
     serve_parser.set_defaults(dispatch_function=serve)
 
