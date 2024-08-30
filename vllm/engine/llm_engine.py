@@ -2019,7 +2019,7 @@ class LLMEngine:
         if prompt_ids is None or len(prompt_ids) == 0:
             raise ValueError("Prompt cannot be empty")
 
-        if self.model_config.multimodal_config is not None:
+        if self.model_config.is_multimodal_model:
             max_prompt_len = self.model_config.max_model_len
 
             if len(prompt_ids) > max_prompt_len:
