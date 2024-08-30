@@ -1107,10 +1107,7 @@ class Scheduler:
         if not self.cache_config.enable_prefix_caching:
             common_computed_block_nums = []
 
-        # TODO: Combine multi-step and async postprocessor
-        allow_async_output_proc: bool = (
-            self.use_async_output_proc
-            and not self.scheduler_config.is_multi_step)
+        allow_async_output_proc: bool = self.use_async_output_proc
 
         # Create input data structures.
         seq_group_metadata_list: List[SequenceGroupMetadata] = []

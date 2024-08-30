@@ -3,7 +3,8 @@ from typing import Sequence as GenericSequence
 from typing import Union
 
 from vllm.core.scheduler import ScheduledSequenceGroup
-from vllm.sequence import PoolerOutput, SamplerOutput, SequenceGroupOutput
+from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.sequence import PoolerOutput, SequenceGroupOutput
 
 
 def create_output_by_sequence_group(
