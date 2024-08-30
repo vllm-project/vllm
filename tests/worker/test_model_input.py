@@ -62,12 +62,11 @@ def test_model_runner_input():
         "categorized_sample_indices",
         "num_prompts",
     )
-    attn_metadata = AttentionMetadata(
-        num_prefills=1,
-        num_prefill_tokens=2,
-        num_decode_tokens=3,
-        slot_mapping=torch.zeros(1),
-    )
+    attn_metadata = AttentionMetadata(num_prefills=1,
+                                      num_prefill_tokens=2,
+                                      num_decode_tokens=3,
+                                      slot_mapping=torch.zeros(1),
+                                      enable_layered_transfer=False)
     model_input = ModelInputForGPUWithSamplingMetadata(
         input_tokens=torch.ones(10),
         input_positions=torch.ones(10),
@@ -118,6 +117,7 @@ def test_embedding_model_runner_input():
         num_prefill_tokens=2,
         num_decode_tokens=3,
         slot_mapping=torch.zeros(1),
+        enable_layered_transfer=False,
     )
     model_input = ModelInputForGPUWithPoolingMetadata(
         input_tokens=torch.ones(10),

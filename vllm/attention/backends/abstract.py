@@ -75,6 +75,14 @@ class AttentionBackend(ABC):
     ) -> None:
         raise NotImplementedError
 
+    @staticmethod
+    @abstractmethod
+    def copy_blocks_one_layer(
+        kv_caches: torch.Tensor,
+        src_to_dists: torch.Tensor,
+    ) -> None:
+        raise NotImplementedError
+
 
 @dataclass
 class AttentionMetadata:
@@ -91,6 +99,8 @@ class AttentionMetadata:
     # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
     # in block 0, and 1st slot in block 1, respectively.
     slot_mapping: torch.Tensor
+
+    enable_layered_transfer: bool
 
     @property
     @abstractmethod
@@ -118,6 +128,17 @@ class AttentionMetadata:
             field.name: getattr(self, field.name)
             for field in fields(self) if field.name not in skip_fields
         }
+
+    @abstractmethod
+    def add_kv_cache_for_layered_transfer(
+            self,
+            num_hidden_layers: int,
+            blocks_to_swap_in: Optional[torch.Tensor] = None,
+            blocks_to_swap_out: Optional[torch.Tensor] = None,
+            blocks_to_copy: Optional[torch.Tensor] = None,
+            gpu_caches: Optional[List[torch.Tensor]] = None,
+            cpu_caches: Optional[List[torch.Tensor]] = None):
+        raise NotImplementedError
 
 
 T = TypeVar("T", bound=AttentionMetadata)

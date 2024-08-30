@@ -345,6 +345,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=False,
             slot_mapping=slot_mapping,
+            enable_layered_transfer=False,
             seq_lens=seq_lens,
             seqlen_q=None,
             max_seqlen=None,
@@ -489,6 +490,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPU]):
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=True,
             slot_mapping=slot_mapping,
+            enable_layered_transfer=False,
             seq_lens=seq_lens,
             seqlen_q=seqlen_q,
             max_seqlen=max_seqlen,

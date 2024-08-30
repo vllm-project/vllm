@@ -175,6 +175,7 @@ class TP1DraftModelRunner(ModelRunner):
                          input_positions=model_input.input_positions,
                          seq_lens=attn_metadata.seq_lens_tensor,
                          slot_mapping=attn_metadata.slot_mapping,
+                         enable_layered_transfer=False,
                          block_tables=attn_metadata.block_tables)
 
         # Update sampling_metadata

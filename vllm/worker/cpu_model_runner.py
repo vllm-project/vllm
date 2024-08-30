@@ -211,6 +211,7 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
             num_decode_tokens=0,
             block_tables=torch.tensor([]),
             slot_mapping=slot_mapping,
+            enable_layered_transfer=False,
         )
 
         multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list)
@@ -285,6 +286,7 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=False,
             slot_mapping=slot_mapping,
+            enable_layered_transfer=False,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
             max_decode_seq_len=max_decode_seq_len,

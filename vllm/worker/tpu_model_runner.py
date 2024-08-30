@@ -184,6 +184,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 num_prefill_tokens=batch_size * seq_len,
                 num_decode_tokens=0,
                 slot_mapping=slot_mapping,
+                enable_layered_transfer=False,
                 block_tables=None,
                 context_lens=None,
             )
@@ -216,6 +217,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 num_prefill_tokens=0,
                 num_decode_tokens=batch_size * seq_len,
                 slot_mapping=slot_mapping,
+                enable_layered_transfer=False,
                 block_tables=block_tables,
                 context_lens=context_lens,
             )
@@ -331,6 +333,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             num_prefill_tokens=0,  # NOTE: This is not used.
             num_decode_tokens=0,
             slot_mapping=slot_mapping,
+            enable_layered_transfer=False,
             block_tables=None,
             context_lens=None,
         )
@@ -400,6 +403,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             num_prefill_tokens=0,
             num_decode_tokens=batch_size,
             slot_mapping=slot_mapping,
+            enable_layered_transfer=False,
             block_tables=block_tables,
             context_lens=context_lens,
         )

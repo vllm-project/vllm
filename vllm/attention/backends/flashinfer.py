@@ -70,6 +70,13 @@ class FlashInferBackend(AttentionBackend):
         PagedAttention.copy_blocks(kv_caches, src_to_dists)
 
     @staticmethod
+    def copy_blocks_one_layer(
+        kv_cache: torch.Tensor,
+        src_to_dists: torch.Tensor,
+    ) -> None:
+        PagedAttention.copy_blocks_one_layer(kv_cache, src_to_dists)
+
+    @staticmethod
     def get_supported_head_sizes() -> List[int]:
         return [64, 128, 256]
 
@@ -205,6 +212,23 @@ class FlashInferMetadata(AttentionMetadata):
             return None
 
         return self
+
+    def add_kv_cache_for_layered_transfer(
+            self,
+            num_hidden_layers: int,
+            blocks_to_swap_in: Optional[torch.Tensor] = None,
+            blocks_to_swap_out: Optional[torch.Tensor] = None,
+            blocks_to_copy: Optional[torch.Tensor] = None,
+            gpu_caches: Optional[List[torch.Tensor]] = None,
+            cpu_caches: Optional[List[torch.Tensor]] = None):
+        self.enable_layered_transfer = True
+        self.blocks_to_swap_in = blocks_to_swap_in
+        self.blocks_to_swap_out = blocks_to_swap_out
+        self.blocks_to_copy = blocks_to_copy
+        self.cpu_caches = cpu_caches
+        self.gpu_caches = gpu_caches
+        self.num_hidden_layers = num_hidden_layers
+        self.current_layer = 1
 
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
@@ -417,6 +441,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             slot_mapping=slot_mapping_tensor,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
+            enable_layered_transfer=False,
             max_prefill_seq_len=max_prefill_seq_len,
             block_tables=block_tables,
             paged_kv_indptr=paged_kv_indptr_tensor,
@@ -476,6 +501,37 @@ class FlashInferImpl(AttentionImpl):
         v_scale: float = 1.0,
         attn_type: AttentionType = AttentionType.DECODER,
     ) -> torch.Tensor:
+
+        # First fetch the next layer
+        if attn_metadata.enable_layered_transfer:
+            if attn_metadata.current_layer < attn_metadata.num_hidden_layers:
+                # Swap out
+                if (attn_metadata.blocks_to_swap_out is not None
+                        and attn_metadata.blocks_to_swap_out.numel() > 0
+                        and attn_metadata.gpu_caches is not None
+                        and attn_metadata.cpu_caches is not None):
+                    PagedAttention.swap_blocks(
+                        attn_metadata.gpu_caches[attn_metadata.current_layer],
+                        attn_metadata.cpu_caches[attn_metadata.current_layer],
+                        attn_metadata.blocks_to_swap_out)
+                if (attn_metadata.blocks_to_copy is not None
+                        and attn_metadata.blocks_to_copy.numel() > 0
+                        and attn_metadata.gpu_caches is not None):
+                    PagedAttention.copy_blocks_one_layer(
+                        attn_metadata.gpu_caches[attn_metadata.current_layer],
+                        attn_metadata.blocks_to_copy)
+                if (attn_metadata.blocks_to_swap_in is not None
+                        and attn_metadata.blocks_to_swap_in.numel() > 0
+                        and attn_metadata.gpu_caches is not None
+                        and attn_metadata.cpu_caches is not None):
+                    PagedAttention.swap_blocks(
+                        attn_metadata.cpu_caches[attn_metadata.current_layer],
+                        attn_metadata.gpu_caches[attn_metadata.current_layer],
+                        attn_metadata.blocks_to_swap_in)
+                attn_metadata.current_layer += 1
+            elif attn_metadata.current_layer == attn_metadata.num_hidden_layers:
+                attn_metadata.current_layer = 1
+
         assert k_scale == 1.0 and v_scale == 1.0, (
             "key/v_scale is not supported in FlashInfer.")
         if attn_type != AttentionType.DECODER:

@@ -1120,6 +1120,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                             slot_mapping=slot_mapping[:batch_size],
                             num_prefill_tokens=0,
                             num_decode_tokens=batch_size,
+                            enable_layered_transfer=False,
                             max_prefill_seq_len=0,
                             block_tables=block_tables,
                             paged_kv_indptr=paged_kv_indptr_tensor_host,
@@ -1144,6 +1145,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                             num_prefill_tokens=0,
                             num_decode_tokens=batch_size,
                             slot_mapping=slot_mapping[:batch_size],
+                            enable_layered_transfer=False,
                             seq_lens=None,
                             seq_lens_tensor=seq_lens[:batch_size],
                             max_query_len=None,
@@ -1284,6 +1286,26 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                                    sampling_metadata=sampling_metadata,
                                    is_prompt=is_prompt,
                                    virtual_engine=virtual_engine)
+
+    def add_kv_cache_for_layered_transfer(
+            self,
+            model_input: ModelInputForGPUWithSamplingMetadata,
+            blocks_to_swap_in: Optional[torch.Tensor] = None,
+            blocks_to_swap_out: Optional[torch.Tensor] = None,
+            blocks_to_copy: Optional[torch.Tensor] = None,
+            gpu_caches: Optional[List[torch.Tensor]] = None,
+            cpu_caches: Optional[List[torch.Tensor]] = None):
+        if model_input.attn_metadata is not None:
+            attn_backend_name = self.attn_backend.get_name()
+            if (attn_backend_name != "xformers"
+                    and attn_backend_name != "flash-attn"
+                    and attn_backend_name != "flashinfer"):
+                raise NotImplementedError("Layered transfer unsupported")
+            model_input.attn_metadata.enable_layered_transfer = True
+            model_input.attn_metadata.add_kv_cache_for_layered_transfer(
+                self.model_config.get_num_attention_layers(
+                    self.parallel_config), blocks_to_swap_in,
+                blocks_to_swap_out, blocks_to_copy, gpu_caches, cpu_caches)
 
     @torch.inference_mode()
     def execute_model(
