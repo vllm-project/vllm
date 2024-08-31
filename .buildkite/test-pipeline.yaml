@@ -90,6 +90,7 @@ steps:
   - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py
   - pytest -v -s entrypoints/llm/test_lazy_outlines.py # it needs a clean process
   - pytest -v -s entrypoints/openai
+  - pytest -v -s entrypoints/test_chat_utils.py
 
 - label: Distributed Tests (4 GPUs) # 10min
   working_dir: "/vllm-workspace/tests"
