@@ -88,9 +88,9 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         # TODO: Add support for async if necessary
         assert not is_async
 
-        # Sequences can only be in the RUNNING and FINISHED_ABORTED state
-        # once they are scheduled. A sequence is moved to FINSIHED_ABORTED
-        # client disconnects from the server, which can occur while
+        # Sequences can be in RUNNING or FINISHED_ABORTED state
+        # once scheduled, as a sequence is moved to FINSIHED_ABORTED
+        # if a client disconnects from the api server.
         seqs = sequence_group.get_seqs(status=SequenceStatus.RUNNING)
         if seqs is None:
             seqs = sequence_group.get_seqs(
