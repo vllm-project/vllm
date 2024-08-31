@@ -224,7 +224,7 @@ async def test_parse_chat_messages_multiple_images_across_messages(
 
 
 @pytest.mark.asyncio
-async def test_parse_chat_messages_rejects_too_many_messages(
+async def test_parse_chat_messages_rejects_too_many_images_in_one_message(
         phi3v_model_config, phi3v_tokenizer, image_url):
     with warnings.catch_warnings():
         warnings.filterwarnings(
@@ -255,5 +255,51 @@ async def test_parse_chat_messages_rejects_too_many_messages(
                 }, {
                     "type": "text",
                     "text": "What's in these images?"
+                }]
+            }], phi3v_model_config, phi3v_tokenizer)
+
+
+@pytest.mark.asyncio
+async def test_parse_chat_messages_rejects_too_many_images_across_messages(
+        phi3v_model_config, phi3v_tokenizer, image_url):
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="coroutine 'async_get_and_parse_image' was never awaited")
+        with pytest.raises(
+                ValueError,
+                match="At most 2 image\\(s\\) may be provided in one request\\."
+        ):
+            parse_chat_messages([{
+                "role":
+                "user",
+                "content": [{
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_url
+                    }
+                }, {
+                    "type": "text",
+                    "text": "What's in this image?"
+                }]
+            }, {
+                "role": "assistant",
+                "content": "Some stuff."
+            }, {
+                "role":
+                "user",
+                "content": [{
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_url
+                    }
+                }, {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_url
+                    }
+                }, {
+                    "type": "text",
+                    "text": "What about these two?"
                 }]
             }], phi3v_model_config, phi3v_tokenizer)
