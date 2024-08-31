@@ -331,11 +331,12 @@ class FusedMoE(torch.nn.Module):
         is_transposed = getattr(param, "is_transposed", False)
         shard_dim = SHARD_ID_TO_SHARDED_DIM[shard_id]
         if is_transposed:
-            loaded_weight = loaded_weight.t().contiguous()
+            #loaded_weight = loaded_weight.t().contiguous()
             shard_dim = ~shard_dim
 
         # Case weight_scales
-        if "weight_scale" in weight_name:
+        #if "weight_scale" in weight_name:
+        if "_scales" in weight_name or "zero" in weight_name:
             # load the weight scaling based on the quantization scheme
             # supported weight scales can be found in
             # FusedMoeWeightScaleSupported
