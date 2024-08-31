@@ -25,7 +25,8 @@
 
 from array import array
 from functools import lru_cache, partial
-from typing import Iterable, List, Mapping, Optional, Tuple, Type, TypedDict, Union
+from typing import (Iterable, List, Mapping, Optional, Tuple, Type, TypedDict,
+                    Union)
 
 import torch
 import torch.nn as nn
