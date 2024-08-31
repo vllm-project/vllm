@@ -163,6 +163,10 @@ def sql_lora_huggingface_id():
     # huggingface repo id is used to test lora runtime downloading.
     return "yard1/llama-2-7b-sql-lora-test"
 
+@pytest.fixture(scope="session")
+def llama3_lora_lm_head_files():
+    return '/workspace/llama3_lora'
+
 
 @pytest.fixture(scope="session")
 def sql_lora_files(sql_lora_huggingface_id):

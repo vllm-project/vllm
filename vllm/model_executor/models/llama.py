@@ -375,6 +375,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
         "gate_proj": ("gate_up_proj", 0),
         "up_proj": ("gate_up_proj", 1),
     }
+    modules_to_save = ["lm_head", "embed_tokens"]
 
     def __init__(
         self,

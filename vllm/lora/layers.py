@@ -23,6 +23,9 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
+
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import (
     LinearScalingRotaryEmbedding, RotaryEmbedding)
@@ -1011,6 +1014,12 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
     ) -> bool:
         return type(source_layer) is RowParallelLinear
 
+class TensorPropertiesMixin:
+    @property
+    def get_dtype(self):
+        return
+
+
 
 class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
     """
@@ -1307,3 +1316,88 @@ class LinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
 
     def extra_repr(self) -> str:
         return self.base_layer.extra_repr()
+
+
+class ModulesToSaveWrapper(BaseLayerWithLoRA):
+    """
+    LoRA wrapper for lm_head layer, inspired by ModulesToSaveWrapper from peft
+    
+    Args:
+        base_layer: layer to replace by Wrapper: nn.Linear for lm_head, nn.Embedding for embed_tokens
+    """
+
+    implemented_layers=['lm_head', 'embed_tokens']
+
+    def __init__(self, base_layer: nn.Linear | nn.Embedding) -> None:
+        super().__init__()
+        self.base_layer = base_layer
+        self.device=_get_lora_device(self.base_layer)
+        
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tensor_model_parallel_rank()
+        
+    
+    @property
+    def vocab_size(self):
+        #TODO add lora extra tokens
+        return self.org_vocab_size
+
+    @property
+    def org_vocab_size(self):
+        return self.base_layer.org_vocab_size
+
+
+    def create_lora_weights(
+        self,
+        max_loras: int,
+        lora_config: LoRAConfig,
+        model_config: Optional[PretrainedConfig] = None,
+    ) -> None:
+        
+        self.lm_head_tensors = torch.zeros(
+            (
+                max_loras,
+                self.vocab_size,
+                self.base_layer.embedding_dim
+            ),
+            dtype=lora_config.lora_dtype,
+            device=self.device,
+        )
+        
+    def reset_lora(self, index: int):
+        self.lora_a_stacked[index] = 0
+        self.lora_b_stacked[index] = 0
+        self.embeddings_tensors[index] = float("-inf")
+
+    def set_lora(
+        self,
+        index: int,
+        lora_a: torch.Tensor,
+        lora_b: torch.Tensor,
+        embeddings_tensor: Optional[torch.Tensor],
+    ):
+        self.reset_lora(index)
+        self.lora_a_stacked[index,
+                            0, :lora_a.shape[1], :lora_a.shape[0]].copy_(
+                                lora_a.T, non_blocking=True)
+        self.lora_b_stacked[index,
+                            0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
+                                lora_b.T, non_blocking=True)
+        if embeddings_tensor is not None:
+            self.embeddings_tensors[
+                index, :embeddings_tensor.shape[0], :embeddings_tensor.
+                shape[1], ] = embeddings_tensor
+
+    def forward(self, *args, **kwargs):
+        return type(self.base_layer).forward(self, *args, **kwargs)
+
+    @classmethod
+    def can_replace_layer(
+        cls,
+        source_layer: nn.Module,
+        lora_config: LoRAConfig,
+        packed_modules_list: List,
+        model_config: Optional[PretrainedConfig],
+    ) -> bool:
+        return type(source_layer) in (ParallelLMHead, ) #TODO add vllm.model_executor.layers.vocab_parallel_embedding.VocabParallelEmbedding
+
