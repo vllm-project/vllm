@@ -72,9 +72,6 @@ class MacheteLinearKernel(MPLinearKernel):
         x_2d = x.reshape(-1, x.shape[-1])
         out_shape = x.shape[:-1] + (c.partition_weight_shape[1], )
 
-        print(w_s)
-        print(c.group_size)
-
         output = ops.machete_gemm(a=x_2d,
                                   b_q=w_q,
                                   b_type=c.weight_type,
