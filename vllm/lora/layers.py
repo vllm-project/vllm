@@ -23,6 +23,9 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
+
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import (
     LinearScalingRotaryEmbedding, RotaryEmbedding)
@@ -1033,6 +1036,12 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
     ) -> bool:
         return type(source_layer) is RowParallelLinear
 
+class TensorPropertiesMixin:
+    @property
+    def get_dtype(self):
+        return
+
+
 
 class LogitsProcessorWithLoRA(BaseLayerWithLoRA, TensorPropertiesMixin):
     """
@@ -1436,16 +1445,21 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
     def set_lora(
         self,
         index: int,
-        lora_a: Optional[torch.Tensor],
+        lora_a: torch.Tensor,
         lora_b: torch.Tensor,
         embeddings_tensor: Optional[torch.Tensor],
     ):
-        assert lora_a is None
-        assert embeddings_tensor is None
-
         self.reset_lora(index)
-        self._lora_tensors[index, :lora_b.shape[0], :lora_b.shape[1]].copy_(
-            lora_b, non_blocking=True)
+        self.lora_a_stacked[index,
+                            0, :lora_a.shape[1], :lora_a.shape[0]].copy_(
+                                lora_a.T, non_blocking=True)
+        self.lora_b_stacked[index,
+                            0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
+                                lora_b.T, non_blocking=True)
+        if embeddings_tensor is not None:
+            self.embeddings_tensors[
+                index, :embeddings_tensor.shape[0], :embeddings_tensor.
+                shape[1], ] = embeddings_tensor
 
     def forward(self, *args, **kwargs):
         return type(self.base_layer).forward(self, *args, **kwargs)
