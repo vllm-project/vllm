@@ -15,7 +15,7 @@ from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
 from vllm.entrypoints.openai.tool_parsers.utils import (
     extract_intermediate_diff)
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 
 logger = init_logger(__name__)
 
@@ -30,6 +30,12 @@ class MistralToolParser(ToolParser):
 
     def __init__(self, tokenizer: AnyTokenizer):
         super().__init__(tokenizer)
+
+        if isinstance(self.model_tokenizer, MistralTokenizer):
+            self.model_tokenizer = self.model_tokenizer.tokenizer
+        else:
+            logger.info("Non-Mistral tokenizer detected when using a Mistral "
+                        "model...")
 
         # initialize properties used for state when parsing tool calls in
         # streaming mode
