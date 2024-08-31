@@ -57,7 +57,7 @@ def get_config(
 ) -> PretrainedConfig:
 
     # Separate model folder from file path for GGUF models
-    is_gguf = check_gguf_file(Path(model))
+    is_gguf = check_gguf_file(model)
     if is_gguf:
         kwargs["gguf_file"] = Path(model).name
         model = Path(model).parent
@@ -113,7 +113,7 @@ def get_hf_image_processor_config(
     if VLLM_USE_MODELSCOPE:
         return dict()
     # Separate model folder from file path for GGUF models
-    if check_gguf_file(Path(model)):
+    if check_gguf_file(model):
         model = Path(model).parent
     return get_image_processor_config(model, revision=revision, **kwargs)
 

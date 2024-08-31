@@ -97,7 +97,7 @@ def get_tokenizer(
         kwargs["truncation_side"] = "left"
 
     # Separate model folder from file path for GGUF models
-    is_gguf = check_gguf_file(Path(tokenizer_name))
+    is_gguf = check_gguf_file(tokenizer_name)
     if is_gguf:
         kwargs["gguf_file"] = Path(tokenizer_name).name
         tokenizer_name = Path(tokenizer_name).parent
