@@ -186,9 +186,13 @@ class FlashInferState(AttentionState):
             self._graph_decode_workspace_buffer, _indptr_buffer,
             self._graph_indices_buffer, _last_page_len_buffer, "NHD",
             use_tensor_cores)
+        if self.runner.kv_cache_dtype.startswith("fp8"):
+            kv_cache_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
+                self.runner.kv_cache_dtype)
+        else:
+            kv_cache_dtype = get_kv_cache_torch_dtype(
+                self.runner.kv_cache_dtype, self.runner.model_config.dtype)
 
-        kv_cache_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
-            self.runner.kv_cache_dtype)
         paged_kv_indptr_tensor_host = torch.arange(0,
                                                    batch_size + 1,
                                                    dtype=torch.int32)
@@ -349,7 +353,7 @@ class FlashInferMetadata(AttentionMetadata):
                 self.page_size,
                 # Disable flashinfer's pos encoding and use vllm's rope.
                 pos_encoding_mode="NONE",
-            )
+                data_type=self.data_type)
 
     def asdict_zerocopy(self,
                         skip_fields: Optional[Set[str]] = None
@@ -586,8 +590,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             paged_kv_indptr_tensor = None
             paged_kv_last_page_len_tensor = None
 
-        kv_cache_dtype = get_kv_cache_torch_dtype(
-            self.runner.kv_cache_dtype, self.runner.model_config.dtype)
+        if self.runner.kv_cache_dtype.startswith("fp8"):
+            kv_cache_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
+                self.runner.kv_cache_dtype)
+        else:
+            kv_cache_dtype = get_kv_cache_torch_dtype(
+                self.runner.kv_cache_dtype, self.runner.model_config.dtype)
 
         return FlashInferMetadata(
             num_prefills=self.num_prefills,
