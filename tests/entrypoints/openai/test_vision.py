@@ -212,7 +212,6 @@ async def test_chat_streaming_image(client: openai.AsyncOpenAI,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
 @pytest.mark.parametrize(
     "image_urls",
     [TEST_IMAGE_URLS[:i] for i in range(2, len(TEST_IMAGE_URLS))])
