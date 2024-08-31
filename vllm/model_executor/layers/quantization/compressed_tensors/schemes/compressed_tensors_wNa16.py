@@ -1,4 +1,4 @@
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Set
 
 import torch
 
@@ -12,6 +12,10 @@ from vllm.model_executor.parameter import (BasevLLMParameter,
                                            PackedvLLMParameter,
                                            RowvLLMParameter)
 from vllm.scalar_type import scalar_types
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 
 __all__ = ["CompressedTensorsWNA16"]
 WNA16_SUPPORTED_TYPES_MAP = {
@@ -22,6 +26,7 @@ WNA16_SUPPORTED_BITS = list(WNA16_SUPPORTED_TYPES_MAP.keys())
 
 
 class CompressedTensorsWNA16(CompressedTensorsScheme):
+    _kernel_backends_being_used: Set[str] = set()
 
     def __init__(self,
                  strategy: str,
@@ -71,6 +76,11 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         )
 
         kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
+        
+        if kernel_type.__name__ not in self._kernel_backends_being_used:
+            logger.info(
+                f"Using {kernel_type.__name__} for CompressedTensorsWNA16")
+            self._kernel_backends_being_used.add(kernel_type.__name__)
 
         # If group_size is -1, we are in channelwise case.
         group_size = self.group_size if self.group_size != -1 else input_size
