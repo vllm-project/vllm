@@ -1,9 +1,10 @@
 import codecs
+import json
 from dataclasses import dataclass
 from functools import lru_cache, partial
 from pathlib import Path
-from typing import (Any, Awaitable, Iterable, List, Literal, Optional, Tuple,
-                    Union, cast)
+from typing import (Any, Awaitable, Dict, Iterable, List, Literal, Optional,
+                    Tuple, Union, cast)
 
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -321,6 +322,20 @@ def apply_chat_template(
             "As of transformers v4.44, default chat template is no longer "
             "allowed, so you must provide a chat template if the tokenizer "
             "does not define one.")
+
+    # per the Transformers docs & maintainers, tool call arguments in
+    # assistant-role messages with tool_calls need to be dicts not JSON str -
+    # this is how tool-use chat templates will expect them moving forwards
+    # so, for messages that have tool_calls, parse the string (which we get
+    # from openAI format) to dict
+    for message in conversation:
+        if (message["role"] == "assistant" and "tool_calls" in message
+                and isinstance(message["tool_calls"], list)):
+
+            for i in range(len(message["tool_calls"])):
+                args: str = message["tool_calls"][i]["function"]["arguments"]
+                parsed_args: Dict = json.loads(args)
+                message["tool_calls"][i]["function"]["arguments"] = parsed_args
 
     prompt = tokenizer.apply_chat_template(
         conversation=conversation,
