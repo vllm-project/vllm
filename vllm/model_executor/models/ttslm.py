@@ -30,7 +30,7 @@ def dummy_data_for_ttsllm(ctx: InputContext, seq_len: int, mm_counts: Mapping[st
     from vllm.sequence import SequenceData
 
 
-    dummy_seq_data = SequenceData([[0] * ctx.model_config.hf_config.num_output_head] * seq_len)
+    dummy_seq_data = SequenceData([0] * seq_len)
     dummy_multi_modal_data = {"audio": SpeechPlugin.sample_random_speaker()}
 
     return dummy_seq_data, dummy_multi_modal_data
@@ -56,8 +56,9 @@ class ChatTtsLlm(nn.Module):
 
         self.gpt = LlamaModel(config)
         self.model_dim = self.gpt.config.hidden_size
-        self.emb_all = nn.ModuleList([
-            VocabParallelEmbedding(self.num_audio_tokens + self.num_text_tokens, self.model_dim) for _ in range(self.num_output_head)
+        self.emb_text = VocabParallelEmbedding(self.num_text_tokens, self.model_dim) 
+        self.emb_code = nn.ModuleList([
+            VocabParallelEmbedding(self.num_audio_tokens, self.model_dim) for _ in range(self.num_output_head)
         ])
         
         self.lm_head = nn.ModuleList([
@@ -97,12 +98,15 @@ class ChatTtsLlm(nn.Module):
                 except KeyError:
                     pass
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        code_emb = [
-            self.emb_all[i](input_ids[:,i])
-            for i in range(self.num_output_head)
-        ]
-        emb = torch.stack(code_emb, 2).sum(2)
+    def get_input_embeddings(self, input_ids: torch.Tensor, is_prompt: bool) -> torch.Tensor:
+        if is_prompt:
+            emb = self.emb_text(input_ids)
+        else:
+            code_emb = [
+                self.emb_code[i](input_ids[:,i])
+                for i in range(self.num_output_head)
+            ]
+            emb = torch.stack(code_emb, 2).sum(2)
         return emb
 
     def compute_logits(self, hidden_states: torch.Tensor,
@@ -125,15 +129,6 @@ class ChatTtsLlm(nn.Module):
             output = self.sampler(head_logits[i + 1], sampling_metadata)
             self.merge_sample_results(next_tokens, output)
 
-        for output in next_tokens.outputs:
-            for sample in output.samples:
-                sample.output_token += self.num_text_tokens
-                for i in range(self.num_output_head):
-                    sample.output_tokens[i] += self.num_text_tokens
-                dic = {}
-                for k,v in sample.logprobs.items():
-                    dic[k + self.num_text_tokens] = v
-                sample.logprobs = dic
         return next_tokens
 
     def forward(
@@ -144,12 +139,16 @@ class ChatTtsLlm(nn.Module):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
+        is_prompt: bool = True,
         **kwargs: object
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.get_input_embeddings(input_ids)
-        spk_emb = kwargs.get("speech", None)
-        if spk_emb is not None:
-            self.apply_spk_emb(hidden_states, spk_emb, attn_metadata, input_ids)
+        if inputs_embeds is not None:
+            hidden_states = inputs_embeds
+        else:
+            hidden_states = self.get_input_embeddings(input_ids, is_prompt)
+            spk_emb = kwargs.get("speech", None)
+            if spk_emb is not None:
+                self.apply_spk_emb(hidden_states, spk_emb, attn_metadata, input_ids)
         model_output = self.gpt(
             input_ids=input_ids,
             inputs_embeds=hidden_states,
@@ -172,7 +171,7 @@ class ChatTtsLlm(nn.Module):
         # convert spk_emb to the same dtype as emb
         spk_emb = spk_emb.to(emb.dtype)
         # find the index of the speaker token
-        indices = (input_ids[:,0] == self.spk_emb_token_id).nonzero(as_tuple=True)
+        indices = (input_ids == self.spk_emb_token_id).nonzero(as_tuple=True)
         if indices[0].size(0) == 0:
             return
         emb.index_put_(indices, spk_emb)

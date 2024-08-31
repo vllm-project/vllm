@@ -347,10 +347,6 @@ class _AsyncLLMEngine(LLMEngine):
         else:
             assert_never(inputs)
 
-        if hasattr(self.model_config.hf_config, "num_output_head"):
-            # duplicate the prompt_token_ids for each head
-            prompt_token_ids = [[i] *  self.model_config.hf_config.num_output_head for i in prompt_token_ids]
-
         return prompt, prompt_token_ids, multi_modal_data
 
     async def _process_encoder_decoder_prompt_async(
