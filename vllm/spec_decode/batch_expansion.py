@@ -5,8 +5,9 @@ from typing import Iterator, List, Optional, Tuple
 import torch
 
 from vllm import SamplingParams
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, ExecuteModelRequest,
-                           SamplerOutput, SequenceData, SequenceGroupMetadata,
+                           SequenceData, SequenceGroupMetadata,
                            get_all_seq_ids)
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
