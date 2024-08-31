@@ -508,11 +508,13 @@ class LoRAModelManager(AdapterModelManager):
                                              hasattr(module.base_layer,
                                                      "embedding_dim") else
                                              module.base_layer.weight.shape[1])
+                    rank_= None if isinstance(module, ModulesToSaveWrapper) else rank
+                        
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name,
                         input_dim,
                         output_dim,
-                        rank,
+                        rank_,
                         module.dtype,
                         "cpu",
                         embeddings_tensor_dim=embeddings_tensor_dim)

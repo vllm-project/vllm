@@ -13,13 +13,20 @@ class LoRALayerWeights:
     def __init__(
         self,
         module_name: str,
-        rank: int,
+        rank: Optional[int],
         lora_alpha: int,
-        lora_a: torch.Tensor,
+        lora_a: Optional[torch.Tensor],
         lora_b: torch.Tensor,
         embeddings_tensor: Optional[torch.Tensor] = None,
         scaling: Optional[float] = None,
     ) -> None:
+        '''
+        rank == None means that we have full rank tensors (ModulesToSave)
+        in this case:
+            lora_a=None
+            lora_b=full rank tensor
+        '''
+
         self.module_name = module_name
         self.rank = rank
         self.lora_alpha = lora_alpha
@@ -63,31 +70,44 @@ class LoRALayerWeights:
             module_name: str,
             input_dim: int,
             output_dim: int,
-            rank: int,
+            rank: Optional[int],
             dtype: torch.dtype,
             device: torch.types.Device,
             embeddings_tensor_dim: Optional[int] = None) -> "LoRALayerWeights":
+        
+        
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
-        lora_a = torch.zeros([input_dim, rank],
-                             dtype=dtype,
-                             device=device,
-                             pin_memory=pin_memory)
-        lora_b = torch.zeros([rank, output_dim],
-                             dtype=dtype,
-                             device=device,
-                             pin_memory=pin_memory)
-        embeddings_tensor = torch.rand(
-            10,
-            embeddings_tensor_dim,
-            dtype=dtype,
-            device=device,
-            pin_memory=pin_memory) if embeddings_tensor_dim else None
+        if rank is None:
+            lora_a=None
+            lora_b=torch.zeros([input_dim, output_dim],dtype=dtype,
+                                device=device,
+                                pin_memory=pin_memory)
+            embeddings_tensor = None
+            scaling=1
+        else:
+            lora_a = torch.zeros([input_dim, rank],
+                                dtype=dtype,
+                                device=device,
+                                pin_memory=pin_memory)
+            lora_b = torch.zeros([rank, output_dim],
+                                dtype=dtype,
+                                device=device,
+                                pin_memory=pin_memory)
+            scaling=None
+        
+            embeddings_tensor = torch.rand(
+                10,
+                embeddings_tensor_dim,
+                dtype=dtype,
+                device=device,
+                pin_memory=pin_memory) if embeddings_tensor_dim else None
         return cls(
             module_name,
             rank=rank,
             lora_alpha=1,
             lora_a=lora_a,
             lora_b=lora_b,
+            scaling=scaling,
             embeddings_tensor=embeddings_tensor,
         )
 
