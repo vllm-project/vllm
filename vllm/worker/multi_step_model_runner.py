@@ -39,7 +39,9 @@ logger = init_logger(__name__)
 
 
 def seq_output_builder():
-    return SequenceOutput(0, 0, {0: Logprob(logprob=-1)})
+    return SequenceOutput(
+        0, 0,
+        {0: Logprob(logprob=float('inf'), rank=None, decoded_token=None)})
 
 
 def completion_seq_group_output_builder():
@@ -120,7 +122,8 @@ class ModelOutput:
         with torch.cuda.stream(copy_stream):
             _pythonize_sampler_output(input_metadata, self.sampler_output,
                                       pinned_sampled_token_buffer,
-                                      self.sampled_token_ids, self.logprobs, self.pythonization_cache)
+                                      self.sampled_token_ids, self.logprobs,
+                                      self.pythonization_cache)
 
         # Erase the logprobs GPU-side tensor.
         # Note that although _pythonize_sampler_output() runs in its
@@ -425,8 +428,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
             model_input.cached_outputs.append(
                 ModelOutput(output[0], output_ready_event,
                             output[0].sampled_token_ids, False,
-                            output[0].logprobs,
-                            self.pythonization_cache))
+                            output[0].logprobs, self.pythonization_cache))
 
             # These GPU tensors are not required by multi-step;
             # erase them to ensure they are not pythonized or
@@ -658,6 +660,9 @@ def _pythonize_sampler_output(
 
     for sgdx, (seq_group,
                sample_result) in enumerate(zip(seq_groups, samples_list)):
+        if seq_group.sampling_params.logits_processors:
+            assert len(seq_group.sampling_params.logits_processors) == 0, (
+                "Logits Processors are not supported in multi-step decoding")
 
         if do_pythonize_logprobs:
             assert prompt_logprobs is not None
@@ -682,80 +687,56 @@ def _pythonize_sampler_output(
         seq_ids = seq_group.seq_ids
         next_token_ids = sample_result
         parent_ids = [0]
-        seq_outputs: List[SequenceOutput] = []
-        if seq_group.sampling_params.logits_processors:
-            assert len(seq_group.sampling_params.logits_processors) == 0, (
-                "Logits Processors are not supported in multi-step decoding")
+
+        if cache is not None:
+            completion_seq_group_output: CompletionSequenceGroupOutput = \
+                cache.cached_completion_seq_group_output.get_object()
+            completion_seq_group_output.samples.clear()
+            seq_outputs: List[
+                SequenceOutput] = completion_seq_group_output.samples
+        else:
+            seq_outputs = []
+
         for tdx, (parent_id,
                   next_token_id) in enumerate(zip(parent_ids, next_token_ids)):
-            seq_outputs.append(
-                SequenceOutput(seq_ids[parent_id], next_token_id,
-                               (group_sample_logprobs[tdx]
-                                if logprobs_are_requested else {
-                                    next_token_id:
-                                    Logprob(logprob=float('inf'),
-                                            rank=None,
-                                            decoded_token=None)
-                                })))
-        output.outputs.append(
-            CompletionSequenceGroupOutput(
-                seq_outputs,
-                (group_prompt_logprobs if logprobs_are_requested else None)))
-    # if cache is None:  # TODO: Remove this IF after handling add_sampler_output
-    #     # Standard non-cached creation of outputs
-    #     for (seq_group, sample_result) in zip(sampling_metadata.seq_groups,
-    #                                           samples_list):
-    #         seq_ids = seq_group.seq_ids
-    #         next_token_ids = sample_result
-    #         parent_ids = [0]
-    #         seq_outputs: List[SequenceOutput] = []
-    #         if seq_group.sampling_params.logits_processors:
-    #             assert len(seq_group.sampling_params.logits_processors) == 0, (
-    #                 "Logits Processors are not supported in multi-step decoding"
-    #             )
-    #         for parent_id, next_token_id in zip(parent_ids, next_token_ids):
-    #             # TODO(will): support logprobs
-    #             # Hard coded logprob
-    #             seq_outputs.append(
-    #                 SequenceOutput(seq_ids[parent_id], next_token_id,
-    #                                {next_token_id: Logprob(logprob=-1)}))
-    #         output.outputs.append(
-    #             CompletionSequenceGroupOutput(seq_outputs, None))
+            if cache is not None:
+                seq_output: SequenceOutput = cache.cached_seq_output.get_object(
+                )
+                seq_output.parent_seq_id = seq_ids[parent_id]
+                seq_output.output_token = next_token_id
 
-    # else:
-    #     # Cached creation of outputs
-    #     for (seq_group, sample_result) in zip(sampling_metadata.seq_groups,
-    #                                           samples_list):
-    #         completion_seq_group_output: CompletionSequenceGroupOutput = \
-    #             cache.cached_completion_seq_group_output.get_object()
-    #         completion_seq_group_output.samples.clear()
+                if logprobs_are_requested:
+                    seq_output.logprobs = group_sample_logprobs[tdx]
+                else:
+                    logprobs = next(iter(seq_output.logprobs.values()))
+                    seq_output.logprobs.clear()
 
-    #         seq_ids = seq_group.seq_ids
-    #         next_token_ids = sample_result
+                    logprobs.logprob = float('inf')
+                    logprobs.rank = None
+                    logprobs.decoded_token = None
 
-    #         parent_id = 0
-    #         seq_outputs = completion_seq_group_output.samples
+                    seq_output.logprobs[next_token_id] = logprobs
 
-    #         if seq_group.sampling_params.logits_processors:
-    #             assert len(seq_group.sampling_params.logits_processors) == 0, (
-    #                 "Logits Processors are not supported in multi-step decoding"
-    #             )
+                seq_outputs.append(seq_output)
 
-    #         for next_token_id in next_token_ids:
-    #             # TODO(will): support logprobs
-    #             # Hard coded logprob
-    #             seq_output: SequenceOutput = cache.cached_seq_output.get_object(
-    #             )
-    #             seq_output.parent_seq_id = seq_ids[parent_id]
-    #             seq_output.output_token = next_token_id
-
-    #             logprobs = next(iter(seq_output.logprobs.values()))
-    #             seq_output.logprobs.clear()
-    #             seq_output.logprobs[next_token_id] = logprobs
-
-    #             seq_outputs.append(seq_output)
-
-    #         completion_seq_group_output.prompt_logprobs = None
-    #         output.outputs.append(completion_seq_group_output)
+            else:
+                seq_outputs.append(
+                    SequenceOutput(seq_ids[parent_id], next_token_id,
+                                   (group_sample_logprobs[tdx]
+                                    if logprobs_are_requested else {
+                                        next_token_id:
+                                        Logprob(logprob=float('inf'),
+                                                rank=None,
+                                                decoded_token=None)
+                                    })))
+        if cache is not None:
+            completion_seq_group_output.prompt_logprobs = \
+                group_prompt_logprobs if logprobs_are_requested else None
+            output.outputs.append(completion_seq_group_output)
+        else:
+            output.outputs.append(
+                CompletionSequenceGroupOutput(
+                    seq_outputs, (group_prompt_logprobs
+                                  if logprobs_are_requested else None)))
 
     assert len(output.outputs) > 0
