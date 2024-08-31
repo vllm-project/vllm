@@ -815,7 +815,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         is_driver_worker: bool = False,
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         multimodal_config: Optional[MultiModalConfig] = None,
-        return_hidden_states: bool = True,
+        return_hidden_states: bool = False,
         observability_config: Optional[ObservabilityConfig] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
@@ -1216,10 +1216,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         # Prepare dummy inputs. These will be reused for all batch sizes.
         max_batch_size = max(_BATCH_SIZES_TO_CAPTURE)
-       
-        seq_data, dummy_multi_modal_data = INPUT_REGISTRY \
-            .dummy_data_for_profiling(self.model_config, max_batch_size, self.mm_registry)
-        input_tokens = torch.tensor(seq_data.prompt_token_ids, dtype=torch.long).cuda()
+
+        input_tokens = torch.zeros(max_batch_size, dtype=torch.long).cuda()
+        if hasattr(self.model_config.hf_config, "num_output_head"):
+            input_tokens = torch.zeros(max_batch_size, self.model_config.hf_config.num_output_head, dtype=torch.long).cuda()
         input_positions = torch.zeros(max_batch_size, dtype=torch.long).cuda()
         slot_mapping = torch.empty(max_batch_size, dtype=torch.long).cuda()
         slot_mapping.fill_(_PAD_SLOT_ID)
@@ -1606,8 +1606,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                 hidden_states = hidden_or_intermediate_states
 
             output.hidden_states = hidden_states
-            for i, o in enumerate(output):
-                o.hidden_state = hidden_states[i]
+            # for i, o in enumerate(output):
+            #     o.hidden_state = hidden_states[i]
 
         return [output]
 

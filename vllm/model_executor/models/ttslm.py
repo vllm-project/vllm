@@ -139,7 +139,7 @@ class ChatTtsLlm(nn.Module):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
-        is_prompt: bool = True,
+        is_prompt: bool = False,
         **kwargs: object
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if inputs_embeds is not None:
