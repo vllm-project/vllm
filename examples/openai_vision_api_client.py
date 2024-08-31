@@ -6,8 +6,8 @@ Launch the vLLM server with the following command:
 vllm serve llava-hf/llava-1.5-7b-hf --chat-template template_llava.jinja
 
 (multi-image inference with Phi-3.5-vision-instruct)
-vllm serve Phi-3.5-vision-instruct --max-model-len 4096 \
-    --limit_mm_per_prompt image=2
+vllm serve microsoft/Phi-3.5-vision-instruct --max-model-len 4096 \
+    --trust-remote-code --limit_mm_per_prompt image=2
 """
 import base64
 
