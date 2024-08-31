@@ -132,11 +132,12 @@ class Hermes2ProToolParser(ToolParser):
             cur_tool_end_count = current_token_ids.count(
                 self.tool_call_end_token_id)
 
-            # case: if we're generating text, NOT tools, return a text delta
+            # case: if we're generating text, OR rounding out a tool call
             if (cur_tool_start_count == cur_tool_end_count
                     and prev_tool_end_count == cur_tool_end_count):
                 logger.debug("Generating text content! skipping tool parsing.")
-                return DeltaMessage(content=delta_text)
+                if delta_text != self.tool_call_end_token:
+                    return DeltaMessage(content=delta_text)
 
             # case: if tool open & close tag counts don't match, we're doing
             # imaginary "else" block here
@@ -185,6 +186,8 @@ class Hermes2ProToolParser(ToolParser):
                     logger.debug(
                         "Finishing tool and found diff that had not "
                         "been streamed yet: %s", diff)
+                    self.streamed_args_for_tool[self.current_tool_id] \
+                        += diff
                     return DeltaMessage(tool_calls=[
                         DeltaToolCall(index=self.current_tool_id,
                                       function=DeltaFunctionCall(
@@ -194,7 +197,10 @@ class Hermes2ProToolParser(ToolParser):
 
             # case -- otherwise we're just generating text
             else:
-                delta = DeltaMessage(tool_calls=[], content=delta_text)
+                print("JUST GENERATING TEXT")
+                text = delta_text.replace(self.tool_call_start_token, "")
+                text = text.replace(self.tool_call_end_token, "")
+                delta = DeltaMessage(tool_calls=[], content=text)
                 return delta
 
             try:
