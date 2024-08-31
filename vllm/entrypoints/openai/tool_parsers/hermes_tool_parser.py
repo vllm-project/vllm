@@ -203,7 +203,6 @@ class Hermes2ProToolParser(ToolParser):
 
             # case -- otherwise we're just generating text
             else:
-                print("JUST GENERATING TEXT")
                 text = delta_text.replace(self.tool_call_start_token, "")
                 text = text.replace(self.tool_call_end_token, "")
                 delta = DeltaMessage(tool_calls=[], content=text)
