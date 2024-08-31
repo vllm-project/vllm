@@ -24,9 +24,8 @@
 """Inference-only Qwen2-VL model compatible with HuggingFace weights."""
 
 from array import array
-from collections.abc import Mapping
 from functools import lru_cache, partial
-from typing import Iterable, List, Optional, Tuple, Type, TypedDict, Union
+from typing import Iterable, List, Mapping, Optional, Tuple, Type, TypedDict, Union
 
 import torch
 import torch.nn as nn
