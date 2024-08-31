@@ -255,7 +255,7 @@ steps:
 
 #####  models test  #####
 
-- label: Basic Models Test # 6min
+- label: Basic Models Test # 3min
   source_file_dependencies:
   - vllm/
   - tests/models
@@ -264,7 +264,7 @@ steps:
     - pytest -v -s models/test_oot_registration.py # it needs a clean process
     - pytest -v -s models/*.py --ignore=models/test_oot_registration.py
 
-- label: Decoder-only Language Models Test # 1h8min
+- label: Decoder-only Language Models Test # 1h3min
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
@@ -272,7 +272,7 @@ steps:
   commands:
     - pytest -v -s models/decoder_only/language
 
-- label: Decoder-only Multi-Modal Models Test # 1h1min
+- label: Decoder-only Multi-Modal Models Test # 56min
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
@@ -282,7 +282,7 @@ steps:
     - pytest -v -s models/decoder_only/audio_language
     - pytest -v -s models/decoder_only/vision_language
 
-- label: Other Models Test # 11min
+- label: Other Models Test # 5min
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
