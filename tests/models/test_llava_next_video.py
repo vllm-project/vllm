@@ -3,8 +3,8 @@ from typing import List, Optional, Tuple, Type, overload
 import pytest
 from transformers import AutoConfig, AutoModelForVision2Seq, AutoTokenizer
 
-from vllm.multimodal.utils import rescale_video_size, resize_video
-from vllm.multimodal.utils import sample_frames_from_video
+from vllm.multimodal.utils import (rescale_video_size, resize_video,
+                                   sample_frames_from_video)
 from vllm.sequence import SampleLogprobs
 
 from ..conftest import VIDEO_ASSETS, HfRunner, VllmRunner, _VideoAssets
@@ -18,7 +18,8 @@ _PREFACE = (
     "questions.")
 
 HF_VIDEO_PROMPTS = VIDEO_ASSETS.prompts({
-    "sample_demo_1": f"{_PREFACE}USER: <video>\nWhy is this video funny? ASSISTANT:"
+    "sample_demo_1":
+    f"{_PREFACE}USER: <video>\nWhy is this video funny? ASSISTANT:"
 })
 
 models = ["llava-hf/LLaVA-NeXT-Video-7B-hf"]
@@ -102,7 +103,8 @@ def run_test(
 ):
     videos = [
         sample_frames_from_video(asset.np_ndarrays, num_frames)
-        for asset in video_assets]
+        for asset in video_assets
+    ]
 
     for video in videos:
         print(video.shape)
@@ -213,7 +215,8 @@ def test_models(hf_runner, vllm_runner, video_assets, model, size_factors,
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("num_frames", [16])
 def test_models_fixed_sizes(hf_runner, vllm_runner, video_assets, model, sizes,
-                            dtype, max_tokens, num_logprobs, num_frames) -> None:
+                            dtype, max_tokens, num_logprobs,
+                            num_frames) -> None:
     run_test(
         hf_runner,
         vllm_runner,
