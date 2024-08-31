@@ -976,9 +976,9 @@ static __device__ __forceinline__ uint32_t __vcmpeq4(const uint32_t a, const uin
 }
 
 static __device__ __forceinline__ uint32_t __vsub4(const uint32_t a, const uint32_t b) {
-        return (static_cast<uint8_t>(((a & 0xff000000) >> 24) - ((b & 0xff000000) >> 24)) << 24) +
-            (static_cast<uint8_t>(((a & 0x00ff0000) >> 16) - ((b & 0x00ff0000) >> 16)) << 16) +
-            (static_cast<uint8_t>(((a & 0x0000ff00) >>  8) - ((b & 0x0000ff00) >>  8)) <<  8) +
-            (static_cast<uint8_t>(((a & 0x000000ff) >>  0) - ((b & 0x000000ff) >>  0)) <<  0);
+    return (static_cast<uint8_t>(((a & 0xff000000) >> 24) - ((b & 0xff000000) >> 24)) << 24) +
+           (static_cast<uint8_t>(((a & 0x00ff0000) >> 16) - ((b & 0x00ff0000) >> 16)) << 16) +
+           (static_cast<uint8_t>(((a & 0x0000ff00) >>  8) - ((b & 0x0000ff00) >>  8)) <<  8) +
+           (static_cast<uint8_t>(((a & 0x000000ff) >>  0) - ((b & 0x000000ff) >>  0)) <<  0);
 }
 #endif // defined(USE_ROCM)
