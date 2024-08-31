@@ -371,8 +371,11 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal):
         video_pixels = inputs["data"]
 
         if isinstance(video_pixels, torch.Tensor):
-            b, num_frames, c, h, w = video_pixels.shape
-            stacked_pixels = video_pixels.view(b * num_frames, c, h, w)
+            # TODO: support multiple videos per input
+            b, num_videos, num_frames, c, h, w = video_pixels.shape
+            assert (num_videos == 1)
+            stacked_pixels = video_pixels.view(b * num_videos * num_frames, c,
+                                               h, w)
             stacked_embeddings = self._video_pixels_to_features(
                 self.vision_tower, stacked_pixels)
             return stacked_embeddings.view(b, num_frames,

@@ -8,6 +8,8 @@ import numpy.typing as npt
 from huggingface_hub import hf_hub_download
 from PIL import Image
 
+from vllm.multimodal.utils import sample_frames_from_video
+
 from .base import get_cache_dir
 
 
@@ -32,33 +34,29 @@ def download_video_asset(filename: str) -> str:
     return video_path_str
 
 
-def video_to_ndarrays(path: str, num_frames: int) -> npt.NDArray:
+def video_to_ndarrays(path: str, num_frames: int = -1) -> npt.NDArray:
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise ValueError(f"Could not open video file {path}")
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
     frames = []
     for i in range(total_frames):
         ret, frame = cap.read()
         if ret:
             frames.append(frame)
-
     cap.release()
 
-    frame_indices = np.linspace(0, total_frames - 1, num_frames, dtype=int)
-    frames = [frames[i] for i in frame_indices if i < len(frames)]
     frames = np.stack(frames)
-
+    frames = sample_frames_from_video(frames, num_frames)
     if len(frames) < num_frames:
         raise ValueError(f"Could not read enough frames from video file {path}"
                          f" (expected {num_frames} frames, got {len(frames)})")
-
     return frames
 
 
-def video_to_pil_images_list(path: str, num_frames: int) -> List[Image.Image]:
+def video_to_pil_images_list(path: str,
+                             num_frames: int = -1) -> List[Image.Image]:
     frames = video_to_ndarrays(path, num_frames)
     return [
         Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
@@ -69,14 +67,16 @@ def video_to_pil_images_list(path: str, num_frames: int) -> List[Image.Image]:
 @dataclass(frozen=True)
 class VideoAsset:
     name: Literal["sample_demo_1.mp4"]
-    num_frames: int
+    num_frames: int = -1
 
     @property
     def pil_images(self) -> List[Image.Image]:
         video_path = download_video_asset(self.name)
-        return video_to_pil_images_list(video_path, self.num_frames)
+        ret = video_to_pil_images_list(video_path, self.num_frames)
+        return ret
 
     @property
     def np_ndarrays(self) -> List[npt.NDArray]:
         video_path = download_video_asset(self.name)
-        return video_to_ndarrays(video_path, self.num_frames)
+        ret = video_to_ndarrays(video_path, self.num_frames)
+        return ret
