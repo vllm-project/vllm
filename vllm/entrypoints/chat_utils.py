@@ -199,8 +199,7 @@ def _get_full_multimodal_text_prompt(placeholder_counts: Dict[str, int],
                                      text_prompt: str) -> str:
     """Combine multimodal prompts for a multimodal language model"""
 
-    # Look through the text prompt so that we don't add placeholders for
-    # items that already have them.
+    # Look through the text prompt to check for missing placeholders
     missing_placeholders = []
     for placeholder in placeholder_counts:
 
@@ -215,7 +214,7 @@ def _get_full_multimodal_text_prompt(placeholder_counts: Dict[str, int],
         missing_placeholders.extend([placeholder] *
                                     placeholder_counts[placeholder])
 
-    # NOTE: For now we add always missing placeholders at the front of
+    # NOTE: For now we always add missing placeholders at the front of
     # the prompt. This may change to be customizable in the future.
     return "\n".join(missing_placeholders + [text_prompt])
 
