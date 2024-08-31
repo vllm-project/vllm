@@ -454,6 +454,8 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     }
     embedding_padding_modules = ["lm_head"]
 
+    modules_to_save = ["lm_head", "embed_tokens"]
+
     # BitandBytes specific attributes
     default_bitsandbytes_target_modules = [
         ".gate_proj.",
