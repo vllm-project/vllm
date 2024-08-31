@@ -48,7 +48,7 @@
         }
     },
     {
-        "test_name": "llama8B_tp1_sonnet_2048_128",
+        "test_name": "llama8B_tp1_sonnet_1024_128",
         "qps_list": [2,4,8,16,32,"inf"],
         "common_parameters": {
             "model": "meta-llama/Meta-Llama-3-8B-Instruct",
@@ -57,7 +57,7 @@
             "dataset_path": "./sonnet_4x.txt",
             "num_prompts": 500,
             "port": 8000,
-            "sonnet_input_len": 2048,
+            "sonnet_input_len": 1024,
             "sonnet_output_len": 128,
             "sonnet_prefix_len": 50,
             "reuse_server": true
@@ -99,7 +99,7 @@
         }
     },
     {
-        "test_name": "llama8B_tp1_sonnet_128_2048",
+        "test_name": "llama8B_tp1_sonnet_1024_1024",
         "qps_list": [2,4,8,16,32,"inf"],
         "common_parameters": {
             "model": "meta-llama/Meta-Llama-3-8B-Instruct",
@@ -108,8 +108,8 @@
             "dataset_path": "./sonnet_4x.txt",
             "num_prompts": 500,
             "port": 8000,
-            "sonnet_input_len": 128,
-            "sonnet_output_len": 2048,
+            "sonnet_input_len": 1024,
+            "sonnet_output_len": 1024,
             "sonnet_prefix_len": 50,
             "reuse_server": true
         },
@@ -198,7 +198,7 @@
         }
     },
     {
-        "test_name": "llama70B_tp4_sonnet_2048_128",
+        "test_name": "llama70B_tp4_sonnet_1024_128",
         "qps_list": [2,4,8,16,32,"inf"],
         "common_parameters": {
             "model": "meta-llama/Meta-Llama-3-70B-Instruct",
@@ -207,7 +207,7 @@
             "dataset_path": "./sonnet_4x.txt",
             "num_prompts": 500,
             "port": 8000,
-            "sonnet_input_len": 2048,
+            "sonnet_input_len": 1024,
             "sonnet_output_len": 128,
             "sonnet_prefix_len": 50,
             "reuse_server": true
@@ -249,7 +249,7 @@
         }
     },
     {
-        "test_name": "llama70B_tp4_sonnet_128_2048",
+        "test_name": "llama70B_tp4_sonnet_1024_1024",
         "qps_list": [2,4,8,16,32,"inf"],
         "common_parameters": {
             "model": "meta-llama/Meta-Llama-3-70B-Instruct",
@@ -258,8 +258,8 @@
             "dataset_path": "./sonnet_4x.txt",
             "num_prompts": 500,
             "port": 8000,
-            "sonnet_input_len": 128,
-            "sonnet_output_len": 2048,
+            "sonnet_input_len": 1024,
+            "sonnet_output_len": 1024,
             "sonnet_prefix_len": 50,
             "reuse_server": true
         },

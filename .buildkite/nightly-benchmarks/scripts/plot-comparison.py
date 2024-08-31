@@ -102,9 +102,9 @@ def main(args):
     plt.set_cmap("cividis")
 
     # plot results
-    fig, axes = plt.subplots(2, 3, figsize=(20, 10))
+    fig, axes = plt.subplots(2, 3, figsize=(20, 6))
     fig.subplots_adjust(hspace=1)
-    methods = [0,1,11]
+    methods = [0,12,11]
     for i, model in enumerate(["llama8B", "llama70B"]):
         for j, metric in enumerate(["Tput", "TPOT", "TTFT"]):
             
@@ -113,15 +113,14 @@ def main(args):
                 ax.set_ylabel(f"{metric} (ms)")
             else:
                 ax.set_ylabel(f"Thoughput (tokens/s)")
-            ax.set_xlabel("QPS")
             if metric == "Tput":
                 ax.set_title(f"{model} {args.dataset} Thoughput")
             else:
                 ax.set_title(f"{model} {args.dataset} {metric}")
             ax.grid(axis='y')
             print(model, metric)
-            
-            inf_qps_results = []
+
+            tput = {}
             for k, method in enumerate(methods):
                 mean, std = get_perf_w_std(df, method, model, metric)
                 if method == 0:
@@ -134,24 +133,28 @@ def main(args):
                 elif method == 1:
                     label = "Current"
                 else:
-                    label = f"{method}-step"
-                ax.errorbar(range(len(mean)),
-                            mean, 
-                            yerr=std, 
-                            capsize=10, 
-                            capthick=4,
-                            label=label,
-                            lw=4,)
-            #     inf_qps_results.append(mean[-2])
-            # print((inf_qps_results[0] - inf_qps_results[1]) / inf_qps_results[1])
-            ax.set_ylim(bottom=0)
-            if metric == "TTFT":
-                ax.set_ylim(0, 500)
-            ax.set_xticks(range(len(mean)))
-            ax.set_xticklabels(["2", "4", "8", "16", "inf"])
-
-            ax.legend()
-
+                    label = f"{method}-step" 
+                if metric == "TTFT" or metric == "TPOT":
+                    ax.errorbar(range(len(mean)),
+                                mean, 
+                                yerr=std, 
+                                capsize=10, 
+                                capthick=4,
+                                label=label,
+                                lw=4,)
+                    ax.set_ylim(bottom=0)
+                    ax.set_xticks(range(len(mean)))
+                    ax.set_xticklabels(["2", "4", "8", "16", "inf"])
+                    ax.set_xlabel("QPS")
+                else:
+                    tput[method] = mean[-1]
+                    
+            if metric == "TTFT" or metric == "TPOT":
+                ax.legend()   
+            else:
+                print(list(tput.values()))
+                ax.bar(["v0.5.3.post1", "Current", "Current 10-step"], tput.values())
+            
 
     fig.tight_layout()
     fig.savefig(f"nightly_results_{args.dataset}.png", bbox_inches='tight', dpi=400)

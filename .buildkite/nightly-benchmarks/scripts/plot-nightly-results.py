@@ -21,11 +21,6 @@ def parse_arguments():
                         type=str,
                         required=True,
                         help='Description of the results.')
-    parser.add_argument('--dataset',
-                        type=str,
-                        required=True,
-                        help="The dataset used for the benchmark.")
-
     args = parser.parse_args()
     return args
 
@@ -49,7 +44,7 @@ def get_perf(df, method, model, metric):
 
 def get_perf_w_std(df, method, model, metric):
     
-    if metric in ["TTFT", "TPOT"]:
+    if metric in ["TTFT", "Latency"]:
         mean = get_perf(df, method, model, "Mean " + metric + " (ms)")
         mean = mean.tolist()
         std = get_perf(df, method, model, "Std " + metric + " (ms)")
@@ -93,9 +88,9 @@ def main(args):
     # generate markdown table
     df = pd.DataFrame.from_dict(results)
     # print(df)
-    df = df[df["Test name"].str.contains(args.dataset)]
+    # df = df[df["Test name"].str.contains(args.dataset)]
     table = tabulate(df, headers='keys', tablefmt='pipe', showindex=False)
-    with open(f"nightly_results_{args.dataset}.md", "w") as f:
+    with open(f"nightly_results.md", "w") as f:
         f.write(table)
     
 
@@ -103,50 +98,65 @@ def main(args):
     plt.set_cmap("cividis")
 
     # plot results
-    fig, axes = plt.subplots(2, 3, figsize=(20, 10))
+    fig, axes = plt.subplots(3, 2, figsize=(13, 13))
     fig.subplots_adjust(hspace=1)
     # methods = [0,1,10,11,12]
     methods = ['vllm', 'trt', 'sglang', 'lmdeploy']
-    for i, model in enumerate(["llama8B", "llama70B"]):
-        for j, metric in enumerate(["Tput", "TPOT", "TTFT"]):
-            
-            ax = axes[i, j]
-            if metric in ["TTFT", "TPOT"]:
-                ax.set_ylabel(f"{metric} (ms)")
-            else:
-                ax.set_ylabel(f"Thoughput (tokens/s)")
-            ax.set_xlabel("QPS")
-            if metric == "Tput":
-                ax.set_title(f"{model} {args.dataset} Thoughput")
-            else:
-                ax.set_title(f"{model} {args.dataset} {metric}")
-            ax.grid(axis='y')
-            print(model, metric)
-            
-            inf_qps_results = []
-            for k, method in enumerate(methods):
-                mean, std = get_perf_w_std(df, method, model, metric)
-                label = method
-                ax.errorbar(range(len(mean)),
-                            mean, 
-                            yerr=std, 
-                            capsize=10, 
-                            capthick=4,
-                            label=label,
-                            lw=4,)
-            #     inf_qps_results.append(mean[-2])
-            # print((inf_qps_results[0] - inf_qps_results[1]) / inf_qps_results[1])
-            ax.set_ylim(bottom=0)
-            # if metric == "TTFT":
-            #     ax.set_ylim(0, 500)
-            ax.set_xticks(range(len(mean)))
-            ax.set_xticklabels(["2", "4", "8", "16", "32", "inf"])
+    formal_name = ['vLLM', 'TRT-LLM', 'SGLang', 'lmdeploy']
+    for model in ["llama70B"]:
+        for i, dataset in enumerate(["sharegpt", "sonnet_128_2048", "sonnet_2048_128"]):
+            for j, metric in enumerate(["Tput", "Latency"]):
+                
+                my_df = df[df["Test name"].str.contains(dataset)]
+                my_dataset_name = {
+                    "sharegpt": "ShareGPT",
+                    "sonnet_128_2048": "Decode-heavy",
+                    "sonnet_2048_128": "Prefill-heavy",
+                }[dataset]
+                
+                ax = axes[i,j]
+                if metric in ["TTFT", "Latency"]:
+                    ax.set_ylabel(f"{metric} (ms)")
+                else:
+                    ax.set_ylabel(f"Thoughput (tokens/s)")
+                
+                if metric == "Tput":
+                    ax.set_title(f"{model} {my_dataset_name} Thoughput")
+                else:
+                    ax.set_title(f"{model} {my_dataset_name} {metric}")
+                ax.grid(axis='y')
+                print(model, metric)
+                
+                tput = {}
+                for k, method in enumerate(methods):
+                    mean, std = get_perf_w_std(my_df, method, model, metric)
+                    label = formal_name[k]
+                    
+                    if metric == "Latency":
+                        ax.errorbar(range(len(mean)),
+                                    mean, 
+                                    yerr=std, 
+                                    capsize=10, 
+                                    capthick=4,
+                                    label=label,
+                                    lw=4,)
+                        ax.set_ylim(bottom=0)
+                        ax.set_xticks(range(len(mean)))
+                        ax.set_xticklabels(["2", "4", "8", "16", "32", "inf"])
+                        ax.set_xlabel("QPS")
+                    else:
+                        tput[method] = mean[-1]
+                        
+                if metric == "Latency":
+                    ax.legend()   
+                else:
+                    ax.bar(formal_name, tput.values())
 
-            ax.legend()
+            
 
 
     fig.tight_layout()
-    fig.savefig(f"nightly_results_{args.dataset}.png", bbox_inches='tight', dpi=400)
+    fig.savefig(f"nightly_results.png", bbox_inches='tight', dpi=400)
 
 
 if __name__ == '__main__':
