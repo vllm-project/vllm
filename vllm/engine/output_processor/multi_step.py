@@ -89,11 +89,12 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         assert not is_async
 
         # Sequences can only be in the RUNNING and FINISHED_ABORTED state
-        # once they are scheduled. A sequence is moved to FINSIHED_ABORTED 
+        # once they are scheduled. A sequence is moved to FINSIHED_ABORTED
         # client disconnects from the server, which can occur while
         seqs = sequence_group.get_seqs(status=SequenceStatus.RUNNING)
         if seqs is None:
-            seqs = sequence_group.get_seqs(status=SequenceStatus.FINISHED_ABORTED)
+            seqs = sequence_group.get_seqs(
+                status=SequenceStatus.FINISHED_ABORTED)
 
         assert seqs, "Expected RUNNING or FINISHED_ABORTED sequences"
         assert len(seqs) == 1, (
