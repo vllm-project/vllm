@@ -24,7 +24,8 @@ from vllm.entrypoints.openai.protocol import (
     DeltaToolCall, ErrorResponse, FunctionCall, ToolCall, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing,
-                                                    PromptAdapterPath)
+                                                    PromptAdapterPath,
+                                                    TextTokensPrompt)
 from vllm.entrypoints.openai.tool_parsers import (Hermes2ProToolParser,
                                                   MistralToolParser,
                                                   ToolParser)
@@ -167,13 +168,22 @@ class OpenAIServingChat(OpenAIServing):
             guided_decode_logits_processor = (
                 await self._guided_decode_logits_processor(request, tokenizer))
 
-            prompt_inputs = self._tokenize_prompt_input(
-                request,
-                tokenizer,
-                prompt,
-                truncate_prompt_tokens=request.truncate_prompt_tokens,
-                add_special_tokens=request.add_special_tokens,
-            )
+            if isinstance(prompt, str):
+                prompt_inputs = self._tokenize_prompt_input(
+                    request,
+                    tokenizer,
+                    prompt,
+                    truncate_prompt_tokens=request.truncate_prompt_tokens,
+                    add_special_tokens=request.add_special_tokens,
+                )
+            else:
+                assert isinstance(prompt, list) and isinstance(
+                    prompt[0], int
+                ), "Prompt has to be either a string or a list of token ids"
+                prompt_inputs = TextTokensPrompt(
+                    prompt=tokenizer.decode(prompt), prompt_token_ids=prompt)
+
+            assert prompt_inputs is not None
 
             sampling_params = request.to_sampling_params(
                 tokenizer,

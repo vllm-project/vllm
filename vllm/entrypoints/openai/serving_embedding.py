@@ -31,7 +31,9 @@ def _get_embedding(
     if encoding_format == "float":
         return output.embedding
     elif encoding_format == "base64":
-        embedding_bytes = np.array(output.embedding).tobytes()
+        # Force to use float32 for base64 encoding
+        # to match the OpenAI python client behavior
+        embedding_bytes = np.array(output.embedding, dtype="float32").tobytes()
         return base64.b64encode(embedding_bytes).decode("utf-8")
 
     assert_never(encoding_format)

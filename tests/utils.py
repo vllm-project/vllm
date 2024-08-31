@@ -11,12 +11,16 @@ from typing import Any, Callable, Dict, List, Optional
 
 import openai
 import requests
+from openai.types.completion import Completion
 from transformers import AutoTokenizer
 from typing_extensions import ParamSpec
 
+from tests.models.utils import TextTextLogprobs
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
+from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.cli_args import make_arg_parser
+from vllm.model_executor.model_loader.loader import DefaultModelLoader
 from vllm.platforms import current_platform
 from vllm.utils import FlexibleArgumentParser, get_open_port, is_hip
 
@@ -59,24 +63,37 @@ class RemoteOpenAIServer:
 
     def __init__(self,
                  model: str,
-                 cli_args: List[str],
+                 vllm_serve_args: List[str],
                  *,
                  env_dict: Optional[Dict[str, str]] = None,
                  auto_port: bool = True,
                  max_wait_seconds: Optional[float] = None) -> None:
         if auto_port:
-            if "-p" in cli_args or "--port" in cli_args:
-                raise ValueError("You have manually specified the port"
+            if "-p" in vllm_serve_args or "--port" in vllm_serve_args:
+                raise ValueError("You have manually specified the port "
                                  "when `auto_port=True`.")
 
-            cli_args = cli_args + ["--port", str(get_open_port())]
+            # Don't mutate the input args
+            vllm_serve_args = vllm_serve_args + [
+                "--port", str(get_open_port())
+            ]
 
         parser = FlexibleArgumentParser(
             description="vLLM's remote OpenAI server.")
         parser = make_arg_parser(parser)
-        args = parser.parse_args(cli_args)
+        args = parser.parse_args(["--model", model, *vllm_serve_args])
         self.host = str(args.host or 'localhost')
         self.port = int(args.port)
+
+        # download the model before starting the server to avoid timeout
+        is_local = os.path.isdir(model)
+        if not is_local:
+            engine_args = AsyncEngineArgs.from_cli_args(args)
+            engine_config = engine_args.create_engine_config()
+            dummy_loader = DefaultModelLoader(engine_config.load_config)
+            dummy_loader._prepare_weights(engine_config.model_config.model,
+                                          engine_config.model_config.revision,
+                                          fall_back_to_pt=True)
 
         env = os.environ.copy()
         # the current process might initialize cuda,
@@ -84,10 +101,12 @@ class RemoteOpenAIServer:
         env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
         if env_dict is not None:
             env.update(env_dict)
-        self.proc = subprocess.Popen(["vllm", "serve"] + [model] + cli_args,
-                                     env=env,
-                                     stdout=sys.stdout,
-                                     stderr=sys.stderr)
+        self.proc = subprocess.Popen(
+            ["vllm", "serve", model, *vllm_serve_args],
+            env=env,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
         max_wait_seconds = max_wait_seconds or 240
         self._wait_for_server(url=self.url_for("health"),
                               timeout=max_wait_seconds)
@@ -137,6 +156,7 @@ class RemoteOpenAIServer:
         return openai.AsyncOpenAI(
             base_url=self.url_for("v1"),
             api_key=self.DUMMY_API_KEY,
+            max_retries=0,
         )
 
 
@@ -414,3 +434,61 @@ def fork_new_process_for_each_test(
                                     f" args {args} and kwargs {kwargs}")
 
     return wrapper
+
+
+async def completions_with_server_args(
+    prompts: List[str],
+    model_name: str,
+    server_cli_args: List[str],
+    num_logprobs: Optional[int],
+    max_wait_seconds: int = 240,
+) -> Completion:
+    '''Construct a remote OpenAI server, obtain an async client to the
+    server & invoke the completions API to obtain completions.
+
+    Args:
+      prompts: test prompts
+      model_name: model to spin up on the vLLM server
+      server_cli_args: CLI args for starting the server
+      num_logprobs: Number of logprobs to report (or `None`)
+      max_wait_seconds: timeout interval for bringing up server.
+                        Default: 240sec
+
+    Returns:
+      OpenAI Completion instance
+    '''
+
+    outputs = None
+    with RemoteOpenAIServer(model_name,
+                            server_cli_args,
+                            max_wait_seconds=max_wait_seconds) as server:
+        client = server.get_async_client()
+        outputs = await client.completions.create(model=model_name,
+                                                  prompt=prompts,
+                                                  temperature=0,
+                                                  stream=False,
+                                                  max_tokens=5,
+                                                  logprobs=num_logprobs)
+    assert outputs is not None
+
+    return outputs
+
+
+def get_client_text_generations(completions: Completion) -> List[str]:
+    '''Extract generated tokens from the output of a
+    request made to an Open-AI-protocol completions endpoint.
+    '''
+    return [x.text for x in completions.choices]
+
+
+def get_client_text_logprob_generations(
+        completions: Completion) -> List[TextTextLogprobs]:
+    '''Operates on the output of a request made to an Open-AI-protocol
+    completions endpoint; obtains top-rank logprobs for each token in
+    each :class:`SequenceGroup`
+    '''
+    text_generations = get_client_text_generations(completions)
+    text = ''.join(text_generations)
+    return [(text_generations, text,
+             (None if x.logprobs is None else x.logprobs.top_logprobs))
+            for x in completions.choices]

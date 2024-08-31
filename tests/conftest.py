@@ -9,14 +9,14 @@ from enum import Enum
 from typing import (Any, Callable, Dict, List, Optional, Tuple, TypedDict,
                     TypeVar, Union)
 
+import numpy as np
 import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from huggingface_hub import snapshot_download
 from PIL import Image
-from transformers import (AutoModelForCausalLM, AutoModelForSeq2SeqLM,
-                          AutoModelForVision2Seq, AutoTokenizer, BatchEncoding,
+from transformers import (AutoModelForCausalLM, AutoTokenizer, BatchEncoding,
                           BatchFeature)
 
 from vllm import LLM, SamplingParams
@@ -40,6 +40,10 @@ logger = init_logger(__name__)
 _TEST_DIR = os.path.dirname(__file__)
 _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
 _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
+
+PromptImageInput = Union[List[Image.Image], List[List[Image.Image]]]
+PromptAudioInput = Union[List[Tuple[np.ndarray, int]],
+                         List[List[Tuple[np.ndarray, int]]]]
 
 
 def _read_prompts(filename: str) -> List[str]:
@@ -161,7 +165,7 @@ def example_encoder_decoder_prompts(
     decoder prompt) tuple.
 
     Returns:
-    
+
     * Encoder prompt list
     * Decoder prompt list (reverse of encoder prompt list)
     '''
@@ -205,8 +209,14 @@ class HfRunner:
 
     def wrap_device(self, input: _T) -> _T:
         if not is_cpu():
+            # Check if the input is already on the GPU
+            if hasattr(input, 'device') and input.device.type == "cuda":
+                return input  # Already on GPU, no need to move
             return input.to("cuda")
         else:
+            # Check if the input is already on the CPU
+            if hasattr(input, 'device') and input.device.type == "cpu":
+                return input  # Already on CPU, no need to move
             return input.to("cpu")
 
     def __init__(
@@ -216,8 +226,7 @@ class HfRunner:
         *,
         model_kwargs: Optional[Dict[str, Any]] = None,
         is_embedding_model: bool = False,
-        is_vision_model: bool = False,
-        is_encoder_decoder_model: bool = False,
+        auto_cls=AutoModelForCausalLM,
         postprocess_inputs: Callable[[BatchEncoding],
                                      BatchEncoding] = identity,
     ) -> None:
@@ -234,13 +243,6 @@ class HfRunner:
                     device="cpu",
                 ).to(dtype=torch_dtype))
         else:
-            if is_vision_model:
-                auto_cls = AutoModelForVision2Seq
-            elif is_encoder_decoder_model:
-                auto_cls = AutoModelForSeq2SeqLM
-            else:
-                auto_cls = AutoModelForCausalLM
-
             model_kwargs = model_kwargs if model_kwargs is not None else {}
             self.model = self.wrap_device(
                 auto_cls.from_pretrained(
@@ -432,6 +434,7 @@ class HfRunner:
         max_tokens: int,
         num_logprobs: int,
         images: Optional[List[Image.Image]] = None,
+        audios: Optional[List[Tuple[np.ndarray, int]]] = None,
         **kwargs: Any,
     ) -> List[Tuple[List[int], str, List[Dict[int, float]]]]:
         all_logprobs: List[List[Dict[int, float]]] = []
@@ -445,6 +448,11 @@ class HfRunner:
             }
             if images is not None and images[i] is not None:
                 processor_kwargs["images"] = images[i]
+
+            if audios is not None:
+                audio, sr = audios[i]
+                processor_kwargs["audio"] = audio
+                processor_kwargs["sampling_rate"] = sr
 
             inputs = self.processor(**processor_kwargs)
             inputs = self.postprocess_inputs(inputs)
@@ -580,8 +588,7 @@ class VllmRunner:
         self,
         prompts: List[str],
         sampling_params: SamplingParams,
-        images: Optional[Union[List[Image.Image],
-                               List[List[Image.Image]]]] = None,
+        images: Optional[PromptImageInput] = None,
     ) -> List[Tuple[List[List[int]], List[str]]]:
         if images is not None:
             assert len(prompts) == len(images)
@@ -625,8 +632,8 @@ class VllmRunner:
         self,
         prompts: List[str],
         sampling_params: SamplingParams,
-        images: Optional[Union[List[Image.Image],
-                               List[List[Image.Image]]]] = None,
+        images: Optional[PromptImageInput] = None,
+        audios: Optional[PromptAudioInput] = None,
     ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
         assert sampling_params.logprobs is not None
 
@@ -637,6 +644,10 @@ class VllmRunner:
         if images is not None:
             for i, image in enumerate(images):
                 inputs[i]["multi_modal_data"] = {"image": image}
+
+        if audios is not None:
+            for i, audio in enumerate(audios):
+                inputs[i]["multi_modal_data"] = {"audio": audio}
 
         req_outputs = self.model.generate(inputs,
                                           sampling_params=sampling_params)
@@ -672,8 +683,8 @@ class VllmRunner:
         prompts: List[str],
         max_tokens: int,
         num_logprobs: int,
-        images: Optional[Union[List[Image.Image],
-                               List[List[Image.Image]]]] = None,
+        images: Optional[PromptImageInput] = None,
+        audios: Optional[PromptAudioInput] = None,
         stop_token_ids: Optional[List[int]] = None,
     ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
         greedy_logprobs_params = SamplingParams(temperature=0.0,
@@ -682,7 +693,8 @@ class VllmRunner:
                                                 stop_token_ids=stop_token_ids)
         outputs = self.generate_w_logprobs(prompts,
                                            greedy_logprobs_params,
-                                           images=images)
+                                           images=images,
+                                           audios=audios)
 
         return [(output_ids, output_str, output_logprobs)
                 for output_ids, output_str, output_logprobs in outputs]

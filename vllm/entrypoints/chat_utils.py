@@ -141,8 +141,8 @@ def _mm_token_str(model_config: ModelConfig, tokenizer: AnyTokenizer,
                   modality: Literal["image", "audio"]) -> Optional[str]:
     # TODO: Let user specify how to insert image tokens into prompt
     # (similar to chat template)
+    model_type = model_config.hf_config.model_type
     if modality == "image":
-        model_type = model_config.hf_config.model_type
         if model_type == "phi3_v":
             # Workaround since this token is not defined in the tokenizer
             return "<|image_1|>"
@@ -158,7 +158,9 @@ def _mm_token_str(model_config: ModelConfig, tokenizer: AnyTokenizer,
 
         raise TypeError(f"Unknown model type: {model_type}")
     elif modality == "audio":
-        raise TypeError("No audio models are supported yet.")
+        if model_type == "ultravox":
+            return "<|reserved_special_token_0|>"
+        raise TypeError(f"Unknown model type: {model_type}")
     else:
         raise TypeError(f"Unknown modality: {modality}")
 
@@ -316,7 +318,7 @@ def apply_chat_template(
     *,
     tokenize: bool = False,  # Different from HF's default
     **kwargs: Any,
-) -> str:
+) -> Union[str, List[int]]:
     if chat_template is None and tokenizer.chat_template is None:
         raise ValueError(
             "As of transformers v4.44, default chat template is no longer "
@@ -343,6 +345,4 @@ def apply_chat_template(
         tokenize=tokenize,
         **kwargs,
     )
-    assert isinstance(prompt, str)
-
     return prompt

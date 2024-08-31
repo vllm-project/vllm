@@ -119,6 +119,35 @@ high-quality one.
 To use a named function, you need to define the functions in the `tools` parameter of the chat completion request, and 
 specify the `name` of one of the tools in the `tool_choice` parameter of the chat completion request. 
 
+### Config file
+
+The `serve` module can also accept arguments from a config file in
+`yaml` format. The arguments in the yaml must be specified using the 
+long form of the argument outlined [here](https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html#command-line-arguments-for-the-server): 
+
+For example:
+
+```yaml
+# config.yaml
+
+host: "127.0.0.1"
+port: 6379
+uvicorn-log-level: "info"
+```
+
+```bash
+$ vllm serve SOME_MODEL --config config.yaml
+```
+---
+**NOTE**  
+In case an argument is supplied using command line and the config file, the value from the commandline will take precedence.
+The order of priorities is `command line > config file values > defaults`.
+
+---
+
+## Tool calling in the chat completion API
+vLLM supports only named function calling in the chat completion API. The `tool_choice` options `auto` and `required` are **not yet supported** but on the roadmap.
+
 It is the callers responsibility to prompt the model with the tool information, vLLM will not automatically manipulate the prompt.
 
 vLLM will use guided decoding to ensure the response matches the tool parameter object defined by the JSON schema in the `tools` parameter.
