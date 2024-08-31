@@ -3,8 +3,8 @@ import codecs
 from collections import defaultdict
 from functools import lru_cache
 from pathlib import Path
-from typing import (Any, Awaitable, Iterable, List, Literal, Mapping, Optional,
-                    Tuple, Union)
+from typing import (Any, Awaitable, Dict, Iterable, List, Literal, Mapping,
+                    Optional, Tuple, Union)
 
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -195,36 +195,28 @@ def load_chat_template(
 
 # TODO: Let user specify how to insert multimodal tokens into prompt
 # (similar to chat template)
-def _get_full_multimodal_text_prompt(placeholders: List[str],
+def _get_full_multimodal_text_prompt(placeholders_count: Dict[str, int],
                                      text_prompt: str) -> str:
     """Combine multimodal prompts for a multimodal language model"""
 
     # Look through the text prompt so that we don't add placeholders for
     # items that already have them.
-    prompt_fragments = [text_prompt]
-    missing_placeholders: List[str] = []
-    for placeholder in placeholders:
-        for fragment_index, fragment in enumerate(prompt_fragments):
-            index = fragment.find(placeholder)
-            if index >= 0:
-                # This part of the text prompt already has a placeholder.
-                # Remove it from the text prompt fragments so that we don't
-                # consider it for later placeholders.
-                prompt_fragments.pop(fragment_index)
-                before = fragment[:index]
-                after = fragment[index + len(placeholder):]
-                if before:
-                    prompt_fragments.insert(fragment_index, before)
-                if after:
-                    prompt_fragments.insert(fragment_index + 1, after)
-                break
-        else:
-            # The placeholder wasn't in any of the text prompts; we need
-            # to include it.
-            missing_placeholders.append(placeholder)
+    missing_placeholders = []
+    for placeholder in placeholders_count:
 
-    # NOTE: For now we assume all model architectures use the same
-    # placeholder + text prompt format. This may change in the future.
+        # For any existing placeholder in the text prompt, we leave it as is
+        placeholders_count[placeholder] -= text_prompt.count(placeholder)
+
+        if placeholders_count[placeholder] < 0:
+            raise ValueError(
+                f"Found more '{placeholder}' placeholders in input prompt than "
+                "actual multimodal data items.")
+
+        missing_placeholders.extend([placeholder] *
+                                    placeholders_count[placeholder])
+
+    # NOTE: For now we add always missing placeholders at the front of
+    # the prompt. This may change to be customizable in the future.
     return "\n".join(missing_placeholders + [text_prompt])
 
 
@@ -239,7 +231,9 @@ def _parse_chat_message_content_parts(
     mm_tracker: MultiModalItemTracker,
 ) -> List[ConversationMessage]:
     texts: List[str] = []
-    mm_placeholders: List[str] = []
+
+    # multimodal placeholder_string : count
+    mm_placeholder_counts: Dict[str, int] = {}
 
     for part in parts:
         part_type = part["type"]
@@ -257,19 +251,21 @@ def _parse_chat_message_content_parts(
             image_coro = async_get_and_parse_image(image_url["url"])
             placeholder = mm_tracker.add("image", image_coro)
             if placeholder:
-                mm_placeholders.append(placeholder)
+                mm_placeholder_counts[placeholder] = mm_placeholder_counts.get(
+                    placeholder, 0) + 1
         elif part_type == "audio_url":
             audio_url = _AudioParser.validate_python(part)["audio_url"]
             audio_coro = async_get_and_parse_audio(audio_url["url"])
             placeholder = mm_tracker.add("audio", audio_coro)
             if placeholder:
-                mm_placeholders.append(placeholder)
+                mm_placeholder_counts[placeholder] = mm_placeholder_counts.get(
+                    placeholder, 0) + 1
         else:
             raise NotImplementedError(f"Unknown part type: {part_type}")
 
     text_prompt = "\n".join(texts)
-    if mm_placeholders:
-        text_prompt = _get_full_multimodal_text_prompt(mm_placeholders,
+    if mm_placeholder_counts:
+        text_prompt = _get_full_multimodal_text_prompt(mm_placeholder_counts,
                                                        text_prompt)
 
     return [ConversationMessage(role=role, content=text_prompt)]
