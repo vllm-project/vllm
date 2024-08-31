@@ -3,6 +3,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from unittest.mock import MagicMock
 
+from vllm.config import MultiModalConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
@@ -20,6 +21,7 @@ class MockModelConfig:
     max_model_len = 100
     tokenizer_revision = None
     embedding_mode = False
+    multimodal_config = MultiModalConfig()
 
 
 @dataclass

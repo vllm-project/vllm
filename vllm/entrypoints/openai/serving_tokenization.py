@@ -65,10 +65,10 @@ class OpenAIServingTokenization(OpenAIServing):
         if isinstance(request, TokenizeChatRequest):
             model_config = self.model_config
 
-            conversation, mm_futures = parse_chat_messages(
+            conversation, mm_data_future = parse_chat_messages(
                 request.messages, model_config, tokenizer)
 
-            if mm_futures:
+            if mm_data_future:
                 logger.warning(
                     "Multi-modal inputs are ignored during tokenization")
 

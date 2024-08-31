@@ -1,7 +1,13 @@
 """An example showing how to use vLLM to serve VLMs.
 
 Launch the vLLM server with the following command:
+
+(single image inference with Llava)
 vllm serve llava-hf/llava-1.5-7b-hf --chat-template template_llava.jinja
+
+(multi-image inference with Phi-3.5-vision-instruct)
+vllm serve microsoft/Phi-3.5-vision-instruct --max-model-len 4096 \
+    --trust-remote-code --limit-mm-per-prompt image=2
 """
 import base64
 
@@ -83,4 +89,37 @@ chat_completion_from_base64 = client.chat.completions.create(
 )
 
 result = chat_completion_from_base64.choices[0].message.content
+print(f"Chat completion output:{result}")
+
+# Multi-image input inference
+image_url_duck = "https://upload.wikimedia.org/wikipedia/commons/d/da/2015_Kaczka_krzy%C5%BCowka_w_wodzie_%28samiec%29.jpg"
+image_url_lion = "https://upload.wikimedia.org/wikipedia/commons/7/77/002_The_lion_king_Snyggve_in_the_Serengeti_National_Park_Photo_by_Giles_Laurent.jpg"
+chat_completion_from_url = client.chat.completions.create(
+    messages=[{
+        "role":
+        "user",
+        "content": [
+            {
+                "type": "text",
+                "text": "What are the animals in these images?"
+            },
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url_duck
+                },
+            },
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url_lion
+                },
+            },
+        ],
+    }],
+    model=model,
+    max_tokens=64,
+)
+
+result = chat_completion_from_url.choices[0].message.content
 print(f"Chat completion output:{result}")
