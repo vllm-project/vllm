@@ -195,25 +195,25 @@ def load_chat_template(
 
 # TODO: Let user specify how to insert multimodal tokens into prompt
 # (similar to chat template)
-def _get_full_multimodal_text_prompt(placeholders_count: Dict[str, int],
+def _get_full_multimodal_text_prompt(placeholder_counts: Dict[str, int],
                                      text_prompt: str) -> str:
     """Combine multimodal prompts for a multimodal language model"""
 
     # Look through the text prompt so that we don't add placeholders for
     # items that already have them.
     missing_placeholders = []
-    for placeholder in placeholders_count:
+    for placeholder in placeholder_counts:
 
         # For any existing placeholder in the text prompt, we leave it as is
-        placeholders_count[placeholder] -= text_prompt.count(placeholder)
+        placeholder_counts[placeholder] -= text_prompt.count(placeholder)
 
-        if placeholders_count[placeholder] < 0:
+        if placeholder_counts[placeholder] < 0:
             raise ValueError(
                 f"Found more '{placeholder}' placeholders in input prompt than "
                 "actual multimodal data items.")
 
         missing_placeholders.extend([placeholder] *
-                                    placeholders_count[placeholder])
+                                    placeholder_counts[placeholder])
 
     # NOTE: For now we add always missing placeholders at the front of
     # the prompt. This may change to be customizable in the future.
