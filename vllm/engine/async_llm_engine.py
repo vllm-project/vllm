@@ -159,14 +159,16 @@ class RequestTracker:
 
         if finished:
             stream = self._request_streams.pop(request_id, None)
+            if stream is not None:
+                stream.finish()
         else:
             stream = self._request_streams.get(request_id)
         # Guard against a KeyError which can occur if the request was aborted
         # while the output was generated
-        if stream is not None:
-            stream.put(request_output)
-            if finished:
-                stream.finish()
+        # if stream is not None:
+        #     stream.put(request_output)
+        #     if finished:
+        #         stream.finish()
 
         if verbose and finished:
             logger.info("Finished request %s.", request_id)

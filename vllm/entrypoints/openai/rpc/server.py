@@ -230,6 +230,9 @@ class AsyncEngineRPCServer:
 
 
 async def run_server(server: AsyncEngineRPCServer):
+    # import pyinstrument
+
+    # with pyinstrument.Profiler(async_mode="disabled") as prof:
     # Put the server task into the asyncio loop.
     loop = asyncio.get_running_loop()
     server_task = loop.create_task(server.run_server_loop())
@@ -249,7 +252,7 @@ async def run_server(server: AsyncEngineRPCServer):
     finally:
         # Clean up all resources.
         server.cleanup()
-
+    # prof.write_html("prof-disabled.html", show_all=True)
 
 def run_rpc_server(async_engine_args: AsyncEngineArgs,
                    usage_context: UsageContext, rpc_path: str):
