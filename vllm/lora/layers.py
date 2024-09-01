@@ -1372,9 +1372,13 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
     so clients can call ModuleToSave exactly as base_layer module
     
     Args:
+<<<<<<< HEAD
         base_layer: layer to replace by Wrapper: 
           VocabParallelEmbedding (for embed_tokens)
           or ParallelLMHead (for lm_head)
+=======
+        base_layer: layer to replace by Wrapper: VocabParallelEmbedding (for embed_tokens) or ParallelLMHead (for lm_head)
+>>>>>>> 69f80fe9 (loading_weights)
     """
 
     implemented_layers = ['lm_head', 'embed_tokens']
@@ -1385,11 +1389,25 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
         super().__init__()
         self.base_layer = base_layer
 
+<<<<<<< HEAD
         self.device = _get_lora_device(self.base_layer)
 
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
 
+=======
+        self._base_layer_replacement=None
+
+
+        self._base_layer_kwargs={"num_embeddings":base_layer.num_embeddings,
+                 "embedding_dim":base_layer.embedding_dim}
+                 
+        self.device=_get_lora_device(self.base_layer)
+        
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tensor_model_parallel_rank()
+        
+>>>>>>> 69f80fe9 (loading_weights)
     @property
     def padded_vocab_size(self):
         # number of embeddings with paddings and with max_lora_extra_vocab_size
@@ -1398,6 +1416,14 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
     @property
     def org_vocab_size(self):
         return self.base_layer.org_vocab_size
+    
+    @property
+    def embedding_dim(self):
+        return self.base_layer.embedding_dim
+    
+    @property
+    def bias(self):
+        return self.base_layer.bias
 
     @property
     def embedding_dim(self):
@@ -1446,19 +1472,28 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
         lora_config: LoRAConfig,
         model_config: Optional[PretrainedConfig] = None,
     ) -> None:
-
-        self.dtype = lora_config.lora_dtype
-
-        # lora_tensors - lm_head tensors in case of ParallelLMHead base
-        # or embed_tokens tensors in case of VocabParallelEmbedding
-        self._lora_tensors = torch.zeros(
-            (max_loras, self.padded_vocab_size, self.base_layer.embedding_dim),
-            dtype=self.base_layer.weight.dtype,
+        
+        self.dtype=lora_config.lora_dtype
+        # TODO implement adding tokens in lora
+        
+        self.lm_head_tensors = torch.zeros(
+            (
+                max_loras,
+                self.padded_vocab_size,
+                self.base_layer.embedding_dim
+            ),
+            dtype=lora_config.lora_dtype,
             device=self.device,
         )
-        for index in range(max_loras):
-            self.reset_lora(index)
 
+        self._base_layer_replacement=ParallelLMHead(num_embeddings=self.padded_vocab_size,
+                 embedding_dim=self.embedding_dim,
+                 bias=self.bias,
+                 params_dtype=self.dtype,
+                 org_num_embeddings = None)
+        
+        self._base_layer_replacement.to(self.device)
+        
     def reset_lora(self, index: int):
         weights = self.base_layer.weight
         self._lora_tensors[index, :weights.shape[0], :weights.shape[1]].copy_(
@@ -1475,9 +1510,12 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
         assert embeddings_tensor is None
 
         self.reset_lora(index)
+        # TODO why we need to copy?
         self.lm_head_tensors[index,
                             :lora_b.shape[0], :lora_b.shape[1]].copy_(
                                 lora_b, non_blocking=True)
+        loaded_tensor=lora_b
+        self._base_layer_replacement.weight.weight_loader(self._base_layer_replacement.weight, loaded_tensor)
         
     def forward(self, *args, **kwargs):
         return type(self.base_layer).forward(self, *args, **kwargs)
