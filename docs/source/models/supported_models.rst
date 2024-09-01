@@ -155,10 +155,6 @@ Decoder-only Language Models
     - Persimmon
     - :code:`adept/persimmon-8b-base`, :code:`adept/persimmon-8b-chat`, etc.
     - 
-  * - :code:`QWenLMHeadModel`
-    - Qwen
-    - :code:`Qwen/Qwen-7B`, :code:`Qwen/Qwen-7B-Chat`, etc.
-    -
   * - :code:`Qwen2ForCausalLM`
     - Qwen2
     - :code:`Qwen/Qwen2-beta-7B`, :code:`Qwen/Qwen2-beta-7B-Chat`, etc.
@@ -241,6 +237,11 @@ Multimodal Language Models
     - MiniCPM-V
     - Image
     - :code:`openbmb/MiniCPM-V-2` (see note), :code:`openbmb/MiniCPM-Llama3-V-2_5`, :code:`openbmb/MiniCPM-V-2_6`, etc.
+    -
+  * - :code:`QWenLMHeadModel`
+    - Qwen
+    - Image
+    - :code:`Qwen/Qwen-VL`, :code:`Qwen/Qwen-VL-Chat`, etc.
     -
   * - :code:`UltravoxModel`
     - Ultravox
