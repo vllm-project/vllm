@@ -1342,7 +1342,7 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
     so clients can call ModuleToSave exactly as base_layer module
     
     Args:
-        base_layer: layer to replace by Wrapper: nn.Linear for lm_head, nn.Embedding for embed_tokens
+        base_layer: layer to replace by Wrapper: VocabParallelEmbedding (for embed_tokens) or ParallelLMHead (for lm_head)
     """
 
     implemented_layers=['lm_head', 'embed_tokens']
@@ -1350,12 +1350,18 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
     def __init__(self, base_layer: VocabParallelEmbedding | ParallelLMHead) -> None:
         super().__init__()
         self.base_layer = base_layer
+
+        self._base_layer_replacement=None
+
+
+        self._base_layer_kwargs={"num_embeddings":base_layer.num_embeddings,
+                 "embedding_dim":base_layer.embedding_dim}
+                 
         self.device=_get_lora_device(self.base_layer)
         
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
         
-    
     @property
     def padded_vocab_size(self):
         return self.base_layer.num_embeddings_padded
@@ -1363,8 +1369,23 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
     @property
     def org_vocab_size(self):
         return self.base_layer.org_vocab_size
+    
+    @property
+    def embedding_dim(self):
+        return self.base_layer.embedding_dim
+    
+    @property
+    def bias(self):
+        return self.base_layer.bias
 
-
+    @property
+    def linear_method(self):
+        return self._base_layer_replacement.linear_method
+    
+    @property
+    def weight(self):
+        return self._base_layer_replacement.weight
+        
     def create_lora_weights(
         self,
         max_loras: int,
@@ -1373,6 +1394,7 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
     ) -> None:
         
         self.dtype=lora_config.lora_dtype
+        # TODO implement adding tokens in lora
         
         self.lm_head_tensors = torch.zeros(
             (
@@ -1383,6 +1405,14 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
             dtype=lora_config.lora_dtype,
             device=self.device,
         )
+
+        self._base_layer_replacement=ParallelLMHead(num_embeddings=self.padded_vocab_size,
+                 embedding_dim=self.embedding_dim,
+                 bias=self.bias,
+                 params_dtype=self.dtype,
+                 org_num_embeddings = None)
+        
+        self._base_layer_replacement.to(self.device)
         
     def reset_lora(self, index: int):
         self.lm_head_tensors[index] = 0
@@ -1399,9 +1429,12 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
         assert embeddings_tensor is None
 
         self.reset_lora(index)
+        # TODO why we need to copy?
         self.lm_head_tensors[index,
                             :lora_b.shape[0], :lora_b.shape[1]].copy_(
                                 lora_b, non_blocking=True)
+        loaded_tensor=lora_b
+        self._base_layer_replacement.weight.weight_loader(self._base_layer_replacement.weight, loaded_tensor)
         
     def forward(self, *args, **kwargs):
         return type(self.base_layer).forward(self, *args, **kwargs)
