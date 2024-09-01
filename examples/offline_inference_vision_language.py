@@ -163,6 +163,10 @@ def run_blip2(question):
 def run_qwen_vl(question):
 
     llm = LLM(model="Qwen/Qwen-VL", trust_remote_code=True)
+    # NOTE: In this case, we could pass either '<image>' or
+    # 'Picture {idx} <img></img>'; currently <image> tags get
+    # unified and resolved to the corresponding indices as part
+    # of the Qwen model input processor.
     prompt = f"{question}<image>"
     stop_token_ids = None
     return llm, prompt, stop_token_ids
