@@ -323,21 +323,19 @@ def selective_scan_fn(u,
         B = B.unsqueeze(1)
     if C.dim() == 3:
         C = C.unsqueeze(1)
-    n_chunks = int((u.shape[-1] + 2048 - 1) / 2048)
-    x = torch.zeros((
-        u.shape[0],
-        u.shape[1],
-        n_chunks,
-        int(A.shape[1]),
-    ),
-                    device=u.device,
-                    dtype=torch.float32,
-                    requires_grad=False)
-    if prev_state is not None:
-        x[:, :, 0, :].copy_(prev_state)
-    out, x, *rest = ops.selective_scan_fwd(u, delta, A, B, C, D, z, delta_bias,
-                                           delta_softplus, position_indices, x)
-    last_state = x[:, :, -1, :]  # (batch, dim, dstate)
+
+    if prev_state is None:
+        prev_state = torch.zeros((
+            u.shape[0],
+            u.shape[1],
+            int(A.shape[1]),
+        ),
+                        device=u.device,
+                        dtype=torch.float32,
+                        requires_grad=False)
+    out, last_state, *rest = ops.selective_scan_fwd(u, delta, A, B, C, D, z, delta_bias,
+                                           delta_softplus, position_indices, prev_state)
+
     if z is None:
         return out if not return_last_state else (out, last_state)
     else:

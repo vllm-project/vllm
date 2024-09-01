@@ -103,7 +103,6 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     auto& smem_scan = *reinterpret_cast<typename Ktraits::BlockScanT::TempStorage*>(smem_ + Ktraits::kSmemIOSize);
     // weight_t *smem_a = reinterpret_cast<weight_t *>(smem_ + smem_loadstorescan_size);
     // weight_t *smem_bc = reinterpret_cast<weight_t *>(smem_a + MAX_DSTATE);
-    scan_t *smem_running_prefix = reinterpret_cast<scan_t *>(smem_ + Ktraits::kSmemSize);
 
     const int batch_id = blockIdx.x;
     const int dim_id = blockIdx.y;
@@ -117,7 +116,8 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     input_t *Bvar = reinterpret_cast<input_t *>(params.B_ptr) + batch_id * params.B_batch_stride + group_id * params.B_group_stride;
     weight_t *C = reinterpret_cast<weight_t *>(params.C_ptr) + dim_id * kNRows * params.C_d_stride;
     input_t *Cvar = reinterpret_cast<input_t *>(params.C_ptr) + batch_id * params.C_batch_stride + group_id * params.C_group_stride;
-    float *x = reinterpret_cast<float *>(params.x_ptr) + (batch_id * params.dim + dim_id * kNRows) * params.n_chunks * params.dstate;
+
+    float *x = reinterpret_cast<float *>(params.x_ptr) + (batch_id * params.dim + dim_id * kNRows) * params.dstate;
     int *index = !kUseIndex ? nullptr :reinterpret_cast<int *>(params.index_ptr) + batch_id * params.seqlen;
 
     float D_val[kNRows] = {0};
@@ -246,10 +246,8 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                     }
                 }
                 // Initialize running total
-                scan_t running_prefix;
-                    // If we use WARP_SCAN then all lane 0 of all warps (not just thread 0) needs to read
-                running_prefix = chunk == 0 ? make_float2(1.0,x[(r * params.n_chunks) * params.dstate + state_idx]) : ( threadIdx.x % 32 == 0 ? smem_running_prefix[state_idx + r * MAX_DSTATE] : make_float2(1.f, 0.f));
-                    // running_prefix = chunk > 0 && threadIdx.x == 0 ? smem_running_prefix[state_idx] : make_float2(1.f, 0.f);
+                scan_t running_prefix = make_float2(1.0,x[state_idx]);
+
                 SSMScanPrefixCallbackOp<weight_t> prefix_op(running_prefix);
                 typename Ktraits::BlockScanT(smem_scan).InclusiveScan(
                     thread_data, thread_data, SSMScanOp<weight_t>(), prefix_op
@@ -257,8 +255,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 // There's a syncthreads in the scan op, so we don't need to sync here.
                 // Unless there's only 1 warp, but then it's the same thread (0) reading and writing.
                 if (threadIdx.x == 0) {
-                    smem_running_prefix[state_idx] = prefix_op.running_prefix;
-                    x[(r * params.n_chunks + chunk) * params.dstate + state_idx] = prefix_op.running_prefix.y;
+                    x[state_idx] = prefix_op.running_prefix.y;
                 }
                 #pragma unroll
                 for (int i = 0; i < kNItems; ++i) {
@@ -566,7 +563,7 @@ selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
         TORCH_CHECK(_x.scalar_type() == weight_type);
         TORCH_CHECK(_x.is_cuda());
         TORCH_CHECK(_x.stride(-1) == 1);
-        CHECK_SHAPE(_x, batch_size, dim, n_chunks, dstate);
+        CHECK_SHAPE(_x, batch_size, dim, dstate);
     }
 
     SSMParamsBase params;
