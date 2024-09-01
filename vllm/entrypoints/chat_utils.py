@@ -143,7 +143,7 @@ class MultiModalItemTracker:
             if model_type == "ultravox":
                 return "<|reserved_special_token_0|>"
             raise TypeError(f"Unknown model type: {model_type}")
-       elif modality == "video":
+        elif modality == "video":
             if model_type == "qwen2_vl":
                 return "<|vision_start|><|video_pad|><|vision_end|>"
             raise TypeError(f"Unknown model type: {model_type}")
