@@ -1319,12 +1319,11 @@ class LLMEngine:
 
             if self.model_config.embedding_mode:
                 self._process_sequence_group_outputs(seq_group, output)
-                continue
-
-            self.output_processor.process_prompt_logprob(seq_group, output)
-            if seq_group_meta.do_sample:
-                self.output_processor.process_outputs(seq_group, output,
-                                                      is_async)
+            else:
+                self.output_processor.process_prompt_logprob(seq_group, output)
+                if seq_group_meta.do_sample:
+                    self.output_processor.process_outputs(
+                        seq_group, output, is_async)
 
             if seq_group.is_finished():
                 finished_now.append(i)
