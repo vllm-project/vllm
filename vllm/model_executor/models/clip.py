@@ -7,7 +7,6 @@ import torch
 import torch.nn as nn
 from PIL import Image
 from transformers import CLIPVisionConfig
-from xformers import ops as xops
 
 from vllm.config import ModelConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
@@ -17,6 +16,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.models.vit_attention import ViTAttention
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    repeat_and_pad_placeholder_tokens)
@@ -198,6 +198,7 @@ class CLIPAttention(nn.Module):
 
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
+        self.attn = ViTAttention(scale=self.scale, dropout=self.dropout)
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads,
@@ -223,11 +224,7 @@ class CLIPAttention(nn.Module):
                                          self.num_heads_per_partition,
                                          self.head_dim)
 
-        out = xops.memory_efficient_attention_forward(query_states,
-                                                      key_states,
-                                                      value_states,
-                                                      p=self.dropout,
-                                                      scale=self.scale)
+        out = self.attn(query_states, key_states, value_states)
         out = out.view(bsz, tgt_len, -1)
         attn_output, _ = self.out_proj(out)
 

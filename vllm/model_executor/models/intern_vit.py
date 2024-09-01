@@ -10,7 +10,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
-from xformers import ops as xops
 
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
@@ -19,6 +18,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.models.vit_attention import ViTAttention
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 NORM2FN = {
@@ -123,6 +123,7 @@ class InternAttention(nn.Module):
 
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
+        self.attn = ViTAttention(self.scale)
 
     def forward(self, x):
         B, N, C = x.shape
@@ -139,13 +140,7 @@ class InternAttention(nn.Module):
                                                      -1)).view(B_, N_, H_, D_)
             k = self.k_norm.forward_native(k.flatten(-2,
                                                      -1)).view(B_, N_, H_, D_)
-
-        x = xops.memory_efficient_attention_forward(
-            q,
-            k,
-            v,
-            scale=self.scale,
-        )
+        x = self.attn(q, k, v)
         x = x.view(B, N, -1)
 
         x, _ = self.proj(x)
