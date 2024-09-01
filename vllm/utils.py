@@ -176,25 +176,69 @@ class LRUCache(Generic[T]):
 
 
 def is_hip() -> bool:
-    return ops.is_hip()
+    return torch.version.hip is not None
 
+
+@lru_cache(maxsize=None)
 def is_cpu() -> bool:
-    return ops.is_cpu()
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        return "cpu" in version("vllm")
+    except PackageNotFoundError:
+        return False
 
+
+@lru_cache(maxsize=None)
 def is_openvino() -> bool:
-    return ops.is_openvino()
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        return "openvino" in version("vllm")
+    except PackageNotFoundError:
+        return False
 
+
+@lru_cache(maxsize=None)
 def is_neuron() -> bool:
-    return ops.is_neuron()
+    try:
+        import transformers_neuronx
+    except ImportError:
+        transformers_neuronx = None
+    return transformers_neuronx is not None
 
+
+@lru_cache(maxsize=None)
 def is_hpu() -> bool:
-    return ops.is_hpu()
+    from importlib import util
+    return util.find_spec('habana_frameworks') is not None
 
+
+@lru_cache(maxsize=None)
 def is_tpu() -> bool:
-    return ops.is_tpu()
+    try:
+        import libtpu
+    except ImportError:
+        libtpu = None
+    return libtpu is not None
 
+
+@lru_cache(maxsize=None)
 def is_xpu() -> bool:
-    return ops.is_xpu()
+    from importlib.metadata import version
+    is_xpu_flag = "xpu" in version("vllm")
+    # vllm is not build with xpu
+    if not is_xpu_flag:
+        return False
+    try:
+        import intel_extension_for_pytorch as ipex  # noqa: F401
+        _import_ipex = True
+    except ImportError as e:
+        logger.warning("Import Error for IPEX: %s", e.msg)
+        _import_ipex = False
+    # ipex dependency is not ready
+    if not _import_ipex:
+        logger.warning("not found ipex lib")
+        return False
+    return hasattr(torch, "xpu") and torch.xpu.is_available()
 
 
 @lru_cache(maxsize=None)

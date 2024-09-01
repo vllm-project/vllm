@@ -6,8 +6,6 @@ from torch.nn import Parameter
 from vllm import _custom_ops as ops
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-if current_platform.is_hpu():
-    import habana_frameworks.torch.utils.experimental as htexp
 
 
 def cutlass_fp8_supported() -> bool:
@@ -20,17 +18,8 @@ def cutlass_fp8_supported() -> bool:
 def per_tensor_dequantize(
         tensor: torch.Tensor, inv_scale: Union[float,
                                                torch.Tensor]) -> torch.Tensor:
-    dtype = torch.float16
-    device = tensor.device
-    if current_platform.is_hpu():
-        dtype = torch.bfloat16
-        if htexp._get_device_type() == htexp.synDeviceType.synDeviceGaudi2:    
-        #dequant on cpu to avoid nan on gaudi2
-            tensor = tensor.to('cpu')
-    
-    fake_qweight = tensor.to(dtype).to(device)
+    fake_qweight = tensor.to(torch.float16)
     dq_weight = fake_qweight * inv_scale
-    
     return dq_weight
 
 
@@ -87,9 +76,6 @@ def requantize_with_max_scale(
         logical_widths: List[int]) -> Tuple[torch.Tensor, torch.Tensor]:
     # Max scale to be used for requanitzation.
     max_w_scale = weight_scale.max()
-    if current_platform.is_hpu() and htexp._get_device_type() == htexp.synDeviceType.synDeviceGaudi2:
-        max_w_scale = max_w_scale * (448/240)
-        
 
     # QKV / MLP is fused in the on disk checkpoint if any of the
     # weight scales are still set to the default since we initialize
@@ -161,25 +147,12 @@ def apply_fp8_linear(
 
         if per_tensor_weights and per_tensor_activations:
             # Fused GEMM_DQ
-            if current_platform.is_hpu():
-                #hpu does not support torch._scaled_mm (SW-197036)
-                output = torch.ops.hpu.fp8_gemm_v2(qinput,
-                                        False,
-                                        weight,
-                                        False,
-                                        None,
-                                        input.dtype,
-                                        x_scale,
-                                        weight_scale,
-                                        None,
-                                        False)
-            else:
-                output, _ = torch._scaled_mm(qinput,
-                                             weight,
-                                             out_dtype=input.dtype,
-                                             scale_a=x_scale,
-                                             scale_b=weight_scale,
-                                             bias=bias)
+            output, _ = torch._scaled_mm(qinput,
+                                         weight,
+                                         out_dtype=input.dtype,
+                                         scale_a=x_scale,
+                                         scale_b=weight_scale,
+                                         bias=bias)
             return torch.narrow(output, 0, 0, input.shape[0])
 
         else:
