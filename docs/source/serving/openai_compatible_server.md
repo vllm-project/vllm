@@ -111,6 +111,32 @@ directory [here](https://github.com/vllm-project/vllm/tree/main/examples/)
 :prog: vllm serve
 ```
 
+### Config file
+
+The `serve` module can also accept arguments from a config file in
+`yaml` format. The arguments in the yaml must be specified using the 
+long form of the argument outlined [here](https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html#command-line-arguments-for-the-server): 
+
+For example:
+
+```yaml
+# config.yaml
+
+host: "127.0.0.1"
+port: 6379
+uvicorn-log-level: "info"
+```
+
+```bash
+$ vllm serve SOME_MODEL --config config.yaml
+```
+---
+**NOTE**  
+In case an argument is supplied using command line and the config file, the value from the commandline will take precedence.
+The order of priorities is `command line > config file values > defaults`.
+
+---
+
 ## Tool calling in the chat completion API
 vLLM supports only named function calling in the chat completion API. The `tool_choice` options `auto` and `required` are **not yet supported** but on the roadmap.
 

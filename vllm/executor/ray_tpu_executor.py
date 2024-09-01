@@ -71,6 +71,19 @@ class RayTPUExecutor(TPUExecutor):
             worker_module_name = "vllm.worker.tpu_worker"
             worker_class_name = "TPUWorker"
 
+            # GKE does not fetch environment information from metadata server
+            # and instead sets these from within the Ray process. Therefore we
+            # need to override the Ray environment variables manually.
+            override_env = {}
+            if "TPU_CHIPS_PER_HOST_BOUNDS" in os.environ:
+                override_env.update({
+                    "TPU_CHIPS_PER_HOST_BOUNDS":
+                    os.environ["TPU_CHIPS_PER_HOST_BOUNDS"]
+                })
+            if "TPU_HOST_BOUNDS" in os.environ:
+                override_env.update(
+                    {"TPU_HOST_BOUNDS": os.environ["TPU_HOST_BOUNDS"]})
+
             worker = ray.remote(
                 num_cpus=0,
                 resources={"TPU": 1},
@@ -81,6 +94,8 @@ class RayTPUExecutor(TPUExecutor):
                 worker_class_name=worker_class_name,
                 trust_remote_code=self.model_config.trust_remote_code,
             )
+            if override_env:
+                worker.override_env_vars.remote(override_env)
 
             worker_ip = ray.get(worker.get_node_ip.remote())
             if worker_ip == driver_ip and self.driver_dummy_worker is None:
