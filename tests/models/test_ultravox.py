@@ -1,6 +1,5 @@
 from typing import List, Optional, Tuple, Type
 
-import librosa
 import numpy as np
 import pytest
 from transformers import AutoModel, AutoTokenizer, BatchEncoding
@@ -109,6 +108,7 @@ def run_test(
                    dtype=dtype,
                    postprocess_inputs=process,
                    auto_cls=AutoModel) as hf_model:
+        import librosa
 
         hf_outputs_per_audio = [
             hf_model.generate_greedy_logprobs_limit(
