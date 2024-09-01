@@ -1,11 +1,9 @@
 import base64
 from functools import lru_cache
 from io import BytesIO
-from typing import List, Optional, Tuple, TypeVar, Union
+from typing import Any, List, Optional, Tuple, TypeVar, Union
 
-import librosa
 import numpy as np
-import soundfile
 from PIL import Image
 
 from vllm.connections import global_http_connection
@@ -73,10 +71,22 @@ async def async_fetch_image(image_url: str,
     return image.convert(image_mode)
 
 
+def try_import_audio_packages() -> Tuple[Any, Any]:
+    try:
+        import librosa
+        import soundfile
+    except ImportError:
+        raise ImportError(
+            "Please install vllm[audio] for audio support.") from None
+    return librosa, soundfile
+
+
 def fetch_audio(audio_url: str) -> Tuple[np.ndarray, Union[int, float]]:
     """
     Load audio from a URL.
     """
+    librosa, _ = try_import_audio_packages()
+
     if audio_url.startswith("http"):
         audio_bytes = global_http_connection.get_bytes(
             audio_url, timeout=VLLM_AUDIO_FETCH_TIMEOUT)
@@ -95,6 +105,8 @@ async def async_fetch_audio(
     """
     Asynchronously fetch audio from a URL.
     """
+    librosa, _ = try_import_audio_packages()
+
     if audio_url.startswith("http"):
         audio_bytes = await global_http_connection.async_get_bytes(
             audio_url, timeout=VLLM_AUDIO_FETCH_TIMEOUT)
@@ -123,6 +135,8 @@ def encode_audio_base64(
     sampling_rate: int,
 ) -> str:
     """Encode audio as base64."""
+    _, soundfile = try_import_audio_packages()
+
     buffered = BytesIO()
     soundfile.write(buffered, audio, sampling_rate, format="WAV")
 

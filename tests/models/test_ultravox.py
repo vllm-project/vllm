@@ -1,11 +1,9 @@
 from typing import List, Optional, Tuple, Type
 
-import librosa
 import numpy as np
 import pytest
 from transformers import AutoModel, AutoTokenizer, BatchEncoding
 
-from vllm.assets.audio import AudioAsset
 from vllm.sequence import SampleLogprobs
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 
@@ -21,6 +19,7 @@ AudioTuple = Tuple[np.ndarray, int]
 
 @pytest.fixture(scope="session")
 def audio_and_sample_rate():
+    from vllm.assets.audio import AudioAsset
     return AudioAsset("mary_had_lamb").audio_and_sample_rate
 
 
@@ -109,6 +108,7 @@ def run_test(
                    dtype=dtype,
                    postprocess_inputs=process,
                    auto_cls=AutoModel) as hf_model:
+        import librosa
 
         hf_outputs_per_audio = [
             hf_model.generate_greedy_logprobs_limit(

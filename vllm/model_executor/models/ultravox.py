@@ -8,7 +8,6 @@ from functools import lru_cache
 from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
                     TypedDict, Union, cast)
 
-import librosa
 import numpy as np
 import torch
 import torch.utils.checkpoint
@@ -107,6 +106,11 @@ def input_mapper_for_ultravox(ctx: InputContext, data: object):
         feature_extractor = whisper_feature_extractor(ctx)
 
         if sr != feature_extractor.sampling_rate:
+            try:
+                import librosa
+            except ImportError:
+                raise ImportError(
+                    "Please install vllm[audio] for audio support.") from None
             audio = librosa.resample(audio,
                                      orig_sr=sr,
                                      target_sr=feature_extractor.sampling_rate)
