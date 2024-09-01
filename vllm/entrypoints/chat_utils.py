@@ -129,13 +129,13 @@ class MultiModalItemTracker:
             if model_type in ("blip-2", "chatglm", "fuyu", "paligemma"):
                 # These models do not use image tokens in the prompt
                 return None
+            if model_type == "qwen":
+                return f"Picture {current_count}: <img></img>"
             if model_type.startswith("llava"):
                 return MultiModalItemTracker._cached_token_str(
                     self._tokenizer,
                     self._model_config.hf_config.image_token_index)
-            # NOTE: qwen models do not use <image> normally, but input
-            # processor will expand it to the expected format
-            if model_type in ("chameleon", "internvl_chat", "qwen"):
+            if model_type in ("chameleon", "internvl_chat"):
                 return "<image>"
 
             raise TypeError(f"Unknown model type: {model_type}")

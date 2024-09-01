@@ -21,7 +21,7 @@ from torch.nn import functional as F
 from torch.nn.init import trunc_normal_
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
-from transformers import PretrainedConfig, PreTrainedTokenizer
+from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
@@ -43,7 +43,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.base import MultiModalInputs
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
@@ -801,54 +801,22 @@ def input_processor_for_qwen(ctx: InputContext, llm_inputs: LLMInputs):
     if prompt is None:
         prompt = tokenizer.decode(prompt_token_ids)
 
-    return get_qwen_llm_inputs(prompt, tokenizer, num_images, multi_modal_data)
+    # Drops anything between <img>/</img> tags; encoding with the tokenizer
+    # will automatically add the image pads for the context.
+    new_prompt, num_matched_images = re.subn(
+        r"(Picture \d*: <img>).*?(<\/img>\n)",
+        r"\1\2",
+        prompt,
+    )
 
-
-def get_qwen_llm_inputs(
-        prompt: str, tokenizer: PreTrainedTokenizer, num_images: int,
-        multi_modal_data: Optional[MultiModalDataDict]) -> LLMInputs:
-    """Standardize the image token format. Qwen generally expects images
-    to be formatted matching the regex below, but currently, we also let
-    users pass <image>. This offers a couple benefits.
-    
-    1. Usually the picture numbering is automatically done by the tokenizer
-    utils when converting from a list format. Expecting users to do it
-    correctly when they may not have the tokenizer on the client side is
-    error-prone, e.g., users may accidentally 0-index their images, which
-    can cause weird results
-    
-    2. Chat can use this to encode images for Qwen without having to consider
-    image indices at the moment.
-
-    Args:
-        prompt: Prompt whose image tags will be standardized.
-        tokenizer: Qwen tokenizer for this model.
-        num_images: Number of images passed in the multimodal data.
-        multi_modal_data: Multimodal data for this request.
-
-    Returns:
-        LLM data to be returned by the input processor.
-    """
-    prompt = re.sub(r"Picture :\d* <img>.+?<\/img>", "<image>", prompt)
-    num_img_tags = prompt.count("<image>")
-    if num_img_tags != num_images:
+    if num_matched_images == num_images:
         logger.warning(
-            "Number of image placeholders does not match the number of images")
+            "Number of matched image placeholders doesn't match the number "
+            "of expected images; are your placeholders formatted correctly?")
 
-    # Only replace as many image tags as we are going to be able to process
-    # correctly. Sequentially replace image tags; padding shenanigans are
-    # mostly to sidestep url encoding logic in the tokenizer
-    new_prompt_no_img_pads = new_prompt_with_img_pads = prompt
-    for img_num in range(1, min(num_images, num_img_tags) + 1):
-        image_prompt_without_padding = get_image_text(img_num, padding=False)
-        image_prompt_with_padding = get_image_text(img_num, padding=True)
-        new_prompt_no_img_pads = new_prompt_no_img_pads.replace(
-            '<image>', image_prompt_without_padding, 1)
-        new_prompt_with_img_pads = new_prompt_with_img_pads.replace(
-            '<image>', image_prompt_with_padding, 1)
-    new_prompt_token_ids = tokenizer.encode(new_prompt_no_img_pads)
+    new_prompt_token_ids = tokenizer.encode(new_prompt)
 
-    return LLMInputs(prompt=new_prompt_with_img_pads,
+    return LLMInputs(prompt=new_prompt,
                      prompt_token_ids=new_prompt_token_ids,
                      multi_modal_data=multi_modal_data)
 

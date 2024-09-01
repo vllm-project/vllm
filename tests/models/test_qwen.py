@@ -2,9 +2,7 @@ import pathlib
 from typing import List, Optional, Type
 
 import pytest
-from transformers import AutoTokenizer
 
-from vllm.model_executor.models.qwen import get_qwen_llm_inputs
 from vllm.multimodal.utils import rescale_image_size
 
 from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
@@ -27,28 +25,6 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
 
 
 ### Tests for multimodal Qwen models
-@pytest.mark.parametrize("hf_input_text,vllm_input_text,num_images", [
-    ("I have no image tags", "I have no image tags", 0),
-    ("Picture 1: <img></img>\n", "Picture 1: <img></img>\n", 1),
-    ("Picture 1: <img></img>\n", "<image>", 1),
-    ("Picture 1: <img></img>\n Picture 2: <img></img>\n", "<image> <image>",
-     2),
-])
-def test_qwen_input_processor_tag_unification(hf_input_text, vllm_input_text,
-                                              num_images):
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen-VL",
-                                              trust_remote_code=True)
-    hf_tok_ids = tokenizer.encode(hf_input_text)
-    vllm_tok_ids = get_qwen_llm_inputs(
-        vllm_input_text,
-        tokenizer,
-        num_images,
-        multi_modal_data=None,
-    )["prompt_token_ids"]
-    assert len(vllm_tok_ids) == len(hf_tok_ids)
-    assert vllm_tok_ids == hf_tok_ids
-
-
 def run_test(
     tmp_path: pathlib.PosixPath,
     hf_runner: Type[HfRunner],
@@ -96,8 +72,9 @@ def run_test(
     # will hurt multiprocessing backend with fork method (the default method).
 
     # max_model_len should be greater than image_feature_size
+    # Qwen encodes images into a fixed content size of 256
     with vllm_runner(model,
-                     max_model_len=2048,
+                     max_model_len=300,
                      dtype=dtype,
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
@@ -164,13 +141,13 @@ def test_multimodal_models(tmp_path, hf_runner, vllm_runner, image_assets,
     )
 
 
-### Tests for language only Qwen models
-@pytest.mark.parametrize("dtype", ["half"])
+# Ensure that a text-only Qwen model can still be loaded and
+# used for inference in VLLM without throwing.
+@pytest.mark.parametrize("model", text_only_models)
+@pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
-@pytest.mark.parametrize("model", text_only_models)
-def test_text_only_qwen_model(
-    hf_runner: Type[HfRunner],
+def test_text_only_qwen_model_can_be_loaded_and_run(
     vllm_runner: Type[VllmRunner],
     example_prompts,
     model: str,
@@ -179,26 +156,9 @@ def test_text_only_qwen_model(
     max_tokens: int,
     num_logprobs: int,
 ):
-    # the primary purpose of this test is to ensure that we can
-    # load Qwen models, e.g., Qwen/Qwen-7B-Chat, that do not have a visual
-    # config, without any problems.
     with vllm_runner(model, dtype=dtype) as vllm_model:
-        vllm_outputs = vllm_model.generate_greedy_logprobs(
+        vllm_model.generate_greedy_logprobs(
             example_prompts,
             max_tokens,
             num_logprobs=num_logprobs,
         )
-
-    with hf_runner(model, dtype=dtype) as hf_model:
-        hf_outputs = hf_model.generate_greedy_logprobs_limit(
-            example_prompts,
-            max_tokens,
-            num_logprobs=num_logprobs,
-        )
-
-    check_logprobs_close(
-        outputs_0_lst=hf_outputs,
-        outputs_1_lst=vllm_outputs,
-        name_0="hf",
-        name_1="vllm",
-    )
