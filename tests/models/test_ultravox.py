@@ -4,7 +4,6 @@ import numpy as np
 import pytest
 from transformers import AutoModel, AutoTokenizer, BatchEncoding
 
-from vllm.assets.audio import AudioAsset
 from vllm.sequence import SampleLogprobs
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 
@@ -20,6 +19,7 @@ AudioTuple = Tuple[np.ndarray, int]
 
 @pytest.fixture(scope="session")
 def audio_and_sample_rate():
+    from vllm.assets.audio import AudioAsset
     return AudioAsset("mary_had_lamb").audio_and_sample_rate
 
 
