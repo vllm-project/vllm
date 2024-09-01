@@ -187,13 +187,16 @@ def rescale_image_size(image: Image.Image,
         image = image.transpose(Image.Transpose(transpose))
     return image
 
-
-def resize_video(frames: npt.NDArray, size: Tuple[int, int]) -> npt.NDArray:
+def try_import_video_packages() -> Any:
     try:
         import cv2
     except ImportError:
         raise ImportError(
-            "Please install vllm[audio] for audio support.") from None
+            "Please install vllm[video] for video support.") from None
+    return cv2
+
+def resize_video(frames: npt.NDArray, size: Tuple[int, int]) -> npt.NDArray:
+    cv2 = try_import_video_packages()
     
     num_frames, _, _, channels = frames.shape
     new_height, new_width = size

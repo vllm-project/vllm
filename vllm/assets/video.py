@@ -7,7 +7,7 @@ import numpy.typing as npt
 from huggingface_hub import hf_hub_download
 from PIL import Image
 
-from vllm.multimodal.utils import sample_frames_from_video
+from vllm.multimodal.utils import (sample_frames_from_video, try_import_video_packages)
 
 from .base import get_cache_dir
 
@@ -34,11 +34,7 @@ def download_video_asset(filename: str) -> str:
 
 
 def video_to_ndarrays(path: str, num_frames: int = -1) -> npt.NDArray:
-    try:
-        import cv2
-    except ImportError:
-        raise ImportError(
-            "Please install vllm[audio] for audio support.") from None
+    cv2 = try_import_video_packages()
     
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
