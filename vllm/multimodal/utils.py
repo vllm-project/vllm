@@ -3,7 +3,6 @@ from functools import lru_cache
 from io import BytesIO
 from typing import Any, List, Optional, Tuple, TypeVar, Union
 
-import cv2
 import numpy as np
 import numpy.typing as npt
 from PIL import Image
@@ -190,6 +189,12 @@ def rescale_image_size(image: Image.Image,
 
 
 def resize_video(frames: npt.NDArray, size: Tuple[int, int]) -> npt.NDArray:
+    try:
+        import cv2
+    except ImportError:
+        raise ImportError(
+            "Please install vllm[audio] for audio support.") from None
+    
     num_frames, _, _, channels = frames.shape
     new_height, new_width = size
     resized_frames = np.empty((num_frames, new_height, new_width, channels),

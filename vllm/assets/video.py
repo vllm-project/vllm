@@ -2,7 +2,6 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import List, Literal
 
-import cv2
 import numpy as np
 import numpy.typing as npt
 from huggingface_hub import hf_hub_download
@@ -35,6 +34,12 @@ def download_video_asset(filename: str) -> str:
 
 
 def video_to_ndarrays(path: str, num_frames: int = -1) -> npt.NDArray:
+    try:
+        import cv2
+    except ImportError:
+        raise ImportError(
+            "Please install vllm[audio] for audio support.") from None
+    
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise ValueError(f"Could not open video file {path}")
