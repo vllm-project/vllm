@@ -112,13 +112,18 @@ class Fp8LinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
-        self.cutlass_fp8_supported = cutlass_fp8_supported()
+        
+        if torch.cuda.is_available():
+            self.cutlass_fp8_supported = cutlass_fp8_supported()
 
-        # For GPUs that lack FP8 hardware support, we can leverage the Marlin
-        # kernel for fast weight-only FP8 quantization
-        capability = current_platform.get_device_capability()
-        capability = capability[0] * 10 + capability[1]
-        self.use_marlin = capability < 89
+            # For GPUs that lack FP8 hardware support, we can leverage the Marlin
+            # kernel for fast weight-only FP8 quantization
+            capability = current_platform.get_device_capability()
+            capability = capability[0] * 10 + capability[1]
+            self.use_marlin = capability < 89
+        else:
+            self.cutlass_fp8_supported = False
+            self.use_marlin = False
 
     def create_weights(
         self,

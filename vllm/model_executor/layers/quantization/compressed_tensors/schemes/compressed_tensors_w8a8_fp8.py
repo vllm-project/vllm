@@ -21,7 +21,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
     def __init__(self, strategy: str, is_static_input_scheme: bool):
         self.strategy = strategy
         self.is_static_input_scheme = is_static_input_scheme
-        self.cutlass_fp8_supported = cutlass_fp8_supported()
+        self.cutlass_fp8_supported = cutlass_fp8_supported() if torch.cuda.is_available() else False
 
     @classmethod
     def get_min_capability(cls) -> int:

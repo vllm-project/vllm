@@ -233,7 +233,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         if is_activation_quantization_format(self.quant_format):
             if self._is_fp8_w8a8(weight_quant, input_quant):
                 is_fp8_w8a8_supported = self._check_scheme_supported(
-                    CompressedTensorsW8A8Fp8.get_min_capability(), error=False)
+                    CompressedTensorsW8A8Fp8.get_min_capability(), error=False) if torch.cuda.is_available() else True
                 if is_fp8_w8a8_supported:
                     return CompressedTensorsW8A8Fp8(
                         strategy=weight_quant.strategy,
@@ -306,7 +306,8 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         # Raise error if device does not support the scheme
         # (e.g. fp8 needs ada lovelace)
-        self._check_scheme_supported(scheme.get_min_capability())
+        if torch.cuda.is_available():
+            self._check_scheme_supported(scheme.get_min_capability())
 
         return scheme
 

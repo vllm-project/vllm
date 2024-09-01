@@ -54,6 +54,9 @@ from vllm.utils import is_hip
 
 from .interfaces import SupportsLoRA
 from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
+from vllm.platforms import current_platform
+if current_platform.is_hpu():
+    import habana_frameworks.torch.core as htcore
 
 
 class LlamaMLP(nn.Module):
@@ -517,6 +520,10 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+
+            #Avoid OOM due to large graph when loading weights
+            if current_platform.is_hpu():
+                htcore.mark_step()
 
     # If this function is called, it should always initialize KV cache scale
     # factors (or else raise an exception). Thus, handled exceptions should
