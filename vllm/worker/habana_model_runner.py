@@ -1567,8 +1567,8 @@ class HabanaModelRunner(
         self.seen_configs.add(cfg)
         if not seen and not warmup_mode:
             phase = 'prompt' if is_prompt else 'decode'
-            logger.warning('Configuration: (', phase, ', ', batch_size, ', ',
-                           seq_len, ') was not warmed-up!')
+            logger.warning("Configuration: (%s, %s, %s) was not warmed-up!",
+                           phase, batch_size, seq_len)
 
     @torch.inference_mode()
     def execute_model(
