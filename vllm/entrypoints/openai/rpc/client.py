@@ -1,11 +1,13 @@
 import asyncio
+import pickle
 from contextlib import contextmanager, suppress
-from typing import Any, AsyncGenerator, Mapping, Optional
+from typing import Any, AsyncGenerator, Iterator, Mapping, Optional
 from uuid import uuid4
 
 import cloudpickle
 import zmq
 import zmq.asyncio
+from zmq.asyncio import Socket
 
 from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
@@ -101,6 +103,7 @@ class AsyncEngineRPCClient:
         # Maximum number of sockets that can be opened (typically 65536).
         # ZMQ_SOCKET_LIMIT (http://api.zeromq.org/4-2:zmq-ctx-get)
         socket_limit = self.context.get(zmq.constants.SOCKET_LIMIT)
+        assert isinstance(socket_limit, int)
         if socket_limit < VLLM_RPC_SOCKET_LIMIT_CUTOFF:
             raise ValueError(
                 f"Found zmq.constants.SOCKET_LIMIT={socket_limit}, which caps "
@@ -114,18 +117,21 @@ class AsyncEngineRPCClient:
         self.context.set(zmq.constants.MAX_SOCKETS, socket_limit)
 
         # IPC connection to RPC Server (uses unix sockets).
-        self.to_rpc_server = self.context.socket(zmq.constants.DEALER)
+        self.to_rpc_server: Socket = self.context.socket(zmq.constants.DEALER)
         self.to_rpc_server.set_hwm(VLLM_RPC_ZMQ_HWM)
         self.to_rpc_server.bind(rpc_path)
 
         # In process proxy to RPC Server (uses memory-based messaging).
-        self.from_api_server = self.context.socket(zmq.constants.ROUTER)
+        self.from_api_server: Socket = self.context.socket(
+            zmq.constants.ROUTER)
         self.from_api_server.set_hwm(VLLM_RPC_ZMQ_HWM)
         self.from_api_server.bind(INPROC_PROXY_PATH)
 
         # Asyncio background task for the proxy.
-        self.proxy_task = asyncio.create_task(
+        self.proxy_in_task = asyncio.create_task(
             self.run_proxy(self.from_api_server, self.to_rpc_server))
+        self.proxy_out_task = asyncio.create_task(
+            self.run_proxy(self.to_rpc_server, self.from_api_server))
 
         # Since we open 1 inproc socket per request, we have a hard cap on
         # the number of requests that can run in vLLM w. frontend
@@ -135,20 +141,11 @@ class AsyncEngineRPCClient:
         # 1 for generate(), 1 for abort(), do_log_stats(), check_health()
         self.limit_concurrency = socket_limit // 2 - 2
 
-    async def run_proxy(self, socket_from, socket_to):
+    async def run_proxy(self, socket_from: Socket, socket_to: Socket):
         """Background task that runs a proxy"""
-        poller = zmq.asyncio.Poller()
-        poller.register(socket_from, zmq.constants.POLLIN)
-        poller.register(socket_to, zmq.constants.POLLIN)
         while True:
-            events = await poller.poll()
-            events = dict(events)
-            if socket_from in events:
-                identity, msg = await socket_from.recv_multipart()
-                await socket_to.send_multipart([identity, msg])
-            if socket_to in events:
-                identity, msg = await socket_to.recv_multipart()
-                await socket_from.send_multipart([identity, msg])
+            frames = await socket_from.recv_multipart(copy=False)
+            await socket_to.send_multipart(frames, copy=False)
 
     async def setup(self):
         """Setup the client before it starts sending server requests."""
@@ -179,7 +176,7 @@ class AsyncEngineRPCClient:
         self.context.destroy()
 
     @contextmanager
-    def to_proxy_socket(self):
+    def to_proxy_socket(self) -> Iterator[Socket]:
         # Connect to the RPCServer via the proxy.
 
         # Raise a sensible error if the client was already closed.
@@ -207,7 +204,8 @@ class AsyncEngineRPCClient:
 
         with self.to_proxy_socket() as socket:
             # Ping RPCServer with a request.
-            await socket.send_multipart([cloudpickle.dumps(request)])
+            await socket.send_multipart((cloudpickle.dumps(request), ),
+                                        copy=False)
 
             # Make sure the server responds
             if await socket.poll(timeout=self._data_timeout) == 0:
@@ -215,7 +213,8 @@ class AsyncEngineRPCClient:
                                    f"{self._data_timeout} ms")
 
             # Await the data from the Server.
-            data = cloudpickle.loads(await socket.recv())
+            frame = await socket.recv(copy=False)
+            data = pickle.loads(frame.buffer)
 
         if isinstance(data, Exception):
             # Re-raise exceptions returned by the server
@@ -233,23 +232,22 @@ class AsyncEngineRPCClient:
 
         return data
 
-    async def _send_one_way_rpc_request(
-            self,
-            request: RPC_REQUEST_TYPE,
-            error_message: str,
-            socket: Optional[zmq.asyncio.Socket] = None):
+    async def _send_one_way_rpc_request(self,
+                                        request: RPC_REQUEST_TYPE,
+                                        error_message: str,
+                                        socket: Optional[Socket] = None):
         """Send one-way RPC request to trigger an action."""
 
-        async def do_rpc_call(socket: zmq.asyncio.Socket,
-                              request: RPC_REQUEST_TYPE):
+        async def do_rpc_call(socket: Socket, request: RPC_REQUEST_TYPE):
 
-            await socket.send_multipart([cloudpickle.dumps(request)])
+            await socket.send_multipart((cloudpickle.dumps(request), ))
 
             if await socket.poll(timeout=self._data_timeout) == 0:
                 raise TimeoutError("Server didn't reply within "
                                    f"{self._data_timeout} ms")
 
-            return cloudpickle.loads(await socket.recv())
+            frame = await socket.recv(copy=False)
+            return pickle.loads(frame.buffer)
 
         # Make a new socket connection.
         if socket is None:
@@ -335,7 +333,18 @@ class AsyncEngineRPCClient:
 
     async def abort(self, request_id: str):
         """Send an ABORT_REQUEST signal to the RPC Server"""
-        with suppress(RPCClientClosedError):
+
+        # Suppress timeouts as well.
+        # In cases where the server is busy processing requests and a very
+        # large volume of abort requests arrive, it is likely that the server
+        # will not be able to ack all of them in time. We have seen this when
+        # we abort 20k requests at once while another 2k are processing- many
+        # of them time out, but we see the server successfully abort all of the
+        # requests.
+        # In this case we assume that the server has received or will receive
+        # these abort requests, and ignore the timeout. This prevents a massive
+        # wall of `TimeoutError` stack traces.
+        with suppress(RPCClientClosedError, TimeoutError):
             await self._send_one_way_rpc_request(
                 request=RPCAbortRequest(request_id),
                 error_message=f"RPCAbortRequest {request_id} failed")
@@ -374,21 +383,19 @@ class AsyncEngineRPCClient:
         try:
             with self.to_proxy_socket() as socket:
                 # Send RPCGenerateRequest to the RPCServer.
-                await socket.send_multipart([
-                    cloudpickle.dumps(
-                        RPCGenerateRequest(
-                            inputs=inputs,
-                            sampling_params=sampling_params,
-                            request_id=request_id,
-                            lora_request=lora_request,
-                            trace_headers=trace_headers,
-                            prompt_adapter_request=prompt_adapter_request))
-                ])
+                await socket.send_multipart((cloudpickle.dumps(
+                    RPCGenerateRequest(
+                        inputs=inputs,
+                        sampling_params=sampling_params,
+                        request_id=request_id,
+                        lora_request=lora_request,
+                        trace_headers=trace_headers,
+                        prompt_adapter_request=prompt_adapter_request)), ))
 
                 # Stream back the results from the RPC Server.
                 while not finished:
-                    message = await socket.recv()
-                    request_output = cloudpickle.loads(message)
+                    message = await socket.recv(copy=False)
+                    request_output = pickle.loads(message.buffer)
 
                     if isinstance(request_output, Exception):
                         # On exception, check if the server is still healthy
@@ -412,9 +419,7 @@ class AsyncEngineRPCClient:
             if not finished and not self._errored:
                 await self.abort(request_id)
 
-    async def check_health(self,
-                           socket: Optional[zmq.asyncio.Socket] = None
-                           ) -> None:
+    async def check_health(self, socket: Optional[Socket] = None) -> None:
         """Raise if unhealthy"""
 
         await self._send_one_way_rpc_request(

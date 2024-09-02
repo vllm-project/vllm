@@ -6,7 +6,7 @@ import os
 import re
 import tempfile
 from argparse import Namespace
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from http import HTTPStatus
 from typing import AsyncIterator, Optional, Set
 
@@ -83,8 +83,7 @@ async def lifespan(app: FastAPI):
     async def _force_log():
         while True:
             await asyncio.sleep(10)
-            with suppress(Exception):
-                await async_engine_client.do_log_stats()
+            await async_engine_client.do_log_stats()
 
     if not engine_args.disable_log_stats:
         task = asyncio.create_task(_force_log())
