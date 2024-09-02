@@ -375,6 +375,10 @@ class CLIPVisionModel(nn.Module):
                  quant_config: Optional[QuantizationConfig] = None,
                  num_hidden_layers_override: Optional[int] = None):
         super().__init__()
+        tp_size = get_tensor_model_parallel_world_size()
+        num_heads = config.num_attention_heads
+        self.shard_weight = USE_XFORMERS_OPS and num_heads % tp_size == 0
+
         self.vision_model = CLIPVisionTransformer(
             config=config,
             quant_config=quant_config,
@@ -396,7 +400,7 @@ class CLIPVisionModel(nn.Module):
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
-        ] if USE_XFORMERS_OPS else []
+        ] if self.shard_weight else []
         params_dict = dict(self.named_parameters())
         layer_count = len(self.vision_model.encoder.layers)
 
