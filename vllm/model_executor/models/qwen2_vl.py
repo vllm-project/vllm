@@ -642,15 +642,6 @@ def input_processor_for_qwen2_vl(ctx: InputContext,
     )
 
 
-def merge_multimodal_embeddings_for_qwen2_vl(
-        input_ids: torch.Tensor, inputs_embeds: torch.Tensor,
-        multimodal_embeddings: torch.Tensor,
-        placeholder_token_id: int) -> torch.Tensor:
-    mask = (input_ids == placeholder_token_id)
-    inputs_embeds[mask, :] = multimodal_embeddings
-    return inputs_embeds
-
-
 @MULTIMODAL_REGISTRY.register_image_input_mapper(
     image_input_mapper_for_qwen2_vl)
 @MULTIMODAL_REGISTRY.register_input_mapper("video",
@@ -765,13 +756,13 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
     def _merge_multimodal_embeddings(
         self,
         input_ids: torch.Tensor,
-        input_embeds: torch.Tensor,
-        image_embeds: Optional[torch.Tensor],
-        video_embeds: Optional[torch.Tensor],
-        image_placeholder_token_id: int,
-        video_placeholder_token_id: int,
+        inputs_embeds: torch.Tensor,
+        multimodal_embeddings: torch.Tensor,
+        placeholder_token_id: int,
     ) -> torch.Tensor:
-        pass
+        mask = (input_ids == placeholder_token_id)
+        inputs_embeds[mask, :] = multimodal_embeddings
+        return inputs_embeds
 
     def forward(
         self,
@@ -818,7 +809,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
 
             if image_input is not None:
                 image_embeds = self._process_image_input(image_input)
-                inputs_embeds = merge_multimodal_embeddings_for_qwen2_vl(
+                inputs_embeds = self._merge_multimodal_embeddings(
                     input_ids,
                     inputs_embeds,
                     image_embeds,
@@ -827,7 +818,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
 
             if video_input is not None:
                 video_embeds = self._process_video_input(video_input)
-                inputs_embeds = merge_multimodal_embeddings_for_qwen2_vl(
+                inputs_embeds = self._merge_multimodal_embeddings(
                     input_ids,
                     inputs_embeds,
                     video_embeds,
