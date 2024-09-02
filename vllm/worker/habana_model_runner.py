@@ -448,6 +448,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         # Profiler stats
         self.profiler_counter_helper = HabanaProfilerCounterHelper()
+        self.seen_configs: set = set()
         self._mem_margin: Optional[int] = None
         self._setup_buckets()
 
@@ -1560,6 +1561,15 @@ class HabanaModelRunner(
         from neural_compressor.torch.quantization import finalize_calibration
         finalize_calibration(self.model.model)
 
+    def _check_config(self, batch_size, seq_len, is_prompt, warmup_mode):
+        cfg = (batch_size, seq_len, is_prompt)
+        seen = cfg in self.seen_configs
+        self.seen_configs.add(cfg)
+        if not seen and not warmup_mode:
+            phase = 'prompt' if is_prompt else 'decode'
+            logger.warning("Configuration: (%s, %s, %s) was not warmed-up!",
+                           phase, batch_size, seq_len)
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1594,6 +1604,7 @@ class HabanaModelRunner(
         batch_size = input_tokens.size(0)
         seq_len = self._seq_len(attn_metadata)
         use_graphs = self._use_graphs(batch_size, seq_len, is_prompt)
+        self._check_config(batch_size, seq_len, is_prompt, warmup_mode)
         execute_model_kwargs = {
             "input_ids": input_tokens,
             "positions": input_positions,
