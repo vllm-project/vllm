@@ -27,6 +27,13 @@ class LlamaVLConfig(PretrainedConfig):
     model_type: str = "llamavl"
     architectures: list[str] = ["LlamaVLForCausalLM"]
 
+    attribute_map = {
+        "num_hidden_layers": "n_layers",
+        "hidden_size": "dim",
+        "num_attention_heads": "n_heads",
+        "num_key_value_heads": "n_kv_heads",
+    }
+
     def __init__(self, **kwargs):
         for k, v in kwargs.items():
             if hasattr(self, k):
@@ -37,3 +44,5 @@ class LlamaVLConfig(PretrainedConfig):
         assert self.n_kv_heads <= self.n_heads
         assert self.n_heads % self.n_kv_heads == 0
         assert self.dim % self.n_heads == 0
+
+        super().__init__(**kwargs)
