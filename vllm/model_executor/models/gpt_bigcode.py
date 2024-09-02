@@ -278,7 +278,8 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA):
 
         if self.config.tie_word_embeddings:
             if quant_config is not None:
-                linear_method = quant_config.get_quant_method(self)
+                linear_method = quant_config.get_quant_method(layer=self,
+                                                              prefix="")
                 assert linear_method is None or isinstance(
                     linear_method, UnquantizedLinearMethod)
 
