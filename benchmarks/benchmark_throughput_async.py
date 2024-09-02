@@ -120,7 +120,7 @@ async def run_vllm(
         disable_log_requests=True,
     )
 
-    decoupled = True
+    decoupled = False
 
     async with build_async_engine_client_from_engine_args(engine_args,
                                                           not decoupled) as llm:

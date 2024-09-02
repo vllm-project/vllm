@@ -40,9 +40,9 @@ class AsyncEngineRPCServer:
         self.context = zmq.asyncio.Context()
 
         # Init socket.
-        self.socket: Socket = self.context.socket(zmq.constants.DEALER)
+        self.socket: Socket = self.context.socket(zmq.constants.ROUTER)
         self.socket.set_hwm(VLLM_RPC_ZMQ_HWM)
-        self.socket.connect(rpc_path)
+        self.socket.bind(rpc_path)
 
     def cleanup(self):
         """Cleanup all resources."""
