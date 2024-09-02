@@ -49,6 +49,7 @@ class RPCUtilityRequest(Enum):
     IS_TRACING_ENABLED = 9
     START_PROFILE = 10
     STOP_PROFILE = 11
+    CLIENT_IS_READY = 11
 
 
 RPC_REQUEST_TYPE = Union[RPCGenerateRequest, RPCAbortRequest,

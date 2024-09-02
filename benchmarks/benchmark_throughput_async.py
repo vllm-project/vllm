@@ -1,5 +1,6 @@
 """Benchmark offline inference throughput."""
 import argparse
+import asyncio
 import json
 import random
 import time
@@ -120,7 +121,7 @@ async def run_vllm(
         disable_log_requests=True,
     )
 
-    decoupled = False
+    decoupled = True
 
     async with build_async_engine_client_from_engine_args(engine_args,
                                                           not decoupled) as llm:
@@ -143,14 +144,14 @@ async def run_vllm(
         generators = []
         start = time.perf_counter()
         for i, (prompt, sp) in enumerate(zip(prompts, sampling_params)):
+            # generator = await llm.generate(prompt, sp, request_id=f"test{i}")
             generator = llm.generate(prompt, sp, request_id=f"test{i}")
-            generators.append(generator)
+            generators.append(generator)        
         all_gens = merge_async_iterators(*generators)
         async for i, res in all_gens:
             pass
         end = time.perf_counter()
         return end - start
-
 
 def run_hf(
     requests: List[Tuple[str, int, int]],

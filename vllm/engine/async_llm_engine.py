@@ -1104,6 +1104,7 @@ class AsyncLLMEngine:
             trace_headers=trace_headers,
             prompt_adapter_request=prompt_adapter_request,
         )
+        return maybe_generator
         if maybe_generator is None or not LLMEngine.DO_VALIDATE_OUTPUT:
             return maybe_generator
 

@@ -449,7 +449,6 @@ async def merge_async_iterators(
     It also optionally polls a provided function at least once per second
     to check for client cancellation.
     """
-
     # Can use anext() in python >= 3.10
     awaits = {
         ensure_future(pair[1].__anext__()): pair

@@ -39,7 +39,8 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               TokenizeResponse)
 # yapf: enable
 from vllm.entrypoints.openai.rpc.client import AsyncEngineRPCClient
-from vllm.entrypoints.openai.rpc.server import run_rpc_server
+# from vllm.entrypoints.openai.rpc.server import run_rpc_server
+from vllm.engine.llm_engine2 import run_rpc_server
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
@@ -84,8 +85,9 @@ async def lifespan(app: FastAPI):
         while True:
             await asyncio.sleep(10)
             await async_engine_client.do_log_stats()
-
-    if not engine_args.disable_log_stats:
+    
+    # if not engine_args.disable_log_stats:
+    if False:
         task = asyncio.create_task(_force_log())
         _running_tasks.add(task)
         task.add_done_callback(_running_tasks.remove)
@@ -169,9 +171,11 @@ async def build_async_engine_client_from_engine_args(
         context = multiprocessing.get_context("spawn")
         # the current process might have CUDA context,
         # so we need to spawn a new process
-        rpc_server_process = context.Process(
-            target=run_rpc_server,
-            args=(engine_args, UsageContext.OPENAI_API_SERVER, rpc_path))
+        # rpc_server_process = context.Process(
+        #     target=run_rpc_server,
+        #     args=(engine_args, UsageContext.OPENAI_API_SERVER, rpc_path))
+        
+        rpc_server_process = context.Process(target=run_rpc_server, args=(engine_args,))
         rpc_server_process.start()
         logger.info("Started engine process with PID %d",
                     rpc_server_process.pid)

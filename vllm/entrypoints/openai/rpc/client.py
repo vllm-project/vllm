@@ -104,24 +104,47 @@ class AsyncEngineRPCClient:
         self._data_timeout = VLLM_RPC_GET_DATA_TIMEOUT_MS
         self._errored = False
 
-        # IPC connection to RPC Server (uses unix sockets).
-        self.socket: Socket = self.context.socket(zmq.constants.DEALER)
-        self.socket.set_hwm(VLLM_RPC_ZMQ_HWM)
-        self.socket.connect(rpc_path)
-        self.rpc_path = rpc_path
+        self.new_req_socket: Socket = self.context.socket(zmq.constants.PUSH)
+        self.new_req_socket.connect("ipc:///tmp/new_req_socket")
+
+        self.output_socket: Socket = self.context.socket(zmq.constants.PULL)
+        self.output_socket.connect("ipc:///tmp/output_socket")
+
+        # self.data_socket: Socket = self.context.socket(zmq.constants.DEALER)
+        # self.data_socket.connect("ipc:///tmp/data_socket")
 
         self.limit_concurrency = None
         self.output_queues: Dict[str, asyncio.Queue] = {}
         self.output_handler = asyncio.create_task(self.run_output_handler())
     
+    @contextmanager
+    def get_data_socket(self) -> Iterator[Socket]:
+        # Connect to the RPCServer via the proxy.
+
+        # Raise a sensible error if the client was already closed.
+        # This can happen if a server shutdown is triggered but some coroutines
+        # are still running requests.
+        # There should not be a race condition with this check because we don't
+        # yield to the event loop between here and opening the socket.
+        if self.context.closed:
+            raise RPCClientClosedError("The ZMQ client has already shut down")
+
+        # Note that we use DEALER to enable asynchronous communication
+        # to enable streaming.
+        socket = self.context.socket(zmq.constants.DEALER)
+        try:
+            socket.connect("ipc:///tmp/data_socket")
+            yield socket
+        finally:
+            socket.close(linger=0)
 
     async def run_output_handler(self):
-        await self.socket.send_multipart(
-            (cloudpickle.dumps(RPCOutputStreamRequest()), ))
+        # await self.socket.send_multipart(
+        #     (cloudpickle.dumps(RPCOutputStreamRequest()), ))
 
         # Stream back the results from the RPC Server.
         while True:
-            message: Frame = await self.socket.recv(copy=False)
+            message: Frame = await self.output_socket.recv(copy=False)
             request_outputs = pickle.loads(message.buffer)
 
             for output in request_outputs:
@@ -155,69 +178,50 @@ class AsyncEngineRPCClient:
             enable_lora=bool(await self._get_lora_config_rpc()),
         )
 
+        await self._notify_ready()
+
     def close(self):
         """Destroy the ZeroMQ Context."""
         # Close all sockets associated with this context and
         # then terminate the context.
-        self.socket.close()
-        self.context.destroy()
+        self.context.destroy(linger=0)
 
-    @contextmanager
-    def rpc_get_data_socket(self) -> Iterator[Socket]:
-        # Connect to the RPCServer via the proxy.
-
-        # Raise a sensible error if the client was already closed.
-        # This can happen if a server shutdown is triggered but some coroutines
-        # are still running requests.
-        # There should not be a race condition with this check because we don't
-        # yield to the event loop between here and opening the socket.
-        if self.context.closed:
-            raise RPCClientClosedError("The ZMQ client has already shut down")
-
-        # Note that we use DEALER to enable asynchronous communication
-        # to enable streaming.
-        socket = self.context.socket(zmq.constants.DEALER)
-        socket.set_hwm(VLLM_RPC_ZMQ_HWM)
-        try:
-            socket.connect(self.rpc_path)
-            yield socket
-        finally:
-            socket.close(linger=0)
 
     async def _send_get_data_rpc_request(self, request: RPCUtilityRequest,
                                          expected_type: Any,
                                          error_message: str) -> Any:
         """Send an RPC request that is expecting data back."""
 
-        with self.rpc_get_data_socket() as socket:
+        with self.get_data_socket() as socket:
             # Ping RPCServer with a request.
-            await socket.send_multipart((cloudpickle.dumps(request), ),
-                                        copy=False)
+            await socket.send_multipart(
+                (cloudpickle.dumps(request), ),
+                copy=False)
 
             # Make sure the server responds
             if await socket.poll(timeout=self._data_timeout) == 0:
                 raise TimeoutError("Server didn't reply within "
-                                   f"{self._data_timeout} ms")
+                                    f"{self._data_timeout} ms")
 
             # Await the data from the Server.
             frame = await socket.recv(copy=False)
             data = pickle.loads(frame.buffer)
 
-        if isinstance(data, Exception):
-            # Re-raise exceptions returned by the server
-            raise data
-
-        if not isinstance(data, expected_type):
-            # LoRAConfig can be None.
-            if expected_type == LoRAConfig and data is None:
-                pass
-            elif isinstance(data, Exception):
-                logger.error(error_message)
+            if isinstance(data, Exception):
+                # Re-raise exceptions returned by the server
                 raise data
-            else:
-                raise ValueError(error_message)
 
-        return data
+            if not isinstance(data, expected_type):
+                # LoRAConfig can be None.
+                if expected_type == LoRAConfig and data is None:
+                    pass
+                elif isinstance(data, Exception):
+                    logger.error(error_message)
+                    raise data
+                else:
+                    raise ValueError(error_message)
+
+            return data
 
     async def _send_one_way_rpc_request(self,
                                         request: RPC_REQUEST_TYPE,
@@ -236,12 +240,9 @@ class AsyncEngineRPCClient:
             frame = await socket.recv(copy=False)
             return pickle.loads(frame.buffer)
 
-        # Make a new socket connection.
         if socket is None:
-            with self.rpc_get_data_socket() as socket:
+            with self.get_data_socket() as socket:
                 response = await do_rpc_call(socket, request)
-
-        # Use existing socket connection.
         else:
             response = await do_rpc_call(socket, request)
 
@@ -269,6 +270,13 @@ class AsyncEngineRPCClient:
         await self._send_one_way_rpc_request(
             request=RPCUtilityRequest.IS_SERVER_READY,
             error_message="Unable to start RPC Server")
+
+    async def _notify_ready(self):
+        """Get the RPCServer that the RPCClient is ready"""
+
+        await self._send_one_way_rpc_request(
+            request=RPCUtilityRequest.CLIENT_IS_READY,
+            error_message="Unable to notify RPC Server of client readiness")
 
     async def _get_model_config_rpc(self) -> ModelConfig:
         """Get the ModelConfig object from the RPC Server"""
@@ -371,21 +379,21 @@ class AsyncEngineRPCClient:
         self.output_queues[request_id] = queue
         finished = False
         try:
-            with self.rpc_get_data_socket() as socket:
-                # Send RPCGenerateRequest to the RPCServer.
-                await socket.send_multipart((cloudpickle.dumps(
-                    RPCGenerateRequest(
-                        inputs=inputs,
-                        sampling_params=sampling_params,
-                        request_id=request_id,
-                        lora_request=lora_request,
-                        trace_headers=trace_headers,
-                        prompt_adapter_request=prompt_adapter_request)), ))
+            
+            # Send RPCGenerateRequest to the RPCServer.
+            await self.new_req_socket.send_multipart((cloudpickle.dumps(
+                RPCGenerateRequest(
+                    inputs=inputs,
+                    sampling_params=sampling_params,
+                    request_id=request_id,
+                    lora_request=lora_request,
+                    trace_headers=trace_headers,
+                    prompt_adapter_request=prompt_adapter_request)), ))
 
-                ack: Frame = await socket.recv(copy=False)
-                if len(ack.buffer) != 0:
-                    exception = pickle.loads(ack.buffer)
-                    raise exception
+                # ack: Frame = await socket.recv(copy=False)
+                # if len(ack.buffer) != 0:
+                #     exception = pickle.loads(ack.buffer)
+                #     raise exception
 
             while not finished:
                 request_output = await queue.get()
@@ -395,7 +403,8 @@ class AsyncEngineRPCClient:
                     # possibly setting the `errored` property.
                     if not self._errored:
                         try:
-                            await self.check_health(socket=socket)
+                            # await self.check_health(socket=socket)
+                            pass
                         except Exception as e:
                             self._errored = True
                             logger.exception(repr(e))
