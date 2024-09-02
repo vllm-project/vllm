@@ -94,7 +94,7 @@ class OpenAIServingChat(OpenAIServing):
             tokenizer = await self.async_engine_client.get_tokenizer(
                 lora_request)
 
-            conversation, mm_futures = parse_chat_messages(
+            conversation, mm_data_future = parse_chat_messages(
                 request.messages, model_config, tokenizer)
 
             tool_dicts = None if request.tools is None else [
@@ -116,12 +116,8 @@ class OpenAIServingChat(OpenAIServing):
 
         mm_data: Optional[MultiModalDataDict] = None
         try:
-            if len(mm_futures):
-                # since we support only single mm data currently
-                assert len(
-                    mm_futures
-                ) == 1, "Multiple 'image_url' input is currently not supported."
-                mm_data = await mm_futures[0]
+            if mm_data_future:
+                mm_data = await mm_data_future
         except Exception as e:
             logger.error("Error in loading multi-modal data: %s", e)
             return self.create_error_response(str(e))

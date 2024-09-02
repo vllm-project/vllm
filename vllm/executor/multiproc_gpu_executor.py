@@ -14,7 +14,8 @@ from vllm.executor.gpu_executor import create_worker
 from vllm.executor.multiproc_worker_utils import (ProcessWorkerWrapper,
                                                   ResultHandler, WorkerMonitor)
 from vllm.logger import init_logger
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.sequence import ExecuteModelRequest
 from vllm.triton_utils import maybe_set_triton_cache_manager
 from vllm.utils import (_run_task_with_lock, cuda_device_count_stateless,
                         get_distributed_init_method, get_open_port,
@@ -126,7 +127,7 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
                           max_parallel_loading_workers)
 
     def _check_executor_parameters(self):
-        world_size = self.parallel_config.tensor_parallel_size
+        world_size = self.parallel_config.world_size
         tensor_parallel_size = self.parallel_config.tensor_parallel_size
 
         # Set CUDA_VISIBLE_DEVICES for the driver, inherited by workers

@@ -14,11 +14,11 @@ from typing_extensions import TypeAlias
 from vllm.config import ModelConfig
 from vllm.inputs import InputContext
 from vllm.logger import init_logger
-from vllm.utils import json_map_leaves
+from vllm.utils import JSONTree, is_list_of, json_map_leaves
 
 logger = init_logger(__name__)
 
-NestedTensors = Union[List["NestedTensors"], torch.Tensor]
+NestedTensors = Union[List["NestedTensors"], List[torch.Tensor], torch.Tensor]
 """
 Uses a list instead of a tensor if the dimensions of each element do not match.
 """
@@ -54,7 +54,8 @@ class MultiModalInputs(_MultiModalInputsBase):
             return nested_tensors
 
         stacked = [MultiModalInputs._try_stack(t) for t in nested_tensors]
-        if any(isinstance(t, list) for t in stacked):
+        if not is_list_of(stacked, torch.Tensor, check="all"):
+            # Only tensors (not lists) can be stacked.
             return stacked
 
         tensors_ = cast(List[torch.Tensor], stacked)
@@ -101,8 +102,14 @@ class MultiModalInputs(_MultiModalInputsBase):
         *,
         device: torch.types.Device,
     ) -> BatchedTensorInputs:
-        return json_map_leaves(lambda x: x.to(device, non_blocking=True),
-                               batched_inputs)
+        json_inputs = cast(JSONTree[torch.Tensor], batched_inputs)
+
+        json_mapped = json_map_leaves(
+            lambda x: x.to(device, non_blocking=True),
+            json_inputs,
+        )
+
+        return cast(BatchedTensorInputs, json_mapped)
 
 
 _T = TypeVar("_T")

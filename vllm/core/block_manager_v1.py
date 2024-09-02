@@ -681,14 +681,20 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             for block in block_table:
                 block.last_accessed = access_time
 
-    def compute_full_blocks_in_seq(self, seq: Sequence):
+    def compute_full_blocks_in_seq(self, seq: Sequence, token_chunk_size: int):
         if seq.seq_id not in self.block_tables:
             return
-        max_full_block = seq.get_len() // self.block_size - 1
+
+        # When chunked prefill is enabled, the computed full blocks
+        # should be calculated based on the number of computed tokens.
+        max_computed_tokens = (seq.data.get_num_computed_tokens() +
+                               token_chunk_size)
+        computed_full_blocks = max_computed_tokens // self.block_size
+
         block_table = self.block_tables[seq.seq_id]
-        if max_full_block == -1:
+        if computed_full_blocks == 0:
             return
-        for i in reversed(range(max_full_block)):
+        for i in reversed(range(computed_full_blocks)):
             if block_table[i].computed:
                 break
             block_table[i].computed = True
@@ -718,10 +724,11 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         ids_list = [self.get_all_computed_blocks(seq) for seq in seqs]
         return commonprefix([ids for ids in ids_list if ids != []])
 
-    def mark_blocks_as_computed(self, seq_group: SequenceGroup):
+    def mark_blocks_as_computed(self, seq_group: SequenceGroup,
+                                token_chunk_size: int):
         if self.enable_caching:
             for seq in seq_group.get_seqs():
-                self.compute_full_blocks_in_seq(seq)
+                self.compute_full_blocks_in_seq(seq, token_chunk_size)
 
     def get_prefix_cache_hit_rate(self, device: Device) -> float:
         if device == Device.GPU:
