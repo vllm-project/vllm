@@ -8,8 +8,6 @@ from transformers import AutoConfig, AutoModel, CLIPImageProcessor
 
 from ....conftest import _ImageAssets, cleanup
 
-pytestmark = pytest.mark.vlm
-
 # we use snapshot_download to prevent conflicts between
 # dynamic_module and trust_remote_code for hf_runner
 DOWNLOAD_PATTERN = ["*.json", "*.py", "*.safetensors", "*.txt", "*.model"]
