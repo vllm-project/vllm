@@ -479,7 +479,6 @@ class SiglipVisionTransformer(nn.Module):
 class SiglipVisionModel(nn.Module):
     config_class = SiglipVisionConfig
     main_input_name = "pixel_values"
-    use_shard_weight_loader = USE_XFORMERS_OPS
 
     def __init__(
         self,
@@ -488,6 +487,10 @@ class SiglipVisionModel(nn.Module):
         num_hidden_layers_override: Optional[int] = None,
     ):
         super().__init__()
+        num_heads = config.num_attention_heads
+        tp_size = get_tensor_model_parallel_world_size()
+        self.shard_weight = USE_XFORMERS_OPS and num_heads % tp_size == 0
+
         self.vision_model = SiglipVisionTransformer(
             config,
             quant_config,

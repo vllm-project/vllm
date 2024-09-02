@@ -307,7 +307,7 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal):
                 if key_to_modify in name:
                     name = name.replace(key_to_modify, new_key)
             use_default_weight_loading = False
-            if "vision" not in name or self.vision_tower.use_shard_weight_loader:
+            if "vision" not in name or self.vision_tower.shard_weight:
                 for (param_name, shard_name,
                      shard_id) in stacked_params_mapping:
                     if shard_name not in name:
