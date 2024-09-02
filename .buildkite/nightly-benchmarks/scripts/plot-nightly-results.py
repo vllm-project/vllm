@@ -87,9 +87,11 @@ def main(args):
             
     # generate markdown table
     df = pd.DataFrame.from_dict(results)
+    df['Avg input tokens'] = df['Total input tokens'] / df['Successful req.']
+    df['Avg output tokens'] = df['Total output tokens'] / df['Successful req.']
     # print(df)
     # df = df[df["Test name"].str.contains(args.dataset)]
-    table = tabulate(df, headers='keys', tablefmt='pipe', showindex=False)
+    table = tabulate(df[df["Test name"].str.contains('qps_inf')], headers='keys', tablefmt='pipe', showindex=False)
     with open(f"nightly_results.md", "w") as f:
         f.write(table)
     

@@ -99,7 +99,7 @@
         }
     },
     {
-        "test_name": "llama8B_tp1_sonnet_512_512",
+        "test_name": "llama8B_tp1_sonnet_512_256",
         "qps_list": [2,4,8,16,32,"inf"],
         "common_parameters": {
             "model": "meta-llama/Meta-Llama-3-8B-Instruct",
@@ -109,7 +109,7 @@
             "num_prompts": 500,
             "port": 8000,
             "sonnet_input_len": 512,
-            "sonnet_output_len": 512,
+            "sonnet_output_len": 256,
             "sonnet_prefix_len": 50,
             "reuse_server": true
         },
@@ -249,7 +249,7 @@
         }
     },
     {
-        "test_name": "llama70B_tp4_sonnet_512_512",
+        "test_name": "llama70B_tp4_sonnet_512_256",
         "qps_list": [2,4,8,16,32,"inf"],
         "common_parameters": {
             "model": "meta-llama/Meta-Llama-3-70B-Instruct",
@@ -259,7 +259,7 @@
             "num_prompts": 500,
             "port": 8000,
             "sonnet_input_len": 512,
-            "sonnet_output_len": 512,
+            "sonnet_output_len": 256,
             "sonnet_prefix_len": 50,
             "reuse_server": true
         },
