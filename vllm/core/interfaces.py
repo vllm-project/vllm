@@ -5,7 +5,7 @@ from typing import Sequence as GenericSequence
 from typing import Tuple
 
 from vllm.sequence import Sequence, SequenceGroup
-from vllm.utils import Device
+from vllm.utils import BlockSwapParam, Device
 
 
 class AllocStatus(enum.Enum):
@@ -74,7 +74,22 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def swap_in(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
+    def swap_in(
+        self, seq_group: SequenceGroup
+    ) -> List[Tuple[BlockSwapParam, BlockSwapParam]]:
+        pass
+
+    @abstractmethod
+    def is_swap_in_from_external(
+        self,
+        seq_group: SequenceGroup,
+    ) -> bool:
+        pass
+
+    @abstractmethod
+    def swap_in_from_external(
+        self, seq_group: SequenceGroup
+    ) -> List[Tuple[BlockSwapParam, BlockSwapParam]]:
         pass
 
     @abstractmethod
@@ -82,7 +97,19 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def swap_out(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
+    def can_swap_out_to_external(self, seq_group: SequenceGroup) -> bool:
+        pass
+
+    @abstractmethod
+    def swap_out(
+        self, seq_group: SequenceGroup
+    ) -> List[Tuple[BlockSwapParam, BlockSwapParam]]:
+        pass
+
+    @abstractmethod
+    def swap_out_to_external(
+        self, seq_group: SequenceGroup
+    ) -> List[Tuple[BlockSwapParam, BlockSwapParam]]:
         pass
 
     @abstractmethod

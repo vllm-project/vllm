@@ -10,6 +10,7 @@ from vllm.core.interfaces import AllocStatus
 from vllm.core.scheduler import Scheduler, SchedulingBudget
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SequenceGroup, SequenceStatus
+from vllm.utils import BlockSwapParam
 
 from .utils import (append_new_token, append_new_token_seq_group,
                     create_dummy_prompt, get_sequence_groups,
@@ -622,7 +623,7 @@ def test_schedule_decode_blocks_to_copy_update():
 def test_schedule_swapped_simple():
     scheduler = initialize_scheduler()
     curr_loras = None
-    blocks_to_swap_out: List[Tuple[int, int]] = []
+    blocks_to_swap_out: List[Tuple[BlockSwapParam, BlockSwapParam]] = []
     _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
     scheduler._allocate_and_set_running(seq_group)
     append_new_token_seq_group(60, seq_group, 1)
@@ -641,7 +642,12 @@ def test_schedule_swapped_simple():
     blocks_to_swap_in_reverse = []
     for swapin, swapout in output.blocks_to_swap_in:
         blocks_to_swap_in_reverse.append((swapout, swapin))
-    assert blocks_to_swap_out == blocks_to_swap_in_reverse
+
+    for i in range(len(blocks_to_swap_out)):
+        assert blocks_to_swap_out[i][0].block_id == blocks_to_swap_in_reverse[
+            i][0].block_id
+        assert blocks_to_swap_out[i][1].block_id == blocks_to_swap_in_reverse[
+            i][1].block_id
 
 
 def test_schedule_swapped_max_token_budget():

@@ -2,7 +2,7 @@ from typing import List, Tuple
 
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.sequence import Sequence, SequenceGroup
-from vllm.utils import Device
+from vllm.utils import BlockSwapParam, Device
 
 
 class EmbeddingModelBlockSpaceManager(BlockSpaceManager):
@@ -47,13 +47,36 @@ class EmbeddingModelBlockSpaceManager(BlockSpaceManager):
                     num_lookahead_slots: int) -> AllocStatus:
         return AllocStatus.OK
 
-    def swap_in(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
+    def swap_in(
+        self, seq_group: SequenceGroup
+    ) -> List[Tuple[BlockSwapParam, BlockSwapParam]]:
         return None  # type: ignore
+
+    def swap_in_from_external(
+        self, seq_group: SequenceGroup
+    ) -> List[Tuple[BlockSwapParam, BlockSwapParam]]:
+        return None  # type: ignore
+
+    def is_swap_in_from_external(
+        self,
+        seq_group: SequenceGroup,
+    ) -> bool:
+        return False
 
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:
         return True
 
-    def swap_out(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
+    def can_swap_out_to_external(self, seq_group: SequenceGroup) -> bool:
+        return True
+
+    def swap_out(
+        self, seq_group: SequenceGroup
+    ) -> List[Tuple[BlockSwapParam, BlockSwapParam]]:
+        return None  # type: ignore
+
+    def swap_out_to_external(
+        self, seq_group: SequenceGroup
+    ) -> List[Tuple[BlockSwapParam, BlockSwapParam]]:
         return None  # type: ignore
 
     def free(self, seq: Sequence) -> None:

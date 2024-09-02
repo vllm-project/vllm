@@ -462,3 +462,10 @@ class NaiveBlock(Block):
     @property
     def content_hash(self) -> Optional[int]:
         return None
+
+    @property
+    def get_current_allocator(self) -> BlockAllocator:
+        return self._allocator
+
+    def set_current_allocator(self, allocator: BlockAllocator) -> None:
+        self._allocator = allocator

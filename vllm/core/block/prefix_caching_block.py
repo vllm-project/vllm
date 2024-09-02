@@ -854,6 +854,13 @@ class PrefixCachingBlock(Block):
         assert (prev_block_hash is None) == is_first_block
         return hash((is_first_block, prev_block_hash, *cur_block_token_ids))
 
+    @property
+    def get_current_allocator(self) -> BlockAllocator:
+        return self._allocator
+
+    def set_current_allocator(self, allocator: BlockAllocator) -> None:
+        self._allocator = allocator  # type: ignore
+
 
 class ComputedBlocksTracker:
     """Handles caching of per-sequence computed block ids. 

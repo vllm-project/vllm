@@ -14,7 +14,7 @@ from vllm.core.evictor_v1 import EvictionPolicy, Evictor, make_evictor
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.logger import init_logger
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
-from vllm.utils import Device
+from vllm.utils import BlockSwapParam, Device, get_external_device
 
 logger = init_logger(__name__)
 
@@ -234,6 +234,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         block_size: int,
         num_gpu_blocks: int,
         num_cpu_blocks: int,
+        num_external_blocks: int = 0,
+        external_swapper: str = "",
         watermark: float = 0.01,
         sliding_window: Optional[int] = None,
         enable_caching: bool = False,
@@ -241,6 +243,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         self.block_size = block_size
         self.num_total_gpu_blocks = num_gpu_blocks
         self.num_total_cpu_blocks = num_cpu_blocks
+        self.num_total_external_blocks = num_external_blocks
 
         if enable_caching and sliding_window is not None:
             raise NotImplementedError(
@@ -258,6 +261,10 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         self.enable_caching = enable_caching
 
         self.watermark_blocks = int(watermark * num_gpu_blocks)
+        self.enable_external_swapper = (external_swapper != ""
+                                        and external_swapper is not None)
+        if self.enable_external_swapper:
+            self._external_device = get_external_device(external_swapper)
 
         if self.enable_caching:
             logger.info("Automatic prefix caching is enabled.")
@@ -265,11 +272,21 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 Device.GPU, block_size, num_gpu_blocks)
             self.cpu_allocator: BlockAllocatorBase = CachedBlockAllocator(
                 Device.CPU, block_size, num_cpu_blocks)
+            if self.enable_external_swapper:
+                self.external_allocator: BlockAllocatorBase = \
+                    CachedBlockAllocator(
+                    self._external_device, block_size,
+                    num_external_blocks)
         else:
             self.gpu_allocator = UncachedBlockAllocator(
                 Device.GPU, block_size, num_gpu_blocks)
             self.cpu_allocator = UncachedBlockAllocator(
                 Device.CPU, block_size, num_cpu_blocks)
+            if self.enable_external_swapper:
+                self.external_allocator = \
+                    UncachedBlockAllocator(
+                    self._external_device, block_size,
+                    num_external_blocks)
         # Mapping: seq_id -> BlockTable.
         self.block_tables: Dict[int, BlockTable] = {}
 
@@ -566,7 +583,9 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
         return new_block_table
 
-    def swap_in(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
+    def swap_in(
+        self, seq_group: SequenceGroup
+    ) -> List[Tuple[BlockSwapParam, BlockSwapParam]]:
 
         request_id = seq_group.request_id
 
@@ -586,14 +605,63 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                                        self.gpu_allocator,
                                        mapping)
 
-        return [(cpu_block.block_number, gpu_block.block_number)
+        return [(BlockSwapParam(cpu_block.block_number, Device.CPU),
+                 BlockSwapParam(gpu_block.block_number, Device.GPU))
                 for cpu_block, gpu_block in mapping.items()]
+
+    def swap_in_from_external(
+        self, seq_group: SequenceGroup
+    ) -> List[Tuple[BlockSwapParam, BlockSwapParam]]:
+
+        request_id = seq_group.request_id
+
+        # External block -> GPU block.
+        # dict is efficient in lookup `if cpu_block in mapping`
+
+        mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
+        for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
+            self.block_tables[seq.seq_id] = \
+                self._swap_block_table(self.block_tables[seq.seq_id],
+                                       self.external_allocator,
+                                       self.gpu_allocator,
+                                       mapping)
+
+        if seq_group.is_encoder_decoder():
+            self.cross_block_tables[request_id] = \
+                self._swap_block_table(self.cross_block_tables[request_id],
+                                       self.external_allocator,
+                                       self.gpu_allocator,
+                                       mapping)
+
+        return [(BlockSwapParam(external_block.block_number,
+                                self._external_device),
+                 BlockSwapParam(gpu_block.block_number, Device.GPU))
+                for external_block, gpu_block in mapping.items()]
+
+    def is_swap_in_from_external(
+        self,
+        seq_group: SequenceGroup,
+    ) -> bool:
+        for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
+            if len(self.block_tables[seq.seq_id]) == 0:
+                continue
+
+            return self.block_tables[
+                seq.seq_id][0].device == self._external_device
+
+        return True
 
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:
         blocks = self._get_physical_blocks(seq_group)
         return len(blocks) <= self.cpu_allocator.get_num_free_blocks()
 
-    def swap_out(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
+    def can_swap_out_to_external(self, seq_group: SequenceGroup) -> bool:
+        blocks = self._get_physical_blocks(seq_group)
+        return len(blocks) <= self.external_allocator.get_num_free_blocks()
+
+    def swap_out(
+        self, seq_group: SequenceGroup
+    ) -> List[Tuple[BlockSwapParam, BlockSwapParam]]:
         request_id = seq_group.request_id
 
         # GPU block -> CPU block.
@@ -612,8 +680,36 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                                        self.cpu_allocator,
                                        mapping)
 
-        return [(cpu_block.block_number, gpu_block.block_number)
-                for cpu_block, gpu_block in mapping.items()]
+        return [(BlockSwapParam(gpu_block.block_number, Device.GPU),
+                 BlockSwapParam(cpu_block.block_number, Device.CPU))
+                for gpu_block, cpu_block in mapping.items()]
+
+    def swap_out_to_external(
+        self, seq_group: SequenceGroup
+    ) -> List[Tuple[BlockSwapParam, BlockSwapParam]]:
+        request_id = seq_group.request_id
+
+        # GPU block -> External block.
+        # dict is efficient in lookup `if gpu_block in mapping`
+        mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
+        for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
+            self.block_tables[seq.seq_id] = \
+                self._swap_block_table(self.block_tables[seq.seq_id],
+                                       self.gpu_allocator,
+                                       self.external_allocator,
+                                       mapping)
+
+        if seq_group.is_encoder_decoder():
+            self.cross_block_tables[request_id] = \
+                self._swap_block_table(self.cross_block_tables[request_id],
+                                       self.gpu_allocator,
+                                       self.external_allocator,
+                                       mapping)
+
+        return [(BlockSwapParam(gpu_block.block_number, Device.GPU),
+                 BlockSwapParam(external_block.block_number,
+                                self._external_device))
+                for gpu_block, external_block in mapping.items()]
 
     def _free_block_table(self, block_table: BlockTable) -> None:
         # when using a sliding window, each seq will only use up
@@ -668,6 +764,9 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
     def get_num_free_cpu_blocks(self) -> int:
         return self.cpu_allocator.get_num_free_blocks()
+
+    def get_num_free_external_blocks(self) -> int:
+        return self.external_allocator.get_num_free_blocks()
 
     def access_all_blocks_in_seq(
         self,

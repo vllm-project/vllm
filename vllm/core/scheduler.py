@@ -15,7 +15,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta,
                            SequenceStatus)
-from vllm.utils import Device, PyObjectCache
+from vllm.utils import BlockSwapParam, Device, PyObjectCache
 
 logger = init_logger(__name__)
 
@@ -120,10 +120,10 @@ class SchedulerOutputs:
     num_prefill_groups: int
     # Total number of batched tokens.
     num_batched_tokens: int
-    # Blocks to swap in. List of CPU -> GPU block number.
-    blocks_to_swap_in: List[Tuple[int, int]]
-    # Blocks to swap out. List of GPU -> CPU block number.
-    blocks_to_swap_out: List[Tuple[int, int]]
+    # Blocks to swap in. List of CPU/External -> GPU block number.
+    blocks_to_swap_in: List[Tuple[BlockSwapParam, BlockSwapParam]]
+    # Blocks to swap out. List of GPU -> CPU/External block number.
+    blocks_to_swap_out: List[Tuple[BlockSwapParam, BlockSwapParam]]
     # Blocks to copy. Source to dest block.
     blocks_to_copy: List[Tuple[int, int]]
     # Sequence groups that are going to be ignored.
@@ -188,7 +188,7 @@ class SchedulerRunningOutputs:
     # Sequences that are swapped out.
     swapped_out: List[SequenceGroup]
     # The blocks to swap out.
-    blocks_to_swap_out: List[Tuple[int, int]]
+    blocks_to_swap_out: List[Tuple[BlockSwapParam, BlockSwapParam]]
     # The blocks to copy.
     blocks_to_copy: List[Tuple[int, int]]
     # The number of slots for lookahead decoding.
@@ -226,7 +226,7 @@ class SchedulerSwappedInOutputs:
     # phase. I.e., it means the prefill has been chunked.
     prefill_seq_groups: List[ScheduledSequenceGroup]
     # The blocks to swap in.
-    blocks_to_swap_in: List[Tuple[int, int]]
+    blocks_to_swap_in: List[Tuple[BlockSwapParam, BlockSwapParam]]
     # The blocks to copy.
     blocks_to_copy: List[Tuple[int, int]]
     # The number of slots for lookahead decoding.
@@ -328,11 +328,17 @@ class Scheduler:
         if num_cpu_blocks:
             num_cpu_blocks //= pipeline_parallel_size
 
+        num_external_blocks = cache_config.num_external_blocks
+        if num_external_blocks:
+            num_external_blocks //= pipeline_parallel_size
+
         # Create the block space manager.
         self.block_manager = BlockSpaceManagerImpl(
             block_size=self.cache_config.block_size,
             num_gpu_blocks=num_gpu_blocks,
             num_cpu_blocks=num_cpu_blocks,
+            num_external_blocks=num_external_blocks,
+            external_swapper=self.cache_config.external_swapper,
             sliding_window=self.cache_config.sliding_window,
             enable_caching=self.cache_config.enable_prefix_caching)
 
@@ -379,6 +385,10 @@ class Scheduler:
         self.output_proc_callback = output_proc_callback
         self.use_async_output_proc = self.output_proc_callback is not None
         self.num_cache_iters = 2 if self.use_async_output_proc else 1
+
+        self.enable_external_swapper = (
+            self.cache_config.external_swapper != ""
+            and self.cache_config.external_swapper is not None)
 
         self.cache_id = 0
         for i in range(self.num_cache_iters):
@@ -528,7 +538,8 @@ class Scheduler:
         ret.prefill_seq_groups_list.clear()
 
         # Blocks that need to be swapped or copied before model execution.
-        blocks_to_swap_out: List[Tuple[int, int]] = ret.blocks_to_swap_out
+        blocks_to_swap_out: List[Tuple[
+            BlockSwapParam, BlockSwapParam]] = ret.blocks_to_swap_out
         blocks_to_copy: List[Tuple[int, int]] = ret.blocks_to_copy
 
         decode_seq_groups: List[ScheduledSequenceGroup] = ret.decode_seq_groups
@@ -666,7 +677,7 @@ class Scheduler:
             SchedulerSwappedInOutputs.
         """
         # Blocks that need to be swapped or copied before model execution.
-        blocks_to_swap_in: List[Tuple[int, int]] = []
+        blocks_to_swap_in: List[Tuple[BlockSwapParam, BlockSwapParam]] = []
         blocks_to_copy: List[Tuple[int, int]] = []
         decode_seq_groups: List[ScheduledSequenceGroup] = []
         prefill_seq_groups: List[ScheduledSequenceGroup] = []
@@ -1321,7 +1332,7 @@ class Scheduler:
     def _preempt(
         self,
         seq_group: SequenceGroup,
-        blocks_to_swap_out: List[Tuple[int, int]],
+        blocks_to_swap_out: List[Tuple[BlockSwapParam, BlockSwapParam]],
         preemption_mode: Optional[PreemptionMode] = None,
     ) -> PreemptionMode:
         # If preemption mode is not specified, we determine the mode as follows:
@@ -1378,16 +1389,26 @@ class Scheduler:
     def _preempt_by_swap(
         self,
         seq_group: SequenceGroup,
-        blocks_to_swap_out: List[Tuple[int, int]],
+        blocks_to_swap_out: List[Tuple[BlockSwapParam, BlockSwapParam]],
     ) -> None:
         self._swap_out(seq_group, blocks_to_swap_out)
+
+    def _is_swap_in_from_external(
+        self,
+        seq_group: SequenceGroup,
+    ) -> bool:
+        return self.block_manager.is_swap_in_from_external(seq_group)
 
     def _swap_in(
         self,
         seq_group: SequenceGroup,
-        blocks_to_swap_in: List[Tuple[int, int]],
+        blocks_to_swap_in: List[Tuple[BlockSwapParam, BlockSwapParam]],
     ) -> None:
-        mapping = self.block_manager.swap_in(seq_group)
+        if self.enable_external_swapper and self._is_swap_in_from_external(
+                seq_group):
+            mapping = self.block_manager.swap_in_from_external(seq_group)
+        else:
+            mapping = self.block_manager.swap_in(seq_group)
         blocks_to_swap_in.extend(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
             seq.status = SequenceStatus.RUNNING
@@ -1395,15 +1416,24 @@ class Scheduler:
     def _swap_out(
         self,
         seq_group: SequenceGroup,
-        blocks_to_swap_out: List[Tuple[int, int]],
+        blocks_to_swap_out: List[Tuple[BlockSwapParam, BlockSwapParam]],
     ) -> None:
-        if not self.block_manager.can_swap_out(seq_group):
+        swap_to_cpu = self.block_manager.can_swap_out(seq_group)
+        swap_to_external = (
+            self.enable_external_swapper
+            and self.block_manager.can_swap_out_to_external(seq_group))
+
+        if not swap_to_cpu and not swap_to_external:
             # FIXME(woosuk): Abort the sequence group instead of aborting the
             # entire engine.
             raise RuntimeError(
                 "Aborted due to the lack of CPU swap space. Please increase "
                 "the swap space to avoid this error.")
-        mapping = self.block_manager.swap_out(seq_group)
+        if swap_to_cpu:
+            mapping = self.block_manager.swap_out(seq_group)
+        else:
+            mapping = self.block_manager.swap_out_to_external(seq_group)
+
         blocks_to_swap_out.extend(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             seq.status = SequenceStatus.SWAPPED

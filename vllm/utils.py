@@ -1224,3 +1224,12 @@ async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
 def supports_dynamo() -> bool:
     base_torch_version = Version(Version(torch.__version__).base_version)
     return base_torch_version >= Version("2.4.0")
+
+
+class BlockSwapParam:
+    """A utility class to save the block id and device information for swap.
+    """
+
+    def __init__(self, block_id: Optional[int], device: Device):
+        self.block_id = block_id
+        self.device = device

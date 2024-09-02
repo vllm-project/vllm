@@ -290,7 +290,7 @@ def test_swap(block_size, num_cpu_blocks, num_gpu_blocks, num_lookahead_slots,
     before_cpu_blocks = block_manager.get_num_free_cpu_blocks()
     before_gpu_blocks = block_manager.get_num_free_gpu_blocks()
     mapping = block_manager.swap_out(seq_group)
-    mapping_keys = [key for key, _ in mapping]
+    mapping_keys = [key.block_id for key, _ in mapping]
     assert mapping_keys == gpu_blocks
     after_cpu_blocks = block_manager.get_num_free_cpu_blocks()
     after_gpu_blocks = block_manager.get_num_free_gpu_blocks()
@@ -304,7 +304,7 @@ def test_swap(block_size, num_cpu_blocks, num_gpu_blocks, num_lookahead_slots,
     before_gpu_blocks = block_manager.get_num_free_gpu_blocks()
     mapping = block_manager.swap_in(seq_group)
     cpu_blocks = block_manager.get_block_table(prompt)
-    mapping_keys = [key for key, _ in mapping]
+    mapping_keys = [key.block_id for key, _ in mapping]
     assert mapping_keys == [cpu_blocks[0]]
     after_cpu_blocks = block_manager.get_num_free_cpu_blocks()
     after_gpu_blocks = block_manager.get_num_free_gpu_blocks()
@@ -338,7 +338,7 @@ def test_can_swap(block_size, num_gpu_blocks, num_lookahead_slots,
     before_cpu_blocks = block_manager.get_num_free_cpu_blocks()
     before_gpu_blocks = block_manager.get_num_free_gpu_blocks()
     mapping = block_manager.swap_out(seq_group)
-    mapping_keys = [key for key, _ in mapping]
+    mapping_keys = [key.block_id for key, _ in mapping]
     assert mapping_keys == gpu_blocks
     after_cpu_blocks = block_manager.get_num_free_cpu_blocks()
     after_gpu_blocks = block_manager.get_num_free_gpu_blocks()

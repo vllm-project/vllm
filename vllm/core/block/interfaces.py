@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Dict, FrozenSet, List, Optional, Protocol, Tuple
 
-from vllm.utils import Device
+from vllm.utils import BlockSwapParam, Device
 
 BlockId = int
 
@@ -69,6 +69,15 @@ class Block(ABC):
     @last_accessed.setter
     @abstractmethod
     def last_accessed(self, last_accessed_ts: float):
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def get_current_allocator(self) -> "BlockAllocator":
+        raise NotImplementedError
+
+    @abstractmethod
+    def set_current_allocator(self, allocator: "BlockAllocator") -> None:
         raise NotImplementedError
 
     class Factory(Protocol):
@@ -268,7 +277,7 @@ class DeviceAwareBlockAllocator(ABC):
 
     @abstractmethod
     def swap(self, blocks: List[Block], src_device: Device,
-             dst_device: Device) -> Dict[int, int]:
+             dst_device: Device) -> Dict[BlockSwapParam, BlockSwapParam]:
         pass
 
     @abstractmethod
@@ -287,4 +296,9 @@ class DeviceAwareBlockAllocator(ABC):
     @abstractmethod
     def get_prefix_cache_hit_rate(self, device: Device) -> float:
         """Prefix cache hit rate. -1 means not supported or disabled."""
+        pass
+
+    @abstractmethod
+    def get_block_device(self, block: Block) -> Device:
+        """Indicate the device of the block."""
         pass

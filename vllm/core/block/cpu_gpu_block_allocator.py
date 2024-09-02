@@ -4,7 +4,7 @@ from vllm.core.block.interfaces import (Block, BlockAllocator, BlockId,
                                         DeviceAwareBlockAllocator)
 from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
 from vllm.core.block.prefix_caching_block import PrefixCachingBlockAllocator
-from vllm.utils import Device
+from vllm.utils import BlockSwapParam, Device, get_external_device
 
 
 class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
@@ -25,6 +25,8 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         num_gpu_blocks: int,
         num_cpu_blocks: int,
         block_size: int,
+        num_external_blocks: int = 0,
+        external_swapper: str = "",
     ) -> DeviceAwareBlockAllocator:
         """Creates a CpuGpuBlockAllocator instance with the specified
         configuration.
@@ -102,7 +104,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             Device.GPU: gpu_block_allocator,
         }
 
-        self._swap_mapping: Dict[int, int] = {}
+        self._swap_mapping: Dict[BlockSwapParam, BlockSwapParam] = {}
         self._null_block: Optional[Block] = None
 
         self._block_ids_to_allocator: Dict[int, BlockAllocator] = {}
@@ -232,7 +234,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         return self._allocators[device].get_physical_block_id(absolute_id)
 
     def swap(self, blocks: List[Block], src_device: Device,
-             dst_device: Device) -> Dict[int, int]:
+             dst_device: Device) -> Dict[BlockSwapParam, BlockSwapParam]:
         """Execute the swap for the given blocks from source_device
         on to dest_device, save the current swap mapping and append 
         them to the accumulated `self._swap_mapping` for each 
@@ -247,16 +249,26 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             Dict[int, int]: Swap mapping from source_device
                 on to dest_device.
         """
-        src_block_ids = [block.block_id for block in blocks]
+        src_blocks = [
+            BlockSwapParam(block.block_id, src_device) for block in blocks
+        ]
         self._allocators[src_device].swap_out(blocks)
         self._allocators[dst_device].swap_in(blocks)
-        dst_block_ids = [block.block_id for block in blocks]
+        dst_blocks = []
+        for block in blocks:
 
-        current_swap_mapping: Dict[int, int] = {}
-        for src_block_id, dst_block_id in zip(src_block_ids, dst_block_ids):
-            if src_block_id is not None and dst_block_id is not None:
-                self._swap_mapping[src_block_id] = dst_block_id
-                current_swap_mapping[src_block_id] = dst_block_id
+            # because block" to allow reusing the
+            # existing "block" object
+            # so change block.allocator to the dst allocator
+            block.set_current_allocator(self._allocators[dst_device])
+            dst_blocks.append(BlockSwapParam(block.block_id, dst_device))
+
+        current_swap_mapping: Dict[BlockSwapParam, BlockSwapParam] = {}
+        for src_block, dst_block in zip(src_blocks, dst_blocks):
+            if src_block.block_id is not None \
+                and dst_block.block_id is not None:
+                self._swap_mapping[src_block] = dst_block
+                current_swap_mapping[src_block] = dst_block
         return current_swap_mapping
 
     def get_num_blocks_touched(self,
@@ -328,17 +340,146 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         assert device in self._allocators
         return self._allocators[device].get_prefix_cache_hit_rate()
 
-    def get_and_reset_swaps(self) -> List[Tuple[int, int]]:
+    def get_and_reset_swaps(
+            self) -> List[Tuple[BlockSwapParam, BlockSwapParam]]:
         """Returns and clears the mapping of source to destination block IDs.
         Will be called after every swapping operations for now, and after every
         schedule when BlockManagerV2 become default. Currently not useful.
 
         Returns:
-            List[Tuple[int, int]]: A mapping of source to destination block IDs.
+            List[Tuple[BlockSwapParam, BlockSwapParam]]: A mapping of source to
+            destination block IDs.
         """
         mapping = self._swap_mapping.copy()
         self._swap_mapping.clear()
         return list(mapping.items())
+
+    def get_block_device(self, block: Block) -> Device:
+        for device, allocator in self._allocators.items():
+            if block.get_current_allocator == allocator:
+                return device
+
+        raise ValueError(f"Unknown block {block}")
+
+
+class CpuGpuExternalBlockAllocator(CpuGpuBlockAllocator):
+
+    @staticmethod
+    def create(
+        allocator_type: str,
+        num_gpu_blocks: int,
+        num_cpu_blocks: int,
+        block_size: int,
+        num_external_blocks: int = 0,
+        external_swapper: str = "",
+    ) -> DeviceAwareBlockAllocator:
+        """Creates a CpuGpuBlockAllocator instance with the specified
+        configuration.
+
+        This static method creates and returns a CpuGpuBlockAllocator instance
+        based on the provided parameters. It initializes the CPU and GPU block
+        allocators with the specified number of blocks, block size, and
+        allocator type.
+
+        Args:
+            allocator_type (str): The type of block allocator to use for CPU
+                and GPU blocks. Currently supported values are "naive" and
+                "prefix_caching".
+            num_gpu_blocks (int): The number of blocks to allocate for GPU
+                memory.
+            num_cpu_blocks (int): The number of blocks to allocate for CPU
+                memory.
+            block_size (int): The size of each block in number of tokens.
+
+        Returns:
+            DeviceAwareBlockAllocator: A CpuGpuBlockAllocator instance with the
+                specified configuration.
+
+        Notes:
+            - The block IDs are assigned contiguously, with GPU block IDs coming
+                before CPU block IDs.
+        """
+        block_ids = list(
+            range(num_gpu_blocks + num_cpu_blocks + num_external_blocks))
+        gpu_block_ids = block_ids[:num_gpu_blocks]
+        cpu_block_ids = block_ids[num_gpu_blocks:num_gpu_blocks +
+                                  num_cpu_blocks]
+        external_block_ids = block_ids[num_gpu_blocks + num_cpu_blocks:]
+
+        if allocator_type == "naive":
+            gpu_allocator: BlockAllocator = NaiveBlockAllocator(
+                create_block=NaiveBlock,  # type: ignore
+                num_blocks=num_gpu_blocks,
+                block_size=block_size,
+                block_ids=gpu_block_ids,
+            )
+
+            cpu_allocator: BlockAllocator = NaiveBlockAllocator(
+                create_block=NaiveBlock,  # type: ignore
+                num_blocks=num_cpu_blocks,
+                block_size=block_size,
+                block_ids=cpu_block_ids,
+            )
+
+            external_allocator: BlockAllocator = NaiveBlockAllocator(
+                create_block=NaiveBlock,  # type: ignore
+                num_blocks=num_external_blocks,
+                block_size=block_size,
+                block_ids=external_block_ids,
+            )
+        elif allocator_type == "prefix_caching":
+            gpu_allocator = PrefixCachingBlockAllocator(
+                num_blocks=num_gpu_blocks,
+                block_size=block_size,
+                block_ids=gpu_block_ids,
+            )
+
+            cpu_allocator = PrefixCachingBlockAllocator(
+                num_blocks=num_cpu_blocks,
+                block_size=block_size,
+                block_ids=cpu_block_ids,
+            )
+
+            external_allocator = PrefixCachingBlockAllocator(
+                num_blocks=num_external_blocks,
+                block_size=block_size,
+                block_ids=external_block_ids,
+            )
+        else:
+            raise ValueError(f"Unknown allocator type {allocator_type=}")
+
+        return CpuGpuExternalBlockAllocator(
+            cpu_block_allocator=cpu_allocator,
+            gpu_block_allocator=gpu_allocator,
+            external_block_allocator=external_allocator,
+            external_swapper=external_swapper,
+        )
+
+    def __init__(self, cpu_block_allocator: BlockAllocator,
+                 gpu_block_allocator: BlockAllocator,
+                 external_block_allocator: BlockAllocator,
+                 external_swapper: str):
+        assert not (cpu_block_allocator.all_block_ids
+                    & gpu_block_allocator.all_block_ids
+                    & external_block_allocator.all_block_ids
+                    ), "cpu, gpu and external block allocators can't \
+            have intersection of block ids"
+
+        self._external_device = get_external_device(external_swapper)
+
+        self._allocators = {
+            Device.CPU: cpu_block_allocator,
+            Device.GPU: gpu_block_allocator,
+            self._external_device: external_block_allocator,
+        }
+
+        self._swap_mapping: Dict[BlockSwapParam, BlockSwapParam] = {}
+        self._null_block: Optional[Block] = None
+
+        self._block_ids_to_allocator: Dict[int, BlockAllocator] = {}
+        for _, allocator in self._allocators.items():
+            for block_id in allocator.all_block_ids:
+                self._block_ids_to_allocator[block_id] = allocator
 
 
 class NullBlock(Block):
@@ -405,3 +546,12 @@ class NullBlock(Block):
     @property
     def content_hash(self):
         return self._proxy.content_hash
+
+    @property
+    def get_current_allocator(self) -> BlockAllocator:
+        raise NotImplementedError(
+            "get_current_allocator is not used for null block")
+
+    def set_current_allocator(self, allocator: BlockAllocator) -> None:
+        raise NotImplementedError(
+            "set_current_allocator is not used for null block")

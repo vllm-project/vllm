@@ -329,19 +329,19 @@ class Worker(LocalOrDistributedWorkerBase):
             first_block = tuple_item[0]
             if first_block.device == Device.CPU:
                 block_to_swap_in_cpu_list.append(
-                    (tuple_item[0].block_number, tuple_item[1].block_number))
+                    (tuple_item[0].block_id, tuple_item[1].block_id))
             else:
                 block_to_swap_in_external_list.append(
-                    (tuple_item[0].block_number, tuple_item[1].block_number))
+                    (tuple_item[0].block_id, tuple_item[1].block_id))
 
         for tuple_item in execute_model_req.blocks_to_swap_out:
             second_block = tuple_item[1]
             if second_block.device == Device.CPU:
                 block_to_swap_out_cpu_list.append(
-                    (tuple_item[0].block_number, tuple_item[1].block_number))
+                    (tuple_item[0].block_id, tuple_item[1].block_id))
             else:
                 block_to_swap_out_external_list.append(
-                    (tuple_item[0].block_number, tuple_item[1].block_number))
+                    (tuple_item[0].block_id, tuple_item[1].block_id))
 
         blocks_to_swap_in_cpu = torch.tensor(block_to_swap_in_cpu_list,
                                              device="cpu",
