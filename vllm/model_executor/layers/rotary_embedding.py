@@ -125,7 +125,7 @@ class RotaryEmbedding(CustomOp):
         key: torch.Tensor,
         offsets: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Another PyTorch-native implementation of forward()."""
+        """A PyTorch-native implementation of forward()."""
         if offsets is not None:
             positions = positions + offsets
         positions = positions.flatten()
