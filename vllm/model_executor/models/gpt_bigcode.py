@@ -339,7 +339,7 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA):
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         for name, loaded_weight in weights:
-            if "lm_head.weight" in name:
+            if "lm_head.weight" in name and self.config.tie_word_embeddings:
                 continue
             if ".attn.bias" in name:
                 # Skip attention mask.
