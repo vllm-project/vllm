@@ -22,11 +22,12 @@ from vllm.inputs import (EncoderDecoderLLMInputs, LLMInputs, PromptInputs,
 from vllm.inputs.parse import is_explicit_encoder_decoder_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.sequence import ExecuteModelRequest
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import print_warning_once
@@ -47,6 +48,7 @@ def _log_task_completion(task: asyncio.Task,
     there is an exception.
     """
 
+    exception = None
     try:
         return_value = task.result()
         raise AssertionError(
@@ -79,7 +81,8 @@ class AsyncStream:
         self._queue: asyncio.Queue = asyncio.Queue()
         self._finished = False
 
-    def put(self, item: Union[RequestOutput, EmbeddingRequestOutput]) -> None:
+    def put(self, item: Union[RequestOutput, EmbeddingRequestOutput,
+                              Exception]) -> None:
         if not self._finished:
             self._queue.put_nowait(item)
 
@@ -121,11 +124,10 @@ class AsyncStream:
 class RequestTracker:
     """Synchronous abstraction for tracking requests."""
 
-    def __init__(self, per_request_streams: bool = True) -> None:
-        self._per_request_streams = per_request_streams
+    def __init__(self) -> None:
         self._request_streams: Dict[str, AsyncStream] = {}
         self._aborted_requests: asyncio.Queue[str] = asyncio.Queue()
-        self._new_requests: asyncio.Queue[Tuple[Optional[AsyncStream],
+        self._new_requests: asyncio.Queue[Tuple[AsyncStream,
                                                 dict]] = asyncio.Queue()
         self.new_requests_event = asyncio.Event()
 
@@ -159,16 +161,14 @@ class RequestTracker:
 
         if finished:
             stream = self._request_streams.pop(request_id, None)
-            if stream is not None:
-                stream.finish()
         else:
             stream = self._request_streams.get(request_id)
         # Guard against a KeyError which can occur if the request was aborted
         # while the output was generated
-        # if stream is not None:
-        #     stream.put(request_output)
-        #     if finished:
-        #         stream.finish()
+        if stream is not None:
+            stream.put(request_output)
+            if finished:
+                stream.finish()
 
         if verbose and finished:
             logger.info("Finished request %s.", request_id)
@@ -187,15 +187,14 @@ class RequestTracker:
                     request_id: str,
                     *,
                     verbose: bool = False,
-                    **engine_add_request_kwargs) -> Optional[AsyncStream]:
+                    **engine_add_request_kwargs) -> AsyncStream:
         """Add a request to be sent to the engine on the next background
         loop iteration."""
         if request_id in self._request_streams:
             raise KeyError(f"Request {request_id} already exists.")
 
         abort_request = partial(self.abort_request, verbose=verbose)
-        stream = AsyncStream(request_id, abort_request) \
-            if self._per_request_streams else None
+        stream = AsyncStream(request_id, abort_request)
         self._new_requests.put_nowait((stream, {
             "request_id": request_id,
             **engine_add_request_kwargs
@@ -236,15 +235,13 @@ class RequestTracker:
 
         while not self._new_requests.empty():
             stream, new_request = self._new_requests.get_nowait()
-            request_id = new_request["request_id"]
+            request_id = stream.request_id
             if request_id in finished_requests:
                 # The request has already been aborted.
-                if stream is not None:
-                    stream.finish(asyncio.CancelledError)
+                stream.finish(asyncio.CancelledError)
                 finished_requests.discard(request_id)
             else:
-                if stream is not None:
-                    self._request_streams[request_id] = stream
+                self._request_streams[request_id] = stream
                 new_requests.append(new_request)
 
         return new_requests, finished_requests
@@ -283,6 +280,10 @@ class _AsyncLLMEngine(LLMEngine):
         scheduler_outputs = cached_outputs.scheduler_outputs
         allow_async_output_proc = cached_outputs.allow_async_output_proc
 
+        # Detect async + multi-step
+        use_async_and_multi_step = (self.scheduler_config.is_multi_step
+                                    and allow_async_output_proc)
+
         ctx = self.scheduler_contexts[virtual_engine]
 
         # skip the scheduler if there are any remaining steps in the seq groups.
@@ -293,16 +294,26 @@ class _AsyncLLMEngine(LLMEngine):
             # Clear outputs on scheduler iteration start
             ctx.request_outputs.clear()
 
+            # Schedule iteration
             (seq_group_metadata_list, scheduler_outputs,
              allow_async_output_proc
              ) = self.scheduler[virtual_engine].schedule()
 
-            # If current scheduler iteration has no async postprocessor,
-            # then we need first to drain the pending async postprocessor
-            # before moving forward
+            # Detect async + multi-step
+            use_async_and_multi_step = (self.scheduler_config.is_multi_step
+                                        and allow_async_output_proc)
+
+            # Maybe switch from async mode to sync mode
             if not allow_async_output_proc and len(ctx.output_queue) > 0:
                 self._process_model_outputs(virtual_engine=virtual_engine,
                                             is_async=True)
+
+            # For async + multi-step, init the queue
+            if use_async_and_multi_step:
+                assert len(ctx.output_queue) == 0
+                assert seq_group_metadata_list is not None
+                ctx.output_queue.append(
+                    (None, seq_group_metadata_list, scheduler_outputs))
 
             if (self.scheduler_config.is_multi_step
                     and scheduler_outputs.num_lookahead_slots > 0):
@@ -314,9 +325,6 @@ class _AsyncLLMEngine(LLMEngine):
 
         assert seq_group_metadata_list is not None
         assert scheduler_outputs is not None
-
-        assert not (self.scheduler_config.is_multi_step and \
-            allow_async_output_proc)
 
         if not scheduler_outputs.is_empty():
             finished_requests_ids = self.scheduler[
@@ -343,8 +351,13 @@ class _AsyncLLMEngine(LLMEngine):
                 last_sampled_token_ids=last_sampled_token_ids)
 
             if allow_async_output_proc:
-                execute_model_req.async_callback = self.async_callback[
-                    virtual_engine]
+                async_callback = self.async_callback_multi_step[
+                    virtual_engine] if use_async_and_multi_step \
+                    else self.async_callback[virtual_engine]
+
+                execute_model_req.async_callback = async_callback
+                execute_model_req.use_async_and_multi_step = \
+                    use_async_and_multi_step
 
             # Execute the model.
             output = await self.model_executor.execute_model_async(
@@ -354,7 +367,7 @@ class _AsyncLLMEngine(LLMEngine):
             if self.scheduler_config.is_multi_step:
                 self._update_cached_scheduler_output(virtual_engine, output)
         else:
-            if len(ctx.output_queue) > 0:
+            if not use_async_and_multi_step and len(ctx.output_queue) > 0:
                 assert not self.scheduler_config.is_multi_step
                 self._process_model_outputs(virtual_engine=virtual_engine,
                                             is_async=True)
@@ -366,22 +379,25 @@ class _AsyncLLMEngine(LLMEngine):
                 seq_group.finish_step()
 
         if not self._has_remaining_steps(seq_group_metadata_list):
-            # clear the cache if we have finished all the steps
+            # Clear the cache if we have finished all the steps
             if self.scheduler_config.is_multi_step:
                 self.cached_scheduler_outputs[
                     virtual_engine] = SchedulerOutputState()
 
-            # Cache results in engine
-            ctx.output_queue.append(
-                (output, seq_group_metadata_list, scheduler_outputs))
+            if use_async_and_multi_step:
+                # For async + multi-step, clear the queue
+                ctx.output_queue.clear()
+            else:
+                ctx.output_queue.append(
+                    (output, seq_group_metadata_list, scheduler_outputs))
 
-            if output and allow_async_output_proc:
-                assert len(
-                    output
-                ) == 1, "Multi step decoding does not work with async output processing."  # noqa: E501
-                self._advance_to_next_step(
-                    output[0], seq_group_metadata_list,
-                    scheduler_outputs.scheduled_seq_groups)
+                if output and allow_async_output_proc:
+                    assert len(
+                        output
+                    ) == 1, "Multi step decoding does not work with async output processing."  # noqa: E501
+                    self._advance_to_next_step(
+                        output[0], seq_group_metadata_list,
+                        scheduler_outputs.scheduled_seq_groups)
 
             if not allow_async_output_proc:
                 self._process_model_outputs(virtual_engine=virtual_engine,
@@ -394,7 +410,11 @@ class _AsyncLLMEngine(LLMEngine):
                 self.do_tracing(scheduler_outputs)
 
         else:
-            ctx.request_outputs = []
+            # Multi-step case
+            if use_async_and_multi_step:
+                return []
+            else:
+                ctx.request_outputs = []
 
         if not self.has_unfinished_requests():
             # Drain async postprocessor (if exists)
@@ -643,34 +663,7 @@ class AsyncLLMEngine:
         self._errored_with: Optional[BaseException] = None
 
         # Lazy initialized fields
-        self._request_tracker: RequestTracker = None  # type: ignore[assignment]
-
-        self._global_queue: Optional[asyncio.Queue] = None
-
-    async def global_output_generator(
-        self
-    ) -> AsyncGenerator[List[Union[RequestOutput, EmbeddingRequestOutput,
-                                   Tuple[str, BaseException]]], None]:
-        """Returns a single generator that streams outputs from all
-        requests.
-
-        Must be called at most once prior to processing any requests,
-        and if used, generate() will return None rather than a per-request
-        stream.
-        """
-        if self._global_queue is not None:
-            raise RuntimeError(
-                "global_output_generator can only be called once")
-        if self._request_tracker is not None:
-            raise RuntimeError(
-                "global_output_generator must be called before processing "
-                "any requests")
-
-        self._global_queue = asyncio.Queue()
-
-        # This runs until the engine is shut down
-        while True:
-            yield await self._global_queue.get()
+        self._request_tracker: RequestTracker
 
     @classmethod
     def _get_executor_cls(
@@ -794,11 +787,6 @@ class AsyncLLMEngine:
     def _error_callback(self, exc: Exception) -> None:
         self.set_errored(exc)
         self._request_tracker.propagate_exception(exc)
-        if self._global_queue is not None:
-            #TODO clean this up
-            for request_id in tuple(
-                    self._request_tracker._request_streams.keys()):
-                self._global_queue.put_nowait((request_id, exc))
 
     async def get_tokenizer(
         self,
@@ -819,8 +807,7 @@ class AsyncLLMEngine:
         if self.is_running:
             raise RuntimeError("Background loop is already running.")
         # Initialize the RequestTracker here so it uses the right event loop.
-        per_request_streams = self._global_queue is None
-        self._request_tracker = RequestTracker(per_request_streams)
+        self._request_tracker = RequestTracker()
 
         self._background_loop_unshielded = asyncio.get_event_loop(
         ).create_task(self.run_engine_loop())
@@ -881,14 +868,11 @@ class AsyncLLMEngine:
                     await self.engine.add_request_async(**new_request)
             except ValueError as e:
                 # TODO: use a vLLM specific error for failed validation
-                request_id = new_request["request_id"]
                 self._request_tracker.process_exception(
-                    request_id,
+                    new_request["request_id"],
                     e,
                     verbose=self.log_requests,
                 )
-                if self._global_queue is not None:
-                    self._global_queue.put_nowait((request_id, e))
 
         if aborted_requests:
             await self._engine_abort(aborted_requests)
@@ -899,18 +883,13 @@ class AsyncLLMEngine:
             request_outputs = await self.engine.step_async(virtual_engine)
 
         # Put the outputs into the corresponding streams.
-        all_finished = True
+        finished = True
         for request_output in request_outputs:
-            finished = request_output.finished
-            if finished or self._global_queue is None:
-                self._request_tracker.process_request_output(
-                    request_output, verbose=self.log_requests)
-            all_finished = all_finished and finished
+            self._request_tracker.process_request_output(
+                request_output, verbose=self.log_requests)
+            finished = finished and request_output.finished
 
-        if self._global_queue is not None:
-            self._global_queue.put_nowait(request_outputs)
-
-        return not all_finished
+        return not finished
 
     async def _engine_abort(self, request_ids: Iterable[str]):
         if self.engine_use_ray:
@@ -995,9 +974,8 @@ class AsyncLLMEngine:
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-    ) -> Optional[AsyncGenerator[Union[RequestOutput, EmbeddingRequestOutput],
-                                 None]]:
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None
+    ) -> AsyncGenerator[Union[RequestOutput, EmbeddingRequestOutput], None]:
         if not self.is_running:
             if self.start_engine_loop:
                 self.start_background_loop()
@@ -1018,7 +996,7 @@ class AsyncLLMEngine:
             trace_headers=trace_headers,
             prompt_adapter_request=prompt_adapter_request)
 
-        return stream.generator() if stream is not None else None
+        return stream.generator()
 
     async def generate(
         self,
@@ -1028,7 +1006,7 @@ class AsyncLLMEngine:
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None
-    ) -> Optional[AsyncGenerator[RequestOutput, None]]:
+    ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request.
 
         Generate outputs for a request. This method is a coroutine. It adds the
@@ -1049,9 +1027,6 @@ class AsyncLLMEngine:
         Yields:
             The output `RequestOutput` objects from the LLMEngine
             for the request.
-
-            Unless a global output generator is being used, in which case
-            this methods will return None.
 
         Details:
             - If the engine is not running, start the background loop,
@@ -1096,23 +1071,15 @@ class AsyncLLMEngine:
             >>> # Process and return the final output
             >>> ...
         """
-        maybe_generator = await self.add_request(
-            request_id,
-            inputs,
-            sampling_params,
-            lora_request=lora_request,
-            trace_headers=trace_headers,
-            prompt_adapter_request=prompt_adapter_request,
-        )
-        return maybe_generator
-        if maybe_generator is None or not LLMEngine.DO_VALIDATE_OUTPUT:
-            return maybe_generator
-
-        async def validating_generator():
-            async for output in maybe_generator:
-                yield LLMEngine.validate_output(output, RequestOutput)
-
-        return validating_generator()
+        async for output in await self.add_request(
+                request_id,
+                inputs,
+                sampling_params,
+                lora_request=lora_request,
+                trace_headers=trace_headers,
+                prompt_adapter_request=prompt_adapter_request,
+        ):
+            yield LLMEngine.validate_output(output, RequestOutput)
 
     async def encode(
         self,
@@ -1182,15 +1149,13 @@ class AsyncLLMEngine:
             >>> # Process and return the final output
             >>> ...
         """
-        generator = await self.add_request(
-            request_id,
-            inputs,
-            pooling_params,
-            lora_request=lora_request,
-            trace_headers=trace_headers,
-        )
-        assert generator is not None
-        async for output in generator:
+        async for output in await self.add_request(
+                request_id,
+                inputs,
+                pooling_params,
+                lora_request=lora_request,
+                trace_headers=trace_headers,
+        ):
             yield LLMEngine.validate_output(output, EmbeddingRequestOutput)
 
     async def abort(self, request_id: str) -> None:
@@ -1223,9 +1188,6 @@ class AsyncLLMEngine:
         self._request_tracker.abort_request(request_id,
                                             exception=asyncio.CancelledError,
                                             verbose=self.log_requests)
-
-        if self._global_queue is not None:
-            self._global_queue.put_nowait((request_id, asyncio.CancelledError))
 
     async def get_model_config(self) -> ModelConfig:
         """Get the model configuration of the vLLM engine."""
