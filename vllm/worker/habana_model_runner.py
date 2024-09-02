@@ -1615,7 +1615,10 @@ class HabanaModelRunner(
         if multi_modal_input is not None:
             execute_model_kwargs.update(multi_modal_input)
         if htorch.utils.internal.is_lazy():
-            execute_model_kwargs.update({"bypass_hpu_graphs": not use_graphs})
+            execute_model_kwargs.update({
+                "bypass_hpu_graphs": not use_graphs,
+                "warmup_mode": warmup_mode
+            })
 
         htorch.core.mark_step()
         if self.is_driver_worker:
