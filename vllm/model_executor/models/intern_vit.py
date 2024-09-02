@@ -18,6 +18,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.models.vit_attention import ViTAttention
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.utils import is_cpu
 
