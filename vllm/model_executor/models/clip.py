@@ -167,7 +167,7 @@ class CLIPVisionEmbeddings(nn.Module):
         return embeddings
 
 
-class CLIPAttention(nn.Module):
+class CLIPParallelAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(
@@ -274,7 +274,7 @@ class CLIPEncoderLayer(nn.Module):
         num_heads = config.num_attention_heads
         tp_size = get_tensor_model_parallel_world_size()
         if USE_XFORMERS_OPS and num_heads % tp_size == 0:
-            self.self_attn = CLIPAttention(config, quant_config=quant_config)
+            self.self_attn = CLIPParallelAttention(config, quant_config=quant_config)
         else:
             self.self_attn = CLIPSdpaAttention(config)
         self.layer_norm1 = nn.LayerNorm(config.hidden_size,
