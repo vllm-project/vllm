@@ -12,6 +12,7 @@ from vllm.transformers_utils.configs.mlp_speculator import MLPSpeculatorConfig
 from vllm.transformers_utils.configs.mpt import MPTConfig
 from vllm.transformers_utils.configs.nemotron import NemotronConfig
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
+from vllm.transformers_utils.configs.llamavl import LlamaVLConfig
 
 __all__ = [
     "ChatGLMConfig",
@@ -22,6 +23,7 @@ __all__ = [
     "JAISConfig",
     "MedusaConfig",
     "EAGLEConfig",
+    "LlamaVLConfig",
     "MLPSpeculatorConfig",
     "NemotronConfig",
     "UltravoxConfig",

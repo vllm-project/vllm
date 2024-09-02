@@ -15,7 +15,7 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
                                              JAISConfig, MedusaConfig,
                                              MLPSpeculatorConfig, MPTConfig,
                                              NemotronConfig, RWConfig,
-                                             UltravoxConfig)
+                                             UltravoxConfig, LlamaVLConfig)
 
 if VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
@@ -37,6 +37,7 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "internvl_chat": InternVLChatConfig,
     "nemotron": NemotronConfig,
     "ultravox": UltravoxConfig,
+    "llamavl": LlamaVLConfig,
 }
 
 for name, cls in _CONFIG_REGISTRY.items():
