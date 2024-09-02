@@ -12,6 +12,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.tokenizers import (BaichuanTokenizer,
                                                 MistralTokenizer)
+from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import make_async
 
 logger = init_logger(__name__)
@@ -96,8 +97,7 @@ def get_tokenizer(
         kwargs["truncation_side"] = "left"
 
     # Separate model folder from file path for GGUF models
-    is_gguf = Path(tokenizer_name).is_file() and Path(
-        tokenizer_name).suffix == ".gguf"
+    is_gguf = check_gguf_file(tokenizer_name)
     if is_gguf:
         kwargs["gguf_file"] = Path(tokenizer_name).name
         tokenizer_name = Path(tokenizer_name).parent

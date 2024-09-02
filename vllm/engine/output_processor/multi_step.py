@@ -4,6 +4,8 @@ from typing import Callable, List
 from vllm.core.scheduler import Scheduler
 from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
+from vllm.engine.output_processor.single_step import (
+    single_step_process_prompt_logprob)
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
@@ -46,9 +48,16 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
 
     def process_prompt_logprob(self, seq_group: SequenceGroup,
                                outputs: List[SequenceGroupOutput]) -> None:
-        # TODO(sang): Prompt logprob currently not implemented in multi step
-        # workers.
-        self._log_prompt_logprob_unsupported_warning_once()
+        """Process prompt logprobs associated with each step of a multi-step-
+        scheduled computation.
+
+        Args:
+          seq_group: the outputs are associated with this :class:`SequenceGroup`
+          outputs: the :class:`SequenceGroupOutput`s for all scheduler steps
+        """
+        for output in outputs:
+            # Concatenate single-step prompt logprob processing results.
+            single_step_process_prompt_logprob(self, seq_group, output)
 
     @staticmethod
     @functools.lru_cache()
@@ -79,9 +88,15 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         # TODO: Add support for async if necessary
         assert not is_async
 
+        # Sequences can be in RUNNING or FINISHED_ABORTED state
+        # once scheduled, as a sequence is moved to FINSIHED_ABORTED
+        # if a client disconnects from the api server.
         seqs = sequence_group.get_seqs(status=SequenceStatus.RUNNING)
+        if seqs is None:
+            seqs = sequence_group.get_seqs(
+                status=SequenceStatus.FINISHED_ABORTED)
 
-        assert seqs, "expected running sequences"
+        assert seqs, "Expected RUNNING or FINISHED_ABORTED sequences"
         assert len(seqs) == 1, (
             "Beam search not supported in multi-step decoding.")
         seq = seqs[0]
