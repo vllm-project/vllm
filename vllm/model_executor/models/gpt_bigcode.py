@@ -34,8 +34,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                QuantizationConfigOverride,
                                                RowParallelLinear,
-                                               TiedWeightLinearMethod,
-                                               UnquantizedLinearMethod)
+                                               TiedWeightLinearMethod)
 # yapf: enable
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
@@ -277,12 +276,6 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA):
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
 
         if self.config.tie_word_embeddings:
-            if quant_config is not None:
-                linear_method = quant_config.get_quant_method(layer=self,
-                                                              prefix="")
-                assert linear_method is None or isinstance(
-                    linear_method, UnquantizedLinearMethod)
-
             self.lm_head = ParallelLMHead(
                 self.unpadded_vocab_size,
                 config.hidden_size,
@@ -293,15 +286,21 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA):
                 if not lora_config else lora_config.lora_vocab_padding_size,
                 quant_config=QuantizationConfigOverride(
                     TiedWeightLinearMethod),
-                params_dtype=torch.float16,
+                params_dtype=self.transformer.wte.weight.dtype,
             )
             self.lm_head.register_parameter("weight",
                                             self.transformer.wte.weight)
         else:
             self.lm_head = ParallelLMHead(
-                self.transformer.vocab_size,
-                self.transformer.embed_dim,
-                org_num_embeddings=self.config.vocab_size)
+                self.unpadded_vocab_size,
+                config.hidden_size,
+                org_num_embeddings=config.vocab_size,
+                padding_size=DEFAULT_VOCAB_PADDING_SIZE
+                # We need bigger padding if using lora for kernel
+                # compatibility
+                if not lora_config else lora_config.lora_vocab_padding_size,
+                quant_config=quant_config,
+            )
 
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
