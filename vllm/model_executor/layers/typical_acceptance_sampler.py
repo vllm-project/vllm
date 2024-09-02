@@ -41,7 +41,7 @@ class TypicalAcceptanceSampler(SpecDecodeDeterministicBaseSampler):
 
     def forward(
         self,
-        target_probs: torch.Tensor,
+        target_with_bonus_probs: torch.Tensor,
         bonus_token_ids: torch.Tensor,
         draft_probs: torch.Tensor,
         draft_token_ids: torch.Tensor,
@@ -80,8 +80,9 @@ class TypicalAcceptanceSampler(SpecDecodeDeterministicBaseSampler):
         # Only perform shape/dtype/device checking in strict mode, as it adds
         # overhead.
         if self._strict_mode:
-            self._raise_if_incorrect_input(target_probs, draft_token_ids,
-                                           bonus_token_ids)
+            self._raise_if_incorrect_input(target_with_bonus_probs,
+                                           draft_token_ids, bonus_token_ids)
+        target_probs = target_with_bonus_probs[:, :-1]
         accepted = self._evaluate_accepted_tokens(target_probs,
                                                   draft_token_ids)
         recovered_token_ids = self._replacement_token_ids(target_probs)
