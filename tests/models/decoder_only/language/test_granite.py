@@ -6,7 +6,7 @@ import importlib.metadata
 
 import pytest
 
-from .utils import check_logprobs_close
+from ...utils import check_logprobs_close
 
 TRANSFORMERS_VERSION = tuple(
     map(int,

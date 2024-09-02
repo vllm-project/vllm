@@ -7,7 +7,7 @@ import torch
 
 from vllm.utils import is_cpu
 
-from .utils import check_logprobs_close
+from ...utils import check_logprobs_close
 
 MODELS = [
     "microsoft/Phi-3.5-MoE-instruct",
