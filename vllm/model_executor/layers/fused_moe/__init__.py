@@ -1,13 +1,14 @@
 from vllm.model_executor.layers.fused_moe.fused_moe_marlin import (
     fused_moe_marlin, single_moe_marlin)
 from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
+    FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported, GPTQFusedMoE)
 from vllm.triton_utils import HAS_TRITON
 
 __all__ = [
     "FusedMoE",
     "FusedMoEMethodBase",
     "FusedMoeWeightScaleSupported",
+    "GPTQFusedMoE",
     "fused_moe_marlin",
     "single_moe_marlin",
 ]
