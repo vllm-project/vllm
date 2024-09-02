@@ -115,5 +115,5 @@ class MPLLMEngine:
             raise ValueError("Unknown Config Request: %s", request)
 
 def run_rpc_server(engine_args: EngineArgs):
-    engine = RPCLLMEngine(engine_args)
+    engine = MPLLMEngine(engine_args)
     engine.run()
