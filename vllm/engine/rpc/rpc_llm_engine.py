@@ -2,12 +2,12 @@ import zmq
 import cloudpickle, pickle
 from vllm.logger import init_logger
 from vllm import EngineArgs, LLMEngine
-from vllm.entrypoints.openai.rpc import (VLLM_RPC_SUCCESS_STR,
-                                         RPCUtilityRequest)
+from vllm.engine.rpc import (VLLM_RPC_SUCCESS_STR,
+                             RPCUtilityRequest)
 
 logger = init_logger(__name__)
 
-class MPLLMEngine:
+class RPCLLMEngine:
     def __init__(self, engine_args) -> None:
         self.engine = LLMEngine.from_engine_args(engine_args)
 

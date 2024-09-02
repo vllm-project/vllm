@@ -48,70 +48,21 @@ class RPCClientClosedError(Exception):
 
 class AsyncEngineRPCClient:
     """
-    RPCClient that connects to the RPCServer wrapping AsyncLLMEngine.
-    
-    The overall design mirrors the Asynchronous Client Server Pattern
-    https://zguide.zeromq.org/docs/chapter3/#The-Asynchronous-Client-Server-Pattern
-
-    On startup, the RPCClient:
-        - makes DEALER socket (to_rpc_server) that connects to the RPCServer 
-            via ipc, which uses unix sockets under the hood
-            (https://libzmq.readthedocs.io/en/zeromq4-1/zmq_ipc.html)
-        - makes ROUTER socket (from_api_server) that binds to a random 
-            inproc address, which uses memory under the hood
-            (https://libzmq.readthedocs.io/en/zeromq3-x/zmq_inproc.html)
-        - runs a proxy in a background asyncio task between 
-            from_api_server (ROUTER, inproc) and to_rpc_server (DEALER ipc, )
-
-    Each request handled by the asyncio api_server calls generate():
-        - make a DEALER socket that connects to from_api_server via inproc
-        - send a RCPGenerateRequest to the inproc socket
-        - background proxy forwards the request from inproc -> ipc
-        - RPCServer responds to the request one token at a time over ipc
-        - background proxy forwards the response from ipc -> inproc
-
-    The connection looks like this:
-        DEALER <- inproc -> [ ROUTER | DEALER ] <- ipc -> DEALER
-    
-    Message routing is performed via identities that are managed by the 
-    ROUTER socket. ROUTER sockets track every connection it has and 
-    tells the caller about these. The way it tells the caller is to stick 
-    the connection identity in front of each message received. When we 
-    send the message via a ROUTER, we first send an identity frame.
-    See https://zguide.zeromq.org/docs/chapter3/#The-Extended-Reply-Envelope
-    for more details on connection identities.
-
-    This proxy design enables us to use a single unix socket, which 
-    improves performance by avoiding syscalls (~5%) and avoids resource limits
-    such as ulimit, which defaults to 1024 on ubuntu.
-
-    Note: we run set_hwm(0) on each socket, which sets the HWM to inf,
-    which is required to avoid dropping messages under high load. 
-    This is generally not advisable. However, since we are in control
-    of both sides of the connection + failure on either side is
-    catastrophic to the overall system health and memory profiling
-    suggests limited memory overhead relative to asyncio, we will 
-    proceed for now.
-
-    See https://zguide.zeromq.org/docs/chapter2/#High-Water-Marks 
-    for more details on high water marks.
+    xxx
     """
 
     def __init__(self, rpc_path: str):
         self.context = zmq.asyncio.Context()
-        self._data_timeout = VLLM_RPC_GET_DATA_TIMEOUT_MS
         self._errored = False
 
         self.new_req_socket: Socket = self.context.socket(zmq.constants.PUSH)
-        self.new_req_socket.connect("ipc:///tmp/new_req_socket")
+        self.new_req_socket.connect(f"{rpc_path}_new_req_socket")
 
         self.output_socket: Socket = self.context.socket(zmq.constants.PULL)
-        self.output_socket.connect("ipc:///tmp/output_socket")
+        self.new_req_socket.connect(f"{rpc_path}_output_socket")
 
-        # self.data_socket: Socket = self.context.socket(zmq.constants.DEALER)
-        # self.data_socket.connect("ipc:///tmp/data_socket")
+        self.get_data_path = f"{rpc_path}_data_socket"
 
-        self.limit_concurrency = None
         self.output_queues: Dict[str, asyncio.Queue] = {}
         self.output_handler = asyncio.create_task(self.run_output_handler())
     
@@ -120,8 +71,8 @@ class AsyncEngineRPCClient:
         # Connect to the RPCServer via the proxy.
 
         # Raise a sensible error if the client was already closed.
-        # This can happen if a server shutdown is triggered but some coroutines
-        # are still running requests.
+        # This can happen if a server shutdown is triggered but some 
+        # coroutines are still running requests.
         # There should not be a race condition with this check because we don't
         # yield to the event loop between here and opening the socket.
         if self.context.closed:
@@ -197,9 +148,9 @@ class AsyncEngineRPCClient:
                 copy=False)
 
             # Make sure the server responds
-            if await socket.poll(timeout=self._data_timeout) == 0:
+            if await socket.poll(timeout=VLLM_RPC_GET_DATA_TIMEOUT_MS) == 0:
                 raise TimeoutError("Server didn't reply within "
-                                    f"{self._data_timeout} ms")
+                                    f"{VLLM_RPC_GET_DATA_TIMEOUT_MS} ms")
 
             # Await the data from the Server.
             frame = await socket.recv(copy=False)
@@ -231,9 +182,9 @@ class AsyncEngineRPCClient:
 
             await socket.send_multipart((cloudpickle.dumps(request), ))
 
-            if await socket.poll(timeout=self._data_timeout) == 0:
+            if await socket.poll(timeout=VLLM_RPC_GET_DATA_TIMEOUT_MS) == 0:
                 raise TimeoutError("Server didn't reply within "
-                                   f"{self._data_timeout} ms")
+                                   f"{VLLM_RPC_GET_DATA_TIMEOUT_MS} ms")
 
             frame = await socket.recv(copy=False)
             return pickle.loads(frame.buffer)
