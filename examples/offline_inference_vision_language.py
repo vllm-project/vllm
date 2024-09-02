@@ -162,7 +162,7 @@ def run_blip2(question):
 
 def run_llama(question, size: str):
     checkpoint_dir = "/data/zhang-chen/llama/checkpoints" # update checkpoint path here
-    llm = LLM(model=f"{checkpoint_dir}/Meta-Llama-3.2-{size}-Vision-Early/") # update checkpoint path here
+    llm = LLM(model=f"{checkpoint_dir}/Meta-Llama-3.2-{size}-Vision-Early/")
     raise NotImplementedError
 
 model_example_map = {

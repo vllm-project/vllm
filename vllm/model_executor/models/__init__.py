@@ -85,6 +85,7 @@ _MULTIMODAL_MODELS = {
                                           "PaliGemmaForConditionalGeneration"),
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
     "UltravoxModel": ("ultravox", "UltravoxModel"),
+    "LlamaVLForCausalLM": ("llamavl", "LlamaVLForCausalLM"),
 }
 _CONDITIONAL_GENERATION_MODELS = {
     "BartModel": ("bart", "BartForConditionalGeneration"),
