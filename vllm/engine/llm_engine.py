@@ -374,6 +374,10 @@ class LLMEngine:
             for v_id in range(self.parallel_config.pipeline_parallel_size)
         ]
 
+        # Currently used by AsyncLLMEngine to ensure quick append
+        # of request outputs to asyncio queues
+        self.process_request_outputs_callback = None
+
         # Create the scheduler.
         # NOTE: the cache_config here have been updated with the numbers of
         # GPU and CPU blocks, which are profiled in the distributed executor.
@@ -1344,6 +1348,10 @@ class LLMEngine:
 
         # For multi-step, do not create outputs each iteration
         if not is_last_step:
+            # Immediately process request outputs here (if callback is given)
+            if len(finished_now
+                   ) > 0 and self.process_request_outputs_callback is not None:
+                self.process_request_outputs_callback(ctx.request_outputs)
             return
 
         # Create the outputs
@@ -1363,6 +1371,11 @@ class LLMEngine:
         for seq_group in scheduler_outputs.ignored_seq_groups:
             request_output = RequestOutputFactory.create(seq_group)
             ctx.request_outputs.append(request_output)
+
+        # Immediately process request outputs here (if callback is given)
+        if len(ctx.request_outputs
+               ) > 0 and self.process_request_outputs_callback is not None:
+            self.process_request_outputs_callback(ctx.request_outputs)
 
         if is_async:
             # Log stats.

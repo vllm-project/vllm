@@ -614,6 +614,17 @@ class AsyncLLMEngine:
         self.log_requests = log_requests
         self.engine = self._init_engine(*args, **kwargs)
 
+        # This ensures quick processing of request outputs
+        # so the append to asyncio queues is not delayed,
+        # especially for multi-step.
+        #
+        # TODO: Currently, disabled for engine_use_ray, ask
+        # Cody/Will/Woosuk about this case.
+        self.use_process_request_outputs_callback = not self.engine_use_ray
+        if self.use_process_request_outputs_callback:
+            self.engine.process_request_outputs_callback = \
+                self.process_request_outputs
+
         if self.engine_use_ray:
             print_warning_once(
                 "DEPRECATED. `--engine-use-ray` is deprecated and will "
@@ -857,13 +868,27 @@ class AsyncLLMEngine:
             request_outputs = await self.engine.step_async(virtual_engine)
 
         # Put the outputs into the corresponding streams.
-        finished = True
+        # If used as a callback, then already invoked inside
+        # LLMEngine's _process_model_outputs
+        if not self.use_process_request_outputs_callback:
+            all_finished = self.process_request_outputs(request_outputs)
+        else:
+            # For callback case, we only need to detect when all
+            # requests are finished
+            all_finished = all(request_output.finished
+                               for request_output in request_outputs)
+
+        return not all_finished
+
+    def process_request_outputs(self, request_outputs) -> bool:
+        # Put the outputs into the corresponding streams.
+        all_finished = True
         for request_output in request_outputs:
             self._request_tracker.process_request_output(
                 request_output, verbose=self.log_requests)
-            finished = finished and request_output.finished
+            all_finished = all_finished and request_output.finished
 
-        return not finished
+        return all_finished
 
     async def _engine_abort(self, request_ids: Iterable[str]):
         if self.engine_use_ray:
