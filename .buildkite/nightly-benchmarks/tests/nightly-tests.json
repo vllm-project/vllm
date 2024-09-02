@@ -7,7 +7,7 @@
             "tp": 1,
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
-            "num_prompts": 500,
+            "num_prompts": 400,
             "port": 8000,
             "reuse_server": false
         },
@@ -48,16 +48,16 @@
         }
     },
     {
-        "test_name": "llama8B_tp1_sonnet_1024_128",
+        "test_name": "llama8B_tp1_sonnet_512_128",
         "qps_list": [2,4,8,16,32,"inf"],
         "common_parameters": {
             "model": "meta-llama/Meta-Llama-3-8B-Instruct",
             "tp": 1,
             "dataset_name": "sonnet",
             "dataset_path": "./sonnet_4x.txt",
-            "num_prompts": 500,
+            "num_prompts": 400,
             "port": 8000,
-            "sonnet_input_len": 1024,
+            "sonnet_input_len": 512,
             "sonnet_output_len": 128,
             "sonnet_prefix_len": 50,
             "reuse_server": true
@@ -99,17 +99,17 @@
         }
     },
     {
-        "test_name": "llama8B_tp1_sonnet_1024_1024",
+        "test_name": "llama8B_tp1_sonnet_512_512",
         "qps_list": [2,4,8,16,32,"inf"],
         "common_parameters": {
             "model": "meta-llama/Meta-Llama-3-8B-Instruct",
             "tp": 1,
             "dataset_name": "sonnet",
             "dataset_path": "./sonnet_4x.txt",
-            "num_prompts": 500,
+            "num_prompts": 400,
             "port": 8000,
-            "sonnet_input_len": 1024,
-            "sonnet_output_len": 1024,
+            "sonnet_input_len": 512,
+            "sonnet_output_len": 512,
             "sonnet_prefix_len": 50,
             "reuse_server": true
         },
@@ -157,7 +157,7 @@
             "tp": 4,
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
-            "num_prompts": 500,
+            "num_prompts": 400,
             "port": 8000,
             "reuse_server": false
         },
@@ -198,16 +198,16 @@
         }
     },
     {
-        "test_name": "llama70B_tp4_sonnet_1024_128",
+        "test_name": "llama70B_tp4_sonnet_512_128",
         "qps_list": [2,4,8,16,32,"inf"],
         "common_parameters": {
             "model": "meta-llama/Meta-Llama-3-70B-Instruct",
             "tp": 4,
             "dataset_name": "sonnet",
             "dataset_path": "./sonnet_4x.txt",
-            "num_prompts": 500,
+            "num_prompts": 400,
             "port": 8000,
-            "sonnet_input_len": 1024,
+            "sonnet_input_len": 512,
             "sonnet_output_len": 128,
             "sonnet_prefix_len": 50,
             "reuse_server": true
@@ -249,17 +249,17 @@
         }
     },
     {
-        "test_name": "llama70B_tp4_sonnet_1024_1024",
+        "test_name": "llama70B_tp4_sonnet_512_512",
         "qps_list": [2,4,8,16,32,"inf"],
         "common_parameters": {
             "model": "meta-llama/Meta-Llama-3-70B-Instruct",
             "tp": 4,
             "dataset_name": "sonnet",
             "dataset_path": "./sonnet_4x.txt",
-            "num_prompts": 500,
+            "num_prompts": 400,
             "port": 8000,
-            "sonnet_input_len": 1024,
-            "sonnet_output_len": 1024,
+            "sonnet_input_len": 512,
+            "sonnet_output_len": 512,
             "sonnet_prefix_len": 50,
             "reuse_server": true
         },

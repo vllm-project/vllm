@@ -103,15 +103,15 @@ def main(args):
     # methods = [0,1,10,11,12]
     methods = ['vllm', 'trt', 'sglang', 'lmdeploy']
     formal_name = ['vLLM', 'TRT-LLM', 'SGLang', 'lmdeploy']
-    for model in ["llama70B"]:
-        for i, dataset in enumerate(["sharegpt", "sonnet_128_2048", "sonnet_2048_128"]):
+    for model in ["llama8B"]:
+        for i, dataset in enumerate(["sharegpt", "sonnet_1024_1024", "sonnet_1024_128"]):
             for j, metric in enumerate(["Tput", "Latency"]):
                 
                 my_df = df[df["Test name"].str.contains(dataset)]
                 my_dataset_name = {
                     "sharegpt": "ShareGPT",
-                    "sonnet_128_2048": "Decode-heavy",
-                    "sonnet_2048_128": "Prefill-heavy",
+                    "sonnet_1024_1024": "Decode-heavy",
+                    "sonnet_1024_128": "Prefill-heavy",
                 }[dataset]
                 
                 ax = axes[i,j]
