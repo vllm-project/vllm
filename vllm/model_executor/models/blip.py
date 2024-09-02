@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from PIL import Image
 from transformers import Blip2VisionConfig, BlipVisionConfig
-from xformers import ops as xops
+from transformers.models.blip.modeling_blip import BlipAttention as BlipEagerAttention
 
 from vllm.config import ModelConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
@@ -20,6 +20,11 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    repeat_and_pad_placeholder_tokens)
 from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE, SequenceData
+from vllm.utils import is_cpu
+
+USE_XFORMERS_OPS = not is_cpu()
+if USE_XFORMERS_OPS:
+    from xformers import ops as xops
 
 
 def get_blip_patch_grid_length(*, image_size: int, patch_size: int) -> int:
@@ -224,7 +229,7 @@ class BlipAttention(nn.Module):
         out = out.view(bsz, tgt_len, -1)
         attn_output, _ = self.projection(out)
 
-        return attn_output
+        return attn_output, None
 
 
 class BlipMLP(nn.Module):
@@ -261,7 +266,12 @@ class BlipEncoderLayer(nn.Module):
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
 
-        self.self_attn = BlipAttention(config, quant_config=quant_config)
+        if USE_XFORMERS_OPS:
+            self.self_attn = BlipAttention(config, quant_config=quant_config)
+        else:
+            # Blip doesn't have SDPA attention implemented in transformers
+            # use eager attention instead for cpu backend
+            self.self_attn = BlipEagerAttention(config)
         self.layer_norm1 = nn.LayerNorm(config.hidden_size,
                                         eps=config.layer_norm_eps)
         self.mlp = BlipMLP(config, quant_config=quant_config)
@@ -272,7 +282,7 @@ class BlipEncoderLayer(nn.Module):
         residual = hidden_states
 
         hidden_states = self.layer_norm1(hidden_states)
-        hidden_states = self.self_attn(hidden_states=hidden_states)
+        hidden_states, _ = self.self_attn(hidden_states=hidden_states)
         hidden_states = residual + hidden_states
 
         residual = hidden_states

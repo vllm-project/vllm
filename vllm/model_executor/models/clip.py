@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from PIL import Image
 from transformers import CLIPVisionConfig
-from xformers import ops as xops
+from transformers.models.clip.modeling_clip import CLIPSdpaAttention
 
 from vllm.config import ModelConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
@@ -21,6 +21,11 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    repeat_and_pad_placeholder_tokens)
 from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE, SequenceData
+from vllm.utils import is_cpu
+
+USE_XFORMERS_OPS = not is_cpu()
+if USE_XFORMERS_OPS:
+    from xformers import ops as xops
 
 
 def get_clip_patch_grid_length(*, image_size: int, patch_size: int) -> int:
@@ -231,7 +236,7 @@ class CLIPAttention(nn.Module):
         out = out.view(bsz, tgt_len, -1)
         attn_output, _ = self.out_proj(out)
 
-        return attn_output
+        return attn_output, None
 
 
 class CLIPMLP(nn.Module):
@@ -266,7 +271,10 @@ class CLIPEncoderLayer(nn.Module):
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
 
-        self.self_attn = CLIPAttention(config, quant_config=quant_config)
+        if USE_XFORMERS_OPS:
+            self.self_attn = CLIPAttention(config, quant_config=quant_config)
+        else:
+            self.self_attn = CLIPSdpaAttention(config)
         self.layer_norm1 = nn.LayerNorm(config.hidden_size,
                                         eps=config.layer_norm_eps)
         self.mlp = CLIPMLP(config, quant_config=quant_config)
@@ -278,7 +286,7 @@ class CLIPEncoderLayer(nn.Module):
         residual = hidden_states
 
         hidden_states = self.layer_norm1(hidden_states)
-        hidden_states = self.self_attn(hidden_states=hidden_states)
+        hidden_states, _ = self.self_attn(hidden_states=hidden_states)
         hidden_states = residual + hidden_states
 
         residual = hidden_states
@@ -386,7 +394,7 @@ class CLIPVisionModel(nn.Module):
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
-        ]
+        ] if USE_XFORMERS_OPS else []
         params_dict = dict(self.named_parameters())
         layer_count = len(self.vision_model.encoder.layers)
 

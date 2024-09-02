@@ -307,17 +307,18 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal):
                 if key_to_modify in name:
                     name = name.replace(key_to_modify, new_key)
             use_default_weight_loading = False
-            for (param_name, shard_name, shard_id) in stacked_params_mapping:
-                if shard_name not in name:
-                    continue
-                name = name.replace(shard_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
+            if (not "vision" in name) or self.vision_tower.use_shard_weight_loader:
+                for (param_name, shard_name, shard_id) in stacked_params_mapping:
+                    if shard_name not in name:
+                        continue
+                    name = name.replace(shard_name, param_name)
+                    # Skip loading extra bias for GPTQ models.
+                    if name.endswith(".bias") and name not in params_dict:
+                        continue
+                    param = params_dict[name]
+                    weight_loader = param.weight_loader
+                    weight_loader(param, loaded_weight, shard_id)
+                    break
             else:
                 # lm_head is not used in vllm as it is tied with
                 # embed_token. To prevent errors, skip loading

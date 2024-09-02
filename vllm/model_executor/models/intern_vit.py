@@ -10,7 +10,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
-from xformers import ops as xops
 
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
@@ -20,6 +19,11 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.utils import is_cpu
+
+USE_XFORMERS_OPS = not is_cpu()
+if USE_XFORMERS_OPS:
+    from xformers import ops as xops
 
 NORM2FN = {
     'rms_norm': RMSNorm,
@@ -124,6 +128,8 @@ class InternAttention(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
 
+        self.attn_fn = self.forward_xformers if USE_XFORMERS_OPS else self.forward_sdpa
+
     def forward(self, x):
         B, N, C = x.shape
         qkv, _ = self.qkv(x)
@@ -140,15 +146,23 @@ class InternAttention(nn.Module):
             k = self.k_norm.forward_native(k.flatten(-2,
                                                      -1)).view(B_, N_, H_, D_)
 
-        x = xops.memory_efficient_attention_forward(
-            q,
-            k,
-            v,
-            scale=self.scale,
-        )
+        x = self.attn_fn(q, k, v)
         x = x.view(B, N, -1)
 
         x, _ = self.proj(x)
+        return x
+
+    def forward_sdpa(self, q, k, v):
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        x = F.scaled_dot_product_attention(q, k, v, scale=self.scale)
+        x = x.transpose(1, 2)
+        return x
+
+    def forward_xformers(self, q, k, v):
+        x = xops.memory_efficient_attention_forward(q, k, v, scale=self.scale)
         return x
 
 

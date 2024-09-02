@@ -9,7 +9,7 @@ import torch
 from PIL import Image
 from torch import nn
 from transformers import SiglipVisionConfig
-from xformers import ops as xops
+from transformers.models.siglip.modeling_siglip import SiglipSdpaAttention
 
 from vllm.config import ModelConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
@@ -25,6 +25,11 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    repeat_and_pad_placeholder_tokens)
 from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE, SequenceData
+from vllm.utils import is_cpu
+
+USE_XFORMERS_OPS = not is_cpu()
+if USE_XFORMERS_OPS:
+    from xformers import ops as xops
 
 
 def get_siglip_patch_grid_length(*, image_size: int, patch_size: int) -> int:
@@ -282,7 +287,7 @@ class SiglipAttention(nn.Module):
         out = out.view(batch_size, q_len, -1)
         attn_output, _ = self.out_proj(out)
 
-        return attn_output
+        return attn_output, None
 
 
 class SiglipMLP(nn.Module):
@@ -327,7 +332,11 @@ class SiglipEncoderLayer(nn.Module):
         super().__init__()
         self.embed_dim = config.hidden_size
 
-        self.self_attn = SiglipAttention(config, quant_config=quant_config)
+        if USE_XFORMERS_OPS:
+            self.self_attn = SiglipAttention(config, quant_config=quant_config)
+        else:
+            self.self_attn = SiglipSdpaAttention(config)
+
         self.layer_norm1 = nn.LayerNorm(self.embed_dim,
                                         eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(
@@ -344,7 +353,7 @@ class SiglipEncoderLayer(nn.Module):
         residual = hidden_states
 
         hidden_states = self.layer_norm1(hidden_states)
-        hidden_states = self.self_attn(hidden_states=hidden_states)
+        hidden_states, _ = self.self_attn(hidden_states=hidden_states)
         hidden_states = residual + hidden_states
 
         residual = hidden_states
@@ -468,6 +477,7 @@ class SiglipVisionTransformer(nn.Module):
 class SiglipVisionModel(nn.Module):
     config_class = SiglipVisionConfig
     main_input_name = "pixel_values"
+    use_shard_weight_loader = USE_XFORMERS_OPS
 
     def __init__(
         self,
