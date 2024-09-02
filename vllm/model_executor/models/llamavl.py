@@ -1,10 +1,16 @@
+from dataclasses import dataclass
+from functools import partial
 import itertools
+import collections
+import math
 from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
-                    TypedDict, Union)
+                    TypedDict, Union, Callable, Dict, Any)
 
 import torch
 import torch.nn as nn
-# from transformers import CLIPVisionConfig, LlavaConfig, SiglipVisionConfig
+import torch.nn.functional as F
+import torchvision.transforms as tv
+from PIL import Image
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
@@ -13,18 +19,256 @@ from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from .interfaces import SupportsMultiModal
+from .llama import LlamaAttention
+from vllm.model_executor.layers.layernorm import RMSNorm
+# from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
+#                                                QKVParallelLinear,
+#                                                RowParallelLinear,
+#                                                ColumnParallelLinear)
+from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
+
 
 logger = init_logger(__name__)
+MP_SCALE = 8
+IMAGE_RES = 224
 
 def get_max_llama_image_tokens(ctx: InputContext) -> int:
     logger.warning("need further check on max llama image tokens")
     print("ctx", type(ctx))
     print(ctx)
     return 1025 * 2
+
+
+def to_2tuple(x):
+    if isinstance(x, collections.abc.Iterable):
+        return x
+    return (x, x)
+
+def resize_local_position_embedding(orig_pos_embed, grid_size):
+    """
+    Resize position embedding for vision encoder.
+    Original position embedding is [n_tiles * n_tiles + 1, dim]
+    New position embedding will be [grid_size[0] * grid_size[1] + 1, dim]
+    """
+    new_grid_size = to_2tuple(grid_size)
+    orig_grid_size = to_2tuple(int(math.sqrt(len(orig_pos_embed) - 1)))
+    new_seq_len = new_grid_size[0] * new_grid_size[1] + 1
+
+    new_pos_emb_tok, new_pos_emb_img = (
+        orig_pos_embed[:1],
+        orig_pos_embed[1:],
+    )
+    logger.info(
+        f"resizing position embedding grid-size from {orig_grid_size} to {new_grid_size}"
+    )
+
+    new_pos_emb_img = new_pos_emb_img.reshape(
+        1, orig_grid_size[0], orig_grid_size[1], -1
+    ).permute(0, 3, 1, 2)
+
+    new_pos_emb_img = F.interpolate(
+        new_pos_emb_img,
+        size=new_grid_size,
+        mode="bilinear",
+        align_corners=True,
+    )
+    new_pos_emb_img = new_pos_emb_img.permute(0, 2, 3, 1).reshape(
+        1, new_grid_size[0] * new_grid_size[1], -1
+    )[0]
+    new_pos_embed = torch.cat([new_pos_emb_tok, new_pos_emb_img], dim=0)
+    return new_pos_embed
+
+
+def initialize_global_position_embedding_from_local(
+    pos_and_cls_embed, grid_size, x_scale, y_scale
+):
+    """
+    Takes a local position embedding for vision encoder and uses it
+    to initialize the global position embedding.
+    Input: local position embedding of shape [grid_size[0] * grid_size[1] + 1, dim]
+    Returns: global position embedding of shape [x_scale, y_scale, grid_size[0] * grid_size[1] + 1, dim]
+    Here x_scale and y_scale are the number of tiles along x-axis and y-axis respectively.
+    """
+    pos_embed = pos_and_cls_embed[1:]
+    cls_embed = pos_and_cls_embed[0].view(1, 1, 1, -1)
+    grid_size = to_2tuple(grid_size)
+    new_pos_emb_img = pos_embed.reshape(1, grid_size[0], grid_size[1], -1).permute(
+        0, 3, 1, 2
+    )
+    new_grid_size = (x_scale * grid_size[0], y_scale * grid_size[1])
+    new_pos_emb_img = F.interpolate(
+        new_pos_emb_img,
+        size=new_grid_size,
+        mode="bilinear",
+        align_corners=True,
+    )
+    new_pos_emb_img = new_pos_emb_img.permute(0, 2, 3, 1)
+    new_pos_emb_img = new_pos_emb_img.view(
+        x_scale, grid_size[0], y_scale, grid_size[1], -1
+    )
+    new_pos_emb_img = new_pos_emb_img.permute(0, 2, 1, 3, 4).contiguous()
+    new_pos_emb_img = new_pos_emb_img.reshape(
+        x_scale, y_scale, grid_size[0] * grid_size[1], -1
+    )
+    cls_embed = cls_embed.expand(x_scale, y_scale, -1, -1)
+    pos_and_cls_embed = torch.cat([cls_embed, new_pos_emb_img], dim=2)
+    return pos_and_cls_embed
+
+
+def resize_global_position_embedding(pos_and_cls_embed, grid_size, x_scale, y_scale):
+    """
+    Takes a global position embedding for vision encoder and resizes it to new size.
+    Input: global position embedding of shape [x_old, y_old, old_grid_size[0] * old_grid_size[1] + 1, dim]
+    Returns: global position embedding of shape [x_scale, y_scale, grid_size[0] * grid_size[1] + 1, dim]
+    Here x_scale and y_scale are the number of tiles along x-axis and y-axis respectively.
+    """
+    # first remove cls token
+    pos_embed = pos_and_cls_embed[:, :, 1:]
+    cls_embed = pos_and_cls_embed[:, :, 0].unsqueeze(2)
+
+    xs_old, ys_old, ntok, dim = pos_embed.shape
+    old_grid_size = int(math.sqrt(ntok))
+
+    # move to correct form for interpolation
+    pos_embed = pos_embed.view(xs_old, ys_old, old_grid_size, old_grid_size, dim)
+    pos_embed = pos_embed.permute(0, 2, 1, 3, 4).contiguous()
+    pos_embed = pos_embed.view(xs_old * old_grid_size, ys_old * old_grid_size, dim)
+    pos_embed = pos_embed.unsqueeze(0)
+
+    # interpolate
+    new_size = (grid_size[0] * x_scale, grid_size[1] * y_scale)
+    pos_embed = pos_embed.permute(0, 3, 1, 2)
+    pos_embed_resized = F.interpolate(
+        pos_embed,
+        size=new_size,
+        mode="bilinear",
+        align_corners=True,
+    )
+    pos_embed = pos_embed_resized.permute(0, 2, 3, 1)[0]
+
+    # move it back in place
+    pos_embed = pos_embed.view(x_scale, grid_size[0], y_scale, grid_size[1], dim)
+    pos_embed = pos_embed.permute(0, 2, 1, 3, 4).contiguous()
+    pos_embed = pos_embed.view(x_scale, y_scale, grid_size[0] * grid_size[1], dim)
+
+    # interpolate cls token
+    cls_embed = cls_embed.permute(2, 3, 0, 1)
+    cls_embed_resized = F.interpolate(
+        cls_embed,
+        size=(x_scale, y_scale),
+        mode="bilinear",
+        align_corners=True,
+    )
+    cls_embed = cls_embed_resized.permute(2, 3, 0, 1)
+    # add cls token back in
+    pos_and_cls_embed = torch.cat([cls_embed, pos_embed], dim=2)
+
+    return pos_and_cls_embed
+
+
+def build_encoder_attention_mask(
+    x: torch.Tensor,
+    ar: torch.Tensor,
+    ntok: int,
+    num_chunks: int,
+    n_heads: int,
+):
+    """
+    Build vision encoder attention mask that omits padding tokens.
+    """
+    masks = []
+    for arx in ar:
+        mask_i = torch.ones((num_chunks, x.shape[2], 1), dtype=x.dtype)
+        mask_i[: arx[0] * arx[1], :ntok] = 0
+        mask_i = mask_i.view(num_chunks * x.shape[2], -1)
+        mask_i = mask_i @ mask_i.T * torch.finfo(x.dtype).min
+        mask_i = mask_i.unsqueeze(0)
+        masks.append(mask_i)
+    masks = torch.stack(masks).to(x.device).expand(-1, n_heads, -1, -1)
+    return masks
+
+
+def expand_num_tokens_to_mult8(x):
+    num_pad_tokens = 8 - (x.shape[-2] % 8)
+    if num_pad_tokens == 0:
+        return x, 0
+    else:
+        return (
+            torch.cat(
+                [
+                    x,
+                    torch.zeros(
+                        (x.shape[0], x.shape[1], num_pad_tokens, x.shape[-1]),
+                        dtype=x.dtype,
+                        device=x.device,
+                    ),
+                ],
+                dim=-2,
+            ),
+            num_pad_tokens,
+        )
+
+
+def contract_num_tokens_from_mult8(x, num_pad_tokens):
+    if num_pad_tokens == 0:
+        return x
+    return x[:, :, :-num_pad_tokens]
+
+def apply_scaling(freqs: torch.Tensor):
+    # Values obtained from grid search
+    scale_factor = 8
+    low_freq_factor = 1
+    high_freq_factor = 4
+    old_context_len = 8192  # original llama3 length
+
+    low_freq_wavelen = old_context_len / low_freq_factor
+    high_freq_wavelen = old_context_len / high_freq_factor
+    new_freqs = []
+    for freq in freqs:
+        wavelen = 2 * math.pi / freq
+        if wavelen < high_freq_wavelen:
+            new_freqs.append(freq)
+        elif wavelen > low_freq_wavelen:
+            new_freqs.append(freq / scale_factor)
+        else:
+            assert low_freq_wavelen != high_freq_wavelen
+            smooth = (old_context_len / wavelen - low_freq_factor) / (
+                high_freq_factor - low_freq_factor
+            )
+            new_freqs.append((1 - smooth) * freq / scale_factor + smooth * freq)
+    return torch.tensor(new_freqs, dtype=freqs.dtype, device=freqs.device)
+
+
+def precompute_freqs_cis(
+    dim: int, end: int, theta: float = 10000.0, use_scaled: bool = False
+):
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+    t = torch.arange(end, device=freqs.device, dtype=torch.float32)
+    if use_scaled:
+        freqs = apply_scaling(freqs)
+    freqs = torch.outer(t, freqs)
+    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
+    return freqs_cis
+
+def _get_full_row_masked_out_mask(
+    attn_bias,
+    negative_inf_value,
+):
+    """
+    attn_bias should be a 4D tensor of shape [B, H, S1, S2]
+    where B is the batch size, H is the number of heads,
+    and S1/S2 are the sequence lengths. This returns
+    a 4D tensor of shape [B, H, S1, 1] which stores boolean
+    values which are 0 if the a full row in the last dimension
+    contains negative infinity values, otherwise it's 1.
+    """
+    return (attn_bias != negative_inf_value).any(dim=-1).type_as(attn_bias)[..., None]
 
 # Image encoder for inference
 class LayerNorm(nn.LayerNorm):
@@ -54,13 +298,18 @@ class ColumnParallelConv2dPatch(torch.nn.Module):
         out_channels: int,
         kernel_size: Union[int, Tuple[int, int]],
         stride: Union[int, Tuple[int, int]],
-        bias: Optional[bool] = False,
+        bias: bool = False,
     ) -> None:
         super().__init__()
         if isinstance(kernel_size, int):
             kernel_size = (kernel_size, kernel_size)
         self._unfold = torch.nn.Unfold(kernel_size=kernel_size, stride=stride)
-        self._linear = ColumnParallelLinear(
+        # self._linear = ColumnParallelLinear(
+        #     in_channels * kernel_size[0] * kernel_size[1],
+        #     out_channels,
+        #     bias=bias,
+        # )
+        self._linear = nn.Linear(
             in_channels * kernel_size[0] * kernel_size[1],
             out_channels,
             bias=bias,
@@ -69,8 +318,9 @@ class ColumnParallelConv2dPatch(torch.nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self._unfold(x)
         x = x.permute(0, 2, 1)
-        x = F.linear(x, self._linear.weight)
-        x = gather_from_tensor_model_parallel_region(x)
+        x = self._linear(x)
+        # x = F.linear(x, self._linear.weight)
+        # x = gather_from_tensor_model_parallel_region(x)
         return x
 
 
@@ -84,29 +334,33 @@ class ImageFeedForward(torch.nn.Module):
     ):
         super().__init__()
         # layers
-        self.c_fc = ColumnParallelLinear(
-            dim,
-            hidden_dim,
-            bias=True,
-            gather_output=False,
-            init_method=lambda x: x,
-        )
-        self.c_proj = RowParallelLinear(
-            hidden_dim,
-            dim,
-            bias=True,
-            input_is_parallel=True,
-            init_method=lambda x: x,
-        )
+        self.c_fc = nn.Linear(dim, hidden_dim, bias=True)
+        # self.c_fc = ColumnParallelLinear(
+        #     dim,
+        #     hidden_dim,
+        #     bias=True,
+        #     gather_output=False,
+        #     init_method=lambda x: x,
+        # )
+        self.c_proj = nn.Linear(hidden_dim, dim, bias=True)
+        # self.c_proj = RowParallelLinear(
+        #     hidden_dim,
+        #     dim,
+        #     bias=True,
+        #     input_is_parallel=True,
+        #     init_method=lambda x: x,
+        # )
         self.non_linearity = act_layer()
         self.dropout = dropout
 
     def forward(self, x):
-        hidden = F.linear(x, self.c_fc.weight, self.c_fc.bias)
+        hidden = self.c_fc(x)
+        # hidden = F.linear(x, self.c_fc.weight, self.c_fc.bias)
         hidden = self.non_linearity(hidden)
-        hidden = F.linear(hidden, self.c_proj.weight)
-        hidden = reduce_from_tensor_model_parallel_region(hidden)
-        hidden += self.c_proj.bias
+        hidden = self.c_proj(hidden)
+        # hidden = F.linear(hidden, self.c_proj.weight)
+        # hidden = reduce_from_tensor_model_parallel_region(hidden)
+        # hidden += self.c_proj.bias
         return hidden
 
 
@@ -118,7 +372,7 @@ class ImageAttention(nn.Module):
         n_heads,
     ):
         super().__init__()
-        model_parallel_size = fs_init.get_model_parallel_world_size()
+        model_parallel_size = get_tensor_model_parallel_world_size()
         qkvo_replication = 1
         if model_parallel_size > 16:
             qkvo_replication = model_parallel_size // 8
@@ -131,34 +385,40 @@ class ImageAttention(nn.Module):
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = dim // n_heads
 
-        self.wq = ColumnParallelLinear(
-            dim,
-            qkvo_replication * n_heads * self.head_dim,
-            bias=True,
-            gather_output=False,
-            init_method=lambda x: x,
-        )
-        self.wk = ColumnParallelLinear(
-            dim,
-            qkvo_replication * self.n_kv_heads * self.head_dim,
-            bias=True,
-            gather_output=False,
-            init_method=lambda x: x,
-        )
-        self.wv = ColumnParallelLinear(
-            dim,
-            qkvo_replication * self.n_kv_heads * self.head_dim,
-            bias=True,
-            gather_output=False,
-            init_method=lambda x: x,
-        )
-        self.wo = RowParallelLinear(
-            qkvo_replication * n_heads * self.head_dim,
-            dim,
-            bias=True,
-            input_is_parallel=True,
-            init_method=lambda x: x,
-        )
+        # The model provided by llama is with bias=True, but the weight does not contain bias
+        # During runtime, the llama executor set bias to zero. We use bias=False here to match the behavior
+        self.wq = nn.Linear(dim, n_heads * self.head_dim, bias=False)
+        self.wk = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False)
+        self.wv = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False)
+        self.wo = nn.Linear(n_heads * self.head_dim, dim, bias=False)
+        # self.wq = ColumnParallelLinear(
+        #     dim,
+        #     qkvo_replication * n_heads * self.head_dim,
+        #     bias=True,
+        #     gather_output=False,
+        #     init_method=lambda x: x,
+        # )
+        # self.wk = ColumnParallelLinear(
+        #     dim,
+        #     qkvo_replication * self.n_kv_heads * self.head_dim,
+        #     bias=True,
+        #     gather_output=False,
+        #     init_method=lambda x: x,
+        # )
+        # self.wv = ColumnParallelLinear(
+        #     dim,
+        #     qkvo_replication * self.n_kv_heads * self.head_dim,
+        #     bias=True,
+        #     gather_output=False,
+        #     init_method=lambda x: x,
+        # )
+        # self.wo = RowParallelLinear(
+        #     qkvo_replication * n_heads * self.head_dim,
+        #     dim,
+        #     bias=True,
+        #     input_is_parallel=True,
+        #     init_method=lambda x: x,
+        # )
         self.qkvo_replication = qkvo_replication
 
     def forward(
@@ -194,7 +454,7 @@ class ImageAttention(nn.Module):
         attn_output = attn_output.transpose(1, 2).contiguous().reshape(bs, slen, -1)
 
         out = F.linear(attn_output, self.wo.weight)
-        out = reduce_from_tensor_model_parallel_region(out)
+        # out = reduce_from_tensor_model_parallel_region(out)
         out = out / self.qkvo_replication
         out += self.wo.bias
         return out
@@ -284,7 +544,7 @@ class VisionEncoder(nn.Module):
     def __init__(
         self,
         max_num_tiles: int,
-        ckpt_path: str = None,
+        # ckpt_path: str = None,
         image_size: int = 224,
         patch_size: int = 14,
         width: int = 1280,
@@ -293,7 +553,7 @@ class VisionEncoder(nn.Module):
         mlp_ratio: float = 4.0,
         act_layer: Callable = nn.GELU,
         in_channels: int = 3,
-        load_ckpt: bool = False,
+        # load_ckpt: bool = False,
         n_global_layers: int = 2,
         global_model: bool = False,
         return_intermediate=None,
@@ -484,170 +744,6 @@ class VisionEncoder(nn.Module):
         return x
 
 
-class Attention(nn.Module):
-    """Multi-head attention module."""
-
-    def __init__(self, args: ModelArgs):
-        """
-        Initialize the Attention module.
-        Args:
-            args (ModelArgs): Model configuration parameters.
-        Attributes:
-            n_kv_heads (int): Number of key and value heads.
-            n_local_heads (int): Number of local query heads.
-            n_local_kv_heads (int): Number of local key and value heads.
-            n_rep (int): Number of repetitions for local heads.
-            head_dim (int): Dimension size of each attention head.
-            wq (ColumnParallelLinear): Linear transformation for queries.
-            wk (ColumnParallelLinear): Linear transformation for keys.
-            wv (ColumnParallelLinear): Linear transformation for values.
-            wo (RowParallelLinear): Linear transformation for output.
-            cache_k (torch.Tensor): Cached keys for attention.
-            cache_v (torch.Tensor): Cached values for attention.
-        """
-        super().__init__()
-        model_parallel_size = fs_init.get_model_parallel_world_size()
-        replication_factor = 1
-        if model_parallel_size > 8:
-            replication_factor = model_parallel_size // MP_SCALE
-
-        self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
-        self.n_kv_heads *= replication_factor
-
-        self.n_local_heads = args.n_heads // model_parallel_size
-        self.n_local_kv_heads = self.n_kv_heads // model_parallel_size
-        self.n_rep = self.n_local_heads // self.n_local_kv_heads
-        self.head_dim = args.dim // args.n_heads
-        self.max_seq_len = args.max_seq_len
-
-        self.wq = ColumnParallelLinear(
-            args.dim,
-            args.n_heads * self.head_dim,
-            bias=False,
-            gather_output=False,
-            init_method=lambda x: x,
-        )
-        self.wk = ColumnParallelLinear(
-            args.dim,
-            self.n_kv_heads * self.head_dim,
-            bias=False,
-            gather_output=False,
-            init_method=lambda x: x,
-        )
-        self.wv = ColumnParallelLinear(
-            args.dim,
-            self.n_kv_heads * self.head_dim,
-            bias=False,
-            gather_output=False,
-            init_method=lambda x: x,
-        )
-        self.wo = RowParallelLinear(
-            args.n_heads * self.head_dim,
-            args.dim,
-            bias=False,
-            input_is_parallel=True,
-            init_method=lambda x: x,
-        )
-        self.n_heads = args.n_heads
-
-        self._register_load_state_dict_pre_hook(self.load_hook)
-
-    def load_hook(
-        self,
-        state_dict: Dict[str, Any],
-        prefix: str,
-        local_metadata: Dict[str, Any],
-        strict: bool,
-        missing_keys: List[str],
-        unexpected_keys: List[str],
-        error_msgs: List[str],
-    ) -> None:
-        if prefix + "wqkv.weight" in state_dict:
-            total_n_heads = self.n_heads + self.n_kv_heads * 2
-            wqkv = state_dict.pop(prefix + "wqkv.weight")
-            head_dim = wqkv.shape[0] // total_n_heads
-            dim1 = head_dim * self.n_heads
-            dim2 = dim1 + head_dim * self.n_kv_heads
-            dim3 = dim1 + head_dim * self.n_kv_heads * 2
-
-            wq = wqkv[:dim1]
-            wk = wqkv[dim1:dim2]
-            wv = wqkv[dim2:dim3]
-
-            state_dict[prefix + "wq.weight"] = wq
-            state_dict[prefix + "wk.weight"] = wk
-            state_dict[prefix + "wv.weight"] = wv
-
-    def setup_cache(self, max_batch_size: int, dtype: torch.dtype):
-        cache_shape = (
-            max_batch_size,
-            self.max_seq_len,
-            self.n_local_kv_heads,
-            self.head_dim,
-        )
-        device = next(self.parameters()).device
-        self.register_buffer(
-            "key_cache",
-            torch.zeros(
-                cache_shape,
-                dtype=dtype,
-                device=device,
-            ),
-            persistent=False,
-        )
-        self.register_buffer(
-            "value_cache",
-            torch.zeros(
-                cache_shape,
-                dtype=dtype,
-                device=device,
-            ),
-            persistent=False,
-        )
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        mask: torch.Tensor,
-        freqs_cis: torch.Tensor,
-        position_ids: torch.LongTensor,
-    ):
-
-        xq, xk, xv = [
-            F.linear(x, w) for w in [self.wq.weight, self.wk.weight, self.wv.weight]
-        ]
-
-        bs, slen, _ = xq.shape
-
-        xq = xq.view(bs, slen, self.n_local_heads, self.head_dim)
-        xk = xk.view(bs, xk.shape[1], self.n_local_kv_heads, self.head_dim)
-        xv = xv.view(bs, xv.shape[1], self.n_local_kv_heads, self.head_dim)
-
-        xq, xk = apply_rotary_emb(xq, xk, freqs_cis)
-
-        self.key_cache[:bs, position_ids, ...] = xk
-        self.value_cache[:bs, position_ids, ...] = xv
-
-        # TODO: we can avoid slicing on first dimension by always padding to max_batch_size()
-        xk = self.key_cache[:bs, ...]
-        xv = self.value_cache[:bs, ...]
-
-        xq, xk, xv = [tensor.transpose(1, 2) for tensor in (xq, xk, xv)]
-
-        xk = xk.repeat_interleave(self.n_rep, dim=1)
-        xv = xv.repeat_interleave(self.n_rep, dim=1)
-
-        attn_output = F.scaled_dot_product_attention(
-            xq, xk, xv, attn_mask=mask, dropout_p=0.0
-        )
-
-        attn_output = attn_output.transpose(1, 2).contiguous().reshape(bs, slen, -1)
-
-        out = F.linear(attn_output, self.wo.weight)
-        out = reduce_from_tensor_model_parallel_region(out)
-        return out
-
-
 class FeedForward(nn.Module):
     def __init__(
         self,
@@ -675,15 +771,18 @@ class FeedForward(nn.Module):
             hidden_dim = int(ffn_dim_multiplier * hidden_dim)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
-        self.w1 = ColumnParallelLinear(
-            dim, hidden_dim, bias=False, gather_output=False, init_method=lambda x: x
-        )
-        self.w2 = RowParallelLinear(
-            hidden_dim, dim, bias=False, input_is_parallel=True, init_method=lambda x: x
-        )
-        self.w3 = ColumnParallelLinear(
-            dim, hidden_dim, bias=False, gather_output=False, init_method=lambda x: x
-        )
+        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
+        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
+        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
+        # self.w1 = ColumnParallelLinear(
+        #     dim, hidden_dim, bias=False, gather_output=False, init_method=lambda x: x
+        # )
+        # self.w2 = RowParallelLinear(
+        #     hidden_dim, dim, bias=False, input_is_parallel=True, init_method=lambda x: x
+        # )
+        # self.w3 = ColumnParallelLinear(
+        #     dim, hidden_dim, bias=False, gather_output=False, init_method=lambda x: x
+        # )
         self._register_load_state_dict_pre_hook(self.load_hook)
 
     def forward(self, x):
@@ -691,7 +790,7 @@ class FeedForward(nn.Module):
         x1 = F.silu(x1)
         x_in = x1 * x3
         out = F.linear(x_in, self.w2.weight)
-        out = reduce_from_tensor_model_parallel_region(out)
+        # out = reduce_from_tensor_model_parallel_region(out)
         return out
 
     def load_hook(
@@ -715,7 +814,7 @@ class FeedForward(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, layer_id: int, args: ModelArgs):
+    def __init__(self, layer_id: int, args):
         """
         Initialize a TransformerBlock.
         Args:
@@ -735,7 +834,8 @@ class TransformerBlock(nn.Module):
         self.n_heads = args.n_heads
         self.dim = args.dim
         self.head_dim = args.dim // args.n_heads
-        self.attention = Attention(args)
+        # self.attention = Attention(args)
+        logger.warning("skip attention")
         self.feed_forward = FeedForward(
             dim=args.dim,
             hidden_dim=4 * args.dim,
@@ -786,13 +886,15 @@ class TransformerBlock(nn.Module):
         Returns:
             torch.Tensor: Output tensor after applying attention and feedforward layers.
         """
-        h = self.attention.forward(
-            x=self.attention_norm(x),
-            freqs_cis=freqs_cis,
-            mask=mask,
-            position_ids=position_ids,
-        )
-        h = h + x
+        # h = self.attention.forward(
+        #     x=self.attention_norm(x),
+        #     freqs_cis=freqs_cis,
+        #     mask=mask,
+        #     position_ids=position_ids,
+        # )
+        # h = h + x
+        h = x
+        logger.warning("skip attention")
         out = h + self.feed_forward.forward(self.ffn_norm(h))
         return out
 
@@ -831,7 +933,7 @@ class TilePositionEmbedding(nn.Module):
         if embed is not None:
             # reshape the weights to the correct shape
             nt_old, nt_old, _, w = embed.shape
-            logging.info(
+            logger.info(
                 f"Resizing tile embedding from {nt_old}x{nt_old} to {self.num_tiles}x{self.num_tiles}"
             )
             embed_new = TilePositionEmbedding._dynamic_resize(embed, self.num_tiles)
@@ -887,7 +989,7 @@ class CrossAttention(torch.nn.Module):
         norm_eps: float,
     ):
         super().__init__()
-        self.model_parallel_size = fs_init.get_model_parallel_world_size()
+        self.model_parallel_size = get_tensor_model_parallel_world_size()
         replication_factor = 1
         if self.model_parallel_size > 8:
             replication_factor = self.model_parallel_size // MP_SCALE
@@ -895,35 +997,40 @@ class CrossAttention(torch.nn.Module):
 
         assert n_heads % n_kv_heads == 0
 
-        self.wq = ColumnParallelLinear(
-            dim,
-            n_heads * head_dim,
-            bias=False,
-            gather_output=False,
-            init_method=_noinit,
-        )
 
-        self.wk = ColumnParallelLinear(
-            dim,
-            n_kv_heads * head_dim,
-            bias=False,
-            gather_output=False,
-            init_method=_noinit,
-        )
-        self.wv = ColumnParallelLinear(
-            dim,
-            n_kv_heads * head_dim,
-            bias=False,
-            gather_output=False,
-            init_method=_noinit,
-        )
-        self.wo = RowParallelLinear(
-            n_heads * head_dim,
-            dim,
-            bias=False,
-            input_is_parallel=True,
-            init_method=_noinit,
-        )
+        self.wq = nn.Linear(dim, n_heads * head_dim, bias=False)
+        self.wk = nn.Linear(dim, n_kv_heads * head_dim, bias=False)
+        self.wv = nn.Linear(dim, n_kv_heads * head_dim, bias=False)
+        self.wo = nn.Linear(n_heads * head_dim, dim, bias=False)
+        # self.wq = ColumnParallelLinear(
+        #     dim,
+        #     n_heads * head_dim,
+        #     bias=False,
+        #     gather_output=False,
+        #     init_method=_noinit,
+        # )
+
+        # self.wk = ColumnParallelLinear(
+        #     dim,
+        #     n_kv_heads * head_dim,
+        #     bias=False,
+        #     gather_output=False,
+        #     init_method=_noinit,
+        # )
+        # self.wv = ColumnParallelLinear(
+        #     dim,
+        #     n_kv_heads * head_dim,
+        #     bias=False,
+        #     gather_output=False,
+        #     init_method=_noinit,
+        # )
+        # self.wo = RowParallelLinear(
+        #     n_heads * head_dim,
+        #     dim,
+        #     bias=False,
+        #     input_is_parallel=True,
+        #     init_method=_noinit,
+        # )
 
         self.n_heads = n_heads
         self.head_dim = head_dim
@@ -1018,7 +1125,7 @@ class CrossAttention(torch.nn.Module):
         output = output.transpose(1, 2).contiguous().reshape(bsz, seqlen, -1)
 
         out = F.linear(output, self.wo.weight)
-        out = reduce_from_tensor_model_parallel_region(out)
+        # out = reduce_from_tensor_model_parallel_region(out)
         return out
 
 
@@ -1027,7 +1134,7 @@ class CrossAttentionTransformerBlock(torch.nn.Module):
 
     def __init__(
         self,
-        args: ModelArgs,
+        args,
         layer_id: int,
         no_ffn: bool = False,
     ) -> None:
@@ -1063,6 +1170,7 @@ class CrossAttentionTransformerBlock(torch.nn.Module):
         )
         self.gate_ffwd = torch.nn.Parameter(torch.zeros(1))
 
+        logger.warning("todo hook")
         self._register_load_state_dict_pre_hook(self.load_hook)
         self.no_ffn = no_ffn
 
@@ -1147,7 +1255,7 @@ class DummySelfAttentionTransformerBlock:
 
 
 class CrossAttentionTransformerVision(torch.nn.Module):
-    def __init__(self, args: ModelArgs) -> None:
+    def __init__(self, args) -> None:
         super().__init__()
         return_intermediate = "3,7,15,23,30"
         self.vision_input_dim = 1280
@@ -1168,12 +1276,17 @@ class CrossAttentionTransformerVision(torch.nn.Module):
             return_intermediate=return_intermediate,
         )
         # vision token projection
-        self.vision_projection = ColumnParallelLinear(
+        self.vision_projection = nn.Linear(
             self.vision_input_dim,
             args.dim,
             bias=True,
-            init_method=lambda x: x,
         )
+        # self.vision_projection = ColumnParallelLinear(
+        #     self.vision_input_dim,
+        #     args.dim,
+        #     bias=True,
+        #     init_method=lambda x: x,
+        # )
 
     def forward(
         self, images: torch.Tensor, aspect_ratios: torch.Tensor
@@ -1186,16 +1299,16 @@ class CrossAttentionTransformerVision(torch.nn.Module):
         )
 
         vision_tokens = F.linear(vision_tokens, self.vision_projection.weight)
-        vision_tokens = gather_from_tensor_model_parallel_region(vision_tokens)
+        # vision_tokens = gather_from_tensor_model_parallel_region(vision_tokens)
         return vision_tokens
 
 
 class CrossAttentionTransformerText(torch.nn.Module):
     INFERENCE_IMAGE_TOKEN_ID = 128010
 
-    def __init__(self, args: ModelArgs) -> None:
+    def __init__(self, args) -> None:
         super().__init__()
-        self.model_parallel_size = fs_init.get_model_parallel_world_size()
+        self.model_parallel_size = get_tensor_model_parallel_world_size()
         assert args.vocab_size > 0
         self.vocab_size = args.vocab_size
         self.n_layers = args.n_layers
@@ -1205,16 +1318,18 @@ class CrossAttentionTransformerText(torch.nn.Module):
         self.n_local_kv_heads = self.n_kv_heads // self.model_parallel_size
         assert self.vocab_size % self.model_parallel_size == 0
         self.tok_embeddings = VocabParallelEmbedding(
-            args.vocab_size, args.dim, init_method=lambda x: x
+            args.vocab_size, args.dim,
+            padding_size=self.model_parallel_size,
         )
         self.pos_embeddings = None
         # final norm layer (not necessary for post-norm)
         self.norm = RMSNorm(args.dim, eps=args.norm_eps)
 
         # output layer
-        self.output = ColumnParallelLinear(
-            args.dim, args.vocab_size, bias=False, init_method=lambda x: x
-        )
+        self.output = nn.Linear(args.dim, args.vocab_size, bias=False)
+        # self.output = ColumnParallelLinear(
+        #     args.dim, args.vocab_size, bias=False, init_method=lambda x: x
+        # )
 
         self.n_llama_layers = args.n_layers
         self.model_dim = args.dim
@@ -1225,9 +1340,9 @@ class CrossAttentionTransformerText(torch.nn.Module):
             args.vision_num_cross_attention_layers
         )
         self.learnable_embedding = VocabParallelEmbedding(
-            max(fs_init.get_model_parallel_world_size(), 8),
+            max(get_tensor_model_parallel_world_size(), 8),
             args.dim,
-            init_method=lambda x: x,
+            padding_size=self.model_parallel_size,
         )
         self.num_frozen_embeddings = self.tok_embeddings.num_embeddings
         self._thresh = self.num_frozen_embeddings - 1
@@ -1350,7 +1465,7 @@ class CrossAttentionTransformerText(torch.nn.Module):
         h = self.norm(h)
 
         output = F.linear(h, self.output.weight)
-        output = gather_from_tensor_model_parallel_region(output)
+        # output = gather_from_tensor_model_parallel_region(output)
         return output.float()
 
     def setup_cache(self, max_batch_size: int, dtype=torch.bfloat16):
@@ -1381,7 +1496,7 @@ class CrossAttentionTransformerText(torch.nn.Module):
         text_dtype,
         vision_tokens,
         cross_attention_masks,
-    ) -> Tuple[Tensor, Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         assert vision_tokens is not None, "Vision tokens must be provided"
         vision_seqlen = vision_tokens.shape[3]
         assert (
@@ -1402,7 +1517,7 @@ class CrossAttentionTransformerText(torch.nn.Module):
         )
         full_text_row_masked_out_mask = _get_full_row_masked_out_mask(
             cross_attention_masks,
-            get_negative_inf_value(cross_attention_masks.dtype),
+            torch.finfo(cross_attention_masks.dtype).min,
         )
         cross_attention_masks *= full_text_row_masked_out_mask
 
@@ -1412,11 +1527,251 @@ class CrossAttentionTransformerText(torch.nn.Module):
         )
 
 
-class CrossAttentionTransformer(torch.nn.Module):
-    def __init__(self, args: ModelArgs) -> None:
-        super().__init__()
-        self.params = args
+class VariableSizeImageTransform(object):
+    """
+    The variable size image transform will resize the image dynamically
+    based on the image aspect ratio and the number of image chunks we allow.
+    The algorithm will not upsample low-res images to fit a certain aspect
+    ratio, because that leads to a significant degradation in image quality.
+    For example, if an input image is of size 300x800, and we want to allow
+    a maximum of 16 image chunks, it will find the closest aspect ratio that
+    is allowed within 16 image chunks, i.e., 2:5 = 2 horizontal patches and
+    5 vertical patches, giving a total of 10 chunks.
+    The image will then be resized to products of the base size (default is
+    224px because MetaCLIP takes that), so in this case it will  be resized to
+    2*224:5*224 = 448:1120, where we maintain the original aspect ratio and
+    pad with the mean value for the rest. This approach minimizes the amount
+    of padding required for any arbitrary resolution.
+    The final output will therefore be of shape (11, 3, 224, 224), where 10
+    patches are coming from the resizing and chunking, and the first patch
+    is a downsampled version of the image that preserves aspect ratios.
+    """
 
+    def __init__(self, size: int = IMAGE_RES) -> None:
+        self.size = size
+        self.to_tensor = tv.ToTensor()
+        self._mean = (0.48145466, 0.4578275, 0.40821073)
+        self._std = (0.26862954, 0.26130258, 0.27577711)
+        self.normalize = tv.Normalize(
+            mean=self._mean,
+            std=self._std,
+            inplace=True,
+        )
+
+    @staticmethod
+    def _factors(n: int):
+        """Return all factors of a number."""
+        return set(
+            reduce(
+                list.__add__,
+                ([i, n // i] for i in range(1, int(n**0.5) + 1) if n % i == 0),
+            )
+        )
+
+    def _find_supported_aspect_ratios(self, num_chunks: int):
+        """
+        This function computes all the allowed aspect ratios for a fixed
+        number of input chunks.
+        For example, with `num_chunks=5`, it will return:
+        {
+            0.2: [(1, 5)],
+            5.0: [(5, 1)],
+            0.25: [(1, 4)],
+            1.0: [(2, 2), (1, 1)],
+            4.0: [(4, 1)],
+            0.3333333333333333: [(1, 3)],
+            3.0: [(3, 1)],
+            0.5: [(1, 2)],
+            2.0: [(2, 1)]
+        }
+        """
+        asp_dict = {}
+        for chunk_size in range(num_chunks, 0, -1):
+            _factors = sorted(VariableSizeImageTransform._factors(chunk_size))
+            _asp_ratios = [(x, chunk_size // x) for x in _factors]
+            for ratio in _asp_ratios:
+                k = ratio[0] / ratio[1]
+                if k not in asp_dict:
+                    asp_dict[k] = [ratio]
+                else:
+                    asp_dict[k].append(ratio)
+        return asp_dict
+
+    def _find_closest_aspect_ratio(
+        self, num_chunks: int, img_width: int, img_height: int
+    ) -> Tuple:
+        """
+        Given an image width, height and target number of chunks
+        this function will find the closest supported aspect ratio.
+        """
+        tgt_ar = img_width / img_height
+        asp_dict = self._find_supported_aspect_ratios(num_chunks)
+        cl_d, cl_p = 1e23, None
+        if tgt_ar >= 1:
+            cl_p = min(
+                [k for k in asp_dict.keys() if k <= tgt_ar],
+                key=lambda x: abs(x - tgt_ar),
+            )
+            v = asp_dict[cl_p]
+            # select width
+            widths = [(idx, self.size * vv[0]) for idx, vv in enumerate(v)]
+            tgt_idx = max(widths, key=lambda x: x[1])[0]
+        else:
+            cl_p = min(
+                [k for k in asp_dict.keys() if k > tgt_ar],
+                key=lambda x: abs(1 / x - 1 / tgt_ar),
+            )
+            v = asp_dict[cl_p]
+            # select height
+            heights = [(idx, self.size * vv[1]) for idx, vv in enumerate(v)]
+            tgt_idx = max(heights, key=lambda x: x[1])[0]
+        out = v[tgt_idx]
+        return out
+
+    def _resize(
+        self, image: Image.Image, target_width: int, target_height: int
+    ) -> Image.Image:
+        # Resize longer edge to given size.
+        w, h = image.size
+        scale = w / h
+
+        if scale > 1.0:
+            # width > height
+            new_w = target_width
+            new_h = math.floor(new_w / scale)
+        else:
+            # height >= width
+            new_h = target_height
+            new_w = math.floor(new_h * scale)
+
+        image = F.resize(image, (new_h, new_w))
+        return image
+
+    def _resize_max_side_to_size(
+        self,
+        image: Image.Image,
+    ) -> Image.Image:
+        # Resize longer edge to given size.
+        w, h = image.size
+        scale = w / h
+
+        if scale > 1.0:
+            # width > height
+            new_w = max(self.size, w)
+            new_h = math.floor(new_w / scale)
+        else:
+            # height >= width
+            new_h = max(self.size, h)
+            new_w = math.floor(new_h * scale)
+
+        image = F.resize(image, (new_h, new_w))
+        return image
+
+    def _pad(self, image: Image.Image, new_width: int, new_height: int) -> Image.Image:
+        mean_per_channel = tuple(
+            np.clip(np.array(image).mean(axis=(0, 1)), 0, 255).astype(np.uint8)
+        )
+        new_im = Image.new(mode="RGB", size=(new_height, new_width), color=(0, 0, 0))  # type: ignore
+        new_im.paste(image)
+        return new_im
+
+    def _split(self, image: torch.Tensor, ncw: int, nch: int) -> torch.Tensor:
+        # Split image into number of required tiles (width x height)
+        num_channels, height, width = image.size()
+        image = image.view(num_channels, nch, height // nch, ncw, width // ncw)
+        # Permute dimensions to reorder the axes
+        image = image.permute(1, 3, 0, 2, 4).contiguous()
+        # Reshape into the desired output shape (batch_size * 4, num_channels, width/2, height/2)
+        image = image.view(ncw * nch, num_channels, height // nch, width // ncw)
+        return image
+
+    def _fit_image_to_canvas(
+        self, num_chunks: int, img_width: int, img_height: int
+    ) -> Any:
+        """
+        Given an image width, height and target number of chunks this function will see if the image
+        can be fit into any of the canvases that can be build from arranging the tiles in a grid.
+        If the image can be fit onto several canvases, it will return the canvas where the shorter edge
+        of the image will be largest.
+        """
+        # Initialize the optimal canvas to None. If no canvas is found where image fits, function returns None.
+        optimal_canvas = None
+        optimal_image_width_height = None
+
+        scale = img_width / img_height
+
+        # Gather all potential supported image resolutions and iterate through them to find best match
+        potential_arrangements = [
+            item
+            for sublist in self._find_supported_aspect_ratios(num_chunks).values()
+            for item in sublist
+        ]
+        current_gap = 1e23
+        for n_w, n_h in potential_arrangements:
+            # Compute the canvas size
+            canvas_width, canvas_height = n_w * self.size, n_h * self.size
+
+            # Check if image can fit into the canvas without downsampling
+            if canvas_width >= img_width and canvas_height >= img_height:
+                # If we did not find a good canvas yet, we will use the current one
+                if optimal_canvas is None:
+                    # Set optimal canvas and determine the actual image height and width in the canvas with aspect ratio preserving resampling
+                    optimal_canvas = (n_w, n_h)
+                    optimal_image_width_height = (n_w * self.size, n_h * self.size)
+                else:
+                    # Find closest fit based on gap
+                    image_width_height = (n_w * self.size, n_h * self.size)
+                    gap = abs(img_width - image_width_height[0]) + abs(
+                        img_height - image_width_height[1]
+                    )
+                    if gap < current_gap:
+                        # If the gap is smaller than the previous one, we will update our optimal canvas and image width height
+                        optimal_canvas = (n_w, n_h)
+                        optimal_image_width_height = image_width_height
+                        current_gap = gap
+        return optimal_canvas
+
+    def __call__(self, image: Image.Image, max_num_chunks: int) -> Tuple[Any, Any]:
+        assert max_num_chunks > 0
+        assert isinstance(image, Image.Image), type(image)
+        w, h = image.size
+        # Check if the image can be fit to the canvas without downsampling
+        ar = self._fit_image_to_canvas(
+            num_chunks=max_num_chunks, img_width=w, img_height=h
+        )
+        if ar is None:
+            # If we did not find a canvas, we have to find the closest aspect ratio and downsample the image
+            ar = self._find_closest_aspect_ratio(
+                num_chunks=max_num_chunks, img_width=w, img_height=h
+            )
+            image = self._resize(image, ar[0] * self.size, ar[1] * self.size)
+        else:
+            image = self._resize_max_side_to_size(image)
+        image = self._pad(image, ar[1] * self.size, ar[0] * self.size)
+        image = self.to_tensor(image)
+        image = self.normalize(image)
+        image = self._split(image, ar[0], ar[1])  # type: ignore
+        return image, ar
+
+@MULTIMODAL_REGISTRY.register_image_input_mapper()
+@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_llama_image_tokens)
+class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
+    def __init__(self, config,
+                 multimodal_config: MultiModalConfig,
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None):
+        super().__init__()
+        print("config", type(config))
+        print(config)
+        print("multimodal_config", type(multimodal_config))
+        print(multimodal_config)
+        print("cache_config", type(cache_config))
+        print(cache_config)
+        print("quant_config", type(quant_config))
+        print(quant_config)
+
+        # self.params = args
+        args = config
         self.model_dim = args.dim
         self.vision_model = CrossAttentionTransformerVision(args)
         self.text_model = CrossAttentionTransformerText(args)
@@ -1432,7 +1787,7 @@ class CrossAttentionTransformer(torch.nn.Module):
 
     def compute_vision_tokens_masks(
         self,
-        batch_images: List[List[PIL_Image.Image]],
+        batch_images: List[List[Image.Image]],
         batch_masks: List[List[List[int]]],
         total_len: int,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -1517,6 +1872,10 @@ class CrossAttentionTransformer(torch.nn.Module):
 
         return (xattn_caches, cross_attention_masks, full_text_row_masked_out_mask)
 
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        state_dict = {name: weight for name, weight in weights}
+        self.load_state_dict(state_dict, strict=False)
+
     def forward(
         self,
         position_ids: torch.Tensor,
@@ -1539,7 +1898,7 @@ class CrossAttentionTransformer(torch.nn.Module):
 
 
 def _stack_images(
-    images: List[List[PIL_Image.Image]],
+    images: List[List[Image.Image]],
     max_num_chunks: int,
     image_res: int,
     max_num_images: int,
@@ -1574,7 +1933,7 @@ def _pad_masks(
     max_num_chunks: int,
 ) -> torch.Tensor:
     dtype = torch.bfloat16
-    inf_value = get_negative_inf_value(dtype)
+    inf_value = torch.finfo(dtype).min
 
     bsz = len(all_masks)
     max_num_media = max([len(m) for m in all_masks])
@@ -1596,26 +1955,4 @@ def _pad_masks(
                 ].fill_(0.0)
 
     return out_masks
-
-
-@MULTIMODAL_REGISTRY.register_image_input_mapper()
-@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_llama_image_tokens)
-class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
-    def __init__(self, config,
-                 multimodal_config: MultiModalConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
-        super().__init__()
-        print("config", type(config))
-        print(config)
-        print("multimodal_config", type(multimodal_config))
-        print(multimodal_config)
-        print("cache_config", type(cache_config))
-        print(cache_config)
-        print("quant_config", type(quant_config))
-        print(quant_config)
-
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        for name, weight in weights:
-            print(name, weight.shape)
 
