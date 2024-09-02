@@ -11,6 +11,7 @@ from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
+from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.fused_moe_marlin import (
     fused_moe_marlin, single_moe_marlin)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
@@ -218,6 +219,9 @@ def test_fused_marlin_moe(
     sort_indices2 = stack_and_dev(sort_indices2_l)
 
     score = torch.randn((m, e), device="cuda", dtype=dtype)
+
+    topk_weights, topk_ids = fused_topk(a, score, topk, False)
+
     triton_output = fused_moe(
         a,
         w_ref1.transpose(1, 2).contiguous(),
@@ -235,7 +239,8 @@ def test_fused_marlin_moe(
         g_idx2,
         sort_indices1,
         sort_indices2,
-        topk,
+        topk_weights,
+        topk_ids,
         renormalize=False,
         w1_scale=scales1,
         w2_scale=scales2,
