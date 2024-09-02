@@ -16,6 +16,7 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
                                              MedusaConfig, MLPSpeculatorConfig,
                                              MPTConfig, NemotronConfig,
                                              RWConfig, UltravoxConfig)
+from vllm.transformers_utils.utils import check_gguf_file
 
 if VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
@@ -56,7 +57,7 @@ def get_config(
 ) -> PretrainedConfig:
 
     # Separate model folder from file path for GGUF models
-    is_gguf = Path(model).is_file() and Path(model).suffix == ".gguf"
+    is_gguf = check_gguf_file(model)
     if is_gguf:
         kwargs["gguf_file"] = Path(model).name
         model = Path(model).parent
@@ -112,7 +113,7 @@ def get_hf_image_processor_config(
     if VLLM_USE_MODELSCOPE:
         return dict()
     # Separate model folder from file path for GGUF models
-    if Path(model).is_file() and Path(model).suffix == ".gguf":
+    if check_gguf_file(model):
         model = Path(model).parent
     return get_image_processor_config(model, revision=revision, **kwargs)
 
