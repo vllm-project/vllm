@@ -12,7 +12,6 @@ import torch
 import torch.nn.functional as F
 
 from vllm.logger import init_logger
-import vllm.decode as decode
 
 logger = init_logger(__name__)
 HPUFusedRMSNorm = None
@@ -194,6 +193,18 @@ def prompt_attention(
     return attn_weights
 
 
+class LoraMask:
+    lora_mask = None
+
+    @staticmethod
+    def setLoraMask(mask):
+        LoraMask.lora_mask = mask
+
+    @staticmethod
+    def getLoraMask():
+        return LoraMask.lora_mask
+
+
 def dispatch_bgmv_linear(
     y: torch.Tensor,
     x: torch.Tensor,
@@ -207,33 +218,41 @@ def dispatch_bgmv_linear(
     `wa_t_all` and `wb_t_all` contains all LoRA A and LoRA B weight matrices
     stacked into single tensors, assuming same rank. HPU handles no-LoRA
     requests using zero valued A and B tensors. These zero valued tensors are
-    appended at the end of `wa_t_all` and `wb_t_all` during initialization. For
-    custom BGMV, the corresponding `wa` and `wb` for each batch is created
-    based on the lora_index of each sample.
+    appended at the end of `wa_t_all` and `wb_t_all` during initialization.
+    """
 
-    For example:
+    assert layer_idx == 0, f'layer_idx should be 0, but got {layer_idx}'
+    max_loras = wa_t_all.size(0)
+    # Wrap-around for negative indices
+    mask = LoraMask.getLoraMask()
+    if mask is not None:
+        """
+        We reshape w_a_t_all to [hidden_dim, num_layers * lora_rank]
+        and w_b_t_all to [num_layers * lora_rank, hidden_dim]. We also
+        have a loraMask of shape [batch_size, num_layers * lora_rank]
+        """
+        wa = wa_t_all[:, 0, :, :]
+        wb = wb_t_all[:, 0, :, :].transpose(1, 2)
+        wa_shape = wa.shape
+        wb_shape = wb.shape
+        wa = wa.reshape(wa_shape[0] * wa_shape[1], wa_shape[2]).transpose(0, 1)
+        wb = wb.reshape(wb_shape[0] * wb_shape[1], wb_shape[2])
+        out = x @ wa
+        assert (out.shape == mask.shape)
+        out = out * mask
+        out = out @ wb
+    else:
+        """For custom BGMV, the corresponding `wa` and `wb` for each batch is
+        created based on the lora_index of each sample.
+
+        For example:
         `wa_t_all` is tensor of shape (num_loras, num_layers, lora_rank,
         hidden_dim), where `wa_t_all[-1]` is zero valued tensor which handles
         no-LoRA case. The `wa` tensor for a batch of size batch_Size will have
         a shape of (batch_size, num_layers, hidden_dim, lora_rank)
 
-    This method avoids for-loop as well as graph breaks.
-    """
-    assert layer_idx == 0, f'layer_idx should be 0, but got {layer_idx}'
-    max_loras = wa_t_all.size(0)
-    # Wrap-around for negative indices
-    if decode.mask is not None:
-        wa = wa_t_all[:, 0, :, :]
-        wb = wb_t_all[:, 0, :, :].transpose(0, 1)
-        wa_shape = wa.shape
-        wb_shape = wb.shape
-        wa = wa.reshape(wa_shape[0] * wa_shape[1], wa_shape[2]).transpose(0, 1)
-        wb = wb.reshape(wb_shape[0], wb_shape[1] * wb_shape[2]).transpose(0, 1)
-        out = x @ wa
-        assert (out.shape == decode.mask.shape)
-        out = out * decode.mask
-        out = out @ wb
-    else:
+        This method avoids for-loop as well as graph breaks.
+        """
         indices = indices % max_loras
         wa = torch.index_select(wa_t_all, 0,
                                 indices)[:, 0, :, :].transpose(-1, -2)

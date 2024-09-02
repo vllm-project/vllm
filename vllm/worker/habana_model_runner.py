@@ -22,6 +22,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, MultiModalConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.distributed.parallel_state import get_world_group
+from vllm.hpu.ops import LoraMask as LoraMask
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
@@ -33,7 +34,6 @@ from vllm.sequence import (IntermediateTensors, SamplerOutput, SequenceData,
                            SequenceGroupMetadata)
 from vllm.utils import (HabanaMemoryProfiler, format_bytes,
                         is_pin_memory_available, make_tensor_with_pad)
-import vllm.decode as decode
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase,
     _add_attn_metadata_broadcastable_dict,
@@ -230,11 +230,11 @@ class HpuModelAdapter():
                                                       input_ids.size(1),
                                                       input_ids.device,
                                                       torch.bfloat16)
-        decode.mask = kwargs.pop('mask')
+        LoraMask.setLoraMask(kwargs.pop('mask'))
         hidden_states = self.model(*args, **kwargs)
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
         hidden_states = hidden_states.index_select(0, selected_token_indices)
-        return hidden_states, decode.mask
+        return hidden_states
 
     def compute_logits(self, *args, **kwargs):
         return self.model.compute_logits(*args, **kwargs)
@@ -339,7 +339,7 @@ class ModelInputForHPU(ModelRunnerInputBase):
             "real_batch_size": self.real_batch_size,
             "batch_size_padded": self.batch_size_padded,
             "virtual_engine": self.virtual_engine,
-            "mask": mask
+            "mask": self.mask
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
         return tensor_dict
@@ -634,8 +634,6 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         if len(seq_group_metadata_list) == 0:
             return PreparePromptMetadata.empty()
-        mask = None
-        counter = 0
 
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
@@ -748,6 +746,8 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             find_bucket(max(seq_lens), self.prompt_seq_bucket_cfg),
             self.block_size)
 
+        mask: torch.Tensor = None
+        counter = 0
         if self.lora_config:
             mask = torch.zeros(len(seq_group_metadata_list) * max_prompt_len,
                                (self.lora_config.max_loras + 1) *
@@ -861,7 +861,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         if len(seq_group_metadata_list) == 0:
             return PrepareDecodeMetadata.empty()
-        mask = None
+        mask: torch.Tensor = None
         counter = 0
 
         if self.lora_config:
@@ -1251,7 +1251,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 if dummy_lora_requests_per_seq else None)
             for i in range(batch_size)
         ]
-        #torch.hpu.synchronize()
+        torch.hpu.synchronize()
         for _ in range(times):
             inputs = self.prepare_model_input(seqs)
             self.execute_model(inputs, kv_caches, warmup_mode=True)
@@ -1679,7 +1679,7 @@ class HabanaModelRunner(
         else:
             model_event_name = 'model_executable'
         with self.profiler.record_event('internal', model_event_name):
-            hidden_states, _ = self.model.forward(
+            hidden_states = self.model.forward(
                 **execute_model_kwargs,
                 selected_token_indices=sampling_metadata.selected_token_indices
             )
@@ -1693,7 +1693,7 @@ class HabanaModelRunner(
                         module.indices_len[
                             i] = sampling_metadata.selected_token_indices.numel(
                             )
-            decode.mask = None
+            LoraMask.setLoraMask(None)
 
         # Compute the logits.
         with self.profiler.record_event(
