@@ -243,8 +243,7 @@ class InternVisionEncoderLayer(nn.Module):
         # fallback to sdpa attention if tp unavailable
         tp_size = get_tensor_model_parallel_world_size()
         num_heads = config.num_attention_heads
-        shard_attn = num_heads % tp_size == 0
-        if USE_XFORMERS_OPS and shard_attn:
+        if USE_XFORMERS_OPS and num_heads % tp_size == 0:
             self.attn = InternParallelAttention(config,
                                                 quant_config=quant_config)
         else:

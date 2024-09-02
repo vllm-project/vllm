@@ -266,7 +266,10 @@ class BlipEncoderLayer(nn.Module):
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
 
-        if USE_XFORMERS_OPS:
+        # fallback to sdpa attention if tp unavailable
+        num_heads = config.num_attention_heads
+        tp_size = get_tensor_model_parallel_world_size()
+        if USE_XFORMERS_OPS and num_heads % tp_size == 0:
             self.self_attn = BlipParallelAttention(config,
                                                    quant_config=quant_config)
         else:
