@@ -18,7 +18,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.models.vit_attention import ViTAttention
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.utils import is_cpu
 
@@ -86,7 +85,7 @@ class InternVisionEmbeddings(nn.Module):
         return embeddings
 
 
-class InternAttention(nn.Module):
+class InternParallelAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(
@@ -129,8 +128,6 @@ class InternAttention(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
 
-        self.attn_fn = self.forward_xformers if USE_XFORMERS_OPS else self.forward_sdpa
-
     def forward(self, x):
         B, N, C = x.shape
         qkv, _ = self.qkv(x)
@@ -147,23 +144,64 @@ class InternAttention(nn.Module):
             k = self.k_norm.forward_native(k.flatten(-2,
                                                      -1)).view(B_, N_, H_, D_)
 
-        x = self.attn_fn(q, k, v)
+        x = xops.memory_efficient_attention_forward(q, k, v, scale=self.scale)
         x = x.view(B, N, -1)
 
         x, _ = self.proj(x)
         return x
 
-    def forward_sdpa(self, q, k, v):
+
+class InternSdpaAttention(nn.Module):
+    """Multi-headed attention from 'Attention Is All You Need' paper"""
+
+    def __init__(self, config: PretrainedConfig):
+        super().__init__()
+        self.config = config
+        self.embed_dim = config.hidden_size
+        self.num_heads = config.num_attention_heads
+        self.head_dim = self.embed_dim // self.num_heads
+        if self.head_dim * self.num_heads != self.embed_dim:
+            raise ValueError(
+                f'embed_dim must be divisible by num_heads '
+                f'(got `embed_dim`: {self.embed_dim} and `num_heads`:'
+                f' {self.num_heads}).')
+
+        self.scale = self.head_dim**-0.5
+        self.qkv = nn.Linear(self.embed_dim,
+                             3 * self.embed_dim,
+                             bias=config.qkv_bias)
+
+        self.qk_normalization = config.qk_normalization
+
+        if self.qk_normalization:
+            self.q_norm = RMSNorm(self.embed_dim, eps=config.layer_norm_eps)
+            self.k_norm = RMSNorm(self.embed_dim, eps=config.layer_norm_eps)
+
+        self.proj = nn.Linear(self.embed_dim, self.embed_dim)
+
+    def forward(self, x):
+        B, N, C = x.shape
+        qkv = self.qkv(x)
+        q, k, v = qkv.chunk(3, dim=-1)
+
+        q = q.view(B, N, self.num_heads, self.head_dim)
+        k = k.view(B, N, self.num_heads, self.head_dim)
+        v = v.view(B, N, self.num_heads, self.head_dim)
+
+        if self.qk_normalization:
+            B_, N_, H_, D_ = q.shape
+            q = self.q_norm.forward_native(q.flatten(-2,
+                                                     -1)).view(B_, N_, H_, D_)
+            k = self.k_norm.forward_native(k.flatten(-2,
+                                                     -1)).view(B_, N_, H_, D_)
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
         x = F.scaled_dot_product_attention(q, k, v, scale=self.scale)
-        x = x.transpose(1, 2)
-        return x
+        x = x.transpose(1, 2).view(B, N, -1)
 
-    def forward_xformers(self, q, k, v):
-        x = xops.memory_efficient_attention_forward(q, k, v, scale=self.scale)
+        x = self.proj(x)
         return x
 
 
@@ -202,7 +240,14 @@ class InternVisionEncoderLayer(nn.Module):
         self.intermediate_size = config.intermediate_size
         self.norm_type = config.norm_type
 
-        self.attn = InternAttention(config, quant_config=quant_config)
+        # fallback to sdpa attention if tp unavaliable
+        tp_size = get_tensor_model_parallel_world_size()
+        num_heads = config.num_attention_heads
+        shard_attn = num_heads % tp_size == 0
+        if USE_XFORMERS_OPS and shard_attn:
+            self.attn = InternParallelAttention(config, quant_config=quant_config)
+        else:
+            self.attn = InternSdpaAttention(config)
         self.mlp = InternMLP(config, quant_config=quant_config)
         self.norm1 = NORM2FN[self.norm_type](self.embed_dim,
                                              eps=config.layer_norm_eps)
