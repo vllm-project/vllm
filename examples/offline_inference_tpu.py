@@ -19,8 +19,7 @@ sampling_params = SamplingParams(temperature=0.7,
 
 # Set `enforce_eager=True` to avoid ahead-of-time compilation.
 # In real workloads, `enforace_eager` should be `False`.
-# llm = LLM(model="google/gemma-2b", quantization="tpu_int8", enforce_eager=True)
-llm = LLM(model="neuralmagic/Meta-Llama-3-8B-Instruct-quantized.w8a8", enforce_eager=True)
+llm = LLM(model="google/gemma-2b", enforce_eager=True)
 outputs = llm.generate(prompts, sampling_params)
 for output, answer in zip(outputs, answers):
     prompt = output.prompt
