@@ -1364,6 +1364,7 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
         
     @property
     def padded_vocab_size(self):
+        # number of embeddings with paddings and with max_lora_extra_vocab_size
         return self.base_layer.num_embeddings_padded
 
     @property
@@ -1407,10 +1408,10 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
         )
 
         self._base_layer_replacement=ParallelLMHead(num_embeddings=self.padded_vocab_size,
+                                                    org_num_embeddings=self.padded_vocab_size,
                  embedding_dim=self.embedding_dim,
                  bias=self.bias,
-                 params_dtype=self.dtype,
-                 org_num_embeddings = None)
+                 params_dtype=self.dtype)
         
         self._base_layer_replacement.to(self.device)
         
@@ -1434,6 +1435,13 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
                             :lora_b.shape[0], :lora_b.shape[1]].copy_(
                                 lora_b, non_blocking=True)
         loaded_tensor=lora_b
+        if loaded_tensor.shape[0]<=self._base_layer_replacement.org_vocab_size:
+            diff_tokens=self._base_layer_replacement.org_vocab_size-loaded_tensor.shape[0]
+            if diff_tokens:
+                loaded_tensor=F.pad(loaded_tensor, (0,0, 0, diff_tokens), mode='constant', value=0)
+        else:
+            raise ValueError(f'lora_b num of tokens {loaded_tensor.shape[0]} must be less of org_vocab_size {self._base_layer_replacement.org_vocab_size}')
+
         self._base_layer_replacement.weight.weight_loader(self._base_layer_replacement.weight, loaded_tensor)
         
     def forward(self, *args, **kwargs):
