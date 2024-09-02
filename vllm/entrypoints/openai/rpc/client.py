@@ -15,11 +15,9 @@ from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 # yapf: disable
 from vllm.entrypoints.openai.rpc import (RPC_REQUEST_TYPE,
-                                         VLLM_RPC_SOCKET_LIMIT_CUTOFF,
                                          VLLM_RPC_SUCCESS_STR,
-                                         VLLM_RPC_ZMQ_HWM, RPCAbortRequest,
+                                         RPCAbortRequest,
                                          RPCGenerateRequest,
-                                         RPCOutputStreamRequest,
                                          RPCUtilityRequest)
 # yapf: enable
 from vllm.envs import VLLM_RPC_GET_DATA_TIMEOUT_MS

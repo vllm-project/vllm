@@ -3,10 +3,6 @@ import cloudpickle, pickle
 from vllm.logger import init_logger
 from vllm import EngineArgs, LLMEngine
 from vllm.entrypoints.openai.rpc import (VLLM_RPC_SUCCESS_STR,
-                                         VLLM_RPC_ZMQ_HWM,
-                                         RPCAbortRequest,
-                                         RPCGenerateRequest,
-                                         RPCOutputStreamRequest,
                                          RPCUtilityRequest)
 
 logger = init_logger(__name__)
@@ -57,25 +53,13 @@ class MPLLMEngine:
                 del self.data_socket
 
     def engine_loop(self):
-        has_requests_in_progress = False
         while True:
-            if not has_requests_in_progress:
+            if not self.engine.has_unfinished_requests():
                 self.wait_for_new_requests()
-            has_requests_in_progress = self.engine_step()
-
-    def engine_step(self):
-        self.add_new_requests()
-        request_outputs = self.engine.step()
-        self.send_request_outputs(request_outputs)
-
-        all_finished = True
-        for request_output in request_outputs:
-            finished = request_output.finished
-            if not finished:
-                all_finished = False
-                break
-
-        return not all_finished
+            
+            self.add_new_requests()
+            request_outputs = self.engine.step()
+            self.send_request_outputs(request_outputs)
 
     def send_request_outputs(self, request_outputs):
         self.output_socket.send_multipart(
