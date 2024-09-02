@@ -212,26 +212,25 @@ def apply_int8_linear(
     input_scale: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
 ):
-    try:
+    if current_platform.is_tpu():
         import torch_xla.experimental.xla_quantized_matmul  # noqa: F401
-    except ImportError as err:
-        raise ImportError(
-            "Please install torch_xla by following the instructions at "
-            "https://docs.vllm.ai/en/latest/getting_started/tpu-installation.html "  # noqa: E501
-            "to run vLLM on TPU.") from err
-    return torch.ops.xla.quantized_matmul(input, weight.t(), weight_scale.squeeze(-1).to(torch.bfloat16), quantize_activation=True)
+        return torch.ops.xla.quantized_matmul(input,
+                                              weight.t(),
+                                              weight_scale.squeeze(-1).to(
+                                                  torch.bfloat16),
+                                              quantize_activation=True)
 
     # ops.scaled_int8_quant supports both dynamic and static quant.
     # * dynamic, layer.input_scale is None and x_scale computed from x.
     # * static, layer.input_scale is scalar and x_scale is input_scale.
-    # x_q, x_scale = ops.scaled_int8_quant(input, input_scale)
+    x_q, x_scale = ops.scaled_int8_quant(input, input_scale)
 
-    # return ops.cutlass_scaled_mm(x_q,
-    #                              weight,
-    #                              scale_a=x_scale,
-    #                              scale_b=weight_scale,
-    #                              out_dtype=input.dtype,
-    #                              bias=bias)
+    return ops.cutlass_scaled_mm(x_q,
+                                 weight,
+                                 scale_a=x_scale,
+                                 scale_b=weight_scale,
+                                 out_dtype=input.dtype,
+                                 bias=bias)
 
 
 def normalize_e4m3fn_to_e4m3fnuz(

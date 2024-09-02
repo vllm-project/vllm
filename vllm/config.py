@@ -274,7 +274,9 @@ class ModelConfig:
             "fbgemm_fp8", "compressed_tensors", "compressed-tensors",
             "experts_int8"
         ]
-        tpu_supported_quantization = ["tpu_int8", "compressed_tensors", "compressed-tensors"]
+        tpu_supported_quantization = [
+            "tpu_int8", "compressed_tensors", "compressed-tensors"
+        ]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
 
