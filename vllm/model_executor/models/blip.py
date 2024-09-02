@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from PIL import Image
 from transformers import Blip2VisionConfig, BlipVisionConfig
-from transformers.models.blip.modeling_blip import BlipAttention as BlipEagerAttention
+from transformers.models.blip.modeling_blip import BlipAttention
 
 from vllm.config import ModelConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
@@ -161,7 +161,7 @@ class BlipVisionEmbeddings(nn.Module):
         return embeddings
 
 
-class BlipAttention(nn.Module):
+class BlipParallelAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(
@@ -267,11 +267,12 @@ class BlipEncoderLayer(nn.Module):
         super().__init__()
 
         if USE_XFORMERS_OPS:
-            self.self_attn = BlipAttention(config, quant_config=quant_config)
+            self.self_attn = BlipParallelAttention(config,
+                                                   quant_config=quant_config)
         else:
             # Blip doesn't have SDPA attention implemented in transformers
             # use eager attention instead for cpu backend
-            self.self_attn = BlipEagerAttention(config)
+            self.self_attn = BlipAttention(config)
         self.layer_norm1 = nn.LayerNorm(config.hidden_size,
                                         eps=config.layer_norm_eps)
         self.mlp = BlipMLP(config, quant_config=quant_config)
