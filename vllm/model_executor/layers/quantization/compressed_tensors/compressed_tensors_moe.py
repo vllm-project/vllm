@@ -5,7 +5,7 @@ from typing import Callable, List, Optional
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
+from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     WNA16_SUPPORTED_BITS)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
@@ -272,6 +272,16 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         from vllm.model_executor.layers.fused_moe.fused_moe_marlin import (
             fused_moe_marlin)
 
+        topk_weights, topk_ids = FusedMoE.select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            use_grouped_topk=use_grouped_topk,
+            top_k=top_k,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function)
+
         return fused_moe_marlin(
             x,
             layer.w13_weight_packed,
@@ -281,8 +291,8 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             layer.w2_g_idx,
             layer.w13_g_idx_sort_indices,
             layer.w2_g_idx_sort_indices,
-            top_k,
-            custom_routing_function=custom_routing_function,
+            topk_weights,
+            topk_ids,
             renormalize=renormalize,
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,

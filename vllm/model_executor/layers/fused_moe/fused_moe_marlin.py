@@ -105,7 +105,8 @@ def fused_moe_marlin(
     g_idx2: torch.Tensor,
     rand_perm1: torch.Tensor,
     rand_perm2: torch.Tensor,
-    topk: int,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
     custom_routing_function: Optional[Callable] = None,
     renormalize: bool = True,
     override_config: Optional[Dict[str, Any]] = None,
@@ -161,13 +162,7 @@ def fused_moe_marlin(
     M, K = hidden_states.shape
     E = w1.shape[0]
     N = w2.shape[1] * 16
-
-    if custom_routing_function is None:
-        topk_weights, topk_ids = fused_topk(hidden_states, gating_output, topk,
-                                            renormalize)
-    else:
-        topk_weights, topk_ids = custom_routing_function(
-            hidden_states, gating_output, topk, renormalize)
+    topk = topk_ids.shape[1]
 
     get_config_func = functools.partial(
         try_get_optimal_moe_config,
