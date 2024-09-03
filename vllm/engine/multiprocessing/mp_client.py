@@ -122,7 +122,12 @@ class MPEngineClient:
         """Destroy the ZeroMQ Context."""
         # Close all sockets associated with this context and
         # then terminate the context.
+        self.output_socket.close()
+        self.input_socket.close()
+        self.health_socket.close()
         self.context.destroy(linger=0)
+
+        # TODO: cancel the handler task.
 
     async def _send_get_data_rpc_request(self, request: RPCStartupRequest,
                                          expected_type: Any,
