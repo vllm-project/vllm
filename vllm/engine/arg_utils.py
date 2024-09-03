@@ -16,6 +16,7 @@ from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import FlexibleArgumentParser
 
 if TYPE_CHECKING:
@@ -753,7 +754,7 @@ class EngineArgs:
 
     def create_engine_config(self) -> EngineConfig:
         # gguf file needs a specific model loader and doesn't use hf_repo
-        if self.model.endswith(".gguf"):
+        if check_gguf_file(self.model):
             self.quantization = self.load_format = "gguf"
 
         # bitsandbytes quantization needs a specific model loader
