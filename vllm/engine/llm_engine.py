@@ -1379,6 +1379,9 @@ class LLMEngine:
                 and self.process_request_outputs_callback is not None):
             self.process_request_outputs_callback(ctx.request_outputs)
 
+        # For async case, we need to record the stats here.
+        # For non-async case, the stats are done in the
+        # LLMEngine/AsyncLLMEngine directly
         if is_async:
             # Log stats.
             self.do_log_stats(scheduler_outputs, outputs, finished_before)
