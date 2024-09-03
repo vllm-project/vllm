@@ -3,8 +3,9 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, Union
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sequence import ExecuteModelRequest, PoolerOutput, SamplerOutput
+from vllm.sequence import ExecuteModelRequest, PoolerOutput
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         make_async)
 from vllm.worker.worker_base import WorkerBase, WorkerWrapperBase

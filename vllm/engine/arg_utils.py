@@ -16,6 +16,7 @@ from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import FlexibleArgumentParser
 
 if TYPE_CHECKING:
@@ -199,10 +200,11 @@ class EngineArgs:
             '--tokenizer-mode',
             type=str,
             default=EngineArgs.tokenizer_mode,
-            choices=['auto', 'slow'],
+            choices=['auto', 'slow', 'mistral'],
             help='The tokenizer mode.\n\n* "auto" will use the '
             'fast tokenizer if available.\n* "slow" will '
-            'always use the slow tokenizer.')
+            'always use the slow tokenizer. \n* '
+            '"mistral" will always use the `mistral_common` tokenizer.')
         parser.add_argument('--trust-remote-code',
                             action='store_true',
                             help='Trust remote code from huggingface.')
@@ -760,7 +762,7 @@ class EngineArgs:
 
     def create_engine_config(self) -> EngineConfig:
         # gguf file needs a specific model loader and doesn't use hf_repo
-        if self.model.endswith(".gguf"):
+        if check_gguf_file(self.model):
             self.quantization = self.load_format = "gguf"
 
         # bitsandbytes quantization needs a specific model loader
@@ -929,6 +931,7 @@ class EngineArgs:
             delay_factor=self.scheduler_delay_factor,
             enable_chunked_prefill=self.enable_chunked_prefill,
             embedding_mode=model_config.embedding_mode,
+            is_multimodal_model=model_config.is_multimodal_model,
             preemption_mode=self.preemption_mode,
             num_scheduler_steps=self.num_scheduler_steps,
             send_delta_data=(envs.VLLM_USE_RAY_SPMD_WORKER
