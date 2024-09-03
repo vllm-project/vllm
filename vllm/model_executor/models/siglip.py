@@ -492,11 +492,15 @@ class SiglipVisionModel(nn.Module):
         num_hidden_layers_override: Optional[int] = None,
     ):
         super().__init__()
-        if num_hidden_layers_override is None or num_hidden_layers_override == config.num_hidden_layers:
+        if (
+            num_hidden_layers_override is None
+            or num_hidden_layers_override == config.num_hidden_layers
+        ):
             self.need_post_layernorm = True
         elif num_hidden_layers_override > config.num_hidden_layers:
             raise ValueError(
-                "num_hidden_layers_override cannot be greater than num_hidden_layers"
+                "num_hidden_layers_override cannot be greater than "
+                "num_hidden_layers"
             )
         else:
             self.need_post_layernorm = False
@@ -530,7 +534,10 @@ class SiglipVisionModel(nn.Module):
 
         for name, loaded_weight in weights:
             # post_layernorm is optional in SiglipVisionModel
-            if "vision_model.post_layernorm" in name and not self.need_post_layernorm:
+            if (
+                "vision_model.post_layernorm" in name
+                and not self.need_post_layernorm
+            ):
                 continue
 
             # omit layers when num_hidden_layers_override is set
