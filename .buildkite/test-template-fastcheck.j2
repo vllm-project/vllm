@@ -1,24 +1,12 @@
 {% set default_num_gpu = 1 %}
+{% set docker_image = "us-central1-docker.pkg.dev/vllm-gcp/vllm-ci-test-repo-gcp/vllm:$BUILDKITE_COMMIT" %}
+
 steps:
-    -   label: Test
+    -   label: Build
         agents:
-            queue: kubernetes
-        plugins:
-            -   kubernetes:
-                    podSpec:
-                        volumes:
-                            -   name: dshm
-                                emptyDir:
-                                    medium: Memory
-                        containers:
-                            -   image: alpine:3.12
-                                command: ["bash"]
-                                args:
-                                - '-c'
-                                - "'echo Hello World'"
-                                resources:
-                                    requests:
-                                        nvidia.com/gpu: 1
-                                    limits:
-                                        nvidia.com/gpu: 1
-    
+            queue: cpu-gcp
+        commands:
+            - "docker build --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --tag {{ docker_image }} --target test --progress plain ."
+            - "docker push {{ docker_image }}"
+        env:
+            DOCKER_BUILDKIT: "1"
