@@ -444,6 +444,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: (None if os.getenv("VLLM_TORCH_PROFILER_DIR", None) is None else os
              .path.expanduser(os.getenv("VLLM_TORCH_PROFILER_DIR", "."))),
 
+    # If set, vLLM will use Triton implementations of AWQ.
+    "VLLM_USE_TRITON_AWQ":
+    lambda: bool(int(os.getenv("VLLM_USE_TRITON_AWQ", "0"))),
+
     # Try to accumulate this many requests before proceeding
     "VLLM_SYNC_SERVER_ACCUM_REQUESTS":
     lambda: int(os.getenv("VLLM_SYNC_SERVER_ACCUM_REQUESTS", "1")),
@@ -455,10 +459,6 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Pad the weight for moe kernel or not
     "VLLM_MOE_PADDING":
     lambda: bool(int(os.getenv("VLLM_MOE_PADDING", "1"))),
-
-    # If set, vllm will print verbose logs during installation
-    "VLLM_USE_TRITON_AWQ":
-    lambda: bool(int(os.getenv("VLLM_USE_TRITON_AWQ", '1'))),
 }
 
 # end-env-vars-definition

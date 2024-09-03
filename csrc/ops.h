@@ -237,7 +237,6 @@ std::tuple<torch::Tensor, std::vector<int64_t>> get_graph_buffer_ipc_meta(
 void register_graph_buffers(fptr_t _fa, const std::vector<std::string>& handles,
                             const std::vector<std::vector<int64_t>>& offsets);
 #ifdef USE_ROCM
-torch::Tensor allocate_meta_buffer(int size);
-std::vector<uint8_t> get_meta_buffer_ipc_handle(torch::Tensor inp);
-std::vector<uint8_t> get_device_bdf(int dev);
+torch::Tensor allocate_meta_buffer(int64_t size);
+torch::Tensor get_meta_buffer_ipc_handle(torch::Tensor& inp);
 #endif

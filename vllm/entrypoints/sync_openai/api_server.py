@@ -5,7 +5,7 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Dict, List, Union
+from typing import Dict, List, Optional, Union
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -15,8 +15,8 @@ from fastapi.routing import Mount
 from prometheus_client import make_asgi_app
 
 import vllm
+import vllm.envs as envs
 from vllm import FastSyncLLM as LLM
-from vllm import envs
 from vllm.config import EngineConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.chat_utils import (_parse_chat_message_content,
@@ -63,8 +63,8 @@ class BackgroundRunner:
         self.llm: LLM
         self.proc: multiprocessing.Process
         self.tokenizer = None
-        self.response_role: str
-        self.chat_template: str
+        self.response_role: Optional[str]
+        self.chat_template: Optional[str]
 
     def set_response_role(self, role):
         self.response_role = role
@@ -96,7 +96,8 @@ class BackgroundRunner:
         )
 
         self.loop = asyncio.get_event_loop()
-        self.proc = mp.Process(target=self.llm.run_engine)
+        self.proc = mp.Process(  # type: ignore[attr-defined]
+            target=self.llm.run_engine)
         self.t.start()
         self.proc.start()
 
@@ -173,8 +174,9 @@ async def _check_model(request: Union[CompletionRequest,
 
 async def _guided_decode_logits_processor(request, tokenizer):
     decoding_config = runner.engine_config.decoding_config
-    guided_decoding_backend = request.guided_decoding_backend \
-            or decoding_config.guided_decoding_backend
+    assert decoding_config is not None
+    guided_decoding_backend = (request.guided_decoding_backend
+                               or decoding_config.guided_decoding_backend)
     return await get_guided_decoding_logits_processor(guided_decoding_backend,
                                                       request, tokenizer)
 

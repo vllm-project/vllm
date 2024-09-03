@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 from torch.nn.modules import Module
 
-from vllm import envs
+import vllm.envs as envs
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)

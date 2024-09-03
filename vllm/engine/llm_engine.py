@@ -513,9 +513,6 @@ class LLMEngine:
             initialize_ray_cluster(engine_config.parallel_config)
             from vllm.executor.ray_gpu_executor import RayGPUExecutor
             executor_class = RayGPUExecutor
-        elif distributed_executor_backend == "torchrun":
-            from vllm.executor.torchrun_gpu_executor import TorchrunGPUExecutor
-            executor_class = TorchrunGPUExecutor
         elif distributed_executor_backend == "mp":
             from vllm.executor.multiproc_gpu_executor import (
                 MultiprocessingGPUExecutor)

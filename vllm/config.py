@@ -896,11 +896,12 @@ class ParallelConfig:
         if self.use_ray:
             from vllm.executor import ray_utils
             ray_utils.assert_ray_available()
-        if is_hip():
+        if not self.disable_custom_all_reduce and self.world_size > 1 and (
+                self.pipeline_parallel_size) > 1:
             self.disable_custom_all_reduce = True
             logger.info(
                 "Disabled the custom all-reduce kernel because it is not "
-                "supported on AMD GPUs.")
+                "supported with pipeline parallelism.")
         if self.ray_workers_use_nsight and not self.use_ray:
             raise ValueError("Unable to use nsight profiling unless workers "
                              "run with Ray.")

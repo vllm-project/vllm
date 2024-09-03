@@ -65,13 +65,6 @@ To build vllm on ROCm 6.1 for Radeon RX7900 series (gfx1100), you should specify
 
     $ DOCKER_BUILDKIT=1 docker build --build-arg BUILD_FA="0" -f Dockerfile.rocm -t vllm-rocm .
 
-To build docker image for vllm on ROCm 5.7, you can specify ``BASE_IMAGE`` as below:
-
-.. code-block:: console
-
-    $ DOCKER_BUILDKIT=1 docker build --build-arg BASE_IMAGE="rocm/pytorch:rocm5.7_ubuntu22.04_py3.10_pytorch_2.0.1" \
-       -f Dockerfile.rocm -t vllm-rocm . 
-
 To run the above docker image ``vllm-rocm``, use the below command:
 
 .. code-block:: console
@@ -160,10 +153,13 @@ Alternatively, wheels intended for vLLM use can be accessed under the releases.
 .. tip::
 
     - Triton flash attention is used by default. For benchmarking purposes, it is recommended to run a warm up step before collecting perf numbers.
-    - To use CK flash-attention, please use this flag ``export VLLM_USE_TRITON_FLASH_ATTN=0`` to turn off triton flash attention. 
-    - The ROCm version of pytorch, ideally, should match the ROCm driver version.
+    - Triton flash attention does not currently support sliding window attention. If using half precision, please use CK flash-attention for sliding window support.
+    - To use CK flash-attention or PyTorch naive attention, please use this flag ``export VLLM_USE_TRITON_FLASH_ATTN=0`` to turn off triton flash attention. 
+    - The ROCm version of PyTorch, ideally, should match the ROCm driver version.
 
 
 .. tip::
     - For MI300x (gfx942) users, to achieve optimal performance, please refer to `MI300x tuning guide <https://rocm.docs.amd.com/en/latest/how-to/tuning-guides/mi300x/index.html>`_ for performance optimization and tuning tips on system and workflow level.
       For vLLM, please refer to `vLLM performance optimization <https://rocm.docs.amd.com/en/latest/how-to/tuning-guides/mi300x/workload.html#vllm-performance-optimization>`_.
+
+

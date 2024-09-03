@@ -2,13 +2,13 @@ import multiprocessing as mp
 from queue import Empty
 from typing import Union
 
-from vllm import envs
+import vllm.envs as envs
 from vllm.distributed.communication_op import broadcast_tensor_dict
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.executor.multiproc_gpu_executor import MultiprocessingGPUExecutor
 from vllm.executor.ray_gpu_executor import RayGPUExecutor
-from vllm.inputs.data import PromptInputs, TokensPrompt
+from vllm.inputs import PromptInputs, TokensPrompt
 from vllm.logger import init_logger
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams

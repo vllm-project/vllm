@@ -285,12 +285,11 @@ class EngineArgs:
         # Parallel arguments
         parser.add_argument(
             '--distributed-executor-backend',
-            choices=['ray', 'mp', 'torchrun'],
+            choices=['ray', 'mp'],
             default=EngineArgs.distributed_executor_backend,
             help='Backend to use for distributed serving. When more than 1 GPU '
             'is used, on CUDA this will be automatically set to "ray" if '
-            'installed or "mp" (multiprocessing) otherwise. On ROCm, this is '
-            'instead set to torchrun by default.')
+            'installed or "mp" (multiprocessing) otherwise.')
         parser.add_argument(
             '--worker-use-ray',
             action='store_true',

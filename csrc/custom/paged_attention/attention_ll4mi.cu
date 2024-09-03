@@ -3,6 +3,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <hip/hip_bf16.h>
+#include "cuda_compat.h"
 
 #include <algorithm>
 
@@ -23,7 +24,6 @@
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define DIVIDE_ROUND_UP(a, b) (((a) + (b) - 1) / (b))
-#define WARP_SIZE 64
 
 #if defined(__HIP__MI300_MI250__)  // TODO: Add NAVI support
 

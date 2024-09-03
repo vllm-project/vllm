@@ -444,12 +444,8 @@ def init_worker_distributed_environment(
     """Initialize the distributed environment."""
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 
-    if parallel_config.distributed_executor_backend != "torchrun":
-        init_distributed_environment(parallel_config.world_size, rank,
-                                     distributed_init_method, local_rank)
-    else:
-        init_distributed_environment(parallel_config.world_size, -1, "env://",
-                                     local_rank)
+    init_distributed_environment(parallel_config.world_size, rank,
+                                 distributed_init_method, local_rank)
 
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)

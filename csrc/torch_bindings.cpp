@@ -340,7 +340,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cuda_utils), cuda_utils) {
                   &get_max_shared_memory_per_block_device_attribute);
 }
 
-#ifndef USE_ROCM
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
   // Custom all-reduce kernels
   custom_ar.def("init_custom_ar", &init_custom_ar);
@@ -373,7 +372,13 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
   custom_ar.def("register_graph_buffers", &register_graph_buffers);
   custom_ar.impl("register_graph_buffers", torch::kCPU,
                  &register_graph_buffers);
-}
+#ifdef USE_ROCM
+  custom_ar.def("allocate_meta_buffer", &allocate_meta_buffer);
+  custom_ar.impl("allocate_meta_buffer", torch::kCUDA, &allocate_meta_buffer);
+  custom_ar.def("get_meta_buffer_ipc_handle", &get_meta_buffer_ipc_handle);
+  custom_ar.impl("get_meta_buffer_ipc_handle", torch::kCPU,
+                 &get_meta_buffer_ipc_handle);
 #endif
+}
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

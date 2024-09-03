@@ -21,8 +21,8 @@ if not current_platform.is_tpu():
 with contextlib.suppress(ImportError):
     import vllm._moe_C  # noqa: F401
 
-if is_hip():
-    import vllm._custom_C
+with contextlib.suppress(ImportError):
+    import vllm._custom_C  # noqa: F401
 
 
 def hint_on_error(fn):
@@ -129,31 +129,6 @@ def paged_attention_v2(
         alibi_slopes, kv_cache_dtype, k_scale, v_scale, tp_rank,
         blocksparse_local_blocks, blocksparse_vert_stride,
         blocksparse_block_size, blocksparse_head_sliding_step)
-
-
-def paged_attention_custom(
-    out: torch.Tensor,
-    exp_sum: torch.Tensor,
-    max_logits: torch.Tensor,
-    tmp_out: torch.Tensor,
-    query: torch.Tensor,
-    key_cache: torch.Tensor,
-    value_cache: torch.Tensor,
-    num_kv_heads: int,
-    scale: float,
-    block_tables: torch.Tensor,
-    seq_lens: torch.Tensor,
-    block_size: int,
-    max_seq_len: int,
-    alibi_slopes: Optional[torch.Tensor],
-    kv_cache_dtype: str,
-):
-    torch.ops._custom_C.paged_attention_custom(out, exp_sum, max_logits,
-                                               tmp_out, query, key_cache,
-                                               value_cache, num_kv_heads,
-                                               scale, block_tables, seq_lens,
-                                               block_size, max_seq_len,
-                                               alibi_slopes, kv_cache_dtype)
 
 
 # pos encoding ops
@@ -442,7 +417,7 @@ def scaled_fp8_quant(
     assert (input.ndim == 2)
     shape: Union[Tuple[int, int], torch.Size] = input.shape
     # For rocm, the output fp8 dtype is torch.float_e3m3fnuz
-    out_dtype: torch.dtype = torch.float8_e4m3fnuz if vllm.utils.is_hip() \
+    out_dtype: torch.dtype = torch.float8_e4m3fnuz if is_hip() \
         else torch.float8_e4m3fn
     if num_token_padding:
         shape = (max(num_token_padding, input.shape[0]), shape[1])
@@ -680,19 +655,55 @@ def register_graph_buffers(fa: int, handles: List[str],
     torch.ops._C_custom_ar.register_graph_buffers(fa, handles, offsets)
 
 
-def LLMM1(in_a: torch.Tensor, in_b: torch.Tensor, out_c: torch.Tensor,
-          rows_per_block: int):
-    torch.ops._custom_C.LLMM1(in_a, in_b, out_c, rows_per_block)
+def allocate_meta_buffer(size: int) -> torch.Tensor:
+    return torch.ops._C_custom_ar.allocate_meta_buffer(size)
 
 
-def LLMM_Silu(in_a: torch.Tensor, in_b: torch.Tensor, out_c: torch.Tensor,
-              rows_per_block: int):
-    torch.ops._custom_C.LLMM_Silu(in_a, in_b, out_c, rows_per_block)
+def get_meta_buffer_ipc_handle(inp: torch.Tensor) -> torch.Tensor:
+    return torch.ops._C_custom_ar.get_meta_buffer_ipc_handle(inp)
 
 
-def wvSpltK(in_a: torch.Tensor, in_b: torch.Tensor, out_c: torch.Tensor,
-            N_in: int, CuCount: int):
-    torch.ops._custom_C.wvSpltK(in_a, in_b, out_c, N_in, CuCount)
+# ROCm custom
+def LLMM1(a: torch.Tensor,
+          b: torch.Tensor,
+          out: torch.Tensor,
+          rows_per_block: int) -> None:
+    torch.ops._custom_C.LLMM1(a, b, out, rows_per_block)
+
+
+def LLMM_Silu(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor,
+              rows_per_block: int) -> None:
+    torch.ops._custom_C.LLMM_Silu(a, b, out, rows_per_block)
+
+
+def paged_attention_custom(
+    out: torch.Tensor,
+    exp_sum: torch.Tensor,
+    max_logits: torch.Tensor,
+    tmp_out: torch.Tensor,
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    num_kv_heads: int,
+    scale: float,
+    block_tables: torch.Tensor,
+    seq_lens: torch.Tensor,
+    block_size: int,
+    max_seq_len: int,
+    alibi_slopes: Optional[torch.Tensor],
+    kv_cache_dtype: str,
+) -> None:
+    torch.ops._custom_C.paged_attention_custom(out, exp_sum, max_logits,
+                                               tmp_out, query, key_cache,
+                                               value_cache, num_kv_heads,
+                                               scale, block_tables, seq_lens,
+                                               block_size, max_seq_len,
+                                               alibi_slopes, kv_cache_dtype)
+
+
+def wvSpltK(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor, N: int,
+            cu_count: int) -> None:
+    torch.ops._custom_C.wvSpltK(a, b, out, N, cu_count)
 
 
 # temporary fix for https://github.com/vllm-project/vllm/issues/5456

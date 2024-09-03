@@ -12,88 +12,16 @@ from vllm.distributed.device_communicators.custom_all_reduce_utils import (
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import cuda_device_count_stateless, is_hip
+from vllm.utils import cuda_device_count_stateless
 
 try:
-    if is_hip():
-        from amdsmi import (AmdSmiException, amdsmi_get_processor_handles,
-                            amdsmi_init, amdsmi_shut_down,
-                            amdsmi_topo_get_link_type)
-    else:
-        import pynvml
-
-    @contextmanager
-    def _nvml():
-        if torch.version.hip:
-            try:
-                amdsmi_init()
-                yield
-            finally:
-                amdsmi_shut_down()
-        else:
-            try:
-                pynvml.nvmlInit()
-                yield
-            finally:
-                pynvml.nvmlShutdown()
-
-except ImportError:
-    # For AMD GPUs
+    ops.meta_size()
+    custom_ar = True
+except Exception:
+    # For CPUs
     custom_ar = False
-    pynvml = None
-
-    @contextmanager
-    def _nvml():
-        try:
-            yield
-        finally:
-            pass
-
 
 logger = init_logger(__name__)
-
-
-@_nvml()
-def _is_full_nvlink(device_ids: List[int], world_size) -> bool:
-    """
-    query if the set of gpus are fully connected by nvlink (1 hop)
-    Note that `pynvml` is not affected by `CUDA_VISIBLE_DEVICES`,
-    so it works on real physical device ids.
-    """
-    if is_hip():
-        # On ROCm, we instead query if GPUs are connected by 1-hop XGMI
-        handles = [amdsmi_get_processor_handles()[i] for i in device_ids]
-        for i, handle in enumerate(handles):
-            for j, peer_handle in enumerate(handles):
-                if i < j:
-                    try:
-                        link_type = amdsmi_topo_get_link_type(
-                            handle, peer_handle)
-                        # type is 2 for XGMI
-                        if link_type["hops"] != 1 or link_type["type"] != 2:
-                            return False
-                    except AmdSmiException as error:
-                        logger.error("AMD link detection failed.",
-                                     exc_info=error)
-                        return False
-    else:
-        handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in device_ids]
-        for i, handle in enumerate(handles):
-            for j, peer_handle in enumerate(handles):
-                if i < j:
-                    try:
-                        p2p_status = pynvml.nvmlDeviceGetP2PStatus(
-                            handle, peer_handle,
-                            pynvml.NVML_P2P_CAPS_INDEX_NVLINK)
-                        if p2p_status != pynvml.NVML_P2P_STATUS_OK:
-                            return False
-                    except pynvml.NVMLError as error:
-                        logger.error(
-                            "NVLink detection failed. This is normal if your"
-                            " machine has no NVLink equipped.",
-                            exc_info=error)
-                        return False
-    return True
 
 
 def _can_p2p(rank: int, world_size: int) -> bool:
@@ -186,14 +114,8 @@ class CustomAllreduce:
         # test nvlink first, this will filter out most of the cases
         # where custom allreduce is not supported
         # this checks hardware and driver support for NVLink
-
-        if current_platform.is_cuda():
-            from vllm.platforms.cuda import CudaPlatform
-            cuda_platform: CudaPlatform = current_platform
-            full_nvlink = cuda_platform.is_full_nvlink(physical_device_ids,
-                                                       world_size)
-        else:
-            full_nvlink = _is_full_nvlink(physical_device_ids, world_size)
+        assert current_platform.is_cuda() or current_platform.is_rocm()
+        full_nvlink = current_platform.is_full_nvlink(physical_device_ids)
         if world_size > 2 and not full_nvlink:
             logger.warning(
                 "Custom allreduce is disabled because it's not supported on"
@@ -204,7 +126,7 @@ class CustomAllreduce:
         # this is expensive to compute at the first time
         # then we cache the result
         # On AMD GPU, p2p is always enabled between XGMI connected GPUs
-        if not is_hip() and not _can_p2p(rank, world_size):
+        if not current_platform.is_rocm() and not _can_p2p(rank, world_size):
             logger.warning(
                 "Custom allreduce is disabled because your platform lacks "
                 "GPU P2P capability or P2P test failed. To silence this "
@@ -216,7 +138,7 @@ class CustomAllreduce:
         # meta data composes of two parts: meta data for synchronization
         # (256 bytes) and a temporary buffer for storing intermediate
         # allreduce results.
-        if is_hip():
+        if current_platform.is_rocm():
             # meta data buffers need to be "uncached" for signal on MI200
             self.meta = ops.allocate_meta_buffer(ops.meta_size() + max_size)
         else:
@@ -239,7 +161,7 @@ class CustomAllreduce:
         self.max_size = max_size
         self.rank = rank
         self.world_size = world_size
-        if is_hip():
+        if current_platform.is_rocm():
             # _share_cuda_() doesn't accept meta buffer not allocated from
             # PyTorch cache allocator, use direct HIP call to get IPC handle
             handle = ops.get_meta_buffer_ipc_handle(self.meta)
@@ -271,10 +193,10 @@ class CustomAllreduce:
                 self.register_graph_buffers()
 
     def _get_ipc_meta(self, inp: torch.Tensor):
-        if is_hip():
+        if current_platform.is_rocm():
             # _share_cuda_() doesn't accept meta buffer not allocated from
             # PyTorch cache allocator, use direct HIP call to get IPC handle
-            handle = custom_ar.get_meta_buffer_ipc_handle(inp)
+            handle = ops.get_meta_buffer_ipc_handle(inp)
             shard_data = (
                 bytes(handle),  # ipc handle to base ptr
                 0,  # offset of base ptr

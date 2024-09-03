@@ -688,7 +688,7 @@ class SequenceGroup:
         #   in TPOT, rather than recalculating TTFT (since from the )
         #   POV of the user, there is simply a long generation delay.
         if (self.metrics.first_token_time is None
-                and next(iter(self.seqs)).get_output_len() == 1):
+                and self.seqs[0].get_output_len() == 1):
             self.metrics.first_token_time = time
 
     def maybe_set_first_scheduled_time(self, time: float) -> None:
@@ -818,7 +818,7 @@ class SequenceGroup:
 
     def is_prefill(self) -> bool:
         # Every sequence should be in the same stage.
-        return next(iter(self.seqs)).is_prefill()
+        return self.seqs[0].is_prefill()
 
     def __repr__(self) -> str:
         return (f"SequenceGroup(request_id={self.request_id}, "

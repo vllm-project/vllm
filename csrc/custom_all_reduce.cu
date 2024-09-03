@@ -154,16 +154,19 @@ void register_graph_buffers(fptr_t _fa, const std::vector<std::string>& handles,
 
 #ifdef USE_ROCM
 
-void free_meta_buffer(void* buffer) { hipFree(buffer); }
+void free_meta_buffer(void* buffer) { CUDACHECK(cudaFree(buffer)); }
 
-std::vector<uint8_t> get_meta_buffer_ipc_handle(torch::Tensor inp) {
-  std::vector<uint8_t> data_handle(sizeof(cudaIpcMemHandle_t), 0);
-  CUDACHECK(cudaIpcGetMemHandle((cudaIpcMemHandle_t*)data_handle.data(),
+torch::Tensor get_meta_buffer_ipc_handle(torch::Tensor& inp) {
+  auto options =
+      torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
+  auto data_handle =
+      torch::empty({static_cast<int64_t>(sizeof(cudaIpcMemHandle_t))}, options);
+  CUDACHECK(cudaIpcGetMemHandle((cudaIpcMemHandle_t*)data_handle.data_ptr(),
                                 inp.data_ptr()));
   return data_handle;
 }
 
-torch::Tensor allocate_meta_buffer(int size) {
+torch::Tensor allocate_meta_buffer(int64_t size) {
   auto device_index = c10::cuda::current_device();
   at::DeviceGuard device_guard(at::Device(at::DeviceType::CUDA, device_index));
   void* buffer;
@@ -179,14 +182,6 @@ torch::Tensor allocate_meta_buffer(int size) {
                      .dtype(torch::kI8)
                      .device(torch::kCUDA, device_index);
   return torch::from_blob(buffer, {size}, free_meta_buffer, options);
-}
-
-std::vector<uint8_t> get_device_bdf(int dev) {
-  char busIdStr[] = "0000:00:00.0";
-  std::vector<uint8_t> bdf(sizeof(busIdStr), 0);
-  CUDACHECK(cudaDeviceGetPCIBusId((char*)bdf.data(), sizeof(busIdStr), dev));
-  bdf.resize(bdf.size() - 1);  // remove trailing NULL
-  return bdf;
 }
 
 #endif

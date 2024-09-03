@@ -9,7 +9,7 @@ from torch.nn import functional as F
 from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
-from vllm import envs
+import vllm.envs as envs
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.models.mixtral import MixtralMoE
@@ -97,14 +97,14 @@ def test_mixtral_moe(dtype: torch.dtype):
 
     # pad the weight if using padding
     if envs.VLLM_MOE_PADDING:
-        w13_weight = F.pad(vllm_moe.experts.w13_weight, (0, 128), "constant",
-                           0)
-        torch.cuda.empty_cache()
-        w2_weight = F.pad(vllm_moe.experts.w2_weight, (0, 128), "constant", 0)
-        torch.cuda.empty_cache()
-        vllm_moe.experts.w13_weight = Parameter(w13_weight,
+        vllm_moe.experts.w13_weight = Parameter(F.pad(
+            vllm_moe.experts.w13_weight, (0, 128), "constant", 0),
                                                 requires_grad=False)
-        vllm_moe.experts.w2_weight = Parameter(w2_weight, requires_grad=False)
+        torch.cuda.empty_cache()
+        vllm_moe.experts.w2_weight = Parameter(F.pad(
+            vllm_moe.experts.w2_weight, (0, 128), "constant", 0),
+                                               requires_grad=False)
+        torch.cuda.empty_cache()
 
     # Run forward passes for both MoE blocks
     hf_states, _ = hf_moe.forward(hf_inputs)

@@ -307,7 +307,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
 
             if self.use_naive_attn:
                 self.attn_func = _sdpa_attention
-                logger.debug("Using naive attention in ROCmBackend")
+                logger.debug("Using naive (SDPA) attention in ROCmBackend")
 
     def repeat_kv(self, x: torch.Tensor, n_rep: int) -> torch.Tensor:
         """torch.repeat_interleave(x, dim=1, repeats=n_rep)"""

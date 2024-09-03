@@ -6,7 +6,7 @@ from typing import Any
 import uvicorn
 from fastapi import FastAPI, Response
 
-from vllm import envs
+import vllm.envs as envs
 from vllm.engine.async_llm_engine import AsyncEngineDeadError
 from vllm.engine.protocol import AsyncEngineClient
 from vllm.logger import init_logger
