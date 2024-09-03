@@ -358,15 +358,18 @@ class LLM:
         add_generation_prompt: bool = True,
     ) -> List[RequestOutput]:
         """
-        Generates responses for chat messages.
+        Generate responses for a chat conversation.
 
-        Converts the messages to prompts using the tokenizer and calls
-        the :meth:`generate` method to generate the responses.
+        The chat conversation is converted into a text prompt using the
+        tokenizer and calls the :meth:`generate` method to generate the
+        responses.
+
+        Multi-modal inputs can be passed in the same way you would pass them
+        to the OpenAI API.
 
         Args:
-            messages: A list of messages to generate responses for. Each
-                message is a list of dictionaries with 'role' and 'content'
-                keys.
+            messages: A single conversation represented as a list of messages.
+                Each message is a dictionary with 'role' and 'content' keys.
             sampling_params: The sampling parameters for text generation.
                 If None, we use the default sampling parameters. When it
                 is a single value, it is applied to every prompt. When it
