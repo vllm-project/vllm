@@ -438,7 +438,7 @@ class SiglipVisionTransformer(nn.Module):
         )
         if num_hidden_layers_override == config.num_hidden_layers:
             self.num_hidden_layers_override = None
-            self.post_layernorm = nn.LayerNorm(embed_dim, 
+            self.post_layernorm = nn.LayerNorm(embed_dim,
                                                eps=config.layer_norm_eps)
         else:
             self.num_hidden_layers_override = num_hidden_layers_override
