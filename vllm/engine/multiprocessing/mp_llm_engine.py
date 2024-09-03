@@ -188,7 +188,7 @@ class MPLLMEngine:
                                           copy=False)
 
     def run_engine_loop(self) -> None:
-        self.engine.process_request_outputs_callback = self.stream_outputs
+        self.engine.process_request_outputs_callback = self.stream_outputs_and_get_inputs
 
         while True:
             # Block until there is a new request.
@@ -199,18 +199,17 @@ class MPLLMEngine:
             self.maybe_handle_new_input()
 
             # Engine step.
-            request_outputs = self.engine.step()
-
-            # # Stream results to output socket.
-            # self.stream_outputs(request_outputs)
+            _ = self.engine.step()
 
     def wait_for_new_input(self):
         while self.input_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
             logger.debug("Waiting for new request.")
 
-    def stream_outputs(self, request_outputs: List[RequestOutput]):
+    def stream_outputs_and_get_inputs(self,
+                                      request_outputs: List[RequestOutput]):
         self.output_socket.send_multipart((pickle.dumps(request_outputs), ),
                                           copy=False)
+        self.maybe_handle_new_input()
 
     def ack_check_health(self):
         self.health_socket.send_multipart(
