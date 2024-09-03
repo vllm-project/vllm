@@ -169,14 +169,19 @@ endif()
 
 include(FetchContent)
 
+# If VLLM_FLASH_ATTN_SRC_DIR is set, vllm-flash-attn is installed from that directory instead of downloading.
+# This is to enable local development of vllm-flash-attn within vLLM.
+if(VLLM_FLASH_ATTN_SRC_DIR)
+  FetchContent_Declare(flash-attention SOURCE_DIR ${VLLM_FLASH_ATTN_SRC_DIR})
+else()
 # TODO(luka) use vllm-project version
-FetchContent_Declare(
-        flash-attention
-        SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../flash-attention # TODO use GIT, allow local
-#        GIT_REPOSITORY https://github.com/neuralmagic/flash-attention.git
-#        GIT_TAG ce9ce0d82edfedc928e34f712e875d71542cc7b3
-#        GIT_PROGRESS TRUE
-)
+  FetchContent_Declare(
+          flash-attention
+          GIT_REPOSITORY https://github.com/neuralmagic/flash-attention.git
+          GIT_TAG f38f9dfe2f9c227d986048fe134357b15745bdf4
+          GIT_PROGRESS TRUE
+  )
+endif()
 
 set(VLLM_PARENT_BUILD ON)
 FetchContent_MakeAvailable(flash-attention)
