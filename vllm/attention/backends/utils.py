@@ -346,6 +346,7 @@ class CommonAttentionState(AttentionState):
         if is_encoder_decoder_model:
             # The encoder decoder model works only with XFormers backend.
             # Assert the same.
+
             assert self.runner.attn_backend.get_name() == "xformers", \
             f"Expected attn_backend name to be 'xformers', but "\
             f" got '{self.runner.attn_backend.get_name()}'"
