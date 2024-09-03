@@ -10,7 +10,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
 from vllm.scalar_type import scalar_types
 
 
-def single_moe_marlin(
+def single_marlin_moe(
     hidden_states: torch.Tensor,
     w: torch.Tensor,
     scales: torch.Tensor,
@@ -96,7 +96,7 @@ def single_moe_marlin(
     return torch.sum(intermediate_cache.view(*intermediate_cache.shape), dim=1)
 
 
-def fused_moe_marlin(
+def fused_marlin_moe(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,

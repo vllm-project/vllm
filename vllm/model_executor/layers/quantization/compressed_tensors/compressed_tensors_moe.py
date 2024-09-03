@@ -269,8 +269,8 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         custom_routing_function: Optional[Callable] = None,
     ) -> torch.Tensor:
 
-        from vllm.model_executor.layers.fused_moe.fused_moe_marlin import (
-            fused_moe_marlin)
+        from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+            fused_marlin_moe)
 
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
@@ -282,7 +282,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function)
 
-        return fused_moe_marlin(
+        return fused_marlin_moe(
             x,
             layer.w13_weight_packed,
             layer.w2_weight_packed,
