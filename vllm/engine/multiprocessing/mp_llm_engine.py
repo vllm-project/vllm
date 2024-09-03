@@ -21,6 +21,7 @@ CONFIG_TYPE = Union[ModelConfig, DecodingConfig, ParallelConfig,
 
 logger = init_logger(__name__)
 
+POLLING_TIMEOUT_MS = 10000
 
 class MPLLMEngine:
     """A multiprocessing wrapper for :class:`LLMEngine`.
@@ -201,7 +202,7 @@ class MPLLMEngine:
             self.stream_outputs(request_outputs)
 
     def wait_for_new_input(self):
-        while self.input_socket.poll(timeout=10000) == 0:
+        while self.input_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
             logger.debug("Waiting for new request.")
 
     def stream_outputs(self, request_outputs: List[RequestOutput]):
