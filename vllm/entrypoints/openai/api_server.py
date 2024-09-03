@@ -67,7 +67,7 @@ _running_tasks: Set[asyncio.Task] = set()
 
 
 def model_is_embedding(model_name: str, trust_remote_code: bool,
-                       quantization: str) -> bool:
+                       quantization: Optional[str]) -> bool:
     return ModelConfig(model=model_name,
                        tokenizer=model_name,
                        tokenizer_mode="auto",
@@ -108,7 +108,7 @@ async def build_async_engine_client(
     async with build_async_engine_client_from_engine_args(
             engine_args, args.disable_frontend_multiprocessing) as engine:
 
-        async_engine_client = engine
+        async_engine_client = engine  # type: ignore[assignment]
         yield engine
 
 
@@ -189,7 +189,7 @@ async def build_async_engine_client_from_engine_args(
                         yield None
                         return
 
-            yield rpc_client
+            yield rpc_client  # type: ignore[misc]
         finally:
             # Ensure rpc server process was terminated
             rpc_server_process.terminate()
