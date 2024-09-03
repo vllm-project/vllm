@@ -45,7 +45,7 @@ def get_perf(df, method, model, metric):
 def get_perf_w_std(df, method, model, metric):
     
     if metric in ["TTFT", "Latency"]:
-        mean = get_perf(df, method, model, "Mean " + metric + " (ms)")
+        mean = get_perf(df, method, model, "Median " + metric + " (ms)")
         mean = mean.tolist()
         std = get_perf(df, method, model, "Std " + metric + " (ms)")
         if std.mean() == 0:
@@ -56,8 +56,10 @@ def get_perf_w_std(df, method, model, metric):
             std = std.tolist()
 
     else:
-        assert metric == "Tput"
-        mean = get_perf(df, method, model, "Input Tput (tok/s)") + get_perf(df, method, model, "Output Tput (tok/s)")
+        # assert metric == "Tput"
+        # mean = get_perf(df, method, model, "Input Tput (tok/s)") + get_perf(df, method, model, "Output Tput (tok/s)")
+        # mean = get_perf(df, method, model, 'Tput (req/s)')
+        mean = get_perf(df, method, model, metric)
         mean = mean.tolist()
         std = None
 
@@ -86,9 +88,12 @@ def main(args):
     #     print(len(results))
             
     # generate markdown table
-    df = pd.DataFrame.from_dict(results)
+    df = pd.DataFrame.from_dict(sorted(results, key = lambda x: x['Test name']))
     df['Avg input tokens'] = df['Total input tokens'] / df['Successful req.']
     df['Avg output tokens'] = df['Total output tokens'] / df['Successful req.']
+    df['Input Throughput'] = df['Input Tput (tok/s)']
+    df['Output Throughput'] = df['Output Tput (tok/s)']
+    df['Mean Latency (ms)'] = df['Mean Latency (ms)'] - 4 * df['Mean TPOT (ms)']
     # print(df)
     # df = df[df["Test name"].str.contains(args.dataset)]
     table = tabulate(df[df["Test name"].str.contains('qps_inf')], headers='keys', tablefmt='pipe', showindex=False)
@@ -100,20 +105,20 @@ def main(args):
     plt.set_cmap("cividis")
 
     # plot results
-    fig, axes = plt.subplots(3, 2, figsize=(13, 13))
+    fig, axes = plt.subplots(3, 3, figsize=(19, 13))
     fig.subplots_adjust(hspace=1)
     # methods = [0,1,10,11,12]
-    methods = ['vllm', 'trt', 'sglang', 'lmdeploy']
-    formal_name = ['vLLM', 'TRT-LLM', 'SGLang', 'lmdeploy']
-    for model in ["llama8B"]:
-        for i, dataset in enumerate(["sharegpt", "sonnet_1024_1024", "sonnet_1024_128"]):
-            for j, metric in enumerate(["Tput", "Latency"]):
+    methods = ['vllm', 'sglang', 'lmdeploy', 'trt']
+    formal_name = ['vLLM', 'SGLang', 'lmdeploy',  'TRT-LLM']
+    for model in ["llama70B"]:
+        for i, dataset in enumerate(["sharegpt", "sonnet_512_256", "sonnet_512_16"]):
+            for j, metric in enumerate(["Tput (req/s)", "Output Throughput", "Latency"]):
                 
                 my_df = df[df["Test name"].str.contains(dataset)]
                 my_dataset_name = {
                     "sharegpt": "ShareGPT",
-                    "sonnet_1024_1024": "Decode-heavy",
-                    "sonnet_1024_128": "Prefill-heavy",
+                    "sonnet_512_256": "Decode-heavy",
+                    "sonnet_512_16": "Prefill-heavy",
                 }[dataset]
                 
                 ax = axes[i,j]
@@ -123,9 +128,9 @@ def main(args):
                     ax.set_ylabel(f"Thoughput (tokens/s)")
                 
                 if metric == "Tput":
-                    ax.set_title(f"{model} {my_dataset_name} Thoughput")
+                    ax.set_title(f"{my_dataset_name} Thoughput")
                 else:
-                    ax.set_title(f"{model} {my_dataset_name} {metric}")
+                    ax.set_title(f"{my_dataset_name} {metric}")
                 ax.grid(axis='y')
                 print(model, metric)
                 
@@ -152,7 +157,11 @@ def main(args):
                 if metric == "Latency":
                     ax.legend()   
                 else:
-                    ax.bar(formal_name, tput.values())
+                    for _ in range(len(formal_name)):
+                        ax.bar(_, tput[methods[_]])
+                    ax.set_xticks(range(len(formal_name)))
+                    ax.set_xticklabels(formal_name)
+                    # ax.bar(formal_name, tput.values())
 
             
 
