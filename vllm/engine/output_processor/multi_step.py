@@ -4,6 +4,8 @@ from typing import Callable, List
 from vllm.core.scheduler import Scheduler
 from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
+from vllm.engine.output_processor.single_step import (
+    single_step_process_prompt_logprob)
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
@@ -46,9 +48,16 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
 
     def process_prompt_logprob(self, seq_group: SequenceGroup,
                                outputs: List[SequenceGroupOutput]) -> None:
-        # TODO(sang): Prompt logprob currently not implemented in multi step
-        # workers.
-        self._log_prompt_logprob_unsupported_warning_once()
+        """Process prompt logprobs associated with each step of a multi-step-
+        scheduled computation.
+
+        Args:
+          seq_group: the outputs are associated with this :class:`SequenceGroup`
+          outputs: the :class:`SequenceGroupOutput`s for all scheduler steps
+        """
+        for output in outputs:
+            # Concatenate single-step prompt logprob processing results.
+            single_step_process_prompt_logprob(self, seq_group, output)
 
     @staticmethod
     @functools.lru_cache()
@@ -76,29 +85,54 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             no tokens need to be appended since it is already done
             externally (before the next schedule() call)
         """
-        # TODO: Add support for async if necessary
-        assert not is_async
-
+        # Sequences can be in RUNNING or FINISHED_ABORTED state
+        # once scheduled, as a sequence is moved to FINSIHED_ABORTED
+        # if a client disconnects from the api server.
         seqs = sequence_group.get_seqs(status=SequenceStatus.RUNNING)
+        if seqs is None:
+            seqs = sequence_group.get_seqs(
+                status=SequenceStatus.FINISHED_ABORTED)
 
-        assert seqs, "expected running sequences"
+        assert seqs, "Expected RUNNING or FINISHED_ABORTED sequences"
         assert len(seqs) == 1, (
             "Beam search not supported in multi-step decoding.")
         seq = seqs[0]
 
-        # Since there's only one sequence per sequence group, we can take the
-        # first sample.
-        samples = [output.samples[0] for output in outputs]
+        if is_async:
+            # Async case: We process tokens one by one. Here, we know the token
+            # was already appended, so we only need to do the rest of the
+            # postprocessor: Detokenization + stopping logic
+            self._process_decode_and_stop(seq, sequence_group.sampling_params)
+        else:
+            # Standard multi-step case
 
-        # -1 means the output token is not valid (eg. due to spec decode
-        # rejecting tokens).
-        valid_samples = [
-            sample for sample in samples if sample.output_token != -1
-        ]
-        assert valid_samples
+            # Since there's only one sequence per sequence group,
+            # we can take the first sample.
+            samples = [output.samples[0] for output in outputs]
 
-        self._process_seq_outputs(seq, valid_samples,
-                                  sequence_group.sampling_params)
+            # -1 means the output token is not valid (eg. due to spec decode
+            # rejecting tokens).
+            valid_samples = [
+                sample for sample in samples if sample.output_token != -1
+            ]
+            assert valid_samples
+
+            self._process_seq_outputs(seq, valid_samples,
+                                      sequence_group.sampling_params)
+
+    def _process_decode_and_stop(self, seq: Sequence,
+                                 sampling_params: SamplingParams) -> None:
+        new_char_count = 0
+        if sampling_params.detokenize:
+            new_char_count = self.detokenizer.decode_sequence_inplace(
+                seq, sampling_params)
+
+        # TODO(sang): Support lora.
+        self.stop_checker.maybe_stop_sequence(
+            seq,
+            new_char_count=new_char_count,
+            sampling_params=sampling_params,
+        )
 
     def _process_seq_outputs(self, seq: Sequence,
                              valid_samples: List[SequenceOutput],
@@ -136,16 +170,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
                 logprobs=output_logprob,
             )
 
-            new_char_count = 0
-            if sampling_params.detokenize:
-                new_char_count = self.detokenizer.decode_sequence_inplace(
-                    seq, sampling_params)
+            self._process_decode_and_stop(seq, sampling_params)
 
-            # TODO(sang): Support lora.
-            self.stop_checker.maybe_stop_sequence(
-                seq,
-                new_char_count=new_char_count,
-                sampling_params=sampling_params,
-            )
             if seq.is_finished():
                 break
