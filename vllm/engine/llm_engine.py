@@ -1671,11 +1671,19 @@ class LLMEngine:
         return None
 
     def add_logger(self, logger_name: str, logger: StatLoggerBase) -> None:
+        if not self.log_stats:
+            raise RuntimeError(
+                "Stat logging is disabled. Set `disable_log_stats=False` "
+                "argument to enable.")
         if logger_name in self.stat_loggers:
             raise KeyError(f"Logger with name {logger_name} already exists.")
         self.stat_loggers[logger_name] = logger
 
     def remove_logger(self, logger_name: str) -> None:
+        if not self.log_stats:
+            raise RuntimeError(
+                "Stat logging is disabled. Set `disable_log_stats=False` "
+                "argument to enable.")
         if logger_name not in self.stat_loggers:
             raise KeyError(f"Logger with name {logger_name} does not exist.")
         del self.stat_loggers[logger_name]
