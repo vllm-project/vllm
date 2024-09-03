@@ -23,7 +23,7 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer,
                                                get_cached_tokenizer)
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Counter, deprecate_kwargs
+from vllm.utils import Counter, deprecate_kwargs, is_list_of
 
 logger = init_logger(__name__)
 
@@ -387,20 +387,24 @@ class LLM:
         tokenizer = self.get_tokenizer()
         model_config = self.llm_engine.get_model_config()
 
-        conversations, _ = parse_chat_messages(messages, model_config,
-                                               tokenizer)
+        conversation, mm_data = parse_chat_messages(messages, model_config,
+                                                    tokenizer)
 
         prompt = apply_chat_template(
             tokenizer,
-            conversations,
+            conversation,
             chat_template=chat_template,
-            add_generation_prompt=add_generation_prompt)
+            add_generation_prompt=add_generation_prompt,
+        )
 
         inputs: PromptInputs
-        if isinstance(prompt, list) and isinstance(prompt[0], int):
+        if is_list_of(prompt, int):
             inputs = TokensPrompt(prompt_token_ids=prompt)
         else:
             inputs = TextPrompt(prompt=prompt)
+
+        if mm_data is not None:
+            inputs["multi_modal_data"] = mm_data
 
         return self.generate(
             inputs,

@@ -5,7 +5,7 @@ from PIL import Image
 
 from vllm.assets.image import ImageAsset
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import parse_chat_messages
+from vllm.entrypoints.chat_utils import parse_chat_messages_futures
 from vllm.multimodal.utils import encode_image_base64
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 
@@ -45,7 +45,7 @@ def image_url():
 @pytest.mark.asyncio
 async def test_parse_chat_messages_with_image_url(phi3v_model_config,
                                                   phi3v_tokenizer, image_url):
-    conversation, mm_future = parse_chat_messages([{
+    conversation, mm_future = parse_chat_messages_futures([{
         "role":
         "user",
         "content": [{
@@ -71,7 +71,7 @@ async def test_parse_chat_messages_with_image_url(phi3v_model_config,
 @pytest.mark.asyncio
 async def test_parse_chat_messages_multiple_images(phi3v_model_config,
                                                    phi3v_tokenizer, image_url):
-    conversation, mm_future = parse_chat_messages([{
+    conversation, mm_future = parse_chat_messages_futures([{
         "role":
         "user",
         "content": [{
@@ -104,7 +104,7 @@ async def test_parse_chat_messages_multiple_images(phi3v_model_config,
 @pytest.mark.asyncio
 async def test_parse_chat_messages_placeholder_already_in_prompt(
         phi3v_model_config, phi3v_tokenizer, image_url):
-    conversation, mm_future = parse_chat_messages([{
+    conversation, mm_future = parse_chat_messages_futures([{
         "role":
         "user",
         "content": [{
@@ -139,7 +139,7 @@ async def test_parse_chat_messages_placeholder_already_in_prompt(
 @pytest.mark.asyncio
 async def test_parse_chat_messages_placeholder_one_already_in_prompt(
         phi3v_model_config, phi3v_tokenizer, image_url):
-    conversation, mm_future = parse_chat_messages([{
+    conversation, mm_future = parse_chat_messages_futures([{
         "role":
         "user",
         "content": [{
@@ -175,34 +175,35 @@ async def test_parse_chat_messages_placeholder_one_already_in_prompt(
 @pytest.mark.asyncio
 async def test_parse_chat_messages_multiple_images_across_messages(
         phi3v_model_config, phi3v_tokenizer, image_url):
-    conversation, mm_future = parse_chat_messages([{
-        "role":
-        "user",
-        "content": [{
-            "type": "image_url",
-            "image_url": {
-                "url": image_url
-            }
+    conversation, mm_future = parse_chat_messages_futures(
+        [{
+            "role":
+            "user",
+            "content": [{
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url
+                }
+            }, {
+                "type": "text",
+                "text": "What's in this image?"
+            }]
         }, {
-            "type": "text",
-            "text": "What's in this image?"
-        }]
-    }, {
-        "role": "assistant",
-        "content": "Some stuff."
-    }, {
-        "role":
-        "user",
-        "content": [{
-            "type": "image_url",
-            "image_url": {
-                "url": image_url
-            }
+            "role": "assistant",
+            "content": "Some stuff."
         }, {
-            "type": "text",
-            "text": "What about this one?"
-        }]
-    }], phi3v_model_config, phi3v_tokenizer)
+            "role":
+            "user",
+            "content": [{
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url
+                }
+            }, {
+                "type": "text",
+                "text": "What about this one?"
+            }]
+        }], phi3v_model_config, phi3v_tokenizer)
 
     assert conversation == [
         {
@@ -234,7 +235,7 @@ async def test_parse_chat_messages_rejects_too_many_images_in_one_message(
                 ValueError,
                 match="At most 2 image\\(s\\) may be provided in one request\\."
         ):
-            parse_chat_messages([{
+            parse_chat_messages_futures([{
                 "role":
                 "user",
                 "content": [{
@@ -270,7 +271,7 @@ async def test_parse_chat_messages_rejects_too_many_images_across_messages(
                 ValueError,
                 match="At most 2 image\\(s\\) may be provided in one request\\."
         ):
-            parse_chat_messages([{
+            parse_chat_messages_futures([{
                 "role":
                 "user",
                 "content": [{

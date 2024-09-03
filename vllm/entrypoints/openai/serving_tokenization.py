@@ -4,7 +4,7 @@ from vllm.config import ModelConfig
 from vllm.engine.protocol import AsyncEngineClient
 from vllm.entrypoints.chat_utils import (apply_chat_template,
                                          load_chat_template,
-                                         parse_chat_messages)
+                                         parse_chat_messages_futures)
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -65,7 +65,7 @@ class OpenAIServingTokenization(OpenAIServing):
         if isinstance(request, TokenizeChatRequest):
             model_config = self.model_config
 
-            conversation, mm_data_future = parse_chat_messages(
+            conversation, mm_data_future = parse_chat_messages_futures(
                 request.messages, model_config, tokenizer)
 
             if mm_data_future:
