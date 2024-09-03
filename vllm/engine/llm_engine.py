@@ -368,7 +368,7 @@ class LLMEngine:
             for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
 
-        self.async_callback = [
+        self.async_callbacks = [
             functools.partial(self._process_model_outputs,
                               ctx=self.scheduler_contexts[v_id])
             for v_id in range(self.parallel_config.pipeline_parallel_size)
@@ -385,7 +385,7 @@ class LLMEngine:
             Scheduler(
                 scheduler_config, cache_config, lora_config,
                 parallel_config.pipeline_parallel_size,
-                self.async_callback[v_id]
+                self.async_callbacks[v_id]
                 if model_config.use_async_output_proc else None)
             for v_id in range(parallel_config.pipeline_parallel_size)
         ]
@@ -1342,21 +1342,23 @@ class LLMEngine:
             ctx.request_outputs.append(request_output)
 
         # Free currently finished requests
-        if len(finished_now) > 0:
+        if finished_now:
             for scheduler in self.scheduler:
                 scheduler.free_finished_seq_groups()
 
         # For multi-step, do not create outputs each iteration
         if not is_last_step:
             # Immediately process request outputs here (if callback is given)
-            if len(finished_now
-                   ) > 0 and self.process_request_outputs_callback is not None:
+            if (finished_now
+                    and self.process_request_outputs_callback is not None):
                 self.process_request_outputs_callback(ctx.request_outputs)
             return
 
         # Create the outputs
-        for i, _ in enumerate(seq_group_metadata_list):
-            scheduled_seq_group = scheduler_outputs.scheduled_seq_groups[i]
+        # Note: scheduled_seq_groups and seq_group_metadata_list
+        # must match with the indices
+        for i, scheduled_seq_group in enumerate(
+                scheduler_outputs.scheduled_seq_groups):
 
             if i in finished_before or i in finished_now:
                 continue  # Avoids double processing
@@ -1373,8 +1375,8 @@ class LLMEngine:
             ctx.request_outputs.append(request_output)
 
         # Immediately process request outputs here (if callback is given)
-        if len(ctx.request_outputs
-               ) > 0 and self.process_request_outputs_callback is not None:
+        if (ctx.request_outputs
+                and self.process_request_outputs_callback is not None):
             self.process_request_outputs_callback(ctx.request_outputs)
 
         if is_async:
@@ -1538,7 +1540,7 @@ class LLMEngine:
                 last_sampled_token_ids=last_sampled_token_ids)
 
             if allow_async_output_proc:
-                execute_model_req.async_callback = self.async_callback[
+                execute_model_req.async_callback = self.async_callbacks[
                     virtual_engine]
 
             output = self.model_executor.execute_model(

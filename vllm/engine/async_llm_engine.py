@@ -338,7 +338,7 @@ class _AsyncLLMEngine(LLMEngine):
                 last_sampled_token_ids=last_sampled_token_ids)
 
             if allow_async_output_proc:
-                execute_model_req.async_callback = self.async_callback[
+                execute_model_req.async_callback = self.async_callbacks[
                     virtual_engine]
 
             # Execute the model.
