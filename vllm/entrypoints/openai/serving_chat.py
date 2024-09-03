@@ -114,10 +114,7 @@ class OpenAIServingChat(OpenAIServing):
             return self.create_error_response(str(e))
 
         try:
-            if mm_data_future:
-                mm_data = await mm_data_future
-            else:
-                mm_data = None
+            mm_data = await mm_data_future
         except Exception as e:
             logger.error("Error in loading multi-modal data: %s", e)
             return self.create_error_response(str(e))

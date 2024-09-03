@@ -68,7 +68,8 @@ class OpenAIServingTokenization(OpenAIServing):
             conversation, mm_data_future = parse_chat_messages_futures(
                 request.messages, model_config, tokenizer)
 
-            if mm_data_future:
+            mm_data = await mm_data_future
+            if mm_data:
                 logger.warning(
                     "Multi-modal inputs are ignored during tokenization")
 

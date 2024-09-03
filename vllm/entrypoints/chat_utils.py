@@ -182,19 +182,15 @@ class MultiModalItemTracker(BaseMultiModalItemTracker[MultiModalDataDict]):
         return self._combine(self._items) if self._items else None
 
 
-MultiModalDataFuture = Awaitable[MultiModalDataDict]
-
-
 class AsyncMultiModalItemTracker(
-        BaseMultiModalItemTracker[MultiModalDataFuture], ):
+        BaseMultiModalItemTracker[Awaitable[MultiModalDataDict]]):
 
-    def all_mm_data(self) -> Optional[MultiModalDataFuture]:
-
-        async def combine_async(futures: List[MultiModalDataFuture]):
-            items = await asyncio.gather(*futures)
+    async def all_mm_data(self) -> Optional[MultiModalDataDict]:
+        if self._items:
+            items = await asyncio.gather(*self._items)
             return self._combine(items)
 
-        return combine_async(self._items) if self._items else None
+        return None
 
 
 class BaseMultiModalContentParser(ABC):
@@ -396,7 +392,7 @@ def parse_chat_messages_futures(
     messages: List[ChatCompletionMessageParam],
     model_config: ModelConfig,
     tokenizer: AnyTokenizer,
-) -> Tuple[List[ConversationMessage], Optional[MultiModalDataFuture]]:
+) -> Tuple[List[ConversationMessage], Awaitable[Optional[MultiModalDataDict]]]:
     conversation: List[ConversationMessage] = []
 
     mm_tracker = AsyncMultiModalItemTracker(model_config, tokenizer)
