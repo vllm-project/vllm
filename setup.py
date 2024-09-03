@@ -362,7 +362,8 @@ def get_vllm_version() -> str:
     version = find_version(get_path("vllm", "version.py"))
 
     if _no_device():
-        version += "+empty"
+        if VLLM_TARGET_DEVICE == envs.VLLM_TARGET_DEVICE:
+            version += "+empty"
     elif _is_cuda():
         cuda_version = str(get_nvcc_cuda_version())
         if cuda_version != MAIN_CUDA_VERSION:
