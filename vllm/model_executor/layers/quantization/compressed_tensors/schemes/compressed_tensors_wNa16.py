@@ -7,9 +7,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    apply_gptq_marlin_linear, marlin_is_k_full, marlin_make_empty_g_idx,
-    marlin_make_workspace, marlin_permute_scales, marlin_sort_g_idx,
-    replace_tensor, verify_marlin_supported, verify_marlin_supports_shape)
+    apply_gptq_marlin_linear, marlin_make_empty_g_idx, marlin_make_workspace,
+    marlin_permute_scales, marlin_sort_g_idx, replace_tensor,
+    verify_marlin_supported, verify_marlin_supports_shape)
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            ChannelQuantScaleParameter,
                                            GroupQuantScaleParameter,
@@ -31,8 +31,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
     def __init__(self,
                  strategy: str,
                  num_bits: int,
-                 group_size: Optional[int] = None,
-                 actorder: bool = False):
+                 group_size: Optional[int] = None):
 
         self.pack_factor = 32 // num_bits
         self.strategy = strategy
@@ -50,15 +49,6 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
 
         self.quant_type = WNA16_SUPPORTED_TYPES_MAP[num_bits]
 
-        if actorder and self.group_size == -1:
-            # In this case, actorder == True is the same as actorder == False
-            # (since we have only one group per output channel)
-            logger.warning(
-                "Model must be quantized with group_size > 0 in order to use "
-                "activation ordering")
-            actorder = False
-        self.actorder = actorder
-
         # Verify supported on platform.
         verify_marlin_supported(quant_type=self.quant_type,
                                 group_size=self.group_size)
@@ -75,7 +65,6 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                        **kwargs):
 
         output_size_per_partition = sum(output_partition_sizes)
-        is_row_parallel = input_size != input_size_per_partition
 
         # If group_size is -1, we are in channelwise case.
         channelwise = (self.group_size == -1)
@@ -133,21 +122,20 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                                                           dtype=torch.int64),
                                          weight_loader=weight_loader)
 
-        # G_IDX (for activation reordering)
-        g_idx = BasevLLMParameter(data=torch.empty(input_size_per_partition,
-                                                   dtype=torch.int32),
-                                  weight_loader=weight_loader)
+        # group index (for activation reordering)
+        weight_g_idx = BasevLLMParameter(data=torch.full(
+            (input_size_per_partition, ), -1, dtype=torch.int32),
+                                         weight_loader=weight_loader)
 
         layer.register_parameter("weight_packed", weight)
         layer.register_parameter("weight_scale", weight_scale)
         layer.register_parameter("weight_shape", weight_shape)
-        layer.register_parameter("weight_g_idx", g_idx)
+        layer.register_parameter("weight_g_idx", weight_g_idx)
 
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
         layer.input_size = input_size
         layer.group_size = group_size
-        layer.is_k_full = marlin_is_k_full(self.actorder, is_row_parallel)
 
     # Checkpoints are serialized in compressed-tensors format, which is
     # different from marlin format. Handle repacking here.
@@ -159,7 +147,8 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             layer.output_size_per_partition, device)
 
         # Handle sorting for activation reordering if needed.
-        if self.actorder:
+        has_g_idx = -1 not in layer.weight_g_idx
+        if has_g_idx:
             g_idx, g_idx_sort_indices = marlin_sort_g_idx(layer.weight_g_idx)
             layer.g_idx_sort_indices = g_idx_sort_indices
             replace_tensor(layer, "weight_g_idx", g_idx)
@@ -188,7 +177,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         marlin_scales = marlin_permute_scales(
             layer.weight_scale,
             size_k=(layer.input_size
-                    if self.actorder else layer.input_size_per_partition),
+                    if has_g_idx else layer.input_size_per_partition),
             size_n=layer.output_size_per_partition,
             group_size=layer.group_size)
         replace_tensor(layer, "weight_scale", marlin_scales)

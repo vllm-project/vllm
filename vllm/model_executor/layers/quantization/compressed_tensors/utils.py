@@ -40,6 +40,19 @@ class QuantizationStrategy(str, Enum):
     TOKEN = "token"
 
 
+class ActivationOrdering(str, Enum):
+    """
+    Enum storing strategies for activation ordering
+
+    Group: reorder groups and weight\n
+    Weight: only reorder weight, not groups. Slightly lower latency and
+    accuracy compared to group actorder\n
+    """
+
+    GROUP = "group"
+    WEIGHT = "weight"
+
+
 class QuantizationArgs(BaseModel):
     """
     User facing arguments used to define a quantization config 
@@ -59,7 +72,7 @@ class QuantizationArgs(BaseModel):
         quantization. Note that enabling dynamic quantization 
         will change the default observer to a memoryless one
     :param actorder: whether to apply group quantization in decreasing order of
-        activation. Defaults to False for arbitrary ordering
+        activation. Defaults to None for arbitrary ordering
     """
 
     num_bits: int = 8
@@ -69,7 +82,7 @@ class QuantizationArgs(BaseModel):
     strategy: Optional[QuantizationStrategy] = None
     block_structure: Optional[str] = None
     dynamic: bool = False
-    actorder: bool = False
+    actorder: Optional[ActivationOrdering] = None
     observer: str = Field(
         default="minmax",
         description=("The class to use to compute the quantization param - "
