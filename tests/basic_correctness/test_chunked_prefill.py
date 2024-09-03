@@ -148,17 +148,17 @@ def test_with_prefix_caching(
     use_v2_block_manager: bool,
     tensor_parallel_size: int,
 ) -> None:
-    """	
-    Checks exact match decode with and without prefix caching	
-    with chunked prefill enabled.	
+    """
+    Checks exact match decode with and without prefix caching
+    with chunked prefill enabled.
     """
     model = "meta-llama/Llama-2-7b-chat-hf"
     # The common prompt has 142 tokens with Llama-2 tokenizer.
     common_prompt = "You are a helpful AI assistant " * 20
     unique_prompts = [
-        "Question",  # Warmup	
-        "Question",  # Fully cached	
-        "Another question",  # Partial cached	
+        "Question",  # Warmup
+        "Question",  # Fully cached
+        "Another question",  # Partial cached
     ]
     full_prompts = [f"{common_prompt}\n{p}" for p in unique_prompts]
 
