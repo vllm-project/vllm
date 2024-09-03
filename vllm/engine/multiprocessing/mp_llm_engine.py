@@ -86,7 +86,7 @@ class MPLLMEngine:
     @classmethod
     def from_engine_args(cls, engine_args: AsyncEngineArgs,
                          usage_context: UsageContext, ipc_path: str):
-        """Creates an RPCLLM engine from the engine arguments."""
+        """Creates an MPLLMEngine from the engine arguments."""
 
         engine_config = engine_args.create_engine_config()
 
