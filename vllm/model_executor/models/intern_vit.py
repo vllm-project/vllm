@@ -10,7 +10,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
-from xformers import ops as xops
 
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
@@ -156,11 +155,7 @@ class InternParallelAttention(nn.Module):
 class InternSdpaAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-    ):
+    def __init__(self, config: PretrainedConfig):
         super().__init__()
         self.config = config
         self.embed_dim = config.hidden_size
@@ -173,13 +168,9 @@ class InternSdpaAttention(nn.Module):
                 f' {self.num_heads}).')
 
         self.scale = self.head_dim**-0.5
-        self.qkv = QKVParallelLinear(
-            self.embed_dim,
-            self.head_dim,
-            self.num_heads,
-            bias=config.qkv_bias,
-            quant_config=quant_config,
-        )
+        self.qkv = nn.Linear(self.embed_dim,
+                             3 * self.embed_dim,
+                             bias=config.qkv_bias)
 
         self.qk_normalization = config.qk_normalization
 
@@ -187,14 +178,7 @@ class InternSdpaAttention(nn.Module):
             self.q_norm = RMSNorm(self.embed_dim, eps=config.layer_norm_eps)
             self.k_norm = RMSNorm(self.embed_dim, eps=config.layer_norm_eps)
 
-        self.proj = RowParallelLinear(
-            self.embed_dim,
-            self.embed_dim,
-            quant_config=quant_config,
-        )
-
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
+        self.proj = nn.Linear(self.embed_dim, self.embed_dim)
 
     def forward(self, x):
         B, N, C = x.shape
@@ -218,7 +202,7 @@ class InternSdpaAttention(nn.Module):
         x = F.scaled_dot_product_attention(q, k, v, scale=self.scale)
         x = x.transpose(1, 2).view(B, N, -1)
 
-        x, _ = self.proj(x)
+        x = self.proj(x)
         return x
 
 
