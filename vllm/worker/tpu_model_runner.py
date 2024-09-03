@@ -164,9 +164,10 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             position_ids = torch.zeros((batch_size, seq_len),
                                        dtype=torch.int32,
                                        device=self.device)
-            num_orig_input_tokens_tensor = torch.full((batch_size, seq_len), seq_len,
-                                       dtype=torch.int32,
-                                       device=self.device)
+            num_orig_input_tokens_tensor = torch.full((batch_size, seq_len),
+                                                      seq_len,
+                                                      dtype=torch.int32,
+                                                      device=self.device)
             slot_mapping = torch.zeros((batch_size, seq_len),
                                        dtype=torch.int64,
                                        device=self.device)
@@ -191,8 +192,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                                        dtype=torch.int32,
                                        device=self.device)
             num_orig_input_tokens_tensor = torch.ones((batch_size, seq_len),
-                                       dtype=torch.int32,
-                                       device=self.device)
+                                                      dtype=torch.int32,
+                                                      device=self.device)
             slot_mapping = torch.zeros((batch_size, seq_len),
                                        dtype=torch.int64,
                                        device=self.device)
@@ -318,7 +319,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
 
             input_tokens.extend(prompt_tokens)
             input_positions.extend(list(range(prompt_len)))
-            num_orig_input_tokens_list.extend([seq_data.get_prompt_len()] * prompt_len)
+            num_orig_input_tokens_list.extend([seq_data.get_prompt_len()] *
+                                              prompt_len)
 
             assert seq_group_metadata.block_tables is not None
             block_table = seq_group_metadata.block_tables[seq_id]
@@ -349,9 +351,9 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         input_positions = torch.tensor(input_positions,
                                        dtype=torch.int32,
                                        device="cpu")
-        num_orig_input_tokens_tensor = torch.tensor(num_orig_input_tokens_list,
-                                       dtype=torch.long,
-                                       device=self.device)  # type: ignore
+        num_orig_input_tokens_tensor = torch.tensor(
+            num_orig_input_tokens_list, dtype=torch.long,
+            device=self.device)  # type: ignore
         slot_mapping = torch.tensor(slot_mapping,
                                     dtype=torch.int64,
                                     device="cpu")
@@ -410,7 +412,9 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         num_paddings = batch_size - batch_idx
         input_tokens = input_tokens + [[0]] * num_paddings
         input_positions = input_positions + [[0]] * num_paddings
-        num_orig_input_tokens_list = num_orig_input_tokens_list + [[0]] * num_paddings
+        num_orig_input_tokens_list = num_orig_input_tokens_list + [[
+            0
+        ]] * num_paddings
         slot_mapping = slot_mapping + [[_PAD_SLOT_ID]] * num_paddings
         context_lens = context_lens + [0] * num_paddings
 
@@ -421,8 +425,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                                        dtype=torch.int32,
                                        device="cpu")
         num_orig_input_tokens_tensor = torch.tensor(num_orig_input_tokens_list,
-                                       dtype=torch.long,
-                                       device="cpu")
+                                                    dtype=torch.long,
+                                                    device="cpu")
         slot_mapping = torch.tensor(slot_mapping,
                                     dtype=torch.int64,
                                     device="cpu")

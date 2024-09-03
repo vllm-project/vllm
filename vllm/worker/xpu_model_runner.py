@@ -181,7 +181,8 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
             # is always the first token in the sequence.
             input_positions.extend(list(range(computed_len, seq_len)))
 
-            num_orig_input_tokens_list.extend([seq_data.get_prompt_len()] * (seq_len - computed_len))
+            num_orig_input_tokens_list.extend([seq_data.get_prompt_len()] *
+                                              (seq_len - computed_len))
 
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized
@@ -219,9 +220,9 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
         input_positions = torch.tensor(input_positions,
                                        dtype=torch.long,
                                        device=self.device)  # type: ignore
-        num_orig_input_tokens_tensor = torch.tensor(num_orig_input_tokens_list,
-                                       dtype=torch.long,
-                                       device=self.device)  # type: ignore
+        num_orig_input_tokens_tensor = torch.tensor(
+            num_orig_input_tokens_list, dtype=torch.long,
+            device=self.device)  # type: ignore
         slot_mapping = torch.tensor(slot_mapping,
                                     dtype=torch.long,
                                     device=self.device)  # type: ignore
@@ -312,8 +313,8 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
                                        dtype=torch.int,
                                        device=self.device)
         num_orig_input_tokens_tensor = torch.tensor(num_orig_input_tokens_list,
-                                       dtype=torch.long,
-                                       device=self.device)
+                                                    dtype=torch.long,
+                                                    device=self.device)
 
         block_tables = make_tensor_with_pad(
             block_tables,
