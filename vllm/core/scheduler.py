@@ -1473,4 +1473,8 @@ class Scheduler:
         if enable_chunking and len(seqs) == 1:
             num_new_tokens = min(num_new_tokens,
                                  budget.remaining_token_budget())
+            if self.scheduler_config.is_multi_step:
+                num_new_tokens = min(
+                    self.scheduler_config.
+                    multi_step_chunked_prefill_max_token_chunk, num_new_tokens)
         return num_new_tokens
