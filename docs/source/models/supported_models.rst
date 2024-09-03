@@ -155,6 +155,10 @@ Decoder-only Language Models
     - Persimmon
     - :code:`adept/persimmon-8b-base`, :code:`adept/persimmon-8b-chat`, etc.
     - 
+  * - :code:`QWenLMHeadModel`
+    - Qwen
+    - :code:`Qwen/Qwen-7B`, :code:`Qwen/Qwen-7B-Chat`, etc.
+    -
   * - :code:`Qwen2ForCausalLM`
     - Qwen2
     - :code:`Qwen/Qwen2-beta-7B`, :code:`Qwen/Qwen2-beta-7B-Chat`, etc.
