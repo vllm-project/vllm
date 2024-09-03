@@ -21,6 +21,7 @@ from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
+from vllm.core.scheduler import SchedulerOutputs
 from vllm.distributed import get_pp_group
 from vllm.distributed.parallel_state import graph_capture
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
@@ -96,7 +97,8 @@ class ModelInputForGPU(ModelRunnerInputBase):
     finished_requests_ids: Optional[List[str]] = None
     virtual_engine: int = 0
     async_callback: Optional[Callable] = None
-    use_async_and_multi_step: bool = False
+    seq_group_metadata_list: Optional[List[SequenceGroupMetadata]] = None
+    scheduler_outputs: Optional[SchedulerOutputs] = None
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
