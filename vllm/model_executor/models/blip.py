@@ -1,4 +1,4 @@
-"""Minimal implementation of BlipVisionModel intended to be only used 
+å"""Minimal implementation of BlipVisionModel intended to be only used 
 within a vision language model."""
 from array import array
 from typing import Optional, Union
@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from PIL import Image
 from transformers import Blip2VisionConfig, BlipVisionConfig
-from transformers.models.blip.modeling_blip import BlipAttention
+from xformers import ops as xops
 
 from vllm.config import ModelConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
@@ -287,7 +287,7 @@ class BlipEncoderLayer(nn.Module):
         residual = hidden_states
 
         hidden_states = self.layer_norm1(hidden_states)
-        hidden_states, _ = self.self_attn(hidden_states=hidden_states)
+        hidden_states = self.self_attn(hidden_states=hidden_states)
         hidden_states = residual + hidden_states
 
         residual = hidden_states

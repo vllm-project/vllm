@@ -280,6 +280,10 @@ class _AsyncLLMEngine(LLMEngine):
         scheduler_outputs = cached_outputs.scheduler_outputs
         allow_async_output_proc = cached_outputs.allow_async_output_proc
 
+        # Detect async + multi-step
+        use_async_and_multi_step = (self.scheduler_config.is_multi_step
+                                    and allow_async_output_proc)
+
         ctx = self.scheduler_contexts[virtual_engine]
 
         # Clear outputs for each new scheduler iteration
@@ -301,6 +305,13 @@ class _AsyncLLMEngine(LLMEngine):
             # Maybe switch from async mode to sync mode
             if not allow_async_output_proc and len(ctx.output_queue) > 0:
                 self._process_model_outputs(ctx=ctx)
+
+            # For async + multi-step, init the queue
+            if use_async_and_multi_step:
+                assert len(ctx.output_queue) == 0
+                assert seq_group_metadata_list is not None
+                ctx.output_queue.append(
+                    (None, seq_group_metadata_list, scheduler_outputs))
 
             if (self.scheduler_config.is_multi_step
                     and scheduler_outputs.num_lookahead_slots > 0):
@@ -760,11 +771,6 @@ class AsyncLLMEngine:
     @property
     def errored(self) -> bool:
         return self._errored_with is not None
-
-    @property
-    def limit_concurrency(self) -> Optional[int]:
-        """Maximum number of concurrently running requests."""
-        return None
 
     def set_errored(self, exc: Exception) -> None:
         self._errored_with = exc

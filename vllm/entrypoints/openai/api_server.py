@@ -21,6 +21,9 @@ import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
+# yapf: enable
+from vllm.engine.multiprocessing.mp_client import MPEngineClient
+from vllm.engine.multiprocessing.mp_llm_engine import run_mp_engine
 from vllm.engine.protocol import AsyncEngineClient
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
@@ -37,9 +40,6 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               EmbeddingResponse, ErrorResponse,
                                               TokenizeRequest,
                                               TokenizeResponse)
-# yapf: enable
-from vllm.entrypoints.openai.rpc.client import AsyncEngineRPCClient
-from vllm.entrypoints.openai.rpc.server import run_rpc_server
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
@@ -82,7 +82,7 @@ async def lifespan(app: FastAPI):
 
     async def _force_log():
         while True:
-            await asyncio.sleep(10)
+            await asyncio.sleep(1.)
             await async_engine_client.do_log_stats()
 
     if not engine_args.disable_log_stats:
@@ -96,6 +96,22 @@ async def lifespan(app: FastAPI):
 @asynccontextmanager
 async def build_async_engine_client(
         args: Namespace) -> AsyncIterator[Optional[AsyncEngineClient]]:
+
+    # Context manager to handle async_engine_client lifecycle
+    # Ensures everything is shutdown and cleaned up on error/exit
+    global engine_args
+    engine_args = AsyncEngineArgs.from_cli_args(args)
+
+    async with build_async_engine_client_from_engine_args(
+            engine_args, args.disable_frontend_multiprocessing) as engine:
+        yield engine
+
+
+@asynccontextmanager
+async def build_async_engine_client_from_engine_args(
+    engine_args: AsyncEngineArgs,
+    disable_frontend_multiprocessing: bool = False,
+) -> AsyncIterator[Optional[AsyncEngineClient]]:
     """
     Create AsyncEngineClient, either:
         - in-process using the AsyncLLMEngine Directly
@@ -104,22 +120,20 @@ async def build_async_engine_client(
     Returns the Client or None if the creation failed.
     """
 
-    # Context manager to handle async_engine_client lifecycle
-    # Ensures everything is shutdown and cleaned up on error/exit
-    global engine_args
-    engine_args = AsyncEngineArgs.from_cli_args(args)
-
     # Backend itself still global for the silly lil' health handler
     global async_engine_client
 
     # If manually triggered or embedding model, use AsyncLLMEngine in process.
     # TODO: support embedding model via RPC.
-    if (model_is_embedding(args.model, args.trust_remote_code,
-                           args.quantization)
-            or args.disable_frontend_multiprocessing):
+    if (model_is_embedding(engine_args.model, engine_args.trust_remote_code,
+                           engine_args.quantization)
+            or disable_frontend_multiprocessing):
         async_engine_client = AsyncLLMEngine.from_engine_args(
             engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
-        yield async_engine_client
+        try:
+            yield async_engine_client
+        finally:
+            async_engine_client.shutdown_background_loop()
         return
 
     # Otherwise, use the multiprocessing AsyncLLMEngine.
@@ -140,57 +154,57 @@ async def build_async_engine_client(
                 "and vLLM will properly handle cleanup.")
 
         # Select random path for IPC.
-        rpc_path = get_open_zmq_ipc_path()
-        logger.info("Multiprocessing frontend to use %s for RPC Path.",
-                    rpc_path)
+        ipc_path = get_open_zmq_ipc_path()
+        logger.info("Multiprocessing frontend to use %s for IPC Path.",
+                    ipc_path)
 
         # Build RPCClient, which conforms to AsyncEngineClient Protocol.
         # NOTE: Actually, this is not true yet. We still need to support
         # embedding models via RPC (see TODO above)
-        rpc_client = AsyncEngineRPCClient(rpc_path)
-        async_engine_client = rpc_client  # type: ignore
+        mp_engine_client = MPEngineClient(ipc_path)
+        async_engine_client = mp_engine_client  # type: ignore
 
-        # Start RPCServer in separate process (holds the AsyncLLMEngine).
-        context = multiprocessing.get_context("spawn")
+        # Start RPCServer in separate process (holds the LLMEngine).
         # the current process might have CUDA context,
         # so we need to spawn a new process
-        rpc_server_process = context.Process(
-            target=run_rpc_server,
-            args=(engine_args, UsageContext.OPENAI_API_SERVER, rpc_path))
-        rpc_server_process.start()
-        logger.info("Started engine process with PID %d",
-                    rpc_server_process.pid)
+        context = multiprocessing.get_context("spawn")
+
+        engine_process = context.Process(target=run_mp_engine,
+                                         args=(engine_args,
+                                               UsageContext.OPENAI_API_SERVER,
+                                               ipc_path))
+        engine_process.start()
+        logger.info("Started engine process with PID %d", engine_process.pid)
 
         try:
             while True:
                 try:
-                    await rpc_client.setup()
+                    await mp_engine_client.setup()
                     break
                 except TimeoutError:
-                    if not rpc_server_process.is_alive():
-                        logger.error(
-                            "RPCServer process died before responding "
-                            "to readiness probe")
+                    if not engine_process.is_alive():
+                        logger.error("Engine process died before responding "
+                                     "to readiness probe")
                         yield None
                         return
 
             yield async_engine_client
         finally:
             # Ensure rpc server process was terminated
-            rpc_server_process.terminate()
+            engine_process.terminate()
 
             # Close all open connections to the backend
-            rpc_client.close()
+            mp_engine_client.close()
 
             # Wait for server process to join
-            rpc_server_process.join()
+            engine_process.join()
 
             # Lazy import for prometheus multiprocessing.
             # We need to set PROMETHEUS_MULTIPROC_DIR environment variable
             # before prometheus_client is imported.
             # See https://prometheus.github.io/client_python/multiprocess/
             from prometheus_client import multiprocess
-            multiprocess.mark_process_dead(rpc_server_process.pid)
+            multiprocess.mark_process_dead(engine_process.pid)
 
 
 router = APIRouter()
