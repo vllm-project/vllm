@@ -164,6 +164,9 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             position_ids = torch.zeros((batch_size, seq_len),
                                        dtype=torch.int32,
                                        device=self.device)
+            num_orig_input_tokens_tensor = torch.full((batch_size, seq_len), seq_len,
+                                       dtype=torch.int32,
+                                       device=self.device)
             slot_mapping = torch.zeros((batch_size, seq_len),
                                        dtype=torch.int64,
                                        device=self.device)
@@ -172,6 +175,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 num_prefill_tokens=batch_size * seq_len,
                 num_decode_tokens=0,
                 slot_mapping=slot_mapping,
+                num_orig_input_tokens_tensor=num_orig_input_tokens_tensor,
                 block_tables=None,
                 context_lens=None,
             )
@@ -184,6 +188,9 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                                     dtype=torch.int32,
                                     device=self.device)
             position_ids = torch.zeros((batch_size, seq_len),
+                                       dtype=torch.int32,
+                                       device=self.device)
+            num_orig_input_tokens_tensor = torch.ones((batch_size, seq_len),
                                        dtype=torch.int32,
                                        device=self.device)
             slot_mapping = torch.zeros((batch_size, seq_len),
@@ -204,6 +211,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 num_prefill_tokens=0,
                 num_decode_tokens=batch_size * seq_len,
                 slot_mapping=slot_mapping,
+                num_orig_input_tokens_tensor=num_orig_input_tokens_tensor,
                 block_tables=block_tables,
                 context_lens=context_lens,
             )
@@ -291,6 +299,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[int] = []
         input_positions: List[int] = []
+        # The number of original input tokens of each sequence
+        num_orig_input_tokens_list: List[int] = []
         prompt_lens: List[int] = []
         slot_mapping: List[int] = []
 
@@ -308,6 +318,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
 
             input_tokens.extend(prompt_tokens)
             input_positions.extend(list(range(prompt_len)))
+            num_orig_input_tokens_list.extend([seq_data.get_prompt_len()] * prompt_len)
 
             assert seq_group_metadata.block_tables is not None
             block_table = seq_group_metadata.block_tables[seq_id]
@@ -327,6 +338,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             num_paddings = padded_prompt_len - prompt_len
             input_tokens += [0] * num_paddings
             input_positions += [0] * num_paddings
+            num_orig_input_tokens_list += [0] * num_paddings
             slot_mapping += [_PAD_SLOT_ID] * num_paddings
 
         assert len(prompt_lens) > 0
@@ -337,6 +349,9 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         input_positions = torch.tensor(input_positions,
                                        dtype=torch.int32,
                                        device="cpu")
+        num_orig_input_tokens_tensor = torch.tensor(num_orig_input_tokens_list,
+                                       dtype=torch.long,
+                                       device=self.device)  # type: ignore
         slot_mapping = torch.tensor(slot_mapping,
                                     dtype=torch.int64,
                                     device="cpu")
@@ -348,6 +363,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             num_prefill_tokens=0,  # NOTE: This is not used.
             num_decode_tokens=0,
             slot_mapping=slot_mapping,
+            num_orig_input_tokens_tensor=num_orig_input_tokens_tensor,
             block_tables=None,
             context_lens=None,
         )
@@ -360,6 +376,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[List[int]] = []
         input_positions: List[List[int]] = []
+        # The number of original input tokens of each sequence
+        num_orig_input_tokens_list: List[List[int]] = []
         slot_mapping: List[List[int]] = []
         context_lens: List[int] = []
 
@@ -375,6 +393,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 seq_len = seq_data.get_len()
                 position = seq_len - 1
                 input_positions.append([position])
+                num_orig_input_tokens_list.append([seq_data.get_prompt_len()])
                 context_lens.append(seq_len)
 
                 assert seq_group_metadata.block_tables is not None
@@ -391,6 +410,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         num_paddings = batch_size - batch_idx
         input_tokens = input_tokens + [[0]] * num_paddings
         input_positions = input_positions + [[0]] * num_paddings
+        num_orig_input_tokens_list = num_orig_input_tokens_list + [[0]] * num_paddings
         slot_mapping = slot_mapping + [[_PAD_SLOT_ID]] * num_paddings
         context_lens = context_lens + [0] * num_paddings
 
@@ -399,6 +419,9 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                                     device="cpu")
         input_positions = torch.tensor(input_positions,
                                        dtype=torch.int32,
+                                       device="cpu")
+        num_orig_input_tokens_tensor = torch.tensor(num_orig_input_tokens_list,
+                                       dtype=torch.long,
                                        device="cpu")
         slot_mapping = torch.tensor(slot_mapping,
                                     dtype=torch.int64,
@@ -419,6 +442,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             slot_mapping=slot_mapping,
             block_tables=block_tables,
             context_lens=context_lens,
+            num_orig_input_tokens_tensor=num_orig_input_tokens_tensor,
         )
         return input_tokens, input_positions, attn_metadata, input_lens
 
