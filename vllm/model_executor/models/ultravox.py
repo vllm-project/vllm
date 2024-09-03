@@ -55,6 +55,7 @@ class UltravoxAudioFeatureInputs(TypedDict):
 class UltravoxAudioEmbeddingInputs(TypedDict):
     type: Literal["audio_embeds"]
     data: NestedTensors
+    """Shape: `(batch_size, num_audios, audio_feature_size, hidden_size)"""
 
 
 UltravoxAudioInputs = Union[UltravoxAudioFeatureInputs,

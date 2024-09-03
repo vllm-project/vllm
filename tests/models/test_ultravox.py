@@ -19,10 +19,12 @@ AudioTuple = Tuple[np.ndarray, int]
 VLLM_PLACEHOLDER = "<|reserved_special_token_0|>"
 HF_PLACEHOLDER = "<|audio|>"
 
+
 @pytest.fixture(scope="session")
 def audio_assets():
     from vllm.assets.audio import AudioAsset
     return [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
+
 
 @pytest.fixture(scope="module", params=("mary_had_lamb", "winning_call"))
 def audio(request):
@@ -190,7 +192,8 @@ def test_models_with_multiple_audios(vllm_runner, audio_assets, dtype: str,
                               VLLM_PLACEHOLDER)
     run_multi_audio_test(
         vllm_runner,
-        [(vllm_prompt, [audio.audio_and_sample_rate for audio in audio_assets])],
+        [(vllm_prompt, [audio.audio_and_sample_rate
+                        for audio in audio_assets])],
         MODEL_NAME,
         dtype=dtype,
         max_tokens=max_tokens,
