@@ -71,9 +71,7 @@ class MockEngine:
 
 
 class MockAsyncLLMEngine(AsyncLLMEngine):
-
-    def _init_engine(self, *args, **kwargs):
-        return MockEngine()
+    _engine_class = MockEngine
 
 
 @pytest.mark.asyncio
