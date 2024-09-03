@@ -16,7 +16,7 @@ from vllm.engine.llm_engine import (DecoderPromptComponents, LLMEngine,
                                     PromptComponents, SchedulerOutputState)
 from vllm.engine.metrics_types import StatLoggerBase
 from vllm.executor.executor_base import ExecutorAsyncBase
-from vllm.executor.ray_utils import initialize_ray_cluster, ray
+from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.inputs import (EncoderDecoderLLMInputs, LLMInputs, PromptInputs,
                          SingletonPromptInputs)
 from vllm.inputs.parse import is_explicit_encoder_decoder_prompt
@@ -606,7 +606,7 @@ class AsyncLLMEngine:
                  **kwargs) -> None:
         self.worker_use_ray = worker_use_ray
         self.log_requests = log_requests
-        self.engine = self._init_engine(*args, **kwargs)
+        self.engine = self._engine_class(*args, **kwargs)
 
         # This ensures quick processing of request outputs
         # so the append to asyncio queues is not delayed,
@@ -782,14 +782,6 @@ class AsyncLLMEngine:
             self._background_loop_unshielded.cancel()
             self._background_loop_unshielded = None
         self.background_loop = None
-
-    def _init_engine(self, *args,
-                     **kwargs) -> Union[_AsyncLLMEngine, "ray.ObjectRef"]:
-        if self.worker_use_ray:
-            engine_class = ray.remote(num_cpus=0)(self._engine_class).remote
-        else:
-            engine_class = self._engine_class
-        return engine_class(*args, **kwargs)
 
     async def engine_step(self, virtual_engine: int) -> bool:
         """Kick the engine to process the waiting requests.
