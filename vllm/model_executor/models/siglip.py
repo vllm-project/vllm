@@ -492,12 +492,12 @@ class SiglipVisionModel(nn.Module):
         num_hidden_layers_override: Optional[int] = None,
     ):
         super().__init__()
-        if num_hidden_layers_override is None:
-            self.need_post_layernorm = True
-        elif num_hidden_layers_override == config.num_hidden_layers:
+        if num_hidden_layers_override is None or num_hidden_layers_override == config.num_hidden_layers:
             self.need_post_layernorm = True
         elif num_hidden_layers_override > config.num_hidden_layers:
-            raise ValueError("num_hidden_layers_override cannot be greater than num_hidden_layers")
+            raise ValueError(
+                "num_hidden_layers_override cannot be greater than num_hidden_layers"
+            )
         else:
             self.need_post_layernorm = False
 
@@ -509,8 +509,7 @@ class SiglipVisionModel(nn.Module):
             config,
             quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
-            need_post_layernorm=self.need_post_layernorm
-        )
+            need_post_layernorm=self.need_post_layernorm)
 
     def get_input_embeddings(self) -> nn.Module:
         return self.vision_model.embeddings.patch_embedding
