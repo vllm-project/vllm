@@ -32,13 +32,13 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.rotary_embedding import GemmaRotaryEmbedding
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors, SamplerOutput
+from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA
 from .utils import (is_pp_missing_parameter,
@@ -132,14 +132,12 @@ class Gemma2Attention(nn.Module):
             bias=config.attention_bias,
             quant_config=quant_config,
         )
-        # TODO(woosuk): Use the `get_rope` interface.
-        self.rotary_emb = GemmaRotaryEmbedding(
+        self.rotary_emb = get_rope(
             self.head_dim,
-            self.head_dim,
-            max_position_embeddings,
+            rotary_dim=self.head_dim,
+            max_position=max_position_embeddings,
             base=self.rope_theta,
             is_neox_style=True,
-            dtype=torch.get_default_dtype(),
         )
 
         # FIXME(woosuk): While Gemma 2 uses sliding window attention for every
@@ -340,6 +338,8 @@ class Gemma2ForCausalLM(nn.Module, SupportsLoRA):
         del lora_config  # Unused.
         super().__init__()
         self.config = config
+        # currently all existing Gemma models have `tie_word_embeddings` enabled
+        assert config.tie_word_embeddings
         self.quant_config = quant_config
         self.model = Gemma2Model(config, cache_config, quant_config)
         self.logits_processor = LogitsProcessor(
@@ -360,8 +360,11 @@ class Gemma2ForCausalLM(nn.Module, SupportsLoRA):
                                    attn_metadata, intermediate_tensors)
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.model.embed_tokens, hidden_states,
                                        sampling_metadata)
         return logits

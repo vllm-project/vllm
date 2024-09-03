@@ -6,9 +6,19 @@ from torch.nn import Parameter
 from vllm import _custom_ops as ops
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.utils import is_hip
+
+# scaled_mm in pytorch on rocm has a bug that requires always
+# providing scaling factor for result. This value is created
+# as global value to avoid multiple tensor allocations, and
+# can be removed once pytorch fixes the bug.
+TORCH_SCALED_MM_SCALE_RESULT = torch.ones(1).cuda() if is_hip() else None
 
 
 def cutlass_fp8_supported() -> bool:
+    # cutlass is not supported on Rocm
+    if is_hip():
+        return False
     capability = current_platform.get_device_capability()
     capability = capability[0] * 10 + capability[1]
 
@@ -147,13 +157,19 @@ def apply_fp8_linear(
 
         if per_tensor_weights and per_tensor_activations:
             # Fused GEMM_DQ
-            output, _ = torch._scaled_mm(qinput,
-                                         weight,
-                                         out_dtype=input.dtype,
-                                         scale_a=x_scale,
-                                         scale_b=weight_scale,
-                                         bias=bias)
-            return torch.narrow(output, 0, 0, input.shape[0])
+            output = torch._scaled_mm(
+                qinput,
+                weight,
+                out_dtype=input.dtype,
+                scale_a=x_scale,
+                scale_b=weight_scale,
+                scale_result=TORCH_SCALED_MM_SCALE_RESULT,
+                bias=bias)
+            # Since in torch 2.5, scaled_mm only returns single value
+            # This should be removed when vllm-nvidia also moves to 2.5
+            if is_hip():
+                return torch.narrow(output, 0, 0, input.shape[0])
+            return torch.narrow(output[0], 0, 0, input.shape[0])
 
         else:
             # Fallback for channelwise case, where we use unfused DQ
@@ -207,3 +223,27 @@ def apply_int8_linear(
                                  scale_b=weight_scale,
                                  out_dtype=input.dtype,
                                  bias=bias)
+
+
+def normalize_e4m3fn_to_e4m3fnuz(
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    input_scale: Optional[torch.Tensor] = None
+) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    assert weight.dtype == torch.float8_e4m3fn
+    # The bits pattern 10000000(-128) represents zero in e4m3fn
+    # but NaN in e4m3fnuz. So here we set it to 0.
+    # https://onnx.ai/onnx/technical/float8.html
+    weight_as_int8 = weight.view(torch.int8)
+    ROCM_FP8_NAN_AS_INT = -128
+    weight_as_int8[weight_as_int8 == ROCM_FP8_NAN_AS_INT] = 0
+    weight = weight_as_int8.view(torch.float8_e4m3fnuz)
+
+    # For the same bits representation, e4m3fnuz value is half of
+    # the e4m3fn value, so we should double the scaling factor to
+    # get the same dequantized value.
+    # https://onnx.ai/onnx/technical/float8.html
+    weight_scale = weight_scale * 2.0
+    if input_scale is not None:
+        input_scale = input_scale * 2.0
+    return weight, weight_scale, input_scale
