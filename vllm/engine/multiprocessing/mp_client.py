@@ -55,6 +55,10 @@ class MPEngineClient:
         self.output_socket: Socket = self.context.socket(zmq.constants.PULL)
         self.output_socket.connect(f"{ipc_path}_output_socket")
 
+        # IPC path for awk of check_health requests.
+        self.health_socket: Socket = self.context.socket(zmq.constants.PULL)
+        self.health_socket.connect(f"{ipc_path}_health_socket")
+
         # IPC path for the data socket.
         self.data_ipc_path = f"{ipc_path}_data_socket"
 
@@ -164,7 +168,8 @@ class MPEngineClient:
         await socket.send_multipart((cloudpickle.dumps(request), ))
 
         # TODO: is there a way to ack this if we are using the input_socket?
-        # I don't think so, b/c we are using PUSH/PULL
+        # I don't think so, b/c we are using PUSH/PULL w/out identities so no
+        # way to preserve order.
     
     async def _awk_one_way_rpc_request(self,
                                        timeout: int,
@@ -349,7 +354,7 @@ class MPEngineClient:
                     # possibly setting the `errored` property.
                     if not self._errored:
                         try:
-                            # await self.check_health(socket=socket)
+                            await self.check_health()
                             pass
                         except Exception as e:
                             self._errored = True
@@ -371,6 +376,17 @@ class MPEngineClient:
         await self._send_one_way_rpc_request(
             request=RPCUtilityRequest.CHECK_HEALTH,
             socket=self.input_socket)
+
+        # Await awknoledgement from MPLLMEngine.
+        # Note: these requests are not necessarily serial.
+        # I.e. if two clients A, B send CHECK_HEALTH, the
+        # response to A could actually be the call send by B.
+        # TODO: is this bad?
+        await self._awk_one_way_rpc_request(
+            timeout=VLLM_RPC_GET_DATA_TIMEOUT_MS,
+            expected_str=VLLM_RPC_SUCCESS_STR,
+            error_message="Check health timeout.",
+            socket=self.health_socket)
         
 
     async def encode(self, *args,

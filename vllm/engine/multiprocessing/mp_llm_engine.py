@@ -76,6 +76,10 @@ class MPLLMEngine:
         self.output_socket = self.ctx.socket(zmq.constants.PUSH)
         self.output_socket.bind(f"{ipc_path}_output_socket")
 
+        # Send health status back to client.
+        self.health_socket = self.ctx.socket(zmq.constants.PUSH)
+        self.health_socket.bind(f"{ipc_path}_health_socket")
+
         # IPC path for the data socket.
         self.data_ipc_path = f"{ipc_path}_data_socket"
 
@@ -213,6 +217,10 @@ class MPLLMEngine:
         self.output_socket.send_multipart(
             (pickle.dumps(request_outputs),), copy=False)
     
+    def awk_check_health(self):
+        self.health_socket.send_multipart(
+            (pickle.dumps(VLLM_RPC_SUCCESS_STR), ), copy=False)
+
     def maybe_handle_new_input(self):
         """Handle new input with non-blocking IO"""
         while self.input_socket.poll(timeout=0) != 0:
@@ -246,8 +254,9 @@ class MPLLMEngine:
             self.engine.do_log_stats()
         elif request == RPCUtilityRequest.CHECK_HEALTH:
             self.engine.check_health()
-
-
+            # Special check_health channel for awk check health.
+            self.awk_check_health()
+    
 def run_mp_engine(engine_args: AsyncEngineArgs, 
                   usage_context: UsageContext, 
                   ipc_path: str):
