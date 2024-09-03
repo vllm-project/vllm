@@ -425,6 +425,7 @@ class SiglipVisionTransformer(nn.Module):
         config: SiglipVisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
         num_hidden_layers_override: Optional[int] = None,
+        need_post_layernorm: bool = True,
     ):
         super().__init__()
         self.config = config
@@ -436,12 +437,11 @@ class SiglipVisionTransformer(nn.Module):
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
         )
-        if num_hidden_layers_override == config.num_hidden_layers:
-            self.num_hidden_layers_override = None
+        if need_post_layernorm:
             self.post_layernorm = nn.LayerNorm(embed_dim,
                                                eps=config.layer_norm_eps)
         else:
-            self.num_hidden_layers_override = num_hidden_layers_override
+            self.post_layernorm = nn.Identity()
         self.use_head = (True if not hasattr(config, "vision_use_head") else
                          config.vision_use_head)
         if self.use_head:
@@ -460,14 +460,10 @@ class SiglipVisionTransformer(nn.Module):
 
         encoder_outputs = self.encoder(inputs_embeds=hidden_states)
 
-        # When it is used as a visual encoder, post_layernorm is not required
-        if self.num_hidden_layers_override is None:
-            last_hidden_state = self.post_layernorm(encoder_outputs)
-            # TODO: add this back when pooled_output is used in inference
-            # if self.use_head:
-            # pooled_output = self.head(last_hidden_state)
-        else:
-            last_hidden_state = encoder_outputs
+        last_hidden_state = self.post_layernorm(encoder_outputs)
+        # TODO: add this back when pooled_output is used in inference
+        # if self.use_head:
+        # pooled_output = self.head(last_hidden_state)
 
         return last_hidden_state
 
@@ -483,10 +479,19 @@ class SiglipVisionModel(nn.Module):
         num_hidden_layers_override: Optional[int] = None,
     ):
         super().__init__()
+        if num_hidden_layers_override is None:
+            self.need_post_layernorm = True
+        elif num_hidden_layers_override == config.num_hidden_layers:
+            self.need_post_layernorm = True
+        elif num_hidden_layers_override > config.num_hidden_layers:
+            raise ValueError("num_hidden_layers_override cannot be greater than num_hidden_layers")
+        else:
+            self.need_post_layernorm = False
         self.vision_model = SiglipVisionTransformer(
             config,
             quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
+            need_post_layernorm=self.need_post_layernorm
         )
 
     def get_input_embeddings(self) -> nn.Module:
@@ -507,6 +512,10 @@ class SiglipVisionModel(nn.Module):
         layer_count = len(self.vision_model.encoder.layers)
 
         for name, loaded_weight in weights:
+            # post_layernorm is optional in SiglipVisionModel
+            if "vision_model.post_layernorm" in name and not self.need_post_layernorm:
+                continue
+
             # omit layers when num_hidden_layers_override is set
             if "vision_model.encoder.layers." in name:
                 layer_idx = int(name.split(".")[3])
