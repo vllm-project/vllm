@@ -87,7 +87,7 @@ ModalityStr = Literal["image", "audio"]
 _T = TypeVar("_T")
 
 
-class BaseMultiModalItemTracker(Generic[_T]):
+class BaseMultiModalItemTracker(ABC, Generic[_T]):
     """
     Tracks multi-modal items in a given request and ensures that the number
     of multi-modal items in a given request does not exceed the configured
@@ -174,12 +174,19 @@ class BaseMultiModalItemTracker(Generic[_T]):
         self._items.append(item)
 
         return self._placeholder_str(modality, current_count)
+    
+    @abstractmethod
+    def create_parser(self) -> "BaseMultiModalContentParser":
+        raise NotImplementedError
 
 
 class MultiModalItemTracker(BaseMultiModalItemTracker[MultiModalDataDict]):
 
     def all_mm_data(self) -> Optional[MultiModalDataDict]:
         return self._combine(self._items) if self._items else None
+
+    def create_parser(self) -> "BaseMultiModalContentParser":
+        return MultiModalContentParser(self)
 
 
 class AsyncMultiModalItemTracker(
@@ -191,6 +198,9 @@ class AsyncMultiModalItemTracker(
             return self._combine(items)
 
         return None
+
+    def create_parser(self) -> "BaseMultiModalContentParser":
+        return AsyncMultiModalContentParser(self)
 
 
 class BaseMultiModalContentParser(ABC):
@@ -317,9 +327,11 @@ _AudioParser = TypeAdapter(ChatCompletionContentPartAudioParam)
 def _parse_chat_message_content_parts(
     role: str,
     parts: Iterable[ChatCompletionContentPartParam],
-    mm_parser: BaseMultiModalContentParser,
+    mm_tracker: BaseMultiModalItemTracker,
 ) -> List[ConversationMessage]:
     texts: List[str] = []
+
+    mm_parser = mm_tracker.create_parser()
 
     for part in parts:
         part_type = part["type"]
@@ -353,7 +365,7 @@ def _parse_chat_message_content_parts(
 
 def _parse_chat_message_content(
     message: ChatCompletionMessageParam,
-    mm_parser: BaseMultiModalContentParser,
+    mm_tracker: BaseMultiModalItemTracker,
 ) -> List[ConversationMessage]:
     role = message["role"]
     content = message.get("content")
@@ -366,7 +378,7 @@ def _parse_chat_message_content(
     return _parse_chat_message_content_parts(
         role,
         content,  # type: ignore
-        mm_parser,
+        mm_tracker,
     )
 
 
@@ -380,8 +392,7 @@ def parse_chat_messages(
     mm_tracker = MultiModalItemTracker(model_config, tokenizer)
 
     for msg in messages:
-        mm_parser = MultiModalContentParser(mm_tracker)
-        sub_messages = _parse_chat_message_content(msg, mm_parser)
+        sub_messages = _parse_chat_message_content(msg, mm_tracker)
 
         conversation.extend(sub_messages)
 
@@ -398,8 +409,7 @@ def parse_chat_messages_futures(
     mm_tracker = AsyncMultiModalItemTracker(model_config, tokenizer)
 
     for msg in messages:
-        mm_parser = AsyncMultiModalContentParser(mm_tracker)
-        sub_messages = _parse_chat_message_content(msg, mm_parser)
+        sub_messages = _parse_chat_message_content(msg, mm_tracker)
 
         conversation.extend(sub_messages)
 
