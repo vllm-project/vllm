@@ -237,7 +237,7 @@ class VisualAttention(nn.Module):
     """
 
     def __init__(self, embed_dim, num_heads, bias=True, kdim=None, vdim=None):
-        super(VisualAttention, self).__init__()
+        super().__init__()
         self.embed_dim = embed_dim
         self.kdim = kdim if kdim is not None else embed_dim
         self.vdim = vdim if vdim is not None else embed_dim
