@@ -355,7 +355,14 @@ class PhiMoEAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
+        q, k =  self.rotary_emb(positions, q, k) \
+            if self.rope_scaling is None \
+            else self.rotary_emb(
+                positions,
+                q,
+                k,
+                num_orig_input_tokens_tensor=attn_metadata.num_orig_input_tokens_tensor)
+
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
         return output
