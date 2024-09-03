@@ -1,3 +1,4 @@
+import copy
 from typing import Dict, List, Optional, Tuple
 
 from vllm.sequence import Logprob, SamplingParams, Sequence, SequenceGroup
@@ -5,7 +6,6 @@ from vllm.sequence import Logprob, SamplingParams, Sequence, SequenceGroup
 from .tokenizer import AnyTokenizer
 from .tokenizer_group import BaseTokenizerGroup
 
-from copy import deepcopy
 # Used eg. for marking rejected tokens in spec decoding.
 INVALID_TOKEN_ID = -1
 
@@ -91,7 +91,7 @@ class Detokenizer:
             prefix_offset = next_iter_prefix_offset
             read_offset = next_iter_read_offset
             if prev_tokens is None:
-                prev_tokens = deepcopy(next_iter_tokens)
+                prev_tokens = copy.deepcopy(next_iter_tokens)
             else:
                 prev_tokens.extend(next_iter_tokens)
 
