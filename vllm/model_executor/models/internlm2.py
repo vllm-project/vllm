@@ -27,7 +27,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-from .utils import is_pp_missing_parameter, make_layers
+from .utils import is_pp_missing_parameter, make_layers, make_empty_intermediate_tensors_factory
 
 
 class InternLM2MLP(nn.Module):
@@ -251,6 +251,9 @@ class InternLM2Model(nn.Module):
                                                 quant_config),
             prefix=f"{prefix}.layers")
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states", "residual"], config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.tok_embeddings(input_ids)
@@ -311,6 +314,8 @@ class InternLM2ForCausalLM(nn.Module):
             self.output.weight = self.model.tok_embeddings.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors)
 
     def forward(
         self,
@@ -332,20 +337,6 @@ class InternLM2ForCausalLM(nn.Module):
         logits = self.logits_processor(self.output, hidden_states,
                                        sampling_metadata)
         return logits
-
-    def make_empty_intermediate_tensors(
-            self, batch_size: int, dtype: torch.dtype,
-            device: torch.device) -> IntermediateTensors:
-        return IntermediateTensors({
-            "hidden_states":
-                torch.zeros((batch_size, self.config.hidden_size),
-                            dtype=dtype,
-                            device=device),
-            "residual":
-                torch.zeros((batch_size, self.config.hidden_size),
-                            dtype=dtype,
-                            device=device),
-        })
 
     def sample(
         self,
