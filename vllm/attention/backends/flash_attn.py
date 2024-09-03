@@ -18,8 +18,8 @@ from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUBuilder
 
-from vllm_flash_attn import flash_attn_varlen_func as _flash_attn_varlen_func
-from vllm_flash_attn import flash_attn_with_kvcache as _flash_attn_with_kvcache
+from vllm.vllm_flash_attn import flash_attn_varlen_func as _flash_attn_varlen_func
+from vllm.vllm_flash_attn import flash_attn_with_kvcache as _flash_attn_with_kvcache
 
 
 @torch.library.custom_op("vllm::flash_attn_varlen_func", mutates_args=[])

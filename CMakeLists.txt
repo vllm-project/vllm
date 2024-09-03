@@ -167,6 +167,32 @@ if(NVCC_THREADS AND VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_GPU_FLAGS "--threads=${NVCC_THREADS}")
 endif()
 
+include(FetchContent)
+
+# TODO(luka) use vllm-project version
+FetchContent_Declare(
+        flash-attention
+        SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../flash-attention # TODO use GIT, allow local
+#        GIT_REPOSITORY https://github.com/neuralmagic/flash-attention.git
+#        GIT_TAG ce9ce0d82edfedc928e34f712e875d71542cc7b3
+#        GIT_PROGRESS TRUE
+)
+
+set(VLLM_PARENT_BUILD ON)
+FetchContent_MakeAvailable(flash-attention)
+message(STATUS "Flash-attention is available at ${flash-attention_SOURCE_DIR}")
+
+add_custom_target(
+  copy_flash_attention
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+  ${flash-attention_SOURCE_DIR}/vllm_flash_attn
+  ${CMAKE_CURRENT_SOURCE_DIR}/vllm/vllm_flash_attn
+  DEPENDS vllm_flash_attn_c
+  BYPRODUCTS ${CMAKE_CURRENT_SOURCE_DIR}/vllm/vllm_flash_attn
+  COMMENT "Copying flash-attention python files to vllm/vllm_flash_attn"
+)
+add_dependencies(default copy_flash_attention)
+
 #
 # Define other extension targets
 #
@@ -191,7 +217,6 @@ set(VLLM_EXT_SRC
   "csrc/torch_bindings.cpp")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
-  include(FetchContent)
   SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
   FetchContent_Declare(
         cutlass
