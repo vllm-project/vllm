@@ -1042,22 +1042,12 @@ class Scheduler:
         def get_max_prefill_chunk_steps(
                 prefill_seq_groups: Iterable[ScheduledSequenceGroup],
                 max_token_chunk_size: int):
-            if any([
-                    sg.token_chunk_size < max_token_chunk_size
-                    for sg in prefill_seq_groups
-            ]):
-                return 1
-
             prefill_num_uncomputed = [
                 psg.seq_group.get_num_uncomputed_tokens()
                 for psg in prefill_seq_groups
             ]
-            # we floor because, the processing the last
-            import math
-            max_steps = \
-                [int(math.ceil(float(x) / float(max_token_chunk_size))) \
-                                for x in prefill_num_uncomputed]
 
+            import math
             max_steps = [
                 int(math.ceil(float(x) / float(max_token_chunk_size)))
                 for x in prefill_num_uncomputed
@@ -1078,9 +1068,29 @@ class Scheduler:
         max_prefill_steps = get_max_prefill_chunk_steps(
             prefill_seq_groups,
             self.scheduler_config.multi_step_chunked_prefill_max_token_chunk)
+
+        prefill_num_uncomputed = [
+                psg.seq_group.get_num_uncomputed_tokens()
+                for psg in prefill_seq_groups
+            ]
+ 
         assert max_prefill_steps >= 1
         max_prefill_steps = min(max_prefill_steps,
                                 self.scheduler_config.num_scheduler_steps)
+
+        # Update token chunk size
+        max_tcs = self.scheduler_config.multi_step_chunked_prefill_max_token_chunk
+        for sg in scheduler_outputs.scheduled_seq_groups:
+            sg.token_chunk_size = min(sg.token_chunk_size, max_tcs)
+
+        #s = "prefill uncomputed : ("
+        #for pnu in prefill_num_uncomputed:
+        #    s = s + f"{pnu}, "
+        #s = s + ") ::: tcs ("
+        #for sg in prefill_seq_groups:
+        #    s += f"{sg.token_chunk_size},"
+        #s += f") :::: max steps {max_prefill_steps}"
+        #print (s)
 
         # update all the sequence to run only until
         # max_scheduled_prefill_chunk_steps. We curtail the decodes
@@ -1462,8 +1472,4 @@ class Scheduler:
         if enable_chunking and len(seqs) == 1:
             num_new_tokens = min(num_new_tokens,
                                  budget.remaining_token_budget())
-            if self.scheduler_config.is_multi_step:
-                num_new_tokens = min(
-                    self.scheduler_config.
-                    multi_step_chunked_prefill_max_token_chunk, num_new_tokens)
         return num_new_tokens
