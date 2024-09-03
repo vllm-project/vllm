@@ -27,5 +27,5 @@ different tokens being sampled. Once a different token is sampled, further diver
 **Mitigation Strategies**
 
 - For improved stability and reduced variance, use `float32`. Note that this will require more memory.
-- If using `bfloat16`, switching to `float16` can also help, though `float16` is still less stable than `float32`.
+- If using `bfloat16`, switching to `float16` can also help.
 - Using request seeds can aid in achieving more stable generation for temperature > 0, but discrepancies due to precision differences may still occur.
