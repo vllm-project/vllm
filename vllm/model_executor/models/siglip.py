@@ -436,9 +436,12 @@ class SiglipVisionTransformer(nn.Module):
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
         )
-        if self.config.num_hidden_layers_override is None:
-            self.post_layernorm = nn.LayerNorm(embed_dim,
-                                            eps=config.layer_norm_eps)
+        if num_hidden_layers_override == config.num_hidden_layers:
+            self.num_hidden_layers_override = None
+            self.post_layernorm = nn.LayerNorm(embed_dim, 
+                                               eps=config.layer_norm_eps)
+        else:
+            self.num_hidden_layers_override = num_hidden_layers_override
         self.use_head = (True if not hasattr(config, "vision_use_head") else
                          config.vision_use_head)
         if self.use_head:
@@ -458,7 +461,7 @@ class SiglipVisionTransformer(nn.Module):
         encoder_outputs = self.encoder(inputs_embeds=hidden_states)
 
         # When it is used as a visual encoder, post_layernorm is not required
-        if self.config.num_hidden_layers_override is None:
+        if self.num_hidden_layers_override is None:
             last_hidden_state = self.post_layernorm(encoder_outputs)
             # TODO: add this back when pooled_output is used in inference
             # if self.use_head:
