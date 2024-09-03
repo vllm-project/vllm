@@ -676,13 +676,12 @@ class EngineArgs:
             'calculation in proposal sampling, target sampling, and after '
             'accepted tokens are determined.')
 
-        parser.add_argument(
-            '--cpu-draft-worker',
-            action=StoreBoolean,
-            default=EngineArgs.cpu_draft_worker,
-            nargs="?",
-            const="True",
-            help='Use CPU to run draft model.')
+        parser.add_argument('--cpu-draft-worker',
+                            action=StoreBoolean,
+                            default=EngineArgs.cpu_draft_worker,
+                            nargs="?",
+                            const="True",
+                            help='Use CPU to run draft model.')
 
         parser.add_argument('--model-loader-extra-config',
                             type=nullable_str,
