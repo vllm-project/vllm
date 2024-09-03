@@ -124,17 +124,7 @@ class MPLLMEngine:
         elif self.worker_use_ray:
             engine_class = ray.remote(num_cpus=0)(self._engine_class).remote
         else:
-            # FIXME(woosuk): This is a bit hacky. Be careful when changing the
-            # order of the arguments.
-            cache_config = kwargs["cache_config"]
-            parallel_config = kwargs["parallel_config"]
-            if (parallel_config.tensor_parallel_size == 1
-                    and parallel_config.pipeline_parallel_size == 1):
-                num_gpus = cache_config.gpu_memory_utilization
-            else:
-                num_gpus = 1
-            engine_class = ray.remote(num_gpus=num_gpus)(
-                self._engine_class).remote
+            raise NotImplementedError("Not supported yet!")
         return engine_class(*args, **kwargs)
 
     def run_background_loop(self):
@@ -218,7 +208,7 @@ class MPLLMEngine:
         self.output_socket.send_multipart((pickle.dumps(request_outputs), ),
                                           copy=False)
 
-    def awk_check_health(self):
+    def ack_check_health(self):
         self.health_socket.send_multipart(
             (pickle.dumps(VLLM_RPC_SUCCESS_STR), ), copy=False)
 
@@ -255,8 +245,7 @@ class MPLLMEngine:
             self.engine.do_log_stats()
         elif request == RPCUtilityRequest.CHECK_HEALTH:
             self.engine.check_health()
-            # Special check_health channel for awk check health.
-            self.awk_check_health()
+            self.ack_check_health()
 
 
 def run_mp_engine(engine_args: AsyncEngineArgs, usage_context: UsageContext,
