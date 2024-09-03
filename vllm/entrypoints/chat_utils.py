@@ -287,10 +287,10 @@ def load_chat_template(
 # (similar to chat template)
 def _get_full_multimodal_text_prompt(placeholder_counts: Dict[str, int],
                                      text_prompt: str) -> str:
-    """Combine multimodal prompts for a multimodal language model"""
+    """Combine multimodal prompts for a multimodal language model."""
 
     # Look through the text prompt to check for missing placeholders
-    missing_placeholders = []
+    missing_placeholders: List[str] = []
     for placeholder in placeholder_counts:
 
         # For any existing placeholder in the text prompt, we leave it as is
