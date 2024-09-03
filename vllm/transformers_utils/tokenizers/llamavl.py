@@ -153,7 +153,6 @@ class LlamaVLTokenizer:
             t.insert(0, self.bos_id)
         if eos:
             t.append(self.eos_id)
-        print("t:", t)
         return t
 
     def decode(self, t: Sequence[int]) -> str:

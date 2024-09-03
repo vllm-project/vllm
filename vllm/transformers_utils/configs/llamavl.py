@@ -27,6 +27,8 @@ class LlamaVLConfig(PretrainedConfig):
     model_type: str = "llamavl"
     architectures: list[str] = ["LlamaVLForCausalLM"]
 
+    torch_dtype: str = "bfloat16"
+
     attribute_map = {
         "num_hidden_layers": "n_layers",
         "hidden_size": "dim",
