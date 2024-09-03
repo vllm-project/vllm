@@ -468,10 +468,10 @@ def gather_all_input_nodes_old(
 
 
 def gather_all_input_nodes(
-    mod: torch.fx.GraphModule,
-    do_renames: bool = True
-) -> Tuple[OrderedDict[torch.fx.Node, List[torch.fx.Node]], OrderedDict[
-        torch.fx.Node, OrderedDict[torch.fx.Node, None]]]:
+    mod: torch.fx.GraphModule
+) -> Tuple[OrderedDict[torch.fx.Node, List[torch.fx.Node]],
+           OrderedDict[torch.fx.Node, OrderedDict[torch.fx.Node, None]],
+           Dict[torch.fx.Node, Dict[torch.fx.Node, torch.fx.Node]]]:
     """
     Collect all def/use information for each node in 'nodes'.  This is different
     than node.all_input_nodes and node.users since it handles in-place
@@ -490,6 +490,7 @@ def gather_all_input_nodes(
                                 OrderedDict[torch.fx.Node,
                                             None]] = OrderedDict()
     renames: Dict[torch.fx.Node, torch.fx.Node] = dict()
+    all_renames: Dict[torch.fx.Node, Dict[torch.fx.Node, torch.fx.Node]] = dict()
 
     def process_arg(arg: torch.fx.node.Argument, fn):
         if isinstance(arg, tuple):
@@ -513,6 +514,9 @@ def gather_all_input_nodes(
         if arg in renames:
             renamed_arg = renames[arg]
             all_node_users[renamed_arg][n] = None
+            if n not in all_renames:
+                all_renames[n] = dict()
+            all_renames[n][renamed_arg] = arg
 
     #
     # process each node
@@ -522,10 +526,6 @@ def gather_all_input_nodes(
     for n in mod.graph.nodes:
         all_input_nodes[n] = list()
         all_node_users[n] = n.users
-
-        if not do_renames:
-            continue
-
         mutable_args = mutable_function_args(n)
 
         # Add this node as a user for all mutable args.
@@ -555,7 +555,7 @@ def gather_all_input_nodes(
         all_input_nodes[n] = list(sorted(all_input_nodes[n]))
         all_node_users[n] = OrderedDict(sorted(all_node_users[n].items(), key=lambda kv: kv[0].name))
 
-    return all_input_nodes, all_node_users
+    return all_input_nodes, all_node_users, all_renames
 
 
 class FlowGraph:
@@ -583,10 +583,14 @@ class FlowGraph:
             n for n in self.module.graph.nodes if n.op == 'placeholder'
         ]
 
-        self.all_renamed_input_nodes, self.all_renamed_node_users = (
-            gather_all_input_nodes(self.module.graph.nodes, True))
+#        self.all_renamed_input_nodes, self.all_renamed_node_users, self.renames = (
+#            gather_all_input_nodes(self.module.graph.nodes))
 
-        self.all_input_nodes, self.all_node_users = gather_all_input_nodes(
+        self.renames = {}
+        self.all_renamed_input_nodes, self.all_renamed_node_users = (
+            gather_all_input_nodes_old(self.module.graph.nodes, True))
+
+        self.all_input_nodes, self.all_node_users = gather_all_input_nodes_old(
             self.module.graph.nodes, False)
 
         self.preds: Dict[torch.fx.Node, OrderedDict[torch.fx.Node, None]] = {}
@@ -704,10 +708,11 @@ class SubGraph:
         self.inputs: List[torch.fx.Node] = []
         self.outputs: List[torch.fx.Node] = []
         self.nodes: List[torch.fx.Node] = []
-        self.all_input_nodes = fg.all_input_nodes
-        self.all_node_users = fg.all_node_users
+        self.all_input_nodes = fg.all_input_nodes # DELETE
+        self.all_node_users = fg.all_node_users   # DELETE
         self.all_renamed_input_nodes = fg.all_renamed_input_nodes
         self.all_renamed_node_users = fg.all_renamed_node_users
+        self.renames = fg.renames
         self.build(nodes)
 
     def in_subgraph(self, n: torch.fx.Node) -> bool:
@@ -718,20 +723,28 @@ class SubGraph:
         inputs = []
         outputs = []
 
+        # DELETE
         all_input_nodes, all_node_users = (self.all_input_nodes,
                                            self.all_node_users)
 
+        def rename(n, p):
+            if n in self.renames and p in self.renames[n]:
+                print(f"renames[{n}] = {self.renames[n]}, p = {p}")
+                return self.renames[n][p]
+            return p
+
         for n in self.nodes:
             new_inputs = [
-                inp for inp in self.all_renamed_input_nodes[n] if not self.in_subgraph(inp)
+                #rename(n, inp) for inp in self.fg.predecessors(n) if not self.in_subgraph(rename(n, inp))
+                inp for inp in all_input_nodes[n] if not self.in_subgraph(inp)
             ]
             for inp in new_inputs:
                 if inp not in inputs:
                     inputs.append(inp)
 
             if any([
-                    user
-                    for user in self.all_renamed_node_users[n] if not self.in_subgraph(user)
+                    #user for user in self.fg.successors(n) if not self.in_subgraph(n)
+                    user for user in all_node_users[n] if not self.in_subgraph(user)
             ]) and n not in outputs:
                 outputs.append(n)
 
@@ -836,10 +849,13 @@ class SubGraph:
         return candidates.pop()
 
     def _refresh_def_use(self):
-        self.all_renamed_input_nodes, self.all_renamed_node_users = (
-            gather_all_input_nodes(self.module.graph.nodes, True))
+#        self.all_renamed_input_nodes, self.all_renamed_node_users, self.renames = (
+#            gather_all_input_nodes(self.module.graph.nodes))
 
-        self.all_input_nodes, self.all_node_users = gather_all_input_nodes(
+        self.all_renamed_input_nodes, self.all_renamed_node_users = (
+            gather_all_input_nodes_old(self.module.graph.nodes, True))
+
+        self.all_input_nodes, self.all_node_users = gather_all_input_nodes_old(
             self.module.graph.nodes, False)
 
     def erase(self):
