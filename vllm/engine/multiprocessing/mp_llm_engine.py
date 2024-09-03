@@ -2,17 +2,19 @@ import ray
 import zmq
 import cloudpickle
 import pickle
-from typing import Any, Type, Union, Iterator
+from typing import Iterator, List, Type, Union
 from contextlib import contextmanager
 
-import vllm.envs as envs
 from vllm import AsyncEngineArgs, LLMEngine, AsyncLLMEngine
 from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.logger import init_logger
 from vllm.engine.multiprocessing import (VLLM_RPC_SUCCESS_STR,
-                             RPCUtilityRequest)
-from vllm.utils import print_warning_once
+                                         RPCGenerateRequest,
+                                         RPCAbortRequest,
+                                         RPCStartupRequest,
+                                         RPCUtilityRequest)
+from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
 
 CONFIG_TYPE = Union[ModelConfig, DecodingConfig, ParallelConfig,
@@ -64,27 +66,13 @@ class MPLLMEngine:
         self.log_requests = log_requests
         self.engine = self._init_engine(*args, **kwargs)
 
-        if self.engine_use_ray:
-            print_warning_once(
-                "DEPRECATED. `--engine-use-ray` is deprecated and will "
-                "be removed in a future update. "
-                "See https://github.com/vllm-project/vllm/issues/7045.")
-
-            if envs.VLLM_ALLOW_ENGINE_USE_RAY:
-                print_warning_once(
-                    "VLLM_ALLOW_ENGINE_USE_RAY is set, force engine use Ray")
-            else:
-                raise ValueError("`--engine-use-ray` is deprecated. "
-                                 "Set `VLLM_ALLOW_ENGINE_USE_RAY=1` to "
-                                 "force use it")
-
         self.ctx = zmq.Context()
 
-        # Recieve RPCGenerateRequest from the client.
+        # Recieve input from the client.
         self.input_socket = self.ctx.socket(zmq.constants.PULL)
         self.input_socket.bind(f"{ipc_path}_input_socket")
 
-        # Send streams of RequestOutput back to Client.
+        # Send output stream back to client.
         self.output_socket = self.ctx.socket(zmq.constants.PUSH)
         self.output_socket.bind(f"{ipc_path}_output_socket")
 
@@ -144,6 +132,7 @@ class MPLLMEngine:
                 self._engine_class).remote
         return engine_class(*args, **kwargs)
     
+
     def run_background_loop(self):
         """Entrypoint that kicks off the background processing loop."""
         
@@ -152,7 +141,8 @@ class MPLLMEngine:
 
         # Kick off core processing loop.
         self.run_engine_loop()
-    
+
+
     @contextmanager
     def make_data_socket(self) -> Iterator[zmq.Socket]:
         socket = self.ctx.socket(zmq.constants.ROUTER)
@@ -163,7 +153,7 @@ class MPLLMEngine:
             socket.close(linger=0)
 
     def run_startup_loop(self) -> None:
-        """Loop over startup RPCRequests from RPCClient."""
+        """Loop over startup RPCStatupRequest from RPCClient."""
         
         with self.make_data_socket() as socket:
 
@@ -172,29 +162,27 @@ class MPLLMEngine:
             while not client_is_ready:
                 try:
                     identity, message = socket.recv_multipart(copy=False)
-                    request: RPCUtilityRequest = cloudpickle.loads(message.buffer)
+                    request: RPCStartupRequest = pickle.loads(message.buffer)
 
                     # Handle the query from the Client.
-                    if request == RPCUtilityRequest.GET_MODEL_CONFIG:
+                    if request == RPCStartupRequest.GET_MODEL_CONFIG:
                         response = self.engine.get_model_config()
-                    elif request == RPCUtilityRequest.GET_DECODING_CONFIG:
+                    elif request == RPCStartupRequest.GET_DECODING_CONFIG:
                         response = self.engine.get_decoding_config()
-                    elif request == RPCUtilityRequest.GET_LORA_CONFIG:
+                    elif request == RPCStartupRequest.GET_LORA_CONFIG:
                         response = self.engine.get_lora_config()
-                    elif request == RPCUtilityRequest.GET_SCHEDULER_CONFIG:
+                    elif request == RPCStartupRequest.GET_SCHEDULER_CONFIG:
                         response = self.engine.get_scheduler_config()
-                    elif request == RPCUtilityRequest.GET_PARALLEL_CONFIG:
+                    elif request == RPCStartupRequest.GET_PARALLEL_CONFIG:
                         response = self.engine.get_parallel_config()
-                    elif request == RPCUtilityRequest.IS_SERVER_READY:
-                        response = VLLM_RPC_SUCCESS_STR
-                    elif request == RPCUtilityRequest.IS_TRACING_ENABLED:
+                    elif request == RPCStartupRequest.GET_TRACING_ENABLED:
                         response = self.engine.is_tracing_enabled()
-                    elif request == RPCUtilityRequest.CLIENT_IS_READY:
+                    elif request == RPCStartupRequest.IS_SERVER_READY:
                         response = VLLM_RPC_SUCCESS_STR
-                        # Once client ready, breakout of loop.
+                    elif request == RPCStartupRequest.CLIENT_IS_READY:
+                        response = VLLM_RPC_SUCCESS_STR
+                        # Breakout of loop once client is ready.
                         client_is_ready = True
-                    else:
-                        raise ValueError(f"Unknown RPCRequest: {request}")
                 
                     socket.send_multipart(
                         (identity, pickle.dumps(response)), copy=False)
@@ -203,43 +191,61 @@ class MPLLMEngine:
                     socket.send_multipart((identity, pickle.dumps(e)), copy=False)
 
     def run_engine_loop(self) -> None:
-        # TODO: handle PP
-
         while True:
             # Block until there is a new request.
             if not self.engine.has_unfinished_requests():
-                self.wait_for_new_requests()
+                self.wait_for_new_input()
 
-            # Add new work from input socket.
-            self.maybe_add_new_requests()
+            # Handle any new input from the input socket.
+            self.maybe_handle_new_input()
             
             # Engine step.
             request_outputs = self.engine.step()
             
             # Stream results to output socket.
-            self.stream_outputs(request_outputs)        
+            self.stream_outputs(request_outputs)
 
-
-    def wait_for_new_requests(self):
+    def wait_for_new_input(self):
         while self.input_socket.poll(timeout=10000) == 0:
             logger.debug("Waiting for new request.")
 
-    def stream_outputs(self, request_outputs):
+    def stream_outputs(self, request_outputs: List[RequestOutput]):
         self.output_socket.send_multipart(
             (pickle.dumps(request_outputs),), copy=False)
-
-    def maybe_add_new_requests(self):
+    
+    def maybe_handle_new_input(self):
+        """Handle new input with non-blocking IO"""
         while self.input_socket.poll(timeout=0) != 0:
             message = self.input_socket.recv(copy=False)
-            generate_rpc_request = pickle.loads(message.buffer)
-            self.engine.add_request(
-                request_id=generate_rpc_request.request_id,
-                inputs=generate_rpc_request.inputs,
-                params=generate_rpc_request.sampling_params,
-                lora_request=generate_rpc_request.lora_request,
-                trace_headers=generate_rpc_request.trace_headers,
-                prompt_adapter_request=generate_rpc_request.prompt_adapter_request,
-            )
+            request = cloudpickle.loads(message.buffer)
+
+            if isinstance(request, RPCGenerateRequest):
+                self._handle_generate_request(request)
+            elif isinstance(request, RPCAbortRequest):
+                self._handle_abort_request(request)
+            elif isinstance(request, RPCUtilityRequest):
+                self._handle_utility_request(request)
+            else:
+                raise ValueError(f"Unknown RPCRequest: {request}")
+    
+    def _handle_generate_request(self, request: RPCGenerateRequest):
+        self.engine.add_request(
+            request_id=request.request_id,
+            inputs=request.inputs,
+            params=request.sampling_params,
+            lora_request=request.lora_request,
+            trace_headers=request.trace_headers,
+            prompt_adapter_request=request.prompt_adapter_request,
+        )
+
+    def _handle_abort_request(self, request: RPCAbortRequest):
+        self.engine.abort_request([request.request_id])
+    
+    def _handle_utility_request(self, request: RPCUtilityRequest):
+        if request == RPCUtilityRequest.DO_LOG_STATS:
+            self.engine.do_log_stats()
+        elif request == RPCUtilityRequest.CHECK_HEALTH:
+            self.engine.check_health()
 
 
 def run_mp_engine(engine_args: AsyncEngineArgs, 
