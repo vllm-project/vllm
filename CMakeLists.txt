@@ -187,16 +187,13 @@ set(VLLM_PARENT_BUILD ON)
 FetchContent_MakeAvailable(flash-attention)
 message(STATUS "Flash-attention is available at ${flash-attention_SOURCE_DIR}")
 
-add_custom_target(
-  copy_flash_attention
-  COMMAND ${CMAKE_COMMAND} -E copy_directory
-  ${flash-attention_SOURCE_DIR}/vllm_flash_attn
-  ${CMAKE_CURRENT_SOURCE_DIR}/vllm/vllm_flash_attn
-  DEPENDS vllm_flash_attn_c
-  BYPRODUCTS ${CMAKE_CURRENT_SOURCE_DIR}/vllm/vllm_flash_attn
-  COMMENT "Copying flash-attention python files to vllm/vllm_flash_attn"
-)
-add_dependencies(default copy_flash_attention)
+# Copy over the flash-attention python files
+set(VLLM_FA_PY_OUTDIR ${CMAKE_CURRENT_SOURCE_DIR}/vllm/vllm_flash_attn)
+file(GLOB VLLM_FA_PY_FILES ${flash-attention_SOURCE_DIR}/vllm_flash_attn/*.py)
+foreach(VLLM_FA_PY_FILE ${VLLM_FA_PY_FILES})
+  get_filename_component(VLLM_FA_PY_FILENAME ${VLLM_FA_PY_FILE} NAME)
+  configure_file(${VLLM_FA_PY_FILE} ${VLLM_FA_PY_OUTDIR}/${VLLM_FA_PY_FILENAME} COPYONLY)
+endforeach()
 
 #
 # Define other extension targets
