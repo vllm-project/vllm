@@ -302,13 +302,15 @@ def run_vllm(
                 max_tokens=2048,
                 top_k=1
             ))
-
+    print(prompts)
+    outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
+    print("warmup done")
     start = time.perf_counter()
     outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
+    end = time.perf_counter()
     total_output_tokens = 0
     for output in outputs:
         total_output_tokens += len(output.outputs[0].token_ids)
-    end = time.perf_counter()
     return end - start, total_output_tokens
 
 

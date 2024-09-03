@@ -815,7 +815,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         is_driver_worker: bool = False,
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         multimodal_config: Optional[MultiModalConfig] = None,
-        return_hidden_states: bool = False,
+        return_hidden_states: bool = True,
         observability_config: Optional[ObservabilityConfig] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
@@ -1606,8 +1606,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                 hidden_states = hidden_or_intermediate_states
 
             output.hidden_states = hidden_states
-            # for i, o in enumerate(output):
-            #     o.hidden_state = hidden_states[i]
+            for i, o in enumerate(output):
+                o.hidden_state = hidden_states[i]
 
         return [output]
 

@@ -94,6 +94,9 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
             else:
                 seq.append_token_id(sample.output_token,
                                     sample.logprobs)
+            # store the hidden state if it have one
+            if outputs.hidden_state is not None:
+                seq.output_hiddens.append(outputs.hidden_state.clone())
             if sampling_params.detokenize and self.detokenizer:
                 new_char_count = self.detokenizer.decode_sequence_inplace(
                     seq, sampling_params)

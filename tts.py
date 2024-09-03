@@ -45,7 +45,7 @@ torch.random.manual_seed(999)
 # # save the model
 # torch.save(tts, '/home/zhn/ttslm/GPT_merged_emb_nonorm.pt')
 
-llm = LLM(model='/home/zhn/ttslm', gpu_memory_utilization=0.5, dtype=torch.float32, enforce_eager=True)
+llm = LLM(model='/home/zhn/ttslm_dev', gpu_memory_utilization=0.5, dtype=torch.float16, enforce_eager=True)
 prompts = [
     {
         "prompt": "[Stts][empty_spk][speed_5]Your text one[Ptts]",
@@ -57,14 +57,14 @@ prompts = [
     }
 ]
 
-for i in range(12):
+for i in range(0):
     prompts.append(prompts[0])
     prompts.append(prompts[1])
 
-sampling_params = SamplingParams(temperature=1, detokenize=False, stop_token_ids=[21803], max_tokens=2048, top_k=1)
+sampling_params = SamplingParams(temperature=1, detokenize=False, stop_token_ids=[625], max_tokens=2048, top_k=1)
 outputs = llm.generate(prompts, sampling_params)
 for output in outputs:
     print(output.prompt)
     token_ids = output.outputs[0].token_ids
     for token_id in token_ids:
-        print([x - 21178 for x in token_id])
+        print([x - 0 for x in token_id])

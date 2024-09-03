@@ -159,6 +159,10 @@ class SequenceData:
         self._update_cached_all_tokens()
 
     @property
+    def prompt_token_ids_array(self) -> array:
+        return self._prompt_token_ids
+
+    @property
     def output_token_ids(self) -> Tuple[int, ...]:
         return tuple(self._output_token_ids)
 
@@ -166,6 +170,10 @@ class SequenceData:
     def output_token_ids(self, new_output_token_ids) -> None:
         self._output_token_ids = list(new_output_token_ids)
         self._update_cached_all_tokens()
+
+    @property
+    def output_token_ids_array(self) -> array:
+        return self._output_token_ids
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self._output_token_ids.append(token_id)
@@ -899,6 +907,16 @@ class SequenceOutput:
                  and self.output_token == other.output_token)
         log_probs_equal = other.logprobs == self.logprobs
         return equal and log_probs_equal
+
+class MultiHeadSequenceOutput(SequenceOutput):
+    def __init__(
+        self,
+        parent_seq_id: int,
+        output_tokens: List[int],
+        logprobs: Dict[int, Logprob],
+    ) -> None:
+        super().__init__(parent_seq_id, output_tokens[0], logprobs)
+        self.output_tokens = output_tokens
 
 
 class SequenceGroupOutput(ABC):
