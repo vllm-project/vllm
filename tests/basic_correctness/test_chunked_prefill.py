@@ -6,11 +6,10 @@ prefill requests are chunked.
 
 Run `pytest tests/models/test_chunked_prefill.py`.
 """
-from contextlib import nullcontext
 
 import pytest
 
-from ..models.utils import check_outputs_equal
+from ..models.utils import check_logprobs_close, check_outputs_equal
 
 MODELS = [
     "facebook/opt-125m",
@@ -66,66 +65,62 @@ def test_models(
     )
 
 
-@pytest.mark.parametrize("max_tokens", [16])
-@pytest.mark.parametrize("enforce_eager", [False])
-@pytest.mark.parametrize("chunk_size", [30, 32])
-@pytest.mark.parametrize("use_v2_block_manager", [False, True])
+@pytest.mark.parametrize(
+    "kv_cache_dtype,model",
+    [("fp8_e4m3",
+      "nm-testing/TinyLlama-1.1B-compressed-tensors-kv-cache-scheme")])
+# Due to low-precision numerical divergence, we only test logprob of 4 tokens
+@pytest.mark.parametrize("max_tokens", [4])
+@pytest.mark.parametrize("chunked_prefill_token_size", [4, 16])
+@pytest.mark.parametrize("enforce_eager", [False, True])
 # NOTE: Increasing this in this suite will fail CI because we currently cannot
 # reset distributed env properly. Use a value > 1 just when you test.
 @pytest.mark.parametrize("tensor_parallel_size", [1])
-def test_with_prefix_caching(
+def test_models_with_fp8_kv_cache(
     vllm_runner,
+    example_prompts,
+    kv_cache_dtype: str,
+    model: str,
     max_tokens: int,
+    chunked_prefill_token_size: int,
     enforce_eager: bool,
-    chunk_size: int,
-    use_v2_block_manager: bool,
     tensor_parallel_size: int,
 ) -> None:
     """
-    Checks exact match decode with and without prefix caching
-    with chunked prefill enabled.
+    Check output logprobs match between no_chunked_prefill and chunked_prefill
+    with fp8 kv cache. General fp8 kv-cache tests are covered in test_fp8.py,
+    so here we only check chunked prefill.
     """
-    model = "meta-llama/Llama-2-7b-chat-hf"
-    # The common prompt has 142 tokens with Llama-2 tokenizer.
-    common_prompt = "You are a helpful AI assistant " * 20
-    unique_prompts = [
-        "Question",  # Warmup
-        "Question",  # Fully cached
-        "Another question",  # Partial cached
-    ]
-    full_prompts = [f"{common_prompt}\n{p}" for p in unique_prompts]
+    NUM_LOG_PROBS = 8
 
-    max_num_batched_tokens = max_num_seqs = chunk_size
-    outputs = {}  # type: ignore
-    check_result = True
-    for enable in (True, False):
-        with vllm_runner(
-                model,
-                dtype="half",
-                max_num_batched_tokens=max_num_batched_tokens,
-                enable_chunked_prefill=True,
-                enable_prefix_caching=enable,
-                tensor_parallel_size=tensor_parallel_size,
-                use_v2_block_manager=use_v2_block_manager,
-                enforce_eager=enforce_eager,
-                max_num_seqs=max_num_seqs,
-        ) as vllm_model:
-            # It should fail when prefix caching is enable and chunk
-            # size is not a multiple of block size (16).
-            should_fail = chunk_size % 16 != 0 and enable
-            check_result &= not should_fail
-            outputs[enable] = []
-            # Send the request one-by-one to ensure the cache is populated.
-            with pytest.raises(ValueError) if should_fail else nullcontext():
-                for prompt in full_prompts:
-                    outputs[enable] += vllm_model.generate_greedy([prompt],
-                                                                  max_tokens)
+    max_num_seqs = chunked_prefill_token_size
+    max_num_batched_tokens = chunked_prefill_token_size
 
-    # Check results only if we did not expect a failure.
-    if check_result:
-        check_outputs_equal(
-            outputs_0_lst=outputs[False],
-            outputs_1_lst=outputs[True],
-            name_0="w/o prefix caching",
-            name_1="with prefix caching",
-        )
+    with vllm_runner(
+            model,
+            tensor_parallel_size=tensor_parallel_size,
+            enforce_eager=enforce_eager,
+            max_num_seqs=max_num_seqs,
+            kv_cache_dtype=kv_cache_dtype,
+    ) as vllm_model:
+        no_chunked_prefill_outputs = vllm_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, NUM_LOG_PROBS)
+
+    with vllm_runner(
+            model,
+            max_num_batched_tokens=max_num_batched_tokens,
+            enable_chunked_prefill=True,
+            tensor_parallel_size=tensor_parallel_size,
+            enforce_eager=enforce_eager,
+            max_num_seqs=max_num_seqs,
+            kv_cache_dtype=kv_cache_dtype,
+    ) as vllm_model:
+        chunked_prefill_outputs = vllm_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, NUM_LOG_PROBS)
+
+    check_logprobs_close(
+        outputs_0_lst=no_chunked_prefill_outputs,
+        outputs_1_lst=chunked_prefill_outputs,
+        name_0="no_chunked_prefill",
+        name_1="chunked_prefill",
+    )
