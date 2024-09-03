@@ -23,7 +23,8 @@ logger = init_logger(__name__)
 WEIGHT_LOADER_V2_SUPPORTED = [
     "CompressedTensorsLinearMethod", "AWQMarlinLinearMethod",
     "AWQLinearMethod", "GPTQMarlinLinearMethod", "Fp8LinearMethod",
-    "MarlinLinearMethod"
+    "MarlinLinearMethod", "QQQLinearMethod", "GPTQMarlin24LinearMethod",
+    "TPUInt8LinearMethod"
 ]
 
 
@@ -35,9 +36,9 @@ def adjust_marlin_shard(param, shard_size, shard_offset):
     return shard_size * marlin_tile_size, shard_offset * marlin_tile_size
 
 
-def adjust_bitsandbytes_shard(param: Parameter,
-                              qkv_offsets: Dict[str, Tuple[int, int]],
-                              loaded_shard_id: str) -> Tuple[int, int]:
+def adjust_bitsandbytes_4bit_shard(param: Parameter,
+                                   qkv_offsets: Dict[str, Tuple[int, int]],
+                                   loaded_shard_id: str) -> Tuple[int, int]:
     """Adjust the quantization offsets and sizes for BitsAndBytes sharding."""
 
     total, _ = qkv_offsets["total"]
@@ -208,8 +209,7 @@ class ReplicatedLinear(LinearBase):
                                          self.input_size,
                                          self.output_size,
                                          self.params_dtype,
-                                         weight_loader=self.weight_loader,
-                                         prefix=prefix)
+                                         weight_loader=self.weight_loader)
 
         if bias:
             self.bias = Parameter(
@@ -307,8 +307,7 @@ class ColumnParallelLinear(LinearBase):
             params_dtype=self.params_dtype,
             weight_loader=(
                 self.weight_loader_v2 if self.quant_method.__class__.__name__
-                in WEIGHT_LOADER_V2_SUPPORTED else self.weight_loader),
-            prefix=prefix)
+                in WEIGHT_LOADER_V2_SUPPORTED else self.weight_loader))
         if bias:
             self.bias = Parameter(
                 torch.empty(self.output_size_per_partition,
@@ -506,8 +505,9 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 shard_size, shard_offset = adjust_marlin_shard(
                     param, shard_size, shard_offset)
 
-            use_bitsandbytes = getattr(param, "use_bitsandbytes", False)
-            if use_bitsandbytes:
+            use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit",
+                                            False)
+            if use_bitsandbytes_4bit:
                 shard_size = loaded_weight.shape[output_dim]
                 shard_offset = loaded_weight.shape[output_dim] * \
                     loaded_shard_id
@@ -859,8 +859,9 @@ class QKVParallelLinear(ColumnParallelLinear):
                 shard_size, shard_offset = adjust_marlin_shard(
                     param, shard_size, shard_offset)
 
-            use_bitsandbytes = getattr(param, "use_bitsandbytes", False)
-            if use_bitsandbytes:
+            use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit",
+                                            False)
+            if use_bitsandbytes_4bit:
                 orig_qkv_offsets = {
                     "q": (0, self.num_heads * self.head_size),
                     "k": (self.num_heads * self.head_size,
@@ -872,7 +873,7 @@ class QKVParallelLinear(ColumnParallelLinear):
                     ((self.num_heads + 2 * self.num_kv_heads) * self.head_size,
                      0)
                 }
-                shard_size, shard_offset = adjust_bitsandbytes_shard(
+                shard_size, shard_offset = adjust_bitsandbytes_4bit_shard(
                     param, orig_qkv_offsets, loaded_shard_id)
 
             if is_gguf_weight:
@@ -976,8 +977,7 @@ class RowParallelLinear(LinearBase):
             params_dtype=self.params_dtype,
             weight_loader=(
                 self.weight_loader_v2 if self.quant_method.__class__.__name__
-                in WEIGHT_LOADER_V2_SUPPORTED else self.weight_loader),
-            prefix=prefix)
+                in WEIGHT_LOADER_V2_SUPPORTED else self.weight_loader))
         if not reduce_results and (bias and not skip_bias_add):
             raise ValueError("When not reduce the results, adding bias to the "
                              "results can lead to incorrect results")

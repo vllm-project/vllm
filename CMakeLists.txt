@@ -203,6 +203,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   FetchContent_MakeAvailable(cutlass)
 
   list(APPEND VLLM_EXT_SRC
+    "csrc/mamba/mamba_ssm/selective_scan_fwd.cu"
+    "csrc/mamba/causal_conv1d/causal_conv1d.cu"
     "csrc/quantization/aqlm/gemm_kernels.cu"
     "csrc/quantization/awq/gemm_kernels.cu"
     "csrc/quantization/marlin/dense/marlin_cuda_kernel.cu"
@@ -295,6 +297,11 @@ define_gpu_extension_target(
 set(VLLM_MOE_EXT_SRC
   "csrc/moe/torch_bindings.cpp"
   "csrc/moe/topk_softmax_kernels.cu")
+
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  list(APPEND VLLM_MOE_EXT_SRC
+      "csrc/moe/marlin_moe_ops.cu")
+endif()
 
 define_gpu_extension_target(
   _moe_C

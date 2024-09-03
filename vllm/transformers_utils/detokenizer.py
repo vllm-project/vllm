@@ -230,7 +230,7 @@ def convert_prompt_ids_to_tokens(
     prefix_offset = max(
         read_offset - INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET, 0)
     # This is required to guard against out-of-vocab prompt token ids
-    _replace_none_with_empty(new_tokens)
+    _replace_none_with_empty(new_tokens)  # type: ignore[arg-type]
     return new_tokens, prefix_offset, read_offset
 
 
