@@ -280,7 +280,7 @@ def _parse_chat_message_content_parts(
                     placeholder, 0) + 1
         elif part_type == "audio_url":
 
-            audio_url = _AudioParser.validate_python(part)["audio_url"]
+            audio_url = _AudioParser(part)["audio_url"]
             audio_coro = async_get_and_parse_audio(audio_url["url"])
             placeholder = mm_tracker.add("audio", audio_coro)
             if placeholder:
