@@ -32,8 +32,8 @@ TIKTOKEN_MAX_ENCODE_CHARS = 400_000
 # of max consecutive non-whitespace or whitespace characters.
 MAX_NO_WHITESPACES_CHARS = 25_000
 
-
-class LlamaVLTokenizer(PreTrainedTokenizer):
+# TODO: this class is with some hack. need toreplace with official release
+class LlamaVLTokenizer:
     """
     Tokenizing and encoding/decoding text using the Tiktoken tokenizer.
     """
@@ -52,7 +52,7 @@ class LlamaVLTokenizer(PreTrainedTokenizer):
             model_path (str): The path to the Tiktoken model file.
         """
         assert os.path.isfile(model_path), model_path
-
+ 
         mergeable_ranks = load_tiktoken_bpe(model_path)
         num_base_tokens = len(mergeable_ranks)
         special_tokens = [
@@ -99,14 +99,14 @@ class LlamaVLTokenizer(PreTrainedTokenizer):
             self.special_tokens["<|eot_id|>"],
         ]
 
+        self.bos_token_id = self.bos_id
+        self.eos_token_id = self.eos_id
+        print("need to replace tokenizer with official release")
+        print("warning: recheck add bos and add eos of encode function")
+
     def encode(
         self,
         s: str,
-        *,
-        bos: bool,
-        eos: bool,
-        allowed_special: Optional[Union[Literal["all"], AbstractSet[str]]] = None,
-        disallowed_special: Union[Literal["all"], Collection[str]] = (),
     ) -> List[int]:
         """
         Encodes a string into a list of token IDs.
@@ -129,8 +129,8 @@ class LlamaVLTokenizer(PreTrainedTokenizer):
         - Setting `allowed_special` to "all" will treat all text corresponding
           to special tokens to be encoded as special tokens.
         """
-        if allowed_special is None:
-            allowed_special = set()
+        bos = True
+        eos = False
         assert type(s) is str
 
         substrs = (
@@ -145,14 +145,15 @@ class LlamaVLTokenizer(PreTrainedTokenizer):
             t.extend(
                 self.model.encode(
                     substr,
-                    allowed_special=allowed_special,
-                    disallowed_special=disallowed_special,
+                    allowed_special=set(),
+                    disallowed_special=set(),
                 )
             )
         if bos:
             t.insert(0, self.bos_id)
         if eos:
             t.append(self.eos_id)
+        print("t:", t)
         return t
 
     def decode(self, t: Sequence[int]) -> str:
