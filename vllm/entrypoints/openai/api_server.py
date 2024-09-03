@@ -134,7 +134,6 @@ async def build_async_engine_client_from_engine_args(
             yield async_engine_client
         finally:
             async_engine_client.shutdown_background_loop()
-            async_engine_client = None  #TODO
         return
 
     # Otherwise, use the multiprocessing AsyncLLMEngine.
@@ -206,8 +205,6 @@ async def build_async_engine_client_from_engine_args(
             # See https://prometheus.github.io/client_python/multiprocess/
             from prometheus_client import multiprocess
             multiprocess.mark_process_dead(engine_process.pid)
-
-            async_engine_client = None  #TODO
 
 
 router = APIRouter()
