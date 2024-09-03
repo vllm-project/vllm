@@ -45,7 +45,7 @@ def get_perf(df, method, model, metric):
 def get_perf_w_std(df, method, model, metric):
     
     if metric in ["TTFT", "Latency"]:
-        mean = get_perf(df, method, model, "Median " + metric + " (ms)")
+        mean = get_perf(df, method, model, "P99 " + metric + " (ms)")
         mean = mean.tolist()
         std = get_perf(df, method, model, "Std " + metric + " (ms)")
         if std.mean() == 0:
