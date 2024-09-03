@@ -1,4 +1,4 @@
-from typing import (Callable, Dict, Iterable, List, Literal, Optional, Protocol, Tuple,
+from typing import (Dict, Iterable, List, Literal, Optional, Protocol, Tuple,
                     Union, overload)
 
 import torch
@@ -279,18 +279,3 @@ def is_pp_missing_parameter(name: str, model: torch.nn.Module) -> bool:
         if name.startswith(missing_layer_name):
             return True
     return False
-
-
-def make_empty_intermediate_tensors_factory(keys: List[str],
-                                            hidden_size: int) -> Callable:
-
-    def make_empty_intermediate_tensors(batch_size: int, dtype: torch.dtype,
-                                        device: torch.device) -> NestedTensors:
-        return NestedTensors({
-            key: torch.zeros((batch_size, hidden_size),
-                             dtype=dtype,
-                             device=device)
-            for key in keys
-        })
-
-    return make_empty_intermediate_tensors

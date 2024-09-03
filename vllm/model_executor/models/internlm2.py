@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 from functools import partial
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -8,7 +8,7 @@ from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig
-from vllm.distributed import (get_tensor_model_parallel_rank,get_pp_group,
+from vllm.distributed import (get_tensor_model_parallel_rank, get_pp_group,
                               get_tensor_model_parallel_world_size,
                               split_tensor_along_last_dim,
                               tensor_model_parallel_all_gather)
@@ -27,9 +27,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-
-from .utils import (is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+from .utils import is_pp_missing_parameter, make_layers
 
 
 class InternLM2MLP(nn.Module):
@@ -237,6 +235,7 @@ class InternLM2Model(nn.Module):
         config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.config = config
@@ -246,14 +245,12 @@ class InternLM2Model(nn.Module):
             config.vocab_size,
             config.hidden_size,
         )
-        self.layers = nn.ModuleList([
-            InternLMDecoderLayer(config, cache_config, quant_config)
-            for _ in range(config.num_hidden_layers)
-        ])
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            config.num_hidden_layers,
+            lambda prefix: InternLMDecoderLayer(config, cache_config,
+                                                quant_config),
+            prefix=f"{prefix}.layers")
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.tok_embeddings(input_ids)
@@ -266,7 +263,7 @@ class InternLM2Model(nn.Module):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: IntermediateTensors = None,
         inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -277,7 +274,7 @@ class InternLM2Model(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        for i in range(len(self.layers)):
+        for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             hidden_states, residual = layer(
                 positions,
@@ -337,6 +334,20 @@ class InternLM2ForCausalLM(nn.Module):
         logits = self.logits_processor(self.output, hidden_states,
                                        sampling_metadata)
         return logits
+
+    def make_empty_intermediate_tensors(
+            self, batch_size: int, dtype: torch.dtype,
+            device: torch.device) -> IntermediateTensors:
+        return IntermediateTensors({
+            "hidden_states":
+                torch.zeros((batch_size, self.config.hidden_size),
+                            dtype=dtype,
+                            device=device),
+            "residual":
+                torch.zeros((batch_size, self.config.hidden_size),
+                            dtype=dtype,
+                            device=device),
+        })
 
     def sample(
         self,

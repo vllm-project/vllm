@@ -446,7 +446,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: object,
-    ) -> Union[SamplerOutput, IntermediateTensors]:
+    ) -> SamplerOutput:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is not None:
             inputs_embeds = self.language_model.model.get_input_embeddings(
