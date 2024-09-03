@@ -73,7 +73,7 @@ HF_MOUNT="/root/.cache/huggingface"
 
 commands=$@
 PARALLEL_JOB_COUNT=8
-#check if the command contains shard flag
+# check if the command contains shard flag, we will run all shards in parallel because the host have 8 GPUs. 
 if [[ $commands == *"--shard-id="* ]]; then
   for GPU in $(seq 0 $(($PARALLEL_JOB_COUNT-1))); do
     #replace shard arguments
