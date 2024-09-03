@@ -8,7 +8,6 @@ from functools import lru_cache
 from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
                     TypedDict, Union, cast)
 
-import librosa
 import numpy as np
 import torch
 import torch.utils.checkpoint
@@ -27,6 +26,7 @@ from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.utils import (filter_weights,
@@ -37,7 +37,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.base import MultiModalInputs
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    repeat_and_pad_placeholder_tokens)
-from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE, SamplerOutput, SequenceData
+from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE, SequenceData
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 
 _AUDIO_PLACEHOLDER_TOKEN = 128002
@@ -49,7 +49,7 @@ logger = init_logger(__name__)
 class UltravoxAudioFeatureInputs(TypedDict):
     type: Literal["audio_features"]
     data: Union[torch.Tensor, List[torch.Tensor]]
-    """Shape: `(batch_size, 80, M)"""
+    """Shape: `(batch_size * num_audios, 80, M)"""
 
 
 class UltravoxAudioEmbeddingInputs(TypedDict):
@@ -106,6 +106,11 @@ def input_mapper_for_ultravox(ctx: InputContext, data: object):
         feature_extractor = whisper_feature_extractor(ctx)
 
         if sr != feature_extractor.sampling_rate:
+            try:
+                import librosa
+            except ImportError:
+                raise ImportError(
+                    "Please install vllm[audio] for audio support.") from None
             audio = librosa.resample(audio,
                                      orig_sr=sr,
                                      target_sr=feature_extractor.sampling_rate)
@@ -333,6 +338,12 @@ class UltravoxModel(nn.Module, SupportsMultiModal):
                 raise ValueError("Incorrect type of audio features. "
                                  f"Got type: {type(audio_features)}")
 
+            # Remove the N dimension until multiple audios are supported.
+            if isinstance(audio_features, torch.Tensor):
+                audio_features = audio_features.squeeze(1)
+            else:
+                audio_features = [t.squeeze(0) for t in audio_features]
+
             return UltravoxAudioFeatureInputs(type="audio_features",
                                               data=audio_features)
 
@@ -340,6 +351,9 @@ class UltravoxModel(nn.Module, SupportsMultiModal):
             if not isinstance(audio_embeds, torch.Tensor):
                 raise ValueError("Incorrect type of audio embeds. "
                                  f"Got type: {type(audio_embeds)}")
+
+            # Remove the N dimension until multiple audios are supported.
+            audio_embeds = audio_embeds.squeeze(1)
 
             return UltravoxAudioEmbeddingInputs(type="audio_embeds",
                                                 data=audio_embeds)

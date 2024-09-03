@@ -4,6 +4,8 @@ from typing import Callable, List
 from vllm.core.scheduler import Scheduler
 from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
+from vllm.engine.output_processor.single_step import (
+    single_step_process_prompt_logprob)
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
@@ -46,9 +48,16 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
 
     def process_prompt_logprob(self, seq_group: SequenceGroup,
                                outputs: List[SequenceGroupOutput]) -> None:
-        # TODO(sang): Prompt logprob currently not implemented in multi step
-        # workers.
-        self._log_prompt_logprob_unsupported_warning_once()
+        """Process prompt logprobs associated with each step of a multi-step-
+        scheduled computation.
+
+        Args:
+          seq_group: the outputs are associated with this :class:`SequenceGroup`
+          outputs: the :class:`SequenceGroupOutput`s for all scheduler steps
+        """
+        for output in outputs:
+            # Concatenate single-step prompt logprob processing results.
+            single_step_process_prompt_logprob(self, seq_group, output)
 
     @staticmethod
     @functools.lru_cache()
@@ -57,20 +66,37 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             "Prompt logprob is not supported by multi step workers. "
             "(e.g., speculative decode uses multi step workers).")
 
-    def process_outputs(self, sequence_group: SequenceGroup,
-                        outputs: List[SequenceGroupOutput]) -> None:
+    def process_outputs(self,
+                        sequence_group: SequenceGroup,
+                        outputs: List[SequenceGroupOutput],
+                        is_async: bool = False) -> None:
         """Append new tokens in the outputs to sequences in the sequence group.
 
         This only supports sequence groups of size 1. It supports greater than
         one new token per sequence.
 
-        This applies logic like stop condition checking and detokenization,
-        including freeing finished sequences. It also handles cases where there
-        are tokens emitted after the EOS token.
-        """
-        seqs = sequence_group.get_seqs(status=SequenceStatus.RUNNING)
+        This applies logic like stop condition checking and detokenization.
+        It also handles cases where there are tokens emitted after 
+        the EOS token.
 
-        assert seqs, "expected running sequences"
+        is_async - Indicates whether this postprocessor runs in 
+            parallel with the GPU forward pass and is processing 
+            tokens from the previous step. If this is true, then
+            no tokens need to be appended since it is already done
+            externally (before the next schedule() call)
+        """
+        # TODO: Add support for async if necessary
+        assert not is_async
+
+        # Sequences can be in RUNNING or FINISHED_ABORTED state
+        # once scheduled, as a sequence is moved to FINSIHED_ABORTED
+        # if a client disconnects from the api server.
+        seqs = sequence_group.get_seqs(status=SequenceStatus.RUNNING)
+        if seqs is None:
+            seqs = sequence_group.get_seqs(
+                status=SequenceStatus.FINISHED_ABORTED)
+
+        assert seqs, "Expected RUNNING or FINISHED_ABORTED sequences"
         assert len(seqs) == 1, (
             "Beam search not supported in multi-step decoding.")
         seq = seqs[0]
@@ -138,7 +164,3 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             )
             if seq.is_finished():
                 break
-
-        if seq.is_finished():
-            for scheduler in self.scheduler:
-                scheduler.free_seq(seq)
