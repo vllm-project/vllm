@@ -38,9 +38,8 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               TokenizeRequest,
                                               TokenizeResponse)
 # yapf: enable
-from vllm.entrypoints.openai.rpc.client import AsyncEngineRPCClient
-# from vllm.entrypoints.openai.rpc.server import run_rpc_server
-from vllm.engine.mp_llm_engine import run_rpc_server
+from vllm.engine.multiprocessing.mp_client import MPEngineClient
+from vllm.engine.multiprocessing.mp_llm_engine import run_mp_engine
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
@@ -157,38 +156,37 @@ async def build_async_engine_client_from_engine_args(
                 "and vLLM will properly handle cleanup.")
 
         # Select random path for IPC.
-        rpc_path = get_open_zmq_ipc_path()
-        logger.info("Multiprocessing frontend to use %s for RPC Path.",
-                    rpc_path)
+        ipc_path = get_open_zmq_ipc_path()
+        logger.info("Multiprocessing frontend to use %s for IPC Path.",
+                    ipc_path)
 
         # Build RPCClient, which conforms to AsyncEngineClient Protocol.
         # NOTE: Actually, this is not true yet. We still need to support
         # embedding models via RPC (see TODO above)
-        rpc_client = AsyncEngineRPCClient(rpc_path)
-        async_engine_client = rpc_client  # type: ignore
+        mp_engine_client = MPEngineClient(ipc_path)
+        async_engine_client = mp_engine_client  # type: ignore
 
-        # Start RPCServer in separate process (holds the AsyncLLMEngine).
-        context = multiprocessing.get_context("spawn")
+        # Start RPCServer in separate process (holds the LLMEngine).
         # the current process might have CUDA context,
         # so we need to spawn a new process
-        # rpc_server_process = context.Process(
-        #     target=run_rpc_server,
-        #     args=(engine_args, UsageContext.OPENAI_API_SERVER, rpc_path))
-        
-        rpc_server_process = context.Process(target=run_rpc_server, args=(engine_args,))
-        rpc_server_process.start()
+        context = multiprocessing.get_context("spawn")
+
+        engine_process = context.Process(
+            target=run_mp_engine, 
+            args=(engine_args, UsageContext.OPENAI_API_SERVER, ipc_path))
+        engine_process.start()
         logger.info("Started engine process with PID %d",
-                    rpc_server_process.pid)
+                    engine_process.pid)
 
         try:
             while True:
                 try:
-                    await rpc_client.setup()
+                    await mp_engine_client.setup()
                     break
                 except TimeoutError:
-                    if not rpc_server_process.is_alive():
+                    if not engine_process.is_alive():
                         logger.error(
-                            "RPCServer process died before responding "
+                            "Engine process died before responding "
                             "to readiness probe")
                         yield None
                         return
@@ -196,20 +194,20 @@ async def build_async_engine_client_from_engine_args(
             yield async_engine_client
         finally:
             # Ensure rpc server process was terminated
-            rpc_server_process.terminate()
+            engine_process.terminate()
 
             # Close all open connections to the backend
-            rpc_client.close()
+            mp_engine_client.close()
 
             # Wait for server process to join
-            rpc_server_process.join()
+            engine_process.join()
 
             # Lazy import for prometheus multiprocessing.
             # We need to set PROMETHEUS_MULTIPROC_DIR environment variable
             # before prometheus_client is imported.
             # See https://prometheus.github.io/client_python/multiprocess/
             from prometheus_client import multiprocess
-            multiprocess.mark_process_dead(rpc_server_process.pid)
+            multiprocess.mark_process_dead(engine_process.pid)
 
             async_engine_client = None  #TODO
 
