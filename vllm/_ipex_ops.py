@@ -91,7 +91,7 @@ class ipex_ops:
                1).repeat_interleave(num_queries_per_tokens).flatten()
         # todo: ipex will refactor namespace
         import vllm._C.ops
-        vllm._C.ops.paged_attention_v1(out, query.contiguous(),
+        vllm._C.ops.paged_attention_v1(out, query,
                                      key_cache.view_as(value_cache),
                                      value_cache, num_kv_heads, scale,
                                      block_tables, context_lens, block_size,
@@ -135,7 +135,7 @@ class ipex_ops:
         # todo: ipex will refactor namespace
         import vllm._C.ops
         vllm._C.ops.paged_attention_v2(out, exp_sum, max_logits, tmp_out,
-                                     query.contiguous(),
+                                     query,
                                      key_cache.view_as(value_cache),
                                      value_cache, num_kv_heads, scale, block_tables,
                                      context_lens, block_size,

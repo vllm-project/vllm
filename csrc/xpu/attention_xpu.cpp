@@ -674,7 +674,7 @@ void paged_attention_v1_kernel(
         });                                                                 \
   });
 
-template <typename T, int BLOCK_SIZE, int NUM_THREADS = 128>
+template <typename T, int BLOCK_SIZE, int NUM_THREADS = 512>
 void paged_attention_xpu_v1_impl_launcher(
     torch::Tensor& out,
     torch::Tensor& query,
@@ -1084,7 +1084,7 @@ void paged_attention_v2_kernel(
 template <
     typename T,
     int BLOCK_SIZE,
-    int NUM_THREADS = 128,
+    int NUM_THREADS = 512,
     int PARTITION_SIZE = 512>
 void paged_attention_v2_launcher(
     torch::Tensor& out,
