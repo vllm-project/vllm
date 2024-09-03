@@ -167,11 +167,14 @@ def generate_prompt_buckets(bs_bucket_config, seq_bucket_config):
 
 def generate_decode_buckets(bs_bucket_config, blocks_bucket_config, max_blocks):
     buckets = []
-    for bs in warmup_range(bs_bucket_config):
-        for blocks in warmup_range(blocks_bucket_config):
+    bs_buckets = warmup_range(bs_bucket_config)
+    block_buckets = warmup_range(blocks_bucket_config)
+    last_bucket = min(block_buckets, key=lambda x: abs(x - max_blocks))
+    for bs in bs_buckets:
+        for blocks in block_buckets:
             if blocks < bs:
                 continue
-            if blocks > max_blocks:
+            if blocks > last_bucket:
                 break
             buckets.append((bs, blocks))
     return list(sorted(buckets, key=lambda b: (b[0] * b[1], b[1], b[0])))
@@ -683,7 +686,11 @@ class HabanaModelRunner:
                 seq_lens.append(seq_len)
 
                 block_table = seq_group_metadata.block_tables[seq_id]
-                block_number = block_table[position // self.block_size]
+                if len(block_table) == 0:
+                    block_number = 0
+                    block_table = {0: []}
+                else:
+                    block_number = block_table[position // self.block_size]
                 block_offset = position % self.block_size
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append([slot])
@@ -958,7 +965,7 @@ class HabanaModelRunner:
             batch_size_padded = find_bucket(real_batch_size, bucket_cfg)
             batch_size_padding = batch_size_padded - real_batch_size
             seq_group_metadata_list = seq_group_metadata_list.copy()
-            seq_group_metadata_list.extend(seq_group_metadata_list[0] for _ in range(batch_size_padding))
+            seq_group_metadata_list.extend(self.create_dummy_seq_group_metadata(0,0,is_prompt) for _ in range(batch_size_padding))
         with self.profiler.record_event('internal', 'prepare_input_tensors'):
             (input_tokens, input_positions, attn_metadata, sampling_metadata,
             lora_requests, lora_mapping, multi_modal_input
