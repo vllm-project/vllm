@@ -311,8 +311,6 @@ class InternLM2ForCausalLM(nn.Module):
             self.output.weight = self.model.tok_embeddings.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
-        self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors)
 
     def forward(
         self,
