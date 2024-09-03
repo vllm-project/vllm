@@ -174,7 +174,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         self._items.append(item)
 
         return self._placeholder_str(modality, current_count)
-    
+
     @abstractmethod
     def create_parser(self) -> "BaseMultiModalContentParser":
         raise NotImplementedError
@@ -388,7 +388,6 @@ def parse_chat_messages(
     tokenizer: AnyTokenizer,
 ) -> Tuple[List[ConversationMessage], Optional[MultiModalDataDict]]:
     conversation: List[ConversationMessage] = []
-
     mm_tracker = MultiModalItemTracker(model_config, tokenizer)
 
     for msg in messages:
@@ -405,7 +404,6 @@ def parse_chat_messages_futures(
     tokenizer: AnyTokenizer,
 ) -> Tuple[List[ConversationMessage], Awaitable[Optional[MultiModalDataDict]]]:
     conversation: List[ConversationMessage] = []
-
     mm_tracker = AsyncMultiModalItemTracker(model_config, tokenizer)
 
     for msg in messages:
