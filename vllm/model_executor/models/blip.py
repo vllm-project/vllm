@@ -20,11 +20,12 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    repeat_and_pad_placeholder_tokens)
 from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE, SequenceData
-from vllm.utils import is_cpu
 
-USE_XFORMERS_OPS = not is_cpu()
-if USE_XFORMERS_OPS:
+try:
     from xformers import ops as xops
+    USE_XFORMERS_OPS = True
+except ImportError:
+    USE_XFORMERS_OPS = False
 
 
 def get_blip_patch_grid_length(*, image_size: int, patch_size: int) -> int:

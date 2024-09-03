@@ -19,11 +19,12 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.utils import is_cpu
 
-USE_XFORMERS_OPS = not is_cpu()
-if USE_XFORMERS_OPS:
+try:
     from xformers import ops as xops
+    USE_XFORMERS_OPS = True
+except ImportError:
+    USE_XFORMERS_OPS = False
 
 NORM2FN = {
     'rms_norm': RMSNorm,
