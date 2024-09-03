@@ -44,7 +44,8 @@ from vllm.utils import is_list_of
 
 from .clip import dummy_image_for_clip, dummy_seq_data_for_clip
 from .interfaces import SupportsMultiModal
-from .utils import flatten_bn, merge_multimodal_embeddings, is_pp_missing_parameter
+from .utils import (flatten_bn, is_pp_missing_parameter,
+                    merge_multimodal_embeddings)
 
 logger = init_logger(__name__)
 

@@ -1,7 +1,7 @@
 from array import array
 from functools import cached_property
 from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional,
-                    Tuple, Union, TypedDict)
+                    Tuple, TypedDict, Union)
 
 import torch
 import torch.nn.functional as F

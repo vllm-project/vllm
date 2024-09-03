@@ -30,8 +30,8 @@ from .llava import LlavaMultiModalProjector
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_siglip_image_feature_size,
                      get_siglip_patch_grid_length, input_processor_for_siglip)
-from .utils import (is_pp_missing_parameter, filter_weights, flatten_bn, init_vllm_registered_model,
-                    merge_multimodal_embeddings)
+from .utils import (filter_weights, flatten_bn, init_vllm_registered_model,
+                    is_pp_missing_parameter, merge_multimodal_embeddings)
 
 logger = init_logger(__name__)
 
@@ -312,7 +312,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         self.language_model = init_vllm_registered_model(
             config.text_config, cache_config, quant_config)
-        self.make_empty_intermediate_tensors = self.language_model.model.make_empty_intermediate_tensors
+        self.make_empty_intermediate_tensors = (
+            self.language_model.model.make_empty_intermediate_tensors)
 
         self.image_newline = nn.Parameter(
             torch.empty(config.text_config.hidden_size))
@@ -609,11 +610,11 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
             inputs_embeds = None
 
         hidden_states = self.language_model.model(input_ids,
-                                            positions,
-                                            kv_caches,
-                                            attn_metadata,
-                                            intermediate_tensors,
-                                            inputs_embeds=inputs_embeds)
+                                                  positions,
+                                                  kv_caches,
+                                                  attn_metadata,
+                                                  intermediate_tensors,
+                                                  inputs_embeds=inputs_embeds)
 
         return hidden_states
 
