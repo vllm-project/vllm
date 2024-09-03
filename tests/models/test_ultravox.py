@@ -1,11 +1,9 @@
 from typing import List, Optional, Tuple, Type
 
-import librosa
 import numpy as np
 import pytest
 from transformers import AutoModel, AutoTokenizer, BatchEncoding
 
-from vllm.assets.audio import AudioAsset
 from vllm.sequence import SampleLogprobs
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 
@@ -18,9 +16,18 @@ MODEL_NAME = "fixie-ai/ultravox-v0_3"
 
 AudioTuple = Tuple[np.ndarray, int]
 
-AUDIO_ASSETS = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
 VLLM_PLACEHOLDER = "<|reserved_special_token_0|>"
 HF_PLACEHOLDER = "<|audio|>"
+
+@pytest.fixture(scope="session")
+def audio_assets():
+    from vllm.assets.audio import AudioAsset
+    return [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
+
+@pytest.fixture(scope="module", params=("mary_had_lamb", "winning_call"))
+def audio(request):
+    from vllm.assets.audio import AudioAsset
+    return AudioAsset(request.param)
 
 
 def _get_prompt(audio_count, question, placeholder):
@@ -94,6 +101,7 @@ def run_test(
                    dtype=dtype,
                    postprocess_inputs=process,
                    auto_cls=AutoModel) as hf_model:
+        import librosa
 
         hf_outputs_per_audio = [
             hf_model.generate_greedy_logprobs_limit(
@@ -151,7 +159,6 @@ def run_multi_audio_test(
 
 
 @pytest.mark.parametrize("dtype", ["half"])
-@pytest.mark.parametrize("audio", AUDIO_ASSETS)
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models(hf_runner, vllm_runner, audio, dtype: str, max_tokens: int,
@@ -172,19 +179,18 @@ def test_models(hf_runner, vllm_runner, audio, dtype: str, max_tokens: int,
 
 
 @pytest.mark.parametrize("dtype", ["half"])
-@pytest.mark.parametrize("audios", [AUDIO_ASSETS])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
-def test_models_with_multiple_audios(vllm_runner, audios, dtype: str,
+def test_models_with_multiple_audios(vllm_runner, audio_assets, dtype: str,
                                      max_tokens: int,
                                      num_logprobs: int) -> None:
 
-    vllm_prompt = _get_prompt(len(audios),
+    vllm_prompt = _get_prompt(len(audio_assets),
                               "Describe each of the audios above.",
                               VLLM_PLACEHOLDER)
     run_multi_audio_test(
         vllm_runner,
-        [(vllm_prompt, [audio.audio_and_sample_rate for audio in audios])],
+        [(vllm_prompt, [audio.audio_and_sample_rate for audio in audio_assets])],
         MODEL_NAME,
         dtype=dtype,
         max_tokens=max_tokens,

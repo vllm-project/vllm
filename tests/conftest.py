@@ -209,8 +209,14 @@ class HfRunner:
 
     def wrap_device(self, input: _T) -> _T:
         if not is_cpu():
+            # Check if the input is already on the GPU
+            if hasattr(input, 'device') and input.device.type == "cuda":
+                return input  # Already on GPU, no need to move
             return input.to("cuda")
         else:
+            # Check if the input is already on the CPU
+            if hasattr(input, 'device') and input.device.type == "cpu":
+                return input  # Already on CPU, no need to move
             return input.to("cpu")
 
     def __init__(
