@@ -40,4 +40,4 @@ class RPCStartupRequest(Enum):
 
 
 RPC_REQUEST_TYPE = Union[RPCGenerateRequest, RPCAbortRequest,
-                         RPCUtilityRequest]
+                         RPCUtilityRequest, RPCStartupRequest]

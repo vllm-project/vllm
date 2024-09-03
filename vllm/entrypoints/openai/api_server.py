@@ -21,6 +21,9 @@ import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
+# yapf: enable
+from vllm.engine.multiprocessing.mp_client import MPEngineClient
+from vllm.engine.multiprocessing.mp_llm_engine import run_mp_engine
 from vllm.engine.protocol import AsyncEngineClient
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
@@ -37,9 +40,6 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               EmbeddingResponse, ErrorResponse,
                                               TokenizeRequest,
                                               TokenizeResponse)
-# yapf: enable
-from vllm.engine.multiprocessing.mp_client import MPEngineClient
-from vllm.engine.multiprocessing.mp_llm_engine import run_mp_engine
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
@@ -84,7 +84,7 @@ async def lifespan(app: FastAPI):
         while True:
             await asyncio.sleep(1.)
             await async_engine_client.do_log_stats()
-    
+
     if not engine_args.disable_log_stats:
         task = asyncio.create_task(_force_log())
         _running_tasks.add(task)
@@ -170,12 +170,12 @@ async def build_async_engine_client_from_engine_args(
         # so we need to spawn a new process
         context = multiprocessing.get_context("spawn")
 
-        engine_process = context.Process(
-            target=run_mp_engine, 
-            args=(engine_args, UsageContext.OPENAI_API_SERVER, ipc_path))
+        engine_process = context.Process(target=run_mp_engine,
+                                         args=(engine_args,
+                                               UsageContext.OPENAI_API_SERVER,
+                                               ipc_path))
         engine_process.start()
-        logger.info("Started engine process with PID %d",
-                    engine_process.pid)
+        logger.info("Started engine process with PID %d", engine_process.pid)
 
         try:
             while True:
@@ -184,9 +184,8 @@ async def build_async_engine_client_from_engine_args(
                     break
                 except TimeoutError:
                     if not engine_process.is_alive():
-                        logger.error(
-                            "Engine process died before responding "
-                            "to readiness probe")
+                        logger.error("Engine process died before responding "
+                                     "to readiness probe")
                         yield None
                         return
 
