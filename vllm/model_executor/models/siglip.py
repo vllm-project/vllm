@@ -456,13 +456,14 @@ class SiglipVisionTransformer(nn.Module):
 
         encoder_outputs = self.encoder(inputs_embeds=hidden_states)
 
-        last_hidden_state = self.post_layernorm(encoder_outputs)
+        # When it is used as a visual encoder, post_layernorm is not required
+        # last_hidden_state = self.post_layernorm(encoder_outputs)
 
         # TODO: add this back when pooled_output is used in inference
         # if self.use_head:
         # pooled_output = self.head(last_hidden_state)
 
-        return last_hidden_state
+        return encoder_outputs
 
 
 class SiglipVisionModel(nn.Module):
