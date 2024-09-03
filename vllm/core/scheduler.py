@@ -1079,6 +1079,7 @@ class Scheduler:
                                 self.scheduler_config.num_scheduler_steps)
 
         # Update token chunk size
+        # TODO (Varun) : fixAvg. Gneration throughput reporiting.
         max_tcs = self.scheduler_config.multi_step_chunked_prefill_max_token_chunk
         for sg in scheduler_outputs.scheduled_seq_groups:
             sg.token_chunk_size = min(sg.token_chunk_size, max_tcs)
