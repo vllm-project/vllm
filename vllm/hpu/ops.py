@@ -128,7 +128,6 @@ def static_fused_moe(hidden_states, w1, w2, score, topk):
         w_output = silu_and_mul(w_output)
         w_output = torch.matmul(w_output, w2[expert_idx].transpose(0, 1))
         final_hidden_states += w_output * padded_weights[expert_idx]
-        htorch.core.mark_step()
 
     return final_hidden_states.view(-1, D)
 
