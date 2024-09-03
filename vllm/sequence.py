@@ -1225,7 +1225,6 @@ class ExecuteModelRequest(
     last_sampled_token_ids: Optional[torch.Tensor] = None
     # Async callback
     async_callback: Optional[Callable] = None
-    use_async_and_multi_step: bool = False
 
     @property
     def is_first_multi_step(self) -> bool:
@@ -1272,5 +1271,4 @@ class ExecuteModelRequest(
             finished_requests_ids=self.finished_requests_ids,
             last_sampled_token_ids=self.last_sampled_token_ids.clone()
             if self.last_sampled_token_ids is not None else None,
-            async_callback=self.async_callback,
-            use_async_and_multi_step=self.use_async_and_multi_step)
+            async_callback=self.async_callback)
