@@ -55,7 +55,7 @@ class MPEngineClient:
         self.output_socket: Socket = self.context.socket(zmq.constants.PULL)
         self.output_socket.connect(f"{ipc_path}_output_socket")
 
-        # IPC path for awk of check_health requests.
+        # IPC path for ack of check_health requests.
         self.health_socket: Socket = self.context.socket(zmq.constants.PULL)
         self.health_socket.connect(f"{ipc_path}_health_socket")
 
@@ -168,7 +168,7 @@ class MPEngineClient:
         # I don't think so, b/c we are using PUSH/PULL w/out identities so no
         # way to preserve order.
 
-    async def _awk_one_way_rpc_request(
+    async def _ack_one_way_rpc_request(
         self,
         timeout: int,
         expected_str: str,
@@ -206,8 +206,8 @@ class MPEngineClient:
         request = RPCStartupRequest.IS_SERVER_READY
         await socket.send_multipart((cloudpickle.dumps(request), ))
 
-        # Raises TimeoutError if not awk, causing a retry.
-        await self._awk_one_way_rpc_request(
+        # Raises TimeoutError if not ack, causing a retry.
+        await self._ack_one_way_rpc_request(
             expected_str=VLLM_RPC_SUCCESS_STR,
             timeout=VLLM_RPC_GET_DATA_TIMEOUT_MS,
             error_message="Unable to start RPC Server",
@@ -337,11 +337,6 @@ class MPEngineClient:
                     trace_headers=trace_headers,
                     prompt_adapter_request=prompt_adapter_request)), ))
 
-            # ack: Frame = await socket.recv(copy=False)
-            # if len(ack.buffer) != 0:
-            #     exception = pickle.loads(ack.buffer)
-            #     raise exception
-
             while not finished:
                 request_output = await queue.get()
                 if isinstance(request_output, BaseException):
@@ -372,12 +367,12 @@ class MPEngineClient:
         await self._send_one_way_rpc_request(
             request=RPCUtilityRequest.CHECK_HEALTH, socket=self.input_socket)
 
-        # Await awknoledgement from MPLLMEngine.
+        # Await acknowledgement from MPLLMEngine.
         # Note: these requests are not necessarily serial.
         # I.e. if two clients A, B send CHECK_HEALTH, the
         # response to A could actually be the call send by B.
         # TODO: is this bad?
-        await self._awk_one_way_rpc_request(
+        await self._ack_one_way_rpc_request(
             timeout=VLLM_RPC_GET_DATA_TIMEOUT_MS,
             expected_str=VLLM_RPC_SUCCESS_STR,
             error_message="Check health timeout.",
