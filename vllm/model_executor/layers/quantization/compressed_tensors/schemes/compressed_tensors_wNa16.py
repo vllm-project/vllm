@@ -3,7 +3,6 @@ from typing import Callable, List, Optional
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
@@ -22,8 +21,6 @@ WNA16_SUPPORTED_TYPES_MAP = {
     8: scalar_types.uint8b128,
 }
 WNA16_SUPPORTED_BITS = list(WNA16_SUPPORTED_TYPES_MAP.keys())
-
-logger = init_logger(__name__)
 
 
 class CompressedTensorsWNA16(CompressedTensorsScheme):
