@@ -1,6 +1,6 @@
 """Fused MoE utilities for GPTQ."""
 import functools
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Dict, Optional
 
 import torch
 
@@ -16,11 +16,10 @@ def single_marlin_moe(
     scales: torch.Tensor,
     gating_output: torch.Tensor,
     g_idx: torch.Tensor,
-    rand_perm: torch.Tensor,
+    perm: torch.Tensor,
     topk: int,
     renormalize: bool,
     override_config: Optional[Dict[str, Any]] = None,
-    use_fp8: bool = False,
     num_bits: int = 8,
 ) -> torch.Tensor:
     """
@@ -28,18 +27,18 @@ def single_marlin_moe(
     and top-k gating mechanism. It is meant for testing and debugging.
 
     Parameters:
-    - hidden_states (torch.Tensor): The input tensor to the MoE layer.
-    - w (torch.Tensor): The first set of expert weights.
+    - hidden_states (torch.Tensor): The input tensor to the Marlin Mul.
+    - w (torch.Tensor): The set of expert weights.
+    - scales (torch.Tensor): The quantization scales.
     - gating_output (torch.Tensor): The output of the gating operation
         (before softmax).
+    - g_idx (torch.Tensor): The act_order indices.
+    - perm (torch.Tensor): The act_order input permutation.
     - topk (int): The number of top-k experts to select.
     - renormalize (bool): If True, renormalize the top-k weights to sum to 1.
-    - inplace (bool): If True, perform the operation in-place.
-        Defaults to False.
     - override_config (Optional[Dict[str, Any]]): Optional override
         for the kernel configuration.
-    - use_fp8 (bool): If True, use fp8 arithmetic to compute the inner
-        product for w. Defaults to False.
+    - num_bits (bool): The number of bits in expert weights quantization.
 
     Returns:
     - torch.Tensor: The output tensor after applying the MoE layer.
@@ -55,8 +54,6 @@ def single_marlin_moe(
         torch.float32, torch.float16, torch.bfloat16
     ]
     assert num_bits in [4, 8]
-    # TODO support this
-    assert not use_fp8
 
     M, K = hidden_states.shape
     E = w.shape[0]
@@ -70,7 +67,7 @@ def single_marlin_moe(
                                         w.shape,
                                         w.shape,
                                         topk_ids.shape[1],
-                                        "float8" if use_fp8 else None,
+                                        None,
                                         override_config=override_config,
                                         is_marlin=True)
     config = get_config_func(M)
@@ -90,7 +87,7 @@ def single_marlin_moe(
 
     intermediate_cache = torch.ops._moe_C.marlin_gemm_moe(
         hidden_states, w, sorted_token_ids, topk_weights, topk_ids, scales,
-        g_idx, rand_perm, workspace, scalar_type, M, N, K, True, E, topk,
+        g_idx, perm, workspace, scalar_type, M, N, K, True, E, topk,
         block_size_m, True, False)
 
     return torch.sum(intermediate_cache.view(*intermediate_cache.shape), dim=1)
@@ -103,14 +100,11 @@ def fused_marlin_moe(
     gating_output: torch.Tensor,
     g_idx1: torch.Tensor,
     g_idx2: torch.Tensor,
-    rand_perm1: torch.Tensor,
-    rand_perm2: torch.Tensor,
+    perm1: torch.Tensor,
+    perm2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    custom_routing_function: Optional[Callable] = None,
-    renormalize: bool = True,
     override_config: Optional[Dict[str, Any]] = None,
-    use_fp8: bool = False,
     w1_scale: Optional[torch.Tensor] = None,
     w2_scale: Optional[torch.Tensor] = None,
     num_bits: int = 8,
@@ -125,18 +119,20 @@ def fused_marlin_moe(
     - w2 (torch.Tensor): The second set of expert weights.
     - gating_output (torch.Tensor): The output of the gating operation
         (before softmax).
-    - topk (int): The number of top-k experts to select.
+    - g_idx1 (torch.Tensor): The fist set of act_order indices.
+    - g_idx2 (torch.Tensor): The second set of act_order indices.
+    - perm1 (torch.Tensor): The first act_order input permutation.
+    - perm2 (torch.Tensor): The second act_order input permutation.
+    - topk_weights (torch.Tensor): Top-k weights.
+    - topk_ids (torch.Tensor): Indices of topk-k elements.
     - renormalize (bool): If True, renormalize the top-k weights to sum to 1.
-    - inplace (bool): If True, perform the operation in-place.
-        Defaults to False.
     - override_config (Optional[Dict[str, Any]]): Optional override
         for the kernel configuration.
-    - use_fp8 (bool): If True, use fp8 arithmetic to compute the inner
-        products for w1 and w2. Defaults to False.
     - w1_scale (Optional[torch.Tensor]): Optional scale to be used for
         w1.
     - w2_scale (Optional[torch.Tensor]): Optional scale to be used for
         w2.
+    - num_bits (bool): The number of bits in expert weights quantization.
 
     Returns:
     - torch.Tensor: The output tensor after applying the MoE layer.
@@ -156,8 +152,6 @@ def fused_marlin_moe(
         torch.float32, torch.float16, torch.bfloat16
     ]
     assert num_bits in [4, 8]
-    # TODO support this
-    assert not use_fp8
 
     M, K = hidden_states.shape
     E = w1.shape[0]
@@ -169,7 +163,7 @@ def fused_marlin_moe(
         w1.shape,
         w2.shape,
         topk_ids.shape[1],
-        "float8" if use_fp8 else None,
+        None,
         override_config=override_config,
         is_marlin=True,
     )
@@ -202,7 +196,7 @@ def fused_marlin_moe(
         topk_ids,
         w1_scale,
         g_idx1,
-        rand_perm1,
+        perm1,
         workspace,
         scalar_type,
         M,
@@ -226,7 +220,7 @@ def fused_marlin_moe(
         topk_ids,
         w2_scale,
         g_idx2,
-        rand_perm2,
+        perm2,
         workspace,
         scalar_type,
         M,
