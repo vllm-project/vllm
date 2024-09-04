@@ -384,17 +384,17 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         assert len(
             input_slot_mapping) == num_prefill_tokens * (num_multi_step - 1)
 
-        for idx, x in enumerate(input_slot_mapping):
-            if x == -1:
-                part_idx = idx % num_prefill_tokens
-                assert not advance_prefill_token[part_idx]
+        #for idx, x in enumerate(input_slot_mapping):
+        #    if x == -1:
+        #        part_idx = idx % num_prefill_tokens
+        #        assert not advance_prefill_token[part_idx]
 
-        slots_min = min(input_slot_mapping)
-        slots_max = max(input_slot_mapping)
-        print (f"input slot mapping min {slots_min} max {slots_max}")
-        if slots_max / 16 >= 27911:
-            print ("Failure !!")
-        assert slots_max / 16 < 27911
+        #slots_min = min(input_slot_mapping)
+        #slots_max = max(input_slot_mapping)
+        #print (f"input slot mapping min {slots_min} max {slots_max}")
+        #if slots_max / 16 >= 27911:
+        #    print ("Failure !!")
+        #assert slots_max / 16 < 27911
 
 
         # Populate position update tensor
@@ -530,7 +530,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         #   appended sampler output from last iteration
         #   - also maybe pythonize if CPU is ahead of GPU
 
-        print (f"model execute {model_input.current_step}")
+        #print (f"model execute {model_input.current_step}")
 
         current_stream = torch.cuda.current_stream()
         if not model_input.is_first_multi_step:
@@ -647,8 +647,8 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         if num_prefill_tokens > 0:
             assert model_input.prefill_steps_tokens is not None and \
                         model_input.prefill_steps_slot_mapping is not None
-            tmp = model_input.prefill_steps_slot_mapping[prefill_step_offset:prefill_step_offset + num_prefill_tokens]
-            print (f"advancing .... slot idx max  {torch.max(tmp)}")
+            #tmp = model_input.prefill_steps_slot_mapping[prefill_step_offset:prefill_step_offset + num_prefill_tokens]
+            #print (f"advancing .... slot idx max  {torch.max(tmp)}")
 
 
         # Update GPU tensors
@@ -684,25 +684,23 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
             prefill_token_chunk_sizes_tensor)
 
 
-        torch.cuda.synchronize()
-        has_prefills = num_prefills > 0
-        has_decodes = num_seqs > num_prefills
+        #torch.cuda.synchronize()
+        #has_prefills = num_prefills > 0
+        #has_decodes = num_seqs > num_prefills
+        #if has_prefills:
+        #    prefill_max_slot_mapping = torch.max(model_input.frozen_model_input.attn_metadata.slot_mapping.flatten()[:num_prefill_tokens])
+        #    assert prefill_max_slot_mapping / 16 < 27911
+        #if has_decodes:
+        #    decode_max_slot_mapping = torch.max(model_input.frozen_model_input.attn_metadata.slot_mapping.flatten()[num_prefill_tokens:])
+        #    if decode_max_slot_mapping / 16 >= 27911:
+        #        torch.set_printoptions(profile="full")
+        #        print (f"num prefills {num_prefills} ")
+        #        print (f'all decode slot mapping {model_input.frozen_model_input.attn_metadata.slot_mapping.flatten()[num_prefill_tokens:]}')
+        #        print (f"decode input pos {frozen_model_input.input_positions[num_prefill_tokens:]}")
+        #        print (f"block tables {attn_metadata.block_tables} ")
+        #        torch.set_printoptions(profile="default") 
 
-
-        if has_prefills:
-            prefill_max_slot_mapping = torch.max(model_input.frozen_model_input.attn_metadata.slot_mapping.flatten()[:num_prefill_tokens])
-            assert prefill_max_slot_mapping / 16 < 27911
-        if has_decodes:
-            decode_max_slot_mapping = torch.max(model_input.frozen_model_input.attn_metadata.slot_mapping.flatten()[num_prefill_tokens:])
-            if decode_max_slot_mapping / 16 >= 27911:
-                torch.set_printoptions(profile="full")
-                print (f"num prefills {num_prefills} ")
-                print (f'all decode slot mapping {model_input.frozen_model_input.attn_metadata.slot_mapping.flatten()[num_prefill_tokens:]}')
-                print (f"decode input pos {frozen_model_input.input_positions[num_prefill_tokens:]}")
-                print (f"block tables {attn_metadata.block_tables} ")
-                torch.set_printoptions(profile="default") 
-
-            assert decode_max_slot_mapping / 16 < 27911
+        #    assert decode_max_slot_mapping / 16 < 27911
 
         if frozen_model_input.seq_lens is not None:
             for i in range(num_queries):

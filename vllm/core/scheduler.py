@@ -1082,9 +1082,9 @@ class Scheduler:
             for psg in prefill_seq_groups
         ]
         #prefill_num_uncomputed_chunk = sorted(prefill_num_uncomputed_chunk)
-        print (f"prefill max steps {max_prefill_steps}")
-        for uncomputed, chunk in prefill_num_uncomputed_chunk:
-            print (f"   - {uncomputed} - {chunk}")
+        #print (f"prefill max steps {max_prefill_steps}")
+        #for uncomputed, chunk in prefill_num_uncomputed_chunk:
+        #    print (f"   - {uncomputed} - {chunk}")
 
         # update all the sequence to run only until
         # max_scheduled_prefill_chunk_steps. We curtail the decodes

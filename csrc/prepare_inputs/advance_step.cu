@@ -231,7 +231,7 @@ void advance_step(
   }
 
   int const num_decode_tokens = num_seqs - num_prefills;
-  int const num_decodes = num_seqs - num_prefills;
+  int const num_decodes = num_queries - num_prefills;
   int const expected_num_input_tokens = num_prefill_tokens + num_decode_tokens;
 
   // Verify all tensors
