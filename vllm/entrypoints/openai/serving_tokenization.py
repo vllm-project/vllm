@@ -43,7 +43,11 @@ class OpenAIServingTokenization(OpenAIServing):
                          request_logger=request_logger)
 
         # If this is None we use the tokenizer's default chat template
-        self.chat_template = load_chat_template(chat_template)
+        # the list of commonly-used chat template names for HF named templates
+        hf_chat_templates: List[str] = ['default', 'tool_use']
+        self.chat_template = chat_template \
+            if chat_template in hf_chat_templates \
+            else load_chat_template(chat_template)
 
     async def create_tokenize(
         self,
