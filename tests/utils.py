@@ -180,7 +180,8 @@ def compare_two_settings(model: str,
 
     trust_remote_code = "--trust-remote-code"
     if trust_remote_code in arg1 or trust_remote_code in arg2:
-        tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(model,
+                                                  trust_remote_code=True)
     else:
         tokenizer = AutoTokenizer.from_pretrained(model)
 

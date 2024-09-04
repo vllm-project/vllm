@@ -19,10 +19,8 @@ VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
 
 
 @pytest.mark.parametrize(
-    (
-        "TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, TRUST_REMOTE_CODE, "
-        "MODEL_NAME, DIST_BACKEND"
-    ),
+    ("TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, TRUST_REMOTE_CODE, "
+     "MODEL_NAME, DIST_BACKEND"),
     [
         (2, 2, 0, 1, 0, "meta-llama/Meta-Llama-3-8B", "mp"),
         (2, 2, 1, 0, 0, "meta-llama/Meta-Llama-3-8B", "mp"),
