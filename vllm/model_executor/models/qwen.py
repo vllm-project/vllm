@@ -16,7 +16,6 @@ from typing import (Any, Callable, Dict, Iterable, List, Literal, Mapping,
 import torch
 from PIL import Image
 from torch import nn
-from torch.nn.init import trunc_normal_
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 from transformers import PretrainedConfig
@@ -34,8 +33,7 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.resampler import (get_abs_pos,
-                                                  Resampler2)
+from vllm.model_executor.layers.resampler import (get_abs_pos, Resampler2)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -97,7 +95,14 @@ class VisualAttention(nn.Module):
     and returns output of the same size.
     """
 
-    def __init__(self, embed_dim, num_heads, bias=True, kdim=None, vdim=None):
+    def __init__(
+        self,
+        embed_dim: int,
+        num_heads: int,
+        bias: bool = True,
+        kdim: Optional[int] = None,
+        vdim: Optional[int] = None,
+    ):
         super().__init__()
         self.embed_dim = embed_dim
         self.kdim = kdim if kdim is not None else embed_dim
@@ -120,7 +125,13 @@ class VisualAttention(nn.Module):
         self.out_proj = nn.Linear(embed_dim, embed_dim)
         self.norm_factor = math.sqrt(self.hidden_size_per_attention_head)
 
-    def forward(self, query, key, value, attn_mask=None):
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         # query/key/value: [sq, b, h]
         sq, b, _ = query.size()
 
@@ -212,7 +223,7 @@ class VisualAttentionBlock(nn.Module):
         k_x: Optional[torch.Tensor] = None,
         v_x: Optional[torch.Tensor] = None,
         attn_mask: Optional[torch.Tensor] = None,
-    ):
+    ) -> torch.Tensor:
         k_x = k_x if k_x is not None else q_x
         v_x = v_x if v_x is not None else q_x
 
@@ -225,7 +236,7 @@ class VisualAttentionBlock(nn.Module):
         k_x: Optional[torch.Tensor] = None,
         v_x: Optional[torch.Tensor] = None,
         attn_mask: Optional[torch.Tensor] = None,
-    ):
+    ) -> torch.Tensor:
         k_x = self.ln_1_kv(k_x) if hasattr(
             self, "ln_1_kv") and k_x is not None else None
         v_x = self.ln_1_kv(v_x) if hasattr(
@@ -268,7 +279,7 @@ class TransformerBlock(nn.Module):
 
     def forward(self,
                 x: torch.Tensor,
-                attn_mask: Optional[torch.Tensor] = None):
+                attn_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         for r in self.resblocks:
             x = r(x, attn_mask=attn_mask)
         return x
@@ -336,7 +347,7 @@ class VisionTransformer(nn.Module):
         self.image_start_id = image_start_id
         self.image_end_id = image_start_id + 1
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x.to(
             dtype=self.transformer.get_cast_dtype(),
             device=self.transformer.get_cast_device(),
@@ -402,7 +413,7 @@ class QWenMLP(nn.Module):
                              "Only silu is supported for now.")
         self.act_fn = SiluAndMul()
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
         x, _ = self.c_proj(x)
@@ -626,7 +637,8 @@ def get_image_text(image_num: int, padding: bool) -> str:
     return f"{image_start}{MAX_QWEN_IMG_TOKENS * IMG_PAD}{image_end}"
 
 
-def input_processor_for_qwen(ctx: InputContext, llm_inputs: LLMInputs):
+def input_processor_for_qwen(ctx: InputContext,
+                             llm_inputs: LLMInputs) -> LLMInputs:
     """Processes the inputs, which may or may not be multimodal.
     Multimodal inputs will only be processed if the model has a "visual"
     component in its model config, otherwise they'll be ignored.
@@ -675,10 +687,11 @@ def input_processor_for_qwen(ctx: InputContext, llm_inputs: LLMInputs):
         prompt,
     )
 
-    if num_matched_images == num_images:
+    if num_matched_images != num_images:
         logger.warning(
-            "Number of matched image placeholders doesn't match the number "
-            "of expected images; are your placeholders formatted correctly?")
+            f"Number of matched image placeholders {num_matched_images} "
+            f"doesn't match the number of expected images {num_images}; "
+            "are your placeholders formatted correctly?")
 
     new_prompt_token_ids = tokenizer.encode(new_prompt)
 
@@ -687,7 +700,7 @@ def input_processor_for_qwen(ctx: InputContext, llm_inputs: LLMInputs):
                      multi_modal_data=multi_modal_data)
 
 
-def input_mapper_for_qwen(ctx: InputContext, data: object):
+def input_mapper_for_qwen(ctx: InputContext, data: object) -> MultiModalInputs:
     """Maps the input data to its MultiModalInputs (if any).
 
     Args:
@@ -769,8 +782,11 @@ def build_normalization_transform(image_size: int) -> transforms.Compose:
     ])
 
 
-def dummy_data_for_qwen(ctx: InputContext, seq_len: int,
-                        mm_counts: Mapping[str, int]):
+def dummy_data_for_qwen(
+    ctx: InputContext,
+    seq_len: int,
+    mm_counts: Mapping[str, int],
+) -> Tuple[SequenceData, Optional[Dict]]:
     """Build dummy data for warming up Qwen models; this will only contain text
     matching the defaults for VLLM unless the model has a visual config.
 
