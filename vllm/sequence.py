@@ -5,8 +5,8 @@ from abc import ABC, abstractmethod
 from array import array
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Set,
-                    Tuple, Union, cast)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Mapping,
+                    Optional, Set, Tuple, Union, cast)
 
 import msgspec
 import torch
@@ -474,11 +474,8 @@ class Sequence:
         """Reset the sequence states for recomputation."""
         self.data.reset_state_for_recompute()
 
-    def append_token_id(
-        self,
-        token_id: int,
-        logprobs: Dict[int, Logprob],
-    ) -> None:
+    def append_token_id(self, token_id: int, logprobs: Dict[int,
+                                                            Logprob]) -> None:
         assert token_id in logprobs
         self.output_logprobs.append(logprobs)
         self.data.append_token_id(token_id, logprobs[token_id].logprob)
@@ -814,6 +811,9 @@ class SequenceGroup:
         self.is_single_seq = len(self.seqs) == 1
 
     def is_finished(self) -> bool:
+        if self.is_single_seq:
+            return self.seqs[0].is_finished()
+
         return all(seq.is_finished() for seq in self.seqs)
 
     def is_prefill(self) -> bool:
@@ -886,7 +886,7 @@ class SequenceGroupMetadata(
     request_id: str
     is_prompt: bool
     seq_data: Dict[int, SequenceData]
-    sampling_params: SamplingParams
+    sampling_params: Optional[SamplingParams]
     block_tables: Dict[int, List[int]]
     do_sample: bool = True
     pooling_params: Optional[PoolingParams] = None
@@ -1060,76 +1060,6 @@ class IntermediateTensors(
         return f"IntermediateTensors(tensors={self.tensors})"
 
 
-class SamplerOutput(
-        msgspec.Struct,
-        omit_defaults=True,  # type: ignore[call-arg]
-        array_like=True):  # type: ignore[call-arg]
-    """For each sequence group, we generate a list of SequenceOutput object,
-    each of which contains one possible candidate for the next token.
-
-    This data structure implements methods, so it can be used like a list, but
-    also has optional fields for device tensors.
-    """
-
-    outputs: List[CompletionSequenceGroupOutput]
-
-    # On-device tensor containing probabilities of each token.
-    sampled_token_probs: Optional[torch.Tensor] = None
-
-    # On-device tensor containing the logprobs of each token.
-    logprobs: Optional["torch.Tensor"] = None
-
-    # On-device tensor containing the sampled token ids.
-    sampled_token_ids: Optional[torch.Tensor] = None
-    # CPU tensor containing the sampled token ids. Used during multi-step to
-    # return the sampled token ids from last rank to AsyncLLMEngine to be
-    # 'broadcasted' to all other PP ranks for next step.
-    sampled_token_ids_cpu: Optional[torch.Tensor] = None
-
-    # Spec decode metrics populated by workers.
-    spec_decode_worker_metrics: Optional[SpecDecodeWorkerMetrics] = None
-
-    # Optional last hidden states from the model.
-    hidden_states: Optional[torch.Tensor] = None
-
-    # Optional prefill hidden states from the model
-    # (used for models like EAGLE).
-    prefill_hidden_states: Optional[torch.Tensor] = None
-
-    # Time taken in the forward pass for this across all workers
-    model_forward_time: Optional[float] = None
-
-    # Time taken in the model execute function. This will include model forward,
-    # block/sync across workers, cpu-gpu sync time and sampling time.
-    model_execute_time: Optional[float] = None
-
-    def __getitem__(self, idx: int):
-        return self.outputs[idx]
-
-    def __setitem__(self, idx: int, value):
-        self.outputs[idx] = value
-
-    def __len__(self):
-        return len(self.outputs)
-
-    def __eq__(self, other: object):
-        return isinstance(other,
-                          self.__class__) and self.outputs == other.outputs
-
-    def __repr__(self) -> str:
-        """Show the shape of a tensor instead of its values to reduce noise.
-        """
-        sampled_token_probs_repr = ("None" if self.sampled_token_probs is None
-                                    else self.sampled_token_probs.shape)
-        sampled_token_ids_repr = ("None" if self.sampled_token_ids is None else
-                                  self.sampled_token_ids.shape)
-        return (
-            f"SamplerOutput(outputs={self.outputs}, "
-            f"sampled_token_probs={sampled_token_probs_repr}, "
-            f"sampled_token_ids={sampled_token_ids_repr}, "
-            f"spec_decode_worker_metrics={self.spec_decode_worker_metrics})")
-
-
 class PoolerOutput(
         msgspec.Struct,
         omit_defaults=True,  # type: ignore[call-arg]
@@ -1293,6 +1223,8 @@ class ExecuteModelRequest(
     finished_requests_ids: List[str] = msgspec.field(default_factory=list)
     # The last sampled token ids for multi step decoding.
     last_sampled_token_ids: Optional[torch.Tensor] = None
+    # Async callback
+    async_callback: Optional[Callable] = None
 
     @property
     def is_first_multi_step(self) -> bool:
@@ -1338,4 +1270,5 @@ class ExecuteModelRequest(
             num_steps=self.num_steps,
             finished_requests_ids=self.finished_requests_ids,
             last_sampled_token_ids=self.last_sampled_token_ids.clone()
-            if self.last_sampled_token_ids is not None else None)
+            if self.last_sampled_token_ids is not None else None,
+            async_callback=self.async_callback)

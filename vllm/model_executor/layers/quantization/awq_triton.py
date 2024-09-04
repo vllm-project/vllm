@@ -286,11 +286,7 @@ def awq_gemm_triton(input: torch.Tensor,
     assert split_k_iters & (split_k_iters - 1) == 0 and split_k_iters != 0
     assert split_k_iters <= 32
     assert group_size <= K
-    # if not (group_size in AWQ_TRITON_SUPPORTED_GROUP_SIZES or group_size == K):
-        # print(f"input.shape = {input.shape}, qweight.shape = {qweight.shape},"
-              # f"qzeros.shape = {qzeros.shape}, group_size = {group_size}")
     assert group_size in AWQ_TRITON_SUPPORTED_GROUP_SIZES or group_size == K
-
 
     grid = lambda META: (
         triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(
