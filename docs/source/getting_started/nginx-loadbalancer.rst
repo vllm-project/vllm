@@ -101,5 +101,18 @@ Launch Nginx
 
 .. code-block:: console
 
-    docker run -itd -p 8000:80 --network vllm_nginx -v ./nginx_conf/:/etc/nginx/conf.d/ --name nginx-lb nginx-lb:latest 
+    docker run -itd -p 8000:80 --network vllm_nginx -v ./nginx_conf/:/etc/nginx/conf.d/ --name nginx-lb nginx-lb:latest
+    
+Verify That vLLM Servers Are Ready
+-----------
 
+.. code-block:: console
+    
+    docker logs vllm0 | grep Uvicorn
+    docker logs vllm1 | grep Uvicorn
+
+Both outputs should look like this:
+
+.. code-block:: console
+
+    INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
