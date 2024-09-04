@@ -359,7 +359,7 @@ if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
             return JSONResponse(content=response.model_dump(),
                                 status_code=response.code)
 
-        return Response(status_code=200)
+        return Response(status_code=200, content=response)
 
     @router.post("/v1/unload_lora_adapter")
     async def unload_lora_adapter(request: UnloadLoraAdapterRequest):
@@ -373,7 +373,7 @@ if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
             return JSONResponse(content=response.model_dump(),
                                 status_code=response.code)
 
-        return Response(status_code=200)
+        return Response(status_code=200, content=response)
 
 
 def build_app(args: Namespace) -> FastAPI:

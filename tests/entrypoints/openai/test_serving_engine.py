@@ -11,6 +11,10 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse,
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 
 MODEL_NAME = "meta-llama/Llama-2-7b"
+LORA_LOADING_SUCCESS_MESSAGE = (
+    "Success: LoRA adapter '{lora_name}' added successfully.")
+LORA_UNLOADING_SUCCESS_MESSAGE = (
+    "Success: LoRA adapter '{lora_name}' removed successfully.")
 
 
 async def _async_serving_engine_init():
@@ -34,7 +38,7 @@ async def test_load_lora_adapter_success():
     request = LoadLoraAdapterRequest(lora_name="adapter",
                                      lora_path="/path/to/adapter2")
     response = await serving_engine.load_lora_adapter(request)
-    assert response.status_code == HTTPStatus.OK
+    assert response == LORA_LOADING_SUCCESS_MESSAGE.format(lora_name='adapter')
     assert len(serving_engine.lora_requests) == 1
     assert serving_engine.lora_requests[0].lora_name == "adapter"
 
@@ -45,9 +49,8 @@ async def test_load_lora_adapter_missing_fields():
     request = LoadLoraAdapterRequest(lora_name="", lora_path="")
     response = await serving_engine.load_lora_adapter(request)
     assert isinstance(response, ErrorResponse)
-    assert response.err_type == "InvalidUserInput"
-    assert response.status_code == HTTPStatus.BAD_REQUEST
-    assert len(serving_engine.lora_requests) == 1
+    assert response.type == "InvalidUserInput"
+    assert response.code == HTTPStatus.BAD_REQUEST
 
 
 @pytest.mark.asyncio
@@ -56,15 +59,16 @@ async def test_load_lora_adapter_duplicate():
     request = LoadLoraAdapterRequest(lora_name="adapter1",
                                      lora_path="/path/to/adapter1")
     response = await serving_engine.load_lora_adapter(request)
-    assert response.status_code == HTTPStatus.OK
+    assert response == LORA_LOADING_SUCCESS_MESSAGE.format(
+        lora_name='adapter1')
     assert len(serving_engine.lora_requests) == 1
 
     request = LoadLoraAdapterRequest(lora_name="adapter1",
                                      lora_path="/path/to/adapter1")
     response = await serving_engine.load_lora_adapter(request)
     assert isinstance(response, ErrorResponse)
-    assert response.err_type == "InvalidUserInput"
-    assert response.status_code == HTTPStatus.BAD_REQUEST
+    assert response.type == "InvalidUserInput"
+    assert response.code == HTTPStatus.BAD_REQUEST
     assert len(serving_engine.lora_requests) == 1
 
 
@@ -74,12 +78,12 @@ async def test_unload_lora_adapter_success():
     request = LoadLoraAdapterRequest(lora_name="adapter1",
                                      lora_path="/path/to/adapter1")
     response = await serving_engine.load_lora_adapter(request)
-    assert response.status_code == HTTPStatus.OK
     assert len(serving_engine.lora_requests) == 1
 
     request = UnloadLoraAdapterRequest(lora_name="adapter1")
     response = await serving_engine.unload_lora_adapter(request)
-    assert response == "Success: LoRA adapter 'adapter1' removed successfully."
+    assert response == LORA_UNLOADING_SUCCESS_MESSAGE.format(
+        lora_name='adapter1')
     assert len(serving_engine.lora_requests) == 0
 
 
@@ -89,8 +93,8 @@ async def test_unload_lora_adapter_missing_fields():
     request = UnloadLoraAdapterRequest(lora_name="", lora_int_id=None)
     response = await serving_engine.unload_lora_adapter(request)
     assert isinstance(response, ErrorResponse)
-    assert response.err_type == "InvalidUserInput"
-    assert response.status_code == HTTPStatus.BAD_REQUEST
+    assert response.type == "InvalidUserInput"
+    assert response.code == HTTPStatus.BAD_REQUEST
 
 
 @pytest.mark.asyncio
@@ -99,5 +103,5 @@ async def test_unload_lora_adapter_not_found():
     request = UnloadLoraAdapterRequest(lora_name="nonexistent_adapter")
     response = await serving_engine.unload_lora_adapter(request)
     assert isinstance(response, ErrorResponse)
-    assert response.err_type == "InvalidUserInput"
-    assert response.status_code == HTTPStatus.BAD_REQUEST
+    assert response.type == "InvalidUserInput"
+    assert response.code == HTTPStatus.BAD_REQUEST
