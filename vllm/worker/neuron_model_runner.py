@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from importlib.util import find_spec
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -76,9 +77,14 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         self.model: nn.Module  # initialize after load_model.
 
     def load_model(self) -> None:
-        self.model = get_neuron_model(self.model_config,
-                                      parallel_config=self.parallel_config,
-                                      scheduler_config=self.scheduler_config)
+        if find_spec("transformers_neuronx") is not None:
+            self.model = get_neuron_model(
+                self.model_config,
+                parallel_config=self.parallel_config,
+                scheduler_config=self.scheduler_config)
+        else:
+            raise NotImplementedError(
+                "Supports only Transformer-NeuronX based models.")
 
     def _prepare_prompt(
         self,
