@@ -59,7 +59,7 @@ First, install the dependencies:
     $ export DATE="20240828"
     $ export TORCH_VERSION="2.5.0"
     $ pip install https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch-${TORCH_VERSION}.dev${DATE}-cp310-cp310-linux_x86_64.whl
-    $ pip3 install https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-${TORCH_VERSION}.dev${DATE}-cp310-cp310-linux_x86_64.whl
+    $ pip install https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-${TORCH_VERSION}.dev${DATE}-cp310-cp310-linux_x86_64.whl
 
     $ # Install JAX and Pallas.
     $ pip install torch_xla[tpu] -f https://storage.googleapis.com/libtpu-releases/index.html
