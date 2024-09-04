@@ -598,7 +598,6 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             layer.w2_g_idx_sort_indices,
             topk_weights,
             topk_ids,
-            renormalize=renormalize,
             w1_scale=layer.w13_scales,
             w2_scale=layer.w2_scales,
             num_bits=self.quant_config.quant_type.size_bits,
