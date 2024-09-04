@@ -1,6 +1,6 @@
 import pickle
 from contextlib import contextmanager
-from typing import Iterator, List, Type, Union
+from typing import Iterator, List, Optional, Tuple, Type, Union
 
 import cloudpickle
 import ray
@@ -22,6 +22,8 @@ CONFIG_TYPE = Union[ModelConfig, DecodingConfig, ParallelConfig,
 logger = init_logger(__name__)
 
 POLLING_TIMEOUT_MS = 10000
+
+HEALTHY_RESPONSE = (pickle.dumps(VLLM_RPC_SUCCESS_STR), )
 
 
 class MPLLMEngine:
@@ -207,28 +209,33 @@ class MPLLMEngine:
             self.maybe_handle_new_input()
 
             # Engine step.
-            request_outputs = self.engine.step()
+            try:
+                request_outputs = self.engine.step()
+            except Exception as e:
+                # Fail all requests with this exception.
+                request_outputs = (None, e)
 
             if not self.use_async_sockets:
                 # Stream results to output socket.
-                self.stream_outputs(request_outputs)
+                self.send_outputs(request_outputs)
 
     def wait_for_new_input(self):
         while self.input_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
             logger.debug("Waiting for new request.")
 
-    def stream_outputs(self, request_outputs: List[RequestOutput]):
-        self.output_socket.send_multipart((pickle.dumps(request_outputs), ),
-                                          copy=False)
+    def send_outputs(self, request_outputs: Union[List[RequestOutput],
+                                                  Tuple[Optional[str],
+                                                        BaseException]]):
+        output_bytes = pickle.dumps(request_outputs)
+        self.output_socket.send_multipart((output_bytes, ), copy=False)
 
     def stream_outputs_and_get_inputs(self,
                                       request_outputs: List[RequestOutput]):
-        self.stream_outputs(request_outputs)
+        self.send_outputs(request_outputs)
         self.maybe_handle_new_input()
 
     def ack_check_health(self):
-        self.health_socket.send_multipart(
-            (pickle.dumps(VLLM_RPC_SUCCESS_STR), ), copy=False)
+        self.health_socket.send_multipart(HEALTHY_RESPONSE, copy=False)
 
     def maybe_handle_new_input(self):
         """Handle new input with non-blocking IO"""
@@ -246,17 +253,22 @@ class MPLLMEngine:
                 raise ValueError(f"Unknown RPCRequest: {request}")
 
     def _handle_generate_request(self, request: RPCGenerateRequest):
-        self.engine.add_request(
-            request_id=request.request_id,
-            inputs=request.inputs,
-            params=request.sampling_params,
-            lora_request=request.lora_request,
-            trace_headers=request.trace_headers,
-            prompt_adapter_request=request.prompt_adapter_request,
-        )
+        request_id = request.request_id
+        try:
+            self.engine.add_request(
+                request_id=request_id,
+                inputs=request.inputs,
+                params=request.sampling_params,
+                lora_request=request.lora_request,
+                trace_headers=request.trace_headers,
+                prompt_adapter_request=request.prompt_adapter_request,
+            )
+        except Exception as e:
+            self.engine.abort_request(request_id)
+            self.send_outputs((request_id, e))
 
     def _handle_abort_request(self, request: RPCAbortRequest):
-        self.engine.abort_request([request.request_id])
+        self.engine.abort_request(request.request_id)
 
     def _handle_utility_request(self, request: RPCUtilityRequest):
         if request == RPCUtilityRequest.DO_LOG_STATS:

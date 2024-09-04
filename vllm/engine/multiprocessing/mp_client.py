@@ -88,9 +88,14 @@ class MPEngineClient:
                 else:
                     request_id = output.request_id
 
-                queue = self.output_queues.get(request_id)
-                if queue is not None:
-                    queue.put_nowait(output)
+                if request_id is not None:
+                    queue = self.output_queues.get(request_id)
+                    if queue is not None:
+                        queue.put_nowait(output)
+                else:
+                    # request_id None means apply to all active requests.
+                    for queue in tuple(self.output_queues.values()):
+                        queue.put_nowait(output)
 
     async def setup(self):
         """Setup the client before it starts sending server requests."""
