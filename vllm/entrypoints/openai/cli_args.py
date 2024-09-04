@@ -163,6 +163,24 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         help="If specified, will run the OpenAI frontend server in the same "
         "process as the model serving engine.")
 
+    parser.add_argument(
+        "--enable-auto-tool-choice",
+        action="store_true",
+        default=False,
+        help=
+        "Enable auto tool choice for supported models. Use --tool-call-parser"
+        "to specify which parser to use")
+
+    parser.add_argument(
+        "--tool-call-parser",
+        type=str,
+        choices=["mistral", "hermes"],
+        default=None,
+        help=
+        "Select the tool call parser depending on the model that you're using."
+        " This is used to parse the model-generated tool call into OpenAI API "
+        "format. Required for --enable-auto-tool-choice.")
+
     parser = AsyncEngineArgs.add_cli_args(parser)
 
     parser.add_argument('--max-log-len',

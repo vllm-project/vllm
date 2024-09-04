@@ -59,8 +59,9 @@ def _adapt_request_for_tool_use(request: Union[CompletionRequest,
     if type(request) is CompletionRequest:
         return request
 
-    # user has chosen to not use any tool
-    if request.tool_choice == "none":
+    # user has chosen to not use any tool,
+    # OR is allowing the model to choose a tool.
+    if request.tool_choice == "none" or request.tool_choice == "auto":
         return request
 
     # user has chosen to use a named tool
