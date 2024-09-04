@@ -434,6 +434,7 @@ class _AsyncLLMEngine(LLMEngine):
                 lora_request=lora_request,
             )
             multi_modal_data = None
+            prompt_embeds = None
         elif isinstance(inputs, dict):
             prompt = inputs.get("prompt")
             prompt_embeds = inputs.get("prompt_embeds")

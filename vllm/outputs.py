@@ -1,6 +1,6 @@
 import time
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from typing import Sequence as GenericSequence
 from typing import Union
 

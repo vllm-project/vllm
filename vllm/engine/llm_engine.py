@@ -987,7 +987,7 @@ class LLMEngine:
 
         return LLMInputs(prompt_token_ids=prompt_token_ids,
                          prompt=prompt,
-                         prompt_embeds=prompt_embeds
+                         prompt_embeds=prompt_embeds,
                          multi_modal_data=multi_modal_data)
 
     def _process_decoder_only_prompt(
@@ -2013,8 +2013,9 @@ class LLMEngine:
             prompt_ids = inputs.get("encoder_prompt_token_ids")
         else:
             prompt_ids = inputs.get("prompt_token_ids")
+            prompt_embeds = inputs.get("prompt_embeds")
 
-        if prompt_ids is None or len(prompt_ids) == 0:
+        if (prompt_ids is None or len(prompt_ids) == 0) and prompt_embeds is None:
             raise ValueError("Prompt cannot be empty")
 
         if self.model_config.is_multimodal_model:
