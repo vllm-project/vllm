@@ -18,22 +18,26 @@ logger = init_logger("test_pipeline_parallel")
 VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
 
 
-@pytest.mark.parametrize(("TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, TRUST_REMOTE_CODE, "
-                          "MODEL_NAME, DIST_BACKEND"),
-                         [
-                             (2, 2, 0, 1, 0, "meta-llama/Meta-Llama-3-8B", "mp"),
-                             (2, 2, 1, 0, 0, "meta-llama/Meta-Llama-3-8B", "mp"),
-                             (1, 3, 0, 0, 0, "meta-llama/Meta-Llama-3-8B", "mp"),
-                             (1, 4, 0, 1, 0, "meta-llama/Meta-Llama-3-8B", "mp"),
-                             (1, 4, 1, 0, 0, "meta-llama/Meta-Llama-3-8B", "mp"),
-                             (1, 3, 0, 0, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
-                             (1, 4, 0, 1, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
-                             (1, 4, 1, 0, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
-                             (2, 2, 1, 0, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
-                             (2, 2, 0, 1, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
-                             (1, 2, 1, 1, 1, "OpenGVLab/InternVL2-8B", "ray"),
-                             (1, 2, 1, 1, 1, "internlm/internlm2_5-7b-chat", "ray")
-                         ])
+@pytest.mark.parametrize(
+    (
+        "TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, TRUST_REMOTE_CODE, "
+        "MODEL_NAME, DIST_BACKEND"
+    ),
+    [
+        (2, 2, 0, 1, 0, "meta-llama/Meta-Llama-3-8B", "mp"),
+        (2, 2, 1, 0, 0, "meta-llama/Meta-Llama-3-8B", "mp"),
+        (1, 3, 0, 0, 0, "meta-llama/Meta-Llama-3-8B", "mp"),
+        (1, 4, 0, 1, 0, "meta-llama/Meta-Llama-3-8B", "mp"),
+        (1, 4, 1, 0, 0, "meta-llama/Meta-Llama-3-8B", "mp"),
+        (1, 3, 0, 0, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
+        (1, 4, 0, 1, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
+        (1, 4, 1, 0, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
+        (2, 2, 1, 0, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
+        (2, 2, 0, 1, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
+        (1, 2, 1, 1, 1, "OpenGVLab/InternVL2-8B", "ray"),
+        (1, 2, 1, 1, 1, "internlm/internlm2_5-7b-chat", "ray"),
+    ],
+)
 @fork_new_process_for_each_test
 def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, TRUST_REMOTE_CODE, MODEL_NAME,
                     DIST_BACKEND):
