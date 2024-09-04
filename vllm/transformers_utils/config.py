@@ -59,7 +59,7 @@ def get_config(
     **kwargs,
 ) -> PretrainedConfig:
     # Separate model folder from file path for GGUF models
-    
+
     is_gguf = check_gguf_file(model)
     if is_gguf:
         kwargs["gguf_file"] = Path(model).name
@@ -89,8 +89,8 @@ def get_config(
     if config.model_type in _CONFIG_REGISTRY:
         config_class = _CONFIG_REGISTRY[config.model_type]
         config = config_class.from_pretrained(model,
-                                            revision=revision,
-                                            code_revision=code_revision)
+                                              revision=revision,
+                                              code_revision=code_revision)
 
     # Special architecture mapping check for GGUF models
     if is_gguf:
@@ -119,7 +119,8 @@ def load_params_config(model, revision) -> PretrainedConfig:
     config_path = Path(model) / config_file_name
 
     if not config_path.is_file():
-        config_path = Path(hf_hub_download(model, config_file_name, revision=revision))
+        config_path = Path(
+            hf_hub_download(model, config_file_name, revision=revision))
 
     with open(config_path, 'r') as file:
         config_dict = json.load(file)
@@ -146,7 +147,8 @@ def load_params_config(model, revision) -> PretrainedConfig:
     config_dict["model_type"] = config_dict.get("model_type", "transformer")
     config_dict["hidden_act"] = config_dict.get("activation", "silu")
     config_dict["max_position_embeddings"] = 32768
-    config_dict["tie_word_embeddings"] = config_dict.get("tie_embeddings", False)
+    config_dict["tie_word_embeddings"] = config_dict.get(
+        "tie_embeddings", False)
     config_dict["torch_dtype"] = "bfloat16"
 
     if config_dict["model_type"] == "transformer":
@@ -156,7 +158,6 @@ def load_params_config(model, revision) -> PretrainedConfig:
             config_dict["architectures"] = ["MistralForCausalLM"]
 
     return recurse_elems(config_dict)
-
 
 
 def get_hf_image_processor_config(

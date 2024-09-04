@@ -288,7 +288,8 @@ def download_safetensors_index_file_from_hf(
 # So, we use the index_file to
 # look up which safetensors files should be used.
 def filter_duplicate_safetensors_files(hf_weights_files: List[str],
-                                       hf_folder: str, index_file: str) -> List[str]:
+                                       hf_folder: str,
+                                       index_file: str) -> List[str]:
     # model.safetensors.index.json is a mapping from keys in the
     # torch state_dict to safetensors file holding that weight.
     index_file_name = os.path.join(hf_folder, index_file)

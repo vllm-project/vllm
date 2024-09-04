@@ -290,8 +290,8 @@ class DefaultModelLoader(BaseModelLoader):
             # any files not found in the index.
             if not is_local:
                 download_safetensors_index_file_from_hf(
-                    model_name_or_path, self.load_config.download_dir, index_file,
-                    revision)
+                    model_name_or_path, self.load_config.download_dir,
+                    index_file, revision)
             hf_weights_files = filter_duplicate_safetensors_files(
                 hf_weights_files, hf_folder, index_file)
         else:
