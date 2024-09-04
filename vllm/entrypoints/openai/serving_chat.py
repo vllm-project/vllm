@@ -13,7 +13,7 @@ from vllm.engine.protocol import AsyncEngineClient
 from vllm.entrypoints.chat_utils import (ConversationMessage,
                                          apply_chat_template,
                                          load_chat_template,
-                                         parse_chat_messages)
+                                         parse_chat_messages_futures)
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionLogProb, ChatCompletionLogProbs,
@@ -31,7 +31,6 @@ from vllm.entrypoints.openai.tool_parsers import (Hermes2ProToolParser,
                                                   ToolParser)
 from vllm.inputs import TokensPrompt
 from vllm.logger import init_logger
-from vllm.multimodal import MultiModalDataDict
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sequence import Logprob
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
@@ -115,7 +114,7 @@ class OpenAIServingChat(OpenAIServing):
             tokenizer = await self.async_engine_client.get_tokenizer(
                 lora_request)
 
-            conversation, mm_data_future = parse_chat_messages(
+            conversation, mm_data_future = parse_chat_messages_futures(
                 request.messages, model_config, tokenizer)
 
             tool_dicts = None if request.tools is None else [
@@ -135,12 +134,8 @@ class OpenAIServingChat(OpenAIServing):
             logger.error("Error in applying chat template from request: %s", e)
             return self.create_error_response(str(e))
 
-        mm_data: Optional[MultiModalDataDict] = None
-
         try:
-
-            if mm_data_future:
-                mm_data = await mm_data_future
+            mm_data = await mm_data_future
         except Exception as e:
             logger.error("Error in loading multi-modal data: %s", e)
             return self.create_error_response(str(e))
