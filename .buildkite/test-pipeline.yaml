@@ -218,9 +218,9 @@ steps:
     - pytest -v -s spec_decode
 
 - label: LoRA Test %N # 30min each
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/lora
-  - csrc/punica
   - tests/lora
   command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_long_context.py
   parallelism: 4
@@ -360,7 +360,6 @@ steps:
   num_gpus: 4
   source_file_dependencies:
   - vllm/lora
-  - csrc/punica
   - tests/lora/test_long_context
   commands:
     # FIXIT: find out which code initialize cuda before running the test
