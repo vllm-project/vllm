@@ -67,7 +67,7 @@ def run_test(
 ):
     """Inference result should be the same between hf and vllm.
 
-    All the image fixtures for the test is under tests/images.
+    All the image fixtures for the test are from IMAGE_ASSETS.
     For huggingface runner, we provide the PIL images as input.
     For vllm runner, we provide MultiModalDataDict objects 
     and corresponding MultiModalConfig as input.
