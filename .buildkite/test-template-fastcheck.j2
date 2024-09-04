@@ -1,12 +1,40 @@
 {% set default_num_gpu = 1 %}
-{% set docker_image = "us-central1-docker.pkg.dev/vllm-gcp/vllm-ci-test-repo-gcp/vllm:$BUILDKITE_COMMIT" %}
+{% set docker_image = "us-central1-docker.pkg.dev/vllm-gcp/vllm-ci-test-repo-gcp/vllm:28cbb143d1f31153bfcb41226691d16ff92dd894" %}
 
 steps:
-    -   label: Build
+    {% for step in steps %}
+    -  label: "{{ step.label }}"
         agents:
-            queue: cpu-gcp
-        commands:
-            - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=64 --build-arg buildkite_commit=$BUILDKITE_COMMIT --tag {{ docker_image }} --target test --progress plain ."
-            - "docker push {{ docker_image }}"
-        env:
-            DOCKER_BUILDKIT: "1"
+            queue: kubernetes
+        soft_fail: {{ step.soft_fail or false }}
+        {% if step.parallelism %}
+    parallelism: {{ step.parallelism }}
+    {% endif %}
+        plugins:
+            - kubernetes:
+                podSpec:
+                    containers:
+                    -   image: "{{ docker_image }}"
+                        command: ["bash"]
+                        args:
+                        - '-c'
+                        - "'cd {{ (step.working_dir or default_working_dir) | safe }} && {{ step.command or (step.commands | join(' && ')) | safe }}'"
+                        {% if not step.no_gpu %}
+                        resources:
+                        requests:
+                            nvidia.com/gpu: "{{ step.num_gpus or default_num_gpu }}"
+                        limits:
+                            nvidia.com/gpu: "{{ step.num_gpus or default_num_gpu }}"
+                        {% endif %}
+                        env:
+                        - name: VLLM_USAGE_SOURCE
+                            value: ci-test
+                        - name: HF_TOKEN
+                            valueFrom:
+                            secretKeyRef:
+                                name: hf-token-secret
+                                key: token
+                        volumeMounts:
+                        - mountPath: /dev/shm
+                            name: dshm
+    {% endfor %}
