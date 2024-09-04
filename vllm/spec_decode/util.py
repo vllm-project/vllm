@@ -4,9 +4,9 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import torch
 
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
-                           SamplerOutput, SequenceGroupMetadata,
-                           SequenceOutput)
+                           SequenceGroupMetadata, SequenceOutput)
 
 SeqId = int
 

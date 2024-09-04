@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
     VLLM_USE_FLASHINFER_SAMPLER: bool = False
+    VLLM_USE_FLASHINFER_REJECTION_SAMPLER: bool = False
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
@@ -352,7 +353,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
             os.path.join(get_default_cache_root(), "vllm", "xla_cache"),
         )),
     "VLLM_FUSED_MOE_CHUNK_SIZE":
-    lambda: int(os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", "65536")),
+    lambda: int(os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", "32768")),
 
     # If set, vllm will skip the deprecation warnings.
     "VLLM_NO_DEPRECATION_WARNING":
