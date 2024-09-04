@@ -34,7 +34,7 @@ if "HIP_VISIBLE_DEVICES" in os.environ:
 # the major benefit of using AMDSMI is that it will not initialize CUDA
 
 
-def with_nvml_context(fn):
+def with_amdsmi_context(fn):
 
     @wraps(fn)
     def wrapper(*args, **kwargs):
@@ -65,12 +65,11 @@ class RocmPlatform(Platform):
         return torch.cuda.get_device_capability(device_id)
 
     @staticmethod
-    @with_nvml_context
+    @with_amdsmi_context
     def is_full_nvlink(physical_device_ids: List[int]) -> bool:
         """
-        query if the set of gpus are fully connected by xgmi (1 hop)
+        Query if the set of gpus are fully connected by xgmi (1 hop)
         """
-        # On ROCm, we instead query if GPUs are connected by 1 hop XGMI
         handles = [
             amdsmi_get_processor_handles()[i] for i in physical_device_ids
         ]
@@ -90,7 +89,7 @@ class RocmPlatform(Platform):
         return True
 
     @staticmethod
-    @with_nvml_context
+    @with_amdsmi_context
     @lru_cache(maxsize=8)
     def get_device_name(device_id: int = 0) -> str:
         physical_device_id = device_id_to_physical_device_id(device_id)

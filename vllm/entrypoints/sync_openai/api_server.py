@@ -174,9 +174,11 @@ async def _check_model(request: Union[CompletionRequest,
 
 async def _guided_decode_logits_processor(request, tokenizer):
     decoding_config = runner.engine_config.decoding_config
-    assert decoding_config is not None
-    guided_decoding_backend = (request.guided_decoding_backend
-                               or decoding_config.guided_decoding_backend)
+    if request.guided_decoding_backend:
+        guided_decoding_backend = request.guided_decoding_backend
+    else:
+        assert decoding_config is not None
+        guided_decoding_backend = decoding_config.guided_decoding_backend
     return await get_guided_decoding_logits_processor(guided_decoding_backend,
                                                       request, tokenizer)
 

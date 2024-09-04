@@ -646,7 +646,7 @@ def register_buffer(fa: int, t: torch.Tensor, handles: List[str],
     return torch.ops._C_custom_ar.register_buffer(fa, t, handles, offsets)
 
 
-def get_graph_buffer_ipc_meta(fa: int) -> Tuple[List[str], List[int]]:
+def get_graph_buffer_ipc_meta(fa: int) -> Tuple[torch.Tensor, List[int]]:
     return torch.ops._C_custom_ar.get_graph_buffer_ipc_meta(fa)
 
 

@@ -1,7 +1,6 @@
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_runtime.h>
-#include "core/registration.h"
 
 // declare templates for front (cpp) and back (cuda) sides of function:
 // template <typename T>
