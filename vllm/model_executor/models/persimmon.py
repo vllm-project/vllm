@@ -284,6 +284,7 @@ class PersimmonForCausalLM(nn.Module):
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
             inputs_embeds=inputs_embeds,
+            inputs_embeds_masks=inputs_embeds_masks
         )
         return hidden_states
 
