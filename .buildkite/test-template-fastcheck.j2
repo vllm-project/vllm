@@ -27,20 +27,20 @@ steps:
                         - "'cd {{ (step.working_dir or default_working_dir) | safe }} && {{ step.command or (step.commands | join(' && ')) | safe }}'"
                         {% if not step.no_gpu %}
                         resources:
-                        requests:
-                            nvidia.com/gpu: "{{ step.num_gpus or default_num_gpu }}"
-                        limits:
-                            nvidia.com/gpu: "{{ step.num_gpus or default_num_gpu }}"
+                            requests:
+                                nvidia.com/gpu: "{{ step.num_gpus or default_num_gpu }}"
+                            limits:
+                                nvidia.com/gpu: "{{ step.num_gpus or default_num_gpu }}"
                         {% endif %}
                         env:
-                        - name: VLLM_USAGE_SOURCE
+                        -   name: VLLM_USAGE_SOURCE
                             value: ci-test
-                        - name: HF_TOKEN
+                        -   name: HF_TOKEN
                             valueFrom:
-                            secretKeyRef:
-                                name: hf-token-secret
-                                key: token
+                                secretKeyRef:
+                                    name: hf-token-secret
+                                    key: token
                         volumeMounts:
-                        - mountPath: /dev/shm
-                            name: dshm
+                            -   mountPath: /dev/shm
+                                name: dshm
     {% endfor %}

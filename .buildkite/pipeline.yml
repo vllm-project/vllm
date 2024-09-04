@@ -2,8 +2,14 @@
 
 
 steps:
+    -   label: "Build"
+        agents:
+            queue: small-cpu
+        commands:
+        - "echo Hello world"
+
     
-    -  label: "Documentation Build"
+    -   label: "Documentation Build"
         agents:
             queue: kubernetes
         soft_fail: false
@@ -30,7 +36,7 @@ steps:
                         - mountPath: /dev/shm
                             name: dshm
     
-    -  label: "Async Engine, Inputs, Utils, Worker Test"
+    -   label: "Async Engine, Inputs, Utils, Worker Test"
         agents:
             queue: kubernetes
         soft_fail: false
@@ -63,7 +69,7 @@ steps:
                         - mountPath: /dev/shm
                             name: dshm
     
-    -  label: "Basic Correctness Test"
+    -   label: "Basic Correctness Test"
         agents:
             queue: kubernetes
         soft_fail: false
@@ -96,7 +102,7 @@ steps:
                         - mountPath: /dev/shm
                             name: dshm
     
-    -  label: "Core Test"
+    -   label: "Core Test"
         agents:
             queue: kubernetes
         soft_fail: false
@@ -129,7 +135,7 @@ steps:
                         - mountPath: /dev/shm
                             name: dshm
     
-    -  label: "Entrypoints Test"
+    -   label: "Entrypoints Test"
         agents:
             queue: kubernetes
         soft_fail: false
@@ -162,7 +168,7 @@ steps:
                         - mountPath: /dev/shm
                             name: dshm
     
-    -  label: "Distributed Tests (4 GPUs)"
+    -   label: "Distributed Tests (4 GPUs)"
         agents:
             queue: kubernetes
         soft_fail: false
@@ -195,7 +201,7 @@ steps:
                         - mountPath: /dev/shm
                             name: dshm
     
-    -  label: "Metrics, Tracing Test"
+    -   label: "Metrics, Tracing Test"
         agents:
             queue: kubernetes
         soft_fail: false
@@ -228,7 +234,7 @@ steps:
                         - mountPath: /dev/shm
                             name: dshm
     
-    -  label: "Regression Test"
+    -   label: "Regression Test"
         agents:
             queue: kubernetes
         soft_fail: false
@@ -261,7 +267,7 @@ steps:
                         - mountPath: /dev/shm
                             name: dshm
     
-    -  label: "Engine Test"
+    -   label: "Engine Test"
         agents:
             queue: kubernetes
         soft_fail: false
@@ -294,7 +300,7 @@ steps:
                         - mountPath: /dev/shm
                             name: dshm
     
-    -  label: "Examples Test"
+    -   label: "Examples Test"
         agents:
             queue: kubernetes
         soft_fail: false
@@ -327,7 +333,7 @@ steps:
                         - mountPath: /dev/shm
                             name: dshm
     
-    -  label: "Models Test"
+    -   label: "Models Test"
         agents:
             queue: kubernetes
         soft_fail: false
@@ -360,7 +366,7 @@ steps:
                         - mountPath: /dev/shm
                             name: dshm
     
-    -  label: "torch compile integration test"
+    -   label: "torch compile integration test"
         agents:
             queue: kubernetes
         soft_fail: false
@@ -393,7 +399,7 @@ steps:
                         - mountPath: /dev/shm
                             name: dshm
     
-    -  label: "Vision Language Models Test"
+    -   label: "Vision Language Models Test"
         agents:
             queue: kubernetes
         soft_fail: false
@@ -426,7 +432,7 @@ steps:
                         - mountPath: /dev/shm
                             name: dshm
     
-    -  label: "Prefix Caching Test"
+    -   label: "Prefix Caching Test"
         agents:
             queue: kubernetes
         soft_fail: false
@@ -459,7 +465,7 @@ steps:
                         - mountPath: /dev/shm
                             name: dshm
     
-    -  label: "Samplers Test"
+    -   label: "Samplers Test"
         agents:
             queue: kubernetes
         soft_fail: false
@@ -492,7 +498,7 @@ steps:
                         - mountPath: /dev/shm
                             name: dshm
     
-    -  label: "LogitsProcessor Test"
+    -   label: "LogitsProcessor Test"
         agents:
             queue: kubernetes
         soft_fail: false
@@ -525,7 +531,7 @@ steps:
                         - mountPath: /dev/shm
                             name: dshm
     
-    -  label: "Speculative decoding tests"
+    -   label: "Speculative decoding tests"
         agents:
             queue: kubernetes
         soft_fail: false
@@ -558,7 +564,7 @@ steps:
                         - mountPath: /dev/shm
                             name: dshm
     
-    -  label: "LoRA Test %N"
+    -   label: "LoRA Test %N"
         agents:
             queue: kubernetes
         soft_fail: false
@@ -593,7 +599,7 @@ steps:
                         - mountPath: /dev/shm
                             name: dshm
     
-    -  label: "Kernels Test %N"
+    -   label: "Kernels Test %N"
         agents:
             queue: kubernetes
         soft_fail: false
@@ -628,7 +634,7 @@ steps:
                         - mountPath: /dev/shm
                             name: dshm
     
-    -  label: "Tensorizer Test"
+    -   label: "Tensorizer Test"
         agents:
             queue: kubernetes
         soft_fail: true
@@ -661,7 +667,7 @@ steps:
                         - mountPath: /dev/shm
                             name: dshm
     
-    -  label: "Benchmarks"
+    -   label: "Benchmarks"
         agents:
             queue: kubernetes
         soft_fail: false
@@ -694,7 +700,7 @@ steps:
                         - mountPath: /dev/shm
                             name: dshm
     
-    -  label: "Quantization Test"
+    -   label: "Quantization Test"
         agents:
             queue: kubernetes
         soft_fail: false
@@ -727,7 +733,7 @@ steps:
                         - mountPath: /dev/shm
                             name: dshm
     
-    -  label: "LM Eval Small Models"
+    -   label: "LM Eval Small Models"
         agents:
             queue: kubernetes
         soft_fail: false
@@ -760,7 +766,7 @@ steps:
                         - mountPath: /dev/shm
                             name: dshm
     
-    -  label: "Distributed Comm Ops Test"
+    -   label: "Distributed Comm Ops Test"
         agents:
             queue: kubernetes
         soft_fail: false
@@ -793,7 +799,7 @@ steps:
                         - mountPath: /dev/shm
                             name: dshm
     
-    -  label: "2 Node Tests (4 GPUs in total)"
+    -   label: "2 Node Tests (4 GPUs in total)"
         agents:
             queue: kubernetes
         soft_fail: false
@@ -826,7 +832,7 @@ steps:
                         - mountPath: /dev/shm
                             name: dshm
     
-    -  label: "Distributed Tests (2 GPUs)"
+    -   label: "Distributed Tests (2 GPUs)"
         agents:
             queue: kubernetes
         soft_fail: false
@@ -859,7 +865,7 @@ steps:
                         - mountPath: /dev/shm
                             name: dshm
     
-    -  label: "Multi-step Tests (4 GPUs)"
+    -   label: "Multi-step Tests (4 GPUs)"
         agents:
             queue: kubernetes
         soft_fail: false
@@ -892,7 +898,7 @@ steps:
                         - mountPath: /dev/shm
                             name: dshm
     
-    -  label: "Pipeline Parallelism Test"
+    -   label: "Pipeline Parallelism Test"
         agents:
             queue: kubernetes
         soft_fail: false
@@ -925,7 +931,7 @@ steps:
                         - mountPath: /dev/shm
                             name: dshm
     
-    -  label: "LoRA Long Context (Distributed)"
+    -   label: "LoRA Long Context (Distributed)"
         agents:
             queue: kubernetes
         soft_fail: false
@@ -958,7 +964,7 @@ steps:
                         - mountPath: /dev/shm
                             name: dshm
     
-    -  label: "Weight Loading Multiple GPU Test"
+    -   label: "Weight Loading Multiple GPU Test"
         agents:
             queue: kubernetes
         soft_fail: false
@@ -991,7 +997,7 @@ steps:
                         - mountPath: /dev/shm
                             name: dshm
     
-    -  label: "Distributed Tests (A100)"
+    -   label: "Distributed Tests (A100)"
         agents:
             queue: kubernetes
         soft_fail: false
@@ -1024,7 +1030,7 @@ steps:
                         - mountPath: /dev/shm
                             name: dshm
     
-    -  label: "LM Eval Large Models"
+    -   label: "LM Eval Large Models"
         agents:
             queue: kubernetes
         soft_fail: false
