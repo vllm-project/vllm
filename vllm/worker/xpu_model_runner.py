@@ -16,6 +16,7 @@ from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
+from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadataCache
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
@@ -78,6 +79,8 @@ class XPUModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
+        # Set after load_model.
+        self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
 
         # Used to cache python objects
         self.inter_data_cache: Dict[int, PyObjectCache] = {}
@@ -95,6 +98,25 @@ class XPUModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB",
                     self.model_memory_usage / float(2**30))
+        
+        if self.lora_config:
+            assert supports_lora(self.model), "Model does not support LoRA"
+            assert not supports_multimodal(
+                self.model
+            ), "To be tested: Multi-modal model with LoRA settings."
+
+            self.lora_manager = LRUCacheWorkerLoRAManager(
+                self.scheduler_config.max_num_seqs,
+                self.scheduler_config.max_num_batched_tokens,
+                self.vocab_size,
+                self.lora_config,
+                self.device,
+                self.model.embedding_modules,
+                self.model.embedding_padding_modules,
+                max_position_embeddings=self.model.config.
+                max_position_embeddings,
+            )
+            self.model = self.lora_manager.create_lora_manager(self.model)
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -109,6 +131,30 @@ class XPUModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         sampling_params = SamplingParams(top_p=0.99, top_k=self.vocab_size - 1)
         max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
         max_num_seqs = self.scheduler_config.max_num_seqs
+
+        # This represents the maximum number of different requests
+        # that will have unique loras, an therefore the max amount of memory
+        # consumption create dummy lora request copies from the lora request
+        # passed in, which contains a lora from the lora warmup path.
+        dummy_lora_requests: List[LoRARequest] = []
+        dummy_lora_requests_per_seq: List[LoRARequest] = []
+        if self.lora_config:
+            assert self.lora_manager is not None
+            with self.lora_manager.dummy_lora_cache():
+                for idx in range(self.lora_config.max_loras):
+                    lora_id = idx + 1
+                    dummy_lora_request = LoRARequest(
+                        lora_name=f"warmup_{lora_id}",
+                        lora_int_id=lora_id,
+                        lora_path="/not/a/real/path",
+                    )
+                    self.lora_manager.add_dummy_lora(dummy_lora_request,
+                                                     rank=LORA_WARMUP_RANK)
+                    dummy_lora_requests.append(dummy_lora_request)
+                dummy_lora_requests_per_seq = [
+                    dummy_lora_requests[idx % len(dummy_lora_requests)]
+                    for idx in range(max_num_seqs)
+                ]
 
         # Profile memory usage with max_num_sequences sequences and the total
         # number of tokens equal to max_num_batched_tokens.
@@ -150,7 +196,8 @@ class XPUModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                 seq_data={group_id: dummy_data.seq_data},
                 sampling_params=sampling_params,
                 block_tables=None,
-                lora_request=None,
+                lora_request=dummy_lora_requests_per_seq[group_id]
+                if dummy_lora_requests_per_seq else None,
                 multi_modal_data=dummy_data.multi_modal_data,
                 multi_modal_placeholders=dummy_data.multi_modal_placeholders)
             seqs.append(seq)
@@ -236,6 +283,12 @@ class XPUModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             raise ValueError(
                 "XPUModelRunner does not support multi-step execution.")
 
+        if self.lora_config:
+            assert model_input.lora_requests is not None
+            assert model_input.lora_mapping is not None
+            self.set_active_loras(model_input.lora_requests,
+                                  model_input.lora_mapping)
+
         model_executable = self.model
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
@@ -285,3 +338,9 @@ class XPUModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             output.model_forward_time = model_forward_time
 
         return [output]
+
+    def set_active_loras(self, lora_requests: Set[LoRARequest],
+                         lora_mapping: LoRAMapping) -> None:
+        if not self.lora_manager:
+            raise RuntimeError("LoRA is not enabled.")
+        self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
