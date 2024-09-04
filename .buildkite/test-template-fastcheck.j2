@@ -2,8 +2,14 @@
 {% set docker_image = "us-central1-docker.pkg.dev/vllm-gcp/vllm-ci-test-repo-gcp/vllm:28cbb143d1f31153bfcb41226691d16ff92dd894" %}
 
 steps:
+    -   label: "Build"
+        agents:
+            queue: small-cpu
+        commands:
+        - "echo Hello world"
+
     {% for step in steps %}
-    -  label: "{{ step.label }}"
+    -   label: "{{ step.label }}"
         agents:
             queue: kubernetes
         soft_fail: {{ step.soft_fail or false }}
