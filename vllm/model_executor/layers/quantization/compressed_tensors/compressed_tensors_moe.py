@@ -293,7 +293,6 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             layer.w2_g_idx_sort_indices,
             topk_weights,
             topk_ids,
-            renormalize=renormalize,
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
             num_bits=self.num_bits,
