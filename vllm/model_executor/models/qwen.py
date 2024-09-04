@@ -8,7 +8,6 @@
 import math
 import re
 from array import array
-from collections import OrderedDict
 from functools import partial
 from typing import (Any, Callable, Dict, Iterable, List, Literal, Mapping,
                     Optional, Tuple, TypedDict, Union)
@@ -26,9 +25,10 @@ from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -95,7 +95,6 @@ class VisualAttention(nn.Module):
     Self-attention layer takes input with size [s, b, h]
     and returns output of the same size.
     """
-
 
     def __init__(
         self,
@@ -187,6 +186,36 @@ class VisualAttention(nn.Module):
 
         return output
 
+
+class QwenVMLP(nn.Module):
+    """MLP for the visual component of the Qwen model."""
+
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        quant_config: Optional[QuantizationConfig] = None,
+    ):
+        super().__init__()
+        self.c_fc = ColumnParallelLinear(hidden_size,
+                                         intermediate_size,
+                                         bias=True,
+                                         quant_config=quant_config)
+        self.act_fn = get_act_fn("gelu", quant_config, intermediate_size)
+        self.c_proj = RowParallelLinear(
+            intermediate_size,
+            hidden_size,
+            bias=True,
+            quant_config=quant_config,
+        )
+
+    def forward(self, x):
+        x, _ = self.c_fc(x)
+        x = self.act_fn(x)
+        x, _ = self.c_proj(x)
+        return x
+
+
 class VisualAttentionBlock(nn.Module):
 
     def __init__(
@@ -194,8 +223,8 @@ class VisualAttentionBlock(nn.Module):
         d_model: int,
         n_head: int,
         mlp_ratio: float = 4.0,
-        act_layer: Callable = nn.GELU,
         norm_layer: Callable = nn.LayerNorm,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
 
@@ -203,10 +232,11 @@ class VisualAttentionBlock(nn.Module):
         self.ln_2 = norm_layer(d_model)
         mlp_width = int(d_model * mlp_ratio)
         self.attn = VisualAttention(d_model, n_head)
-        self.mlp = nn.Sequential(
-            OrderedDict([("c_fc", nn.Linear(d_model, mlp_width)),
-                         ("gelu", act_layer()),
-                         ("c_proj", nn.Linear(mlp_width, d_model))]))
+        self.mlp = QwenVMLP(
+            hidden_size=d_model,
+            intermediate_size=mlp_width,
+            quant_config=quant_config,
+        )
 
     def attention(
         self,
@@ -234,8 +264,8 @@ class TransformerBlock(nn.Module):
         layers: int,
         heads: int,
         mlp_ratio: float = 4.0,
-        act_layer: Callable = nn.GELU,
         norm_layer: Callable = nn.LayerNorm,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.width = width
@@ -245,8 +275,9 @@ class TransformerBlock(nn.Module):
             VisualAttentionBlock(width,
                                  heads,
                                  mlp_ratio,
-                                 act_layer=act_layer,
-                                 norm_layer=norm_layer) for _ in range(layers)
+                                 norm_layer=norm_layer,
+                                 quant_config=quant_config)
+            for _ in range(layers)
         ])
 
     def get_cast_dtype(self) -> torch.dtype:
@@ -275,6 +306,7 @@ class VisionTransformer(nn.Module):
                  n_queries: int = 256,
                  output_dim: int = 512,
                  image_start_id: int = 151857,
+                 quant_config: Optional[QuantizationConfig] = None,
                  **kwargs):
         super().__init__()
         image_height, image_width = self.image_size = (image_size, image_size)
@@ -294,17 +326,14 @@ class VisionTransformer(nn.Module):
                                                  torch.randn(256, width))
 
         norm_layer = partial(nn.LayerNorm, eps=1e-6)
-        act_layer = nn.GELU
 
         self.ln_pre = norm_layer(width)
-        self.transformer = TransformerBlock(
-            width,
-            layers,
-            heads,
-            mlp_ratio,
-            act_layer=act_layer,
-            norm_layer=norm_layer,
-        )
+        self.transformer = TransformerBlock(width,
+                                            layers,
+                                            heads,
+                                            mlp_ratio,
+                                            norm_layer=norm_layer,
+                                            quant_config=quant_config)
 
         self.attn_pool = Resampler2(
             grid_size=int(math.sqrt(n_queries)),
@@ -369,6 +398,8 @@ class VisionTransformer(nn.Module):
 
 
 class QWenMLP(nn.Module):
+    """MLP for the language component of the Qwen model, which contains a
+    MergedColumnParallelLinear merging 2 outputs via silu activation."""
 
     def __init__(
         self,
@@ -538,8 +569,9 @@ class QWenModel(nn.Module):
             lambda prefix: QWenBlock(config, cache_config, quant_config),
             prefix=f"{prefix}.h")
         self.ln_f = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
-        self.visual = VisionTransformer(
-            **config.visual) if hasattr(config, "visual") else None
+        self.visual = VisionTransformer(**config.visual,
+                                        quant_config=quant_config) if hasattr(
+                                            config, "visual") else None
 
     def forward(
         self,
