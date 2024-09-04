@@ -61,6 +61,7 @@ Build vLLM Container
 ------------
 
 Notes:
+
 * Adjust the model name that you want to use in your vLLM servers if you don't want to use ``Llama-2-7b-hf``. 
 
 .. code-block:: console
@@ -81,6 +82,7 @@ Launch vLLM Containers
 ------------
 
 Notes:
+
 * If you have your HuggingFace models cached somewhere else, update ``hf_cache_dir`` below. 
 * If you don't have an existing HuggingFace cache you will want to start ``vllm0`` and wait for the model to complete downloading and the server to be ready. This will ensure that ``vllm1`` can leverage the model you just downloaded and it won't have to be downloaded again.
 * The below example assumes a machine where socket 0 has cores 0-47 and socket 1 has cores 48-95. Adjust as needed for your application.
