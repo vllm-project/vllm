@@ -58,18 +58,20 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             weight = layer.weight
 
             if is_hip():
-                weight, weight_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
-                    weight=weight,
-                    weight_scale=weight_scale,
-                    input_scale=layer.input_scale)
+                weight, weight_scale, input_scale = \
+                    normalize_e4m3fn_to_e4m3fnuz(
+                        weight=weight,
+                        weight_scale=layer.weight_scale,
+                        input_scale=layer.input_scale)
                 if input_scale is not None:
                     layer.input_scale = Parameter(input_scale,
                                                   requires_grad=False)
+            else:
+                weight_scale = layer.weight_scale.data
 
             layer.weight = Parameter(weight.t(), requires_grad=False)
             # required by torch.compile to be torch.nn.Parameter
-            layer.weight_scale = Parameter(layer.weight_scale.data,
-                                           requires_grad=False)
+            layer.weight_scale = Parameter(weight_scale, requires_grad=False)
 
         else:
             raise ValueError(f"Unknown quantization strategy {self.strategy}")

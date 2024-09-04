@@ -27,7 +27,6 @@ if "HIP_VISIBLE_DEVICES" in os.environ:
     else:
         os.environ["CUDA_VISIBLE_DEVICES"] = val
 
-
 # AMDSMI utils
 # Note that NVML is not affected by `{CUDA/HIP}_VISIBLE_DEVICES`,
 # all the related functions work on real physical device ids.

@@ -101,22 +101,23 @@ class FastSyncLLM:
                     broadcast_tensor_dict({}, src=0)
                     self.need_restart = True
                 for output in step_outputs:
-                    assert len(output.outputs) == 1
-                    output_len = len(output.outputs[0].text)
+                    assert len(output.outputs) == 1 # type: ignore
+                    first_out = output.outputs[0] # type: ignore
+                    output_len = len(first_out.text)
                     stats = None
                     if output_len >= 0 and (output.request_id
                                             not in request_stats):
                         request_stats[output.request_id] = output_len
-                        result = output.outputs[0].text
+                        result = first_out.text
                     else:
-                        result = output.outputs[0].text[
+                        result = first_out.text[
                             request_stats[output.request_id]:output_len]
                     if output.finished:
                         stats = {
                             "prompt": len(output.prompt_token_ids),
-                            "tokens": len(output.outputs[0].token_ids),
-                            "finish_reason": output.outputs[0].finish_reason,
-                            "stop_reason": output.outputs[0].stop_reason,
+                            "tokens": len(first_out.token_ids),
+                            "finish_reason": first_out.finish_reason,
+                            "stop_reason": first_out.stop_reason,
                         }
                         del request_stats[output.request_id]
                     else:

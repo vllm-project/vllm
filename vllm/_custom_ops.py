@@ -664,9 +664,7 @@ def get_meta_buffer_ipc_handle(inp: torch.Tensor) -> torch.Tensor:
 
 
 # ROCm custom
-def LLMM1(a: torch.Tensor,
-          b: torch.Tensor,
-          out: torch.Tensor,
+def LLMM1(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor,
           rows_per_block: int) -> None:
     torch.ops._custom_C.LLMM1(a, b, out, rows_per_block)
 

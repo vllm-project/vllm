@@ -19,7 +19,8 @@ import vllm.envs as envs
 from vllm import FastSyncLLM as LLM
 from vllm.config import EngineConfig
 from vllm.engine.arg_utils import EngineArgs
-from vllm.entrypoints.chat_utils import (_parse_chat_message_content,
+from vllm.entrypoints.chat_utils import (MultiModalItemTracker,
+                                         _parse_chat_message_content,
                                          load_chat_template)
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.entrypoints.openai.protocol import (
@@ -63,7 +64,7 @@ class BackgroundRunner:
         self.llm: LLM
         self.proc: multiprocessing.Process
         self.tokenizer = None
-        self.response_role: Optional[str]
+        self.response_role: str
         self.chat_template: Optional[str]
 
     def set_response_role(self, role):
@@ -234,8 +235,11 @@ async def completions(request: CompletionRequest, raw_request: Request):
     guided_decode_logits_processor = (await _guided_decode_logits_processor(
         request, runner.tokenizer))
     sampling_params = request.to_sampling_params(
-        runner.tokenizer, guided_decode_logits_processor,
-        runner.engine_args.max_model_len)
+        runner.tokenizer,
+        guided_decode_logits_processor,
+        runner.engine_config.model_config.
+        max_model_len  # TODO: gshtras add len(prompt_inputs["prompt_token_ids"])
+    )
     ids, result_queue = await runner.add_request(request.prompt,
                                                  sampling_params)
     res = CompletionResponse(model=request.model,
@@ -342,8 +346,11 @@ async def chat_completions(request: ChatCompletionRequest,
     guided_decode_logits_processor = (await _guided_decode_logits_processor(
         request, runner.tokenizer))
     sampling_params = request.to_sampling_params(
-        runner.tokenizer, guided_decode_logits_processor,
-        runner.engine_args.max_model_len)
+        runner.tokenizer,
+        guided_decode_logits_processor,
+        runner.engine_config.model_config.
+        max_model_len  # TODO: gshtras add len(prompt_inputs["prompt_token_ids"])
+    )
     conversation: List[ConversationMessage] = []
 
     res = ChatCompletionResponse(model=request.model,
@@ -352,10 +359,11 @@ async def chat_completions(request: ChatCompletionRequest,
                                                  total_tokens=0,
                                                  completion_tokens=0))
 
+    mm_tracker = MultiModalItemTracker(runner.engine_config.model_config,
+                                       runner.tokenizer)
     for msg in request.messages:
-        parsed_msg = _parse_chat_message_content(
-            msg, runner.engine_config.model_config, runner.tokenizer)
-        conversation.extend(parsed_msg.messages)
+        parsed_msg = _parse_chat_message_content(msg, mm_tracker)
+        conversation.extend(parsed_msg)
 
     prompt = runner.tokenizer.apply_chat_template(  # type: ignore
         conversation=conversation,
