@@ -56,7 +56,8 @@ class BenchmarkMetrics:
     total_input: int
     total_output: int
     request_throughput: float
-    token_throughput: float
+    output_throughput: float
+    total_token_throughput: float
     mean_ttft_ms: float
     median_ttft_ms: float
     std_ttft_ms: float
@@ -282,7 +283,8 @@ def calculate_metrics(
         total_input=total_input,
         total_output=sum(actual_output_lens),
         request_throughput=completed / dur_s,
-        token_throughput=(total_input + sum(actual_output_lens)) / dur_s,
+        output_throughput=sum(actual_output_lens) / dur_s,
+        total_token_throughput=(total_input + sum(actual_output_lens)) / dur_s,
         mean_ttft_ms=np.mean(ttfts or 0) *
         1000,  # ttfts is empty if streaming is not supported by backend
         std_ttft_ms=np.std(ttfts or 0) * 1000,
@@ -424,8 +426,8 @@ async def benchmark(
                                  metrics.total_output))
     print("{:<40} {:<10.2f}".format("Request throughput (req/s):",
                                     metrics.request_throughput))
-    print("{:<40} {:<10.2f}".format("Token throughput (tok/s):",
-                                    metrics.token_throughput))
+    print("{:<40} {:<10.2f}".format("Total Token throughput (tok/s):",
+                                    metrics.total_token_throughput))
 
     result = {
         "duration": benchmark_duration,
@@ -433,7 +435,8 @@ async def benchmark(
         "total_input_tokens": metrics.total_input,
         "total_output_tokens": metrics.total_output,
         "request_throughput": metrics.request_throughput,
-        "token_throughput": metrics.token_throughput,
+        "output_throughput": metrics.output_throughput,
+        "total_token_throughput": metrics.total_token_throughput,
         "input_lens": [output.prompt_len for output in outputs],
         "output_lens": actual_output_lens,
         "ttfts": [output.ttft for output in outputs],
