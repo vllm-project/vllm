@@ -82,7 +82,6 @@ def test_models(
     with vllm_runner(
             test_model,
             max_model_len=MAX_MODEL_LEN,
-            trust_remote_code=True,
             tensor_parallel_size=tensor_parallel_size,
             enforce_eager=enforce_eager,
             kv_cache_dtype=kv_cache_dtype,
