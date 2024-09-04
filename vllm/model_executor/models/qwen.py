@@ -96,6 +96,7 @@ class VisualAttention(nn.Module):
     and returns output of the same size.
     """
 
+
     def __init__(
         self,
         embed_dim: int,
@@ -128,18 +129,12 @@ class VisualAttention(nn.Module):
 
     def forward(
         self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
+        x: torch.Tensor,
         attn_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         # query/key/value: [sq, b, h]
-        sq, b, _ = query.size()
-
-        assert torch.allclose(query, key), \
-                'Visual Attention implementation only supports self-attention'
-        sk = sq
-        mixed_x_layer = self.in_proj(query)
+        sq, b, _ = x.size()
+        mixed_x_layer = self.in_proj(x)
 
         # [sq, b, (np * 3 * hn)] --> [sq, b, np, 3 * hn]
         new_tensor_shape = mixed_x_layer.size()[:-1] + \
@@ -157,7 +152,7 @@ class VisualAttention(nn.Module):
             self.hidden_size_per_attention_head).transpose(0, 1)
         # [sk, b, np, hn] -> [sk, b * np, hn]
         key_layer = key_layer.view(
-            sk, b * self.num_attention_heads_per_partition,
+            sq, b * self.num_attention_heads_per_partition,
             self.hidden_size_per_attention_head).transpose(0, 1)
 
         q_scaled = query_layer / self.norm_factor
@@ -169,7 +164,7 @@ class VisualAttention(nn.Module):
         attention_probs = attention_probs.softmax(dim=-1)
 
         value_layer = value_layer.view(
-            sk, b * self.num_attention_heads_per_partition,
+            sq, b * self.num_attention_heads_per_partition,
             self.hidden_size_per_attention_head).transpose(0, 1)
 
         # matmul: [b * np, sq, hn]
@@ -192,7 +187,6 @@ class VisualAttention(nn.Module):
 
         return output
 
-
 class VisualAttentionBlock(nn.Module):
 
     def __init__(
@@ -202,14 +196,10 @@ class VisualAttentionBlock(nn.Module):
         mlp_ratio: float = 4.0,
         act_layer: Callable = nn.GELU,
         norm_layer: Callable = nn.LayerNorm,
-        is_cross_attention: bool = False,
     ):
         super().__init__()
 
         self.ln_1 = norm_layer(d_model)
-        if is_cross_attention:
-            self.ln_1_kv = norm_layer(d_model)
-
         self.ln_2 = norm_layer(d_model)
         mlp_width = int(d_model * mlp_ratio)
         self.attn = VisualAttention(d_model, n_head)
@@ -220,31 +210,18 @@ class VisualAttentionBlock(nn.Module):
 
     def attention(
         self,
-        q_x: torch.Tensor,
-        k_x: Optional[torch.Tensor] = None,
-        v_x: Optional[torch.Tensor] = None,
+        x: torch.Tensor,
         attn_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        k_x = k_x if k_x is not None else q_x
-        v_x = v_x if v_x is not None else q_x
-
-        attn_mask = attn_mask.to(q_x.dtype) if attn_mask is not None else None
-        return self.attn(q_x, k_x, v_x, attn_mask=attn_mask)
+        attn_mask = attn_mask.to(x.dtype) if attn_mask is not None else None
+        return self.attn(x, attn_mask=attn_mask)
 
     def forward(
         self,
-        q_x: torch.Tensor,
-        k_x: Optional[torch.Tensor] = None,
-        v_x: Optional[torch.Tensor] = None,
+        x: torch.Tensor,
         attn_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        k_x = self.ln_1_kv(k_x) if hasattr(
-            self, "ln_1_kv") and k_x is not None else None
-        v_x = self.ln_1_kv(v_x) if hasattr(
-            self, "ln_1_kv") and v_x is not None else None
-
-        x = q_x + self.attention(
-            q_x=self.ln_1(q_x), k_x=k_x, v_x=v_x, attn_mask=attn_mask)
+        x = x + self.attention(self.ln_1(x), attn_mask=attn_mask)
         x = x + self.mlp(self.ln_2(x))
         return x
 
