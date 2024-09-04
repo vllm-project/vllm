@@ -171,6 +171,11 @@ include(FetchContent)
 
 # If VLLM_FLASH_ATTN_SRC_DIR is set, vllm-flash-attn is installed from that directory instead of downloading.
 # This is to enable local development of vllm-flash-attn within vLLM.
+# It can be set as an environment variable or passed as a cmake argument.
+if (ENV{VLLM_FLASH_ATTN_SRC_DIR})
+  set(VLLM_FLASH_ATTN_SRC_DIR $ENV{VLLM_FLASH_ATTN_SRC_DIR})
+endif()
+
 if(VLLM_FLASH_ATTN_SRC_DIR)
   FetchContent_Declare(flash-attention SOURCE_DIR ${VLLM_FLASH_ATTN_SRC_DIR})
 else()
@@ -178,7 +183,7 @@ else()
   FetchContent_Declare(
           flash-attention
           GIT_REPOSITORY https://github.com/neuralmagic/flash-attention.git
-          GIT_TAG f38f9dfe2f9c227d986048fe134357b15745bdf4
+          GIT_TAG 0836f4aae65b768d6e55e070b6070b6bde67da02
           GIT_PROGRESS TRUE
   )
 endif()
