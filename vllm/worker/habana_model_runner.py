@@ -91,7 +91,8 @@ def warmup_range(config: Tuple[int, int, int]):
     ramp_up_tw = itertools.takewhile(lambda x: x < bstep and x <= bmax, \
         ramp_up_acc)
     stable = range(bstep, bmax + 1, bstep)
-    return list(ramp_up_tw) + list(stable)
+    buckets = list(ramp_up_tw) + list(stable)
+    return list(filter(lambda bucket: bucket >= bmin, buckets))
 
 
 def warmup_buckets(bs_bucket_config, seq_bucket_config,
