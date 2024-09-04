@@ -1,17 +1,17 @@
 import argparse
 import copy
+import os
 import itertools
 import math
 import pickle as pkl
 import time
-from itertools import product
-from typing import Callable, Iterable, List, Optional, Tuple, Dict
-from functools import partial
-from dataclasses import dataclass
-
 import pandas as pd
 import torch
 import torch.utils.benchmark as TBenchmark
+from itertools import product
+from dataclasses import dataclass
+from typing import Callable, Iterable, List, Optional, Tuple
+
 from torch.utils.benchmark import Measurement as TMeasurement
 from weight_shapes import WEIGHT_SHAPES
 
@@ -30,6 +30,10 @@ DEFAULT_MODELS = ["meta-llama/Llama-3-8b", "meta-llama/Llama-2-70b-hf"]
 DEFAULT_BATCH_SIZES = [1, 16, 32, 64, 128, 256, 512, 1024]
 DEFAULT_TP_SIZES = [1]
 
+NVTX_PROFILE = os.environ.get("NVTX_PROFILE", False)
+
+if NVTX_PROFILE:
+    import nvtx
 
 def terse_type_name(dt):
     return {
@@ -268,8 +272,9 @@ def machete_create_bench_fn(bt: BenchmarkTensors,
 
 def bench_fns(label: str, sub_label: str, description: str,
               fns: List[Callable]):
-    min_run_time = 1
-    return TBenchmark.Timer(
+    
+    min_run_time = 1 if not NVTX_PROFILE else 0.1
+    res = TBenchmark.Timer(
         stmt="""
         for fn in fns:
             fn()
@@ -281,6 +286,13 @@ def bench_fns(label: str, sub_label: str, description: str,
         sub_label=sub_label,
         description=description,
     ).blocked_autorange(min_run_time=min_run_time)
+
+    if NVTX_PROFILE:
+        with nvtx.annotate("mm-bench"):
+            with nvtx.annotate(f"{label}|{sub_label}|{description}"):
+                fns[0]()
+
+    return res
 
 
 _SWEEP_SCHEDULES_RESULTS: Optional[pd.DataFrame] = None
