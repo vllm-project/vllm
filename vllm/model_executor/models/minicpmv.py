@@ -26,11 +26,9 @@ import re
 from array import array
 from functools import partial
 from typing import (Any, Callable, Iterable, List, Mapping, Optional, Tuple,
-                    TypedDict, Union)
+                    TypedDict)
 
-import numpy as np
 import torch
-import torch.nn.functional as F
 import torch.types
 from PIL import Image
 from torch import nn
@@ -44,8 +42,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.resampler import (get_abs_pos,
-                                                  get_2d_sincos_pos_embed)
+from vllm.model_executor.layers.resampler import (get_2d_sincos_pos_embed,
+                                                  Resampler2)
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
@@ -150,62 +148,6 @@ class BaseResampler(nn.Module):
 
     def _repeat(self, query, N: int):
         return query.unsqueeze(1).repeat(1, N, 1)
-
-
-class Resampler2(BaseResampler):
-
-    def __init__(
-        self,
-        grid_size: int,
-        embed_dim: int,
-        num_heads: int,
-        kv_dim: Optional[int] = None,
-        norm_layer: Callable[[int], nn.LayerNorm] = DEFAULT_LN,
-        adaptive: bool = False,
-    ) -> None:
-        super().__init__(grid_size**2, embed_dim, num_heads, kv_dim,
-                         norm_layer)
-
-        self.adaptive = adaptive
-        pos_embed_arr = get_2d_sincos_pos_embed(embed_dim,
-                                                grid_size,
-                                                version=(2, 0))
-        self.pos_embed = nn.Parameter(
-            torch.from_numpy(pos_embed_arr).float()).requires_grad_(False)
-
-        self.apply(self._init_weights)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        tgt_sizes: torch.Tensor,
-        attn_mask: Optional[torch.Tensor] = None,
-    ):
-        if self.adaptive:
-            pos_embed_arr = get_2d_sincos_pos_embed(self.embed_dim,
-                                                    tgt_sizes,
-                                                    version=(2, 0))
-            pos_embed = torch.from_numpy(pos_embed_arr).to(device=x.device,
-                                                           dtype=x.dtype)
-        else:
-            pos_embed = get_abs_pos(self.pos_embed, tgt_sizes)
-
-        x, _ = self.kv_proj(x)
-        x = self.ln_kv(x).permute(1, 0, 2)
-
-        N = x.shape[1]
-        q = self.ln_q(self.query)
-        out = self.attn(
-            self._repeat(q, N) + self.pos_embed.unsqueeze(1),
-            x + pos_embed.unsqueeze(1),
-            x,
-            attn_mask=attn_mask,
-        )[0]
-        x = out.permute(1, 0, 2)
-
-        x = self.ln_post(x)
-        x = x @ self.proj
-        return x
 
 
 class Resampler2_5(BaseResampler):
@@ -689,7 +631,8 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
                 num_heads=embed_dim // 128,
                 grid_size=int(math.sqrt(self.config.query_num)),
                 kv_dim=vision_dim,
-                adaptive=True,
+                adaptive=False,
+                do_post_projection=True,
             )
 
         return resampler

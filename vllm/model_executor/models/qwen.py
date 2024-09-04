@@ -35,7 +35,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.resampler import (get_abs_pos,
-                                                  get_2d_sincos_pos_embed)
+                                                  Resampler2)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -89,65 +89,6 @@ class QwenImageEmbeddingInputs(TypedDict):
 
 
 QwenImageInputs = Union[QwenImagePixelInputs, QwenImageEmbeddingInputs]
-
-
-class Resampler(nn.Module):
-    """
-    A 2D perceiver-resampler network with one cross attention layers by
-        (grid_size**2) learnable queries and 2d sincos pos_emb
-    Outputs:
-        A tensor with the shape of (grid_size**2, embed_dim)
-    """
-
-    def __init__(self,
-                 grid_size,
-                 embed_dim,
-                 num_heads,
-                 device,
-                 dtype,
-                 kv_dim=None,
-                 norm_layer=nn.LayerNorm):
-        super().__init__()
-        self.num_queries = grid_size**2
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        # NOTE - we need to directly initialize the device / dtype since we
-        # init this parameter out of a numpy array, so it defaults to CPU
-        # even though the model itself is initialized in a torch device context
-        # manager by default.
-        self.pos_embed = nn.Parameter(
-            torch.from_numpy(get_2d_sincos_pos_embed(embed_dim, grid_size)).to(
-                dtype=dtype, device=device).requires_grad_(False))
-
-        self.query = nn.Parameter(
-            torch.zeros(self.num_queries, embed_dim).to(device))
-        trunc_normal_(self.query, std=.02)
-
-        if kv_dim is not None and kv_dim != embed_dim:
-            self.kv_proj = nn.Linear(kv_dim, embed_dim, bias=False)
-        else:
-            self.kv_proj = nn.Identity()
-
-        self.attn = nn.MultiheadAttention(embed_dim, num_heads)
-        self.ln_q = norm_layer(embed_dim)
-        self.ln_kv = norm_layer(embed_dim)
-
-    def forward(self, x, attn_mask=None):
-        pos_embed = get_abs_pos(self.pos_embed, int(math.sqrt(x.size(1))))
-
-        x = self.kv_proj(x)
-        x = self.ln_kv(x).permute(1, 0, 2)
-
-        N = x.shape[1]
-        q = self.ln_q(self.query)
-        out = self.attn(self._repeat(q, N) + self.pos_embed.unsqueeze(1),
-                        x + pos_embed.unsqueeze(1),
-                        x,
-                        attn_mask=attn_mask)[0]
-        return out.permute(1, 0, 2)
-
-    def _repeat(self, query, N: int):
-        return query.unsqueeze(1).repeat(1, N, 1)
 
 
 class VisualAttention(nn.Module):
@@ -376,15 +317,19 @@ class VisionTransformer(nn.Module):
             norm_layer=norm_layer,
         )
 
-        self.attn_pool = Resampler(
+        self.attn_pool = Resampler2(
             grid_size=int(math.sqrt(n_queries)),
             embed_dim=output_dim,
             num_heads=output_dim // 128,
-            device=self.positional_embedding.device,
-            dtype=self.positional_embedding.dtype,
             kv_dim=width,
             norm_layer=norm_layer,
+            adaptive=False,
+            do_post_projection=False,
+        ).to(
+            device=self.positional_embedding.device,
+            dtype=self.positional_embedding.dtype,
         )
+
         self.ln_post = norm_layer(output_dim)
         self.proj = nn.Parameter(
             (output_dim**-0.5) * torch.randn(output_dim, output_dim))
