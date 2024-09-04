@@ -52,11 +52,12 @@ class MistralTokenizer:
         assert isinstance(self.tokenizer,
                           (Tekkenizer, SentencePieceTokenizer)), type(
                               self.tokenizer)
-        self._is_tekken = isinstance(self.tokenizer, Tekkenizer)
 
-        if self._is_tekken:
+        if (is_tekken := isinstance(self.tokenizer, Tekkenizer)):
             # Make sure special tokens will not raise
             self.tokenizer.special_token_policy = SpecialTokenPolicy.IGNORE
+
+        self._is_tekken = is_tekken
 
         # the following attributes are set to fit VLLM's design
         self.is_fast = True
