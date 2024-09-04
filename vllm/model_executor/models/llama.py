@@ -572,7 +572,8 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
                 raise RuntimeError("Self attention has no KV cache scaling "
                                    "factor attribute!")
 
-    # This function is used to remap the consolidated format as used by Mistral and Llama <=2
+    # This function is used to remap the consolidated format as
+    # used by Mistral and Llama <=2
     def maybe_remap_consolidated(
             self, name: str,
             loaded_weight: torch.Tensor) -> Tuple[str, torch.Tensor]:
