@@ -404,7 +404,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             torch.empty(num_experts,
                         scales_size13,
                         2 * intermediate_size,
-                        dtype=params_dtype),
+                        dtype=torch.half),
             requires_grad=False,
         )
         layer.register_parameter("w13_scales", w13_scales)
@@ -414,7 +414,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             torch.empty(num_experts,
                         scales_size2,
                         hidden_size,
-                        dtype=params_dtype),
+                        dtype=torch.half),
             requires_grad=False,
         )
         layer.register_parameter("w2_scales", w2_scales)
