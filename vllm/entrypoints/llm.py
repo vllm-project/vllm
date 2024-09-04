@@ -23,7 +23,7 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer,
                                                get_cached_tokenizer)
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Counter, deprecate_kwargs
+from vllm.utils import Counter, deprecate_kwargs, is_list_of
 
 logger = init_logger(__name__)
 
@@ -358,15 +358,18 @@ class LLM:
         add_generation_prompt: bool = True,
     ) -> List[RequestOutput]:
         """
-        Generates responses for chat messages.
+        Generate responses for a chat conversation.
 
-        Converts the messages to prompts using the tokenizer and calls
-        the :meth:`generate` method to generate the responses.
+        The chat conversation is converted into a text prompt using the
+        tokenizer and calls the :meth:`generate` method to generate the
+        responses.
+
+        Multi-modal inputs can be passed in the same way you would pass them
+        to the OpenAI API.
 
         Args:
-            messages: A list of messages to generate responses for. Each
-                message is a list of dictionaries with 'role' and 'content'
-                keys.
+            messages: A single conversation represented as a list of messages.
+                Each message is a dictionary with 'role' and 'content' keys.
             sampling_params: The sampling parameters for text generation.
                 If None, we use the default sampling parameters. When it
                 is a single value, it is applied to every prompt. When it
@@ -387,20 +390,24 @@ class LLM:
         tokenizer = self.get_tokenizer()
         model_config = self.llm_engine.get_model_config()
 
-        conversations, _ = parse_chat_messages(messages, model_config,
-                                               tokenizer)
+        conversation, mm_data = parse_chat_messages(messages, model_config,
+                                                    tokenizer)
 
         prompt = apply_chat_template(
             tokenizer,
-            conversations,
+            conversation,
             chat_template=chat_template,
-            add_generation_prompt=add_generation_prompt)
+            add_generation_prompt=add_generation_prompt,
+        )
 
         inputs: PromptInputs
-        if isinstance(prompt, list) and isinstance(prompt[0], int):
+        if is_list_of(prompt, int):
             inputs = TokensPrompt(prompt_token_ids=prompt)
         else:
             inputs = TextPrompt(prompt=prompt)
+
+        if mm_data is not None:
+            inputs["multi_modal_data"] = mm_data
 
         return self.generate(
             inputs,
