@@ -1,4 +1,4 @@
-from typing import (Callable, Dict, Iterable, List, Literal, Optional,
+from typing import (Dict, Iterable, List, Literal, Optional,
                     Protocol, Tuple, Union, overload)
 
 import torch
@@ -282,7 +282,7 @@ def is_pp_missing_parameter(name: str, model: torch.nn.Module) -> bool:
     return False
 
 def make_empty_intermediate_tensors_factory(keys: List[str],
-                                            hidden_size: int) -> Callable:
+                                            hidden_size: int):
 
     def make_empty_intermediate_tensors(
             batch_size: int, dtype: torch.dtype,
