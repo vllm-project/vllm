@@ -8,7 +8,8 @@ ARG TORCH_CUDA_ARCH_LIST="7.0 7.5 8.0 8.6 8.9 9.0+PTX"
 FROM registry.access.redhat.com/ubi9/ubi-minimal:${BASE_UBI_IMAGE_TAG} as base
 ARG PYTHON_VERSION
 
-RUN microdnf install -y \
+RUN microdnf -y update && \
+    microdnf install -y \
     python${PYTHON_VERSION}-pip python${PYTHON_VERSION}-wheel \
     && microdnf clean all
 
