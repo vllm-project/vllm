@@ -242,6 +242,9 @@ class RayGPUExecutor(DistributedGPUExecutor):
             VLLM_INSTANCE_ID,
             "VLLM_TRACE_FUNCTION":
             str(envs.VLLM_TRACE_FUNCTION),
+            **({
+                "VLLM_ATTENTION_BACKEND": envs.VLLM_ATTENTION_BACKEND
+            } if envs.VLLM_ATTENTION_BACKEND is not None else {})
         }, ) for (node_id, _) in worker_node_and_gpu_ids]
 
         self._env_vars_for_all_workers = (
