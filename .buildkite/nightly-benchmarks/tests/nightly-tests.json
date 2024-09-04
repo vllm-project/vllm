@@ -10,7 +10,7 @@
             "num_prompts": 21,
             "port": 8000,
             "sonnet_input_len": 512,
-            "sonnet_output_len": 1000,
+            "sonnet_output_len": 400,
             "sonnet_prefix_len": 50,
             "reuse_server": false
         },
