@@ -177,7 +177,7 @@ def test_custom_logging_config_is_parsed_and_used_when_provided():
                    logging_config_file.name), patch(
                        "logging.config.dictConfig") as dict_config_mock:
             _configure_vllm_root_logger()
-            assert dict_config_mock.called_with(valid_logging_config)
+            dict_config_mock.assert_called_with(valid_logging_config)
 
 
 @patch("vllm.logger.VLLM_CONFIGURE_LOGGING", 0)
