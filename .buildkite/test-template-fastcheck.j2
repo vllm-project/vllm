@@ -44,4 +44,7 @@ steps:
                                 secretKeyRef:
                                     name: hf-token-secret
                                     key: token
+                        volumeMounts:
+                        -   mountPath: /dev/shm
+                            name: dshm
     {% endfor %}
