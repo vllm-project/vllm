@@ -6,7 +6,7 @@ steps:
         agents:
             queue: cpu-gcp
         commands:
-            - "docker build --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --tag {{ docker_image }} --target test --progress plain ."
+            - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=64 --build-arg buildkite_commit=$BUILDKITE_COMMIT --tag {{ docker_image }} --target test --progress plain ."
             - "docker push {{ docker_image }}"
         env:
             DOCKER_BUILDKIT: "1"
