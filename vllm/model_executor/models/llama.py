@@ -28,7 +28,7 @@ from torch import nn
 from transformers import LlamaConfig
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig, LoRAConfig
+from vllm.config import CacheConfig, LoRAConfig, LoadFormat
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -344,6 +344,14 @@ class LlamaModel(nn.Module):
         return hidden_states
 
 
+def maybe_remap_consolidated(name: str, mapping: Dict[str, str], params_dict: Dict[str, torch.Tensor]) -> str:
+    for item in name.split("."):
+        if item in mapping:
+            name = name.replace(item, mapping[item])
+
+    return name
+
+
 class LlamaForCausalLM(nn.Module, SupportsLoRA):
     packed_modules_mapping = {
         "qkv_proj": [
@@ -374,6 +382,25 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
         "v_proj": ("qkv_proj", 2),
         "gate_proj": ("gate_up_proj", 0),
         "up_proj": ("gate_up_proj", 1),
+    }
+    # for Llama models we also allow parameters to be in 
+    # consolidated format
+    consolidated_mapping = {
+        "layers": "model.layers",
+        "attention": "self_attn",
+        "wq": "q_proj",
+        "wk": "k_proj",
+        "wv": "v_proj",
+        "wo": "o_proj",
+        "attention_norm": "input_layernorm",
+        "feed_forward": "mlp",
+        "w1": "gate_proj",
+        "w2": "down_proj",
+        "w3": "up_proj",
+        "ffn_norm": "post_attention_layernorm",
+        "tok_embeddings": "model.embed_tokens",
+        "output": "lm_head",
+        "norm": "model.norm"
     }
 
     def __init__(
@@ -472,6 +499,8 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
         ]
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
+            name = maybe_remap_consolidated(name, self.consolidated_mapping, params_dict)
+
             if "rotary_emb.inv_freq" in name:
                 continue
             if ("rotary_emb.cos_cached" in name
@@ -504,6 +533,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
                     continue
 
                 param = params_dict[name]
+                
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
 
@@ -514,6 +544,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
                     continue
                 # Remapping the name of FP8 kv-scale.
                 name = maybe_remap_kv_scale_name(name, params_dict)
+
                 if name is None:
                     continue
 

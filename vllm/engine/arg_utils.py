@@ -802,6 +802,7 @@ class EngineArgs:
             served_model_name=self.served_model_name,
             limit_mm_per_prompt=self.limit_mm_per_prompt,
             use_async_output_proc=not self.disable_async_output_proc,
+            load_consolidated_config=self.load_format == "consolidated",
         )
         cache_config = CacheConfig(
             block_size=self.block_size if self.device != "neuron" else

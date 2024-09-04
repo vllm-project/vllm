@@ -22,6 +22,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoadFormat,
                          LoRAConfig, ModelConfig, MultiModalConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.envs import VLLM_USE_MODELSCOPE
+from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -241,12 +242,17 @@ class DefaultModelLoader(BaseModelLoader):
         is_local = os.path.isdir(model_name_or_path)
         load_format = self.load_config.load_format
         use_safetensors = False
+        index_file = SAFE_WEIGHTS_INDEX_NAME
         # Some quantized models use .pt files for storing the weights.
         if load_format == LoadFormat.AUTO:
             allow_patterns = ["*.safetensors", "*.bin"]
         elif load_format == LoadFormat.SAFETENSORS:
             use_safetensors = True
             allow_patterns = ["*.safetensors"]
+        elif load_format == LoadFormat.CONSOLIDATED:
+            use_safetensors = True
+            allow_patterns = ["consolidated*.safetensors"]
+            index_file = "consolidated.safetensors.index.json"
         elif load_format == LoadFormat.PT:
             allow_patterns = ["*.pt"]
         elif load_format == LoadFormat.NPCACHE:
@@ -284,10 +290,10 @@ class DefaultModelLoader(BaseModelLoader):
             # any files not found in the index.
             if not is_local:
                 download_safetensors_index_file_from_hf(
-                    model_name_or_path, self.load_config.download_dir,
+                    model_name_or_path, self.load_config.download_dir, index_file,
                     revision)
             hf_weights_files = filter_duplicate_safetensors_files(
-                hf_weights_files, hf_folder)
+                hf_weights_files, hf_folder, index_file)
         else:
             hf_weights_files = filter_files_not_needed_for_inference(
                 hf_weights_files)
@@ -341,6 +347,7 @@ class DefaultModelLoader(BaseModelLoader):
                 model = _initialize_model(model_config, self.load_config,
                                           lora_config, cache_config,
                                           scheduler_config)
+
             model.load_weights(
                 self._get_weights_iterator(model_config.model,
                                            model_config.revision,
