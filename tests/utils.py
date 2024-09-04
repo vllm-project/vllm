@@ -11,9 +11,11 @@ from typing import Any, Callable, Dict, List, Optional
 
 import openai
 import requests
+from openai.types.completion import Completion
 from transformers import AutoTokenizer
 from typing_extensions import ParamSpec
 
+from tests.models.utils import TextTextLogprobs
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -432,3 +434,61 @@ def fork_new_process_for_each_test(
                                     f" args {args} and kwargs {kwargs}")
 
     return wrapper
+
+
+async def completions_with_server_args(
+    prompts: List[str],
+    model_name: str,
+    server_cli_args: List[str],
+    num_logprobs: Optional[int],
+    max_wait_seconds: int = 240,
+) -> Completion:
+    '''Construct a remote OpenAI server, obtain an async client to the
+    server & invoke the completions API to obtain completions.
+
+    Args:
+      prompts: test prompts
+      model_name: model to spin up on the vLLM server
+      server_cli_args: CLI args for starting the server
+      num_logprobs: Number of logprobs to report (or `None`)
+      max_wait_seconds: timeout interval for bringing up server.
+                        Default: 240sec
+
+    Returns:
+      OpenAI Completion instance
+    '''
+
+    outputs = None
+    with RemoteOpenAIServer(model_name,
+                            server_cli_args,
+                            max_wait_seconds=max_wait_seconds) as server:
+        client = server.get_async_client()
+        outputs = await client.completions.create(model=model_name,
+                                                  prompt=prompts,
+                                                  temperature=0,
+                                                  stream=False,
+                                                  max_tokens=5,
+                                                  logprobs=num_logprobs)
+    assert outputs is not None
+
+    return outputs
+
+
+def get_client_text_generations(completions: Completion) -> List[str]:
+    '''Extract generated tokens from the output of a
+    request made to an Open-AI-protocol completions endpoint.
+    '''
+    return [x.text for x in completions.choices]
+
+
+def get_client_text_logprob_generations(
+        completions: Completion) -> List[TextTextLogprobs]:
+    '''Operates on the output of a request made to an Open-AI-protocol
+    completions endpoint; obtains top-rank logprobs for each token in
+    each :class:`SequenceGroup`
+    '''
+    text_generations = get_client_text_generations(completions)
+    text = ''.join(text_generations)
+    return [(text_generations, text,
+             (None if x.logprobs is None else x.logprobs.top_logprobs))
+            for x in completions.choices]

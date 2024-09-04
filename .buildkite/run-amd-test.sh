@@ -1,5 +1,4 @@
 # This script runs test inside the corresponding ROCm docker container.
-#set -ex
 set -o pipefail
 
 # Print ROCm version
@@ -92,12 +91,13 @@ if [[ $commands == *" kernels "* ]]; then
 fi
 
 PARALLEL_JOB_COUNT=8
-#check if the command contains shard flag
+# check if the command contains shard flag, we will run all shards in parallel because the host have 8 GPUs. 
 if [[ $commands == *"--shard-id="* ]]; then
   for GPU in $(seq 0 $(($PARALLEL_JOB_COUNT-1))); do
     #replace shard arguments
-    commands=${@//"--shard-id= "/"--shard-id=${GPU} "}
+    commands=${commands//"--shard-id= "/"--shard-id=${GPU} "}
     commands=${commands//"--num-shards= "/"--num-shards=${PARALLEL_JOB_COUNT} "}
+    echo "Shard ${GPU} commands:$commands"
     docker run \
         --device /dev/kfd --device /dev/dri \
         --network host \

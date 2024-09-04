@@ -302,7 +302,7 @@ class Scheduler:
         cache_config: CacheConfig,
         lora_config: Optional[LoRAConfig],
         pipeline_parallel_size: int = 1,
-        output_proc_callback_fn: Optional[Callable] = None,
+        output_proc_callback: Optional[Callable] = None,
     ) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
@@ -376,8 +376,8 @@ class Scheduler:
         # iterations. I.e. since the output processing is lagged one step,
         # we cannot reuse the cached objects immediately when the schedule()
         # is called again, but only when schedule() is called the second time.
-        self.output_proc_callback_fn = output_proc_callback_fn
-        self.use_async_output_proc = self.output_proc_callback_fn is not None
+        self.output_proc_callback = output_proc_callback
+        self.use_async_output_proc = self.output_proc_callback is not None
         self.num_cache_iters = 2 if self.use_async_output_proc else 1
 
         self.cache_id = 0
@@ -573,8 +573,8 @@ class Scheduler:
                     seq_group):
                 tmp = self.running
                 self.running = orig_running
-                assert self.output_proc_callback_fn is not None
-                self.output_proc_callback_fn(is_async=True)
+                assert self.output_proc_callback is not None
+                self.output_proc_callback()
                 self.running = tmp
 
             while not self._can_append_slots(seq_group):
@@ -1027,16 +1027,21 @@ class Scheduler:
 
         # Update waiting requests.
         self.waiting.extendleft(running_scheduled.preempted)
+
         # Update new running requests.
-        self.running.extend([s.seq_group for s in prefills.seq_groups])
-        self.running.extend(
-            [s.seq_group for s in running_scheduled.decode_seq_groups])
-        self.running.extend(
-            [s.seq_group for s in running_scheduled.prefill_seq_groups])
+        # By default, vLLM scheduler prioritizes prefills.
+        # Once chunked prefill is enabled,
+        # the policy is changed to prioritize decode requests.
         self.running.extend(
             [s.seq_group for s in swapped_in.decode_seq_groups])
         self.running.extend(
             [s.seq_group for s in swapped_in.prefill_seq_groups])
+        self.running.extend(
+            [s.seq_group for s in running_scheduled.decode_seq_groups])
+        self.running.extend(
+            [s.seq_group for s in running_scheduled.prefill_seq_groups])
+        self.running.extend([s.seq_group for s in prefills.seq_groups])
+
         # Update swapped requests.
         self.swapped.extend(running_scheduled.swapped_out)
         return SchedulerOutputs(
@@ -1088,9 +1093,9 @@ class Scheduler:
         )
 
     def _allow_async_output_proc(self, seq_group: SequenceGroup) -> bool:
-        no_beam_search = (seq_group.sampling_params.best_of == 1
-                          and not seq_group.sampling_params.use_beam_search)
-
+        no_beam_search = seq_group.sampling_params is None or (
+            seq_group.sampling_params.best_of == 1
+            and not seq_group.sampling_params.use_beam_search)
         return no_beam_search
 
     def schedule(
@@ -1107,10 +1112,7 @@ class Scheduler:
         if not self.cache_config.enable_prefix_caching:
             common_computed_block_nums = []
 
-        # TODO: Combine multi-step and async postprocessor
-        allow_async_output_proc: bool = (
-            self.use_async_output_proc
-            and not self.scheduler_config.is_multi_step)
+        allow_async_output_proc: bool = self.use_async_output_proc
 
         # Create input data structures.
         seq_group_metadata_list: List[SequenceGroupMetadata] = []
@@ -1226,7 +1228,8 @@ class Scheduler:
         # will crash the vLLM instance / will not retry.
         for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
             self.block_manager.mark_blocks_as_computed(
-                scheduled_seq_group.seq_group)
+                scheduled_seq_group.seq_group,
+                scheduled_seq_group.token_chunk_size)
 
         self._seq_group_metadata_cache[self.next_cache_id].reset()
 
@@ -1457,10 +1460,27 @@ class Scheduler:
         for seq in seqs:
             num_new_tokens += seq.get_num_new_tokens()
         assert num_new_tokens > 0
-        # Chunk if a running request cannot fit in.
-        # If number of seq > 1, it means it is doing beam search in a
-        # decode phase. Do not chunk in that case.
+        # Chunk if a running request cannot fit in the given budget.
+        # If number of seq > 1, it means it is doing beam search
+        # in a decode phase. Do not chunk.
         if enable_chunking and len(seqs) == 1:
-            num_new_tokens = min(num_new_tokens,
-                                 budget.remaining_token_budget())
+            remaining_token_budget = budget.remaining_token_budget()
+            if self.cache_config.enable_prefix_caching:
+                # When prefix caching is enabled, we always allocate
+                # the number of new tokens that is dividable by the block size
+                # to avoid partial block matching.
+                block_size = self.cache_config.block_size
+                reminder = budget.token_budget % block_size
+                if reminder != 0:
+                    raise ValueError("When enabling chunked prefill and "
+                                     "prefix caching, max_num_batched_tokens "
+                                     "(chunk size) must be dividable by "
+                                     "block size, but got chunk_size "
+                                     f"({budget.token_budget}) % block_size "
+                                     f"({block_size}) = {reminder}")
+                if remaining_token_budget < num_new_tokens:
+                    num_new_tokens = (remaining_token_budget //
+                                      block_size) * block_size
+            else:
+                num_new_tokens = min(num_new_tokens, remaining_token_budget)
         return num_new_tokens

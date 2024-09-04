@@ -44,7 +44,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -57,7 +57,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import cached_get_image_processor
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
-                           SamplerOutput, SequenceData)
+                           SequenceData)
 
 from .idefics2_vision_model import Idefics2VisionTransformer
 
@@ -594,9 +594,14 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal):
 
         pixel_values_flat: List[torch.Tensor] = []
         tgt_sizes_flat: List[torch.Tensor] = []
-        for b in range(len(pixel_values)):
-            pixel_values_flat += pixel_values[b]
-            tgt_sizes_flat += tgt_sizes[b]
+        for pixel_b, tgt_b in zip(pixel_values, tgt_sizes):
+            if len(pixel_b) != len(tgt_b):
+                raise ValueError("Inconsistent N lengths, found: "
+                                 f"{len(pixel_b)} vs {len(tgt_b)}")
+
+            for pixel_n, tgt_n in zip(pixel_b, tgt_b):
+                pixel_values_flat += pixel_n
+                tgt_sizes_flat += tgt_n
 
         # NOTE: Input IDs does not contain image tokens during memory profiling,
         # so we allow it to be empty
