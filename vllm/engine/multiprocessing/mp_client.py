@@ -351,7 +351,6 @@ class MPEngineClient:
                     if not self._errored:
                         try:
                             await self.check_health()
-                            pass
                         except Exception as e:
                             self._errored = True
                             logger.exception(repr(e))
