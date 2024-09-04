@@ -8,8 +8,8 @@ steps:
             queue: kubernetes
         soft_fail: {{ step.soft_fail or false }}
         {% if step.parallelism %}
-    parallelism: {{ step.parallelism }}
-    {% endif %}
+        parallelism: {{ step.parallelism }}
+        {% endif %}
         plugins:
             - kubernetes:
                 podSpec:
