@@ -1,7 +1,7 @@
 import os
 import zipfile
 
-MAX_SIZE_MB = 250
+MAX_SIZE_MB = 300
 
 
 def print_top_10_largest_files(zip_file):
