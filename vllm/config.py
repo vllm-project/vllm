@@ -1,8 +1,8 @@
 import enum
 import json
 from dataclasses import dataclass, field, fields
-from typing import (TYPE_CHECKING, ClassVar, List, Mapping, Optional, Tuple,
-                    Type, Union)
+from typing import (TYPE_CHECKING, Any, ClassVar, Dict, List, Mapping,
+                    Optional, Tuple, Type, Union)
 
 import torch
 from transformers import PretrainedConfig
@@ -115,35 +115,39 @@ class ModelConfig:
             the model name will be the same as `model`.
         limit_mm_per_prompt: Maximum number of data instances per modality 
             per prompt. Only applicable for multimodal models.
+        override_neuron_config: Initialize non default neuron config or 
+            override default neuron config that are specific to Neuron devices, 
+            this argument will be used to configure the neuron config that 
+            can not be gathered from the vllm arguments. 
     """
 
     def __init__(
-        self,
-        model: str,
-        tokenizer: str,
-        tokenizer_mode: str,
-        trust_remote_code: bool,
-        dtype: Union[str, torch.dtype],
-        seed: int,
-        revision: Optional[str] = None,
-        code_revision: Optional[str] = None,
-        rope_scaling: Optional[dict] = None,
-        rope_theta: Optional[float] = None,
-        tokenizer_revision: Optional[str] = None,
-        max_model_len: Optional[int] = None,
-        spec_target_max_model_len: Optional[int] = None,
-        quantization: Optional[str] = None,
-        quantization_param_path: Optional[str] = None,
-        enforce_eager: Optional[bool] = None,
-        max_context_len_to_capture: Optional[int] = None,
-        max_seq_len_to_capture: Optional[int] = None,
-        max_logprobs: int = 20,
-        disable_sliding_window: bool = False,
-        skip_tokenizer_init: bool = False,
-        served_model_name: Optional[Union[str, List[str]]] = None,
-        limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
-        use_async_output_proc: bool = True,
-    ) -> None:
+            self,
+            model: str,
+            tokenizer: str,
+            tokenizer_mode: str,
+            trust_remote_code: bool,
+            dtype: Union[str, torch.dtype],
+            seed: int,
+            revision: Optional[str] = None,
+            code_revision: Optional[str] = None,
+            rope_scaling: Optional[dict] = None,
+            rope_theta: Optional[float] = None,
+            tokenizer_revision: Optional[str] = None,
+            max_model_len: Optional[int] = None,
+            spec_target_max_model_len: Optional[int] = None,
+            quantization: Optional[str] = None,
+            quantization_param_path: Optional[str] = None,
+            enforce_eager: Optional[bool] = None,
+            max_context_len_to_capture: Optional[int] = None,
+            max_seq_len_to_capture: Optional[int] = None,
+            max_logprobs: int = 20,
+            disable_sliding_window: bool = False,
+            skip_tokenizer_init: bool = False,
+            served_model_name: Optional[Union[str, List[str]]] = None,
+            limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
+            use_async_output_proc: bool = True,
+            override_neuron_config: Optional[Dict[str, Any]] = None) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
@@ -227,6 +231,9 @@ class ModelConfig:
             limit_mm_per_prompt)
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
+
+        self.override_neuron_config = override_neuron_config if is_neuron(
+        ) else None
         self._verify_embedding_mode()
         self._verify_quantization()
         self._verify_cuda_graph()
@@ -275,6 +282,7 @@ class ModelConfig:
             "experts_int8"
         ]
         tpu_supported_quantization = ["tpu_int8"]
+        neuron_supported_quantization = ["neuron_quant"]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
 
@@ -329,6 +337,11 @@ class ModelConfig:
                     "Using AWQ quantization with ROCm, but VLLM_USE_TRITON_AWQ"
                     " is not set, enabling VLLM_USE_TRITON_AWQ.")
                 envs.VLLM_USE_TRITON_AWQ = True
+            if is_neuron(
+            ) and self.quantization not in neuron_supported_quantization:
+                raise ValueError(
+                    f"{self.quantization} quantization is currently not "
+                    f"supported in Neuron Backend.")
 
     def _verify_cuda_graph(self) -> None:
         if self.max_seq_len_to_capture is None:
