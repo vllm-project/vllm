@@ -1,5 +1,7 @@
 {% set default_num_gpu = 1 %}
 {% set docker_image = "us-central1-docker.pkg.dev/vllm-gcp/vllm-ci-test-repo-gcp/vllm:28cbb143d1f31153bfcb41226691d16ff92dd894" %}
+{% set default_working_dir = "/vllm-workspace/tests" %}
+{% set hf_home = "/root/.cache/huggingface" %}
 
 steps:
     -   label: "Build"
