@@ -102,8 +102,9 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         # NOTE(woosuk): Set per-rank cache path since different ranks
         # can have slightly different XLA graphs.
         world_size = self.parallel_config.world_size
+        rank = xr.global_ordinal()
         per_rank_path = os.path.join(envs.VLLM_XLA_CACHE_PATH,
-                                     f"tp{world_size}_rank{self.rank}")
+                                     f"tp{world_size}_rank{rank}")
         xr.initialize_cache(per_rank_path, readonly=False)
 
     def load_model(self):
