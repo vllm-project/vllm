@@ -172,7 +172,7 @@ include(FetchContent)
 # If VLLM_FLASH_ATTN_SRC_DIR is set, vllm-flash-attn is installed from that directory instead of downloading.
 # This is to enable local development of vllm-flash-attn within vLLM.
 # It can be set as an environment variable or passed as a cmake argument.
-if (ENV{VLLM_FLASH_ATTN_SRC_DIR})
+if (DEFINED ENV{VLLM_FLASH_ATTN_SRC_DIR})
   set(VLLM_FLASH_ATTN_SRC_DIR $ENV{VLLM_FLASH_ATTN_SRC_DIR})
 endif()
 
