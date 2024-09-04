@@ -50,8 +50,8 @@ _PP_SUPPORTED_MODELS = [
     "Qwen2ForCausalLM",
     "Qwen2MoeForCausalLM",
     "QWenLMHeadModel",
+    "InternLM2ForCausalLM",
     "InternVLChatModel",
-    "InternLM2ForCausalLM"
 ]
 
 
