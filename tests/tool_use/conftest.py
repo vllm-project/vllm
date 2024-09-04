@@ -1,4 +1,5 @@
 import pytest
+import pytest_asyncio
 from huggingface_hub import snapshot_download
 
 from tests.utils import RemoteOpenAIServer
@@ -25,6 +26,7 @@ def server(request, server_config: ServerConfig):
         yield server
 
 
-@pytest.fixture(scope="session")
-def client(server: RemoteOpenAIServer):
-    return server.get_async_client()
+@pytest_asyncio.fixture
+async def client(server: RemoteOpenAIServer):
+    async with server.get_async_client() as async_client:
+        yield async_client
