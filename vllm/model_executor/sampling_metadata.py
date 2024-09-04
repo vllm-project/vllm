@@ -391,6 +391,7 @@ class SamplingTensors:
         device: torch.device,
         dtype: torch.dtype,
         *,
+        head_idx: int = -1,
         extra_seeds_to_generate: int = 0,
         extra_entropy: Optional[Tuple[int, ...]] = None
     ) -> Tuple["SamplingTensors", bool, bool, bool]:
@@ -413,6 +414,7 @@ class SamplingTensors:
         do_penalties = False
         do_top_p_top_k = False
         do_min_p = False
+        is_prompt = False
 
         if _USE_TRITON_SAMPLER:
             prompt_best_of: List[int] = []
@@ -501,6 +503,7 @@ class SamplingTensors:
         if do_penalties:
             for seq_group in sampling_metadata.seq_groups:
                 seq_ids = seq_group.seq_ids
+                repetition_window = seq_group.sampling_params.repetition_window
                 if (seq_group.is_prompt
                         and sampling_params.prompt_logprobs is not None):
                     prefill_len = len(seq_group.prompt_logprob_indices)
@@ -512,14 +515,17 @@ class SamplingTensors:
                     for seq_id in seq_ids:
                         seq_data = seq_group.seq_data[seq_id]
                         prompt_tokens.append(seq_data.prompt_token_ids_array)
-                        output_tokens.append(seq_data.output_token_ids_array)
+                        if head_idx >= 0 and seq_group.is_prompt == False:
+                            output_tokens.append([i[head_idx] for i in seq_data.output_token_ids_array[-repetition_window:]])
+                        else:
+                            output_tokens.append(seq_data.output_token_ids_array)
 
         sampling_tensors = SamplingTensors.from_lists(
             temperatures, top_ps, top_ks, min_ps, presence_penalties,
             frequency_penalties, repetition_penalties, sampling_seeds,
             sample_indices, prompt_tokens, output_tokens, vocab_size,
             extra_seeds_to_generate, device, dtype)
-        return (sampling_tensors, do_penalties, do_top_p_top_k, do_min_p)
+        return (sampling_tensors, do_penalties, do_top_p_top_k, do_min_p, is_prompt)
 
     @classmethod
     def from_lists(cls, temperatures: List[float], top_ps: List[float],

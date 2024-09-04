@@ -15,9 +15,9 @@ prompts = [
     }
 ]
 
-engine_args = AsyncEngineArgs(model='/home/zhn/ttslm', gpu_memory_utilization=0.5, dtype=torch.float32, enforce_eager=True)
+engine_args = AsyncEngineArgs(model='/home/zhn/ttslm_dev', gpu_memory_utilization=0.5, dtype=torch.float16)
 model = AsyncLLMEngine.from_engine_args(engine_args)
-sampling_params = SamplingParams(temperature=1, detokenize=False, stop_token_ids=[21803], max_tokens=2048, top_k=1)
+sampling_params = SamplingParams(temperature=1, detokenize=False, stop_token_ids=[625], max_tokens=2048, top_k=1)
 
 async def generate_streaming(prompt, id):
     results_generator = model.generate(prompt, sampling_params, request_id=id)
@@ -25,8 +25,8 @@ async def generate_streaming(prompt, id):
     tokens = []
     async for request_output in results_generator:
         token_ids = request_output.outputs[0].token_ids
-        print(f'{id}  {[x - 21178 for x in token_ids[-1]]}')
-        tokens.append([x - 21178 for x in token_ids[-1]])
+        print(f'{id}  {[x - 0 for x in token_ids[-1]]}')
+        tokens.append([x - 0 for x in token_ids[-1]])
         count+=1
     
     print(prompt['prompt'])
@@ -35,7 +35,7 @@ async def generate_streaming(prompt, id):
 
 async def generate():
     tasks = []
-    for i in range(10):
+    for i in range(1):
         t = generate_streaming(prompts[i%2], i)
         tasks.append(t)
     await asyncio.gather(*tasks)

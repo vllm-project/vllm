@@ -65,7 +65,7 @@ class ChatTtsLlm(nn.Module):
             nn.Linear(self.model_dim, self.num_audio_tokens, bias=False) for _ in range(self.num_output_head)
         ])
         self.logits_processor = LogitsProcessor(self.num_audio_tokens)
-        self.sampler = Sampler()
+        self.samplers = [Sampler(head_idx) for head_idx in range(self.num_output_head)]
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
@@ -124,9 +124,9 @@ class ChatTtsLlm(nn.Module):
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
         head_logits = logits.permute(1, 0, 2)
-        next_tokens = self.sampler(head_logits[0], sampling_metadata)
+        next_tokens = self.samplers[0](head_logits[0], sampling_metadata)
         for i in range(self.num_output_head - 1):
-            output = self.sampler(head_logits[i + 1], sampling_metadata)
+            output = self.samplers[i](head_logits[i + 1], sampling_metadata)
             self.merge_sample_results(next_tokens, output)
 
         return next_tokens
