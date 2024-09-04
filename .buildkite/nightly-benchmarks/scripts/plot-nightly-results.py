@@ -75,52 +75,78 @@ def main(args):
     for test_file in results_folder.glob("*_nightly_results.json"):
         with open(test_file, "r") as f:
             results = results + json.loads(f.read())
-    
-    # results = []
-    # for step in [0,1,10,11,12]:
-        
-    #     with open(results_folder / f"step{step}.txt", "r") as f:
-    #         temp_results = json.loads(f.read())
-    #         # print(len(temp_results))
-    #         for i in temp_results:
-    #             i['step'] = step
-    #         results = results + temp_results
-    #     print(len(results))
-            
+
+    for result in results:
+        if 'sonnet_512_16' in result['Test name']:
+            result['Test name'] = result['Test name'].replace('sonnet_512_16', 'prefill_heavy')
+        if 'sonnet_512_256' in result['Test name']:
+            result['Test name'] = result['Test name'].replace('sonnet_512_256', 'decode_heavy')
+                
     # generate markdown table
     df = pd.DataFrame.from_dict(sorted(results, key = lambda x: x['Test name']))
-    df['Avg input tokens'] = df['Total input tokens'] / df['Successful req.']
-    df['Avg output tokens'] = df['Total output tokens'] / df['Successful req.']
-    df['Input Throughput'] = df['Input Tput (tok/s)']
-    df['Output Throughput'] = df['Output Tput (tok/s)']
-    df['Throughput'] = df['Tput (req/s)']
-    # df['Mean Latency (ms)'] = df['Mean Latency (ms)'] - 4 * df['Mean TPOT (ms)']
-    # print(df)
-    # df = df[df["Test name"].str.contains(args.dataset)]
-    table = tabulate(df[df["Test name"].str.contains('inf')], headers='keys', tablefmt='pipe', showindex=False)
+    df['Input tokens per request'] = df['Total input tokens'] / df['Successful req.']
+    df['Output tokens per request'] = df['Total output tokens'] / df['Successful req.']
+    df['Throughput (req/s)'] = df['Tput (req/s)']
+
+    df2 = df.copy()
+    
+    
+    drop_keys = []
+    for key in df.keys():
+        if key not in ['Test name',
+                       'Mean TTFT (ms)',
+                       'Std TTFT (ms)',
+                       'Mean TPOT (ms)',
+                       'Std TPOT (ms)',
+                       'Throughput (req/s)',
+                       'Input tokens per request',
+                       'Output tokens per request'
+                       ]:
+            drop_keys.append(key)
+    df = df.drop(columns=drop_keys)
+    table = tabulate(df, 
+                     headers='keys', 
+                     tablefmt='pipe', 
+                     showindex=False)
+
     with open(f"nightly_results.md", "w") as f:
         f.write(table)
+
+        
+    for qps in [2,4,8,16,32,"inf"]:
+        for dataset in ["sharegpt", "decode_heavy", "prefill_heavy"]:
+            subset_df = df['Test name'].str.contains(dataset)
+            subset_df = subset_df & df['Test name'].str.contains("qps_" + str(qps))
+            subset_df = df[subset_df]
+            print((subset_df['Output tokens per request'].max() - subset_df['Output tokens per request'].min()))
+        
+    df = df2
+    df['Throughput'] = df['Throughput (req/s)']
     
 
-    plt.rcParams.update({'font.size': 18})
+    plt.rcParams.update({'font.size': 24})
     plt.set_cmap("cividis")
 
     # plot results
     fig, axes = plt.subplots(3, 3, figsize=(18, 13))
     fig.subplots_adjust(hspace=1)
-    # methods = [0,1,10,11,12]
-    methods = ['vllm', 'sglang', 'lmdeploy', 'trt']
-    formal_name = ['vLLM', 'SGLang', 'lmdeploy',  'TRT-LLM']
-    for model in ["llama70B"]:
-        for i, dataset in enumerate(["sharegpt", "sonnet_512_256", "sonnet_512_16"]):
-            for j, metric in enumerate(["TTFT", "TPOT", "Throughput"]):
+    # methods = ['vllm', 'sglang', 'lmdeploy', 'trt']
+    # formal_name = ['vLLM', 'SGLang', 'lmdeploy',  'TRT-LLM']
+    methods = ['vllm_053post1', 'vllm_055'][::-1]
+    formal_name = ['vLLM v0.5.3', 'vLLM v0.6.0'][::-1]
+    # for model in ["llama70B"]:
+    for i, model in enumerate(["llama8B", "llama70B"]):
+        # for i, dataset in enumerate(["sharegpt", "decode_heavy", "prefill_heavy"]):
+        for dataset in ["sharegpt"]:
+            for j, metric in enumerate(["TPOT", "Throughput"][::-1]):
                 
                 my_df = df[df["Test name"].str.contains(dataset)]
-                my_dataset_name = {
-                    "sharegpt": "ShareGPT",
-                    "sonnet_512_256": "Decode-heavy",
-                    "sonnet_512_16": "Prefill-heavy",
-                }[dataset]
+                # my_dataset_name = {
+                #     "sharegpt": "ShareGPT",
+                #     "sonnet_512_256": "Decode-heavy",
+                #     "sonnet_512_16": "Prefill-heavy",
+                # }[dataset]
+                my_dataset_name = dataset
                 
                 ax = axes[i,j]
                 if metric in ["TTFT", "Latency", "TPOT", "ITL"]:
@@ -128,17 +154,19 @@ def main(args):
                 else:
                     ax.set_ylabel(f"Thoughput (req/s)")
                 
-                if metric == "Tput":
-                    ax.set_title(f"{my_dataset_name} Thoughput")
-                else:
-                    ax.set_title(f"{my_dataset_name} {metric}")
-                ax.grid(axis='y')
-                print(model, metric)
+                # if metric == "Tput":
+                #     ax.set_title(f"{my_dataset_name} Thoughput")
+                # else:
+                #     ax.set_title(f"{my_dataset_name} {metric}")
+                # ax.grid(axis='y')
+                # print(model, metric)
                 
                 tput = {}
                 for k, method in enumerate(methods):
                     mean, std = get_perf_w_std(my_df, method, model, metric)
                     label = formal_name[k]
+                    
+                    # print(method, metric, mean, std)
                     
                     if "Tput" not in metric and "Throughput" not in metric:
                         ax.errorbar(range(len(mean)),
@@ -156,13 +184,13 @@ def main(args):
                         tput[method] = mean[-1]
                         
                 if "Tput" not in metric and "Throughput" not in metric:
-                    ax.legend(framealpha=0.5) 
+                    # ax.legend(framealpha=0.5) 
                     ax.set_ylim(bottom=0)  
                 else:
                     for _ in range(len(formal_name)):
-                        ax.bar(_, tput[methods[_]])
+                        ax.bar(1-_, tput[methods[_]])
                     ax.set_xticks(range(len(formal_name)))
-                    ax.set_xticklabels(formal_name)
+                    ax.set_xticklabels(formal_name[::-1])
                     ax.set_ylim(bottom=0)
                     # ax.bar(formal_name, tput.values())
 
