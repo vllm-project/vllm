@@ -39,75 +39,75 @@ steps:
   - block: ":rocket: Ready for comparing vllm against alternatives? This will take 4 hours."
 
 
-  - label: "A100 vllm latest main"
-    priority: 100
-    agents:
-      queue: A100
-    plugins:
-      - kubernetes:
-          podSpec:
-            <<: *common_pod_spec
-            containers:
-              - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:d4db9f53c8a50a2b0788cf1e03b5b91f20de4313
-                <<: *common_container_settings
+  # - label: "A100 vllm latest main"
+  #   priority: 100
+  #   agents:
+  #     queue: A100
+  #   plugins:
+  #     - kubernetes:
+  #         podSpec:
+  #           <<: *common_pod_spec
+  #           containers:
+  #             - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:d4db9f53c8a50a2b0788cf1e03b5b91f20de4313
+  #               <<: *common_container_settings
 
 
                 
-  - wait
+  # - wait
 
 
-  - label: "A100 sglang benchmark"
-    priority: 100
-    agents:
-      queue: A100
-    plugins:
-      - kubernetes:
-          podSpec:
-            <<: *common_pod_spec
-            containers:
-              - image: lmsysorg/sglang:v0.3.0-cu124
-                <<: *common_container_settings
+  # - label: "A100 sglang benchmark"
+  #   priority: 100
+  #   agents:
+  #     queue: A100
+  #   plugins:
+  #     - kubernetes:
+  #         podSpec:
+  #           <<: *common_pod_spec
+  #           containers:
+  #             - image: lmsysorg/sglang:v0.3.0-cu124
+  #               <<: *common_container_settings
 
-  - label: "A100 lmdeploy benchmark"
-    priority: 100
-    agents:
-      queue: A100
-    plugins:
-      - kubernetes:
-          podSpec:
-            <<: *common_pod_spec
-            containers:
-              - image: openmmlab/lmdeploy:v0.6.0a0-cu12
-                <<: *common_container_settings
-
-
+  # - label: "A100 lmdeploy benchmark"
+  #   priority: 100
+  #   agents:
+  #     queue: A100
+  #   plugins:
+  #     - kubernetes:
+  #         podSpec:
+  #           <<: *common_pod_spec
+  #           containers:
+  #             - image: openmmlab/lmdeploy:v0.6.0a0-cu12
+  #               <<: *common_container_settings
 
 
-  - label: "A100 trt llama-8B"
-    priority: 100
-    agents:
-      queue: A100
-    plugins:
-      - kubernetes:
-          podSpec:
-            <<: *common_pod_spec
-            containers:
-              - image: nvcr.io/nvidia/tritonserver:24.07-trtllm-python-py3
-                <<: *common_container_settings
-                env:
-                  - name: VLLM_USAGE_SOURCE
-                    value: ci-test
-                  - name: HF_HOME
-                    value: /root/.cache/huggingface
-                  - name: VLLM_SOURCE_CODE_LOC
-                    value: /workspace/build/buildkite/vllm/performance-benchmark
-                  - name: HF_TOKEN
-                    valueFrom:
-                      secretKeyRef:
-                        name: hf-token-secret
-                        key: token
-                  - name: TEST_SELECTOR
-                    value: "llama8B"
+
+
+  # - label: "A100 trt llama-8B"
+  #   priority: 100
+  #   agents:
+  #     queue: A100
+  #   plugins:
+  #     - kubernetes:
+  #         podSpec:
+  #           <<: *common_pod_spec
+  #           containers:
+  #             - image: nvcr.io/nvidia/tritonserver:24.07-trtllm-python-py3
+  #               <<: *common_container_settings
+  #               env:
+  #                 - name: VLLM_USAGE_SOURCE
+  #                   value: ci-test
+  #                 - name: HF_HOME
+  #                   value: /root/.cache/huggingface
+  #                 - name: VLLM_SOURCE_CODE_LOC
+  #                   value: /workspace/build/buildkite/vllm/performance-benchmark
+  #                 - name: HF_TOKEN
+  #                   valueFrom:
+  #                     secretKeyRef:
+  #                       name: hf-token-secret
+  #                       key: token
+  #                 - name: TEST_SELECTOR
+  #                   value: "llama8B"
 
 
   - label: "A100 trt llama-70B"

@@ -1,6 +1,6 @@
 [
     {
-        "test_name": "llama8B_tp1_sonnet_512_1024",
+        "test_name": "llama8B_tp1_sonnet_512_400",
         "qps_list": ["inf"],
         "common_parameters": {
             "model": "meta-llama/Meta-Llama-3-8B-Instruct",
