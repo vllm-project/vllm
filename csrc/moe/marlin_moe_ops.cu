@@ -1166,8 +1166,6 @@ __device__ inline void MarlinMoESingle(
     if (slice_iters == 0) {
       cp_async_wait<0>();
       bool last = slice_idx == slice_count - 1;
-      // For per-column scales, we only fetch them here in the final step before
-      // write-out
       if constexpr (!has_act_order && group_blocks == -1) {
         if (last) {
           if (s_sh_wr_pred) {

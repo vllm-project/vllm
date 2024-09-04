@@ -272,16 +272,28 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         from vllm.model_executor.layers.fused_moe.fused_moe import (
             fused_marlin_moe)
 
-        return fused_marlin_moe(x,
-                                layer.w13_weight_packed,
-                                layer.w2_weight_packed,
-                                router_logits,
-                                layer.w13_g_idx,
-                                layer.w2_g_idx,
-                                layer.w13_g_idx_sort_indices,
-                                layer.w2_g_idx_sort_indices,
-                                top_k,
-                                custom_routing_function,
-                                renormalize=renormalize,
-                                w1_scale=layer.w13_weight_scale,
-                                w2_scale=layer.w2_weight_scale)
+        topk_weights, topk_ids = FusedMoE.select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            use_grouped_topk=use_grouped_topk,
+            top_k=top_k,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function)
+
+        return fused_marlin_moe(
+            x,
+            layer.w13_weight_packed,
+            layer.w2_weight_packed,
+            router_logits,
+            layer.w13_g_idx,
+            layer.w2_g_idx,
+            layer.w13_g_idx_sort_indices,
+            layer.w2_g_idx_sort_indices,
+            topk_weights,
+            topk_ids,
+            w1_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            num_bits=self.num_bits,
+        )
