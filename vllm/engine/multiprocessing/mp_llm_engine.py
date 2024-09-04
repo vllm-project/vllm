@@ -57,6 +57,7 @@ class MPLLMEngine:
                  engine_use_ray: bool,
                  *args,
                  ipc_path: str,
+                 use_async_sockets: bool,
                  log_requests: bool = True,
                  **kwargs) -> None:
 
@@ -85,6 +86,10 @@ class MPLLMEngine:
         # IPC path for the data socket.
         self.data_ipc_path = f"{ipc_path}_data_socket"
 
+        # Indicates if we do socket read/write async with
+        # the GPU forward pass
+        self.use_async_sockets = use_async_sockets
+
     @classmethod
     def from_engine_args(cls, engine_args: AsyncEngineArgs,
                          usage_context: UsageContext, ipc_path: str):
@@ -108,7 +113,7 @@ class MPLLMEngine:
             log_stats=not engine_args.disable_log_stats,
             usage_context=usage_context,
             ipc_path=ipc_path,
-        )
+            use_async_sockets=engine_config.model_config.use_async_output_proc)
 
     def cleanup(self):
         """Cleanup zeromq state on shutdown."""
@@ -189,6 +194,10 @@ class MPLLMEngine:
                                           copy=False)
 
     def run_engine_loop(self) -> None:
+        if self.use_async_sockets:
+            self.engine.process_request_outputs_callback = \
+                self.stream_outputs_and_get_inputs
+
         while True:
             # Block until there is a new request.
             if not self.engine.has_unfinished_requests():
@@ -200,8 +209,9 @@ class MPLLMEngine:
             # Engine step.
             request_outputs = self.engine.step()
 
-            # Stream results to output socket.
-            self.stream_outputs(request_outputs)
+            if not self.use_async_sockets:
+                # Stream results to output socket.
+                self.stream_outputs(request_outputs)
 
     def wait_for_new_input(self):
         while self.input_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
@@ -210,6 +220,11 @@ class MPLLMEngine:
     def stream_outputs(self, request_outputs: List[RequestOutput]):
         self.output_socket.send_multipart((pickle.dumps(request_outputs), ),
                                           copy=False)
+
+    def stream_outputs_and_get_inputs(self,
+                                      request_outputs: List[RequestOutput]):
+        self.stream_outputs(request_outputs)
+        self.maybe_handle_new_input()
 
     def ack_check_health(self):
         self.health_socket.send_multipart(
