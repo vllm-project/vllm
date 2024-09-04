@@ -79,6 +79,7 @@ _O = TypeVar("_O", RequestOutput, EmbeddingRequestOutput)
 PromptComponents = Tuple[Optional[str], List[int], Optional[torch.Tensor],
                          Optional[MultiModalDataDict]]
 DecoderPromptComponents = Tuple[Optional[str], Optional[List[int]],
+                                Optional[torch.Tensor],
                                 Optional[MultiModalDataDict]]
 
 
@@ -819,8 +820,8 @@ class LLMEngine:
                     WorkerWrapperBase) else driver_worker.model_runner
                 if not model_runner.model_supports_input_embeds:
                     raise ValueError(
-                        f"Model {self.model_config.model} does not support input "
-                        "embeddings, but prompt_embeds was provided.")
+                        f"Model {self.model_config.model} does not support "
+                        "input embeddings, but prompt_embeds was provided.")
                 prompt = None
                 prompt_token_ids = []
             elif "prompt_token_ids" in inputs:
@@ -895,7 +896,7 @@ class LLMEngine:
         decoder_comps: DecoderPromptComponents,
     ) -> EncoderDecoderLLMInputs:
         encoder_prompt, encoder_prompt_ids, _, encoder_mm_data = encoder_comps
-        decoder_prompt, decoder_prompt_ids, decoder_mm_data = decoder_comps
+        decoder_prompt, decoder_prompt_ids, _, decoder_mm_data = decoder_comps
 
         if encoder_mm_data is not None or decoder_mm_data is not None:
             raise ValueError("Multi-modal encoder-decoder models are "
@@ -959,20 +960,19 @@ class LLMEngine:
             )
 
             if (decoder_input := inputs["decoder_prompt"]) is None:
-                decoder_comps = None, None, None
+                decoder_comps = None, None, None, None
             else:
-                prompt, prompt_token_ids, _, multi_modal_data = self._extract_prompt_components(
+                decoder_comps = self._extract_prompt_components(
                     decoder_input,
                     request_id=request_id,
                 )
-                decoder_comps = prompt, prompt_token_ids, multi_modal_data
         else:
             encoder_comps = self._extract_prompt_components(
                 inputs,
                 request_id=request_id,
             )
 
-            decoder_comps = None, None, None
+            decoder_comps = None, None, None, None
 
         return self._build_enc_dec_llm_inputs(encoder_comps, decoder_comps)
 

@@ -447,8 +447,8 @@ class _AsyncLLMEngine(LLMEngine):
                     WorkerWrapperBase) else driver_worker.model_runner
                 if not model_runner.model_supports_input_embeds:
                     raise ValueError(
-                        f"Model {self.model_config.model} does not support input "
-                        "embeddings, but prompt_embeds was provided.")
+                        f"Model {self.model_config.model} does not support "
+                        "input embeddings, but prompt_embeds was provided.")
                 prompt = None
                 prompt_token_ids = []
             elif "prompt_token_ids" in inputs:
@@ -486,7 +486,7 @@ class _AsyncLLMEngine(LLMEngine):
 
             if (decoder_input := inputs["decoder_prompt"]) is None:
                 encoder_comps = await encoder_task
-                decoder_comps = None, None, None
+                decoder_comps = None, None, None, None
             else:
                 decoder_task = self._extract_prompt_components_async(
                     decoder_input,
@@ -501,7 +501,7 @@ class _AsyncLLMEngine(LLMEngine):
                 request_id=request_id,
             )
 
-            decoder_comps = None, None, None
+            decoder_comps = None, None, None, None
 
         return self._build_enc_dec_llm_inputs(encoder_comps, decoder_comps)
 

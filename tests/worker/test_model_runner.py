@@ -1,4 +1,3 @@
-import itertools
 import random
 from array import array
 from typing import List

@@ -1,8 +1,8 @@
 import time
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional
 from typing import Sequence as GenericSequence
-from typing import Union
+from typing import Tuple, Union
 
 from vllm.lora.request import LoRARequest
 from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
