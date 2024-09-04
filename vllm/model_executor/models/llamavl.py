@@ -22,7 +22,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.logger import init_logger
-from vllm.sequence import IntermediateTensors, SamplerOutput
+from vllm.sequence import IntermediateTensors
 from .interfaces import SupportsMultiModal
 from .llama import LlamaAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -37,6 +37,18 @@ from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
 logger = init_logger(__name__)
 MP_SCALE = 8
 IMAGE_RES = 224
+
+class LlamaImagePixelInputs(TypedDict):
+    type: Literal["pixel_values"]
+    data: torch.Tensor
+    """Shape: `(batch_size, max_num_image, max_num_chunk, num_channels, height, width)`"""
+    aspect_ratios: torch.Tensor
+    """Shape: `(batch_size, max_num_image, 2)`"""
+    num_chunks: List[List[int]]
+
+# TODO: support LlamaImageEmbeddingInputs
+
+LlavaImageInputs = LlamaImagePixelInputs
 
 def get_max_llama_image_tokens(ctx: InputContext) -> int:
     logger.warning("need further check on max llama image tokens")
@@ -456,7 +468,7 @@ class ImageAttention(nn.Module):
         out = F.linear(attn_output, self.wo.weight)
         # out = reduce_from_tensor_model_parallel_region(out)
         out = out / self.qkvo_replication
-        out += self.wo.bias
+        # out += self.wo.bias
         return out
 
 
@@ -1785,115 +1797,108 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
     def setup_cache(self, max_batch_size: int, dtype: torch.dtype):
         self.text_model.setup_cache(max_batch_size, dtype)
 
-    def compute_vision_tokens_masks(
-        self,
-        batch_images: List[List[Image.Image]],
-        batch_masks: List[List[List[int]]],
-        total_len: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        skip_vision_encoder = False
-
-        assert len(batch_images) == len(
-            batch_masks
-        ), "Images and masks must have the same length"
-
-        max_num_images = max(len(x) for x in batch_images)
-        bsz = len(batch_images)
-
-        if max_num_images == 0:
-            num_chunks = [[self.max_num_chunks] for _ in batch_images]
-            skip_vision_encoder = True
-        else:
-            images_and_aspect_ratios = [
-                [self.image_transform(im) for im in row] for row in batch_images
-            ]
-            transformed_images = [
-                [x[0] for x in row] for row in images_and_aspect_ratios
-            ]
-
-            aspect_ratios = torch.ones(bsz, max_num_images, 2, dtype=torch.int64)
-            for i, row in enumerate(images_and_aspect_ratios):
-                if len(row) > 0:
-                    aspect_ratios[i, : len(row)] = torch.stack(
-                        [torch.tensor(x[1]) for x in row]
-                    )
-
-            stacked_images, num_chunks = _stack_images(
-                transformed_images,
-                max_num_chunks=self.max_num_chunks,
-                image_res=self.params.vision_chunk_size,
-                max_num_images=max_num_images,
-            )
-
-        if skip_vision_encoder:
-            vision_tokens = torch.zeros(
-                (
-                    bsz,
-                    max_num_images,
-                    self.max_num_chunks,
-                    int(
-                        (self.vision_model.image_res / self.vision_model.patch_size)
-                        ** 2
-                        + 1
-                    ),
-                    self.model_dim,
-                ),
-            )
-        else:
-            vision_tokens = self.vision_model(stacked_images, aspect_ratios)
-
-        vision_tokens = vision_tokens.to("cuda")
-
-        bsz, nimg, nchunk, ntok, image_token_dim = tuple(vision_tokens.shape)
-        xattn_caches = torch.stack(
-            [
-                layer.compute_xattn_kv_cache(
-                    vision_tokens.view(bsz, -1, image_token_dim)
-                )
-                for layer in self.text_model.cross_attention_layers
-            ]
-        )
-        padded_masks = _pad_masks(
-            batch_masks,
-            num_chunks,
-            total_len,
-            self.max_num_chunks,
-        )
-
-        cross_attention_masks, full_text_row_masked_out_mask = (
-            self.text_model._get_xattn_mask(
-                num_tokens=total_len,
-                text_device="cuda",
-                text_dtype=next(self.text_model.parameters()).dtype,
-                vision_tokens=vision_tokens,
-                cross_attention_masks=padded_masks,
-            )
-        )
-
-        return (xattn_caches, cross_attention_masks, full_text_row_masked_out_mask)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         state_dict = {name: weight for name, weight in weights}
         self.load_state_dict(state_dict, strict=False)
 
+    def _parse_and_validate_image_input(
+            self, **kwargs: object) -> Optional[LlavaImageInputs]:
+        pixel_values = kwargs.pop("pixel_values", None)
+        image_embeds = kwargs.pop("image_embeds", None)
+        aspect_ratios = kwargs.pop("aspect_ratios", None)
+
+        if pixel_values is None and image_embeds is None:
+            return None
+        
+        if pixel_values is not None and image_embeds is not None:
+            raise ValueError("Both pixel values and image embeds are provided.")
+
+        if pixel_values is not None:
+            print("pixel shapes", [x.shape for x in pixel_values])
+            # tensor with the same shape will be batched together by MultiModalInputs.batch, so pixel_values here can be: 
+            #   - List[List[torch.Tensor]]: with shape (num_chunks, 3, image_res, image_res)
+            #   - List[torch.Tensor]: with shape (num_image_in_batch, num_chunks, 3, image_res, image_res)
+            #   - torch.Tensor: with shape (bs, num_image_in_batch, num_chunks, 3, image_res, image_res)
+            # the best choice is to remove MultiModalInputs.batch
+            pixel_values_unpacked = []
+            for b in range(len(pixel_values)):
+                pixel_values_unpacked_b = []
+                for i in range(len(pixel_values[b])):
+                    pixel_values_unpacked_b.append(pixel_values[b][i])
+                pixel_values_unpacked.append(pixel_values_unpacked_b)
+            
+            max_num_images = max([len(x) for x in pixel_values_unpacked])
+            max_num_chunks = max(max([len(x) for x in y]) for y in pixel_values_unpacked)
+            bsz = len(pixel_values_unpacked)
+            out_num_chunks = []
+            out_images = torch.zeros(
+                bsz,
+                max_num_images,
+                max_num_chunks,
+                3,
+                self.image_res,
+                self.image_res
+            )
+            out_ar = torch.ones(bsz, max_num_images, 2, dtype=torch.int64)
+            for b in range(len(pixel_values_unpacked)):
+                _num_chunks = []
+                for i in range(len(pixel_values_unpacked[b])):
+                    img = pixel_values_unpacked[b][i]
+                    out_images[b, i, :img.shape[0]] = img
+                    out_ar[b, i] = aspect_ratios[b][i]
+                    _num_chunks.append(img.shape[0])
+                out_num_chunks.append(_num_chunks)
+
+            return LlamaImagePixelInputs(
+                type="pixel_values",
+                data=out_images,
+                num_chunks=out_num_chunks,
+                aspect_ratios=out_ar,
+            )
+
+        if image_embeds is not None:
+            raise NotImplementedError
+
+        raise AssertionError("This line should be unreachable.")
+
     def forward(
         self,
-        position_ids: torch.Tensor,
-        tokens: torch.Tensor,
-        cross_attention_masks: torch.Tensor,
-        full_text_row_masked_out_mask: torch.Tensor,
-        xattn_caches: torch.Tensor,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        **kwargs: object,
     ) -> torch.Tensor:
-        h = self.text_model.get_partially_trainable_embedding(tokens[:, position_ids])
-        logits = self.text_model.forward(
-            position_ids=position_ids,
-            h=h,
-            xattn_mask=cross_attention_masks[:, :, position_ids],
-            full_text_row_masked_out_mask=full_text_row_masked_out_mask[
-                :, :, position_ids
-            ],
-            xattn_caches=xattn_caches,
-        )
+        print("input_ids", input_ids)
+        print("positions", positions)
+        print("kv_caches", len(kv_caches), kv_caches[0].shape)
+        print("attn_metadata", attn_metadata)
+        print("intermediate_tensors", intermediate_tensors)
+        print("kwargs", kwargs)
+        image = self._parse_and_validate_image_input(**kwargs)
+        if image is None:
+            raise ValueError("No images provided")
+        else:
+            # llama's reference implementation runs the vision model on CPU
+            cuda_images = image['data'].cuda()
+            cuda_aspect_ratios = image['aspect_ratios'].cuda()
+            vision_tokens = self.vision_model(cuda_images, cuda_aspect_ratios)
+            print("vision_tokens", vision_tokens.shape, vision_tokens)
+        # pixel_values = kwargs.pop("pixel_values", None)
+        # if pixel_values is not None:
+
+        # h = self.text_model.get_partially_trainable_embedding(tokens[:, position_ids])
+        # logits = self.text_model.forward(
+        #     position_ids=position_ids,
+        #     h=h,
+        #     xattn_mask=cross_attention_masks[:, :, position_ids],
+        #     full_text_row_masked_out_mask=full_text_row_masked_out_mask[
+        #         :, :, position_ids
+        #     ],
+        #     xattn_caches=xattn_caches,
+        # )
         return logits
 
 

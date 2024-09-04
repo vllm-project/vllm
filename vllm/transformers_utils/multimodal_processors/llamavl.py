@@ -345,9 +345,10 @@ class LlamaVLImageProcessor(BaseImageProcessor):
                         aspect_ratios[i, : len(row)] = torch.stack(
                             [torch.tensor(x[1]) for x in row]
                         )
+                assert bsz == 1, "the below code is not for batched images"
                 data = {
-                    'pixel_values': transformed_images,
-                    'aspect_ratios': aspect_ratios,
+                    'pixel_values': transformed_images[0],
+                    'aspect_ratios': aspect_ratios[0],
                 }
                 # print("transformed_images", transformed_images)
                 # for i, row in enumerate(transformed_images):
