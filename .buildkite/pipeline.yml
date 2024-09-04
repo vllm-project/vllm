@@ -25,16 +25,16 @@ steps:
                         - "'cd /vllm-workspace/test_docs/docs && pip install -r requirements-docs.txt && SPHINXOPTS=\"-W\" make html && grep \"sig sig-object py\" build/html/dev/sampling_params.html'"
                         
                         env:
-                        - name: VLLM_USAGE_SOURCE
+                        -   name: VLLM_USAGE_SOURCE
                             value: ci-test
-                        - name: HF_TOKEN
+                        -   name: HF_TOKEN
                             valueFrom:
-                            secretKeyRef:
-                                name: hf-token-secret
-                                key: token
+                                secretKeyRef:
+                                    name: hf-token-secret
+                                    key: token
                         volumeMounts:
-                        - mountPath: /dev/shm
-                            name: dshm
+                            -   mountPath: /dev/shm
+                                name: dshm
     
     -   label: "Async Engine, Inputs, Utils, Worker Test"
         agents:
@@ -52,22 +52,22 @@ steps:
                         - "'cd  && pytest -v -s async_engine && pytest -v -s test_inputs.py && pytest -v -s multimodal && pytest -v -s test_utils.py && pytest -v -s worker'"
                         
                         resources:
-                        requests:
-                            nvidia.com/gpu: "1"
-                        limits:
-                            nvidia.com/gpu: "1"
+                            requests:
+                                nvidia.com/gpu: "1"
+                            limits:
+                                nvidia.com/gpu: "1"
                         
                         env:
-                        - name: VLLM_USAGE_SOURCE
+                        -   name: VLLM_USAGE_SOURCE
                             value: ci-test
-                        - name: HF_TOKEN
+                        -   name: HF_TOKEN
                             valueFrom:
-                            secretKeyRef:
-                                name: hf-token-secret
-                                key: token
+                                secretKeyRef:
+                                    name: hf-token-secret
+                                    key: token
                         volumeMounts:
-                        - mountPath: /dev/shm
-                            name: dshm
+                            -   mountPath: /dev/shm
+                                name: dshm
     
     -   label: "Basic Correctness Test"
         agents:
@@ -85,22 +85,22 @@ steps:
                         - "'cd  && pytest -v -s basic_correctness/test_basic_correctness.py && pytest -v -s basic_correctness/test_cpu_offload.py && VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_chunked_prefill.py && VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_chunked_prefill.py && VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py'"
                         
                         resources:
-                        requests:
-                            nvidia.com/gpu: "1"
-                        limits:
-                            nvidia.com/gpu: "1"
+                            requests:
+                                nvidia.com/gpu: "1"
+                            limits:
+                                nvidia.com/gpu: "1"
                         
                         env:
-                        - name: VLLM_USAGE_SOURCE
+                        -   name: VLLM_USAGE_SOURCE
                             value: ci-test
-                        - name: HF_TOKEN
+                        -   name: HF_TOKEN
                             valueFrom:
-                            secretKeyRef:
-                                name: hf-token-secret
-                                key: token
+                                secretKeyRef:
+                                    name: hf-token-secret
+                                    key: token
                         volumeMounts:
-                        - mountPath: /dev/shm
-                            name: dshm
+                            -   mountPath: /dev/shm
+                                name: dshm
     
     -   label: "Core Test"
         agents:
@@ -118,22 +118,22 @@ steps:
                         - "'cd  && pytest -v -s core'"
                         
                         resources:
-                        requests:
-                            nvidia.com/gpu: "1"
-                        limits:
-                            nvidia.com/gpu: "1"
+                            requests:
+                                nvidia.com/gpu: "1"
+                            limits:
+                                nvidia.com/gpu: "1"
                         
                         env:
-                        - name: VLLM_USAGE_SOURCE
+                        -   name: VLLM_USAGE_SOURCE
                             value: ci-test
-                        - name: HF_TOKEN
+                        -   name: HF_TOKEN
                             valueFrom:
-                            secretKeyRef:
-                                name: hf-token-secret
-                                key: token
+                                secretKeyRef:
+                                    name: hf-token-secret
+                                    key: token
                         volumeMounts:
-                        - mountPath: /dev/shm
-                            name: dshm
+                            -   mountPath: /dev/shm
+                                name: dshm
     
     -   label: "Entrypoints Test"
         agents:
@@ -151,22 +151,22 @@ steps:
                         - "'cd /vllm-workspace/tests && pip install -e ./plugins/vllm_add_dummy_model && pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git@a4987bba6e9e9b3f22bd3a6c1ecf0abd04fd5622#egg=lm_eval[api] && pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py && pytest -v -s entrypoints/llm/test_lazy_outlines.py && pytest -v -s entrypoints/openai'"
                         
                         resources:
-                        requests:
-                            nvidia.com/gpu: "1"
-                        limits:
-                            nvidia.com/gpu: "1"
+                            requests:
+                                nvidia.com/gpu: "1"
+                            limits:
+                                nvidia.com/gpu: "1"
                         
                         env:
-                        - name: VLLM_USAGE_SOURCE
+                        -   name: VLLM_USAGE_SOURCE
                             value: ci-test
-                        - name: HF_TOKEN
+                        -   name: HF_TOKEN
                             valueFrom:
-                            secretKeyRef:
-                                name: hf-token-secret
-                                key: token
+                                secretKeyRef:
+                                    name: hf-token-secret
+                                    key: token
                         volumeMounts:
-                        - mountPath: /dev/shm
-                            name: dshm
+                            -   mountPath: /dev/shm
+                                name: dshm
     
     -   label: "Distributed Tests (4 GPUs)"
         agents:
@@ -184,22 +184,22 @@ steps:
                         - "'cd /vllm-workspace/tests && pytest -v -s distributed/test_pynccl.py && pytest -v -s spec_decode/e2e/test_integration_dist_tp4.py'"
                         
                         resources:
-                        requests:
-                            nvidia.com/gpu: "4"
-                        limits:
-                            nvidia.com/gpu: "4"
+                            requests:
+                                nvidia.com/gpu: "4"
+                            limits:
+                                nvidia.com/gpu: "4"
                         
                         env:
-                        - name: VLLM_USAGE_SOURCE
+                        -   name: VLLM_USAGE_SOURCE
                             value: ci-test
-                        - name: HF_TOKEN
+                        -   name: HF_TOKEN
                             valueFrom:
-                            secretKeyRef:
-                                name: hf-token-secret
-                                key: token
+                                secretKeyRef:
+                                    name: hf-token-secret
+                                    key: token
                         volumeMounts:
-                        - mountPath: /dev/shm
-                            name: dshm
+                            -   mountPath: /dev/shm
+                                name: dshm
     
     -   label: "Metrics, Tracing Test"
         agents:
@@ -217,22 +217,22 @@ steps:
                         - "'cd  && pytest -v -s metrics && pip install 'opentelemetry-sdk>=1.26.0,<1.27.0' 'opentelemetry-api>=1.26.0,<1.27.0' 'opentelemetry-exporter-otlp>=1.26.0,<1.27.0' 'opentelemetry-semantic-conventions-ai>=0.4.1,<0.5.0' && pytest -v -s tracing'"
                         
                         resources:
-                        requests:
-                            nvidia.com/gpu: "2"
-                        limits:
-                            nvidia.com/gpu: "2"
+                            requests:
+                                nvidia.com/gpu: "2"
+                            limits:
+                                nvidia.com/gpu: "2"
                         
                         env:
-                        - name: VLLM_USAGE_SOURCE
+                        -   name: VLLM_USAGE_SOURCE
                             value: ci-test
-                        - name: HF_TOKEN
+                        -   name: HF_TOKEN
                             valueFrom:
-                            secretKeyRef:
-                                name: hf-token-secret
-                                key: token
+                                secretKeyRef:
+                                    name: hf-token-secret
+                                    key: token
                         volumeMounts:
-                        - mountPath: /dev/shm
-                            name: dshm
+                            -   mountPath: /dev/shm
+                                name: dshm
     
     -   label: "Regression Test"
         agents:
@@ -250,22 +250,22 @@ steps:
                         - "'cd /vllm-workspace/tests && pytest -v -s test_regression.py'"
                         
                         resources:
-                        requests:
-                            nvidia.com/gpu: "1"
-                        limits:
-                            nvidia.com/gpu: "1"
+                            requests:
+                                nvidia.com/gpu: "1"
+                            limits:
+                                nvidia.com/gpu: "1"
                         
                         env:
-                        - name: VLLM_USAGE_SOURCE
+                        -   name: VLLM_USAGE_SOURCE
                             value: ci-test
-                        - name: HF_TOKEN
+                        -   name: HF_TOKEN
                             valueFrom:
-                            secretKeyRef:
-                                name: hf-token-secret
-                                key: token
+                                secretKeyRef:
+                                    name: hf-token-secret
+                                    key: token
                         volumeMounts:
-                        - mountPath: /dev/shm
-                            name: dshm
+                            -   mountPath: /dev/shm
+                                name: dshm
     
     -   label: "Engine Test"
         agents:
@@ -283,22 +283,22 @@ steps:
                         - "'cd  && pytest -v -s engine test_sequence.py test_config.py test_logger.py && pytest -v -s tokenization'"
                         
                         resources:
-                        requests:
-                            nvidia.com/gpu: "1"
-                        limits:
-                            nvidia.com/gpu: "1"
+                            requests:
+                                nvidia.com/gpu: "1"
+                            limits:
+                                nvidia.com/gpu: "1"
                         
                         env:
-                        - name: VLLM_USAGE_SOURCE
+                        -   name: VLLM_USAGE_SOURCE
                             value: ci-test
-                        - name: HF_TOKEN
+                        -   name: HF_TOKEN
                             valueFrom:
-                            secretKeyRef:
-                                name: hf-token-secret
-                                key: token
+                                secretKeyRef:
+                                    name: hf-token-secret
+                                    key: token
                         volumeMounts:
-                        - mountPath: /dev/shm
-                            name: dshm
+                            -   mountPath: /dev/shm
+                                name: dshm
     
     -   label: "Examples Test"
         agents:
@@ -316,22 +316,22 @@ steps:
                         - "'cd /vllm-workspace/examples && pip install awscli tensorizer && python3 offline_inference.py && python3 cpu_offload.py && python3 offline_inference_chat.py && python3 offline_inference_with_prefix.py && python3 llm_engine_example.py && python3 offline_inference_vision_language.py && python3 tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors && python3 offline_inference_encoder_decoder.py'"
                         
                         resources:
-                        requests:
-                            nvidia.com/gpu: "1"
-                        limits:
-                            nvidia.com/gpu: "1"
+                            requests:
+                                nvidia.com/gpu: "1"
+                            limits:
+                                nvidia.com/gpu: "1"
                         
                         env:
-                        - name: VLLM_USAGE_SOURCE
+                        -   name: VLLM_USAGE_SOURCE
                             value: ci-test
-                        - name: HF_TOKEN
+                        -   name: HF_TOKEN
                             valueFrom:
-                            secretKeyRef:
-                                name: hf-token-secret
-                                key: token
+                                secretKeyRef:
+                                    name: hf-token-secret
+                                    key: token
                         volumeMounts:
-                        - mountPath: /dev/shm
-                            name: dshm
+                            -   mountPath: /dev/shm
+                                name: dshm
     
     -   label: "Models Test"
         agents:
@@ -349,22 +349,22 @@ steps:
                         - "'cd  && pip install -e ./plugins/vllm_add_dummy_model && pytest -v -s models/test_oot_registration.py && pytest -v -s models -m \"not vlm\" --ignore=models/test_oot_registration.py'"
                         
                         resources:
-                        requests:
-                            nvidia.com/gpu: "1"
-                        limits:
-                            nvidia.com/gpu: "1"
+                            requests:
+                                nvidia.com/gpu: "1"
+                            limits:
+                                nvidia.com/gpu: "1"
                         
                         env:
-                        - name: VLLM_USAGE_SOURCE
+                        -   name: VLLM_USAGE_SOURCE
                             value: ci-test
-                        - name: HF_TOKEN
+                        -   name: HF_TOKEN
                             valueFrom:
-                            secretKeyRef:
-                                name: hf-token-secret
-                                key: token
+                                secretKeyRef:
+                                    name: hf-token-secret
+                                    key: token
                         volumeMounts:
-                        - mountPath: /dev/shm
-                            name: dshm
+                            -   mountPath: /dev/shm
+                                name: dshm
     
     -   label: "torch compile integration test"
         agents:
@@ -382,22 +382,22 @@ steps:
                         - "'cd  && pytest -v -s ./compile/test_full_graph.py && pytest -v -s ./compile/test_wrapper.py'"
                         
                         resources:
-                        requests:
-                            nvidia.com/gpu: "1"
-                        limits:
-                            nvidia.com/gpu: "1"
+                            requests:
+                                nvidia.com/gpu: "1"
+                            limits:
+                                nvidia.com/gpu: "1"
                         
                         env:
-                        - name: VLLM_USAGE_SOURCE
+                        -   name: VLLM_USAGE_SOURCE
                             value: ci-test
-                        - name: HF_TOKEN
+                        -   name: HF_TOKEN
                             valueFrom:
-                            secretKeyRef:
-                                name: hf-token-secret
-                                key: token
+                                secretKeyRef:
+                                    name: hf-token-secret
+                                    key: token
                         volumeMounts:
-                        - mountPath: /dev/shm
-                            name: dshm
+                            -   mountPath: /dev/shm
+                                name: dshm
     
     -   label: "Vision Language Models Test"
         agents:
@@ -415,22 +415,22 @@ steps:
                         - "'cd  && pytest -v -s models -m vlm'"
                         
                         resources:
-                        requests:
-                            nvidia.com/gpu: "1"
-                        limits:
-                            nvidia.com/gpu: "1"
+                            requests:
+                                nvidia.com/gpu: "1"
+                            limits:
+                                nvidia.com/gpu: "1"
                         
                         env:
-                        - name: VLLM_USAGE_SOURCE
+                        -   name: VLLM_USAGE_SOURCE
                             value: ci-test
-                        - name: HF_TOKEN
+                        -   name: HF_TOKEN
                             valueFrom:
-                            secretKeyRef:
-                                name: hf-token-secret
-                                key: token
+                                secretKeyRef:
+                                    name: hf-token-secret
+                                    key: token
                         volumeMounts:
-                        - mountPath: /dev/shm
-                            name: dshm
+                            -   mountPath: /dev/shm
+                                name: dshm
     
     -   label: "Prefix Caching Test"
         agents:
@@ -448,22 +448,22 @@ steps:
                         - "'cd  && pytest -v -s prefix_caching'"
                         
                         resources:
-                        requests:
-                            nvidia.com/gpu: "1"
-                        limits:
-                            nvidia.com/gpu: "1"
+                            requests:
+                                nvidia.com/gpu: "1"
+                            limits:
+                                nvidia.com/gpu: "1"
                         
                         env:
-                        - name: VLLM_USAGE_SOURCE
+                        -   name: VLLM_USAGE_SOURCE
                             value: ci-test
-                        - name: HF_TOKEN
+                        -   name: HF_TOKEN
                             valueFrom:
-                            secretKeyRef:
-                                name: hf-token-secret
-                                key: token
+                                secretKeyRef:
+                                    name: hf-token-secret
+                                    key: token
                         volumeMounts:
-                        - mountPath: /dev/shm
-                            name: dshm
+                            -   mountPath: /dev/shm
+                                name: dshm
     
     -   label: "Samplers Test"
         agents:
@@ -481,22 +481,22 @@ steps:
                         - "'cd  && pytest -v -s samplers && VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers'"
                         
                         resources:
-                        requests:
-                            nvidia.com/gpu: "1"
-                        limits:
-                            nvidia.com/gpu: "1"
+                            requests:
+                                nvidia.com/gpu: "1"
+                            limits:
+                                nvidia.com/gpu: "1"
                         
                         env:
-                        - name: VLLM_USAGE_SOURCE
+                        -   name: VLLM_USAGE_SOURCE
                             value: ci-test
-                        - name: HF_TOKEN
+                        -   name: HF_TOKEN
                             valueFrom:
-                            secretKeyRef:
-                                name: hf-token-secret
-                                key: token
+                                secretKeyRef:
+                                    name: hf-token-secret
+                                    key: token
                         volumeMounts:
-                        - mountPath: /dev/shm
-                            name: dshm
+                            -   mountPath: /dev/shm
+                                name: dshm
     
     -   label: "LogitsProcessor Test"
         agents:
@@ -514,22 +514,22 @@ steps:
                         - "'cd  && pytest -v -s test_logits_processor.py'"
                         
                         resources:
-                        requests:
-                            nvidia.com/gpu: "1"
-                        limits:
-                            nvidia.com/gpu: "1"
+                            requests:
+                                nvidia.com/gpu: "1"
+                            limits:
+                                nvidia.com/gpu: "1"
                         
                         env:
-                        - name: VLLM_USAGE_SOURCE
+                        -   name: VLLM_USAGE_SOURCE
                             value: ci-test
-                        - name: HF_TOKEN
+                        -   name: HF_TOKEN
                             valueFrom:
-                            secretKeyRef:
-                                name: hf-token-secret
-                                key: token
+                                secretKeyRef:
+                                    name: hf-token-secret
+                                    key: token
                         volumeMounts:
-                        - mountPath: /dev/shm
-                            name: dshm
+                            -   mountPath: /dev/shm
+                                name: dshm
     
     -   label: "Speculative decoding tests"
         agents:
@@ -547,22 +547,22 @@ steps:
                         - "'cd  && export VLLM_ATTENTION_BACKEND=XFORMERS && pytest -v -s spec_decode'"
                         
                         resources:
-                        requests:
-                            nvidia.com/gpu: "1"
-                        limits:
-                            nvidia.com/gpu: "1"
+                            requests:
+                                nvidia.com/gpu: "1"
+                            limits:
+                                nvidia.com/gpu: "1"
                         
                         env:
-                        - name: VLLM_USAGE_SOURCE
+                        -   name: VLLM_USAGE_SOURCE
                             value: ci-test
-                        - name: HF_TOKEN
+                        -   name: HF_TOKEN
                             valueFrom:
-                            secretKeyRef:
-                                name: hf-token-secret
-                                key: token
+                                secretKeyRef:
+                                    name: hf-token-secret
+                                    key: token
                         volumeMounts:
-                        - mountPath: /dev/shm
-                            name: dshm
+                            -   mountPath: /dev/shm
+                                name: dshm
     
     -   label: "LoRA Test %N"
         agents:
@@ -582,22 +582,22 @@ steps:
                         - "'cd  && pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_long_context.py'"
                         
                         resources:
-                        requests:
-                            nvidia.com/gpu: "1"
-                        limits:
-                            nvidia.com/gpu: "1"
+                            requests:
+                                nvidia.com/gpu: "1"
+                            limits:
+                                nvidia.com/gpu: "1"
                         
                         env:
-                        - name: VLLM_USAGE_SOURCE
+                        -   name: VLLM_USAGE_SOURCE
                             value: ci-test
-                        - name: HF_TOKEN
+                        -   name: HF_TOKEN
                             valueFrom:
-                            secretKeyRef:
-                                name: hf-token-secret
-                                key: token
+                                secretKeyRef:
+                                    name: hf-token-secret
+                                    key: token
                         volumeMounts:
-                        - mountPath: /dev/shm
-                            name: dshm
+                            -   mountPath: /dev/shm
+                                name: dshm
     
     -   label: "Kernels Test %N"
         agents:
@@ -617,22 +617,22 @@ steps:
                         - "'cd  && pytest -v -s kernels --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT'"
                         
                         resources:
-                        requests:
-                            nvidia.com/gpu: "1"
-                        limits:
-                            nvidia.com/gpu: "1"
+                            requests:
+                                nvidia.com/gpu: "1"
+                            limits:
+                                nvidia.com/gpu: "1"
                         
                         env:
-                        - name: VLLM_USAGE_SOURCE
+                        -   name: VLLM_USAGE_SOURCE
                             value: ci-test
-                        - name: HF_TOKEN
+                        -   name: HF_TOKEN
                             valueFrom:
-                            secretKeyRef:
-                                name: hf-token-secret
-                                key: token
+                                secretKeyRef:
+                                    name: hf-token-secret
+                                    key: token
                         volumeMounts:
-                        - mountPath: /dev/shm
-                            name: dshm
+                            -   mountPath: /dev/shm
+                                name: dshm
     
     -   label: "Tensorizer Test"
         agents:
@@ -650,22 +650,22 @@ steps:
                         - "'cd  && apt-get update && apt-get install -y curl libsodium23 && export VLLM_WORKER_MULTIPROC_METHOD=spawn && pytest -v -s tensorizer_loader'"
                         
                         resources:
-                        requests:
-                            nvidia.com/gpu: "1"
-                        limits:
-                            nvidia.com/gpu: "1"
+                            requests:
+                                nvidia.com/gpu: "1"
+                            limits:
+                                nvidia.com/gpu: "1"
                         
                         env:
-                        - name: VLLM_USAGE_SOURCE
+                        -   name: VLLM_USAGE_SOURCE
                             value: ci-test
-                        - name: HF_TOKEN
+                        -   name: HF_TOKEN
                             valueFrom:
-                            secretKeyRef:
-                                name: hf-token-secret
-                                key: token
+                                secretKeyRef:
+                                    name: hf-token-secret
+                                    key: token
                         volumeMounts:
-                        - mountPath: /dev/shm
-                            name: dshm
+                            -   mountPath: /dev/shm
+                                name: dshm
     
     -   label: "Benchmarks"
         agents:
@@ -683,22 +683,22 @@ steps:
                         - "'cd /vllm-workspace/.buildkite && pip install aiohttp && bash run-benchmarks.sh'"
                         
                         resources:
-                        requests:
-                            nvidia.com/gpu: "1"
-                        limits:
-                            nvidia.com/gpu: "1"
+                            requests:
+                                nvidia.com/gpu: "1"
+                            limits:
+                                nvidia.com/gpu: "1"
                         
                         env:
-                        - name: VLLM_USAGE_SOURCE
+                        -   name: VLLM_USAGE_SOURCE
                             value: ci-test
-                        - name: HF_TOKEN
+                        -   name: HF_TOKEN
                             valueFrom:
-                            secretKeyRef:
-                                name: hf-token-secret
-                                key: token
+                                secretKeyRef:
+                                    name: hf-token-secret
+                                    key: token
                         volumeMounts:
-                        - mountPath: /dev/shm
-                            name: dshm
+                            -   mountPath: /dev/shm
+                                name: dshm
     
     -   label: "Quantization Test"
         agents:
@@ -716,22 +716,22 @@ steps:
                         - "'cd  && pytest -v -s quantization'"
                         
                         resources:
-                        requests:
-                            nvidia.com/gpu: "1"
-                        limits:
-                            nvidia.com/gpu: "1"
+                            requests:
+                                nvidia.com/gpu: "1"
+                            limits:
+                                nvidia.com/gpu: "1"
                         
                         env:
-                        - name: VLLM_USAGE_SOURCE
+                        -   name: VLLM_USAGE_SOURCE
                             value: ci-test
-                        - name: HF_TOKEN
+                        -   name: HF_TOKEN
                             valueFrom:
-                            secretKeyRef:
-                                name: hf-token-secret
-                                key: token
+                                secretKeyRef:
+                                    name: hf-token-secret
+                                    key: token
                         volumeMounts:
-                        - mountPath: /dev/shm
-                            name: dshm
+                            -   mountPath: /dev/shm
+                                name: dshm
     
     -   label: "LM Eval Small Models"
         agents:
@@ -749,22 +749,22 @@ steps:
                         - "'cd /vllm-workspace/.buildkite/lm-eval-harness && pip install lm-eval && export VLLM_WORKER_MULTIPROC_METHOD=spawn && bash ./run-tests.sh -c configs/models-small.txt -t 1'"
                         
                         resources:
-                        requests:
-                            nvidia.com/gpu: "1"
-                        limits:
-                            nvidia.com/gpu: "1"
+                            requests:
+                                nvidia.com/gpu: "1"
+                            limits:
+                                nvidia.com/gpu: "1"
                         
                         env:
-                        - name: VLLM_USAGE_SOURCE
+                        -   name: VLLM_USAGE_SOURCE
                             value: ci-test
-                        - name: HF_TOKEN
+                        -   name: HF_TOKEN
                             valueFrom:
-                            secretKeyRef:
-                                name: hf-token-secret
-                                key: token
+                                secretKeyRef:
+                                    name: hf-token-secret
+                                    key: token
                         volumeMounts:
-                        - mountPath: /dev/shm
-                            name: dshm
+                            -   mountPath: /dev/shm
+                                name: dshm
     
     -   label: "Distributed Comm Ops Test"
         agents:
@@ -782,22 +782,22 @@ steps:
                         - "'cd /vllm-workspace/tests && pytest -v -s distributed/test_comm_ops.py && pytest -v -s distributed/test_shm_broadcast.py'"
                         
                         resources:
-                        requests:
-                            nvidia.com/gpu: "2"
-                        limits:
-                            nvidia.com/gpu: "2"
+                            requests:
+                                nvidia.com/gpu: "2"
+                            limits:
+                                nvidia.com/gpu: "2"
                         
                         env:
-                        - name: VLLM_USAGE_SOURCE
+                        -   name: VLLM_USAGE_SOURCE
                             value: ci-test
-                        - name: HF_TOKEN
+                        -   name: HF_TOKEN
                             valueFrom:
-                            secretKeyRef:
-                                name: hf-token-secret
-                                key: token
+                                secretKeyRef:
+                                    name: hf-token-secret
+                                    key: token
                         volumeMounts:
-                        - mountPath: /dev/shm
-                            name: dshm
+                            -   mountPath: /dev/shm
+                                name: dshm
     
     -   label: "2 Node Tests (4 GPUs in total)"
         agents:
@@ -815,22 +815,22 @@ steps:
                         - "'cd /vllm-workspace/tests && ["VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py", "VLLM_MULTI_NODE=1 pytest -v -s distributed/test_multi_node_assignment.py", "VLLM_MULTI_NODE=1 pytest -v -s distributed/test_pipeline_parallel.py"] && ["VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py"]'"
                         
                         resources:
-                        requests:
-                            nvidia.com/gpu: "2"
-                        limits:
-                            nvidia.com/gpu: "2"
+                            requests:
+                                nvidia.com/gpu: "2"
+                            limits:
+                                nvidia.com/gpu: "2"
                         
                         env:
-                        - name: VLLM_USAGE_SOURCE
+                        -   name: VLLM_USAGE_SOURCE
                             value: ci-test
-                        - name: HF_TOKEN
+                        -   name: HF_TOKEN
                             valueFrom:
-                            secretKeyRef:
-                                name: hf-token-secret
-                                key: token
+                                secretKeyRef:
+                                    name: hf-token-secret
+                                    key: token
                         volumeMounts:
-                        - mountPath: /dev/shm
-                            name: dshm
+                            -   mountPath: /dev/shm
+                                name: dshm
     
     -   label: "Distributed Tests (2 GPUs)"
         agents:
@@ -848,22 +848,22 @@ steps:
                         - "'cd /vllm-workspace/tests && VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py && TARGET_TEST_SUITE=L4 pytest -v -s distributed/test_basic_distributed_correctness.py && pytest -v -s distributed/test_basic_distributed_correctness_enc_dec.py && pytest -v -s distributed/test_chunked_prefill_distributed.py && pytest -v -s distributed/test_multimodal_broadcast.py && pytest -v -s spec_decode/e2e/test_integration_dist_tp2.py && pip install -e ./plugins/vllm_add_dummy_model && pytest -v -s distributed/test_distributed_oot.py && CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py && CUDA_VISIBLE_DEVICES=0,1 pytest -v -s distributed/test_utils.py'"
                         
                         resources:
-                        requests:
-                            nvidia.com/gpu: "2"
-                        limits:
-                            nvidia.com/gpu: "2"
+                            requests:
+                                nvidia.com/gpu: "2"
+                            limits:
+                                nvidia.com/gpu: "2"
                         
                         env:
-                        - name: VLLM_USAGE_SOURCE
+                        -   name: VLLM_USAGE_SOURCE
                             value: ci-test
-                        - name: HF_TOKEN
+                        -   name: HF_TOKEN
                             valueFrom:
-                            secretKeyRef:
-                                name: hf-token-secret
-                                key: token
+                                secretKeyRef:
+                                    name: hf-token-secret
+                                    key: token
                         volumeMounts:
-                        - mountPath: /dev/shm
-                            name: dshm
+                            -   mountPath: /dev/shm
+                                name: dshm
     
     -   label: "Multi-step Tests (4 GPUs)"
         agents:
@@ -881,22 +881,22 @@ steps:
                         - "'cd /vllm-workspace/tests && pytest -v -s multi_step/test_correctness_async_llm.py && pytest -v -s multi_step/test_correctness_llm.py'"
                         
                         resources:
-                        requests:
-                            nvidia.com/gpu: "4"
-                        limits:
-                            nvidia.com/gpu: "4"
+                            requests:
+                                nvidia.com/gpu: "4"
+                            limits:
+                                nvidia.com/gpu: "4"
                         
                         env:
-                        - name: VLLM_USAGE_SOURCE
+                        -   name: VLLM_USAGE_SOURCE
                             value: ci-test
-                        - name: HF_TOKEN
+                        -   name: HF_TOKEN
                             valueFrom:
-                            secretKeyRef:
-                                name: hf-token-secret
-                                key: token
+                                secretKeyRef:
+                                    name: hf-token-secret
+                                    key: token
                         volumeMounts:
-                        - mountPath: /dev/shm
-                            name: dshm
+                            -   mountPath: /dev/shm
+                                name: dshm
     
     -   label: "Pipeline Parallelism Test"
         agents:
@@ -914,22 +914,22 @@ steps:
                         - "'cd /vllm-workspace/tests && pytest -v -s distributed/test_pp_cudagraph.py && pytest -v -s distributed/test_pipeline_parallel.py'"
                         
                         resources:
-                        requests:
-                            nvidia.com/gpu: "4"
-                        limits:
-                            nvidia.com/gpu: "4"
+                            requests:
+                                nvidia.com/gpu: "4"
+                            limits:
+                                nvidia.com/gpu: "4"
                         
                         env:
-                        - name: VLLM_USAGE_SOURCE
+                        -   name: VLLM_USAGE_SOURCE
                             value: ci-test
-                        - name: HF_TOKEN
+                        -   name: HF_TOKEN
                             valueFrom:
-                            secretKeyRef:
-                                name: hf-token-secret
-                                key: token
+                                secretKeyRef:
+                                    name: hf-token-secret
+                                    key: token
                         volumeMounts:
-                        - mountPath: /dev/shm
-                            name: dshm
+                            -   mountPath: /dev/shm
+                                name: dshm
     
     -   label: "LoRA Long Context (Distributed)"
         agents:
@@ -947,22 +947,22 @@ steps:
                         - "'cd  && export VLLM_WORKER_MULTIPROC_METHOD=spawn && pytest -v -s -x lora/test_long_context.py'"
                         
                         resources:
-                        requests:
-                            nvidia.com/gpu: "4"
-                        limits:
-                            nvidia.com/gpu: "4"
+                            requests:
+                                nvidia.com/gpu: "4"
+                            limits:
+                                nvidia.com/gpu: "4"
                         
                         env:
-                        - name: VLLM_USAGE_SOURCE
+                        -   name: VLLM_USAGE_SOURCE
                             value: ci-test
-                        - name: HF_TOKEN
+                        -   name: HF_TOKEN
                             valueFrom:
-                            secretKeyRef:
-                                name: hf-token-secret
-                                key: token
+                                secretKeyRef:
+                                    name: hf-token-secret
+                                    key: token
                         volumeMounts:
-                        - mountPath: /dev/shm
-                            name: dshm
+                            -   mountPath: /dev/shm
+                                name: dshm
     
     -   label: "Weight Loading Multiple GPU Test"
         agents:
@@ -980,22 +980,22 @@ steps:
                         - "'cd /vllm-workspace/tests && bash weight_loading/run_model_weight_loading_test.sh'"
                         
                         resources:
-                        requests:
-                            nvidia.com/gpu: "2"
-                        limits:
-                            nvidia.com/gpu: "2"
+                            requests:
+                                nvidia.com/gpu: "2"
+                            limits:
+                                nvidia.com/gpu: "2"
                         
                         env:
-                        - name: VLLM_USAGE_SOURCE
+                        -   name: VLLM_USAGE_SOURCE
                             value: ci-test
-                        - name: HF_TOKEN
+                        -   name: HF_TOKEN
                             valueFrom:
-                            secretKeyRef:
-                                name: hf-token-secret
-                                key: token
+                                secretKeyRef:
+                                    name: hf-token-secret
+                                    key: token
                         volumeMounts:
-                        - mountPath: /dev/shm
-                            name: dshm
+                            -   mountPath: /dev/shm
+                                name: dshm
     
     -   label: "Distributed Tests (A100)"
         agents:
@@ -1013,22 +1013,22 @@ steps:
                         - "'cd  && pytest -v -s distributed/test_custom_all_reduce.py && TARGET_TEST_SUITE=A100 pytest -v -s distributed/test_basic_distributed_correctness.py && pytest -v -s -x lora/test_mixtral.py'"
                         
                         resources:
-                        requests:
-                            nvidia.com/gpu: "4"
-                        limits:
-                            nvidia.com/gpu: "4"
+                            requests:
+                                nvidia.com/gpu: "4"
+                            limits:
+                                nvidia.com/gpu: "4"
                         
                         env:
-                        - name: VLLM_USAGE_SOURCE
+                        -   name: VLLM_USAGE_SOURCE
                             value: ci-test
-                        - name: HF_TOKEN
+                        -   name: HF_TOKEN
                             valueFrom:
-                            secretKeyRef:
-                                name: hf-token-secret
-                                key: token
+                                secretKeyRef:
+                                    name: hf-token-secret
+                                    key: token
                         volumeMounts:
-                        - mountPath: /dev/shm
-                            name: dshm
+                            -   mountPath: /dev/shm
+                                name: dshm
     
     -   label: "LM Eval Large Models"
         agents:
@@ -1046,20 +1046,20 @@ steps:
                         - "'cd /vllm-workspace/.buildkite/lm-eval-harness && pip install lm-eval && export VLLM_WORKER_MULTIPROC_METHOD=spawn && bash ./run-tests.sh -c configs/models-large.txt -t 4'"
                         
                         resources:
-                        requests:
-                            nvidia.com/gpu: "4"
-                        limits:
-                            nvidia.com/gpu: "4"
+                            requests:
+                                nvidia.com/gpu: "4"
+                            limits:
+                                nvidia.com/gpu: "4"
                         
                         env:
-                        - name: VLLM_USAGE_SOURCE
+                        -   name: VLLM_USAGE_SOURCE
                             value: ci-test
-                        - name: HF_TOKEN
+                        -   name: HF_TOKEN
                             valueFrom:
-                            secretKeyRef:
-                                name: hf-token-secret
-                                key: token
+                                secretKeyRef:
+                                    name: hf-token-secret
+                                    key: token
                         volumeMounts:
-                        - mountPath: /dev/shm
-                            name: dshm
+                            -   mountPath: /dev/shm
+                                name: dshm
     
