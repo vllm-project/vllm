@@ -344,14 +344,6 @@ class LlamaModel(nn.Module):
         return hidden_states
 
 
-def maybe_remap_consolidated(name: str, mapping: Dict[str, str], params_dict: Dict[str, torch.Tensor]) -> str:
-    for item in name.split("."):
-        if item in mapping:
-            name = name.replace(item, mapping[item])
-
-    return name
-
-
 class LlamaForCausalLM(nn.Module, SupportsLoRA):
     packed_modules_mapping = {
         "qkv_proj": [
@@ -499,7 +491,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
         ]
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
-            name = maybe_remap_consolidated(name, self.consolidated_mapping, params_dict)
+            name, loaded_weight = self.maybe_remap_consolidated(name, loaded_weight)
 
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -580,3 +572,27 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
             else:
                 raise RuntimeError("Self attention has no KV cache scaling "
                                    "factor attribute!")
+
+    def maybe_remap_consolidated(self, name: str, loaded_weight: torch.Tensor) -> Tuple[str, torch.Tensor]:
+        def permute(w, n_heads):
+            attn_in = self.config.head_dim * n_heads
+            attn_out = self.config.hidden_size
+
+            return w.view(n_heads, attn_in // n_heads // 2, 2, attn_out).transpose(1, 2).reshape(attn_in, attn_out)
+
+        mapping = self.consolidated_mapping
+        modules = name.split(".")
+
+        # rotary embeds should be sliced
+        if "wk" in modules:
+            loaded_weight = permute(loaded_weight, self.config.num_key_value_heads)
+        elif "wq" in modules:
+            loaded_weight = permute(loaded_weight, self.config.num_attention_heads)
+
+        for item in modules:
+            if item in mapping and mapping[item] not in name:
+                name = name.replace(item, mapping[item])
+
+        return name, loaded_weight
+
+

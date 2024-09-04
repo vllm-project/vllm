@@ -61,20 +61,20 @@ def get_config(
     # Separate model folder from file path for GGUF models
     is_gguf = check_gguf_file(model)
 
-    if load_from_dict:
-        return get_consolidated_config(model, revision)
-
     if is_gguf:
         kwargs["gguf_file"] = Path(model).name
         model = Path(model).parent
 
     try:
-        config = AutoConfig.from_pretrained(
-            model,
-            trust_remote_code=trust_remote_code,
-            revision=revision,
-            code_revision=code_revision,
-            **kwargs)
+        if load_from_dict:
+            config = get_consolidated_config(model, revision)
+        else:
+            config = AutoConfig.from_pretrained(
+                model,
+                trust_remote_code=trust_remote_code,
+                revision=revision,
+                code_revision=code_revision,
+                **kwargs)
     except ValueError as e:
         if (not trust_remote_code and
                 "requires you to execute the configuration file" in str(e)):
@@ -89,8 +89,8 @@ def get_config(
     if config.model_type in _CONFIG_REGISTRY:
         config_class = _CONFIG_REGISTRY[config.model_type]
         config = config_class.from_pretrained(model,
-                                              revision=revision,
-                                              code_revision=code_revision)
+                                            revision=revision,
+                                            code_revision=code_revision)
 
     # Special architecture mapping check for GGUF models
     if is_gguf:
@@ -106,8 +106,6 @@ def get_config(
             logger.info("Updating %s from %r to %r", key,
                         getattr(config, key, None), value)
             config.update({key: value})
-
-    import ipdb; ipdb.set_trace()
 
     return config
 
@@ -144,7 +142,9 @@ def get_consolidated_config(model, revision) -> PretrainedConfig:
 
     config_dict["model_type"] = config_dict.get("model_type", "transformer")
     config_dict["hidden_act"] = config_dict.get("activation", "silu")
+    config_dict["max_position_embeddings"] = 32768
     config_dict["tie_word_embeddings"] = config_dict.get("tie_embeddings", False)
+    config_dict["torch_dtype"] = "bfloat16"
 
     if config_dict["model_type"] == "transformer":
         if "moe" in config_dict:
