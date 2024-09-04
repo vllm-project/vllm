@@ -44,8 +44,8 @@ def get_perf(df, method, model, metric):
 
 def get_perf_w_std(df, method, model, metric):
     
-    if metric in ["TTFT", "Latency"]:
-        mean = get_perf(df, method, model, "P99 " + metric + " (ms)")
+    if metric in ["TTFT", "Latency", "TPOT", "ITL"]:
+        mean = get_perf(df, method, model, "Mean " + metric + " (ms)")
         mean = mean.tolist()
         std = get_perf(df, method, model, "Std " + metric + " (ms)")
         if std.mean() == 0:
@@ -93,10 +93,11 @@ def main(args):
     df['Avg output tokens'] = df['Total output tokens'] / df['Successful req.']
     df['Input Throughput'] = df['Input Tput (tok/s)']
     df['Output Throughput'] = df['Output Tput (tok/s)']
-    df['Mean Latency (ms)'] = df['Mean Latency (ms)'] - 4 * df['Mean TPOT (ms)']
+    df['Throughput'] = df['Tput (req/s)']
+    # df['Mean Latency (ms)'] = df['Mean Latency (ms)'] - 4 * df['Mean TPOT (ms)']
     # print(df)
     # df = df[df["Test name"].str.contains(args.dataset)]
-    table = tabulate(df[df["Test name"].str.contains('qps_inf')], headers='keys', tablefmt='pipe', showindex=False)
+    table = tabulate(df[df["Test name"].str.contains('inf')], headers='keys', tablefmt='pipe', showindex=False)
     with open(f"nightly_results.md", "w") as f:
         f.write(table)
     
@@ -105,14 +106,14 @@ def main(args):
     plt.set_cmap("cividis")
 
     # plot results
-    fig, axes = plt.subplots(3, 3, figsize=(19, 13))
+    fig, axes = plt.subplots(3, 3, figsize=(18, 13))
     fig.subplots_adjust(hspace=1)
     # methods = [0,1,10,11,12]
     methods = ['vllm', 'sglang', 'lmdeploy', 'trt']
     formal_name = ['vLLM', 'SGLang', 'lmdeploy',  'TRT-LLM']
     for model in ["llama70B"]:
         for i, dataset in enumerate(["sharegpt", "sonnet_512_256", "sonnet_512_16"]):
-            for j, metric in enumerate(["Tput (req/s)", "Output Throughput", "Latency"]):
+            for j, metric in enumerate(["TTFT", "TPOT", "Throughput"]):
                 
                 my_df = df[df["Test name"].str.contains(dataset)]
                 my_dataset_name = {
@@ -122,10 +123,10 @@ def main(args):
                 }[dataset]
                 
                 ax = axes[i,j]
-                if metric in ["TTFT", "Latency"]:
+                if metric in ["TTFT", "Latency", "TPOT", "ITL"]:
                     ax.set_ylabel(f"{metric} (ms)")
                 else:
-                    ax.set_ylabel(f"Thoughput (tokens/s)")
+                    ax.set_ylabel(f"Thoughput (req/s)")
                 
                 if metric == "Tput":
                     ax.set_title(f"{my_dataset_name} Thoughput")
@@ -139,7 +140,7 @@ def main(args):
                     mean, std = get_perf_w_std(my_df, method, model, metric)
                     label = formal_name[k]
                     
-                    if metric == "Latency":
+                    if "Tput" not in metric and "Throughput" not in metric:
                         ax.errorbar(range(len(mean)),
                                     mean, 
                                     yerr=std, 
@@ -147,21 +148,25 @@ def main(args):
                                     capthick=4,
                                     label=label,
                                     lw=4,)
-                        ax.set_ylim(bottom=0)
+                        
                         ax.set_xticks(range(len(mean)))
                         ax.set_xticklabels(["2", "4", "8", "16", "32", "inf"])
                         ax.set_xlabel("QPS")
                     else:
                         tput[method] = mean[-1]
                         
-                if metric == "Latency":
-                    ax.legend()   
+                if "Tput" not in metric and "Throughput" not in metric:
+                    ax.legend(framealpha=0.5) 
+                    ax.set_ylim(bottom=0)  
                 else:
                     for _ in range(len(formal_name)):
                         ax.bar(_, tput[methods[_]])
                     ax.set_xticks(range(len(formal_name)))
                     ax.set_xticklabels(formal_name)
+                    ax.set_ylim(bottom=0)
                     # ax.bar(formal_name, tput.values())
+
+                
 
             
 
