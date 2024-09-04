@@ -56,7 +56,8 @@ void gelu_quick(torch::Tensor& out, torch::Tensor& input);
 
 void advance_step(
     int64_t num_prefill_tokens, int64_t num_prefills, int64_t num_seqs,
-    int64_t num_queries, int64_t block_size, torch::Tensor& input_tokens,
+    int64_t num_queries, int64_t block_size, int64_t num_prefills_with_sampling,
+    torch::Tensor& input_tokens,
     torch::Tensor& sampled_token_ids, torch::Tensor& input_positions,
     torch::Tensor& seq_lens, torch::Tensor& slot_mapping,
     torch::Tensor& block_tables, torch::Tensor& seq_start_loc,
@@ -65,6 +66,8 @@ void advance_step(
     c10::optional<torch::Tensor> const& prefill_steps_slot_mapping,
     c10::optional<torch::Tensor> const& prefill_input_positions_update,
     c10::optional<torch::Tensor> const& prefill_seq_start_loc_update,
+    c10::optional<torch::Tensor> const& prefill_advance_query,
+    c10::optional<torch::Tensor> const& prefill_advance_tokens,
     c10::optional<torch::Tensor> const& prefill_token_chunk_sizes);
 
 #ifndef USE_ROCM

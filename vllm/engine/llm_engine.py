@@ -38,7 +38,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
                            PoolerOutput, SamplerOutput, Sequence,
                            SequenceGroup, SequenceGroupMetadata,
-                           SequenceStatus)
+                           SequenceStatus, CompletionSequenceGroupOutput)
 from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
 from vllm.transformers_utils.config import try_get_generation_config
@@ -1199,19 +1199,42 @@ class LLMEngine:
         output_by_sequence_group = create_output_by_sequence_group(
             output, num_seq_groups=len(scheduled_seq_groups))
 
+        #print (f"output by seqeunce group ...\n")
+        #for osg in output_by_sequence_group:
+        #    print (f"{osg}")
+
+        # Update 
+        if self.scheduler_config.is_multi_step:
+            for scheduled_seq_group, outputs, seq_group_meta in zip(
+                    scheduled_seq_groups, output_by_sequence_group,
+                    seq_group_metadata_list):
+                if not self.scheduler_config.chunked_prefill_enabled:
+                    # multi step prefill updates
+                    scheduled_seq_group.seq_group.update_num_computed_tokens(
+                        scheduled_seq_group.token_chunk_size *
+                        seq_group_meta.state.num_steps)
+                else:
+                    # chunked prefill case
+                    if seq_group_meta.is_prompt:
+                        if seq_group_meta.do_sample:
+                            scheduled_seq_group.seq_group.update_num_computed_tokens(
+                                scheduled_seq_group.token_chunk_size)
+                            # update outputs
+                            assert all([op == outputs[0] for op in outputs])
+                            for idx in range(1, len(outputs)):
+                                outputs[idx] = CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None)
+                        else:
+                            scheduled_seq_group.seq_group.update_num_computed_tokens(
+                                scheduled_seq_group.token_chunk_size *
+                                seq_group_meta.state.num_steps)
+
         # Update the scheduled sequence groups with the model outputs.
         for scheduled_seq_group, outputs, seq_group_meta in zip(
                 scheduled_seq_groups, output_by_sequence_group,
                 seq_group_metadata_list):
             seq_group = scheduled_seq_group.seq_group
 
-            if self.scheduler_config.is_multi_step:
-                if seq_group_meta.is_prompt:
-                    # multi step prefill updates
-                    seq_group.update_num_computed_tokens(
-                        scheduled_seq_group.token_chunk_size *
-                        seq_group_meta.state.num_steps)
-            else:
+            if not self.scheduler_config.is_multi_step:
                 # TODO (varun) : Is this required ?
                 seq_group.update_num_computed_tokens(
                     scheduled_seq_group.token_chunk_size)

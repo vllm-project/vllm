@@ -15,8 +15,7 @@ __device__ void update_decode(
     long* input_tokens_ptr, long* input_positions_ptr, int* seq_lens_ptr,
     long* slot_mapping_ptr, int const* block_tables_ptr,
     long const* sampled_token_ids_ptr, int64_t const block_tables_stride,
-    int const block_size, int* context_lens_ptr, int* seq_start_loc,
-    int const* prefill_seq_start_loc_update) {
+    int const block_size, int* context_lens_ptr) {
   // Update input_tokens
   input_tokens_ptr[token_idx] = sampled_token_ids_ptr[sampled_token_idx];
 
@@ -26,11 +25,6 @@ __device__ void update_decode(
 
   if (context_lens_ptr) {
     context_lens_ptr[cur_query_id] += 1;
-  }
-
-  if (seq_start_loc && prefill_seq_start_loc_update) {
-    seq_start_loc[cur_query_id + 1] +=
-        prefill_seq_start_loc_update[cur_query_id + 1];
   }
 
   // Update seq_lens
@@ -52,18 +46,16 @@ __device__ void update_decode(
 }
 
 __device__ void update_prefill(int const cur_query_id, int* seq_lens_ptr,
-                               int* context_lens_ptr, int* seq_start_loc,
-                               int const* prefill_seq_start_loc_update,
+                               int* context_lens_ptr, 
                                int const* prefill_token_chunk_sizes) {
   seq_lens_ptr[cur_query_id] += prefill_token_chunk_sizes[cur_query_id];
   context_lens_ptr[cur_query_id] += prefill_token_chunk_sizes[cur_query_id];
-  seq_start_loc[cur_query_id + 1] +=
-      prefill_seq_start_loc_update[cur_query_id + 1];
 }
 
 template <int const num_threads>
 __global__ void advance_step_kernel(
     int num_prefill_tokens, int num_prefills, int num_seqs, int num_queries,
+    int num_prefills_with_sampling,
     int block_size, long* input_tokens_ptr, long const* sampled_token_ids_ptr,
     long* input_positions_ptr, int* seq_lens_ptr, long* slot_mapping_ptr,
     int const* block_tables_ptr, int64_t const block_tables_stride,
@@ -73,14 +65,19 @@ __global__ void advance_step_kernel(
     long const* prefill_steps_slot_mapping = nullptr,
     long const* prefill_input_positions_update = nullptr,
     int const* prefill_seq_start_loc_update = nullptr,
+    bool const* prefill_advance_query = nullptr,
+    bool const* prefill_advance_tokens = nullptr,
     int const* prefill_token_chunk_sizes = nullptr) {
+  // TODO : USE PREFILL ADVANCE QUERY AND TOKENS
   // copy prefills
   if (num_prefill_tokens > 0 && blockIdx.x == 0) {
     // Update prefill input tokens and slot mapping
     for (int i = threadIdx.x; i < num_prefill_tokens; i += blockDim.x) {
-      input_tokens_ptr[i] = prefill_steps_tokens[i];
-      slot_mapping_ptr[i] = prefill_steps_slot_mapping[i];
-      input_positions_ptr[i] += prefill_input_positions_update[i];
+      if (prefill_advance_tokens[i]) {
+        input_tokens_ptr[i] = prefill_steps_tokens[i];
+        slot_mapping_ptr[i] = prefill_steps_slot_mapping[i];
+        input_positions_ptr[i] += prefill_input_positions_update[i];
+      }
     }
   }
 
@@ -94,6 +91,12 @@ __global__ void advance_step_kernel(
     return;
   }
 
+  // seq stsart loc update is for all seqs
+  if (seq_start_loc && prefill_seq_start_loc_update) {
+    seq_start_loc[cur_query_id + 1] +=
+        prefill_seq_start_loc_update[cur_query_id + 1];
+  }
+
   bool const is_prefill_query_id = cur_query_id < num_prefills;
 
   if (is_prefill_query_id) {
@@ -102,21 +105,21 @@ __global__ void advance_step_kernel(
     // - input tokens
     // - input positions and,
     // - slot mapping are already updated.
-    update_prefill(cur_query_id, seq_lens_ptr, context_lens_ptr, seq_start_loc,
-                   prefill_seq_start_loc_update, prefill_token_chunk_sizes);
+    if (prefill_advance_query[cur_query_id]) {
+      update_prefill(cur_query_id, seq_lens_ptr, context_lens_ptr, 
+                     prefill_token_chunk_sizes);
+    }
   } else {
     // decode update
     int const decode_token_idx =
         (cur_query_id - num_prefills) + num_prefill_tokens;
-    // TODO (varun) being here means that none of the prefills have do_sample
-    int const sampled_token_idx = cur_query_id - num_prefills;
+    // TODO (fix this )
+    int const sampled_token_idx = num_prefills_with_sampling + (cur_query_id - num_prefills);
     update_decode(
         cur_query_id, decode_token_idx, sampled_token_idx, input_tokens_ptr,
         input_positions_ptr, seq_lens_ptr, slot_mapping_ptr, block_tables_ptr,
         sampled_token_ids_ptr, block_tables_stride, block_size,
-        // prefill_seq_start_loc_update is a misnomer! it is all prefill +
-        // decode
-        context_lens_ptr, seq_start_loc, prefill_seq_start_loc_update);
+        context_lens_ptr);
   }
 }
 
@@ -173,6 +176,7 @@ inline void verify_tensor_ge(std::string const& name, torch::Tensor const& t,
 void advance_step(
     int const num_prefill_tokens, int const num_prefills, int const num_seqs,
     int const num_queries, int const block_size,
+    int const num_prefills_with_sampling,
     torch::Tensor& input_tokens,                               // type: long
     torch::Tensor& sampled_token_ids,                          // type: long
     torch::Tensor& input_positions,                            // type: long
@@ -188,6 +192,10 @@ void advance_step(
         prefill_input_positions_update,  // type long
     c10::optional<torch::Tensor> const& prefill_seq_start_loc_update,
     c10::optional<torch::Tensor> const&
+        prefill_advance_query,  // type int8
+    c10::optional<torch::Tensor> const&
+        prefill_advance_tokens,  // typei int8 
+    c10::optional<torch::Tensor> const&
         prefill_token_chunk_sizes) {  // type int
 
   if (logging) {
@@ -196,6 +204,7 @@ void advance_step(
     printf("  num_prefills = %d\n", num_prefills);
     printf("  num_seqs = %d\n", num_seqs);
     printf("  num_queries = %d\n", num_queries);
+    printf("  num_prefills_with_sampling = %d\n", num_prefills_with_sampling);
     printf("  block_size = %d\n", block_size);
   }
 
@@ -206,6 +215,8 @@ void advance_step(
     TORCH_CHECK(prefill_steps_slot_mapping.has_value());
     TORCH_CHECK(prefill_input_positions_update.has_value());
     TORCH_CHECK(prefill_seq_start_loc_update.has_value());
+    TORCH_CHECK(prefill_advance_query.has_value())
+    TORCH_CHECK(prefill_advance_tokens.has_value())
     TORCH_CHECK(prefill_token_chunk_sizes.has_value());
   } else {
     TORCH_CHECK(num_prefill_tokens == 0);
@@ -214,17 +225,20 @@ void advance_step(
     TORCH_CHECK(!prefill_steps_slot_mapping.has_value());
     TORCH_CHECK(!prefill_input_positions_update.has_value());
     TORCH_CHECK(!prefill_seq_start_loc_update.has_value());
+    TORCH_CHECK(!prefill_advance_query.has_value())
+    TORCH_CHECK(!prefill_advance_tokens.has_value())
     TORCH_CHECK(!prefill_token_chunk_sizes.has_value());
   }
 
   int const num_decode_tokens = num_seqs - num_prefills;
+  int const num_decodes = num_seqs - num_prefills;
   int const expected_num_input_tokens = num_prefill_tokens + num_decode_tokens;
 
   // Verify all tensors
   verify_tensor("input_tokens", input_tokens, expected_num_input_tokens, -1,
                 at::kLong);
   verify_tensor("sampled_token_ids", sampled_token_ids,
-                num_queries - num_prefills, 1, at::kLong);
+                num_decodes + num_prefills_with_sampling, 1, at::kLong);
   verify_tensor("input_positions", input_positions, expected_num_input_tokens,
                 -1, at::kLong);
   verify_tensor("seq_lens", seq_lens, num_seqs, -1, at::kInt);
@@ -246,6 +260,10 @@ void advance_step(
     verify_tensor("prefill_seq_start_loc_update",
                   prefill_seq_start_loc_update.value(), num_seqs + 1, -1,
                   at::kInt);
+    verify_tensor("prefill_advance_query",
+                  prefill_advance_query.value(), num_prefills, -1, at::kChar);
+    verify_tensor("prefill_advance_tokens",
+                  prefill_advance_tokens.value(), num_prefill_tokens, -1, at::kChar);
     verify_tensor("prefill_token_chunk_sizes",
                   prefill_token_chunk_sizes.value(), num_prefills, -1,
                   at::kInt);
@@ -258,7 +276,7 @@ void advance_step(
   cudaDeviceGetAttribute(&blocks, cudaDevAttrMultiProcessorCount, dev);
 
   advance_step_kernel<max_threads><<<blocks, max_threads, 0, stream>>>(
-      num_prefill_tokens, num_prefills, num_seqs, num_queries, block_size,
+      num_prefill_tokens, num_prefills, num_seqs, num_queries, num_prefills_with_sampling, block_size,
       reinterpret_cast<long*>(input_tokens.data_ptr()),
       reinterpret_cast<long const*>(sampled_token_ids.data_ptr()),
       reinterpret_cast<long*>(input_positions.data_ptr()),
@@ -284,6 +302,14 @@ void advance_step(
           ? reinterpret_cast<int const*>(
                 prefill_seq_start_loc_update->data_ptr())
           : nullptr,
+      prefill_advance_query.has_value()
+          ? reinterpret_cast<bool const*>(
+                prefill_advance_query->data_ptr())
+          : nullptr,
+      prefill_advance_tokens.has_value()
+          ? reinterpret_cast<bool const*>(
+                prefill_advance_tokens->data_ptr())
+          : nullptr,
       prefill_token_chunk_sizes.has_value()
           ? reinterpret_cast<int const*>(prefill_token_chunk_sizes->data_ptr())
           : nullptr);
@@ -293,7 +319,8 @@ void advance_step(
 
 void advance_step(
     int64_t num_prefill_tokens, int64_t num_prefills, int64_t num_seqs,
-    int64_t num_queries, int64_t block_size, torch::Tensor& input_tokens,
+    int64_t num_queries, int64_t block_size, int64_t num_prefills_with_sampling, 
+    torch::Tensor& input_tokens,
     torch::Tensor& sampled_token_ids, torch::Tensor& input_positions,
     torch::Tensor& seq_lens, torch::Tensor& slot_mapping,
     torch::Tensor& block_tables,
@@ -303,11 +330,15 @@ void advance_step(
     c10::optional<torch::Tensor> const& prefill_steps_slot_mapping,
     c10::optional<torch::Tensor> const& prefill_input_positions_update,
     c10::optional<torch::Tensor> const& prefill_seq_start_loc_update,
+    c10::optional<torch::Tensor> const& prefill_advance_query,
+    c10::optional<torch::Tensor> const& prefill_advance_tokens,
     c10::optional<torch::Tensor> const& prefill_token_chunk_sizes) {
   prepare_inputs::advance_step(
       num_prefill_tokens, num_prefills, num_seqs, num_queries, block_size,
+      num_prefills_with_sampling,
       input_tokens, sampled_token_ids, input_positions, seq_lens, slot_mapping,
       block_tables, seq_start_loc, context_lens, prefill_steps_tokens,
       prefill_steps_slot_mapping, prefill_input_positions_update,
-      prefill_seq_start_loc_update, prefill_token_chunk_sizes);
+      prefill_seq_start_loc_update, prefill_advance_query, prefill_advance_tokens,
+      prefill_token_chunk_sizes);
 }

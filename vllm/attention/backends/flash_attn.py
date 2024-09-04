@@ -247,8 +247,8 @@ class FlashAttentionMetadata(AttentionMetadata):
         if self.num_prefills == 0:
             return None
 
-        if self._cached_prefill_metadata is not None:
-            return self._cached_prefill_metadata
+        #if self._cached_prefill_metadata is not None:
+        #    return self._cached_prefill_metadata
 
         assert self.seq_lens is not None
         assert self.seq_lens_tensor is not None
@@ -256,6 +256,8 @@ class FlashAttentionMetadata(AttentionMetadata):
         assert self.context_lens_tensor is not None
         assert self.block_tables is not None
         assert self.seq_start_loc is not None
+
+        assert self.query_start_loc.shape[0] >= self.num_prefills + 1
 
         self._cached_prefill_metadata = FlashAttentionMetadata(
             num_prefills=self.num_prefills,
@@ -358,7 +360,8 @@ class FlashAttentionMetadata(AttentionMetadata):
     def advance_step(self,
                      num_seqs: int,
                      num_queries: int,
-                     prefill_token_chunk_sizes: Optional[List[int]] = None):
+                     prefill_token_chunk_sizes: Optional[List[int]] = None,
+                     prefill_do_samples: Optional[List[int]] = None):
         """
         Update metadata in-place to advance one decode step.
         """
@@ -398,6 +401,7 @@ class FlashAttentionMetadata(AttentionMetadata):
             assert prefill_token_chunk_sizes is not None
             assert sum(prefill_token_chunk_sizes) == self.num_prefill_tokens
             assert len(prefill_token_chunk_sizes) == self.num_prefills
+            assert len(prefill_do_samples) == self.num_prefills
             assert self.num_decode_tokens == num_seqs - self.num_prefills
         else:
             assert self.num_prefills == 0
@@ -412,7 +416,9 @@ class FlashAttentionMetadata(AttentionMetadata):
         if has_prefills:
             assert prefill_token_chunk_sizes is not None
             for idx, tcs in enumerate(prefill_token_chunk_sizes):
-                self.seq_lens[idx] += tcs
+                if not prefill_do_samples[idx]:
+                    # do_sample prefills end in first step
+                    self.seq_lens[idx] += tcs
         for i in range(self.num_prefills, num_queries):
             self.seq_lens[i] += 1
 
@@ -711,6 +717,11 @@ class FlashAttentionImpl(AttentionImpl):
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
+        slot_max = torch.max(attn_metadata.slot_mapping.flatten())
+        slot_min = torch.min(attn_metadata.slot_mapping.flatten())
+        print (f"max block acccesed : {slot_max/16} - min {slot_min}")
+        assert slot_max / 16 < 27911
+
         if kv_cache is not None:
             key_cache = kv_cache[0]
             value_cache = kv_cache[1]
@@ -771,6 +782,39 @@ class FlashAttentionImpl(AttentionImpl):
             else:
                 # prefix-enabled attention
                 assert prefill_meta.seq_lens is not None
+
+            #self._cached_prefill_metadata = FlashAttentionMetadata(
+            #    num_prefills=self.num_prefills,
+            #    num_prefill_tokens=self.num_prefill_tokens,
+            #    num_decode_tokens=0,
+            #    slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
+            #    seq_lens=self.seq_lens[:self.num_prefills],
+            #    seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
+            #    max_query_len=self.max_query_len,
+            #    max_prefill_seq_len=self.max_prefill_seq_len,
+            #    max_decode_seq_len=0,
+            #    query_start_loc=self.query_start_loc[:self.num_prefills + 1],
+            #    seq_start_loc=self.seq_start_loc[:self.num_prefills + 1],
+            #    context_lens_tensor=self.context_lens_tensor[:self.num_prefills],
+            #    block_tables=self.block_tables[:self.num_prefills],
+            #    use_cuda_graph=False,
+            #)
+
+                #print ("prefill metada sclara : ")
+                #print (f"    - num_prefills {prefill_meta.num_prefills}")
+                #print (f"    - num_prefills_tokens {prefill_meta.num_prefill_tokens}")
+                #print (f"   - num decode tokens {prefill_meta.num_decode_tokens}")
+                #print (f"   - max query lens {prefill_meta.max_query_len}")
+                #print (f"   - max prefill seq lens {prefill_meta.max_prefill_seq_len}")
+                #print (f"   - max decode seq len {prefill_meta.max_decode_seq_len}")
+                #print (f"   - query start loc ptr {hex(id(prefill_meta.query_start_loc.data_ptr()))}")
+                #print (f"   - query start loc {prefill_meta.query_start_loc}")
+                #print (f"   - query seq start loc {prefill_meta.seq_start_loc}")
+                #print (f"   - query start loc shape {prefill_meta.query_start_loc.shape}")
+
+                #print (f"prefill meta {prefill_meta}")
+                #print (f"prefill meta query sstart loc {prefill_meta.query_start_loc}")
+
                 max_seq_len = max(prefill_meta.seq_lens)
                 output[:
                        num_prefill_tokens] = torch.ops.vllm.flash_attn_varlen_func(  # noqa
