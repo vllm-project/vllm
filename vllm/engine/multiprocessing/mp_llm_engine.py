@@ -114,6 +114,7 @@ class MPLLMEngine:
         """Cleanup zeromq state on shutdown."""
         self.input_socket.close()
         self.output_socket.close()
+        self.health_socket.close()
         self.ctx.destroy(linger=0)
         del self.engine
 

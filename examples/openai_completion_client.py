@@ -19,7 +19,7 @@ completion = client.completions.create(
     model=model,
     prompt="A robot may not injure a human being",
     stream=stream,
-    max_tokens=100)
+    logprobs=3)
 
 print("Completion results:")
 if stream:

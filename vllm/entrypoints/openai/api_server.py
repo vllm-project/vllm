@@ -21,7 +21,6 @@ import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-# yapf: enable
 from vllm.engine.multiprocessing.mp_client import MPEngineClient
 from vllm.engine.multiprocessing.mp_llm_engine import run_mp_engine
 from vllm.engine.protocol import AsyncEngineClient
@@ -40,6 +39,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               EmbeddingResponse, ErrorResponse,
                                               TokenizeRequest,
                                               TokenizeResponse)
+# yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
@@ -82,7 +82,7 @@ async def lifespan(app: FastAPI):
 
     async def _force_log():
         while True:
-            await asyncio.sleep(1.)
+            await asyncio.sleep(10)
             await async_engine_client.do_log_stats()
 
     if not engine_args.disable_log_stats:
