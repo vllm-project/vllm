@@ -39,8 +39,8 @@ VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
     ],
 )
 @fork_new_process_for_each_test
-def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, TRUST_REMOTE_CODE, MODEL_NAME,
-                    DIST_BACKEND):
+def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL,
+                    TRUST_REMOTE_CODE, MODEL_NAME, DIST_BACKEND):
     if VLLM_MULTI_NODE and DIST_BACKEND == "mp":
         pytest.skip("Skipping multi-node pipeline parallel test for "
                     "multiprocessing distributed backend")
