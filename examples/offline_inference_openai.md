@@ -10,7 +10,7 @@
  
  Each line represents a separate request. See the [OpenAI package reference](https://platform.openai.com/docs/api-reference/batch/requestInput) for more details.
  
- **NOTE:** We currently only support to `/v1/chat/completions` endpoint (embeddings and completions coming soon).
+ **NOTE:** We currently only support `/v1/chat/completions` and `/v1/embeddings` endpoints (completions coming soon).
  
  ## Pre-requisites
  
@@ -21,7 +21,7 @@
   - Get access to the gated model by [visiting the model card](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct) and agreeing to the terms and conditions.
  
  
- ## Example: Running with a local file
+ ## Example 1: Running with a local file
  
  ### Step 1: Create your batch file
  
@@ -54,7 +54,7 @@ python -m vllm.entrypoints.openai.run_batch -i openai_example_batch.jsonl -o res
 You should now have your results at `results.jsonl`. You can check your results by running `cat results.jsonl`
 
 ```
-$ cat ../results.jsonl
+$ cat results.jsonl
 {"id":"vllm-383d1c59835645aeb2e07d004d62a826","custom_id":"request-1","response":{"id":"cmpl-61c020e54b964d5a98fa7527bfcdd378","object":"chat.completion","created":1715633336,"model":"meta-llama/Meta-Llama-3-8B-Instruct","choices":[{"index":0,"message":{"role":"assistant","content":"Hello! It's great to meet you! I'm here to help with any questions or tasks you may have. What's on your mind today?"},"logprobs":null,"finish_reason":"stop","stop_reason":null}],"usage":{"prompt_tokens":25,"total_tokens":56,"completion_tokens":31}},"error":null}
 {"id":"vllm-42e3d09b14b04568afa3f1797751a267","custom_id":"request-2","response":{"id":"cmpl-f44d049f6b3a42d4b2d7850bb1e31bcc","object":"chat.completion","created":1715633336,"model":"meta-llama/Meta-Llama-3-8B-Instruct","choices":[{"index":0,"message":{"role":"assistant","content":"*silence*"},"logprobs":null,"finish_reason":"stop","stop_reason":null}],"usage":{"prompt_tokens":27,"total_tokens":32,"completion_tokens":5}},"error":null}
 ```
@@ -107,7 +107,7 @@ aws s3 cp openai_example_batch.jsonl s3://MY_BUCKET/MY_INPUT_FILE.jsonl
   
 ### Step 2: Generate your presigned urls
 
-Presigned put urls can only be generated via the SDK. You can run the following python script to generate your presigned urls. Be sure to replace the `MY_BUCKET`, `MY_INPUT_FILE.jsonl`, and `MY_OUTPUT_FILE.jsonl` placeholders with your bucket and file names.
+Presigned urls can only be generated via the SDK. You can run the following python script to generate your presigned urls. Be sure to replace the `MY_BUCKET`, `MY_INPUT_FILE.jsonl`, and `MY_OUTPUT_FILE.jsonl` placeholders with your bucket and file names.
 
 (The script is adapted from https://github.com/awsdocs/aws-doc-sdk-examples/blob/main/python/example_code/s3/s3_basics/presigned_url.py)
 
@@ -169,4 +169,37 @@ Your results are now on S3. You can view them in your terminal by running
 
 ```
 aws s3 cp s3://MY_BUCKET/MY_OUTPUT_FILE.jsonl -
+```
+
+## Example 4: Using embeddings endpoint
+
+### Additional prerequisites
+
+* Ensure you are using `vllm >= 0.5.5`.
+
+### Step 1: Create your batch file
+ 
+ Add embedding requests to your batch file. The following is an example:
+ 
+ ```
+ {"custom_id": "request-1", "method": "POST", "url": "/v1/embeddings", "body": {"model": "intfloat/e5-mistral-7b-instruct", "input": "You are a helpful assistant."}}
+{"custom_id": "request-2", "method": "POST", "url": "/v1/embeddings", "body": {"model": "intfloat/e5-mistral-7b-instruct", "input": "You are an unhelpful assistant."}}
+```
+ 
+ You can even mix chat completion and embedding requests in the batch file, as long as the model you are using supports both chat completion and embeddings (note that all requests must use the same model).
+
+
+ ### Step 2: Run the batch
+
+You can run the batch using the same command as in earlier examples.
+
+
+### Step 3: Check your results
+
+You can check your results by running `cat results.jsonl`
+
+```
+$ cat results.jsonl
+{"id":"vllm-db0f71f7dec244e6bce530e0b4ef908b","custom_id":"request-1","response":{"status_code":200,"request_id":"vllm-batch-3580bf4d4ae54d52b67eee266a6eab20","body":{"id":"embd-33ac2efa7996430184461f2e38529746","object":"list","created":444647,"model":"intfloat/e5-mistral-7b-instruct","data":[{"index":0,"object":"embedding","embedding":[0.016204833984375,0.0092010498046875,0.0018358230590820312,-0.0028228759765625,0.001422882080078125,-0.0031147003173828125,...]}],"usage":{"prompt_tokens":8,"total_tokens":8,"completion_tokens":0}}},"error":null}
+...```
 ```

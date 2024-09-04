@@ -1,5 +1,6 @@
 import itertools
 import random
+from array import array
 from typing import List
 
 import pytest
@@ -9,7 +10,8 @@ from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
+from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, SamplingParams,
+                           SequenceData, SequenceGroupMetadata)
 from vllm.utils import get_open_port
 from vllm.worker.model_runner import ModelRunner, _get_graph_batch_size
 
@@ -26,6 +28,7 @@ def _create_model_runner(model: str, *args, **kwargs) -> ModelRunner:
         load_config=engine_config.load_config,
         lora_config=engine_config.lora_config,
         prompt_adapter_config=engine_config.prompt_adapter_config,
+        observability_config=engine_config.observability_config,
         is_driver_worker=True,
     )
     return model_runner
@@ -53,8 +56,9 @@ def test_prepare_prompt(batch_size, prompt_embeds_ratio):
         if random.random() < prompt_embeds_ratio:
             seq_data = SequenceData([], prompt_embeds=torch.rand(seq_len, 10))
             input_embeds_len += seq_len
-        else:
-            seq_data = SequenceData(list(range(seq_len)))
+        else
+            seq_data = SequenceData(array(VLLM_TOKEN_ID_ARRAY_TYPE,
+                                        range(seq_len)))
         seq_group_metadata = SequenceGroupMetadata(
             request_id=f"test_{i}",
             is_prompt=True,
@@ -87,7 +91,7 @@ def test_prepare_prompt(batch_size, prompt_embeds_ratio):
     device = model_runner.device
     assert attn_metadata.num_prefills > 0
     assert attn_metadata.num_decode_tokens == 0
-    assert torch.allclose(
+    torch.testing.assert_close(
         attn_metadata.seq_lens_tensor,
         torch.tensor(seq_lens, device=device, dtype=torch.int))
     assert attn_metadata.seq_lens == seq_lens
@@ -100,7 +104,7 @@ def test_prepare_prompt(batch_size, prompt_embeds_ratio):
     for seq_len in seq_lens:
         start_idx += seq_len
         start_loc.append(start_idx)
-    assert torch.allclose(
+    torch.testing.assert_close(
         attn_metadata.query_start_loc,
         torch.tensor(start_loc, dtype=torch.int32, device=device))
 
@@ -112,10 +116,10 @@ def test_prepare_prompt(batch_size, prompt_embeds_ratio):
         start_idx += seq_len
         seq_start_loc.append(start_idx)
 
-    assert torch.allclose(
+    torch.testing.assert_close(
         attn_metadata.seq_start_loc,
         torch.tensor(start_loc, dtype=torch.int32, device=device))
-    assert torch.allclose(
+    torch.testing.assert_close(
         attn_metadata.context_lens_tensor,
         torch.zeros(attn_metadata.context_lens_tensor.shape[0],
                     dtype=torch.int,
@@ -124,7 +128,7 @@ def test_prepare_prompt(batch_size, prompt_embeds_ratio):
     expected = torch.tensor([[] for _ in range(len(seq_group_metadata_list))],
                             dtype=torch.int32,
                             device=model_runner.device)
-    assert torch.allclose(attn_metadata.block_tables, expected)
+    torch.testing.assert_close(attn_metadata.block_tables, expected)
     # Cuda graph should not be used for prerill.
     assert attn_metadata.use_cuda_graph is False
 
@@ -185,7 +189,8 @@ def test_prepare_decode_cuda_graph(batch_size, prompt_embeds_ratio):
                                     prompt_embeds=torch.rand(context_len, 10))
             input_embeds_len += context_len
         else:
-            seq_data = SequenceData(list(range(context_len)))
+            seq_data = SequenceData(
+                array(VLLM_TOKEN_ID_ARRAY_TYPE, range(context_len)))
         seq_data.update_num_computed_tokens(context_len)
         # Append one token ID since prefill is finished.
         seq_data.append_token_id(1, 0)
@@ -227,7 +232,7 @@ def test_prepare_decode_cuda_graph(batch_size, prompt_embeds_ratio):
         # decode has only 1 token for query.
         start_idx += 1
         start_loc.append(start_idx)
-    assert torch.allclose(
+    torch.testing.assert_close(
         attn_metadata.query_start_loc,
         torch.tensor(start_loc, dtype=torch.int32, device=device))
 
@@ -236,15 +241,15 @@ def test_prepare_decode_cuda_graph(batch_size, prompt_embeds_ratio):
     for seq_len in seq_lens:
         start_idx += seq_len
         seq_start_loc.append(start_idx)
-    assert torch.allclose(
+    torch.testing.assert_close(
         attn_metadata.seq_start_loc,
         torch.tensor(seq_start_loc, dtype=torch.int32, device=device))
 
-    assert torch.allclose(
+    torch.testing.assert_close(
         attn_metadata.context_lens_tensor,
         torch.tensor(context_lens, dtype=torch.int, device=device))
     assert attn_metadata.max_decode_seq_len == max(seq_lens)
-    assert torch.allclose(
+    torch.testing.assert_close(
         attn_metadata.seq_lens_tensor[:len(seq_lens)],
         torch.tensor(seq_lens, dtype=torch.int, device=device))
 
@@ -364,7 +369,8 @@ def test_hybrid_batches(batch_size, enforce_eager, prompt_embeds_ratio,
             seq_data = SequenceData([], prompt_embeds=torch.rand(seq_len, 10))
             input_embeds_len += seq_len
         else:
-            seq_data = SequenceData(list(range(seq_len)))
+            seq_data = SequenceData(array(VLLM_TOKEN_ID_ARRAY_TYPE,
+                                      range(seq_len)))
         seq_group_metadata = SequenceGroupMetadata(
             request_id=f"test_{i}",
             is_prompt=True,
@@ -384,7 +390,8 @@ def test_hybrid_batches(batch_size, enforce_eager, prompt_embeds_ratio,
             seq_data = SequenceData([],
                                     prompt_embeds=torch.rand(context_len, 10))
         else:
-            seq_data = SequenceData(list(range(context_len)))
+            prompt_toks = array(VLLM_TOKEN_ID_ARRAY_TYPE, range(context_len))
+            seq_data = SequenceData(prompt_toks)
         seq_data.append_token_id(1, 0)
         seq_data.update_num_computed_tokens(context_len)
         seq_group_metadata = SequenceGroupMetadata(

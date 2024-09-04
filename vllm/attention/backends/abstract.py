@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from dataclasses import dataclass, fields
 from enum import Enum, auto
 from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Set,
@@ -7,7 +8,9 @@ from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Set,
 import torch
 
 if TYPE_CHECKING:
-    from vllm.worker.model_runner_base import ModelRunnerInputBuilderBase
+    from vllm.worker.model_runner_base import (ModelRunnerBase,
+                                               ModelRunnerInputBase,
+                                               ModelRunnerInputBuilderBase)
 
 
 class AttentionType(Enum):
@@ -32,6 +35,11 @@ class AttentionBackend(ABC):
     @staticmethod
     @abstractmethod
     def get_metadata_cls() -> Type["AttentionMetadata"]:
+        raise NotImplementedError
+
+    @staticmethod
+    @abstractmethod
+    def get_state_cls() -> Type["AttentionState"]:
         raise NotImplementedError
 
     @classmethod
@@ -73,6 +81,9 @@ class AttentionBackend(ABC):
         kv_caches: List[torch.Tensor],
         src_to_dists: torch.Tensor,
     ) -> None:
+        raise NotImplementedError
+
+    def advance_step(self, num_seqs: int, num_queries: int):
         raise NotImplementedError
 
 
@@ -121,6 +132,47 @@ class AttentionMetadata:
 
 
 T = TypeVar("T", bound=AttentionMetadata)
+
+
+class AttentionState(ABC, Generic[T]):
+    """Holds attention backend-specific objects reused during the
+    lifetime of the model runner."""
+
+    @abstractmethod
+    def __init__(self, runner: "ModelRunnerBase"):
+        ...
+
+    @abstractmethod
+    @contextmanager
+    def graph_capture(self, max_batch_size: int):
+        """Context manager used when capturing CUDA graphs."""
+        yield
+
+    @abstractmethod
+    def graph_clone(self, batch_size: int) -> "AttentionState[T]":
+        """Clone attention state to save in CUDA graph metadata."""
+        ...
+
+    @abstractmethod
+    def graph_capture_get_metadata_for_batch(self, batch_size: int) -> T:
+        """Get attention metadata for CUDA graph capture of batch_size."""
+        ...
+
+    @abstractmethod
+    def get_graph_input_buffers(self, attn_metadata: T) -> Dict[str, Any]:
+        """Get attention-specific input buffers for CUDA graph capture."""
+        ...
+
+    @abstractmethod
+    def prepare_graph_input_buffers(self, input_buffers: Dict[str, Any],
+                                    attn_metadata: T) -> None:
+        """In-place modify input buffers dict for CUDA graph replay."""
+        ...
+
+    @abstractmethod
+    def begin_forward(self, model_input: "ModelRunnerInputBase") -> None:
+        """Prepare state for forward pass."""
+        ...
 
 
 class AttentionMetadataBuilder(ABC, Generic[T]):

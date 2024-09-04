@@ -3,21 +3,26 @@ from typing import Any, Dict, List, Optional
 import torch
 from pydantic import BaseModel
 
-from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
+                                               UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
     QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
+    CompressedTensorsMoEMethod)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     W4A16SPARSE24_SUPPORTED_BITS, WNA16_SUPPORTED_BITS,
-    CompressedTensorsScheme, CompressedTensorsUnquantized,
-    CompressedTensorsW4A16Sparse24, CompressedTensorsW8A8Fp8,
-    CompressedTensorsW8A8Int8, CompressedTensorsW8A16Fp8,
-    CompressedTensorsWNA16)
+    CompressedTensorsScheme, CompressedTensorsW4A16Sparse24,
+    CompressedTensorsW8A8Fp8, CompressedTensorsW8A8Int8,
+    CompressedTensorsW8A16Fp8, CompressedTensorsWNA16)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     CompressionFormat, QuantizationArgs, QuantizationStrategy,
     QuantizationType, find_matched_target, is_activation_quantization_format,
     should_ignore_layer)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.platforms import current_platform
+
+__all__ = ["CompressedTensorsLinearMethod"]
 
 
 class CompressedTensorsConfig(QuantizationConfig):
@@ -50,18 +55,25 @@ class CompressedTensorsConfig(QuantizationConfig):
     def get_name(self) -> str:
         return "compressed_tensors"
 
-    # TODO (@robertgshaw2-neuralmagic): do layer skipping though here
-    # rather than though create_weights to match other methods
     def get_quant_method(
         self,
         layer: torch.nn.Module,
         prefix: str,
     ) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
+
+        # Check if the layer is skipped for quantization.
+        # TODO (@robertgshaw2): support module names
+        if should_ignore_layer(prefix, ignore=self.ignore):
+            return UnquantizedLinearMethod()
         if isinstance(layer, LinearBase):
+            scheme = self.get_scheme(layer=layer, layer_name=prefix)
+            layer.scheme = scheme
             return CompressedTensorsLinearMethod(self)
         if isinstance(layer, Attention):
             return CompressedTensorsKVCacheMethod(self)
+        if isinstance(layer, FusedMoE):
+            return CompressedTensorsMoEMethod(self)
         return None
 
     @classmethod
@@ -146,18 +158,15 @@ class CompressedTensorsConfig(QuantizationConfig):
         if weight_quant is None or input_quant is None:
             return False
 
-        # Confirm we have floating points.
-        if not (weight_quant.type == QuantizationType.FLOAT
-                and input_quant.type == QuantizationType.FLOAT):
-            return False
-
         # Confirm weight scheme is supported.
+        is_floating_point = (weight_quant.type == QuantizationType.FLOAT
+                             and input_quant.type == QuantizationType.FLOAT)
         is_symmetric_weight = weight_quant.symmetric
         is_static_weight = not weight_quant.dynamic
         is_per_tensor_or_channel_weight = (weight_quant.strategy in [
             QuantizationStrategy.TENSOR, QuantizationStrategy.CHANNEL
         ])
-        if not (is_symmetric_weight and is_static_weight
+        if not (is_floating_point and is_symmetric_weight and is_static_weight
                 and is_per_tensor_or_channel_weight):
             return False
 
@@ -169,11 +178,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         is_symmetric_activation = input_quant.symmetric
         is_per_tensor_activation = (
             input_quant.strategy == QuantizationStrategy.TENSOR)
-        if not (is_symmetric_activation and is_per_tensor_activation):
-            return False
-
-        # All conditions satisfied.
-        return True
+        return is_symmetric_activation and is_per_tensor_activation
 
     def _is_fp8_w8a16(self, weight_quant: BaseModel,
                       input_quant: BaseModel) -> bool:
@@ -230,6 +235,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                     group_size=weight_quant.group_size)
 
         # Detect If Activation Quantization.
+        # TODO @dsikka: clean-up conditions
         if is_activation_quantization_format(self.quant_format):
             if self._is_fp8_w8a8(weight_quant, input_quant):
                 is_fp8_w8a8_supported = self._check_scheme_supported(
@@ -237,7 +243,8 @@ class CompressedTensorsConfig(QuantizationConfig):
                 if is_fp8_w8a8_supported:
                     return CompressedTensorsW8A8Fp8(
                         strategy=weight_quant.strategy,
-                        is_static_input_scheme=(not input_quant.dynamic))
+                        is_static_input_scheme=(input_quant
+                                                and not input_quant.dynamic))
                 else:
                     return CompressedTensorsW8A16Fp8(
                         strategy=weight_quant.strategy,
@@ -284,15 +291,11 @@ class CompressedTensorsConfig(QuantizationConfig):
         to select the CompressedTensorsScheme used for infernece.
         """
 
-        # Check if the layer is skipped for quantization.
-        # TODO (@robertgshaw2): support module names
-        if should_ignore_layer(layer_name, ignore=self.ignore):
-            return CompressedTensorsUnquantized()
-
         # Find the "target" in the compressed-tensors config
         # that our layer conforms to.
         # TODO (@robertgshaw): add compressed-tensors as dep
         # so we do not have to re-write these functions
+        # need to make accelerate optional in ct to do this
         matched_target = find_matched_target(
             layer_name=layer_name,
             module=layer,
@@ -330,10 +333,7 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
         details
         """
         weight_loader = extra_weight_attrs.get("weight_loader")
-        layer_name = extra_weight_attrs.get("prefix")
-
-        scheme = self.quantization_config.get_scheme(layer, layer_name)
-        scheme.create_weights(
+        layer.scheme.create_weights(
             layer=layer,
             input_size=input_size,
             input_size_per_partition=input_size_per_partition,
@@ -341,8 +341,6 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
             output_size=output_size,
             params_dtype=params_dtype,
             weight_loader=weight_loader)
-
-        layer.scheme = scheme
 
     def apply(self,
               layer: torch.nn.Module,

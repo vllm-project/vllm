@@ -6,11 +6,10 @@ import torch.nn as nn
 
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs import MLPSpeculatorConfig
 
 SQRT2 = 2**0.5
@@ -175,13 +174,14 @@ class MLPSpeculator(nn.Module):
             states.add_(z, alpha=self.emb_weight / self.state_weight)
 
             states = self.activation(self.ln[head_index](states))  # b k d
-            # TODO: not yet supporting top_k_tokens_per_head
             previous_hidden_states = states
+            # TODO: not yet supporting top_k_tokens_per_head
+            states = states.flatten(0, 1)
 
             logits = self.logits_processor(self.head[head_index], states,
                                            sampling_metadata)
 
-            output = self.sampler(logits.flatten(0, 1), sampling_metadata)
+            output = self.sampler(logits, sampling_metadata)
             last_tokens = output.sampled_token_ids
             next_tokens.append(output)
 

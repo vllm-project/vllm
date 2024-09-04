@@ -1,8 +1,7 @@
-from .data import (EmbedsPrompt, ExplicitEncoderDecoderPrompt, LLMInputs,
-                   ParsedText, ParsedTokens, PromptInputs,
-                   SingletonPromptInputs, TextPrompt, TokensPrompt,
-                   get_prompt_type, is_valid_encoder_decoder_llm_inputs,
-                   parse_and_batch_prompt)
+from .data import (EmbedsPrompt, EncoderDecoderLLMInputs, ExplicitEncoderDecoderPrompt,
+                   LLMInputs, PromptInputs, SingletonPromptInputs, TextPrompt,
+                   TokensPrompt, build_explicit_enc_dec_prompt,
+                   to_enc_dec_tuple_list, zip_enc_dec_prompts)
 from .registry import InputContext, InputRegistry
 
 INPUT_REGISTRY = InputRegistry()
@@ -15,19 +14,18 @@ See also:
 """
 
 __all__ = [
-    "ParsedText",
-    "ParsedTokens",
-    "parse_and_batch_prompt",
     "TextPrompt",
     "TokensPrompt",
     "EmbedsPrompt",
     "PromptInputs",
+    "SingletonPromptInputs",
+    "ExplicitEncoderDecoderPrompt",
     "LLMInputs",
+    "EncoderDecoderLLMInputs",
+    "build_explicit_enc_dec_prompt",
+    "to_enc_dec_tuple_list",
+    "zip_enc_dec_prompts",
     "INPUT_REGISTRY",
     "InputContext",
     "InputRegistry",
-    "get_prompt_type",
-    "is_valid_encoder_decoder_llm_inputs",
-    "ExplicitEncoderDecoderPrompt",
-    "SingletonPromptInputs",
 ]

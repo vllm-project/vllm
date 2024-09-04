@@ -6,6 +6,8 @@ import torch.distributed
 
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
+from vllm.distributed import (ensure_model_parallel_initialized,
+                              init_distributed_environment)
 from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest
 from vllm.worker.neuron_model_runner import NeuronModelRunner
@@ -24,12 +26,18 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
         cache_config: CacheConfig,
+        local_rank: int,
+        rank: int,
+        distributed_init_method: str,
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.cache_config = cache_config
+        self.local_rank = local_rank
+        self.rank = rank
+        self.distributed_init_method = distributed_init_method
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
@@ -40,6 +48,8 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         self.is_driver_worker = True
 
     def init_device(self) -> None:
+        self.init_distributed_environment()
+
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
@@ -89,9 +99,29 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         return WorkerInput(num_seq_groups=len(
             execute_model_req.seq_group_metadata_list), )
 
+    def execute_worker(self, worker_input: WorkerInput) -> None:
+        pass
+
     def get_cache_block_size_bytes(self) -> int:
         """Determine the size in bytes of a cache block.
 
         This is required for speculative decoding; it is not yet implemented.
         """
         raise NotImplementedError
+
+    def init_distributed_environment(self):
+        """Neuron uses transformers-neuronx for tensor parallelism.
+
+        vLLM still needs the environment inited when TP/PP > 1
+        """
+        init_distributed_environment(
+            world_size=1,
+            rank=self.rank,
+            local_rank=self.local_rank,
+            distributed_init_method=self.distributed_init_method,
+            backend="gloo",
+        )
+        ensure_model_parallel_initialized(
+            1,
+            1,
+        )

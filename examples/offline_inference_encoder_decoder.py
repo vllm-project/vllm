@@ -4,8 +4,8 @@ encoder/decoder models, specifically BART
 '''
 
 from vllm import LLM, SamplingParams
-from vllm.inputs import ExplicitEncoderDecoderPrompt, TextPrompt, TokensPrompt
-from vllm.utils import zip_enc_dec_prompt_lists
+from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
+                         TokensPrompt, zip_enc_dec_prompts)
 
 dtype = "float"
 
@@ -61,9 +61,9 @@ enc_dec_prompt3 = ExplicitEncoderDecoderPrompt(
 )
 
 # - Finally, here's a useful helper function for zipping encoder and
-#   decoder prompt lists together into a list of ExplicitEncoderDecoderPrompt
+#   decoder prompts together into a list of ExplicitEncoderDecoderPrompt
 #   instances
-zipped_prompt_list = zip_enc_dec_prompt_lists(
+zipped_prompt_list = zip_enc_dec_prompts(
     ['An encoder prompt', 'Another encoder prompt'],
     ['A decoder prompt', 'Another decoder prompt'])
 

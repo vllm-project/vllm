@@ -1,50 +1,58 @@
+import functools
 import time
+from collections import deque
 from contextlib import contextmanager
-from typing import (TYPE_CHECKING, Any, ClassVar, Dict, Iterable, List,
+from dataclasses import dataclass, field
+from typing import (TYPE_CHECKING, Any, ClassVar, Deque, Dict, Iterable, List,
                     Mapping, Optional)
 from typing import Sequence as GenericSequence
-from typing import Set, Tuple, Type, TypeVar, Union
+from typing import Set, Tuple, Type, Union
+
+import torch
+from typing_extensions import TypeVar, assert_never
 
 import vllm.envs as envs
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
-                         MultiModalConfig, ObservabilityConfig, ParallelConfig,
+                         ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig)
 from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
                                  SchedulerOutputs)
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.metrics import (LoggingStatLogger, PrometheusStatLogger,
-                                 StatLoggerBase, Stats)
+from vllm.engine.metrics_types import StatLoggerBase, Stats
 from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.ray_utils import initialize_ray_cluster
-from vllm.inputs import (INPUT_REGISTRY, LLMInputs, PromptInputs,
-                         get_prompt_type)
+from vllm.inputs import (INPUT_REGISTRY, EncoderDecoderLLMInputs,
+                         InputRegistry, LLMInputs, PromptInputs,
+                         SingletonPromptInputs)
+from vllm.inputs.parse import is_explicit_encoder_decoder_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.multimodal import MultiModalDataDict
 from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
                           RequestOutputFactory)
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
-                           PoolerOutput, SamplerOutput, Sequence,
-                           SequenceGroup, SequenceGroupMetadata,
+                           Sequence, SequenceGroup, SequenceGroupMetadata,
                            SequenceStatus)
 from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
 from vllm.transformers_utils.config import try_get_generation_config
 from vllm.transformers_utils.detokenizer import Detokenizer
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import (
-    AnyTokenizer, BaseTokenizerGroup, init_tokenizer_from_configs)
+    BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
-from vllm.utils import (Counter, is_embedding_model_config,
-                        is_encoder_decoder_model_config)
+from vllm.utils import Counter, Device
 from vllm.version import __version__ as VLLM_VERSION
 from vllm.worker.worker_base import WorkerWrapperBase
 
@@ -65,7 +73,34 @@ def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
     return config.to_diff_dict()
 
 
+_G = TypeVar("_G", bound=BaseTokenizerGroup, default=BaseTokenizerGroup)
 _O = TypeVar("_O", RequestOutput, EmbeddingRequestOutput)
+
+PromptComponents = Tuple[Optional[str], List[int],
+                         Optional[MultiModalDataDict]]
+DecoderPromptComponents = Tuple[Optional[str], Optional[List[int]],
+                                Optional[MultiModalDataDict]]
+
+
+@dataclass
+class SchedulerOutputState:
+    """Caches the scheduler outputs for a virtual engine. Used for Multi-Step"""
+    seq_group_metadata_list: Optional[List[SequenceGroupMetadata]] = None
+    scheduler_outputs: Optional[SchedulerOutputs] = None
+    allow_async_output_proc: bool = False
+    last_output: Optional[SamplerOutput] = None
+
+
+@dataclass
+class SchedulerContext:
+    output_queue: Deque[Tuple[Optional[List[SamplerOutput]],
+                              List[SequenceGroupMetadata],
+                              SchedulerOutputs]] = field(
+                                  default_factory=lambda: deque())
+
+    request_outputs: List[Union[RequestOutput,
+                                EmbeddingRequestOutput]] = field(
+                                    default_factory=lambda: [])
 
 
 class LLMEngine:
@@ -92,8 +127,6 @@ class LLMEngine:
         scheduler_config: The configuration related to the request scheduler.
         device_config: The configuration related to the device.
         lora_config (Optional): The configuration related to serving multi-LoRA.
-        multimodal_config (Optional): The configuration related to multimodal
-            models.
         speculative_config (Optional): The configuration related to speculative
             decoding.
         executor_class: The model executor class for managing distributed
@@ -164,7 +197,6 @@ class LLMEngine:
         device_config: DeviceConfig,
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
-        multimodal_config: Optional[MultiModalConfig],
         speculative_config: Optional[SpeculativeConfig],
         decoding_config: Optional[DecodingConfig],
         observability_config: Optional[ObservabilityConfig],
@@ -173,6 +205,10 @@ class LLMEngine:
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
+        input_registry: InputRegistry = INPUT_REGISTRY,
+        # To improve performance, only final requests outputs may be required.
+        # If this set to true, then no intermediate outputs will be returned.
+        step_return_finished_only: bool = False,
     ) -> None:
         logger.info(
             "Initializing an LLM engine (v%s) with config: "
@@ -187,7 +223,8 @@ class LLMEngine:
             "quantization_param_path=%s, device_config=%s, "
             "decoding_config=%r, observability_config=%r, "
             "seed=%d, served_model_name=%s, use_v2_block_manager=%s, "
-            "enable_prefix_caching=%s)",
+            "num_scheduler_steps=%d, enable_prefix_caching=%s, "
+            "use_async_output_proc=%s)",
             VLLM_VERSION,
             model_config.model,
             speculative_config,
@@ -216,14 +253,17 @@ class LLMEngine:
             model_config.seed,
             model_config.served_model_name,
             scheduler_config.use_v2_block_manager,
+            scheduler_config.num_scheduler_steps,
             cache_config.enable_prefix_caching,
+            model_config.use_async_output_proc,
         )
         # TODO(woosuk): Print more configs in debug mode.
+        from vllm.plugins import load_general_plugins
+        load_general_plugins()
 
         self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config
-        self.multimodal_config = multimodal_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
@@ -234,20 +274,31 @@ class LLMEngine:
         self.observability_config = observability_config or ObservabilityConfig(
         )
         self.log_stats = log_stats
+        self.step_return_finished_only = step_return_finished_only
 
         if not self.model_config.skip_tokenizer_init:
             self.tokenizer = self._init_tokenizer()
             self.detokenizer = Detokenizer(self.tokenizer)
+            tokenizer_group = self.get_tokenizer_group()
         else:
             self.tokenizer = None
             self.detokenizer = None
+            tokenizer_group = None
+
+        # Ensure that the function doesn't contain a reference to self,
+        # to avoid engine GC issues
+        def get_tokenizer_for_seq(sequence: Sequence) -> AnyTokenizer:
+            assert tokenizer_group, ("tokenizer_group cannot be None, "
+                                     "make sure skip_tokenizer_init is False")
+            return tokenizer_group.get_lora_tokenizer(sequence.lora_request)
 
         self.seq_counter = Counter()
         self.generation_config_fields = _load_generation_config_dict(
             model_config)
 
-        self.input_processor = INPUT_REGISTRY.create_input_processor(
-            self.model_config)
+        self.input_registry = input_registry
+        self.input_processor = input_registry.create_input_processor(
+            model_config)
 
         self.model_executor = executor_class(
             model_config=model_config,
@@ -256,10 +307,10 @@ class LLMEngine:
             scheduler_config=scheduler_config,
             device_config=device_config,
             lora_config=lora_config,
-            multimodal_config=multimodal_config,
             speculative_config=speculative_config,
             load_config=load_config,
             prompt_adapter_config=prompt_adapter_config,
+            observability_config=self.observability_config,
         )
 
         if not self.model_config.embedding_mode:
@@ -311,9 +362,14 @@ class LLMEngine:
         # NOTE: the cache_config here have been updated with the numbers of
         # GPU and CPU blocks, which are profiled in the distributed executor.
         self.scheduler = [
-            Scheduler(scheduler_config, cache_config, lora_config,
-                      parallel_config.pipeline_parallel_size)
-            for _ in range(parallel_config.pipeline_parallel_size)
+            Scheduler(
+                scheduler_config, cache_config, lora_config,
+                parallel_config.pipeline_parallel_size,
+                functools.partial(self._process_model_outputs,
+                                  virtual_engine=v_id,
+                                  is_async=True)
+                if model_config.use_async_output_proc else None)
+            for v_id in range(parallel_config.pipeline_parallel_size)
         ]
 
         # Metric Logging.
@@ -321,6 +377,13 @@ class LLMEngine:
             if stat_loggers is not None:
                 self.stat_loggers = stat_loggers
             else:
+                # Lazy import for prometheus multiprocessing.
+                # We need to set PROMETHEUS_MULTIPROC_DIR environment variable
+                # before prometheus_client is imported.
+                # See https://prometheus.github.io/client_python/multiprocess/
+                from vllm.engine.metrics import (LoggingStatLogger,
+                                                 PrometheusStatLogger)
+
                 self.stat_loggers = {
                     "logging":
                     LoggingStatLogger(
@@ -348,12 +411,36 @@ class LLMEngine:
                 self.detokenizer,
                 self.scheduler,
                 self.seq_counter,
-                self.get_tokenizer_for_seq,
+                get_tokenizer_for_seq,
                 stop_checker=StopChecker(
                     self.scheduler_config.max_model_len,
-                    self.get_tokenizer_for_seq,
+                    get_tokenizer_for_seq,
                 ),
             ))
+
+        self.cached_scheduler_outputs = [
+            SchedulerOutputState()
+            for _ in range(self.parallel_config.pipeline_parallel_size)
+        ]
+
+        self.scheduler_contexts = [
+            SchedulerContext()
+            for _ in range(self.parallel_config.pipeline_parallel_size)
+        ]
+
+        self.async_callback = [
+            functools.partial(self._process_model_outputs,
+                              virtual_engine=v_id,
+                              is_async=True)
+            for v_id in range(self.parallel_config.pipeline_parallel_size)
+        ]
+
+        self.async_callback_multi_step = [
+            functools.partial(self._process_model_outputs,
+                              virtual_engine=v_id,
+                              is_async=False)
+            for v_id in range(self.parallel_config.pipeline_parallel_size)
+        ]
 
     def _initialize_kv_caches(self) -> None:
         """Initialize the KV cache in the worker(s).
@@ -414,6 +501,13 @@ class LLMEngine:
                 initialize_ray_cluster(engine_config.parallel_config)
                 from vllm.executor.ray_xpu_executor import RayXPUExecutor
                 executor_class = RayXPUExecutor
+            elif distributed_executor_backend == "mp":
+                # FIXME(kunshang):
+                # spawn needs calling `if __name__ == '__main__':``
+                # fork is not supported for xpu start new process.
+                logger.error(
+                    "Both start methods (spawn and fork) have issue "
+                    "on XPU if you use mp backend, Please try ray instead.")
             else:
                 from vllm.executor.xpu_executor import XPUExecutor
                 executor_class = XPUExecutor
@@ -470,22 +564,27 @@ class LLMEngine:
                                    "skip_tokenizer_init is True")
 
     def get_tokenizer_group(
-            self,
-            fail_msg: str = MISSING_TOKENIZER_GROUP_MSG) -> BaseTokenizerGroup:
-        if self.tokenizer is None:
-            raise ValueError(fail_msg)
+        self,
+        group_type: Type[_G] = BaseTokenizerGroup,
+        *,
+        missing_msg: str = MISSING_TOKENIZER_GROUP_MSG,
+    ) -> _G:
+        tokenizer_group = self.tokenizer
 
-        return self.tokenizer
+        if tokenizer_group is None:
+            raise ValueError(missing_msg)
+        if not isinstance(tokenizer_group, group_type):
+            raise TypeError("Invalid type of tokenizer group. "
+                            f"Expected type: {group_type}, but "
+                            f"found type: {type(tokenizer_group)}")
+
+        return tokenizer_group
 
     def get_tokenizer(
         self,
         lora_request: Optional[LoRARequest] = None,
     ) -> AnyTokenizer:
         return self.get_tokenizer_group().get_lora_tokenizer(lora_request)
-
-    def get_tokenizer_for_seq(self, sequence: Sequence) -> AnyTokenizer:
-        return self.get_tokenizer_group().get_lora_tokenizer(
-            sequence.lora_request)
 
     def _init_tokenizer(self) -> BaseTokenizerGroup:
         return init_tokenizer_from_configs(
@@ -525,7 +624,7 @@ class LLMEngine:
 
         return self.tokenizer.get_lora_tokenizer(lora_request).eos_token_id
 
-    def _get_decoder_start_token_id(self, ) -> Optional[int]:
+    def _get_decoder_start_token_id(self) -> Optional[int]:
         '''
         Obtain the decoder start token id employed by an encoder/decoder
         model. Returns None for non-encoder/decoder models or if the
@@ -554,13 +653,14 @@ class LLMEngine:
     def _add_processed_request(
         self,
         request_id: str,
-        processed_inputs: LLMInputs,
+        processed_inputs: Union[LLMInputs, EncoderDecoderLLMInputs],
         params: Union[SamplingParams, PoolingParams],
         arrival_time: float,
         lora_request: Optional[LoRARequest],
         prompt_adapter_request: Optional[PromptAdapterRequest],
         trace_headers: Optional[Mapping[str, str]] = None,
     ) -> None:
+        self._validate_model_inputs(processed_inputs)
         # Create the sequences.
         block_size = self.cache_config.block_size
         seq_id = next(self.seq_counter)
@@ -614,11 +714,11 @@ class LLMEngine:
     def stop_remote_worker_execution_loop(self) -> None:
         self.model_executor.stop_remote_worker_execution_loop()
 
-    _LLMInputComponentsType = Tuple[str, List[int], ]
+    _LLMInputComponentsType = Tuple[str, List[int]]
 
     def _prepare_decoder_input_ids_for_generation(
         self,
-        decoder_input_ids: Optional[List[int]] = None,
+        decoder_input_ids: Optional[List[int]],
     ) -> List[int]:
         """
         Prepares `decoder_input_ids` for generation with encoder-decoder models.
@@ -640,14 +740,13 @@ class LLMEngine:
         * Processed token list
         """
 
-        decoder_start_token_id: Optional[int] = (
-            self._get_decoder_start_token_id())
+        decoder_start_token_id = self._get_decoder_start_token_id()
         assert decoder_start_token_id is not None
 
         if decoder_input_ids is None:
             # no decoder prompt input ->
             # use decoder_start_token_id as decoder_input_ids
-            (decoder_input_ids) = self._get_default_enc_dec_decoder_prompt()
+            decoder_input_ids = self._get_default_enc_dec_decoder_prompt()
 
         if (len(decoder_input_ids) == 0
                 or decoder_input_ids[0] != decoder_start_token_id):
@@ -658,12 +757,11 @@ class LLMEngine:
     def _tokenize_prompt(
         self,
         prompt: str,
-        request_id: Optional[str] = None,
-        lora_request: Optional[str] = None,
+        request_id: str,
+        lora_request: Optional[LoRARequest],
     ) -> List[int]:
         '''
-        Wrapper around application of the model's
-        tokenizer.
+        Wrapper around application of the model's tokenizer.
 
         Arguments:
 
@@ -676,90 +774,91 @@ class LLMEngine:
         * prompt token ids
         '''
 
-        tokenizer = self.get_tokenizer_group("prompts must be None if "
-                                             "skip_tokenizer_init is True")
+        tokenizer = self.get_tokenizer_group(
+            missing_msg="prompts must be None if skip_tokenizer_init is True")
 
-        prompt_token_ids = tokenizer.encode(request_id=request_id,
-                                            prompt=prompt,
-                                            lora_request=lora_request)
+        return tokenizer.encode(request_id=request_id,
+                                prompt=prompt,
+                                lora_request=lora_request)
 
-        return prompt_token_ids
-
-    def _extract_single_prompt_for_enc_dec_input(
+    def _extract_prompt_components(
         self,
-        inputs: Optional[PromptInputs],
-        request_id: Optional[str] = None,
-        ptype: Optional[str] = None,
-        is_encoder_prompt: bool = False,
-    ) -> Tuple[Optional[str], List[int]]:
+        inputs: SingletonPromptInputs,
+        request_id: str,
+        lora_request: Optional[LoRARequest] = None,
+    ) -> PromptComponents:
         '''
-        Only for encoder/decoder models:
-        Extract prompt & prompt_token_ids from any single
-        encoder or decoder input prompt. For encoder input prompts
-        in particular, also extract multi-modal data.
-
-        This function handles the following scenarios:
-        1. The user supplied a singleton encoder prompt
-          & the prompt/prompt-token-ids must be extracted.
-        2. The user supplied an explicit encoder/decoder
-          prompt & the prompt/prompt-token-ids must be
-          extracted from either the encoder and decoder prompts.
-
-        For decoder prompts in particular (scenario 2), special
-        processing is applied to the returned decoder token ids.
+        Extract the components of any single encoder or decoder input prompt.
 
         Arguments:
 
         * request_id
-        * ptype: str representation of the input prompt type.
-                 If `ptype` is `None`, assume that the prompt
-                 type is unknown and must be inferred. This is the
-                 case for ExplicitEncoderDecoder sub-prompts.
         * inputs: single encoder or decoder input prompt
-        * is_encoder_prompt: True if encoder input prompt.
-                             If False, decoder prompt tokens
-                             are preprocessed.
+        * lora_request: this is only valid for decoder prompts
 
         Returns:
 
         * prompt
         * prompt_token_ids
+        * prompt_embeds
+        * multi_modal_data
         '''
-        prompt_token_ids = None
-        ptype = (get_prompt_type(inputs) if ptype is None else ptype)
-
-        if inputs is None:
-            prompt = None
-        elif ptype == 'str':
+        if isinstance(inputs, str):
             prompt = inputs
             prompt_token_ids = self._tokenize_prompt(
                 prompt,
                 request_id=request_id,
+                lora_request=lora_request,
             )
-        elif ptype == 'TokensPrompt':
-            prompt = None
-            prompt_token_ids = inputs['prompt_token_ids']
+            multi_modal_data = None
+            prompt_embeds = None
+        elif isinstance(inputs, dict):
+            prompt = inputs.get("prompt")
+            prompt_embeds = inputs.get("prompt_embeds")
+            driver_worker = self.model_executor.driver_worker
+            if prompt_embeds is not None:
+                if self.speculative_config is not None:
+                    raise ValueError(
+                        "Speculative decoding does not support prompt_embeds.")
+                model_runner = driver_worker.worker.model_runner if isinstance(
+                    driver_worker,
+                    WorkerWrapperBase) else driver_worker.model_runner
+                if not model_runner.model_supports_input_embeds:
+                    raise ValueError(
+                        f"Model {self.model_config.model} does not support input "
+                        "embeddings, but prompt_embeds was provided.")
+                prompt_token_ids = []
+            elif "prompt_token_ids" in inputs:
+                prompt = None
+                prompt_token_ids = inputs["prompt_token_ids"]
+            else:
+                # NOTE: This extra assignment is required to pass mypy
+                prompt = parsed_prompt = inputs["prompt"]
+                prompt_token_ids = self._tokenize_prompt(
+                    parsed_prompt,
+                    request_id=request_id,
+                    lora_request=lora_request,
+                )
+
+            multi_modal_data = inputs.get("multi_modal_data")
         else:
-            prompt = inputs['prompt']
-            prompt_token_ids = self._tokenize_prompt(
-                prompt,
-                request_id=request_id,
-            )
+            assert_never(inputs)
 
-        if not is_encoder_prompt:
-            # Apply special pre-processing to
-            # decoder prompts
-            prompt_token_ids = (self._prepare_decoder_input_ids_for_generation(
-                prompt_token_ids, ))
+        return prompt, prompt_token_ids, prompt_embeds, multi_modal_data
 
-        assert prompt_token_ids is not None
+    def _apply_prompt_adapter(
+        self,
+        prompt_token_ids: List[int],
+        prompt_adapter_request: Optional[PromptAdapterRequest],
+    ) -> List[int]:
+        if prompt_adapter_request:
+            prompt_token_ids = (
+                [0] * prompt_adapter_request.prompt_adapter_num_virtual_tokens
+                + prompt_token_ids)
 
-        return (
-            prompt,
-            prompt_token_ids,
-        )
+        return prompt_token_ids
 
-    def _get_default_enc_dec_decoder_prompt(self, ) -> List[int]:
+    def _get_default_enc_dec_decoder_prompt(self) -> List[int]:
         '''
         Specifically for encoder/decoder models:
         generate a default decoder prompt for when
@@ -793,18 +892,39 @@ class LLMEngine:
 
         bos_token_id = self._get_bos_token_id()
         assert bos_token_id is not None
-        prompt_token_ids: List[int] = [bos_token_id]
-        return prompt_token_ids
+        return [bos_token_id]
+
+    def _build_enc_dec_llm_inputs(
+        self,
+        encoder_comps: PromptComponents,
+        decoder_comps: DecoderPromptComponents,
+    ) -> EncoderDecoderLLMInputs:
+        encoder_prompt, encoder_prompt_ids, encoder_mm_data = encoder_comps
+        decoder_prompt, decoder_prompt_ids, decoder_mm_data = decoder_comps
+
+        if encoder_mm_data is not None or decoder_mm_data is not None:
+            raise ValueError("Multi-modal encoder-decoder models are "
+                             "not supported yet")
+
+        decoder_prompt_ids = (
+            self._prepare_decoder_input_ids_for_generation(decoder_prompt_ids))
+
+        return EncoderDecoderLLMInputs(
+            prompt_token_ids=decoder_prompt_ids,
+            prompt=decoder_prompt,
+            encoder_prompt_token_ids=encoder_prompt_ids,
+            encoder_prompt=encoder_prompt,
+        )
 
     def _process_encoder_decoder_prompt(
         self,
         inputs: PromptInputs,
-        request_id: Optional[str] = None,
-    ) -> LLMInputs:
+        request_id: str,
+    ) -> EncoderDecoderLLMInputs:
         '''
         For encoder/decoder models only:
-        Process an input prompt
-        into an `LLMInputs` instance.
+        Process an input prompt into an
+        :class:`EncoderDecoderLLMInputs` instance.
 
         There are two types of input prompts:
         singleton prompts which carry only the
@@ -831,150 +951,104 @@ class LLMEngine:
 
         Returns:
 
-        * `LLMInputs` instance
+        * :class:`EncoderDecoderLLMInputs` instance
         '''
 
-        ptype = get_prompt_type(inputs)
+        encoder_comps: PromptComponents
+        decoder_comps: DecoderPromptComponents
 
-        # Obtain encoder and decoder prompt tokens. Note
-        # that, no matter what, the decoder
-        # prompt type is unknown.
-        if ptype == "ExplicitEncoderDecoder":
-            # If input is explicit encoder/decoder prompt,
-            # then it remains to be determined what type
-            # of encoder prompt we have
-            extracted_encoder_prompt = inputs.get('encoder_prompt')
-            encoder_ptype = None
-            # Extract decoder prompt from explicit
-            # encoder/decoder prompt
-            extracted_decoder_prompt = inputs.get('decoder_prompt')
+        if is_explicit_encoder_decoder_prompt(inputs):
+            encoder_comps = self._extract_prompt_components(
+                inputs["encoder_prompt"],
+                request_id=request_id,
+            )
+
+            if (decoder_input := inputs["decoder_prompt"]) is None:
+                decoder_comps = None, None, None
+            else:
+                decoder_comps = self._extract_prompt_components(
+                    decoder_input,
+                    request_id=request_id,
+                )
         else:
-            # If input is singleton encoder prompt, then
-            # we know the encoder prompt type
-            extracted_encoder_prompt = inputs
-            encoder_ptype = ptype
-            # Decoder prompt is always unknown if
-            # encoder/decoder prompt is not explicit
-            extracted_decoder_prompt = None
+            encoder_comps = self._extract_prompt_components(
+                inputs,
+                request_id=request_id,
+            )
 
-        # Invoke helper function to obtain encoder
-        # prompt and prompt token ids, either from
-        # singleton encoder prompt or from the
-        # encoder sub-prompt of an explicit
-        # encoder/decode scenario 2), special
-        # processing is applied to the returned decoder token ids
-        (
-            encoder_prompt,
-            encoder_prompt_token_ids,
-        ) = self._extract_single_prompt_for_enc_dec_input(
-            extracted_encoder_prompt,
-            request_id=request_id,
-            ptype=encoder_ptype,
-            is_encoder_prompt=True,
-        )
+            decoder_comps = None, None, None
 
-        # Invoke helper method to obtain
-        # decoder prompt and prompt token ids.
-        #
-        # The helper method will detect the decoder
-        # prompt type.
-        #
-        # Helper method will also apply special
-        # preprocessing unique to decoder prompts.
-        (
-            decoder_prompt,
-            decoder_prompt_token_ids,
-        ) = self._extract_single_prompt_for_enc_dec_input(
-            extracted_decoder_prompt,
-            request_id=request_id,
-            ptype=None,
-            is_encoder_prompt=False,
-        )
+        return self._build_enc_dec_llm_inputs(encoder_comps, decoder_comps)
 
-        return LLMInputs(
-            prompt_token_ids=decoder_prompt_token_ids,
-            prompt=decoder_prompt,
-            encoder_prompt_token_ids=encoder_prompt_token_ids,
-            encoder_prompt=encoder_prompt,
-        )
+    def _build_decoder_only_llm_inputs(
+        self,
+        prompt_comps: PromptComponents,
+        prompt_adapter_request: Optional[PromptAdapterRequest],
+    ) -> LLMInputs:
+        prompt, prompt_token_ids, prompt_embeds, multi_modal_data = prompt_comps
+
+        prompt_token_ids = self._apply_prompt_adapter(
+            prompt_token_ids, prompt_adapter_request=prompt_adapter_request)
+
+        return LLMInputs(prompt_token_ids=prompt_token_ids,
+                         prompt=prompt,
+                         prompt_embeds=prompt_embeds
+                         multi_modal_data=multi_modal_data)
 
     def _process_decoder_only_prompt(
         self,
-        inputs: PromptInputs,
+        inputs: SingletonPromptInputs,
+        request_id: str,
         lora_request: Optional[LoRARequest] = None,
-        request_id: Optional[str] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> LLMInputs:
         '''
         For decoder-only models:
-        Process an input prompt
-        into an `LLMInputs` instance.
+        Process an input prompt into an :class:`LLMInputs` instance.
 
         Arguments:
 
         * inputs: input prompt
-        * lora_request
         * request_id
+        * lora_request
         * prompt_adapter_request
 
         Returns:
 
-        * `LLMInputs` instance
+        * :class:`LLMInputs` instance
         '''
 
-        if isinstance(inputs, str):
-            inputs = {"prompt": inputs}
-        prompt = inputs.get("prompt")
-        prompt_embeds = inputs.get("prompt_embeds")
-        driver_worker = self.model_executor.driver_worker
-        if prompt_embeds is not None:
-            if self.speculative_config is not None:
-                raise ValueError(
-                    "Speculative decoding does not support prompt_embeds.")
-            model_runner = driver_worker.worker.model_runner if isinstance(
-                driver_worker,
-                WorkerWrapperBase) else driver_worker.model_runner
-            if not model_runner.model_supports_input_embeds:
-                raise ValueError(
-                    f"Model {self.model_config.model} does not support input "
-                    "embeddings, but prompt_embeds was provided.")
-            prompt_token_ids = []
-        elif "prompt_token_ids" not in inputs:
-            prompt_token_ids = self._tokenize_prompt(
-                prompt,
-                request_id=request_id,
-                lora_request=lora_request,
-            )
-        else:
-            prompt_token_ids = inputs["prompt_token_ids"]
+        prompt_comps = self._extract_prompt_components(
+            inputs,
+            request_id=request_id,
+            lora_request=lora_request,
+        )
 
-        if prompt_adapter_request:
-            prompt_token_ids = (
-                [0] * prompt_adapter_request.prompt_adapter_num_virtual_tokens
-                + prompt_token_ids)
-
-        return LLMInputs(prompt_token_ids=prompt_token_ids,
-                         prompt=prompt,
-                         prompt_embeds=prompt_embeds,
-                         multi_modal_data=inputs.get("multi_modal_data"))
+        return self._build_decoder_only_llm_inputs(
+            prompt_comps,
+            prompt_adapter_request=prompt_adapter_request,
+        )
 
     def process_model_inputs(
         self,
-        request_id: str,
         inputs: PromptInputs,
+        request_id: str,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-    ) -> LLMInputs:
+    ) -> Union[LLMInputs, EncoderDecoderLLMInputs]:
 
         if self.is_encoder_decoder_model():
             # Encoder-decoder model requires special mapping of
             # input prompts to encoder & decoder
-
             model_inputs = self._process_encoder_decoder_prompt(
                 inputs,
                 request_id=request_id,
             )
         else:
+            if is_explicit_encoder_decoder_prompt(inputs):
+                raise ValueError("Cannot pass encoder-decoder prompt "
+                                 "to decoder-only models")
+
             # Decoder-only operation
             model_inputs = self._process_decoder_only_prompt(
                 inputs,
@@ -1044,10 +1118,11 @@ class LLMEngine:
             arrival_time = time.time()
 
         processed_inputs = self.process_model_inputs(
+            inputs,
             request_id=request_id,
-            inputs=inputs,
             lora_request=lora_request,
-            prompt_adapter_request=prompt_adapter_request)
+            prompt_adapter_request=prompt_adapter_request,
+        )
 
         self._add_processed_request(
             request_id=request_id,
@@ -1192,56 +1267,174 @@ class LLMEngine:
 
         return
 
-    def _process_model_outputs(
-        self,
-        output: GenericSequence[Union[SamplerOutput, PoolerOutput]],
-        scheduled_seq_groups: List[ScheduledSequenceGroup],
-        ignored_seq_groups: List[SequenceGroup],
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
+    def _process_model_outputs(self,
+                               virtual_engine: int,
+                               is_async: bool,
+                               sampler_output: Optional[SamplerOutput] = None,
+                               is_last_output: bool = False) -> None:
         """Apply the model output to the sequences in the scheduled seq groups.
+
+        virtual_engine: The engine id to operate on
+
+        is_async: Indicates whether this postprocessor runs in
+            parallel with the GPU forward pass and is processing
+            tokens from the previous step. If this is true, then
+            no tokens need to be appended since it is already done
+            externally (before the next schedule() call)
+
+        sampler_output: Used with multi-step execution to provide
+            sampler_output of each step
+        is_last_output: Used with multi-step execution to indicate
+            the last step (of each multi-step group)
 
         Returns RequestOutputs that can be returned to the client.
         """
-
         now = time.time()
 
-        # Organize outputs by [sequence group][step] instead of
-        # [step][sequence group].
-        output_by_sequence_group = create_output_by_sequence_group(
-            output, num_seq_groups=len(scheduled_seq_groups))
+        is_multi_step = sampler_output is not None
 
-        # Update the scheduled sequence groups with the model outputs.
-        for scheduled_seq_group, outputs, seq_group_meta in zip(
-                scheduled_seq_groups, output_by_sequence_group,
-                seq_group_metadata_list):
+        ctx: SchedulerContext = self.scheduler_contexts[virtual_engine]
+
+        if len(ctx.output_queue) == 0:
+            return None
+
+        if is_multi_step:
+            # Async + multi-step case
+            (outputs, seq_group_metadata_list,
+             scheduler_outputs) = ctx.output_queue[0]
+            assert outputs is None
+            outputs = [sampler_output]
+        else:
+            # Async standard case
+            (outputs, seq_group_metadata_list,
+             scheduler_outputs) = ctx.output_queue.popleft()
+
+        assert outputs is not None
+
+        # Sanity check
+        assert len(seq_group_metadata_list) == len(
+            scheduler_outputs.scheduled_seq_groups)
+
+        # Organize outputs by [step][sequence group] instead of
+        # [sequence group][step].
+        if len(outputs) > 1:
+            outputs_by_sequence_group = create_output_by_sequence_group(
+                outputs, num_seq_groups=len(seq_group_metadata_list))
+        else:
+            outputs_by_sequence_group = outputs
+
+        finished_before: List[int] = []
+        for i, seq_group_meta in enumerate(seq_group_metadata_list):
+            scheduled_seq_group = scheduler_outputs.scheduled_seq_groups[i]
+
             seq_group = scheduled_seq_group.seq_group
-            seq_group.update_num_computed_tokens(
-                scheduled_seq_group.token_chunk_size)
-            if self.model_config.embedding_mode:
-                self._process_sequence_group_outputs(seq_group, outputs)
+
+            if seq_group.is_finished():
+                finished_before.append(i)
                 continue
 
-            self.output_processor.process_prompt_logprob(seq_group, outputs)
-            if seq_group_meta.do_sample:
-                self.output_processor.process_outputs(seq_group, outputs)
+            if len(outputs) > 1:
+                output = outputs_by_sequence_group[i]
+            else:
+                output = [outputs_by_sequence_group[0][i]]
 
-        # Free the finished sequence groups.
+            if not is_async:
+                seq_group.update_num_computed_tokens(
+                    scheduled_seq_group.token_chunk_size)
+
+            if outputs:
+                for o in outputs:
+                    if (isinstance(o, SamplerOutput)
+                            and seq_group.metrics is not None):
+                        if seq_group.metrics.model_forward_time is not None:
+                            seq_group.metrics.model_forward_time += (
+                                o.model_forward_time)
+                        else:
+                            seq_group.metrics.model_forward_time = (
+                                o.model_forward_time)
+                        if seq_group.metrics.model_execute_time is not None:
+                            seq_group.metrics.model_execute_time += (
+                                o.model_execute_time)
+                        else:
+                            seq_group.metrics.model_execute_time = (
+                                o.model_execute_time)
+
+            if self.model_config.embedding_mode:
+                self._process_sequence_group_outputs(seq_group, output)
+                continue
+
+            self.output_processor.process_prompt_logprob(seq_group, output)
+            if seq_group_meta.do_sample:
+                self.output_processor.process_outputs(seq_group, output,
+                                                      is_async)
+
+        # For async + multi-step, free finished seqs and create outputs
+        # only on the final step.
+        if is_multi_step and not is_last_output:
+            return
+
         for scheduler in self.scheduler:
             scheduler.free_finished_seq_groups()
 
         # Create the outputs.
-        request_outputs: List[Union[RequestOutput,
-                                    EmbeddingRequestOutput]] = []
-        for scheduled_seq_group in scheduled_seq_groups:
+        for i, _ in enumerate(seq_group_metadata_list):
+            scheduled_seq_group = scheduler_outputs.scheduled_seq_groups[i]
+
+            if not is_multi_step and i in finished_before:
+                continue  # Avoids double processing
+
             seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
+            if (seq_group.is_finished()
+                    if self.step_return_finished_only else True):
+                request_output = RequestOutputFactory.create(seq_group)
+                ctx.request_outputs.append(request_output)
+
+        for seq_group in scheduler_outputs.ignored_seq_groups:
             request_output = RequestOutputFactory.create(seq_group)
-            request_outputs.append(request_output)
-        for seq_group in ignored_seq_groups:
-            request_output = RequestOutputFactory.create(seq_group)
-            request_outputs.append(request_output)
-        return request_outputs
+            ctx.request_outputs.append(request_output)
+
+        # For async + multi-step, do stats only on the last output.
+        # Otherwise, do stats if the execution is async
+        do_stats = is_multi_step or is_async
+
+        if do_stats:
+            # Log stats.
+            self.do_log_stats(scheduler_outputs, outputs, finished_before)
+
+            # Tracing
+            self.do_tracing(scheduler_outputs)
+
+        return None
+
+    def _advance_to_next_step(
+            self, output: List[SamplerOutput],
+            seq_group_metadata_list: List[SequenceGroupMetadata],
+            scheduled_seq_groups: List[ScheduledSequenceGroup]) -> None:
+        """Given model output from a single run, append the tokens to the
+        sequences. This is normally done inside output processor, but it is
+        required if the worker is to perform async forward pass to next step.
+        """
+        for seq_group_metadata, sequence_group_outputs, scheduled_seq_group in \
+            zip(seq_group_metadata_list, output, scheduled_seq_groups):
+            seq_group = scheduled_seq_group.seq_group
+
+            if seq_group.is_finished():
+                continue
+
+            seq_group.update_num_computed_tokens(
+                seq_group_metadata.token_chunk_size)
+
+            if seq_group_metadata.do_sample:
+                assert len(sequence_group_outputs.samples) == 1, (
+                    "Async output processor expects a single sample"
+                    " (i.e sampling_params.n == 1 and no "
+                    "sampling_params.best_of > 1)")
+                sample = sequence_group_outputs.samples[0]
+
+                assert len(seq_group.seqs) == 1
+                seq = seq_group.seqs[0]
+                seq.append_token_id(sample.output_token, sample.logprobs)
 
     def step(self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
@@ -1298,12 +1491,75 @@ class LLMEngine:
             raise NotImplementedError(
                 "Pipeline parallelism is only supported through AsyncLLMEngine "
                 "as performance will be severely degraded otherwise.")
-        seq_group_metadata_list, scheduler_outputs = self.scheduler[
-            0].schedule()
+
+        # For llm_engine, there is no pipeline parallel support, so the engine
+        # used is always 0.
+        virtual_engine = 0
+
+        # These are cached outputs from previous iterations. None if on first
+        # iteration
+        cached_outputs = self.cached_scheduler_outputs[virtual_engine]
+        seq_group_metadata_list = cached_outputs.seq_group_metadata_list
+        scheduler_outputs = cached_outputs.scheduler_outputs
+        allow_async_output_proc = cached_outputs.allow_async_output_proc
+
+        # Detect async + multi-step
+        use_async_and_multi_step = (self.scheduler_config.is_multi_step
+                                    and allow_async_output_proc)
+
+        ctx = self.scheduler_contexts[virtual_engine]
+
+        # Skip the scheduler if there are any remaining steps in the seq groups.
+        # This ensures that the scheduler is only called again when the current
+        # batch has completed.
+        if not self._has_remaining_steps(seq_group_metadata_list):
+
+            # Clear outputs on scheduler iteration start
+            ctx.request_outputs.clear()
+
+            # Schedule iteration
+            (seq_group_metadata_list, scheduler_outputs,
+             allow_async_output_proc
+             ) = self.scheduler[virtual_engine].schedule()
+
+            # Detect async + multi-step
+            use_async_and_multi_step = (self.scheduler_config.is_multi_step
+                                        and allow_async_output_proc)
+
+            # Maybe switch from async mode to sync mode
+            if not allow_async_output_proc and len(ctx.output_queue) > 0:
+                self._process_model_outputs(virtual_engine=virtual_engine,
+                                            is_async=True)
+
+            # For async + multi-step, init the queue
+            if use_async_and_multi_step:
+                assert len(ctx.output_queue) == 0
+                assert seq_group_metadata_list is not None
+                ctx.output_queue.append(
+                    (None, seq_group_metadata_list, scheduler_outputs))
+
+            if (self.scheduler_config.is_multi_step
+                    and scheduler_outputs.num_lookahead_slots > 0):
+                # cache the scheduler outputs for the next iteration if we have
+                # lookahead slots
+                self._cache_scheduler_outputs_for_multi_step(
+                    virtual_engine, seq_group_metadata_list, scheduler_outputs,
+                    allow_async_output_proc)
+
+        assert seq_group_metadata_list is not None
+        assert scheduler_outputs is not None
 
         if not scheduler_outputs.is_empty():
             finished_requests_ids = self.scheduler[
-                0].get_and_reset_finished_requests_ids()
+                virtual_engine].get_and_reset_finished_requests_ids()
+
+            # Check if we have a cached last_output from the previous iteration.
+            # For supporting PP this is probably the best way to pass the
+            # sampled_token_ids, as a separate broadcast over all the PP stages
+            # will cause one virtual engine's microbatch to block the pipeline.
+            last_sampled_token_ids = \
+                self._get_last_sampled_token_ids(virtual_engine)
+
             execute_model_req = ExecuteModelRequest(
                 seq_group_metadata_list=seq_group_metadata_list,
                 blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
@@ -1311,23 +1567,90 @@ class LLMEngine:
                 blocks_to_copy=scheduler_outputs.blocks_to_copy,
                 num_lookahead_slots=scheduler_outputs.num_lookahead_slots,
                 running_queue_size=scheduler_outputs.running_queue_size,
-                finished_requests_ids=finished_requests_ids)
+                finished_requests_ids=finished_requests_ids,
+                # We use ExecuteModelRequest to pass the last sampled_token_ids
+                # to each of the non-last PP stages for in-place prepare_input.
+                last_sampled_token_ids=last_sampled_token_ids)
+
+            if allow_async_output_proc:
+                async_callback = self.async_callback_multi_step[
+                    virtual_engine] if use_async_and_multi_step \
+                    else self.async_callback[virtual_engine]
+
+                execute_model_req.async_callback = async_callback
+                execute_model_req.use_async_and_multi_step = \
+                    use_async_and_multi_step
+
             output = self.model_executor.execute_model(
                 execute_model_req=execute_model_req)
+
+            # We need to do this here so that last step's sampled_token_ids can
+            # be passed to the next iteration for PP.
+            if self.scheduler_config.is_multi_step:
+                self._update_cached_scheduler_output(virtual_engine, output)
         else:
+            # Nothing scheduled => If there is pending async postprocessor,
+            # then finish it here.
+            if not use_async_and_multi_step and len(ctx.output_queue) > 0:
+                assert not self.scheduler_config.is_multi_step
+                self._process_model_outputs(virtual_engine=virtual_engine,
+                                            is_async=True)
+            # No outputs in this case
             output = []
 
-        request_outputs = self._process_model_outputs(
-            output, scheduler_outputs.scheduled_seq_groups,
-            scheduler_outputs.ignored_seq_groups, seq_group_metadata_list)
+        # Finish the current step for all the sequence groups.
+        if self.scheduler_config.is_multi_step:
+            for seq_group in seq_group_metadata_list:
+                seq_group.finish_step()
 
-        # Log stats.
-        self.do_log_stats(scheduler_outputs, output)
+        if not self._has_remaining_steps(seq_group_metadata_list):
+            # clear the cache if we have finished all the steps.
+            if self.scheduler_config.is_multi_step:
+                self.cached_scheduler_outputs[0] = SchedulerOutputState()
 
-        # Tracing
-        self.do_tracing(scheduler_outputs)
+            if use_async_and_multi_step:
+                # For async + multi-step, clear the queue
+                ctx.output_queue.clear()
+            else:
+                # Add results to the output_queue
+                # (for async or non-async postprocessing)
+                ctx.output_queue.append(
+                    (output, seq_group_metadata_list, scheduler_outputs))
+
+                if output and allow_async_output_proc:
+                    assert len(output) == 1, (
+                        "Multi step decoding does not work "
+                        "with async output processing.")
+
+                    self._advance_to_next_step(
+                        output[0], seq_group_metadata_list,
+                        scheduler_outputs.scheduled_seq_groups)
+
+            # Check if need to run the usual non-async path
+            if not allow_async_output_proc:
+                self._process_model_outputs(virtual_engine=virtual_engine,
+                                            is_async=False)
+
+                # Log stats.
+                self.do_log_stats(scheduler_outputs, output)
+
+                # Tracing
+                self.do_tracing(scheduler_outputs)
+        else:
+            # Multi-step case
+            if use_async_and_multi_step:
+                return []
+            else:
+                ctx.request_outputs = []
 
         if not self.has_unfinished_requests():
+            # Drain async postprocessor (if exists)
+            if len(ctx.output_queue) > 0:
+                assert not self.scheduler_config.is_multi_step
+                self._process_model_outputs(virtual_engine=virtual_engine,
+                                            is_async=True)
+            assert len(ctx.output_queue) == 0
+
             # Stop the execute model loop in parallel workers until there are
             # more requests to process. This avoids waiting indefinitely in
             # torch.distributed ops which may otherwise timeout, and unblocks
@@ -1335,7 +1658,63 @@ class LLMEngine:
             # queued control plane messages, such as add/remove lora adapters.
             self.model_executor.stop_remote_worker_execution_loop()
 
-        return request_outputs
+        return ctx.request_outputs
+
+    def _has_remaining_steps(
+        self, seq_group_metadata_list: Optional[List[SequenceGroupMetadata]]
+    ) -> bool:
+        if (not self.scheduler_config.is_multi_step
+                or not seq_group_metadata_list):
+            return False
+
+        # TODO(will) this is a sanity check for nowto make sure that all the
+        # seqs are on the same steps. Eventually we will want to do some sort of
+        # dynamic scheduling when doing multi-step decoding.
+        ref_remaining_steps = seq_group_metadata_list[0].state.remaining_steps
+        if any([
+                seq_group.state.remaining_steps != ref_remaining_steps
+                for seq_group in seq_group_metadata_list[1:]
+        ]):
+            raise AssertionError(("All running sequence groups should "
+                                  "have the same remaining steps."))
+
+        return ref_remaining_steps > 0
+
+    def _cache_scheduler_outputs_for_multi_step(
+            self, virtual_engine: int,
+            seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+            scheduler_outputs: SchedulerOutputs,
+            allow_async_output_proc: bool) -> None:
+        co = self.cached_scheduler_outputs[virtual_engine]
+
+        co.seq_group_metadata_list = seq_group_metadata_list
+        co.scheduler_outputs = scheduler_outputs
+        co.allow_async_output_proc = allow_async_output_proc
+        co.last_output = None
+
+    def _update_cached_scheduler_output(
+            self, virtual_engine: int,
+            output: List[Optional[SamplerOutput]]) -> None:
+        if (self.parallel_config.pipeline_parallel_size > 1 and len(output) > 0
+                and output[0] is not None):
+            last_output = output[-1]
+            assert last_output is not None
+            assert last_output.sampled_token_ids_cpu is not None
+            assert last_output.sampled_token_ids is None
+            assert last_output.sampled_token_probs is None
+            self.cached_scheduler_outputs[
+                virtual_engine].last_output = last_output
+
+    def _get_last_sampled_token_ids(
+            self, virtual_engine: int) -> Optional[torch.Tensor]:
+        cached_last_output = self.cached_scheduler_outputs[
+            virtual_engine].last_output
+        if (self.scheduler_config.is_multi_step
+                and self.parallel_config.pipeline_parallel_size > 1
+                and cached_last_output is not None
+                and cached_last_output.sampled_token_ids_cpu is not None):
+            return cached_last_output.sampled_token_ids_cpu
+        return None
 
     def add_logger(self, logger_name: str, logger: StatLoggerBase) -> None:
         if logger_name in self.stat_loggers:
@@ -1347,20 +1726,21 @@ class LLMEngine:
             raise KeyError(f"Logger with name {logger_name} does not exist.")
         del self.stat_loggers[logger_name]
 
-    def do_log_stats(
-            self,
-            scheduler_outputs: Optional[SchedulerOutputs] = None,
-            model_output: Optional[List[SamplerOutput]] = None) -> None:
+    def do_log_stats(self,
+                     scheduler_outputs: Optional[SchedulerOutputs] = None,
+                     model_output: Optional[List[SamplerOutput]] = None,
+                     finished_before: Optional[List[int]] = None) -> None:
         """Forced log when no requests active."""
         if self.log_stats:
-            stats = self._get_stats(scheduler_outputs, model_output)
+            stats = self._get_stats(scheduler_outputs, model_output,
+                                    finished_before)
             for logger in self.stat_loggers.values():
                 logger.log(stats)
 
-    def _get_stats(
-            self,
-            scheduler_outputs: Optional[SchedulerOutputs],
-            model_output: Optional[List[SamplerOutput]] = None) -> Stats:
+    def _get_stats(self,
+                   scheduler_outputs: Optional[SchedulerOutputs],
+                   model_output: Optional[List[SamplerOutput]] = None,
+                   finished_before: Optional[List[int]] = None) -> Stats:
         """Get Stats to be Logged to Prometheus.
 
         Args:
@@ -1397,6 +1777,13 @@ class LLMEngine:
                 for scheduler in self.scheduler)
             cpu_cache_usage_sys = 1.0 - (num_free_cpu / num_total_cpu)
 
+        # Prefix Cache Hit Rate. Note that we always use
+        # the cache hit rate of the first virtual engine.
+        cpu_prefix_cache_hit_rate = self.scheduler[
+            0].get_prefix_cache_hit_rate(Device.CPU)
+        gpu_prefix_cache_hit_rate = self.scheduler[
+            0].get_prefix_cache_hit_rate(Device.GPU)
+
         # Iteration stats
         num_prompt_tokens_iter = 0
         num_generation_tokens_iter = 0
@@ -1418,6 +1805,10 @@ class LLMEngine:
         # NOTE: This loop assumes prefill seq_groups are before
         # decode seq_groups in scheduled_seq_groups.
         if scheduler_outputs is not None:
+            # For async postprocessor, already finished sequences need to be
+            # not counted (to avoid double counting)
+            actual_num_batched_tokens = scheduler_outputs.num_batched_tokens  # type: ignore
+
             num_generation_tokens_from_prefill_groups = 0.
             # NOTE: if scheduler_outputs.num_prefill_groups > 0 and
             # the len of scheduler_outputs.scheduled_seq_groups is !=
@@ -1426,6 +1817,11 @@ class LLMEngine:
 
             for idx, scheduled_seq_group in enumerate(
                     scheduler_outputs.scheduled_seq_groups):
+                # Skip double logging when using async output proc
+                if finished_before and idx in finished_before:
+                    actual_num_batched_tokens -= 1
+                    continue
+
                 group_was_prefill = idx < scheduler_outputs.num_prefill_groups
                 seq_group = scheduled_seq_group.seq_group
 
@@ -1460,7 +1856,6 @@ class LLMEngine:
                     # Latency timings
                     time_e2e_requests.append(now -
                                              seq_group.metrics.arrival_time)
-
                     # Metadata
                     num_prompt_tokens_requests.append(
                         len(seq_group.prompt_token_ids))
@@ -1484,7 +1879,7 @@ class LLMEngine:
             #   + num_generation_tokens_from_prefill_groups (since we generate
             #   one token on prefills on iters where the prefill finishes).
             num_generation_tokens_iter = (
-                scheduler_outputs.num_batched_tokens - num_prompt_tokens_iter +
+                actual_num_batched_tokens - num_prompt_tokens_iter +
                 num_generation_tokens_from_prefill_groups)
 
         # Spec decode, if enabled, emits specialized metrics from the worker in
@@ -1505,6 +1900,9 @@ class LLMEngine:
             #   KV Cache Usage in %
             gpu_cache_usage_sys=gpu_cache_usage_sys,
             cpu_cache_usage_sys=cpu_cache_usage_sys,
+            #   Prefix Cache Hit Rate
+            cpu_prefix_cache_hit_rate=cpu_prefix_cache_hit_rate,
+            gpu_prefix_cache_hit_rate=gpu_prefix_cache_hit_rate,
 
             # Iteration stats
             num_prompt_tokens_iter=num_prompt_tokens_iter,
@@ -1610,9 +2008,47 @@ class LLMEngine:
             seq_span.set_attribute(
                 SpanAttributes.LLM_LATENCY_TIME_TO_FIRST_TOKEN, ttft)
             seq_span.set_attribute(SpanAttributes.LLM_LATENCY_E2E, e2e_time)
+            if metrics.scheduler_time is not None:
+                seq_span.set_attribute(
+                    SpanAttributes.LLM_LATENCY_TIME_IN_SCHEDULER,
+                    metrics.scheduler_time)
+            if metrics.model_forward_time is not None:
+                seq_span.set_attribute(
+                    SpanAttributes.LLM_LATENCY_TIME_IN_MODEL_FORWARD,
+                    metrics.model_forward_time / 1000.0)
+            if metrics.model_execute_time is not None:
+                seq_span.set_attribute(
+                    SpanAttributes.LLM_LATENCY_TIME_IN_MODEL_EXECUTE,
+                    metrics.model_execute_time)
 
     def is_encoder_decoder_model(self):
-        return is_encoder_decoder_model_config(self.model_config)
+        return self.model_config.is_encoder_decoder_model
 
     def is_embedding_model(self):
-        return is_embedding_model_config(self.model_config)
+        return self.model_config.is_embedding_model
+
+    def _validate_model_inputs(self, inputs: Union[LLMInputs,
+                                                   EncoderDecoderLLMInputs]):
+        if self.is_encoder_decoder_model():
+            prompt_ids = inputs.get("encoder_prompt_token_ids")
+        else:
+            prompt_ids = inputs.get("prompt_token_ids")
+
+        if prompt_ids is None or len(prompt_ids) == 0:
+            raise ValueError("Prompt cannot be empty")
+
+        if self.model_config.is_multimodal_model:
+            max_prompt_len = self.model_config.max_model_len
+
+            if len(prompt_ids) > max_prompt_len:
+                raise ValueError(
+                    f"The prompt (total length {len(prompt_ids)}) is too long "
+                    f"to fit into the model (context length {max_prompt_len}). "
+                    "Make sure that `max_model_len` is no smaller than the "
+                    "number of text tokens plus multimodal tokens. For image "
+                    "inputs, the number of image tokens depends on the number "
+                    "of images, and possibly their aspect ratios as well.")
+
+            # TODO: Find out how many placeholder tokens are there so we can
+            # check that chunked prefill does not truncate them
+            # max_batch_len = self.scheduler_config.max_num_batched_tokens

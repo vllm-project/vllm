@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import contextlib
 import datetime
 import enum
 import gc
@@ -11,24 +12,24 @@ import tempfile
 import threading
 import uuid
 import warnings
-from collections import defaultdict
+from asyncio import FIRST_COMPLETED, ensure_future
 from functools import lru_cache, partial, wraps
 from platform import uname
-from typing import (Any, AsyncIterator, Awaitable, Callable, Dict, Generic,
-                    Hashable, List, Optional, OrderedDict, Set, Tuple, TypeVar,
-                    Union, overload)
+from typing import (Any, AsyncGenerator, Awaitable, Callable, Dict, Generic,
+                    Hashable, List, Literal, Optional, OrderedDict, Set, Tuple,
+                    Type, TypeVar, Union, overload)
+from uuid import uuid4
 
 import numpy as np
 import numpy.typing as npt
 import psutil
 import torch
 import torch.types
-from typing_extensions import ParamSpec
+import yaml
+from packaging.version import Version
+from typing_extensions import ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
-from vllm import _custom_ops as ops
-from vllm.inputs import (ExplicitEncoderDecoderPrompt, PromptInputs,
-                         SingletonPromptInputs)
 from vllm.logger import enable_trace_function_call, init_logger
 
 logger = init_logger(__name__)
@@ -113,6 +114,9 @@ STR_ROCM_FLASH_ATTN_VAL: str = "ROCM_FLASH"
 STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
 STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
+
+GiB_bytes = 1 << 30
+"""The number of bytes in one gibibyte (GiB)."""
 
 STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.half,
@@ -260,6 +264,44 @@ class LRUCache(Generic[T]):
         self.cache.clear()
 
 
+class PyObjectCache:
+    """Used to cache python objects to avoid object allocations 
+    across scheduler iterations.
+    """
+
+    def __init__(self, obj_builder):
+        self._obj_builder = obj_builder
+        self._index = 0
+
+        self._obj_cache = []
+        for _ in range(128):
+            self._obj_cache.append(self._obj_builder())
+
+    def _grow_cache(self):
+        # Double the size of the cache
+        num_objs = len(self._obj_cache)
+        for _ in range(num_objs):
+            self._obj_cache.append(self._obj_builder())
+
+    def get_object(self):
+        """Returns a pre-allocated cached object. If there is not enough 
+        objects, then the cache size will double.
+        """
+        if self._index >= len(self._obj_cache):
+            self._grow_cache()
+            assert self._index < len(self._obj_cache)
+
+        obj = self._obj_cache[self._index]
+        self._index += 1
+
+        return obj
+
+    def reset(self):
+        """Makes all cached-objects available for the next scheduler iteration.
+        """
+        self._index = 0
+
+
 def is_hip() -> bool:
     return torch.version.hip is not None
 
@@ -292,18 +334,12 @@ def is_neuron() -> bool:
 
 
 @lru_cache(maxsize=None)
-def is_tpu() -> bool:
-    try:
-        import libtpu
-    except ImportError:
-        libtpu = None
-    return libtpu is not None
-
-
-@lru_cache(maxsize=None)
 def is_xpu() -> bool:
-    from importlib.metadata import version
-    is_xpu_flag = "xpu" in version("vllm")
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        is_xpu_flag = "xpu" in version("vllm")
+    except PackageNotFoundError:
+        return False
     # vllm is not build with xpu
     if not is_xpu_flag:
         return False
@@ -323,6 +359,7 @@ def is_xpu() -> bool:
 @lru_cache(maxsize=None)
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
+    from vllm import _custom_ops as ops
     max_shared_mem = (
         ops.get_max_shared_memory_per_block_device_attribute(gpu))
     # value 0 will cause MAX_SEQ_LEN become negative and test_attention.py
@@ -373,63 +410,75 @@ def make_async(func: Callable[P, T]) -> Callable[P, Awaitable[T]]:
     return _async_wrapper
 
 
-class ProducerFinished:
-    pass
+async def iterate_with_cancellation(
+    iterator: AsyncGenerator[T, None],
+    is_cancelled: Callable[[], Awaitable[bool]],
+) -> AsyncGenerator[T, None]:
+    """Convert async iterator into one that polls the provided function
+    at least once per second to check for client cancellation.
+    """
+
+    # Can use anext() in python >= 3.10
+    awaits = [ensure_future(iterator.__anext__())]
+    while True:
+        done, pending = await asyncio.wait(awaits, timeout=1)
+        if await is_cancelled():
+            with contextlib.suppress(BaseException):
+                awaits[0].cancel()
+                await iterator.aclose()
+            raise asyncio.CancelledError("client cancelled")
+        if done:
+            try:
+                item = await awaits[0]
+                awaits[0] = ensure_future(iterator.__anext__())
+                yield item
+            except StopAsyncIteration:
+                # we are done
+                return
 
 
-def merge_async_iterators(
-        *iterators: AsyncIterator[T]) -> AsyncIterator[Tuple[int, T]]:
+async def merge_async_iterators(
+    *iterators: AsyncGenerator[T, None],
+    is_cancelled: Optional[Callable[[], Awaitable[bool]]] = None,
+) -> AsyncGenerator[Tuple[int, T], None]:
     """Merge multiple asynchronous iterators into a single iterator.
 
     This method handle the case where some iterators finish before others.
     When it yields, it yields a tuple (i, item) where i is the index of the
     iterator that yields the item.
+
+    It also optionally polls a provided function at least once per second
+    to check for client cancellation.
     """
-    queue: asyncio.Queue[Union[Tuple[int, T], ProducerFinished,
-                               Exception]] = asyncio.Queue()
 
-    producers = len(iterators)
-
-    async def producer(i: int, iterator: AsyncIterator[T]):
-        try:
-            async for item in iterator:
-                await queue.put((i, item))
-        except Exception as e:
-            await queue.put(e)
-        # Signal to the consumer that we've finished
-        await queue.put(ProducerFinished())
-
-    _tasks = [
-        asyncio.create_task(producer(i, iterator))
-        for i, iterator in enumerate(iterators)
-    ]
-
-    async def consumer():
-        remaining = producers
-        try:
-            while remaining or not queue.empty():
-                # we think there is a race condition here
-                item = await queue.get()
-
-                if isinstance(item, ProducerFinished):
-                    # Signal that a producer finished- not a real item
-                    remaining -= 1
-                    continue
-
-                if isinstance(item, Exception):
-                    raise item
-                yield item
-        except (Exception, asyncio.CancelledError) as e:
-            for task in _tasks:
-                if sys.version_info >= (3, 9):
-                    # msg parameter only supported in Python 3.9+
-                    task.cancel(e)
-                else:
-                    task.cancel()
-            raise e
-        await asyncio.gather(*_tasks)
-
-    return consumer()
+    # Can use anext() in python >= 3.10
+    awaits = {
+        ensure_future(pair[1].__anext__()): pair
+        for pair in enumerate(iterators)
+    }
+    timeout = None if is_cancelled is None else 1
+    try:
+        while awaits:
+            done, pending = await asyncio.wait(awaits.keys(),
+                                               return_when=FIRST_COMPLETED,
+                                               timeout=timeout)
+            if is_cancelled is not None and await is_cancelled():
+                raise asyncio.CancelledError("client cancelled")
+            for d in done:
+                pair = awaits.pop(d)
+                try:
+                    item = await d
+                    i, it = pair
+                    awaits[ensure_future(it.__anext__())] = pair
+                    yield i, item
+                except StopAsyncIteration:
+                    pass
+    finally:
+        # Cancel any remaining iterators
+        for f, (_, it) in awaits.items():
+            with contextlib.suppress(BaseException):
+                f.cancel()
+                await it.aclose()
 
 
 def get_ip() -> str:
@@ -471,10 +520,13 @@ def get_distributed_init_method(ip: str, port: int) -> str:
     return f"tcp://[{ip}]:{port}" if ":" in ip else f"tcp://{ip}:{port}"
 
 
-def get_open_port(port: Optional[int] = None) -> int:
-    if port is None:
-        # Default behavior here is to return a port for multi-gpu communication
-        port = envs.VLLM_PORT
+def get_open_zmq_ipc_path() -> str:
+    base_rpc_path = envs.VLLM_RPC_BASE_PATH
+    return f"ipc://{base_rpc_path}/{uuid4()}"
+
+
+def get_open_port() -> int:
+    port = envs.VLLM_PORT
     if port is not None:
         while True:
             try:
@@ -495,6 +547,16 @@ def get_open_port(port: Optional[int] = None) -> int:
         with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
             s.bind(("", 0))
             return s.getsockname()[1]
+
+
+def find_process_using_port(port: int) -> Optional[psutil.Process]:
+    for conn in psutil.net_connections():
+        if conn.laddr.port == port:
+            try:
+                return psutil.Process(conn.pid)
+            except psutil.NoSuchProcess:
+                return None
+    return None
 
 
 def update_environment_variables(envs: Dict[str, str]):
@@ -709,16 +771,6 @@ class CudaMemoryProfiler:
         gc.collect()
 
 
-def str_to_int_tuple(s: str) -> Tuple[int, ...]:
-    """Convert a string to a tuple of integers."""
-    try:
-        return tuple(map(int, s.split(",")))
-    except ValueError as e:
-        raise ValueError(
-            "String must be a series of integers separated by commas "
-            f"(e.g., 1, 2, 3). Given input: {s}") from e
-
-
 def make_ndarray_with_pad(
     x: List[List[T]],
     pad: T,
@@ -794,21 +846,22 @@ def get_dtype_size(dtype: torch.dtype) -> int:
     return torch.tensor([], dtype=dtype).element_size()
 
 
-def merge_dicts(dict1: Dict[K, List[T]],
-                dict2: Dict[K, List[T]]) -> Dict[K, List[T]]:
-    """Merge 2 dicts that have key -> List of items.
+# `collections` helpers
+def is_list_of(
+    value: object,
+    typ: Type[T],
+    *,
+    check: Literal["first", "all"] = "first",
+) -> TypeIs[List[T]]:
+    if not isinstance(value, list):
+        return False
 
-    When a key conflicts, the values in dict1 is prioritized.
-    """
-    merged_dict: Dict[K, List[T]] = defaultdict(list)
+    if check == "first":
+        return len(value) == 0 or isinstance(value[0], typ)
+    elif check == "all":
+        return all(isinstance(v, typ) for v in value)
 
-    for key, value in dict1.items():
-        merged_dict[key].extend(value)
-
-    for key, value in dict2.items():
-        merged_dict[key].extend(value)
-
-    return dict(merged_dict)
+    assert_never(check)
 
 
 JSONTree = Union[Dict[str, "JSONTree[T]"], List["JSONTree[T]"],
@@ -941,6 +994,7 @@ def enable_trace_function_call_for_thread() -> None:
         enable_trace_function_call(log_path)
 
 
+# `functools` helpers
 def identity(value: T) -> T:
     return value
 
@@ -1021,60 +1075,10 @@ def cuda_device_count_stateless() -> int:
     return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
 
 
-# NVML utils
-# Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
-# all the related functions work on real physical device ids.
-# the major benefit of using NVML is that it will not initialize CUDA
-
-try:
-    import pynvml
-except ImportError:
-    # For non-NV devices
-    pynvml = None
-
-
-def with_nvml_context(fn):
-
-    @wraps(fn)
-    def wrapper(*args, **kwargs):
-        if pynvml is not None:
-            pynvml.nvmlInit()
-        try:
-            return fn(*args, **kwargs)
-        finally:
-            if pynvml is not None:
-                pynvml.nvmlShutdown()
-
-    return wrapper
-
-
-@with_nvml_context
-def is_full_nvlink(device_ids: List[int]) -> bool:
-    """
-    query if the set of gpus are fully connected by nvlink (1 hop)
-    """
-    handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in device_ids]
-    for i, handle in enumerate(handles):
-        for j, peer_handle in enumerate(handles):
-            if i < j:
-                try:
-                    p2p_status = pynvml.nvmlDeviceGetP2PStatus(
-                        handle, peer_handle, pynvml.NVML_P2P_CAPS_INDEX_NVLINK)
-                    if p2p_status != pynvml.NVML_P2P_STATUS_OK:
-                        return False
-                except pynvml.NVMLError as error:
-                    logger.error(
-                        "NVLink detection failed. This is normal if your"
-                        " machine has no NVLink equipped.",
-                        exc_info=error)
-                    return False
-    return True
-
-
 #From: https://stackoverflow.com/a/4104188/2749989
-def run_once(f):
+def run_once(f: Callable[P, None]) -> Callable[P, None]:
 
-    def wrapper(*args, **kwargs) -> Any:
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
         if not wrapper.has_run:  # type: ignore[attr-defined]
             wrapper.has_run = True  # type: ignore[attr-defined]
             return f(*args, **kwargs)
@@ -1089,6 +1093,9 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
     def parse_args(self, args=None, namespace=None):
         if args is None:
             args = sys.argv[1:]
+
+        if '--config' in args:
+            args = FlexibleArgumentParser._pull_args_from_config(args)
 
         # Convert underscores to dashes and vice versa in argument names
         processed_args = []
@@ -1106,6 +1113,103 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
 
         return super().parse_args(processed_args, namespace)
 
+    @staticmethod
+    def _pull_args_from_config(args: List[str]) -> List[str]:
+        """Method to pull arguments specified in the config file
+        into the command-line args variable.
+        
+        The arguments in config file will be inserted between 
+        the argument list.
+        
+        example:
+        ```yaml
+            port: 12323
+            tensor-parallel-size: 4
+        ```
+        ```python
+        $: vllm {serve,chat,complete} "facebook/opt-12B" \
+            --config config.yaml -tp 2
+        $: args = [
+            "serve,chat,complete",
+            "facebook/opt-12B", 
+            '--config', 'config.yaml', 
+            '-tp', '2'
+        ]
+        $: args = [
+            "serve,chat,complete",
+            "facebook/opt-12B", 
+            '--port', '12323', 
+            '--tensor-parallel-size', '4', 
+            '-tp', '2'
+            ]
+        ```
+
+        Please note how the config args are inserted after the sub command.
+        this way the order of priorities is maintained when these are args 
+        parsed by super().
+        """
+        assert args.count(
+            '--config') <= 1, "More than one config file specified!"
+
+        index = args.index('--config')
+        if index == len(args) - 1:
+            raise ValueError("No config file specified! \
+                             Please check your command-line arguments.")
+
+        file_path = args[index + 1]
+
+        config_args = FlexibleArgumentParser._load_config_file(file_path)
+
+        # 0th index is for {serve,chat,complete}
+        # followed by config args
+        # followed by rest of cli args.
+        # maintaining this order will enforce the precedence
+        # of cli > config > defaults
+        args = [args[0]] + config_args + args[1:index] + args[index + 2:]
+
+        return args
+
+    @staticmethod
+    def _load_config_file(file_path: str) -> List[str]:
+        """Loads a yaml file and returns the key value pairs as a 
+        flattened list with argparse like pattern
+        ```yaml
+            port: 12323
+            tensor-parallel-size: 4
+        ```
+        returns:
+            processed_args: list[str] = [
+                '--port': '12323',
+                '--tensor-parallel-size': '4'
+            ]
+        
+        """
+
+        extension: str = file_path.split('.')[-1]
+        if extension not in ('yaml', 'yml'):
+            raise ValueError(
+                "Config file must be of a yaml/yml type.\
+                              %s supplied", extension)
+
+        # only expecting a flat dictionary of atomic types
+        processed_args: List[str] = []
+
+        config: Dict[str, Union[int, str]] = {}
+        try:
+            with open(file_path, 'r') as config_file:
+                config = yaml.safe_load(config_file)
+        except Exception as ex:
+            logger.error(
+                "Unable to read the config file at %s. \
+                Make sure path is correct", file_path)
+            raise ex
+
+        for key, value in config.items():
+            processed_args.append('--' + key)
+            processed_args.append(str(value))
+
+        return processed_args
+
 
 async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
                               **kwargs):
@@ -1114,48 +1218,9 @@ async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
         return await task(*args, **kwargs)
 
 
-def is_encoder_decoder_model_config(model_config) -> bool:
-    '''
-    Extract the HF encoder/decoder model flag from the ModelConfig instance.
-    Return False if model_config is None.
-    '''
-    return model_config is not None and \
-                getattr(model_config.hf_config,
-                        "is_encoder_decoder",
-                        False)
-
-
-def is_embedding_model_config(model_config) -> bool:
-    '''
-    Extract the embedding model flag from the ModelConfig instance.
-    Return False if model_config is None.
-    '''
-    return model_config is not None and \
-                model_config.embedding_mode
-
-
-def build_explicit_enc_dec_prompt(
-    encoder_prompt: SingletonPromptInputs,
-    decoder_prompt: SingletonPromptInputs,
-) -> ExplicitEncoderDecoderPrompt:
-    return ExplicitEncoderDecoderPrompt(encoder_prompt=encoder_prompt,
-                                        decoder_prompt=decoder_prompt)
-
-
-def zip_enc_dec_prompt_lists(
-    enc_prompt_list: List[SingletonPromptInputs],
-    dec_prompt_list: List[SingletonPromptInputs],
-) -> List[ExplicitEncoderDecoderPrompt]:
-    return [
-        build_explicit_enc_dec_prompt(encoder_prompt, decoder_prompt)
-        for (encoder_prompt,
-             decoder_prompt) in zip(enc_prompt_list, dec_prompt_list)
-    ]
-
-
-def to_enc_dec_tuple_list(
-    enc_dec_prompts: List[ExplicitEncoderDecoderPrompt],
-) -> List[Tuple[PromptInputs, PromptInputs]]:
-    return [(enc_dec_prompt['encoder_prompt'],
-             enc_dec_prompt['decoder_prompt'])
-            for enc_dec_prompt in enc_dec_prompts]
+# Using dynamo with vLLM doesn't really work well with PyTorch versions < 2.4.0.
+# In particular, the FakeScalarType is not supported for earlier versions of
+# PyTorch which breaks dynamo for any ops registered using ScalarType.
+def supports_dynamo() -> bool:
+    base_torch_version = Version(Version(torch.__version__).base_version)
+    return base_torch_version >= Version("2.4.0")

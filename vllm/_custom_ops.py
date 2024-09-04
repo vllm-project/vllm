@@ -4,24 +4,21 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 
+import vllm.envs as envs
 from vllm._core_ext import ScalarType
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
-try:
-    import vllm._C
-except ImportError as e:
-    logger.warning("Failed to import from vllm._C with %r", e)
+if not current_platform.is_tpu():
+    try:
+        import vllm._C
+    except ImportError as e:
+        logger.warning("Failed to import from vllm._C with %r", e)
 
 with contextlib.suppress(ImportError):
-    # ruff: noqa: F401
-    import vllm._moe_C
-
-
-def is_custom_op_supported(op_name: str) -> bool:
-    op, overloads = torch._C._jit_get_operation(op_name)
-    return op is not None
+    import vllm._moe_C  # noqa: F401
 
 
 def hint_on_error(fn):
@@ -181,12 +178,20 @@ def advance_step(num_seqs: int, num_queries: int, block_size: int,
 def awq_dequantize(qweight: torch.Tensor, scales: torch.Tensor,
                    zeros: torch.Tensor, split_k_iters: int, thx: int,
                    thy: int) -> torch.Tensor:
+    if envs.VLLM_USE_TRITON_AWQ:
+        from vllm.model_executor.layers.quantization.awq_triton import (
+            awq_dequantize_triton)
+        return awq_dequantize_triton(qweight, scales, zeros)
     return torch.ops._C.awq_dequantize(qweight, scales, zeros, split_k_iters,
                                        thx, thy)
 
 
 def awq_gemm(input: torch.Tensor, qweight: torch.Tensor, qzeros: torch.Tensor,
              scales: torch.Tensor, split_k_iters: int) -> torch.Tensor:
+    if envs.VLLM_USE_TRITON_AWQ:
+        from vllm.model_executor.layers.quantization.awq_triton import (
+            awq_gemm_triton)
+        return awq_gemm_triton(input, qweight, qzeros, scales, split_k_iters)
     return torch.ops._C.awq_gemm(input, qweight, qzeros, scales, split_k_iters)
 
 
@@ -278,14 +283,14 @@ def cutlass_scaled_mm_azp(a: torch.Tensor,
 # aqlm
 def aqlm_gemm(input: torch.Tensor, codes: torch.Tensor,
               codebooks: torch.Tensor, scales: torch.Tensor,
-              codebook_partition_sizes: torch.Tensor,
+              codebook_partition_sizes: List[int],
               bias: Optional[torch.Tensor]) -> torch.Tensor:
     return torch.ops._C.aqlm_gemm(input, codes, codebooks, scales,
                                   codebook_partition_sizes, bias)
 
 
 def aqlm_dequant(codes: torch.Tensor, codebooks: torch.Tensor,
-                 codebook_partition_sizes: torch.Tensor) -> torch.Tensor:
+                 codebook_partition_sizes: List[int]) -> torch.Tensor:
     return torch.ops._C.aqlm_dequant(codes, codebooks,
                                      codebook_partition_sizes)
 
@@ -302,6 +307,20 @@ def gptq_marlin_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
 def awq_marlin_repack(b_q_weight: torch.Tensor, size_k: int, size_n: int,
                       num_bits: int) -> torch.Tensor:
     return torch.ops._C.awq_marlin_repack(b_q_weight, size_k, size_n, num_bits)
+
+
+def gptq_marlin_moe_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
+                           size_k: int, size_n: int,
+                           num_bits: int) -> torch.Tensor:
+    num_experts = b_q_weight.shape[0]
+    assert size_k % 16 == 0
+    output = torch.empty((num_experts, size_k // 16, size_n * 2),
+                         device=b_q_weight.device,
+                         dtype=b_q_weight.dtype)
+    for e in range(num_experts):
+        output[e] = torch.ops._C.gptq_marlin_repack(b_q_weight[e], perm[e],
+                                                    size_k, size_n, num_bits)
+    return output
 
 
 def gptq_marlin_gemm(a: torch.Tensor,
@@ -331,6 +350,32 @@ def fp8_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                     size_k: int) -> torch.Tensor:
     return torch.ops._C.fp8_marlin_gemm(a, b_q_weight, b_scales, workspace,
                                         num_bits, size_m, size_n, size_k)
+
+
+# machete
+def machete_supported_schedules(b_type: ScalarType) -> List[str]:
+    return torch.ops._C.machete_supported_schedules(b_type)
+
+
+def machete_gemm(
+    a: torch.Tensor,
+    b_q: torch.Tensor,  # Should be the tensor returned by machete_prepack_B
+    b_type: ScalarType,
+    b_scales: Optional[torch.Tensor] = None,
+    b_zeros: Optional[torch.Tensor] = None,
+    b_group_size: Optional[int] = None,
+    c: Optional[torch.Tensor] = None,
+    alpha: Optional[float] = None,
+    beta: Optional[float] = None,
+    schedule: Optional[str] = None,
+) -> torch.Tensor:
+    return torch.ops._C.machete_gemm(a, b_q, b_type, b_scales, b_zeros,
+                                     b_group_size, c, alpha, beta, schedule)
+
+
+def machete_prepack_B(b_q_weight: torch.Tensor,
+                      b_type: ScalarType) -> torch.Tensor:
+    return torch.ops._C.machete_prepack_B(b_q_weight, b_type)
 
 
 # fp8
@@ -367,9 +412,12 @@ def scaled_fp8_quant(
     # This code assumes batch_dim and num_tokens are flattened
     assert (input.ndim == 2)
     shape: Union[Tuple[int, int], torch.Size] = input.shape
+    # For rocm, the output fp8 dtype is torch.float_e3m3fnuz
+    out_dtype: torch.dtype = torch.float8_e4m3fnuz if vllm.utils.is_hip() \
+        else torch.float8_e4m3fn
     if num_token_padding:
         shape = (max(num_token_padding, input.shape[0]), shape[1])
-    output = torch.empty(shape, device=input.device, dtype=torch.float8_e4m3fn)
+    output = torch.empty(shape, device=input.device, dtype=out_dtype)
 
     if scale is None:
         if use_per_token_if_dynamic:
@@ -429,17 +477,9 @@ def marlin_qqq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
 
 
 # gguf
-def ggml_dequantize(W: torch.Tensor, quant_type: int, m: int, n: int):
+def ggml_dequantize(W: torch.Tensor, quant_type: int, m: int,
+                    n: int) -> torch.Tensor:
     return torch.ops._C.ggml_dequantize(W, quant_type, m, n)
-
-
-def ggml_mul_mat_vec(
-    W: torch.Tensor,
-    X: torch.Tensor,
-    quant_type: int,
-    row: int,
-):
-    return torch.ops._C.ggml_mul_mat_vec(W, X, quant_type, row)
 
 
 def ggml_mul_mat_vec_a8(
@@ -447,7 +487,7 @@ def ggml_mul_mat_vec_a8(
     X: torch.Tensor,
     quant_type: int,
     row: int,
-):
+) -> torch.Tensor:
     return torch.ops._C.ggml_mul_mat_vec_a8(W, X, quant_type, row)
 
 
@@ -456,8 +496,38 @@ def ggml_mul_mat_a8(
     X: torch.Tensor,
     quant_type: int,
     row: int,
-):
+) -> torch.Tensor:
     return torch.ops._C.ggml_mul_mat_a8(W, X, quant_type, row)
+
+
+# mamba
+def causal_conv1d_fwd(x: torch.Tensor, weight: torch.Tensor,
+                      bias_: Optional[torch.Tensor],
+                      seq_idx_: Optional[torch.Tensor],
+                      initial_states_: Optional[torch.Tensor],
+                      final_states_out_: Optional[torch.Tensor],
+                      silu_activation: bool) -> torch.Tensor:
+    return torch.ops._C.causal_conv1d_fwd(x, weight, bias_, seq_idx_,
+                                          initial_states_, final_states_out_,
+                                          silu_activation)
+
+
+def causal_conv1d_update(x: torch.Tensor, conv_state: torch.Tensor,
+                         weight: torch.Tensor, bias_: Optional[torch.Tensor],
+                         silu_activation: bool) -> torch.Tensor:
+    return torch.ops._C.causal_conv1d_update(x, conv_state, weight, bias_,
+                                             silu_activation)
+
+
+def selective_scan_fwd(u: torch.Tensor, delta: torch.Tensor, A: torch.Tensor,
+                       B: torch.Tensor, C: torch.Tensor,
+                       D_: Optional[torch.Tensor], z_: Optional[torch.Tensor],
+                       delta_bias_: Optional[torch.Tensor],
+                       delta_softplus: bool, index_: Optional[torch.Tensor],
+                       x: Optional[torch.Tensor]) -> List[torch.Tensor]:
+    return torch.ops._C.selective_scan_fwd(u, delta, A, B, C, D_, z_,
+                                           delta_bias_, delta_softplus, index_,
+                                           x)
 
 
 # moe
