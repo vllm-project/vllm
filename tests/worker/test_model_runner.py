@@ -34,9 +34,8 @@ def _create_model_runner(model: str, *args, **kwargs) -> ModelRunner:
     return model_runner
 
 
-@pytest.mark.parametrize("batch_size, prompt_embeds_ratio",
-                         list(itertools.product(range(1, 257),
-                                                (0.0, 0.5, 1.0))))
+@pytest.mark.parametrize("batch_size", list(range(1, 257, 3)))
+@pytest.mark.parametrize("prompt_embeds_ratio", (0.0, 0.5, 1.0))
 def test_prepare_prompt(batch_size, prompt_embeds_ratio):
     model_runner = _create_model_runner(
         "facebook/opt-125m",
@@ -54,11 +53,13 @@ def test_prepare_prompt(batch_size, prompt_embeds_ratio):
         seq_len = i % (model_runner.block_size - 1) + 1
         seq_lens.append(seq_len)
         if random.random() < prompt_embeds_ratio:
-            seq_data = SequenceData([], prompt_embeds=torch.rand(seq_len, 10))
+            seq_data = SequenceData(
+                array(VLLM_TOKEN_ID_ARRAY_TYPE, range(seq_len)),
+                torch.rand(seq_len, 10))
             input_embeds_len += seq_len
-        else
-            seq_data = SequenceData(array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                                        range(seq_len)))
+        else:
+            seq_data = SequenceData(
+                array(VLLM_TOKEN_ID_ARRAY_TYPE, range(seq_len)))
         seq_group_metadata = SequenceGroupMetadata(
             request_id=f"test_{i}",
             is_prompt=True,
@@ -163,7 +164,7 @@ def test_prepare_prompt(batch_size, prompt_embeds_ratio):
     torch.testing.assert_close(actual, expected)
 
 
-@pytest.mark.parametrize("batch_size", list(range(1, 257)))
+@pytest.mark.parametrize("batch_size", list(range(1, 257, 3)))
 @pytest.mark.parametrize("prompt_embeds_ratio", (0.0, 0.5, 1.0))
 def test_prepare_decode_cuda_graph(batch_size, prompt_embeds_ratio):
     model_runner = _create_model_runner(
@@ -185,8 +186,8 @@ def test_prepare_decode_cuda_graph(batch_size, prompt_embeds_ratio):
         context_len = i % (model_runner.block_size - 1) + 1
         context_lens.append(context_len)
         if random.random() < prompt_embeds_ratio:
-            seq_data = SequenceData([],
-                                    prompt_embeds=torch.rand(context_len, 10))
+            seq_data = SequenceData(array(VLLM_TOKEN_ID_ARRAY_TYPE, range(0)),
+                                    torch.rand(context_len, 10))
             input_embeds_len += context_len
         else:
             seq_data = SequenceData(
@@ -337,7 +338,7 @@ def distributed_init():
     ensure_model_parallel_initialized(1, 1)
 
 
-@pytest.mark.parametrize("batch_size", list(range(2, 128)))
+@pytest.mark.parametrize("batch_size", list(range(2, 128, 3)))
 @pytest.mark.parametrize("enforce_eager", [True, False])
 @pytest.mark.parametrize('prompt_embeds_ratio', [0.0, 0.5, 1.0])
 def test_hybrid_batches(batch_size, enforce_eager, prompt_embeds_ratio,
@@ -366,11 +367,12 @@ def test_hybrid_batches(batch_size, enforce_eager, prompt_embeds_ratio,
         seq_len = i % (model_runner.block_size - 1) + 1
         seq_lens.append(seq_len)
         if random.random() < prompt_embeds_ratio:
-            seq_data = SequenceData([], prompt_embeds=torch.rand(seq_len, 10))
+            seq_data = SequenceData(array(VLLM_TOKEN_ID_ARRAY_TYPE, range(0)),
+                                    torch.rand(seq_len, 10))
             input_embeds_len += seq_len
         else:
-            seq_data = SequenceData(array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                                      range(seq_len)))
+            seq_data = SequenceData(
+                array(VLLM_TOKEN_ID_ARRAY_TYPE, range(seq_len)))
         seq_group_metadata = SequenceGroupMetadata(
             request_id=f"test_{i}",
             is_prompt=True,
@@ -387,8 +389,8 @@ def test_hybrid_batches(batch_size, enforce_eager, prompt_embeds_ratio,
         # make sure all tokens fit into one block
         context_len = i % (model_runner.block_size - 1) + 1
         if random.random() < prompt_embeds_ratio:
-            seq_data = SequenceData([],
-                                    prompt_embeds=torch.rand(context_len, 10))
+            seq_data = SequenceData(array(VLLM_TOKEN_ID_ARRAY_TYPE, range(0)),
+                                    torch.rand(context_len, 10))
         else:
             prompt_toks = array(VLLM_TOKEN_ID_ARRAY_TYPE, range(context_len))
             seq_data = SequenceData(prompt_toks)

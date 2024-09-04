@@ -27,8 +27,9 @@ from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel,
                               init_distributed_environment,
                               initialize_model_parallel)
-from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt, EmbedsPrompt,
-                         to_enc_dec_tuple_list, zip_enc_dec_prompts)
+from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
+                         EmbedsPrompt, to_enc_dec_tuple_list,
+                         zip_enc_dec_prompts)
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sequence import SampleLogprobs

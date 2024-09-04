@@ -76,7 +76,7 @@ def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
 _G = TypeVar("_G", bound=BaseTokenizerGroup, default=BaseTokenizerGroup)
 _O = TypeVar("_O", RequestOutput, EmbeddingRequestOutput)
 
-PromptComponents = Tuple[Optional[str], List[int],
+PromptComponents = Tuple[Optional[str], List[int], Optional[torch.Tensor],
                          Optional[MultiModalDataDict]]
 DecoderPromptComponents = Tuple[Optional[str], Optional[List[int]],
                                 Optional[MultiModalDataDict]]
@@ -808,7 +808,6 @@ class LLMEngine:
             multi_modal_data = None
             prompt_embeds = None
         elif isinstance(inputs, dict):
-            prompt = inputs.get("prompt")
             prompt_embeds = inputs.get("prompt_embeds")
             driver_worker = self.model_executor.driver_worker
             if prompt_embeds is not None:
@@ -822,6 +821,7 @@ class LLMEngine:
                     raise ValueError(
                         f"Model {self.model_config.model} does not support input "
                         "embeddings, but prompt_embeds was provided.")
+                prompt = None
                 prompt_token_ids = []
             elif "prompt_token_ids" in inputs:
                 prompt = None
@@ -894,7 +894,7 @@ class LLMEngine:
         encoder_comps: PromptComponents,
         decoder_comps: DecoderPromptComponents,
     ) -> EncoderDecoderLLMInputs:
-        encoder_prompt, encoder_prompt_ids, encoder_mm_data = encoder_comps
+        encoder_prompt, encoder_prompt_ids, _, encoder_mm_data = encoder_comps
         decoder_prompt, decoder_prompt_ids, decoder_mm_data = decoder_comps
 
         if encoder_mm_data is not None or decoder_mm_data is not None:
@@ -961,10 +961,11 @@ class LLMEngine:
             if (decoder_input := inputs["decoder_prompt"]) is None:
                 decoder_comps = None, None, None
             else:
-                decoder_comps = self._extract_prompt_components(
+                prompt, prompt_token_ids, _, multi_modal_data = self._extract_prompt_components(
                     decoder_input,
                     request_id=request_id,
                 )
+                decoder_comps = prompt, prompt_token_ids, multi_modal_data
         else:
             encoder_comps = self._extract_prompt_components(
                 inputs,
@@ -2015,7 +2016,8 @@ class LLMEngine:
             prompt_ids = inputs.get("prompt_token_ids")
             prompt_embeds = inputs.get("prompt_embeds")
 
-        if (prompt_ids is None or len(prompt_ids) == 0) and prompt_embeds is None:
+        if (prompt_ids is None
+                or len(prompt_ids) == 0) and prompt_embeds is None:
             raise ValueError("Prompt cannot be empty")
 
         if self.model_config.is_multimodal_model:

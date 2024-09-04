@@ -278,14 +278,12 @@ class PersimmonForCausalLM(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
         inputs_embeds_masks: Optional[torch.Tensor] = None,
     ):
-        hidden_states = self.model(
-            input_ids=input_ids,
-            positions=positions,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
-            inputs_embeds=inputs_embeds,
-            inputs_embeds_masks=inputs_embeds_masks
-        )
+        hidden_states = self.model(input_ids=input_ids,
+                                   positions=positions,
+                                   kv_caches=kv_caches,
+                                   attn_metadata=attn_metadata,
+                                   inputs_embeds=inputs_embeds,
+                                   inputs_embeds_masks=inputs_embeds_masks)
         return hidden_states
 
     def compute_logits(

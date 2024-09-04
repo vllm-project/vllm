@@ -436,7 +436,6 @@ class _AsyncLLMEngine(LLMEngine):
             multi_modal_data = None
             prompt_embeds = None
         elif isinstance(inputs, dict):
-            prompt = inputs.get("prompt")
             prompt_embeds = inputs.get("prompt_embeds")
             driver_worker = self.model_executor.driver_worker
             if prompt_embeds is not None:
@@ -450,6 +449,7 @@ class _AsyncLLMEngine(LLMEngine):
                     raise ValueError(
                         f"Model {self.model_config.model} does not support input "
                         "embeddings, but prompt_embeds was provided.")
+                prompt = None
                 prompt_token_ids = []
             elif "prompt_token_ids" in inputs:
                 prompt = None

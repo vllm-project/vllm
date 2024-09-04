@@ -637,8 +637,11 @@ class JambaForCausalLM(nn.Module, HasInnerState):
             # CUDA graph capturing runs
             mamba_cache = kwargs["seqlen_agnostic_capture_inputs"]
 
-        hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, mamba_cache[0],
+        hidden_states = self.model(input_ids,
+                                   positions,
+                                   kv_caches,
+                                   attn_metadata,
+                                   mamba_cache[0],
                                    mamba_cache[1],
                                    inputs_embeds=inputs_embeds,
                                    inputs_embeds_masks=inputs_embeds_masks)

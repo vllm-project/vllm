@@ -402,7 +402,8 @@ class Sequence:
                              "encoder input prompt fields?")
 
         self.data = SequenceData(
-            array(VLLM_TOKEN_ID_ARRAY_TYPE, self.prompt_token_ids), self.prompt_embeds)
+            array(VLLM_TOKEN_ID_ARRAY_TYPE, self.prompt_token_ids),
+            self.prompt_embeds)
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
 
