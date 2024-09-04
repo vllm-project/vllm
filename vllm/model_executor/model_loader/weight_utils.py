@@ -298,8 +298,8 @@ def filter_duplicate_safetensors_files(hf_weights_files: List[str],
 
     # Iterate through the weight_map (weight_name: safetensors files)
     # to identify weights that we should use.
-    with open(index_file_name) as index_file:
-        weight_map = json.load(index_file)["weight_map"]
+    with open(index_file_name, "r") as f:
+        weight_map = json.load(f)["weight_map"]
     weight_files_in_index = set()
     for weight_name in weight_map:
         weight_files_in_index.add(
