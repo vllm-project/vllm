@@ -2,7 +2,11 @@ from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
 from vllm.triton_utils import HAS_TRITON
 
-__all__ = ["FusedMoE", "FusedMoEMethodBase", "FusedMoeWeightScaleSupported"]
+__all__ = [
+    "FusedMoE",
+    "FusedMoEMethodBase",
+    "FusedMoeWeightScaleSupported",
+]
 
 if HAS_TRITON:
 
