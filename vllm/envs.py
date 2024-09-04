@@ -403,7 +403,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 
     # If set, vLLM will use Triton implementations of AWQ.
     "VLLM_USE_TRITON_AWQ":
-    lambda: bool(int(os.getenv("VLLM_USE_TRITON_AWQ", "0"))),
+    lambda: bool(int(os.getenv("VLLM_USE_TRITON_AWQ", "1"))),
 }
 
 # end-env-vars-definition
