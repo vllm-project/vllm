@@ -432,7 +432,7 @@ class OpenAIServing:
     async def _check_unload_lora_adapter_request(
             self,
             request: UnloadLoraAdapterRequest) -> Optional[ErrorResponse]:
-        # Check if either 'lora_name' or 'lora_path' is provided
+        # Check if either 'lora_name' or 'lora_int_id' is provided
         if not request.lora_name and not request.lora_int_id:
             return self.create_error_response(
                 message=

@@ -342,7 +342,7 @@ if envs.VLLM_TORCH_PROFILER_DIR:
         return Response(status_code=200)
 
 
-if envs.VLLM_ALLOW_RUNTIME_LORA_LOADING:
+if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
     logger.warning(
         "Lora dynamic loading & unloading is enabled in the API server. "
         "This should ONLY be used for local development!")
@@ -379,7 +379,6 @@ if envs.VLLM_ALLOW_RUNTIME_LORA_LOADING:
 def build_app(args: Namespace) -> FastAPI:
     app = FastAPI(lifespan=lifespan)
     app.include_router(router)
-
     app.root_path = args.root_path
 
     mount_metrics(app)
