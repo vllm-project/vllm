@@ -5,15 +5,16 @@ from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Type,
 
 import torch
 
-from vllm.sequence import (IntermediateTensors, SamplerOutput,
-                           SequenceGroupMetadata)
+from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.platforms import current_platform
+from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 
 if TYPE_CHECKING:
     from vllm.attention import AttentionMetadata
     from vllm.attention.backends.abstract import AttentionBackend
     from vllm.model_executor import SamplingMetadata
 
-T = TypeVar('T', bound="ModelRunnerInputBase")
+T = TypeVar('T', bound="BroadcastableModelInput")
 
 
 def _add_attn_metadata_broadcastable_dict(
@@ -80,18 +81,26 @@ def _add_sampling_metadata_broadcastable_dict(
             sampling_metadata.selected_token_indices)
 
 
-@dataclasses.dataclass(frozen=True)
-class ModelRunnerInputBase(ABC):
-    """Local inputs to each worker's model runner. May contain
-    device-specific data. Different worker backends may have different methods
-    of converting from the global ExecuteModelRequest produced by the LLM
-    engine to the worker-local ModelRunnerInputBase objects.
-
-    Model runners that support multi-GPU execution should define a
-    ModelRunnerInputBase subclass, add their required fields, and specify how to
-    serialize/deserialize a ModelInput for broadcast between workers.
+def _init_frozen_model_input_from_tensor_dict(
+        frozen_model_input_cls: Type["ModelRunnerInputBase"],
+        tensor_dict: Dict[str, Any]) -> Dict[str, Any]:
     """
+    Helper method to initialize a frozen ModelInput based on broadcastable
+    """
+    valid_tensor_kwargs = {}
+    for field in dataclasses.fields(frozen_model_input_cls):
+        val = tensor_dict.pop(field.name, None)
+        if val is not None:
+            valid_tensor_kwargs[field.name] = val
 
+    frozen_model_input = frozen_model_input_cls(**valid_tensor_kwargs)
+    tensor_dict["frozen_model_input"] = frozen_model_input
+    return tensor_dict
+
+
+class BroadcastableModelInput(ABC):
+
+    @abstractmethod
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         """
         Extract broadcastable fields. Override for fields that require some
@@ -108,8 +117,37 @@ class ModelRunnerInputBase(ABC):
     ) -> T:
         """
         Pop fields from the given tensor_dict and populate a new instance of
-        ModelRunnerInputBase.
+        BroadcastableModelInput.
         """
+        raise NotImplementedError
+
+
+@dataclasses.dataclass(frozen=True)
+class ModelRunnerInputBase(BroadcastableModelInput):
+    """Local inputs to each worker's model runner. May contain
+    device-specific data. Different worker backends may have different methods
+    of converting from the global ExecuteModelRequest produced by the LLM
+    engine to the worker-local ModelRunnerInputBase objects.
+
+    Model runners that support multi-GPU execution should define a
+    ModelRunnerInputBase subclass, add their required fields, and specify how to
+    serialize/deserialize a ModelInput for broadcast between workers.
+    """
+    pass
+
+
+class ModelRunnerInputBuilderBase(ABC, Generic[T]):
+    """A builder to create ModelRunnerInputBase objects.
+  """
+
+    @abstractmethod
+    def add_seq_group(self, seq_group_metadata):
+        """TBA"""
+        raise NotImplementedError
+
+    @abstractmethod
+    def build(self, *args, **kwargs) -> T:
+        """Build metadata with on-device tensors."""
         raise NotImplementedError
 
 
@@ -122,6 +160,9 @@ class ModelRunnerBase(ABC, Generic[T]):
     Each ModelRunnerBase subclass should define a corresponding
     ModelRunnerInputBase subclass.
     """
+
+    # Map of request_id -> generator used for seeded random sampling
+    generators: Dict[str, torch.Generator] = {}
 
     @abstractmethod
     def make_model_input_from_broadcasted_tensor_dict(
@@ -148,7 +189,7 @@ class ModelRunnerBase(ABC, Generic[T]):
         """
         raise NotImplementedError
 
-    @torch.inference_mode()
+    @current_platform.inference_mode()
     def execute_model(
         self,
         model_input: T,
@@ -160,3 +201,15 @@ class ModelRunnerBase(ABC, Generic[T]):
         Execute the model on the given input.
         """
         raise NotImplementedError
+
+    def get_generators(self, finished_request_ids: Optional[List[str]] = None):
+        """
+        Return dict of per-request generators used for random sampling.
+        """
+
+        # Clean up generators from completed requests
+        if finished_request_ids:
+            for request_id in finished_request_ids:
+                self.generators.pop(request_id, None)
+
+        return self.generators

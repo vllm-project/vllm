@@ -1,7 +1,7 @@
 import time
-from dataclasses import dataclass
 from typing import Callable, Optional
 
+import msgspec
 import torch
 
 from vllm.model_executor.layers.spec_decode_base_sampler import (
@@ -9,8 +9,10 @@ from vllm.model_executor.layers.spec_decode_base_sampler import (
 from vllm.utils import is_pin_memory_available
 
 
-@dataclass
-class SpecDecodeWorkerMetrics:
+class SpecDecodeWorkerMetrics(
+        msgspec.Struct,
+        omit_defaults=True,  # type: ignore[call-arg]
+        array_like=True):  # type: ignore[call-arg]
     """Dataclass holding metrics emitted from the spec decode worker.
     """
 
@@ -145,6 +147,10 @@ class AsyncMetricsCollector:
         """
 
         ready_event.synchronize()
+
+        # update time of last collection
+        self._last_metrics_collect_time = self._timer()
+
         accepted_tokens = self._aggregate_num_accepted_tokens.item()
         emitted_tokens = self._aggregate_num_emitted_tokens.item()
         draft_tokens = self._aggregate_num_draft_tokens

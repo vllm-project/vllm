@@ -212,7 +212,7 @@ def test_paged_attention(
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Using default kv_scale
-    kv_scale = 1.0
+    k_scale = v_scale = 1.0
     tp_rank = 0
 
     # Call the paged attention kernel.
@@ -231,7 +231,8 @@ def test_paged_attention(
             max_seq_len,
             alibi_slopes,
             kv_cache_dtype,
-            kv_scale,
+            k_scale,
+            v_scale,
             tp_rank=tp_rank,
             blocksparse_local_blocks=blocksparse_local_blocks,
             blocksparse_vert_stride=blocksparse_vert_stride,
@@ -267,7 +268,8 @@ def test_paged_attention(
             max_seq_len,
             alibi_slopes,
             kv_cache_dtype,
-            kv_scale,
+            k_scale,
+            v_scale,
             tp_rank=tp_rank,
             blocksparse_local_blocks=blocksparse_local_blocks,
             blocksparse_vert_stride=blocksparse_vert_stride,
@@ -325,7 +327,7 @@ def test_paged_attention(
     atol, rtol = 1e-3, 1e-5
     if kv_cache_dtype == "fp8":
         atol, rtol = 1e-2, 1e-5
-    assert torch.allclose(output, ref_output, atol=atol, rtol=rtol)
+    torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol)
 
 
 def ref_multi_query_kv_attention(
@@ -439,4 +441,4 @@ def test_varlen_blocksparse_attention_prefill(
         scale,
         dtype,
     )
-    assert torch.allclose(output, ref_output, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(output, ref_output, atol=1e-2, rtol=1e-2)

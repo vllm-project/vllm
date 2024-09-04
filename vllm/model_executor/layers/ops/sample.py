@@ -1,4 +1,3 @@
-import math
 from typing import Optional, Tuple
 
 import torch
@@ -6,20 +5,9 @@ import triton
 import triton.language as tl
 
 from vllm.model_executor.layers.ops.rand import seeded_uniform
+from vllm.triton_utils.sample import get_num_triton_sampler_splits
 
-_EPS = 1e-6
-
-# This is a hardcoded limit in Triton (max block size).
-MAX_TRITON_N_COLS = 131072
-
-
-def get_num_triton_sampler_splits(n_cols: int) -> int:
-    """Get the number of splits to use for Triton sampling.
-
-    Triton has a limit on the number of columns it can handle, so we need to
-    split the tensor and call the kernel multiple times if it's too large.
-    """
-    return math.ceil(n_cols / MAX_TRITON_N_COLS)
+_EPS: tl.constexpr = 1e-6
 
 
 def _multi_split_sample(

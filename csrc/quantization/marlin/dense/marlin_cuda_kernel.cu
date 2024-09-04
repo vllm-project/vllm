@@ -25,30 +25,22 @@
 
 #include <iostream>
 
+#include "common/base.h"
+
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+  #include "common/mem.h"
+#endif
+
 template <typename T>
 inline std::string str(T x) {
   return std::to_string(x);
 }
 
-namespace marlin {
-
-constexpr int ceildiv(int a, int b) { return (a + b - 1) / b; }
+namespace marlin_dense {
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
 
-// Instances of `Vec` are used to organize groups of >>registers<<, as needed
-// for instance as inputs to tensor core operations. Consequently, all
-// corresponding index accesses must be compile-time constants, which is why we
-// extensively use `#pragma unroll` throughout the kernel code to guarantee
-// this.
-template <typename T, int n>
-struct Vec {
-  T elems[n];
-  __device__ T& operator[](int i) { return elems[i]; }
-};
-
 using I4 = Vec<int, 4>;
-
 // Matrix fragments for tensor core instructions; their precise layout is
 // documented here:
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#matrix-fragments-for-mma-m16n8k16-with-floating-point-type
@@ -56,43 +48,6 @@ using FragA = Vec<half2, 4>;
 using FragB = Vec<half2, 2>;
 using FragC = Vec<float, 4>;
 using FragS = Vec<half2, 1>;  // quantization scales
-
-// Predicated asynchronous global->shared copy; used for inputs A where we apply
-// predication to handle batchsizes that are not multiples of 16.
-__device__ inline void cp_async4_pred(void* smem_ptr, const void* glob_ptr,
-                                      bool pred = true) {
-  const int BYTES = 16;
-  uint32_t smem = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
-  asm volatile(
-      "{\n"
-      "   .reg .pred p;\n"
-      "   setp.ne.b32 p, %0, 0;\n"
-      "   @p cp.async.cg.shared.global [%1], [%2], %3;\n"
-      "}\n" ::"r"((int)pred),
-      "r"(smem), "l"(glob_ptr), "n"(BYTES));
-}
-
-// Asynchronous global->shared copy
-__device__ inline void cp_async4(void* smem_ptr, const void* glob_ptr) {
-  const int BYTES = 16;
-  uint32_t smem = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
-  asm volatile(
-      "{\n"
-      "   cp.async.cg.shared.global [%0], [%1], %2;\n"
-      "}\n" ::"r"(smem),
-      "l"(glob_ptr), "n"(BYTES));
-}
-
-// Async copy fence.
-__device__ inline void cp_async_fence() {
-  asm volatile("cp.async.commit_group;\n" ::);
-}
-
-// Wait until at most `n` async copy stages are still pending.
-template <int n>
-__device__ inline void cp_async_wait() {
-  asm volatile("cp.async.wait_group %0;\n" ::"n"(n));
-}
 
 // m16n8k16 tensor core mma instruction with fp16 inputs and fp32
 // output/accumulation.
@@ -162,39 +117,6 @@ __device__ inline void scale(FragB& frag_b, FragS& frag_s, int i) {
   half2 s = __half2half2(reinterpret_cast<__half*>(&frag_s)[i]);
   frag_b[0] = __hmul2(frag_b[0], s);
   frag_b[1] = __hmul2(frag_b[1], s);
-}
-
-// Wait until barrier reaches `count`, then lock for current threadblock.
-__device__ inline void barrier_acquire(int* lock, int count) {
-  if (threadIdx.x == 0) {
-    int state = -1;
-    do
-      // Guarantee that subsequent writes by this threadblock will be visible
-      // globally.
-      asm volatile("ld.global.acquire.gpu.b32 %0, [%1];\n"
-                   : "=r"(state)
-                   : "l"(lock));
-    while (state != count);
-  }
-  __syncthreads();
-}
-
-// Release barrier and increment visitation count.
-__device__ inline void barrier_release(int* lock, bool reset = false) {
-  __syncthreads();
-  if (threadIdx.x == 0) {
-    if (reset) {
-      lock[0] = 0;
-      return;
-    }
-    int val = 1;
-    // Make sure that all writes since acquiring this barrier are visible
-    // globally, while releasing the barrier.
-    asm volatile("fence.acq_rel.gpu;\n");
-    asm volatile("red.relaxed.gpu.global.add.s32 [%0], %1;\n"
-                 :
-                 : "l"(lock), "r"(val));
-  }
 }
 
 template <const int threads,          // number of threads in a threadblock
@@ -452,10 +374,15 @@ __global__ void Marlin(
         B_ptr[i] += b_gl_rd_delta_o;
       }
       // Only fetch scales if this tile starts a new group
-      if (group_blocks != -1 && pipe % (group_blocks / thread_k_blocks) == 0) {
-        int4* sh_s_stage = sh_s + s_sh_stage * pipe;
-        if (s_sh_wr_pred) cp_async4(&sh_s_stage[s_sh_wr], &s[s_gl_rd]);
-        s_gl_rd += s_gl_rd_delta;
+      if constexpr (group_blocks != -1) {
+        // This assumes group_blocks >= thread_k_blocks
+        // and would need to be modified to support smaller groups.
+        static_assert(group_blocks >= thread_k_blocks);
+        if (pipe % (group_blocks / thread_k_blocks) == 0) {
+          int4* sh_s_stage = sh_s + s_sh_stage * pipe;
+          if (s_sh_wr_pred) cp_async4(&sh_s_stage[s_sh_wr], &s[s_gl_rd]);
+          s_gl_rd += s_gl_rd_delta;
+        }
       }
     }
     // Insert a fence even when we are winding down the pipeline to ensure that
@@ -480,7 +407,10 @@ __global__ void Marlin(
     // however, this does not seem to be a significant bottleneck, while some
     // theoretically better attempts have lead to bad instruction ordering by
     // the compiler and correspondingly a noticeable drop in performance.
-    if (group_blocks != -1) {
+    if constexpr (group_blocks != -1) {
+      // This assumes group_blocks >= thread_k_blocks
+      // and would need to be modified to support smaller groups.
+      static_assert(group_blocks >= thread_k_blocks);
       int4* sh_s_stage =
           sh_s + s_sh_stage * ((group_blocks / thread_k_blocks) *
                                (pipe / (group_blocks / thread_k_blocks)));
@@ -1040,7 +970,7 @@ void marlin_cuda(const void* A, const void* B, void* C, void* s, int prob_m,
   }
 }
 
-}  // namespace marlin
+}  // namespace marlin_dense
 
 torch::Tensor marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                           torch::Tensor& b_scales, torch::Tensor& workspace,
@@ -1054,24 +984,25 @@ torch::Tensor marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
   TORCH_CHECK(size_k == a.size(1),
               "Shape mismatch: a.size(1) = " + str(a.size(1)) +
                   ", size_k = " + str(size_k));
-  TORCH_CHECK(size_k % marlin::tile_size == 0,
-              "size_k = " + str(size_k) +
-                  " is not divisible by tile_size = " + str(marlin::tile_size));
-  TORCH_CHECK((size_k / marlin::tile_size) == b_q_weight.size(0),
+  TORCH_CHECK(size_k % marlin_dense::tile_size == 0,
+              "size_k = " + str(size_k) + " is not divisible by tile_size = " +
+                  str(marlin_dense::tile_size));
+  TORCH_CHECK((size_k / marlin_dense::tile_size) == b_q_weight.size(0),
               "Shape mismatch: b_q_weight.size(0) = " +
                   str(b_q_weight.size(0)) + ", size_k = " + str(size_k) +
-                  ", tile_size = " + str(marlin::tile_size));
+                  ", tile_size = " + str(marlin_dense::tile_size));
 
   // Verify N
   TORCH_CHECK(b_scales.size(1) == size_n,
               "b_scales.size(1) = " + str(b_scales.size(1)) +
                   ", size_n = " + str(size_n));
-  TORCH_CHECK(b_q_weight.size(1) % marlin::tile_size == 0,
-              "b_q_weight.size(1) = " + str(b_q_weight.size(1)) +
-                  " is not divisible by tile_size = " + str(marlin::tile_size));
+  TORCH_CHECK(
+      b_q_weight.size(1) % marlin_dense::tile_size == 0,
+      "b_q_weight.size(1) = " + str(b_q_weight.size(1)) +
+          " is not divisible by tile_size = " + str(marlin_dense::tile_size));
 
-  int actual_size_n =
-      (b_q_weight.size(1) / marlin::tile_size) * marlin::pack_factor_4bit;
+  int actual_size_n = (b_q_weight.size(1) / marlin_dense::tile_size) *
+                      marlin_dense::pack_factor_4bit;
   TORCH_CHECK(
       size_n == actual_size_n,
       "size_n = " + str(size_n) + ", actual_size_n = " + str(actual_size_n));
@@ -1116,21 +1047,22 @@ torch::Tensor marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
               "Unexpected groupsize = " + str(groupsize));
 
   // Verify workspace size
-  TORCH_CHECK(
-      size_n % marlin::min_thread_n == 0,
-      "size_n = " + str(size_n) +
-          ", is not divisible by min_thread_n = " + str(marlin::min_thread_n));
-  int min_workspace_size = (size_n / marlin::min_thread_n) * marlin::max_par;
+  TORCH_CHECK(size_n % marlin_dense::min_thread_n == 0,
+              "size_n = " + str(size_n) +
+                  ", is not divisible by min_thread_n = " +
+                  str(marlin_dense::min_thread_n));
+  int min_workspace_size =
+      (size_n / marlin_dense::min_thread_n) * marlin_dense::max_par;
   TORCH_CHECK(workspace.numel() >= min_workspace_size,
               "workspace.numel = " + str(workspace.numel()) +
                   " is below min_workspace_size = " + str(min_workspace_size));
 
   int dev = a.get_device();
-  marlin::marlin_cuda(a.data_ptr(), b_q_weight.data_ptr(), c.data_ptr(),
-                      b_scales.data_ptr(), size_m, size_n, size_k,
-                      workspace.data_ptr(), groupsize, dev,
-                      at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n,
-                      sms, marlin::max_par);
+  marlin_dense::marlin_cuda(a.data_ptr(), b_q_weight.data_ptr(), c.data_ptr(),
+                            b_scales.data_ptr(), size_m, size_n, size_k,
+                            workspace.data_ptr(), groupsize, dev,
+                            at::cuda::getCurrentCUDAStream(dev), thread_k,
+                            thread_n, sms, marlin_dense::max_par);
 
   return c;
 }

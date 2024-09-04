@@ -197,13 +197,14 @@ void squeezellm_gemm(torch::Tensor vec, torch::Tensor mat, torch::Tensor mul,
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   vllm::squeezellm::NUQ4MatMulKernel<<<blocks, threads, 0, stream>>>(
 #ifndef USE_ROCM
-      (half2*)vec.data<at::Half>(),
+      (half2*)vec.data_ptr<at::Half>(),
 #else
       (__half2*)vec.data_ptr<at::Half>(),
 #endif
       mat.data_ptr<int>(),
 #ifndef USE_ROCM
-      (half2*)mul.data<at::Half>(), (__half*)lookup_table.data<at::Half>(),
+      (half2*)mul.data_ptr<at::Half>(),
+      (__half*)lookup_table.data_ptr<at::Half>(),
 #else
       (float2*)mul.data_ptr<float>(),
       (__half*)lookup_table.data_ptr<at::Half>(),

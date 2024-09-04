@@ -6,7 +6,8 @@ from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.sequence import ExecuteModelRequest
 
 logger = init_logger(__name__)
 
@@ -64,8 +65,9 @@ class DistributedGPUExecutor(GPUExecutor):
                           num_cpu_blocks=num_cpu_blocks)
 
     def execute_model(
-        self, execute_model_req: ExecuteModelRequest
-    ) -> Optional[List[SamplerOutput]]:
+        self,
+        execute_model_req: ExecuteModelRequest,
+    ) -> List[SamplerOutput]:
         if self.parallel_worker_tasks is None:
             self.parallel_worker_tasks = self._run_workers(
                 "start_worker_execution_loop",
@@ -73,7 +75,9 @@ class DistributedGPUExecutor(GPUExecutor):
                 **self.extra_execute_model_run_workers_kwargs)
 
         # Only the driver worker returns the sampling results.
-        return self._driver_execute_model(execute_model_req)
+        driver_outputs = self._driver_execute_model(execute_model_req)
+        assert driver_outputs is not None
+        return driver_outputs
 
     def stop_remote_worker_execution_loop(self) -> None:
         if self.parallel_worker_tasks is None:
@@ -186,7 +190,7 @@ class DistributedGPUExecutorAsync(DistributedGPUExecutor, ExecutorAsyncBase):
     @abstractmethod
     async def _driver_execute_model_async(
         self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
+        execute_model_req: Optional[ExecuteModelRequest] = None,
     ) -> List[SamplerOutput]:
         """Execute the model asynchronously in the driver worker.
 

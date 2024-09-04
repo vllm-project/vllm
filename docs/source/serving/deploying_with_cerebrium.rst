@@ -28,6 +28,9 @@ Next, to install the required packages, add the following to your cerebrium.toml
 
 .. code-block:: toml
 
+    [cerebrium.deployment]
+    docker_base_image_url = "nvidia/cuda:12.1.1-runtime-ubuntu22.04"
+
     [cerebrium.dependencies.pip]
     vllm = "latest"
 
