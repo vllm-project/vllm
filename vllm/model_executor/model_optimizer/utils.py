@@ -525,7 +525,7 @@ def gather_all_input_nodes(
     # for nullary targets, tie to mutable args?  or add a mapping?
     for n in mod.graph.nodes:
         all_input_nodes[n] = list()
-        all_node_users[n] = n.users
+        all_node_users[n] = OrderedDict(n.users)
         mutable_args = mutable_function_args(n)
 
         # Add this node as a user for all mutable args.
@@ -583,15 +583,15 @@ class FlowGraph:
             n for n in self.module.graph.nodes if n.op == 'placeholder'
         ]
 
-#        self.all_renamed_input_nodes, self.all_renamed_node_users, self.renames = (
-#            gather_all_input_nodes(self.module.graph.nodes))
+        self.all_renamed_input_nodes, self.all_renamed_node_users, self.renames = (
+            gather_all_input_nodes(self.module.graph.nodes))
 
-        self.renames = {}
-        self.all_renamed_input_nodes, self.all_renamed_node_users = (
-            gather_all_input_nodes_old(self.module.graph.nodes, True))
-
-        self.all_input_nodes, self.all_node_users = gather_all_input_nodes_old(
-            self.module.graph.nodes, False)
+#        self.renames = {}
+#        self.all_renamed_input_nodes, self.all_renamed_node_users = (
+#            gather_all_input_nodes_old(self.module.graph.nodes, True))
+#
+#        self.all_input_nodes, self.all_node_users = gather_all_input_nodes_old(
+#            self.module.graph.nodes, False)
 
         self.preds: Dict[torch.fx.Node, OrderedDict[torch.fx.Node, None]] = {}
         self.succs: Dict[torch.fx.Node, OrderedDict[torch.fx.Node, None]] = {}
@@ -708,8 +708,8 @@ class SubGraph:
         self.inputs: List[torch.fx.Node] = []
         self.outputs: List[torch.fx.Node] = []
         self.nodes: List[torch.fx.Node] = []
-        self.all_input_nodes = fg.all_input_nodes # DELETE
-        self.all_node_users = fg.all_node_users   # DELETE
+        #self.all_input_nodes = fg.all_input_nodes # DELETE
+        #self.all_node_users = fg.all_node_users   # DELETE
         self.all_renamed_input_nodes = fg.all_renamed_input_nodes
         self.all_renamed_node_users = fg.all_renamed_node_users
         self.renames = fg.renames
@@ -724,19 +724,20 @@ class SubGraph:
         outputs = []
 
         # DELETE
-        all_input_nodes, all_node_users = (self.all_input_nodes,
-                                           self.all_node_users)
+        all_input_nodes, all_node_users = (self.all_renamed_input_nodes,
+                                           self.all_renamed_node_users)
 
-        def rename(n, p):
-            if n in self.renames and p in self.renames[n]:
-                print(f"renames[{n}] = {self.renames[n]}, p = {p}")
-                return self.renames[n][p]
-            return p
+        #def rename(n, p):
+        #    if n in self.renames and p in self.renames[n]:
+        #        print(f"renames[{n}] = {self.renames[n]}, p = {p}")
+        #        return self.renames[n][p]
+        #    return p
 
         for n in self.nodes:
             new_inputs = [
                 #rename(n, inp) for inp in self.fg.predecessors(n) if not self.in_subgraph(rename(n, inp))
-                inp for inp in all_input_nodes[n] if not self.in_subgraph(inp)
+                #inp for inp in self.fg.predecessors(n) if not self.in_subgraph(inp)
+                inp for inp in n.all_input_nodes if not self.in_subgraph(inp)
             ]
             for inp in new_inputs:
                 if inp not in inputs:
@@ -746,7 +747,9 @@ class SubGraph:
                     #user for user in self.fg.successors(n) if not self.in_subgraph(n)
                     user for user in all_node_users[n] if not self.in_subgraph(user)
             ]) and n not in outputs:
-                outputs.append(n)
+                #print(f"ADD OUTPUT {n} {n.users}")
+                if len(n.users) > 0:
+                    outputs.append(n)
 
         return inputs, outputs
 
@@ -849,14 +852,14 @@ class SubGraph:
         return candidates.pop()
 
     def _refresh_def_use(self):
-#        self.all_renamed_input_nodes, self.all_renamed_node_users, self.renames = (
-#            gather_all_input_nodes(self.module.graph.nodes))
+        self.all_renamed_input_nodes, self.all_renamed_node_users, self.renames = (
+            gather_all_input_nodes(self.module.graph.nodes))
 
-        self.all_renamed_input_nodes, self.all_renamed_node_users = (
-            gather_all_input_nodes_old(self.module.graph.nodes, True))
-
-        self.all_input_nodes, self.all_node_users = gather_all_input_nodes_old(
-            self.module.graph.nodes, False)
+#        self.all_renamed_input_nodes, self.all_renamed_node_users = (
+#            gather_all_input_nodes_old(self.module.graph.nodes, True))
+#
+#        self.all_input_nodes, self.all_node_users = gather_all_input_nodes_old(
+#            self.module.graph.nodes, False)
 
     def erase(self):
         """

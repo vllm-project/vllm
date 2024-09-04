@@ -283,6 +283,7 @@ def pointwise_fusion(cc: CodeCache,
 
     logger.debug("FlowGraph:\n%s", fg.dump())
     #print(f"FlowGraph:\n{fg.dump()}")
+    #print(f"MODULE\n{mod}")
     #print(f"FlowGraph (dot):\n{fg.to_dot('orig')}")
 
     ShapeProp(mod).propagate(*example_inputs)
@@ -480,6 +481,7 @@ def pointwise_fusion(cc: CodeCache,
         sub = SubGraph(fg, subgraphs[p])
         logger.debug("\nFusing sub-module (last_input=%s):\n%s",
                      sub.last_input(), sub.tabular())
+        #print(f"\nFusing sub-module (last_input={sub.last_input()}):\n{sub.tabular()}")
         #print(f"fusing subgraph: {sub.to_dot(str(p))}")
         fuse_graph_nodes(cc, sub)
         logger.debug("Post fusion sub-module:\n%s", sub.tabular())
