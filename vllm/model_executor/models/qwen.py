@@ -13,6 +13,7 @@ from functools import partial
 from typing import (Any, Callable, Dict, Iterable, List, Literal, Mapping,
                     Optional, Tuple, TypedDict, Union)
 
+import numpy as np
 import torch
 from PIL import Image
 from torch import nn
@@ -33,7 +34,7 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.resampler import (get_abs_pos, Resampler2)
+from vllm.model_executor.layers.resampler import Resampler2, get_abs_pos
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -574,7 +575,7 @@ class QWenModel(nn.Module):
     ) -> torch.Tensor:
         img_pos = None
         # If pixel / visual embeddings are provided, this is a visual model
-        if pixel_values is not None:
+        if pixel_values is not None and self.visual is not None:
             if pixel_values["type"] != "image_embeds":
                 image_embeds = self.visual(pixel_values["data"])
             else:
@@ -582,7 +583,9 @@ class QWenModel(nn.Module):
 
             # features should be of shape (# images, 256, hidden_dim)
             img_pos = self.visual.get_image_positions(input_ids)
-            if img_pos.shape[0] != image_embeds.shape[0]:
+            if isinstance(
+                    img_pos,
+                    np.ndarray) and img_pos.shape[0] != image_embeds.shape[0]:
                 raise ValueError(
                     f"Number of placeholders: {img_pos.shape[0]} "
                     f"does not match number of images {image_embeds.shape[0]}."
@@ -689,9 +692,9 @@ def input_processor_for_qwen(ctx: InputContext,
 
     if num_matched_images != num_images:
         logger.warning(
-            f"Number of matched image placeholders {num_matched_images} "
-            f"doesn't match the number of expected images {num_images}; "
-            "are your placeholders formatted correctly?")
+            "Number of matched image placeholders %s doesn't match the number "
+            "of expected images %s; check your placeholder formatting.",
+            num_matched_images, num_images)
 
     new_prompt_token_ids = tokenizer.encode(new_prompt)
 
@@ -891,6 +894,7 @@ class QWenLMHeadModel(nn.Module, SupportsMultiModal):
                     type="pixel_values",
                     data=pixel_values,
                 )
+        return None
 
     def forward(self,
                 input_ids: torch.Tensor,
