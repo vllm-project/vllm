@@ -10,6 +10,7 @@ from vllm.sampling_params import SamplingParams
 # Success string used for RPC instructions.
 VLLM_RPC_SUCCESS_STR = "SUCCESS"
 
+
 @dataclass
 class RPCGenerateRequest:
     inputs: PromptInputs
@@ -24,9 +25,11 @@ class RPCGenerateRequest:
 class RPCAbortRequest:
     request_id: str
 
+
 class RPCUtilityRequest(Enum):
     DO_LOG_STATS = 1
     CHECK_HEALTH = 2
+
 
 class RPCStartupRequest(Enum):
     IS_SERVER_READY = 1
