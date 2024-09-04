@@ -10,9 +10,9 @@ from mistral_common.tokens.tokenizers.mistral import ChatCompletionRequest
 from mistral_common.tokens.tokenizers.mistral import (
     MistralTokenizer as PublicMistralTokenizer)
 # yapf: enable
-from mistral_common.public.tokens.tokenizers.sentencepiece import (
+from mistral_common.tokens.tokenizers.sentencepiece import (
     SentencePieceTokenizer)
-from mistral_common.public.tokens.tokenizers.tekken import (SpecialTokenPolicy,
+from mistral_common.tokens.tokenizers.tekken import (SpecialTokenPolicy,
                                                      Tekkenizer)
 
 if TYPE_CHECKING:

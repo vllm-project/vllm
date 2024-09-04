@@ -28,7 +28,7 @@ from torch import nn
 from transformers import LlamaConfig
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig, LoRAConfig, LoadFormat
+from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -375,8 +375,8 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
         "gate_proj": ("gate_up_proj", 0),
         "up_proj": ("gate_up_proj", 1),
     }
-    # for Llama models we also allow parameters to be in 
-    # consolidated format
+    # Mistral/Llama models can also be loaded with --load-format consolidated
+    # from consolidated.safetensors checkpoints
     consolidated_mapping = {
         "layers": "model.layers",
         "attention": "self_attn",
@@ -525,7 +525,6 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
                     continue
 
                 param = params_dict[name]
-                
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
 
@@ -536,7 +535,6 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
                     continue
                 # Remapping the name of FP8 kv-scale.
                 name = maybe_remap_kv_scale_name(name, params_dict)
-
                 if name is None:
                     continue
 
@@ -573,6 +571,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
                 raise RuntimeError("Self attention has no KV cache scaling "
                                    "factor attribute!")
 
+    # This function is used to remap the consolidated format as used by Mistral and Llama <=2
     def maybe_remap_consolidated(self, name: str, loaded_weight: torch.Tensor) -> Tuple[str, torch.Tensor]:
         def permute(w, n_heads):
             attn_in = self.config.head_dim * n_heads
@@ -594,5 +593,3 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
                 name = name.replace(item, mapping[item])
 
         return name, loaded_weight
-
-

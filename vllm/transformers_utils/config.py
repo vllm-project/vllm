@@ -55,19 +55,19 @@ def get_config(
     code_revision: Optional[str] = None,
     rope_scaling: Optional[dict] = None,
     rope_theta: Optional[float] = None,
-    load_from_dict: bool = False,
+    load_from_params: bool = False,
     **kwargs,
 ) -> PretrainedConfig:
     # Separate model folder from file path for GGUF models
+    
     is_gguf = check_gguf_file(model)
-
     if is_gguf:
         kwargs["gguf_file"] = Path(model).name
         model = Path(model).parent
 
     try:
-        if load_from_dict:
-            config = get_consolidated_config(model, revision)
+        if load_from_params:
+            config = load_params_config(model, revision)
         else:
             config = AutoConfig.from_pretrained(
                 model,
@@ -110,7 +110,10 @@ def get_config(
     return config
 
 
-def get_consolidated_config(model, revision) -> PretrainedConfig:
+def load_params_config(model, revision) -> PretrainedConfig:
+    # This function loads a params.json config which
+    # should be used when loading models in consolidated format
+
     config_file_name = "params.json"
 
     config_path = Path(model) / config_file_name

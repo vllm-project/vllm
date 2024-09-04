@@ -143,7 +143,7 @@ class ModelConfig:
         served_model_name: Optional[Union[str, List[str]]] = None,
         limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
         use_async_output_proc: bool = True,
-        load_consolidated_config: bool = False
+        load_params_config: bool = False
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -171,7 +171,7 @@ class ModelConfig:
         self.skip_tokenizer_init = skip_tokenizer_init
 
         self.hf_config = get_config(self.model, trust_remote_code, revision,
-                                    code_revision, rope_scaling, rope_theta, load_consolidated_config)
+                                    code_revision, rope_scaling, rope_theta, load_params_config)
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, revision)
