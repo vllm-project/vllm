@@ -116,6 +116,9 @@ def test_models_with_fp8_kv_cache(
         pytest.skip(
             "#7378: CUDA illegal memory access (undiagnosed) facebook/opt-125m"
         )
+    if ((model, kv_cache_dtype, chunked_prefill_token_size) == (
+            "nm-testing/Qwen2-1.5B-Instruct-FP8-K-V", "fp8_e4m3", 4)):
+        pytest.skip("flakey test, see: #7874 #8051")
 
     max_num_seqs = chunked_prefill_token_size
     max_num_batched_tokens = chunked_prefill_token_size
