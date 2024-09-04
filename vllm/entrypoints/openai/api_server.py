@@ -67,7 +67,7 @@ _running_tasks: Set[asyncio.Task] = set()
 
 
 def model_is_embedding(model_name: str, trust_remote_code: bool,
-                       quantization: str) -> bool:
+                       quantization: Optional[str]) -> bool:
     return ModelConfig(model=model_name,
                        tokenizer=model_name,
                        tokenizer_mode="auto",
@@ -102,8 +102,13 @@ async def build_async_engine_client(
     global engine_args
     engine_args = AsyncEngineArgs.from_cli_args(args)
 
+    # Backend itself still global for the silly lil' health handler
+    global async_engine_client
+
     async with build_async_engine_client_from_engine_args(
             engine_args, args.disable_frontend_multiprocessing) as engine:
+
+        async_engine_client = engine  # type: ignore[assignment]
         yield engine
 
 
@@ -120,20 +125,17 @@ async def build_async_engine_client_from_engine_args(
     Returns the Client or None if the creation failed.
     """
 
-    # Backend itself still global for the silly lil' health handler
-    global async_engine_client
-
     # If manually triggered or embedding model, use AsyncLLMEngine in process.
     # TODO: support embedding model via RPC.
     if (model_is_embedding(engine_args.model, engine_args.trust_remote_code,
                            engine_args.quantization)
             or disable_frontend_multiprocessing):
-        async_engine_client = AsyncLLMEngine.from_engine_args(
+        engine_client = AsyncLLMEngine.from_engine_args(
             engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
         try:
-            yield async_engine_client
+            yield engine_client
         finally:
-            async_engine_client.shutdown_background_loop()
+            engine_client.shutdown_background_loop()
         return
 
     # Otherwise, use the multiprocessing AsyncLLMEngine.
@@ -162,7 +164,6 @@ async def build_async_engine_client_from_engine_args(
         # NOTE: Actually, this is not true yet. We still need to support
         # embedding models via RPC (see TODO above)
         mp_engine_client = MPEngineClient(ipc_path)
-        async_engine_client = mp_engine_client  # type: ignore
 
         # Start RPCServer in separate process (holds the LLMEngine).
         # the current process might have CUDA context,
@@ -188,7 +189,7 @@ async def build_async_engine_client_from_engine_args(
                         yield None
                         return
 
-            yield async_engine_client
+            yield mp_engine_client  # type: ignore[misc]
         finally:
             # Ensure rpc server process was terminated
             engine_process.terminate()
