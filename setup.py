@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import warnings
+from pathlib import Path
 from shutil import which
 from typing import Dict, List
 
@@ -152,15 +153,8 @@ class cmake_build_ext(build_ext):
         default_cfg = "Debug" if self.debug else "RelWithDebInfo"
         cfg = envs.CMAKE_BUILD_TYPE or default_cfg
 
-        # where .so files will be written, should be the same for all extensions
-        # that use the same CMakeLists.txt.
-        outdir = os.path.abspath(
-            os.path.dirname(self.get_ext_fullpath(ext.name)))
-
         cmake_args = [
             '-DCMAKE_BUILD_TYPE={}'.format(cfg),
-            '-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={}'.format(outdir),
-            '-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY={}'.format(self.build_temp),
             '-DVLLM_TARGET_DEVICE={}'.format(VLLM_TARGET_DEVICE),
         ]
 
@@ -236,6 +230,19 @@ class cmake_build_ext(build_ext):
         ]
 
         subprocess.check_call(["cmake", *build_args], cwd=self.build_temp)
+
+        # Install the libraries
+        for ext in self.extensions:
+            name = remove_prefix(ext.name, "vllm.")
+
+            # CMake install targets already include the vllm/ prefix, so remove it
+            outdir = Path(self.get_ext_fullpath(ext.name)).parent.parent.absolute()
+
+            install_args = [
+                "cmake", "--install", ".", "--prefix", outdir, "--component",
+                name
+            ]
+            subprocess.check_call(install_args, cwd=self.build_temp)
 
 
 def _no_device() -> bool:
