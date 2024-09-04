@@ -218,7 +218,6 @@ steps:
     - pytest -v -s spec_decode
 
 - label: LoRA Test %N # 30min each
-  soft_fail: true
   source_file_dependencies:
   - vllm/lora
   - csrc/punica
