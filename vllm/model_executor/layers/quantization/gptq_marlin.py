@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import torch
 from torch.nn import Parameter
@@ -551,8 +551,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         # Repack scales
         marlin_w13_scales = marlin_moe_permute_scales(
             s=layer.w13_scales,
-            size_k=(layer.intermediate_size if self.quant_config.desc_act else
-                    layer.intermediate_size_per_partition),
+            size_k=layer.intermediate_size_per_partition,
             size_n=layer.w13_scales.shape[2],
             group_size=self.quant_config.group_size,
         )
@@ -575,6 +574,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         use_grouped_topk: bool = False,
         num_expert_group: Optional[int] = None,
         topk_group: Optional[int] = None,
+        custom_routing_function: Optional[Callable] = None,
     ) -> torch.Tensor:
 
         topk_weights, topk_ids = FusedMoE.select_experts(
