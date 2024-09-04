@@ -304,12 +304,17 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
         if execute_model_req:
             for seq_group in execute_model_req.seq_group_metadata_list:
-                if seq_group.request_id not in self.global_logits_processors:
-                    self.global_logits_processors[seq_group.request_id] = \
-                        seq_group.sampling_params.logits_processors
-                else:
-                    seq_group.sampling_params.logits_processors = \
-                        self.global_logits_processors[seq_group.request_id]
+                if (hasattr(seq_group, "sampling_params") and hasattr(
+                        seq_group.sampling_params, "logits_processors")
+                        and seq_group.sampling_params.logits_processors):
+                    if (seq_group.request_id
+                            not in self.global_logits_processors):
+                        self.global_logits_processors[seq_group.request_id] = \
+                            seq_group.sampling_params.logits_processors
+                    else:
+                        seq_group.sampling_params.logits_processors = (
+                            self.global_logits_processors[seq_group.request_id]
+                        )
 
         inputs = self.prepare_input(execute_model_req)
         if inputs is None:
