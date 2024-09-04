@@ -1,10 +1,8 @@
 from typing import List, Optional, Tuple, Union
 
 import torch
-from torch.nn import Parameter
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils import is_hip
 
@@ -36,31 +34,6 @@ def per_tensor_dequantize(
 def all_close_1d(x: torch.Tensor) -> bool:
     assert len(x.shape) == 1
     return all(torch.allclose(x[0], x[i]) for i in range(x.shape[0]))
-
-
-def create_per_tensor_scale_param(
-    output_partition_sizes: List[int],
-    **extra_weight_attrs,
-) -> Parameter:
-    scale = Parameter(torch.empty(len(output_partition_sizes),
-                                  dtype=torch.float32),
-                      requires_grad=False)
-    scale[:] = torch.finfo(torch.float32).min
-    set_weight_attrs(scale, {
-        "needs_scalar_to_array": True,
-        **extra_weight_attrs
-    })
-    return scale
-
-
-def create_per_channel_scale_param(output_partition_sizes: List[int],
-                                   **extra_weight_attrs) -> Parameter:
-    scale = Parameter(torch.empty((sum(output_partition_sizes), 1),
-                                  dtype=torch.float32),
-                      requires_grad=False)
-    scale[:] = torch.finfo(torch.float32).min
-    set_weight_attrs(scale, {"output_dim": 0, **extra_weight_attrs})
-    return scale
 
 
 def convert_to_channelwise(
