@@ -51,6 +51,8 @@ class ModelInputForTPU(ModelRunnerInputBase):
     num_samples: int
     best_of: List[int]
     seq_groups: List[List[int]]
+    is_first_multi_step: bool = True
+    is_last_step: bool = True
     virtual_engine: int = 0
     async_callback: Optional[Callable] = None
 
@@ -65,6 +67,8 @@ class ModelInputForTPU(ModelRunnerInputBase):
             "num_samples": self.num_samples,
             "best_of": self.best_of,
             "seq_groups": self.seq_groups,
+            "is_first_multi_step": self.is_first_multi_step,
+            "is_last_step": self.is_last_step,
             "virtual_engine": self.virtual_engine,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
@@ -118,6 +122,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             self.block_size,
             False,
         )
+        self.cached_outputs: List[SamplerOutput] = []
+        self.current_step = 0
 
     def load_model(self) -> None:
         self.device = self.device_config.device
@@ -518,12 +524,19 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         num_steps: int = 1,
     ) -> List[SamplerOutput]:
         assert intermediate_tensors is None
-        if num_steps > 1:
-            raise ValueError(
-                "TPUModelRunner does not support multi-step execution.")
+        if not model_input.is_first_multi_step:
+            if model_input.is_last_step:
+                outputs = self.cached_outputs
+                self.cached_outputs = []
+                return outputs
+            else:
+                assert self.cached_outputs
+                self.current_step += 1
+                return [self.cached_outputs[self.current_step]]
 
         is_prompt = model_input.attn_metadata.num_prefills > 0
         if is_prompt:
+            assert num_steps == 1
             # NOTE(woosuk): Since the FlashAttention kernel does not support
             # ragged inputs, we split the prompts into different batches and
             # process them separately. This is a temporary hack that should be
@@ -559,14 +572,14 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                                               model_input.num_samples,
                                               kv_caches,
                                               is_prompt=True)
-                next_token_ids.append(output_token_ids)
+                next_token_ids.append(output_token_ids[0])
                 start_idx = end_idx
 
             if model_input.async_callback is not None:
                 model_input.async_callback()
             # Retrieve the outputs to CPU.
             next_token_ids = [
-                output_token_ids.cpu().tolist()[0]
+                output_token_ids.cpu().tolist()
                 for output_token_ids in next_token_ids
             ]
         else:
@@ -582,26 +595,53 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             t = model_input.t.to(self.device)
             p = model_input.p.to(self.device)
             input_lens = model_input.input_lens.to(self.device)
-            output_token_ids = self.model(token_ids,
-                                          position_ids,
-                                          attn_metadata,
-                                          input_lens,
-                                          t,
-                                          p,
-                                          model_input.num_samples,
-                                          kv_caches,
-                                          is_prompt=False)
+            next_token_ids = []
+            for i in range(num_steps):
+                slot_mapping = attn_metadata.slot_mapping
+                output_token_ids = self.model(token_ids,
+                                              position_ids,
+                                              attn_metadata,
+                                              input_lens,
+                                              t,
+                                              p,
+                                              model_input.num_samples,
+                                              kv_caches,
+                                              is_prompt=False)
+                next_token_ids.append(output_token_ids)
+
+                if i < num_steps - 1:
+                    # Prepare the inputs for the next step.
+                    token_ids = output_token_ids.unsqueeze(dim=1).int()
+                    position_ids = position_ids + 1
+                    attn_metadata.context_lens = attn_metadata.context_lens + 1
+
+                    block_tables = attn_metadata.block_tables
+                    block_number = block_tables.gather(
+                        1,
+                        position_ids.long() // self.block_size)
+                    block_offset = position_ids % self.block_size
+
+                    is_padding = slot_mapping == _PAD_SLOT_ID
+                    slot_mapping = block_number * self.block_size + block_offset
+                    slot_mapping = slot_mapping.long()
+                    slot_mapping = torch.where(is_padding, _PAD_SLOT_ID,
+                                               slot_mapping)
+                    attn_metadata.slot_mapping = slot_mapping
 
             if model_input.async_callback is not None:
                 model_input.async_callback()
             # Retrieve the outputs to CPU.
-            next_token_ids = output_token_ids.cpu().tolist()
+            next_token_ids = [
+                output_token_ids.cpu().tolist()
+                for output_token_ids in next_token_ids
+            ]
 
         # NOTE(woosuk): Minimal code to construct the sampler outputs.
         # The TPU backend does not reuse the sampler, since the TPU backend
         # does not support the advanced sampling parameters such as logprobs.
         zero_logprob = Logprob(0.0)
         if is_prompt:
+            assert num_steps == 1
             sampler_outputs = []
             for i, seq_group in enumerate(model_input.seq_groups):
                 seq_ids = seq_group
@@ -617,20 +657,28 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                     CompletionSequenceGroupOutput(seq_outputs, None))
             return [SamplerOutput(sampler_outputs)]
         else:
-            sampler_outputs = []
-            batch_idx = 0
-            for seq_group in model_input.seq_groups:
-                seq_ids = seq_group
-                seq_outputs = []
-                for seq_id in seq_ids:
-                    next_token_id = next_token_ids[batch_idx]
-                    seq_outputs.append(
-                        SequenceOutput(seq_id, next_token_id,
-                                       {next_token_id: zero_logprob}))
-                    batch_idx += 1
-                sampler_outputs.append(
-                    CompletionSequenceGroupOutput(seq_outputs, None))
-            return [SamplerOutput(sampler_outputs)]
+            step_outputs = []
+            for i in range(num_steps):
+                sampler_outputs = []
+                batch_idx = 0
+                for seq_group in model_input.seq_groups:
+                    seq_ids = seq_group
+                    seq_outputs = []
+                    for seq_id in seq_ids:
+                        next_token_id = next_token_ids[i][batch_idx]
+                        seq_outputs.append(
+                            SequenceOutput(seq_id, next_token_id,
+                                           {next_token_id: zero_logprob}))
+                        batch_idx += 1
+                    sampler_outputs.append(
+                        CompletionSequenceGroupOutput(seq_outputs, None))
+                step_outputs.append(SamplerOutput(sampler_outputs))
+            if num_steps == 1:
+                return step_outputs
+            else:
+                self.cached_outputs = step_outputs
+                self.current_step = 0
+                return [self.cached_outputs[self.current_step]]
 
 
 class ModelWrapper(TorchCompileWrapperWithCustomDispacther):
