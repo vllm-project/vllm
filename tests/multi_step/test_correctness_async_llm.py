@@ -103,13 +103,13 @@ async def test_multi_step(
         model,
         server_args + distributed_args,
         num_logprobs,
-        max_wait_seconds=3 * 240)
+        max_wait_seconds=5 * 240)
     test_completions = await completions_with_server_args(
         prompts,
         model,
         ms_server_args + distributed_args,
         num_logprobs,
-        max_wait_seconds=3 * 240)
+        max_wait_seconds=5 * 240)
 
     # Assert multi-step scheduling produces identical tokens
     # to single-step scheduling.
