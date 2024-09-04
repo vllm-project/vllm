@@ -752,11 +752,11 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         if self.lora_config:
             lora_mask = torch.zeros(len(seq_group_metadata_list) *
                                     max_prompt_len,
-                                    (self.lora_config.max_loras + 1) *
+                                    (self.lora_config.max_loras) *
                                     self.lora_config.max_lora_rank,
                                     dtype=self.lora_config.lora_dtype)
             lora_logits_mask = torch.zeros(len(seq_group_metadata_list),
-                                           (self.lora_config.max_loras + 1) *
+                                           (self.lora_config.max_loras) *
                                            self.lora_config.max_lora_rank,
                                            dtype=self.lora_config.lora_dtype)
 
@@ -880,7 +880,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         if self.lora_config:
             lora_mask = torch.zeros(len(seq_group_metadata_list),
-                                    (self.lora_config.max_loras + 1) *
+                                    (self.lora_config.max_loras) *
                                     self.lora_config.max_lora_rank,
                                     dtype=self.lora_config.lora_dtype)
             ones = torch.ones(1,
