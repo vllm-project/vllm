@@ -510,7 +510,10 @@ class SiglipVisionModel(nn.Module):
             quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
         )
-        self.need_post_layernorm = self.vision_model.need_post_layernorm
+
+    @property
+    def need_post_layernorm(self):
+        return self.vision_model.need_post_layernorm
 
     def get_input_embeddings(self) -> nn.Module:
         return self.vision_model.embeddings.patch_embedding
