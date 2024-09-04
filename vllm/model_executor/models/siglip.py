@@ -438,11 +438,20 @@ class SiglipVisionTransformer(nn.Module):
         config: SiglipVisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
         num_hidden_layers_override: Optional[int] = None,
-        need_post_layernorm: bool = True,
     ):
         super().__init__()
         self.config = config
         embed_dim = config.hidden_size
+
+        if (num_hidden_layers_override is None
+                or num_hidden_layers_override == config.num_hidden_layers):
+            self.need_post_layernorm = True
+        elif num_hidden_layers_override > config.num_hidden_layers:
+            raise ValueError(
+                "num_hidden_layers_override cannot be greater than "
+                "num_hidden_layers")
+        else:
+            self.need_post_layernorm = False
 
         self.embeddings = SiglipVisionEmbeddings(config)
         self.encoder = SiglipEncoder(
@@ -450,7 +459,7 @@ class SiglipVisionTransformer(nn.Module):
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
         )
-        if need_post_layernorm:
+        if self.need_post_layernorm:
             self.post_layernorm = nn.LayerNorm(embed_dim,
                                                eps=config.layer_norm_eps)
         else:
@@ -492,16 +501,6 @@ class SiglipVisionModel(nn.Module):
         num_hidden_layers_override: Optional[int] = None,
     ):
         super().__init__()
-        if (num_hidden_layers_override is None
-                or num_hidden_layers_override == config.num_hidden_layers):
-            self.need_post_layernorm = True
-        elif num_hidden_layers_override > config.num_hidden_layers:
-            raise ValueError(
-                "num_hidden_layers_override cannot be greater than "
-                "num_hidden_layers")
-        else:
-            self.need_post_layernorm = False
-
         num_heads = config.num_attention_heads
         tp_size = get_tensor_model_parallel_world_size()
         self.shard_weight = USE_XFORMERS_OPS and num_heads % tp_size == 0
@@ -510,7 +509,8 @@ class SiglipVisionModel(nn.Module):
             config,
             quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
-            need_post_layernorm=self.need_post_layernorm)
+        )
+        self.need_post_layernorm = self.vision_model.need_post_layernorm
 
     def get_input_embeddings(self) -> nn.Module:
         return self.vision_model.embeddings.patch_embedding
