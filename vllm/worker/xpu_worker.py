@@ -22,7 +22,7 @@ from vllm.worker.xpu_model_runner import XPUModelRunner
 logger = init_logger(__name__)
 
 
-class XPUWorker(LoraNotSupportedWorkerBase, Worker):
+class XPUWorker(Worker):
     """A worker class that executes (a partition of) the model on a GPU.
     
     Each worker is associated with a single XPU device. The worker is 
