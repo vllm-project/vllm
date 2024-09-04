@@ -10,6 +10,12 @@ This document shows how to launch multiple vLLM serving containers and use Nginx
 Build Nginx Container
 ------------
 
+This guide assumes that you have just cloned the vLLM project and you're currently in the vllm root directory.
+
+.. code-block:: console
+
+    export vllm_root=`pwd`
+
 Create a file named ``Dockerfile.nginx``:
 
 .. code-block:: console
@@ -26,7 +32,7 @@ Build the container:
 
 .. code-block:: console
 
-    docker build . -f Dockerfile.nginx --tag nginx-lb   
+    docker build . -f Dockerfile.nginx --tag nginx-lb
 
 Create Simple Nginx Config file
 ------------
@@ -54,28 +60,15 @@ Create a file named ``nginx_conf/nginx.conf``. Note that you can add as many ser
 Build vLLM Container
 ------------
 
+Notes:
+* Adjust the model name that you want to use in your vLLM servers if you don't want to use ``Llama-2-7b-hf``. 
+
 .. code-block:: console
 
     cd $vllm_root
-    docker build -f Dockerfile.cpu . --tag vllm 
-
-Create vLLM Launch Script For Use Inside Each Container
-------------
-
-Call the script ``vllm_start_script/vllm_start.sh``
-
-.. code-block:: console
-
-    export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:/usr/local/lib/libiomp5.so:$LD_PRELOAD 
-    export RAY_worker_niceness=0
-    export KMP_BLOCKTIME=1
-    export KMP_TPAUSE=0
-    export KMP_SETTINGS=0
-    export KMP_FORKJOIN_BARRIER_PATTERN=dist,dist
-    export KMP_PLAIN_BARRIER_PATTERN=dist,dist
-    export KMP_REDUCTION_BARRIER_PATTERN=dist,dist
-    svrcmd="cd benchmarks && VLLM_CPU_KVCACHE_SPACE=40 VLLM_CPU_OMP_THREADS_BIND=\"$CPU_BIND\" python3 -m vllm.entrypoints.openai.api_server --model $MODEL  --dtype=bfloat16 --device cpu --disable-log-stats"
-    eval $svrcmd
+    model=meta-llama/Llama-2-7b-hf
+    sed -i "s|ENTRYPOINT \[\"python3\", \"-m\", \"vllm.entrypoints.openai.api_server\"\]|ENTRYPOINT [\"python3\", \"-m\", \"vllm.entrypoints.openai.api_server\", \"--model\", \"$model\"]|" Dockerfile.cpu
+    docker build -f Dockerfile.cpu . --tag vllm --build-arg http_proxy=$http_proxy --build-arg https_proxy=$https_proxy
 
 Create Docker Network
 ------------
@@ -87,11 +80,19 @@ Create Docker Network
 Launch vLLM Containers
 ------------
 
+Notes:
+* If you have your HuggingFace models cached somewhere else, update ``hf_cache_dir`` below. 
+* If you don't have an existing HuggingFace cache you will want to start ``vllm0`` and wait for the model to complete downloading and the server to be ready. This will ensure that ``vllm1`` can leverage the model you just downloaded and it won't have to be downloaded again.
+* The below example assumes a machine where socket 0 has cores 0-47 and socket 1 has cores 48-95. Adjust as needed for your application.
+
 .. code-block:: console
 
-    model=meta-llama/Llama-2-7b-hf
-    docker run -itd --privileged --ipc host --network vllm_nginx --cap-add=SYS_ADMIN --shm-size=10.24gb -e CPU_BIND=0-47  -e MODEL=$model -v ./vllm_start_script/:/workspace/vllm_start_script/ -p 8081:8000 --name vllm0 vllm bash /workspace/vllm_start_script/vllm_start.sh
-    docker run -itd --privileged --ipc host --network vllm_nginx --cap-add=SYS_ADMIN --shm-size=10.24gb -e CPU_BIND=48-95 -e MODEL=$model -v ./vllm_start_script/:/workspace/vllm_start_script/ -p 8082:8000 --name vllm1 vllm bash /workspace/vllm_start_script/vllm_start.sh
+    mkdir -p ~/.cache/huggingface/hub/
+    hf_cache_dir=~/.cache/huggingface/
+    SVR_0_CORES=0-47
+    SVR_1_CORES=48-96
+    docker run -itd --ipc host --network vllm_nginx --cap-add=SYS_ADMIN --shm-size=10.24gb -e VLLM_CPU_KVCACHE_SPACE=40 -e VLLM_CPU_OMP_THREADS_BIND=$SVR_0_CORES -e http_proxy=$http_proxy -e https_proxy=$https_proxy -v $hf_cache_dir:/root/.cache/huggingface/ -p 8081:8000 --name vllm0 vllm
+    docker run -itd --ipc host --network vllm_nginx --cap-add=SYS_ADMIN --shm-size=10.24gb -e VLLM_CPU_KVCACHE_SPACE=40 -e VLLM_CPU_OMP_THREADS_BIND=$SVR_1_CORES -e http_proxy=$http_proxy -e https_proxy=$https_proxy -v $hf_cache_dir:/root/.cache/huggingface/ -p 8082:8000 --name vllm1 vllm 
 
 Launch Nginx
 ------------
@@ -99,3 +100,4 @@ Launch Nginx
 .. code-block:: console
 
     docker run -itd -p 8000:80 --network vllm_nginx -v ./nginx_conf/:/etc/nginx/conf.d/ --name nginx-lb nginx-lb:latest 
+
