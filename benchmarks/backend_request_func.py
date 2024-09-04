@@ -24,6 +24,8 @@ class RequestFuncInput:
     model: str
     best_of: int = 1
     use_beam_search: bool = False
+    logprobs: Optional[int] = None
+    prompt_logprobs: Optional[int] = None
 
 
 @dataclass
@@ -236,6 +238,8 @@ async def async_request_openai_completions(
             "temperature": 0.0,
             "best_of": request_func_input.best_of,
             "max_tokens": request_func_input.output_len,
+            "logprobs": request_func_input.logprobs,
+            "prompt_logprobs": request_func_input.prompt_logprobs,
             "stream": True,
         }
         headers = {

@@ -318,6 +318,8 @@ async def benchmark(
     model_id: str,
     tokenizer: PreTrainedTokenizerBase,
     input_requests: List[Tuple[str, int, int]],
+    logprobs: Optional[int],
+    prompt_logprobs: Optional[int],
     best_of: int,
     use_beam_search: bool,
     request_rate: float,
@@ -339,6 +341,8 @@ async def benchmark(
         api_url=api_url,
         prompt_len=test_prompt_len,
         output_len=test_output_len,
+        logprobs=logprobs,
+        prompt_logprobs=prompt_logprobs,
         best_of=best_of,
         use_beam_search=use_beam_search,
     )
@@ -358,6 +362,8 @@ async def benchmark(
             api_url=base_url + "/start_profile",
             prompt_len=test_prompt_len,
             output_len=test_output_len,
+            logprobs=logprobs,
+            prompt_logprobs=prompt_logprobs,
             best_of=best_of,
             use_beam_search=use_beam_search,
         )
@@ -379,6 +385,8 @@ async def benchmark(
             api_url=api_url,
             prompt_len=prompt_len,
             output_len=output_len,
+            logprobs=logprobs,
+            prompt_logprobs=prompt_logprobs,
             best_of=best_of,
             use_beam_search=use_beam_search,
         )
@@ -396,6 +404,8 @@ async def benchmark(
             api_url=base_url + "/stop_profile",
             prompt_len=test_prompt_len,
             output_len=test_output_len,
+            logprobs=logprobs,
+            prompt_logprobs=prompt_logprobs,
             best_of=best_of,
             use_beam_search=use_beam_search,
         )
@@ -580,6 +590,8 @@ def main(args: argparse.Namespace):
             model_id=model_id,
             tokenizer=tokenizer,
             input_requests=input_requests,
+            logprobs=args.logprobs,
+            prompt_logprobs=args.prompt_logprobs,
             best_of=args.best_of,
             use_beam_search=args.use_beam_search,
             request_rate=args.request_rate,
@@ -720,6 +732,19 @@ if __name__ == "__main__":
         default=150,
         help=
         "Number of output tokens per request, used only for sonnet dataset.",
+    )
+    parser.add_argument(
+        "--logprobs",
+        type=int,
+        default=None,
+        help="Number of logprobs-per-token to return as part of the request.",
+    )
+    parser.add_argument(
+        "--prompt-logprobs",
+        type=int,
+        default=None,
+        help=
+        "Number of prompt-logprobs-per-token to return as part of the request.",
     )
     parser.add_argument(
         "--sonnet-prefix-len",
