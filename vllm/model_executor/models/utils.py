@@ -1,5 +1,5 @@
-from typing import (Dict, Iterable, List, Literal, Optional,
-                    Protocol, Tuple, Union, overload)
+from typing import (Dict, Iterable, List, Literal, Optional, Protocol, Tuple,
+                    Union, overload)
 
 import torch
 import torch.nn as nn
