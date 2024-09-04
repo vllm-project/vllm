@@ -3,10 +3,10 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Optional, Type, Union
 
+from huggingface_hub import hf_hub_download
 from transformers import GenerationConfig, PretrainedConfig
 from transformers.models.auto.image_processing_auto import (
     get_image_processor_config)
-from huggingface_hub import hf_hub_download
 from transformers.models.auto.modeling_auto import (
     MODEL_FOR_CAUSAL_LM_MAPPING_NAMES)
 

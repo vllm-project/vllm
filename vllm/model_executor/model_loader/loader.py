@@ -17,12 +17,12 @@ import torch
 from huggingface_hub import HfApi, hf_hub_download
 from torch import nn
 from transformers import AutoModelForCausalLM, PretrainedConfig
+from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoadFormat,
                          LoRAConfig, ModelConfig, MultiModalConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.envs import VLLM_USE_MODELSCOPE
-from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
