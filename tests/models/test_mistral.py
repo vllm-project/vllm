@@ -33,8 +33,10 @@ def test_models(
     # test that both HF format and consolidated format work
     load_format = "consolidated" if model.endswith("v0.3") else "auto"
 
-    with vllm_runner(model, dtype=dtype,
-                     tokenizer_mode="mistral", load_format=load_format) as vllm_model:
+    with vllm_runner(model,
+                     dtype=dtype,
+                     tokenizer_mode="mistral",
+                     load_format=load_format) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
