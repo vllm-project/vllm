@@ -4,8 +4,6 @@
 setuptools == 69.5.1 # IPEX XPU dependency
 
 torch == 2.1.0.post3+cxx11.abi
-torchvision == 0.16.0.post3+cxx11.abi
-torchaudio == 2.1.0.post3+cxx11.abi
 intel_extension_for_pytorch == 2.1.40+xpu
 oneccl_bind_pt == 2.1.400+xpu
 
