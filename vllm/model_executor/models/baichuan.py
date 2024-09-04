@@ -38,12 +38,14 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import SamplerOutput
+from vllm.sequence import IntermediateTensors
+
+from .interfaces import SupportsLoRA
 
 
 def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
@@ -292,7 +294,7 @@ class BaiChuanModel(nn.Module):
         return hidden_states
 
 
-class BaiChuanBaseForCausalLM(nn.Module):
+class BaiChuanBaseForCausalLM(nn.Module, SupportsLoRA):
     packed_modules_mapping = {
         "W_pack": ["W_pack"],
         "gate_up_proj": [
@@ -312,18 +314,25 @@ class BaiChuanBaseForCausalLM(nn.Module):
 
     def __init__(
         self,
-        config,
+        config: PretrainedConfig,
         position_embedding: str,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ):
         super().__init__()
+
         self.config = config
+        self.lora_config = lora_config
+
         self.quant_config = quant_config
         self.model = BaiChuanModel(config, position_embedding, cache_config,
                                    quant_config)
-        self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
+        self.lm_head = ParallelLMHead(config.vocab_size,
+                                      config.hidden_size,
+                                      quant_config=quant_config)
+        if self.config.tie_word_embeddings:
+            self.lm_head.weight = self.model.embed_tokens.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
@@ -333,14 +342,18 @@ class BaiChuanBaseForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata)
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head.weight, hidden_states,
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
+        logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
 

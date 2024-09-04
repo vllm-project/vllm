@@ -1,22 +1,23 @@
 """A CPU worker class."""
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.distributed
 
+import vllm.envs as envs
 from vllm.attention import get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, SchedulerConfig,
-                         VisionLanguageConfig)
-from vllm.distributed import (broadcast_tensor_dict,
-                              ensure_model_parallel_initialized,
+                         ModelConfig, ParallelConfig, PromptAdapterConfig,
+                         SchedulerConfig)
+from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.sequence import ExecuteModelRequest
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.worker.cpu_model_runner import CPUModelRunner
-from vllm.worker.worker_base import LoraNotSupportedWorkerBase
+from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
+                                     LoraNotSupportedWorkerBase, WorkerInput)
 
 logger = init_logger(__name__)
 
@@ -110,7 +111,7 @@ class CPUCacheEngine:
         return dtype_size * total
 
 
-class CPUWorker(LoraNotSupportedWorkerBase):
+class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     """A worker class that executes (a partition of) the model on a CPU socket.
 
     Each worker is associated with a single CPU socket. The worker is 
@@ -131,8 +132,8 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         rank: int,
         distributed_init_method: str,
         lora_config: Optional[LoRAConfig] = None,
-        vision_language_config: Optional[VisionLanguageConfig] = None,
         kv_cache_dtype: Optional[str] = "auto",
+        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         is_driver_worker: bool = False,
     ) -> None:
         self.model_config = model_config
@@ -145,7 +146,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         self.rank = rank
         self.distributed_init_method = distributed_init_method
         self.lora_config = lora_config
-        self.vision_language_config = vision_language_config
+        self.prompt_adapter_config = prompt_adapter_config
         self.is_driver_worker = is_driver_worker
         if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
@@ -154,7 +155,15 @@ class CPUWorker(LoraNotSupportedWorkerBase):
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
-        self.model_runner = CPUModelRunner(
+
+        # Setup OpenMP threads affinity.
+        omp_cpuids = envs.VLLM_CPU_OMP_THREADS_BIND
+        if omp_cpuids == "all":
+            self.local_omp_cpuid = "all"
+        else:
+            self.local_omp_cpuid = omp_cpuids.split("|")[rank]
+
+        self.model_runner: CPUModelRunner = CPUModelRunner(
             model_config,
             parallel_config,
             scheduler_config,
@@ -162,15 +171,44 @@ class CPUWorker(LoraNotSupportedWorkerBase):
             cache_config,
             load_config=self.load_config,
             lora_config=self.lora_config,
-            vision_language_config=self.vision_language_config,
             kv_cache_dtype=kv_cache_dtype,
+            prompt_adapter_config=self.prompt_adapter_config,
             is_driver_worker=is_driver_worker)
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
-        self.cache_engine: CPUCacheEngine
-        self.cpu_cache: List[torch.Tensor]
+        self.cache_engine: List[CPUCacheEngine]
+        self.cpu_cache: List[List[torch.Tensor]]
+
+        # Torch profiler. Enabled and configured through env vars:
+        # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
+        if envs.VLLM_TORCH_PROFILER_DIR:
+            torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
+            logger.info("Profiling enabled. Traces will be saved to: %s",
+                        torch_profiler_trace_dir)
+            self.profiler = torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                ],
+                with_stack=True,
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(
+                    torch_profiler_trace_dir, use_gzip=True))
+        else:
+            self.profiler = None
+
+    def start_profile(self):
+        if self.profiler is None:
+            raise RuntimeError("Profiler is not enabled.")
+        self.profiler.start()
+
+    def stop_profile(self):
+        if self.profiler is None:
+            raise RuntimeError("Profiler is not enabled.")
+        self.profiler.stop()
 
     def init_device(self) -> None:
+        if self.local_omp_cpuid != "all":
+            torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
+
         self.init_distributed_environment()
         # Set random seed.
         set_random_seed(self.model_config.seed)
@@ -242,68 +280,60 @@ class CPUWorker(LoraNotSupportedWorkerBase):
                 "initializing the engine.")
 
     def _init_cache_engine(self) -> None:
-        self.cache_engine = CPUCacheEngine(self.cache_config,
-                                           self.model_config,
-                                           self.parallel_config,
-                                           self.device_config)
-        self.cpu_cache = self.cache_engine.cpu_cache
-        self.model_runner.block_size = self.cache_engine.block_size
+        self.cache_engine = [
+            CPUCacheEngine(self.cache_config, self.model_config,
+                           self.parallel_config, self.device_config)
+            for _ in range(self.parallel_config.pipeline_parallel_size)
+        ]
+        self.cpu_cache = [
+            self.cache_engine[ve].cpu_cache
+            for ve in range(self.parallel_config.pipeline_parallel_size)
+        ]
+        self.model_runner.block_size = self.cache_engine[0].block_size
 
-        assert self.cpu_cache is not None
+        assert all(
+            self.cpu_cache[ve] is not None
+            for ve in range(self.parallel_config.pipeline_parallel_size))
 
         # Populate the cache to warmup the memory
-        for layer_cache in self.cpu_cache:
-            layer_cache.fill_(0)
+        for ve in range(self.parallel_config.pipeline_parallel_size):
+            for layer_cache in self.cpu_cache[ve]:
+                layer_cache.fill_(0)
 
-    def cache_copy(
+    @property
+    def do_metadata_broadcast(self) -> bool:
+        return self.parallel_config.tensor_parallel_size > 1
+
+    @property
+    def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
+        return self.cpu_cache
+
+    def execute_worker(
         self,
-        blocks_to_copy: torch.Tensor,
+        worker_input: WorkerInput,
     ) -> None:
-        if blocks_to_copy.numel() > 0:
-            self.cache_engine.copy(blocks_to_copy)
+        if (worker_input.blocks_to_copy is not None
+                and worker_input.blocks_to_copy.numel() > 0):
+            self.cache_engine[worker_input.virtual_engine].copy(
+                worker_input.blocks_to_copy)
 
     @torch.inference_mode()
-    def execute_model(
-        self,
-        execute_model_req: Optional[ExecuteModelRequest] = None,
-    ) -> List[SamplerOutput]:
-
-        if execute_model_req is None:
-            seq_group_metadata_list = None
-        else:
-            seq_group_metadata_list = execute_model_req.seq_group_metadata_list
-
-        if self.is_driver_worker:
-            assert seq_group_metadata_list is not None
-            num_seq_groups: int = len(seq_group_metadata_list)
-            assert execute_model_req is not None
-            blocks_to_copy = execute_model_req.blocks_to_copy
-            blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
-                                          device="cpu",
-                                          dtype=torch.int64).view(-1, 2)
-            assert len(execute_model_req.blocks_to_swap_in) == 0
-            assert len(execute_model_req.blocks_to_swap_out) == 0
-            data: Dict[str, Any] = {
-                "num_seq_groups": num_seq_groups,
-                "blocks_to_copy": execute_model_req.blocks_to_copy,
-            }
-            broadcast_tensor_dict(data, src=0)
-        else:
-            data = broadcast_tensor_dict(src=0)
-            num_seq_groups = data["num_seq_groups"]
-            blocks_to_copy = data["blocks_to_copy"]
-
-        self.cache_copy(blocks_to_copy)
-
-        # If there is no input, we don't need to execute the model.
-        if num_seq_groups == 0:
-            return []
-
-        output = self.model_runner.execute_model(seq_group_metadata_list,
-                                                 self.cpu_cache)
-
-        # CPU worker only supports single-step execution.
-        return [output]
+    def prepare_worker_input(
+            self, execute_model_req: ExecuteModelRequest) -> WorkerInput:
+        assert execute_model_req is not None
+        virtual_engine = execute_model_req.virtual_engine
+        num_seq_groups: int = len(execute_model_req.seq_group_metadata_list)
+        blocks_to_copy = execute_model_req.blocks_to_copy
+        blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
+                                      device="cpu",
+                                      dtype=torch.int64).view(-1, 2)
+        assert len(execute_model_req.blocks_to_swap_in) == 0
+        assert len(execute_model_req.blocks_to_swap_out) == 0
+        return WorkerInput(
+            num_seq_groups=num_seq_groups,
+            blocks_to_copy=blocks_to_copy,
+            virtual_engine=virtual_engine,
+        )
 
     def init_distributed_environment(self) -> None:
         """Initialize the distributed environment."""

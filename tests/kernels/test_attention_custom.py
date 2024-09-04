@@ -5,7 +5,6 @@ import pytest
 import torch
 
 from vllm import _custom_ops as ops
-from vllm._custom_C import paged_attention_custom
 from vllm.utils import is_hip
 
 from .allclose_default import get_default_atol, get_default_rtol
@@ -219,7 +218,7 @@ def test_paged_attention(
                 kv_scale,
             )
         elif version == "custom":
-            paged_attention_custom(
+            ops.paged_attention_custom(
                 output,
                 exp_sums,
                 max_logits,

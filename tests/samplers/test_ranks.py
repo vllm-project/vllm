@@ -17,16 +17,27 @@ def test_ranks(
     num_top_logprobs = 5
     num_prompt_logprobs = 5
 
-    vllm_model = vllm_runner(model, dtype=dtype, max_logprobs=num_top_logprobs)
+    with vllm_runner(model, dtype=dtype,
+                     max_logprobs=num_top_logprobs) as vllm_model:
 
-    ## Test greedy logprobs ranks
-    vllm_sampling_params = SamplingParams(temperature=0.0,
-                                          top_p=1.0,
-                                          max_tokens=max_tokens,
-                                          logprobs=num_top_logprobs,
-                                          prompt_logprobs=num_prompt_logprobs)
-    vllm_results = vllm_model.generate_w_logprobs(example_prompts,
-                                                  vllm_sampling_params)
+        ## Test greedy logprobs ranks
+        vllm_sampling_params = SamplingParams(
+            temperature=0.0,
+            top_p=1.0,
+            max_tokens=max_tokens,
+            logprobs=num_top_logprobs,
+            prompt_logprobs=num_prompt_logprobs)
+        vllm_results = vllm_model.generate_w_logprobs(example_prompts,
+                                                      vllm_sampling_params)
+
+        ## Test non-greedy logprobs ranks
+        sampling_params = SamplingParams(temperature=1.0,
+                                         top_p=1.0,
+                                         max_tokens=max_tokens,
+                                         logprobs=num_top_logprobs,
+                                         prompt_logprobs=num_prompt_logprobs)
+        res = vllm_model.generate_w_logprobs(example_prompts, sampling_params)
+
     for result in vllm_results:
         assert result[2] is not None
         assert len(result[2]) == len(result[0])
@@ -35,13 +46,6 @@ def test_ranks(
             assert token in logprobs
             assert logprobs[token].rank == 1
 
-    ## Test non-greedy logprobs ranks
-    sampling_params = SamplingParams(temperature=1.0,
-                                     top_p=1.0,
-                                     max_tokens=max_tokens,
-                                     logprobs=num_top_logprobs,
-                                     prompt_logprobs=num_prompt_logprobs)
-    res = vllm_model.generate_w_logprobs(example_prompts, sampling_params)
     for result in res:
         assert result[2] is not None
         assert len(result[2]) == len(result[0])

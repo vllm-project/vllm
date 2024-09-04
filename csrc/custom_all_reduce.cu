@@ -1,17 +1,17 @@
 #include <ATen/cuda/Exceptions.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAStream.h>
-#include <torch/extension.h>
+#include <torch/all.h>
 
 #include "custom_all_reduce.cuh"
 
-// fake pointer type
-using fptr_t = uint64_t;
+// fake pointer type, must match fptr_t type in ops.h
+using fptr_t = int64_t;
 static_assert(sizeof(void*) == sizeof(fptr_t));
 
 fptr_t init_custom_ar(torch::Tensor& meta, torch::Tensor& rank_data,
                       const std::vector<std::string>& handles,
-                      const std::vector<int64_t>& offsets, int rank,
+                      const std::vector<int64_t>& offsets, int64_t rank,
                       bool full_nvlink) {
   int world_size = offsets.size();
   if (world_size > 8)
@@ -55,7 +55,7 @@ bool _is_weak_contiguous(torch::Tensor& t) {
           t.numel() * t.element_size());
 }
 
-bool should_custom_ar(torch::Tensor& inp, int max_size, int world_size,
+bool should_custom_ar(torch::Tensor& inp, int64_t max_size, int64_t world_size,
                       bool full_nvlink) {
   auto inp_size = inp.numel() * inp.element_size();
   // custom allreduce requires input byte size to be multiples of 16
@@ -125,7 +125,7 @@ void dispose(fptr_t _fa) {
   delete fa;
 }
 
-int meta_size() { return sizeof(vllm::Signal); }
+int64_t meta_size() { return sizeof(vllm::Signal); }
 
 void register_buffer(fptr_t _fa, torch::Tensor& t,
                      const std::vector<std::string>& handles,
@@ -134,10 +134,16 @@ void register_buffer(fptr_t _fa, torch::Tensor& t,
   fa->register_buffer(handles, offsets, t.data_ptr());
 }
 
-std::pair<std::vector<uint8_t>, std::vector<int64_t>> get_graph_buffer_ipc_meta(
+std::tuple<torch::Tensor, std::vector<int64_t>> get_graph_buffer_ipc_meta(
     fptr_t _fa) {
   auto fa = reinterpret_cast<vllm::CustomAllreduce*>(_fa);
-  return fa->get_graph_buffer_ipc_meta();
+  auto [handle_bytes, offsets] = fa->get_graph_buffer_ipc_meta();
+  auto options =
+      torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
+  auto handles =
+      torch::empty({static_cast<int64_t>(handle_bytes.size())}, options);
+  std::memcpy(handles.data_ptr(), handle_bytes.data(), handle_bytes.size());
+  return {handles, std::move(offsets)};
 }
 
 void register_graph_buffers(fptr_t _fa, const std::vector<std::string>& handles,
@@ -148,16 +154,19 @@ void register_graph_buffers(fptr_t _fa, const std::vector<std::string>& handles,
 
 #ifdef USE_ROCM
 
-void free_meta_buffer(void* buffer) { hipFree(buffer); }
+void free_meta_buffer(void* buffer) { CUDACHECK(cudaFree(buffer)); }
 
-std::vector<uint8_t> get_meta_buffer_ipc_handle(torch::Tensor inp) {
-  std::vector<uint8_t> data_handle(sizeof(cudaIpcMemHandle_t), 0);
-  CUDACHECK(cudaIpcGetMemHandle((cudaIpcMemHandle_t*)data_handle.data(),
+torch::Tensor get_meta_buffer_ipc_handle(torch::Tensor& inp) {
+  auto options =
+      torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
+  auto data_handle =
+      torch::empty({static_cast<int64_t>(sizeof(cudaIpcMemHandle_t))}, options);
+  CUDACHECK(cudaIpcGetMemHandle((cudaIpcMemHandle_t*)data_handle.data_ptr(),
                                 inp.data_ptr()));
   return data_handle;
 }
 
-torch::Tensor allocate_meta_buffer(int size) {
+torch::Tensor allocate_meta_buffer(int64_t size) {
   auto device_index = c10::cuda::current_device();
   at::DeviceGuard device_guard(at::Device(at::DeviceType::CUDA, device_index));
   void* buffer;
@@ -173,14 +182,6 @@ torch::Tensor allocate_meta_buffer(int size) {
                      .dtype(torch::kI8)
                      .device(torch::kCUDA, device_index);
   return torch::from_blob(buffer, {size}, free_meta_buffer, options);
-}
-
-std::vector<uint8_t> get_device_bdf(int dev) {
-  char busIdStr[] = "0000:00:00.0";
-  std::vector<uint8_t> bdf(sizeof(busIdStr), 0);
-  CUDACHECK(cudaDeviceGetPCIBusId((char*)bdf.data(), sizeof(busIdStr), dev));
-  bdf.resize(bdf.size() - 1);  // remove trailing NULL
-  return bdf;
 }
 
 #endif

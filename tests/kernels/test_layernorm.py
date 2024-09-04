@@ -42,13 +42,13 @@ def test_rms_norm(
 
     # NOTE(woosuk): The reference implementation should be executed first
     # because the custom kernel is in-place.
-    ref_out = layer._forward(x, residual)
+    ref_out = layer.forward_native(x, residual)
     out = layer(x, residual)
     # NOTE(woosuk): LayerNorm operators (including RMS) typically have larger
     # numerical errors than other operators because they involve reductions.
     # Therefore, we use a larger tolerance.
     if add_residual:
-        assert torch.allclose(out[0], ref_out[0], atol=1e-2, rtol=1e-2)
-        assert torch.allclose(out[1], ref_out[1], atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(out[0], ref_out[0], atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(out[1], ref_out[1], atol=1e-2, rtol=1e-2)
     else:
-        assert torch.allclose(out, ref_out, atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)

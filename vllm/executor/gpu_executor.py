@@ -1,17 +1,33 @@
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, Union
 
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.sequence import ExecuteModelRequest, PoolerOutput, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.prompt_adapter.request import PromptAdapterRequest
+from vllm.sequence import ExecuteModelRequest, PoolerOutput
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         make_async)
-from vllm.worker.worker_base import WorkerWrapperBase
+from vllm.worker.worker_base import WorkerBase, WorkerWrapperBase
 
 logger = init_logger(__name__)
 
 
+def create_worker(worker_module_name: str, worker_class_name: str,
+                  worker_class_fn: Optional[Callable[[], Type[WorkerBase]]],
+                  **kwargs):
+    wrapper = WorkerWrapperBase(
+        worker_module_name=worker_module_name,
+        worker_class_name=worker_class_name,
+        worker_class_fn=worker_class_fn,
+    )
+    wrapper.init_worker(**kwargs)
+    return wrapper.worker
+
+
 class GPUExecutor(ExecutorBase):
+
+    uses_ray: bool = False
 
     def _init_executor(self) -> None:
         """Initialize the worker and load the model.
@@ -43,30 +59,53 @@ class GPUExecutor(ExecutorBase):
             rank=rank,
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
-            vision_language_config=self.vision_language_config,
             speculative_config=self.speculative_config,
-            is_driver_worker=rank == 0,
+            prompt_adapter_config=self.prompt_adapter_config,
+            is_driver_worker=(not self.parallel_config)
+            or (rank % self.parallel_config.tensor_parallel_size == 0),
+            observability_config=self.observability_config,
         )
+
+    def _get_worker_module_and_class(
+            self) -> Tuple[str, str, Optional[Callable[[], Type[WorkerBase]]]]:
+        worker_class_fn = None
+        if self.scheduler_config.is_multi_step:
+            worker_module_name = "vllm.worker.multi_step_worker"
+            worker_class_name = "MultiStepWorker"
+        elif self.speculative_config:
+            worker_module_name = "vllm.spec_decode.spec_decode_worker"
+            worker_class_name = "create_spec_worker"
+        else:
+            worker_module_name = "vllm.worker.worker"
+            worker_class_name = "Worker"
+        return (worker_module_name, worker_class_name, worker_class_fn)
+
+    def _get_create_worker_kwargs(
+            self,
+            local_rank: int = 0,
+            rank: int = 0,
+            distributed_init_method: Optional[str] = None) -> Dict:
+        worker_kwargs = self._get_worker_kwargs(local_rank, rank,
+                                                distributed_init_method)
+
+        (worker_module_name, worker_class_name,
+         worker_class_fn) = self._get_worker_module_and_class()
+        worker_kwargs.update(
+            worker_module_name=worker_module_name,
+            worker_class_name=worker_class_name,
+            worker_class_fn=worker_class_fn,
+        )
+
+        return worker_kwargs
 
     def _create_worker(self,
                        local_rank: int = 0,
                        rank: int = 0,
                        distributed_init_method: Optional[str] = None):
-
-        if self.speculative_config is None:
-            worker_module_name = "vllm.worker.worker"
-            worker_class_name = "Worker"
-        else:
-            worker_module_name = "vllm.spec_decode.spec_decode_worker"
-            worker_class_name = "create_spec_worker"
-
-        wrapper = WorkerWrapperBase(
-            worker_module_name=worker_module_name,
-            worker_class_name=worker_class_name,
-        )
-        wrapper.init_worker(**self._get_worker_kwargs(local_rank, rank,
-                                                      distributed_init_method))
-        return wrapper.worker
+        return create_worker(**self._get_create_worker_kwargs(
+            local_rank=local_rank,
+            rank=rank,
+            distributed_init_method=distributed_init_method))
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available KV blocks by invoking the
@@ -87,7 +126,7 @@ class GPUExecutor(ExecutorBase):
 
     def execute_model(
         self, execute_model_req: ExecuteModelRequest
-    ) -> List[Union[SamplerOutput, PoolerOutput]]:
+    ) -> Optional[List[Union[SamplerOutput, PoolerOutput]]]:
         output = self.driver_worker.execute_model(execute_model_req)
         return output
 
@@ -99,8 +138,31 @@ class GPUExecutor(ExecutorBase):
         assert lora_id > 0, "lora_id must be greater than 0."
         return self.driver_worker.remove_lora(lora_id)
 
+    def pin_lora(self, lora_id: int) -> bool:
+        assert lora_id > 0, "lora_id must be greater than 0."
+        return self.driver_worker.pin_lora(lora_id)
+
     def list_loras(self) -> Set[int]:
         return self.driver_worker.list_loras()
+
+    def add_prompt_adapter(
+            self, prompt_adapter_request: PromptAdapterRequest) -> bool:
+        assert prompt_adapter_request.prompt_adapter_id > 0, \
+            "prompt_adapter_id must be greater than 0."
+        return self.driver_worker.add_prompt_adapter(prompt_adapter_request)
+
+    def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
+        assert prompt_adapter_id > 0, \
+            "prompt_adapter_id must be greater than 0."
+        return self.driver_worker.remove_prompt_adapter(prompt_adapter_id)
+
+    def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
+        assert prompt_adapter_id > 0, \
+                "prompt_adapter_id must be greater than 0."
+        return self.driver_worker.pin_prompt_adapter(prompt_adapter_id)
+
+    def list_prompt_adapters(self) -> Set[int]:
+        return self.driver_worker.list_prompt_adapters()
 
     def check_health(self) -> None:
         # GPUExecutor will always be healthy as long as
@@ -115,5 +177,5 @@ class GPUExecutorAsync(GPUExecutor, ExecutorAsyncBase):
         execute_model_req: ExecuteModelRequest,
     ) -> List[Union[SamplerOutput, PoolerOutput]]:
         output = await make_async(self.driver_worker.execute_model
-                                  )(execute_model_req=execute_model_req, )
+                                  )(execute_model_req=execute_model_req)
         return output

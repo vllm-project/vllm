@@ -1,9 +1,22 @@
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from dataclasses import dataclass, fields
-from typing import (Any, Dict, Generic, List, Optional, Set, Tuple, Type,
-                    TypeVar)
+from enum import Enum, auto
+from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Set,
+                    Tuple, Type, TypeVar)
 
 import torch
+
+if TYPE_CHECKING:
+    from vllm.worker.model_runner_base import (ModelRunnerBase,
+                                               ModelRunnerInputBase,
+                                               ModelRunnerInputBuilderBase)
+
+
+class AttentionType(Enum):
+    DECODER = auto()  # Decoder attention between previous layer Q/K/V
+    ENCODER = auto()  # Encoder attention between previous layer Q/K/V
+    ENCODER_DECODER = auto()  # Attention between dec. Q and enc. K/V
 
 
 class AttentionBackend(ABC):
@@ -21,8 +34,27 @@ class AttentionBackend(ABC):
 
     @staticmethod
     @abstractmethod
-    def make_metadata(*args, **kwargs) -> "AttentionMetadata":
+    def get_metadata_cls() -> Type["AttentionMetadata"]:
         raise NotImplementedError
+
+    @staticmethod
+    @abstractmethod
+    def get_state_cls() -> Type["AttentionState"]:
+        raise NotImplementedError
+
+    @classmethod
+    def make_metadata(cls, *args, **kwargs) -> "AttentionMetadata":
+        return cls.get_metadata_cls()(*args, **kwargs)
+
+    @staticmethod
+    @abstractmethod
+    def get_builder_cls() -> Type["AttentionMetadataBuilder"]:
+        raise NotImplementedError
+
+    @classmethod
+    def make_metadata_builder(cls, *args,
+                              **kwargs) -> "AttentionMetadataBuilder":
+        return cls.get_builder_cls()(*args, **kwargs)
 
     @staticmethod
     @abstractmethod
@@ -49,6 +81,9 @@ class AttentionBackend(ABC):
         kv_caches: List[torch.Tensor],
         src_to_dists: torch.Tensor,
     ) -> None:
+        raise NotImplementedError
+
+    def advance_step(self, num_seqs: int, num_queries: int):
         raise NotImplementedError
 
 
@@ -99,6 +134,61 @@ class AttentionMetadata:
 T = TypeVar("T", bound=AttentionMetadata)
 
 
+class AttentionState(ABC, Generic[T]):
+    """Holds attention backend-specific objects reused during the
+    lifetime of the model runner."""
+
+    @abstractmethod
+    def __init__(self, runner: "ModelRunnerBase"):
+        ...
+
+    @abstractmethod
+    @contextmanager
+    def graph_capture(self, max_batch_size: int):
+        """Context manager used when capturing CUDA graphs."""
+        yield
+
+    @abstractmethod
+    def graph_clone(self, batch_size: int) -> "AttentionState[T]":
+        """Clone attention state to save in CUDA graph metadata."""
+        ...
+
+    @abstractmethod
+    def graph_capture_get_metadata_for_batch(self, batch_size: int) -> T:
+        """Get attention metadata for CUDA graph capture of batch_size."""
+        ...
+
+    @abstractmethod
+    def get_graph_input_buffers(self, attn_metadata: T) -> Dict[str, Any]:
+        """Get attention-specific input buffers for CUDA graph capture."""
+        ...
+
+    @abstractmethod
+    def prepare_graph_input_buffers(self, input_buffers: Dict[str, Any],
+                                    attn_metadata: T) -> None:
+        """In-place modify input buffers dict for CUDA graph replay."""
+        ...
+
+    @abstractmethod
+    def begin_forward(self, model_input: "ModelRunnerInputBase") -> None:
+        """Prepare state for forward pass."""
+        ...
+
+
+class AttentionMetadataBuilder(ABC, Generic[T]):
+    """Abstract class for attention metadata builders."""
+
+    @abstractmethod
+    def __init__(self, input_builder: "ModelRunnerInputBuilderBase") -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def build(self, seq_lens: List[int], query_lens: List[int],
+              cuda_graph_pad_size: int, batch_size: int) -> T:
+        """Build attention metadata with on-device tensors."""
+        raise NotImplementedError
+
+
 class AttentionImpl(ABC, Generic[T]):
 
     @abstractmethod
@@ -112,6 +202,7 @@ class AttentionImpl(ABC, Generic[T]):
         sliding_window: Optional[int] = None,
         kv_cache_dtype: str = "auto",
         blocksparse_params: Optional[Dict[str, Any]] = None,
+        logits_soft_cap: Optional[float] = None,
     ) -> None:
         raise NotImplementedError
 
@@ -123,6 +214,8 @@ class AttentionImpl(ABC, Generic[T]):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: T,
-        kv_scale: float = 1.0,
+        k_scale: float = 1.0,
+        v_scale: float = 1.0,
+        attn_type: AttentionType = AttentionType.DECODER,
     ) -> torch.Tensor:
         raise NotImplementedError

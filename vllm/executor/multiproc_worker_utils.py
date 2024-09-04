@@ -65,10 +65,11 @@ def _set_future_result(future: Union[ResultFuture, asyncio.Future],
         future.set_result(result)
         return
     loop = future.get_loop()
-    if result.exception is not None:
-        loop.call_soon_threadsafe(future.set_exception, result.exception)
-    else:
-        loop.call_soon_threadsafe(future.set_result, result.value)
+    if not loop.is_closed():
+        if result.exception is not None:
+            loop.call_soon_threadsafe(future.set_exception, result.exception)
+        else:
+            loop.call_soon_threadsafe(future.set_result, result.value)
 
 
 class ResultHandler(threading.Thread):

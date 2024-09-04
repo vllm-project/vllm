@@ -39,7 +39,7 @@ from typing import Iterable, List, Optional, Tuple
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PhiConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
@@ -52,18 +52,20 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import SamplerOutput
+from vllm.sequence import IntermediateTensors
+
+from .interfaces import SupportsLoRA
 
 
 class PhiAttention(nn.Module):
 
     def __init__(self,
-                 config: PretrainedConfig,
+                 config: PhiConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
@@ -131,7 +133,7 @@ class PhiAttention(nn.Module):
 class PhiMLP(nn.Module):
 
     def __init__(self,
-                 config: PretrainedConfig,
+                 config: PhiConfig,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
 
@@ -160,7 +162,7 @@ class PhiMLP(nn.Module):
 class PhiLayer(nn.Module):
 
     def __init__(self,
-                 config: PretrainedConfig,
+                 config: PhiConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
@@ -192,7 +194,7 @@ class PhiLayer(nn.Module):
 class PhiModel(nn.Module):
 
     def __init__(self,
-                 config: PretrainedConfig,
+                 config: PhiConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
@@ -229,7 +231,7 @@ class PhiModel(nn.Module):
         return hidden_states
 
 
-class PhiForCausalLM(nn.Module):
+class PhiForCausalLM(nn.Module, SupportsLoRA):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -250,21 +252,26 @@ class PhiForCausalLM(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PhiConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ):
-        del lora_config  # Unused.
         super().__init__()
+
         self.config = config
+        # lm_head use bias, cannot share word embeddings
+        assert not config.tie_word_embeddings
+        self.lora_config = lora_config
+
         self.quant_config = quant_config
 
         self.model = PhiModel(config, cache_config, quant_config)
 
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
-                                      bias=True)
+                                      bias=True,
+                                      quant_config=quant_config)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
@@ -274,15 +281,19 @@ class PhiForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata)
 
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head.weight, hidden_states,
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
+        logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata, self.lm_head.bias)
         return logits
 

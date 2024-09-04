@@ -61,58 +61,78 @@ def dropout_mask(philox_seed, philox_offset, dropout_p, m, n, stride):
 
 
 @triton.jit
-def load_fn(ptrs, offset_first, offset_second, boundary_first,
-            boundary_second):
-    if offset_first is not None and offset_second is not None:
-        mask = (offset_first[:, None] < boundary_first) & \
-               (offset_second[None, :] < boundary_second)
-        tensor = tl.load(ptrs, mask=mask, other=0.0)
-    elif offset_first is not None:
-        mask = offset_first[:, None] < boundary_first
-        tensor = tl.load(ptrs, mask=mask, other=0.0)
-    elif offset_second is not None:
-        mask = offset_second[None, :] < boundary_second
-        tensor = tl.load(ptrs, mask=mask, other=0.0)
+def load_fn(block_ptr, first, second, pad):
+    if first and second:
+        tensor = tl.load(block_ptr, boundary_check=(0, 1), padding_option=pad)
+    elif first:
+        tensor = tl.load(block_ptr, boundary_check=(0, ), padding_option=pad)
+    elif second:
+        tensor = tl.load(block_ptr, boundary_check=(1, ), padding_option=pad)
     else:
-        tensor = tl.load(ptrs)
+        tensor = tl.load(block_ptr)
     return tensor
 
 
 @triton.jit
 def _attn_fwd_inner(
-        acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stride_vk,
-        stride_bn, start_m, actual_seqlen_k, actual_seqlen_q, dropout_p,
-        philox_seed, batch_philox_offset, encoded_sm_ptrs, block_min,
-        block_max, offs_n_causal, masked_blocks, n_extra_tokens, alibi_slope,
-        IS_CAUSAL: tl.constexpr, BLOCK_M: tl.constexpr,
-        BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr,
-        OFFS_M: tl.constexpr, OFFS_N: tl.constexpr, PRE_LOAD_V: tl.constexpr,
-        MASK_STEPS: tl.constexpr, ENABLE_DROPOUT: tl.constexpr,
-        RETURN_ENCODED_SOFTMAX: tl.constexpr, PADDED_HEAD: tl.constexpr,
-        ACTUAL_BLOCK_DMODEL: tl.constexpr):
+    acc,
+    l_i,
+    m_i,
+    q,
+    K_block_ptr,
+    V_block_ptr,
+    start_m,
+    actual_seqlen_k,
+    dropout_p,
+    philox_seed,
+    batch_philox_offset,
+    encoded_softmax_block_ptr,
+    block_min,
+    block_max,
+    offs_n_causal,
+    masked_blocks,
+    n_extra_tokens,
+    bias_ptr,
+    IS_CAUSAL: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    OFFS_M: tl.constexpr,
+    OFFS_N: tl.constexpr,
+    PRE_LOAD_V: tl.constexpr,
+    MASK_STEPS: tl.constexpr,
+    ENABLE_DROPOUT: tl.constexpr,
+    RETURN_ENCODED_SOFTMAX: tl.constexpr,
+    PADDED_HEAD: tl.constexpr,
+):
     # loop over k, v, and update accumulator
     for start_n in range(block_min, block_max, BLOCK_N):
         # For padded blocks, we will overrun the tensor size if
         # we load all BLOCK_N. For others, the blocks are all within range.
-        k_offs_n = start_n + tl.arange(0, BLOCK_N) if MASK_STEPS else None
-        k_offs_k = None if not PADDED_HEAD else tl.arange(0, BLOCK_DMODEL)
-        k = load_fn(k_ptrs, k_offs_k, k_offs_n, ACTUAL_BLOCK_DMODEL,
-                    actual_seqlen_k)
+        k = load_fn(
+            K_block_ptr,
+            PADDED_HEAD,
+            MASK_STEPS and (n_extra_tokens != 0),
+            "zero",
+        )
         if PRE_LOAD_V:
-            # We can use the same offsets as k, just with dims transposed.
-            v = load_fn(v_ptrs, k_offs_n, k_offs_k, actual_seqlen_k,
-                        ACTUAL_BLOCK_DMODEL)
+            v = load_fn(
+                V_block_ptr,
+                MASK_STEPS and (n_extra_tokens != 0),
+                PADDED_HEAD,
+                "zero",
+            )
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         # We start from end of seqlen_k so only the first iteration would need
         # to be checked for padding if it is not a multiple of block_n
         # TODO: This can be optimized to only be true for the padded block.
-        if MASK_STEPS:  # NOQA: SIM102
-            if start_n + BLOCK_N == block_max and n_extra_tokens != 0:
-                # If this is the last block / iteration, we want to
-                # mask if the sequence length is not a multiple of block size
-                # a solution is to always do BLOCK_M // BLOCK_N + 1 steps if
-                # not is_modulo_mn. Last step might get wasted but that is okay.
-                # Check if this masking works for that case.
+        if MASK_STEPS:  # noqa: SIM102
+            # If this is the last block / iteration, we want to
+            # mask if the sequence length is not a multiple of block size
+            # a solution is to always do BLOCK_M // BLOCK_N + 1 steps
+            # if not is_modulo_mn. last step might get wasted but that is okay.
+            # check if this masking works for that case.
+            if (start_n + BLOCK_N == block_max) and (n_extra_tokens != 0):
                 boundary_m = tl.full([BLOCK_M],
                                      actual_seqlen_k,
                                      dtype=tl.int32)
@@ -125,18 +145,13 @@ def _attn_fwd_inner(
             qk = tl.where(causal_mask, qk, float("-inf"))
         # -- compute qk ----
         qk += tl.dot(q, k)
-        if bias_ptrs is not None:
-            bias_offs_n = start_n + tl.arange(0,
-                                              BLOCK_N) if MASK_STEPS else None
-            bias = load_fn(bias_ptrs, OFFS_M, bias_offs_n, actual_seqlen_q,
-                           actual_seqlen_k)
-            # While bias is added after multiplying qk with sm_scale,
-            # our optimization to use 2^x instead of e^x results in an
-            # additional scale factor of log2(e) which we must also multiply
-            # the bias with.
-            qk += (bias * 1.44269504089)
-
-        # softmax
+        if bias_ptr is not None:
+            bias = load_fn(bias_ptr, False, MASK_STEPS
+                           and (n_extra_tokens != 0), "zero")
+            # While bias is added after multiplying qk with sm_scale, our
+            # optimization to use 2^x instead of e^x results in an additional
+            # scale factor of log2(e) which we must also multiply the bias with.
+            qk += bias * 1.44269504089
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
         qk = qk - m_ij[:, None]
         p = tl.math.exp2(qk)
@@ -147,32 +162,48 @@ def _attn_fwd_inner(
             philox_offset = (batch_philox_offset +
                              start_m * BLOCK_M * actual_seqlen_k + start_n -
                              BLOCK_N)
-            keep = dropout_mask(philox_seed, philox_offset, dropout_p, BLOCK_M,
-                                BLOCK_N, actual_seqlen_k)
+            keep = dropout_mask(
+                philox_seed,
+                philox_offset,
+                dropout_p,
+                BLOCK_M,
+                BLOCK_N,
+                actual_seqlen_k,
+            )
             if RETURN_ENCODED_SOFTMAX:
                 tl.store(
-                    encoded_sm_ptrs,
-                    tl.where(keep, p, -p).to(encoded_sm_ptrs.type.element_ty))
+                    encoded_softmax_block_ptr,
+                    tl.where(keep, p,
+                             -p).to(encoded_softmax_block_ptr.type.element_ty),
+                )
             p = tl.where(keep, p, 0.0)
         elif RETURN_ENCODED_SOFTMAX:
-            tl.store(encoded_sm_ptrs, p.to(encoded_sm_ptrs.type.element_ty))
+            tl.store(
+                encoded_softmax_block_ptr,
+                p.to(encoded_softmax_block_ptr.type.element_ty),
+            )
         # -- update output accumulator --
         alpha = tl.math.exp2(m_i - m_ij)
         acc = acc * alpha[:, None]
         if not PRE_LOAD_V:
-            v = load_fn(v_ptrs, k_offs_n, k_offs_k, actual_seqlen_k,
-                        ACTUAL_BLOCK_DMODEL)
+            v = load_fn(
+                V_block_ptr,
+                MASK_STEPS and (n_extra_tokens != 0),
+                PADDED_HEAD,
+                "zero",
+            )
         # -- update m_i and l_i
         l_i = l_i * alpha + l_ij
         # update m_i and l_i
         m_i = m_ij
-        acc += tl.dot(p.to(v.type.element_ty), v)
-        k_ptrs += BLOCK_N * stride_kn
-        v_ptrs += BLOCK_N * stride_vk
-        if bias_ptrs is not None:
-            bias_ptrs += BLOCK_N * stride_bn
+        acc += tl.dot(p.to(V_block_ptr.type.element_ty), v)
+        V_block_ptr = tl.advance(V_block_ptr, (BLOCK_N, 0))
+        K_block_ptr = tl.advance(K_block_ptr, (0, BLOCK_N))
+        if bias_ptr is not None:
+            bias_ptr = tl.advance(bias_ptr, (0, BLOCK_N))
         if RETURN_ENCODED_SOFTMAX:
-            encoded_sm_ptrs += BLOCK_N
+            encoded_softmax_block_ptr = tl.advance(encoded_softmax_block_ptr,
+                                                   (0, BLOCK_N))
     return acc, l_i, m_i
 
 
@@ -275,26 +306,60 @@ def _attn_fwd_inner(
     key=['IS_CAUSAL', 'dropout_p', 'BLOCK_DMODEL'],
 )
 @triton.jit
-def attn_fwd(Q, K, V, bias, sm_scale, L, Out, stride_qz, stride_qh, stride_qm,
-             stride_qk, stride_kz, stride_kh, stride_kn, stride_kk, stride_vz,
-             stride_vh, stride_vk, stride_vn, stride_oz, stride_oh, stride_om,
-             stride_on, stride_bz, stride_bh, stride_bm, stride_bn, stride_az,
-             stride_ah, cu_seqlens_q, cu_seqlens_k, dropout_p, philox_seed,
-             philox_offset_base, encoded_softmax, alibi_slopes,
-             HQ: tl.constexpr, HK: tl.constexpr,
-             ACTUAL_BLOCK_DMODEL: tl.constexpr, MAX_SEQLENS_Q: tl.constexpr,
-             MAX_SEQLENS_K: tl.constexpr, VARLEN: tl.constexpr,
-             IS_CAUSAL: tl.constexpr, BLOCK_M: tl.constexpr,
-             BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr,
-             PRE_LOAD_V: tl.constexpr, USE_BIAS: tl.constexpr,
-             ENABLE_DROPOUT: tl.constexpr,
-             RETURN_ENCODED_SOFTMAX: tl.constexpr, USE_ALIBI: tl.constexpr):
+def attn_fwd(
+    Q,
+    K,
+    V,
+    bias,
+    sm_scale,
+    L,
+    Out,
+    stride_qz,
+    stride_qh,
+    stride_qm,
+    stride_qk,
+    stride_kz,
+    stride_kh,
+    stride_kn,
+    stride_kk,
+    stride_vz,
+    stride_vh,
+    stride_vk,
+    stride_vn,
+    stride_oz,
+    stride_oh,
+    stride_om,
+    stride_on,
+    stride_bz,
+    stride_bh,
+    stride_bm,
+    stride_bn,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    dropout_p,
+    philox_seed,
+    philox_offset_base,
+    encoded_softmax,
+    HQ: tl.constexpr,
+    HK: tl.constexpr,
+    ACTUAL_BLOCK_DMODEL: tl.constexpr,
+    MAX_SEQLENS_Q: tl.constexpr,
+    MAX_SEQLENS_K: tl.constexpr,
+    VARLEN: tl.constexpr,
+    IS_CAUSAL: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    PRE_LOAD_V: tl.constexpr,
+    BIAS_TYPE: tl.constexpr,
+    ENABLE_DROPOUT: tl.constexpr,
+    RETURN_ENCODED_SOFTMAX: tl.constexpr,
+):
     start_m = tl.program_id(0)
     off_h_q = tl.program_id(1)
     off_z = tl.program_id(2)
     offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = tl.arange(0, BLOCK_N)
-    offs_d = tl.arange(0, BLOCK_DMODEL)
     if VARLEN:
         cu_seqlens_q_start = tl.load(cu_seqlens_q + off_z)
         cu_seqlens_q_end = tl.load(cu_seqlens_q + off_z + 1)
@@ -324,8 +389,8 @@ def attn_fwd(Q, K, V, bias, sm_scale, L, Out, stride_qz, stride_qh, stride_qm,
         # If seqlen_q != seqlen_k, attn scores are rectangular which means
         # the causal mask boundary is bottom right aligned, and ends at either
         # the top edge (seqlen_q < seqlen_k) or left edge.
-        # This captures the decrease in n_blocks if we have a rectangular
-        # attn matrix
+        # This captures the decrease in n_blocks if we have a rectangular attn
+        # matrix
         n_blocks_seqlen = cdiv_fn(
             (start_m + 1) * BLOCK_M + seqlen_k - seqlen_q, BLOCK_N)
         # This is what adjusts the block_max for the current WG, only
@@ -334,26 +399,29 @@ def attn_fwd(Q, K, V, bias, sm_scale, L, Out, stride_qz, stride_qh, stride_qm,
         # If we have no blocks after adjusting for seqlen deltas, this WG is
         # part of the blocks that are all 0. We exit early.
         if n_blocks <= 0:
-            o_offset = (Out + off_z * stride_oz + off_h_q * stride_oh +
-                        cu_seqlens_q_start * stride_om)
-            o_ptrs = o_offset + offs_m[:, None] * stride_om + offs_d[
-                None, :] * stride_on
+            o_offset = (off_z * stride_oz + cu_seqlens_q_start * stride_om +
+                        off_h_q * stride_oh)
+            O_block_ptr = tl.make_block_ptr(
+                base=Out + o_offset,
+                shape=(seqlen_q, BLOCK_DMODEL),
+                strides=(stride_om, stride_on),
+                offsets=(start_m * BLOCK_M, 0),
+                block_shape=(BLOCK_M, BLOCK_DMODEL),
+                order=(1, 0),
+            )
             acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=Out.type.element_ty)
-            o_ptrs_mask = offs_m[:, None] < seqlen_q
             # We still need to write 0s to the result
-            tl.store(o_ptrs, acc, mask=o_ptrs_mask)
-            # The tensor allocated for L is based on MAX_SEQLENS_Q as that is
-            # statically known.
-            l_ptrs = (L + off_z * HQ * MAX_SEQLENS_Q +
-                      off_h_q * MAX_SEQLENS_Q + offs_m)
-            # We store inf to LSE, not -inf because in the bwd pass, we subtract
-            # this from qk which makes it -inf, such that exp(qk - inf) = 0 for
-            # these masked blocks.
-            l = tl.full(  # NOQA: E741
-                [BLOCK_M], value=float("inf"), dtype=tl.float32)
-            l_ptrs_mask = offs_m < MAX_SEQLENS_Q
-            tl.store(l_ptrs, l, mask=l_ptrs_mask)
-            # TODO: Should dropout & return encoded softmax be handled here too?
+            # tl.store(O_block_ptr,
+            # acc.to(Out.type.element_ty), boundary_check=(0,1))
+            # l_ptrs = L + off_z * HQ * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q
+            #          + offs_m
+            # We store inf to LSE, not -inf because in the bwd pass,
+            # we subtract this
+            # from qk which makes it -inf, such that exp(qk - inf) = 0
+            # for these masked blocks.
+            # l = tl.full([BLOCK_M], value=float("inf"), dtype=tl.float32)
+            # tl.store(l_ptrs, l)
+            # TODO: Should dropout and return encoded softmax be handled here?
             return
 
     # If MQA / GQA, set the K and V head offsets appropriately.
@@ -365,49 +433,71 @@ def attn_fwd(Q, K, V, bias, sm_scale, L, Out, stride_qz, stride_qh, stride_qm,
         n_extra_tokens = BLOCK_N - seqlen_k
     elif seqlen_k % BLOCK_N:
         n_extra_tokens = seqlen_k % BLOCK_N
-    PADDED_HEAD: tl.constexpr = (ACTUAL_BLOCK_DMODEL != BLOCK_DMODEL)
+    padded_head = ACTUAL_BLOCK_DMODEL != BLOCK_DMODEL
 
     # Compute pointers for all the tensors used in this kernel.
-    q_offset = (Q + off_z * stride_qz + off_h_q * stride_qh +
+    q_offset = (off_z * stride_qz + off_h_q * stride_qh +
                 cu_seqlens_q_start * stride_qm)
-    q_ptrs = (q_offset + offs_m[:, None] * stride_qm +
-              offs_d[None, :] * stride_qk)
-    k_offset = (K + off_z * stride_kz + off_h_k * stride_kh +
+    Q_block_ptr = tl.make_block_ptr(
+        base=Q + q_offset,
+        shape=(seqlen_q, ACTUAL_BLOCK_DMODEL),
+        strides=(stride_qm, stride_qk),
+        offsets=(start_m * BLOCK_M, 0),
+        block_shape=(BLOCK_M, BLOCK_DMODEL),
+        order=(1, 0),
+    )
+    k_offset = (off_z * stride_kz + off_h_k * stride_kh +
                 cu_seqlens_k_start * stride_kn)
-    k_ptrs = (k_offset + offs_d[:, None] * stride_kk +
-              offs_n[None, :] * stride_kn)
-    v_offset = (V + off_z * stride_vz + off_h_k * stride_vh +
+    K_block_ptr = tl.make_block_ptr(
+        base=K + k_offset,
+        shape=(ACTUAL_BLOCK_DMODEL, seqlen_k),
+        strides=(stride_kk, stride_kn),
+        offsets=(0, 0),
+        block_shape=(BLOCK_DMODEL, BLOCK_N),
+        order=(0, 1),
+    )
+    v_offset = (off_z * stride_vz + off_h_k * stride_vh +
                 cu_seqlens_k_start * stride_vk)
-    v_ptrs = (v_offset + offs_n[:, None] * stride_vk +
-              offs_d[None, :] * stride_vn)
-    if USE_BIAS:
-        # Note: this might get large enough to overflow on some configs
-        bias_offset = off_h_q * stride_bh
-        bias_ptrs = bias + bias_offset + offs_m[:, None] * stride_bm + offs_n[
-            None, :] * stride_bn
+    V_block_ptr = tl.make_block_ptr(
+        base=V + v_offset,
+        shape=(seqlen_k, ACTUAL_BLOCK_DMODEL),
+        strides=(stride_vk, stride_vn),
+        offsets=(0, 0),
+        block_shape=(BLOCK_N, BLOCK_DMODEL),
+        order=(1, 0),
+    )
+    if BIAS_TYPE != 0:
+        bias_ptr = tl.make_block_ptr(
+            base=bias + off_h_q * stride_bh,
+            shape=(seqlen_q, seqlen_k),
+            strides=(stride_bm, stride_bn),
+            offsets=(start_m * BLOCK_M, 0),
+            block_shape=(BLOCK_M, BLOCK_N),
+            order=(1, 0),
+        )
     else:
-        bias_ptrs = None
-
-    if USE_ALIBI:
-        a_offset = off_z * stride_az + off_h_q * stride_ah
-        alibi_slope = tl.load(alibi_slopes + a_offset)
-    else:
-        alibi_slope = None
-
+        bias_ptr = None
     if ENABLE_DROPOUT:
-        off_hz = off_z * HQ + off_h_q
-        batch_philox_offset = philox_offset_base + off_hz * seqlen_q * seqlen_k
+        batch_philox_offset = philox_offset_base \
+                              + (off_z * HQ + off_h_q) \
+                              * seqlen_q * seqlen_k
     else:
         batch_philox_offset = 0
-    # We can ask to return the dropout mask without actually doing dropout. In
-    # this case, we return an invalid pointer so indicate the mask is not valid.
+    # We can ask to return the dropout mask without actually doing any dropout.
+    # In this case, we return an invalid pointer so indicate the mask is not i
+    # valid.
+    # TODO: Fix encoded softmax. It currently uses just h_q in the base offset.
     if RETURN_ENCODED_SOFTMAX:
-        encoded_sm_base = encoded_softmax + off_h_q * seqlen_q * seqlen_k
-        encoded_sm_ptrs = encoded_sm_base + offs_m[:,
-                                                   None] * seqlen_k + offs_n[
-                                                       None, :]
+        encoded_softmax_block_ptr = tl.make_block_ptr(
+            base=encoded_softmax + off_h_q * seqlen_q * seqlen_k,
+            shape=(seqlen_q, seqlen_k),
+            strides=(seqlen_k, 1),
+            offsets=(start_m * BLOCK_M, 0),
+            block_shape=(BLOCK_M, BLOCK_N),
+            order=(1, 0),
+        )
     else:
-        encoded_sm_ptrs = None
+        encoded_softmax_block_ptr = 0
     # initialize pointer to m and l
     m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
     l_i = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
@@ -416,11 +506,8 @@ def attn_fwd(Q, K, V, bias, sm_scale, L, Out, stride_qz, stride_qh, stride_qm,
     # have native e^x support in HW.
     qk_scale = sm_scale * 1.44269504089
     # Q is loaded once at the beginning and shared by all N blocks.
-    q_ptrs_mask = offs_m[:, None] < seqlen_q
-    if PADDED_HEAD:
-        q_ptrs_mask = q_ptrs_mask & (offs_d[None, :] < ACTUAL_BLOCK_DMODEL)
-    q = tl.load(q_ptrs, mask=q_ptrs_mask, other=0.0)
-    q = (q * qk_scale).to(q.type.element_ty)
+    q = load_fn(Q_block_ptr, True, padded_head, "zero")
+    q = (q * qk_scale).to(Q_block_ptr.type.element_ty)
 
     # Here we compute how many full and masked blocks we have.
     padded_block_k = n_extra_tokens != 0
@@ -438,8 +525,8 @@ def attn_fwd(Q, K, V, bias, sm_scale, L, Out, stride_qz, stride_qh, stride_qm,
     n_full_blocks = n_blocks - masked_blocks
     block_min = 0
     block_max = n_blocks * BLOCK_N
-    # Compute for full blocks. Here we set causal to false unconditionally
-    # because there is no masking. Similarly we do not need padding.
+    # Compute for full blocks. Here we set causal to false regardless of its
+    # value because there is no masking. Similarly we do not need padding.
     if n_full_blocks > 0:
         block_max = (n_blocks - masked_blocks) * BLOCK_N
         acc, l_i, m_i = _attn_fwd_inner(
@@ -447,26 +534,21 @@ def attn_fwd(Q, K, V, bias, sm_scale, L, Out, stride_qz, stride_qh, stride_qm,
             l_i,
             m_i,
             q,
-            k_ptrs,
-            v_ptrs,
-            bias_ptrs,
-            stride_kn,
-            stride_vk,
-            stride_bn,
+            K_block_ptr,
+            V_block_ptr,
             start_m,
             seqlen_k,
-            seqlen_q,
             dropout_p,
             philox_seed,
             batch_philox_offset,
-            encoded_sm_ptrs,
+            encoded_softmax_block_ptr,
             # _, _, offs_n_causal, masked_blocks, n_extra_tokens, _
             block_min,
             block_max,
             0,
             0,
             0,
-            alibi_slope,
+            bias_ptr,
             # IS_CAUSAL, ....
             False,
             BLOCK_M,
@@ -479,45 +561,41 @@ def attn_fwd(Q, K, V, bias, sm_scale, L, Out, stride_qz, stride_qh, stride_qm,
             False,
             ENABLE_DROPOUT,
             RETURN_ENCODED_SOFTMAX,
-            PADDED_HEAD,
-            ACTUAL_BLOCK_DMODEL)
+            padded_head,
+        )
         block_min = block_max
         block_max = n_blocks * BLOCK_N
 
     tl.debug_barrier()
     # Remaining blocks, if any, are full / not masked.
-    if (masked_blocks > 0):
+    if masked_blocks > 0:
         offs_n_causal = offs_n + (seqlen_q - seqlen_k) if IS_CAUSAL else 0
-        k_ptrs += n_full_blocks * BLOCK_N * stride_kn
-        v_ptrs += n_full_blocks * BLOCK_N * stride_vk
-        if USE_BIAS:
-            bias_ptrs += n_full_blocks * BLOCK_N * stride_bn
+        K_block_ptr = tl.advance(K_block_ptr, (0, n_full_blocks * BLOCK_N))
+        V_block_ptr = tl.advance(V_block_ptr, (n_full_blocks * BLOCK_N, 0))
+        if bias_ptr is not None:
+            bias_ptr = tl.advance(bias_ptr, (0, n_full_blocks * BLOCK_N))
         if RETURN_ENCODED_SOFTMAX:
-            encoded_sm_ptrs += n_full_blocks * BLOCK_N
+            encoded_softmax_block_ptr = tl.advance(encoded_softmax_block_ptr,
+                                                   (0, n_full_blocks))
         acc, l_i, m_i = _attn_fwd_inner(
             acc,
             l_i,
             m_i,
             q,
-            k_ptrs,
-            v_ptrs,
-            bias_ptrs,
-            stride_kn,
-            stride_vk,
-            stride_bn,
+            K_block_ptr,
+            V_block_ptr,
             start_m,
             seqlen_k,
-            seqlen_q,
             dropout_p,
             philox_seed,
             batch_philox_offset,
-            encoded_sm_ptrs,
+            encoded_softmax_block_ptr,
             block_min,
             block_max,
             offs_n_causal,
             masked_blocks,
             n_extra_tokens,
-            alibi_slope,
+            bias_ptr,
             IS_CAUSAL,
             BLOCK_M,
             BLOCK_DMODEL,
@@ -529,8 +607,8 @@ def attn_fwd(Q, K, V, bias, sm_scale, L, Out, stride_qz, stride_qh, stride_qm,
             True,
             ENABLE_DROPOUT,
             RETURN_ENCODED_SOFTMAX,
-            PADDED_HEAD,
-            ACTUAL_BLOCK_DMODEL)
+            padded_head,
+        )
     # epilogue
     acc = acc / l_i[:, None]
     if ENABLE_DROPOUT:
@@ -543,42 +621,45 @@ def attn_fwd(Q, K, V, bias, sm_scale, L, Out, stride_qz, stride_qh, stride_qm,
     start_m_idx = start_m * BLOCK_M
     causal_start_idx = seqlen_q - seqlen_k
     acc = acc.to(Out.type.element_ty)
-    if IS_CAUSAL:  # NOQA: SIM102
+    if IS_CAUSAL:  # noqa: SIM102
         if causal_start_idx > start_m_idx and causal_start_idx < end_m_idx:
             out_mask_boundary = tl.full((BLOCK_DMODEL, ),
                                         causal_start_idx,
                                         dtype=tl.int32)
             mask_m_offsets = start_m_idx + tl.arange(0, BLOCK_M)
-            out_ptrs_mask = mask_m_offsets[:,
-                                           None] >= out_mask_boundary[None, :]
+            out_ptrs_mask = (mask_m_offsets[:, None] >=
+                             out_mask_boundary[None, :])
             z = 0.0
             acc = tl.where(out_ptrs_mask, acc, z.to(acc.type.element_ty))
     # write back LSE
-    l_ptrs = L + off_z * HQ * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q + offs_m
-    # If seqlen_q not multiple of BLOCK_M, we need to mask out the last few
-    # rows. This is only true for the last M block. For others, overflow_size
-    # will be -ve
-    overflow_size = end_m_idx - seqlen_q
-    if overflow_size > 0:
-        boundary = tl.full((BLOCK_M, ),
-                           BLOCK_M - overflow_size,
-                           dtype=tl.int32)
-        l_ptrs_mask = tl.arange(0, BLOCK_M) < boundary
-        tl.store(l_ptrs, m_i + tl.math.log2(l_i), mask=l_ptrs_mask)
-    else:
-        tl.store(l_ptrs, m_i + tl.math.log2(l_i))
+    # l_ptrs = L + off_z * HQ * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q + offs_m
+    # If seqlen_q not multiple of BLOCK_M, we need to mask out the last
+    # few rows. This is only true for the last M block. For others,
+    # overflow_size will be -ve
+    # overflow_size = end_m_idx - seqlen_q
+    # if overflow_size > 0:
+    #    boundary = tl.full((BLOCK_M,), BLOCK_M - overflow_size, dtype=tl.int32)
+    #    # This is a > check because mask being 0 blocks the store.
+    #    l_ptrs_mask = boundary > tl.arange(0, BLOCK_M)
+    #    tl.store(l_ptrs, m_i + tl.math.log2(l_i), mask=l_ptrs_mask)
+    # else:
+    #    tl.store(l_ptrs, m_i + tl.math.log2(l_i))
 
     # write back O
-    o_offset = (Out + off_z * stride_oz + off_h_q * stride_oh +
-                cu_seqlens_q_start * stride_om)
-    o_ptrs = (o_offset + offs_m[:, None] * stride_om +
-              offs_d[None, :] * stride_on)
-    o_ptrs_mask = tl.full([BLOCK_M, BLOCK_DMODEL], 1, dtype=tl.int1)
-    if overflow_size > 0:
-        o_ptrs_mask = o_ptrs_mask & (offs_m[:, None] < seqlen_q)
-    if PADDED_HEAD:
-        o_ptrs_mask = o_ptrs_mask & (offs_d[None, :] < ACTUAL_BLOCK_DMODEL)
-    tl.store(o_ptrs, acc.to(Out.dtype.element_ty), mask=o_ptrs_mask)
+    o_offset = (off_z * stride_oz + cu_seqlens_q_start * stride_om +
+                off_h_q * stride_oh)
+    O_block_ptr = tl.make_block_ptr(
+        base=Out + o_offset,
+        shape=(seqlen_q, ACTUAL_BLOCK_DMODEL),
+        strides=(stride_om, stride_on),
+        offsets=(start_m * BLOCK_M, 0),
+        block_shape=(BLOCK_M, BLOCK_DMODEL),
+        order=(1, 0),
+    )
+    # Need boundary check on this to make sure the padding from the
+    # Q and KV tensors in both dims are not part of what we store back.
+    # TODO: Do the boundary check optionally.
+    tl.store(O_block_ptr, acc, boundary_check=(0, 1))
 
 
 def check_args(
@@ -691,10 +772,6 @@ class _attention(torch.autograd.Function):
             )
         else:
             bias_strides = (0, 0, 0, 0)
-        alibi_strides = (0, 0)
-        M = torch.empty((batch, nheads_q, max_seqlens_q),
-                        device=q.device,
-                        dtype=torch.float32)
 
         attn_fwd[grid](
             q,
@@ -702,21 +779,19 @@ class _attention(torch.autograd.Function):
             v,
             bias,
             sm_scale,
-            M,
+            None,
             o,
             *q_strides,
             *k_strides,
             *v_strides,
             *o_strides,
             *bias_strides,
-            *alibi_strides,
             cu_seqlens_q,
             cu_seqlens_k,
             dropout_p=0.0,
             philox_seed=philox_seed,
             philox_offset_base=philox_offset,
             encoded_softmax=encoded_softmax,
-            alibi_slopes=None,
             HQ=nheads_q,
             HK=nheads_k,
             ACTUAL_BLOCK_DMODEL=head_size,
@@ -725,8 +800,7 @@ class _attention(torch.autograd.Function):
             IS_CAUSAL=causal,
             VARLEN=True,
             BLOCK_DMODEL=padded_d_model,
-            USE_BIAS=bias is not None,
-            USE_ALIBI=False,
+            BIAS_TYPE=0 if bias is None else 1,
             ENABLE_DROPOUT=False,
             RETURN_ENCODED_SOFTMAX=False,
         )

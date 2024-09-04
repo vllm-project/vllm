@@ -2,6 +2,7 @@
 #include <cuda_fp16.h>
 #include <stdexcept>
 #include <algorithm>
+#include "cuda_compat.h"
 
 #if defined(__HIPCC__) && (defined(__gfx90a__) || defined(__gfx940__) || \
                            defined(__gfx941__) || defined(__gfx942__))
@@ -16,8 +17,6 @@
 #else
   #define UNREACHABLE_CODE assert(false);
 #endif
-
-constexpr int WARP_SIZE = 64;
 
 template <typename T>
 __device__ __forceinline__ T loadnt(T* addr) {

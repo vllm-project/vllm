@@ -1,14 +1,14 @@
 from typing import Any, Dict, List, Optional
 
 import torch
-from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.parameter import (GroupQuantScaleParameter,
+                                           PackedvLLMParameter)
 
 
 class AWQConfig(QuantizationConfig):
@@ -44,7 +44,8 @@ class AWQConfig(QuantizationConfig):
     def get_supported_act_dtypes(self) -> List[torch.dtype]:
         return [torch.half]
 
-    def get_min_capability(self) -> int:
+    @classmethod
+    def get_min_capability(cls) -> int:
         # The AWQ kernel only supports Turing or newer GPUs.
         return 75
 
@@ -63,8 +64,8 @@ class AWQConfig(QuantizationConfig):
         zero_point = cls.get_from_keys(config, ["zero_point"])
         return cls(weight_bits, group_size, zero_point)
 
-    def get_quant_method(
-            self, layer: torch.nn.Module) -> Optional["AWQLinearMethod"]:
+    def get_quant_method(self, layer: torch.nn.Module,
+                         prefix: str) -> Optional["AWQLinearMethod"]:
         if isinstance(layer, LinearBase):
             return AWQLinearMethod(self)
         return None
@@ -101,55 +102,51 @@ class AWQLinearMethod(LinearMethodBase):
                 "weight shape. This can be caused by too large "
                 "tensor parallel size.")
 
-        qweight = Parameter(
-            torch.empty(
+        weight_loader = extra_weight_attrs.get("weight_loader")
+        qweight = PackedvLLMParameter(
+            data=torch.empty(
                 input_size_per_partition,
                 output_size_per_partition // self.quant_config.pack_factor,
                 dtype=torch.int32,
             ),
-            requires_grad=False,
-        )
-        set_weight_attrs(
-            qweight, {
-                "input_dim": 0,
-                "output_dim": 1,
-                "packed_dim": 1,
-                "pack_factor": self.quant_config.pack_factor,
-            })
-        qzeros = Parameter(
-            torch.empty(
+            input_dim=0,
+            output_dim=1,
+            packed_dim=1,
+            packed_factor=self.quant_config.pack_factor,
+            weight_loader=weight_loader)
+
+        qzeros = PackedvLLMParameter(
+            data=torch.empty(
                 input_size_per_partition // self.quant_config.group_size,
                 output_size_per_partition // self.quant_config.pack_factor,
                 dtype=torch.int32,
             ),
-            requires_grad=False,
-        )
-        set_weight_attrs(
-            qzeros, {
-                "input_dim": 0,
-                "output_dim": 1,
-                "packed_dim": 1,
-                "pack_factor": self.quant_config.pack_factor,
-            })
-        scales = Parameter(
-            torch.empty(
-                input_size_per_partition // self.quant_config.group_size,
-                output_size_per_partition,
-                dtype=params_dtype,
-            ),
-            requires_grad=False,
-        )
-        set_weight_attrs(scales, {
-            "input_dim": 0,
-            "output_dim": 1,
-        })
+            input_dim=0,
+            output_dim=1,
+            packed_dim=1,
+            packed_factor=self.quant_config.pack_factor,
+            weight_loader=weight_loader)
+
+        scales = GroupQuantScaleParameter(data=torch.empty(
+            input_size_per_partition // self.quant_config.group_size,
+            output_size_per_partition,
+            dtype=params_dtype,
+        ),
+                                          input_dim=0,
+                                          output_dim=1,
+                                          weight_loader=weight_loader)
 
         layer.register_parameter("qweight", qweight)
-        set_weight_attrs(qweight, extra_weight_attrs)
         layer.register_parameter("qzeros", qzeros)
-        set_weight_attrs(qzeros, extra_weight_attrs)
         layer.register_parameter("scales", scales)
-        set_weight_attrs(scales, extra_weight_attrs)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        layer.qweight = torch.nn.Parameter(layer.qweight.data,
+                                           requires_grad=False)
+        layer.qzeros = torch.nn.Parameter(layer.qzeros.data,
+                                          requires_grad=False)
+        layer.scales = torch.nn.Parameter(layer.scales.data,
+                                          requires_grad=False)
 
     def apply(self,
               layer: torch.nn.Module,

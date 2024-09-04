@@ -1,8 +1,9 @@
 // TODO: add license terms
-#include <torch/extension.h>
+#include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <hip/hip_bf16.h>
+#include "cuda_compat.h"
 
 #include <algorithm>
 
@@ -23,7 +24,6 @@
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define DIVIDE_ROUND_UP(a, b) (((a) + (b) - 1) / (b))
-#define WARP_SIZE 64
 
 #if defined(__HIP__MI300_MI250__)  // TODO: Add NAVI support
 
@@ -1095,14 +1095,10 @@ void paged_attention_custom(
         key_cache,  // [num_blocks, num_heads, head_size/x, block_size, x]
     torch::Tensor&
         value_cache,  // [num_blocks, num_heads, head_size, block_size]
-    int num_kv_heads, float scale,
+    int64_t num_kv_heads, double scale,
     torch::Tensor& block_tables,  // [num_seqs, max_num_blocks_per_seq]
     torch::Tensor& context_lens,  // [num_seqs]
-    int block_size, int max_context_len,
-#if 0
-  torch::Tensor& qk_out,
-  torch::Tensor& softmax_out,
-#endif
+    int64_t block_size, int64_t max_context_len,
     const c10::optional<torch::Tensor>& alibi_slopes,
     const std::string& kv_cache_dtype) {
   assert(kv_cache_dtype == "auto");

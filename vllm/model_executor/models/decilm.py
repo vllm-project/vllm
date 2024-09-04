@@ -26,7 +26,7 @@
 from typing import Iterable, Optional, Tuple
 
 import torch
-from transformers import PretrainedConfig
+from transformers import LlamaConfig
 
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.model_executor.layers.quantization.base_config import (
@@ -55,7 +55,7 @@ class DeciLMForCausalLM(LlamaForCausalLM):
 
     def __init__(
         self,
-        config: Optional[PretrainedConfig] = None,
+        config: LlamaConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,

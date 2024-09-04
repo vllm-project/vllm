@@ -9,7 +9,7 @@ from torch.nn import functional as F
 from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
-from vllm import envs
+import vllm.envs as envs
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.models.mixtral import MixtralMoE
@@ -32,7 +32,7 @@ def torch_moe(a, w1, w2, score, topk):
             topk_weight.view(B, -1, 1).to(out.dtype)).sum(dim=1)
 
 
-@pytest.mark.parametrize("m", [512, 222, 33, 1])
+@pytest.mark.parametrize("m", [1024 * 128, 512, 222, 33, 1])
 @pytest.mark.parametrize("n", [2048, 256, 1024])
 @pytest.mark.parametrize("k", [128, 511, 1024])
 @pytest.mark.parametrize("e", [8, 64])
@@ -60,7 +60,7 @@ def test_fused_moe(
         w2 = F.pad(w2, (0, 128), "constant", 0)
         torch.cuda.empty_cache()
     triton_output = fused_moe(a, w1, w2, score, topk, renormalize=False)
-    assert torch.allclose(triton_output, torch_output, atol=1e-2, rtol=0)
+    torch.testing.assert_close(triton_output, torch_output, atol=1e-2, rtol=0)
 
 
 @pytest.mark.parametrize("dtype",
@@ -87,8 +87,8 @@ def test_mixtral_moe(dtype: torch.dtype):
     for i in range(config.num_local_experts):
         weights = (hf_moe.experts[i].w1.weight.data,
                    hf_moe.experts[i].w3.weight.data)
-        vllm_moe.w13_weight[i][:] = torch.cat(weights, dim=0)
-        vllm_moe.w2_weight[i][:] = hf_moe.experts[i].w2.weight.data
+        vllm_moe.experts.w13_weight[i][:] = torch.cat(weights, dim=0)
+        vllm_moe.experts.w2_weight[i][:] = hf_moe.experts[i].w2.weight.data
 
     # Generate input batch of dimensions [batch_size, seq_len, hidden_dim]
     hf_inputs = torch.randn((1, 64, config.hidden_size)).to(dtype).to("cuda")
@@ -97,12 +97,14 @@ def test_mixtral_moe(dtype: torch.dtype):
 
     # pad the weight if using padding
     if envs.VLLM_MOE_PADDING:
-        w13_weight = F.pad(vllm_moe.w13_weight, (0, 128), "constant", 0)
+        vllm_moe.experts.w13_weight = Parameter(F.pad(
+            vllm_moe.experts.w13_weight, (0, 128), "constant", 0),
+                                                requires_grad=False)
         torch.cuda.empty_cache()
-        w2_weight = F.pad(vllm_moe.w2_weight, (0, 128), "constant", 0)
+        vllm_moe.experts.w2_weight = Parameter(F.pad(
+            vllm_moe.experts.w2_weight, (0, 128), "constant", 0),
+                                               requires_grad=False)
         torch.cuda.empty_cache()
-        vllm_moe.w13_weight = Parameter(w13_weight, requires_grad=False)
-        vllm_moe.w2_weight = Parameter(w2_weight, requires_grad=False)
 
     # Run forward passes for both MoE blocks
     hf_states, _ = hf_moe.forward(hf_inputs)
@@ -114,7 +116,7 @@ def test_mixtral_moe(dtype: torch.dtype):
         torch.bfloat16: 1e-2,
     }
 
-    assert torch.allclose(hf_states.flatten(0, 1),
-                          vllm_states,
-                          rtol=mixtral_moe_tol[dtype],
-                          atol=mixtral_moe_tol[dtype])
+    torch.testing.assert_close(hf_states.flatten(0, 1),
+                               vllm_states,
+                               rtol=mixtral_moe_tol[dtype],
+                               atol=mixtral_moe_tol[dtype])

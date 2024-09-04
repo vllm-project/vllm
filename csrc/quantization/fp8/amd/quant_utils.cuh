@@ -38,8 +38,7 @@ vec_conversion<uint16_t, uint8_t>(const uint8_t& a) {
 template <>
 __inline__ __device__ uint32_t
 vec_conversion<uint32_t, uint16_t>(const uint16_t& a) {
-    #if defined(__HIP__MI300__) && \
-        defined(__HIP_FP8_EXPERIMENTAL_BULK_CONVERT__)
+    #if defined(__HIP__MI300__)
   const auto& f2 = __builtin_amdgcn_cvt_pk_f32_fp8(a, 0);
   union {
     __half2_raw h2r;
@@ -142,8 +141,7 @@ __inline__ __device__ float vec_conversion<float, uint8_t>(const uint8_t& a) {
 template <>
 __inline__ __device__ float2
 vec_conversion<float2, uint16_t>(const uint16_t& a) {
-    #if defined(__HIP__MI300__) && \
-        defined(__HIP_FP8_EXPERIMENTAL_BULK_CONVERT__)
+    #if defined(__HIP__MI300__)
   float2 res;
   const auto& f2 = __builtin_amdgcn_cvt_pk_f32_fp8(a, 0);
   res.x = f2[0];
@@ -663,6 +661,7 @@ __inline__ __device__ Tout convert(const Tin& x) {
   }
   #endif
   assert(false);
+  return {};  // Squash missing return statement warning
 }
 
 template <typename Tout, typename Tin, Fp8KVCacheDataType kv_dt>
@@ -673,6 +672,7 @@ __inline__ __device__ Tout scaled_convert(const Tin& x, const float scale) {
   }
   #endif
   assert(false);
+  return {};  // Squash missing return statement warning
 }
 
   // The following macro is used to dispatch the conversion function based on

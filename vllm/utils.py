@@ -1,4 +1,6 @@
+import argparse
 import asyncio
+import contextlib
 import datetime
 import enum
 import gc
@@ -10,22 +12,111 @@ import tempfile
 import threading
 import uuid
 import warnings
-from collections import defaultdict
+from asyncio import FIRST_COMPLETED, ensure_future
 from functools import lru_cache, partial, wraps
 from platform import uname
-from typing import (Any, AsyncIterator, Awaitable, Callable, Dict, Generic,
-                    Hashable, List, Optional, OrderedDict, Tuple, TypeVar,
-                    Union)
+from typing import (Any, AsyncGenerator, Awaitable, Callable, Dict, Generic,
+                    Hashable, List, Literal, Optional, OrderedDict, Set, Tuple,
+                    Type, TypeVar, Union, overload)
+from uuid import uuid4
 
 import numpy as np
+import numpy.typing as npt
 import psutil
 import torch
+import torch.types
+import yaml
+from packaging.version import Version
+from typing_extensions import ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
 
-T = TypeVar("T")
 logger = init_logger(__name__)
+
+# Exception strings for non-implemented encoder/decoder scenarios
+
+STR_NOT_IMPL_ENC_DEC_SWA = \
+    "Sliding window attention for encoder/decoder models " + \
+                    "is not currently supported."
+
+STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE = \
+    "Prefix caching for encoder/decoder models " + \
+                    "is not currently supported."
+
+STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL = \
+    "Chunked prefill for encoder/decoder models " + \
+                    "is not currently supported."
+
+STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP = (
+    "Models with logits_soft_cap "
+    "require FlashInfer backend, which is "
+    "currently not supported for encoder/decoder "
+    "models.")
+
+STR_NOT_IMPL_ENC_DEC_LORA = ("LoRA is currently not currently "
+                             "supported with encoder/decoder "
+                             "models.")
+
+STR_NOT_IMPL_ENC_DEC_PP = ("Pipeline parallelism is not "
+                           "currently supported with "
+                           "encoder/decoder models.")
+
+STR_NOT_IMPL_ENC_DEC_MM = ("Multimodal is not currently "
+                           "supported with encoder/decoder "
+                           "models.")
+
+STR_NOT_IMPL_ENC_DEC_SPEC_DEC = ("Speculative decoding is not "
+                                 "currently supported with encoder/"
+                                 "decoder models.")
+
+STR_NOT_IMPL_ENC_DEC_CUDAGRAPH = ("CUDAGraph is not "
+                                  "currently supported with encoder/"
+                                  "decoder models.")
+
+STR_NOT_IMPL_ENC_DEC_BACKEND = ("XFormers is the only backend "
+                                "currently supported with encoder/"
+                                "decoder models.")
+
+STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER = ("Prompt adapters are not "
+                                       "currently supported with encoder/"
+                                       "decoder models.")
+
+# Efficiently import all enc/dec error strings
+# rather than having to import all of the above
+STR_NOT_IMPL_ENC_DEC_ERR_STRS = {
+    "STR_NOT_IMPL_ENC_DEC_SWA": STR_NOT_IMPL_ENC_DEC_SWA,
+    "STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE": STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE,
+    "STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL":
+    STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL,
+    "STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP": STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP,
+    "STR_NOT_IMPL_ENC_DEC_LORA": STR_NOT_IMPL_ENC_DEC_LORA,
+    "STR_NOT_IMPL_ENC_DEC_PP": STR_NOT_IMPL_ENC_DEC_PP,
+    "STR_NOT_IMPL_ENC_DEC_MM": STR_NOT_IMPL_ENC_DEC_MM,
+    "STR_NOT_IMPL_ENC_DEC_SPEC_DEC": STR_NOT_IMPL_ENC_DEC_SPEC_DEC,
+    "STR_NOT_IMPL_ENC_DEC_CUDA_GRAPH": STR_NOT_IMPL_ENC_DEC_CUDAGRAPH,
+    "STR_NOT_IMPL_ENC_DEC_BACKEND": STR_NOT_IMPL_ENC_DEC_BACKEND,
+    "STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER": STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER,
+}
+
+# Constants related to forcing the attention backend selection
+
+# String name of register which may be set in order to
+# force auto-selection of attention backend by Attention
+# wrapper
+STR_BACKEND_ENV_VAR: str = "VLLM_ATTENTION_BACKEND"
+
+# Possible string values of STR_BACKEND_ENV_VAR
+# register, corresponding to possible backends
+STR_FLASHINFER_ATTN_VAL: str = "FLASHINFER"
+STR_TORCH_SDPA_ATTN_VAL: str = "TORCH_SDPA"
+STR_ROCM_FLASH_ATTN_VAL: str = "ROCM_FLASH"
+STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
+STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
+STR_INVALID_VAL: str = "INVALID"
+
+GiB_bytes = 1 << 30
+"""The number of bytes in one gibibyte (GiB)."""
 
 STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.half,
@@ -35,6 +126,27 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8_e4m3": torch.uint8,
     "fp8_e5m2": torch.uint8,
 }
+
+TORCH_DTYPE_TO_NUMPY_DTYPE = {
+    torch.float16: np.float16,
+    torch.float32: np.float32,
+    torch.float64: np.float64,
+    torch.uint8: np.uint8,
+    torch.int32: np.int32,
+    torch.int64: np.int64,
+}
+
+P = ParamSpec('P')
+K = TypeVar("K")
+T = TypeVar("T")
+U = TypeVar("U")
+
+
+class _Sentinel:
+    ...
+
+
+ALL_PINNED_SENTINEL = _Sentinel()
 
 
 class Device(enum.Enum):
@@ -60,6 +172,7 @@ class LRUCache(Generic[T]):
 
     def __init__(self, capacity: int):
         self.cache: OrderedDict[Hashable, T] = OrderedDict()
+        self.pinned_items: Set[Hashable] = set()
         self.capacity = capacity
 
     def __contains__(self, key: Hashable) -> bool:
@@ -68,8 +181,10 @@ class LRUCache(Generic[T]):
     def __len__(self) -> int:
         return len(self.cache)
 
-    def __getitem__(self, key: Hashable) -> Optional[T]:
-        return self.get(key)
+    def __getitem__(self, key: Hashable) -> T:
+        value = self.cache[key]  # Raise KeyError if not exists
+        self.cache.move_to_end(key)
+        return value
 
     def __setitem__(self, key: Hashable, value: T) -> None:
         self.put(key, value)
@@ -83,8 +198,9 @@ class LRUCache(Generic[T]):
     def get(self,
             key: Hashable,
             default_value: Optional[T] = None) -> Optional[T]:
+        value: Optional[T]
         if key in self.cache:
-            value: Optional[T] = self.cache[key]
+            value = self.cache[key]
             self.cache.move_to_end(key)
         else:
             value = default_value
@@ -95,14 +211,36 @@ class LRUCache(Generic[T]):
         self.cache.move_to_end(key)
         self._remove_old_if_needed()
 
+    def pin(self, key: Hashable) -> None:
+        """
+        Pins a key in the cache preventing it from being
+        evicted in the LRU order.
+        """
+        if key not in self.cache:
+            raise ValueError(f"Cannot pin key: {key} not in cache.")
+        self.pinned_items.add(key)
+
+    def _unpin(self, key: Hashable) -> None:
+        self.pinned_items.remove(key)
+
     def _on_remove(self, key: Hashable, value: Optional[T]):
         pass
 
-    def remove_oldest(self):
+    def remove_oldest(self, remove_pinned=False):
         if not self.cache:
             return
-        key, value = self.cache.popitem(last=False)
-        self._on_remove(key, value)
+
+        if not remove_pinned:
+            # pop the oldest item in the cache that is not pinned
+            lru_key = next(
+                (key for key in self.cache if key not in self.pinned_items),
+                ALL_PINNED_SENTINEL)
+            if lru_key is ALL_PINNED_SENTINEL:
+                raise RuntimeError("All items are pinned, "
+                                   "cannot remove oldest from the cache.")
+        else:
+            lru_key = next(iter(self.cache))
+        self.pop(lru_key)
 
     def _remove_old_if_needed(self) -> None:
         while len(self.cache) > self.capacity:
@@ -113,14 +251,55 @@ class LRUCache(Generic[T]):
             default_value: Optional[T] = None) -> Optional[T]:
         run_on_remove = key in self.cache
         value: Optional[T] = self.cache.pop(key, default_value)
+        # remove from pinned items
+        if key in self.pinned_items:
+            self._unpin(key)
         if run_on_remove:
             self._on_remove(key, value)
         return value
 
     def clear(self):
         while len(self.cache) > 0:
-            self.remove_oldest()
+            self.remove_oldest(remove_pinned=True)
         self.cache.clear()
+
+
+class PyObjectCache:
+    """Used to cache python objects to avoid object allocations 
+    across scheduler iterations.
+    """
+
+    def __init__(self, obj_builder):
+        self._obj_builder = obj_builder
+        self._index = 0
+
+        self._obj_cache = []
+        for _ in range(128):
+            self._obj_cache.append(self._obj_builder())
+
+    def _grow_cache(self):
+        # Double the size of the cache
+        num_objs = len(self._obj_cache)
+        for _ in range(num_objs):
+            self._obj_cache.append(self._obj_builder())
+
+    def get_object(self):
+        """Returns a pre-allocated cached object. If there is not enough 
+        objects, then the cache size will double.
+        """
+        if self._index >= len(self._obj_cache):
+            self._grow_cache()
+            assert self._index < len(self._obj_cache)
+
+        obj = self._obj_cache[self._index]
+        self._index += 1
+
+        return obj
+
+    def reset(self):
+        """Makes all cached-objects available for the next scheduler iteration.
+        """
+        self._index = 0
 
 
 def is_hip() -> bool:
@@ -137,6 +316,15 @@ def is_cpu() -> bool:
 
 
 @lru_cache(maxsize=None)
+def is_openvino() -> bool:
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        return "openvino" in version("vllm")
+    except PackageNotFoundError:
+        return False
+
+
+@lru_cache(maxsize=None)
 def is_neuron() -> bool:
     try:
         import transformers_neuronx
@@ -146,14 +334,34 @@ def is_neuron() -> bool:
 
 
 @lru_cache(maxsize=None)
+def is_xpu() -> bool:
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        is_xpu_flag = "xpu" in version("vllm")
+    except PackageNotFoundError:
+        return False
+    # vllm is not build with xpu
+    if not is_xpu_flag:
+        return False
+    try:
+        import intel_extension_for_pytorch as ipex  # noqa: F401
+        _import_ipex = True
+    except ImportError as e:
+        logger.warning("Import Error for IPEX: %s", e.msg)
+        _import_ipex = False
+    # ipex dependency is not ready
+    if not _import_ipex:
+        logger.warning("not found ipex lib")
+        return False
+    return hasattr(torch, "xpu") and torch.xpu.is_available()
+
+
+@lru_cache(maxsize=None)
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
-    # NOTE: This import statement should be executed lazily since
-    # the Neuron-X backend does not have the `cuda_utils` module.
-    from vllm._C import cuda_utils
-
+    from vllm import _custom_ops as ops
     max_shared_mem = (
-        cuda_utils.get_max_shared_memory_per_block_device_attribute(gpu))
+        ops.get_max_shared_memory_per_block_device_attribute(gpu))
     # value 0 will cause MAX_SEQ_LEN become negative and test_attention.py
     # will fail
     assert max_shared_mem > 0, "max_shared_mem can not be zero"
@@ -170,7 +378,7 @@ def random_uuid() -> str:
 
 
 @lru_cache(maxsize=None)
-def get_vllm_instance_id():
+def get_vllm_instance_id() -> str:
     """
     If the environment variable VLLM_INSTANCE_ID is set, return it.
     Otherwise, return a random UUID.
@@ -186,7 +394,7 @@ def in_wsl() -> bool:
     return "microsoft" in " ".join(uname()).lower()
 
 
-def make_async(func: Callable[..., T]) -> Callable[..., Awaitable[T]]:
+def make_async(func: Callable[P, T]) -> Callable[P, Awaitable[T]]:
     """Take a blocking function, and run it on in an executor thread.
 
     This function prevents the blocking function from blocking the
@@ -194,7 +402,7 @@ def make_async(func: Callable[..., T]) -> Callable[..., Awaitable[T]]:
     The code in this function needs to be thread safe.
     """
 
-    def _async_wrapper(*args, **kwargs) -> asyncio.Future:
+    def _async_wrapper(*args: P.args, **kwargs: P.kwargs) -> asyncio.Future:
         loop = asyncio.get_event_loop()
         p_func = partial(func, *args, **kwargs)
         return loop.run_in_executor(executor=None, func=p_func)
@@ -202,49 +410,75 @@ def make_async(func: Callable[..., T]) -> Callable[..., Awaitable[T]]:
     return _async_wrapper
 
 
-def merge_async_iterators(
-        *iterators: AsyncIterator[T]) -> AsyncIterator[Tuple[int, T]]:
+async def iterate_with_cancellation(
+    iterator: AsyncGenerator[T, None],
+    is_cancelled: Callable[[], Awaitable[bool]],
+) -> AsyncGenerator[T, None]:
+    """Convert async iterator into one that polls the provided function
+    at least once per second to check for client cancellation.
+    """
+
+    # Can use anext() in python >= 3.10
+    awaits = [ensure_future(iterator.__anext__())]
+    while True:
+        done, pending = await asyncio.wait(awaits, timeout=1)
+        if await is_cancelled():
+            with contextlib.suppress(BaseException):
+                awaits[0].cancel()
+                await iterator.aclose()
+            raise asyncio.CancelledError("client cancelled")
+        if done:
+            try:
+                item = await awaits[0]
+                awaits[0] = ensure_future(iterator.__anext__())
+                yield item
+            except StopAsyncIteration:
+                # we are done
+                return
+
+
+async def merge_async_iterators(
+    *iterators: AsyncGenerator[T, None],
+    is_cancelled: Optional[Callable[[], Awaitable[bool]]] = None,
+) -> AsyncGenerator[Tuple[int, T], None]:
     """Merge multiple asynchronous iterators into a single iterator.
 
     This method handle the case where some iterators finish before others.
     When it yields, it yields a tuple (i, item) where i is the index of the
     iterator that yields the item.
+
+    It also optionally polls a provided function at least once per second
+    to check for client cancellation.
     """
-    queue: asyncio.Queue[Union[Tuple[int, T], Exception]] = asyncio.Queue()
 
-    finished = [False] * len(iterators)
-
-    async def producer(i: int, iterator: AsyncIterator[T]):
-        try:
-            async for item in iterator:
-                await queue.put((i, item))
-        except Exception as e:
-            await queue.put(e)
-        finished[i] = True
-
-    _tasks = [
-        asyncio.create_task(producer(i, iterator))
-        for i, iterator in enumerate(iterators)
-    ]
-
-    async def consumer():
-        try:
-            while not all(finished) or not queue.empty():
-                item = await queue.get()
-                if isinstance(item, Exception):
-                    raise item
-                yield item
-        except (Exception, asyncio.CancelledError) as e:
-            for task in _tasks:
-                if sys.version_info >= (3, 9):
-                    # msg parameter only supported in Python 3.9+
-                    task.cancel(e)
-                else:
-                    task.cancel()
-            raise e
-        await asyncio.gather(*_tasks)
-
-    return consumer()
+    # Can use anext() in python >= 3.10
+    awaits = {
+        ensure_future(pair[1].__anext__()): pair
+        for pair in enumerate(iterators)
+    }
+    timeout = None if is_cancelled is None else 1
+    try:
+        while awaits:
+            done, pending = await asyncio.wait(awaits.keys(),
+                                               return_when=FIRST_COMPLETED,
+                                               timeout=timeout)
+            if is_cancelled is not None and await is_cancelled():
+                raise asyncio.CancelledError("client cancelled")
+            for d in done:
+                pair = awaits.pop(d)
+                try:
+                    item = await d
+                    i, it = pair
+                    awaits[ensure_future(it.__anext__())] = pair
+                    yield i, item
+                except StopAsyncIteration:
+                    pass
+    finally:
+        # Cancel any remaining iterators
+        for f, (_, it) in awaits.items():
+            with contextlib.suppress(BaseException):
+                f.cancel()
+                await it.aclose()
 
 
 def get_ip() -> str:
@@ -286,10 +520,23 @@ def get_distributed_init_method(ip: str, port: int) -> str:
     return f"tcp://[{ip}]:{port}" if ":" in ip else f"tcp://{ip}:{port}"
 
 
+def get_open_zmq_ipc_path() -> str:
+    base_rpc_path = envs.VLLM_RPC_BASE_PATH
+    return f"ipc://{base_rpc_path}/{uuid4()}"
+
+
 def get_open_port() -> int:
     port = envs.VLLM_PORT
     if port is not None:
-        return port
+        while True:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.bind(("", port))
+                    return port
+            except OSError:
+                port += 1  # Increment port number if already in use
+                logger.info("Port %d is already in use, trying port %d",
+                            port - 1, port)
     # try ipv4
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -302,6 +549,16 @@ def get_open_port() -> int:
             return s.getsockname()[1]
 
 
+def find_process_using_port(port: int) -> Optional[psutil.Process]:
+    for conn in psutil.net_connections():
+        if conn.laddr.port == port:
+            try:
+                return psutil.Process(conn.pid)
+            except psutil.NoSuchProcess:
+                return None
+    return None
+
+
 def update_environment_variables(envs: Dict[str, str]):
     for k, v in envs.items():
         if k in os.environ and os.environ[k] != v:
@@ -311,9 +568,10 @@ def update_environment_variables(envs: Dict[str, str]):
         os.environ[k] = v
 
 
-def chunk_list(lst, chunk_size):
+def chunk_list(lst: List[T], chunk_size: int):
     """Yield successive chunk_size chunks from lst."""
-    return [lst[i:i + chunk_size] for i in range(0, len(lst), chunk_size)]
+    for i in range(0, len(lst), chunk_size):
+        yield lst[i:i + chunk_size]
 
 
 def cdiv(a: int, b: int) -> int:
@@ -322,7 +580,7 @@ def cdiv(a: int, b: int) -> int:
 
 
 def _generate_random_fp8(
-    tensor: torch.tensor,
+    tensor: torch.Tensor,
     low: float,
     high: float,
 ) -> None:
@@ -376,7 +634,6 @@ def create_kv_caches_with_random_flash(
     seed: int = 0,
     device: Optional[str] = "cuda",
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
-    assert cache_dtype != "fp8"
     torch.random.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
@@ -384,12 +641,21 @@ def create_kv_caches_with_random_flash(
     torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
     key_value_cache_shape = (num_blocks, 2, block_size, num_heads, head_size)
     scale = head_size**-0.5
-    key_caches, value_caches = [], []
+
+    key_caches: List[torch.Tensor] = []
+    value_caches: List[torch.Tensor] = []
+
     for _ in range(num_layers):
         key_value_cache = torch.empty(size=key_value_cache_shape,
                                       dtype=torch_dtype,
                                       device=device)
-        key_value_cache.uniform_(-scale, scale)
+        if cache_dtype in ["auto", "half", "bfloat16", "float"]:
+            key_value_cache.uniform_(-scale, scale)
+        elif cache_dtype == 'fp8':
+            _generate_random_fp8(key_value_cache, -scale, scale)
+        else:
+            raise ValueError(
+                f"Does not support key cache of type {cache_dtype}")
         key_caches.append(key_value_cache[:, 0])
         value_caches.append(key_value_cache[:, 1])
     return key_caches, value_caches
@@ -406,6 +672,12 @@ def create_kv_caches_with_random(
     seed: int = 0,
     device: Optional[str] = "cuda",
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+
+    if cache_dtype == "fp8" and head_size % 16:
+        raise ValueError(
+            f"Does not support key cache of type fp8 with head_size {head_size}"
+        )
+
     torch.random.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
@@ -415,7 +687,7 @@ def create_kv_caches_with_random(
     scale = head_size**-0.5
     x = 16 // torch.tensor([], dtype=torch_dtype).element_size()
     key_cache_shape = (num_blocks, num_heads, head_size // x, block_size, x)
-    key_caches = []
+    key_caches: List[torch.Tensor] = []
     for _ in range(num_layers):
         key_cache = torch.empty(size=key_cache_shape,
                                 dtype=torch_dtype,
@@ -430,7 +702,7 @@ def create_kv_caches_with_random(
         key_caches.append(key_cache)
 
     value_cache_shape = (num_blocks, num_heads, head_size, block_size)
-    value_caches = []
+    value_caches: List[torch.Tensor] = []
     for _ in range(num_layers):
         value_cache = torch.empty(size=value_cache_shape,
                                   dtype=torch_dtype,
@@ -460,23 +732,30 @@ def is_pin_memory_available() -> bool:
         print_warning_once("Using 'pin_memory=False' as WSL is detected. "
                            "This may slow down the performance.")
         return False
+    elif is_xpu():
+        print_warning_once("Pin memory is not supported on XPU.")
+        return False
     elif is_neuron():
         print_warning_once("Pin memory is not supported on Neuron.")
         return False
-    elif is_cpu():
+    elif is_cpu() or is_openvino():
         return False
     return True
 
 
 class CudaMemoryProfiler:
 
-    def __init__(self, device=None):
+    def __init__(self, device: Optional[torch.types.Device] = None):
         self.device = device
 
     def current_memory_usage(self) -> float:
         # Return the memory usage in bytes.
-        torch.cuda.reset_peak_memory_stats(self.device)
-        mem = torch.cuda.max_memory_allocated(self.device)
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats(self.device)
+            mem = torch.cuda.max_memory_allocated(self.device)
+        elif is_xpu():
+            torch.xpu.reset_peak_memory_stats(self.device)  # type: ignore
+            mem = torch.xpu.max_memory_allocated(self.device)  # type: ignore
         return mem
 
     def __enter__(self):
@@ -492,33 +771,54 @@ class CudaMemoryProfiler:
         gc.collect()
 
 
-def str_to_int_tuple(s: str) -> Tuple[int, ...]:
-    """Convert a string to a tuple of integers."""
-    try:
-        return tuple(map(int, s.split(",")))
-    except ValueError as e:
-        raise ValueError(
-            "String must be a series of integers separated by commas "
-            f"(e.g., 1, 2, 3). Given input: {s}") from e
-
-
-def make_tensor_with_pad(
-    x: List[List[int]],
-    max_len: int,
-    pad: int,
-    dtype: torch.dtype,
-    device: Optional[Union[str, torch.device]],
-) -> torch.Tensor:
-    """Make a padded tensor of a 2D inputs.
+def make_ndarray_with_pad(
+    x: List[List[T]],
+    pad: T,
+    dtype: npt.DTypeLike,
+    *,
+    max_len: Optional[int] = None,
+) -> npt.NDArray:
+    """
+    Make a padded array from 2D inputs.
 
     The padding is applied to the end of each inner list until it reaches
     `max_len`.
     """
-    padded_x = np.zeros([len(x), max_len], dtype=np.int32) + pad
+    if max_len is None:
+        # Unlike for most functions, map is faster than a genexpr over `len`
+        max_len = max(map(len, x), default=0)
+
+    padded_x = np.full((len(x), max_len), pad, dtype=dtype)
     for ind, blocktb in enumerate(x):
         assert len(blocktb) <= max_len
         padded_x[ind, :len(blocktb)] = blocktb
-    return torch.tensor(padded_x, dtype=dtype, device=device)
+
+    return padded_x
+
+
+def make_tensor_with_pad(
+    x: List[List[T]],
+    pad: T,
+    dtype: torch.dtype,
+    *,
+    max_len: Optional[int] = None,
+    device: Optional[Union[str, torch.device]] = None,
+    pin_memory: bool = False,
+) -> torch.Tensor:
+    """
+    Make a padded tensor from 2D inputs.
+
+    The padding is applied to the end of each inner list until it reaches
+    `max_len`.
+    """
+    np_dtype = TORCH_DTYPE_TO_NUMPY_DTYPE[dtype]
+    padded_x = make_ndarray_with_pad(x, pad, np_dtype, max_len=max_len)
+
+    tensor = torch.from_numpy(padded_x).to(device)
+    if pin_memory:
+        tensor = tensor.pin_memory()
+
+    return tensor
 
 
 def async_tensor_h2d(
@@ -541,24 +841,83 @@ def maybe_expand_dim(tensor: torch.Tensor,
     return tensor
 
 
-def merge_dicts(dict1: Dict[Any, List[Any]],
-                dict2: Dict[Any, List[Any]]) -> Dict[Any, List[Any]]:
-    """Merge 2 dicts that have key -> List of items.
-
-    When a key conflicts, the values in dict1 is prioritized.
-    """
-    merged_dict = defaultdict(list)
-
-    for key, value in dict1.items():
-        merged_dict[key].extend(value)
-
-    for key, value in dict2.items():
-        merged_dict[key].extend(value)
-
-    return dict(merged_dict)
+def get_dtype_size(dtype: torch.dtype) -> int:
+    """Get the size of the data type in bytes."""
+    return torch.tensor([], dtype=dtype).element_size()
 
 
-def init_cached_hf_modules():
+# `collections` helpers
+def is_list_of(
+    value: object,
+    typ: Type[T],
+    *,
+    check: Literal["first", "all"] = "first",
+) -> TypeIs[List[T]]:
+    if not isinstance(value, list):
+        return False
+
+    if check == "first":
+        return len(value) == 0 or isinstance(value[0], typ)
+    elif check == "all":
+        return all(isinstance(v, typ) for v in value)
+
+    assert_never(check)
+
+
+JSONTree = Union[Dict[str, "JSONTree[T]"], List["JSONTree[T]"],
+                 Tuple["JSONTree[T]", ...], T]
+"""A nested JSON structure where the leaves need not be JSON-serializable."""
+
+
+@overload
+def json_map_leaves(
+    func: Callable[[T], U],
+    value: Dict[str, JSONTree[T]],
+) -> Dict[str, JSONTree[U]]:
+    ...
+
+
+@overload
+def json_map_leaves(
+    func: Callable[[T], U],
+    value: List[JSONTree[T]],
+) -> List[JSONTree[U]]:
+    ...
+
+
+@overload
+def json_map_leaves(
+    func: Callable[[T], U],
+    value: Tuple[JSONTree[T], ...],
+) -> Tuple[JSONTree[U], ...]:
+    ...
+
+
+@overload
+def json_map_leaves(
+    func: Callable[[T], U],
+    value: JSONTree[T],
+) -> JSONTree[U]:
+    ...
+
+
+def json_map_leaves(func: Callable[[T], U], value: JSONTree[T]) -> JSONTree[U]:
+    if isinstance(value, dict):
+        return {k: json_map_leaves(func, v) for k, v in value.items()}
+    elif isinstance(value, list):
+        return [json_map_leaves(func, v) for v in value]
+    elif isinstance(value, tuple):
+        return tuple(json_map_leaves(func, v) for v in value)
+    else:
+        return func(value)
+
+
+def flatten_2d_lists(lists: List[List[T]]) -> List[T]:
+    """Flatten a list of lists to a single list."""
+    return [item for sublist in lists for item in sublist]
+
+
+def init_cached_hf_modules() -> None:
     """
     Lazy initialization of the Hugging Face modules.
     """
@@ -594,7 +953,7 @@ def find_library(lib_name: str) -> str:
     return locs[0]
 
 
-def find_nccl_library():
+def find_nccl_library() -> str:
     """
     We either use the library file specified by the `VLLM_NCCL_SO_PATH`
     environment variable, or we find the library file brought by PyTorch.
@@ -635,6 +994,7 @@ def enable_trace_function_call_for_thread() -> None:
         enable_trace_function_call(log_path)
 
 
+# `functools` helpers
 def identity(value: T) -> T:
     return value
 
@@ -674,3 +1034,193 @@ def deprecate_kwargs(
         return inner  # type: ignore
 
     return wrapper
+
+
+@lru_cache(maxsize=8)
+def _cuda_device_count_stateless(
+        cuda_visible_devices: Optional[str] = None) -> int:
+    # Note: cuda_visible_devices is not used, but we keep it as an argument for
+    # LRU Cache purposes.
+
+    # Code below is based on
+    # https://github.com/pytorch/pytorch/blob/
+    # c1cd946818442aca8c7f812b16d187ce1586c3bc/
+    # torch/cuda/__init__.py#L831C1-L831C17
+    import torch.cuda
+    import torch.version
+
+    if not torch.cuda._is_compiled():
+        return 0
+    if is_hip():
+        # ROCm uses amdsmi instead of nvml for stateless device count
+        # This requires a sufficiently modern version of Torch 2.4.0
+        raw_count = torch.cuda._device_count_amdsmi() if (hasattr(
+            torch.cuda, "_device_count_amdsmi")) else -1
+    else:
+        raw_count = torch.cuda._device_count_nvml()
+    r = torch._C._cuda_getDeviceCount() if raw_count < 0 else raw_count
+    return r
+
+
+def cuda_device_count_stateless() -> int:
+    """Get number of CUDA devices, caching based on the value of
+    CUDA_VISIBLE_DEVICES at the time of call.
+    
+    This should be used instead of torch.cuda.device_count()
+    unless CUDA_VISIBLE_DEVICES has already been set to the desired
+    value."""
+
+    # This can be removed and simply replaced with torch.cuda.get_device_count
+    # after https://github.com/pytorch/pytorch/pull/122815 is released.
+    return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
+
+
+#From: https://stackoverflow.com/a/4104188/2749989
+def run_once(f: Callable[P, None]) -> Callable[P, None]:
+
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
+        if not wrapper.has_run:  # type: ignore[attr-defined]
+            wrapper.has_run = True  # type: ignore[attr-defined]
+            return f(*args, **kwargs)
+
+    wrapper.has_run = False  # type: ignore[attr-defined]
+    return wrapper
+
+
+class FlexibleArgumentParser(argparse.ArgumentParser):
+    """ArgumentParser that allows both underscore and dash in names."""
+
+    def parse_args(self, args=None, namespace=None):
+        if args is None:
+            args = sys.argv[1:]
+
+        if '--config' in args:
+            args = FlexibleArgumentParser._pull_args_from_config(args)
+
+        # Convert underscores to dashes and vice versa in argument names
+        processed_args = []
+        for arg in args:
+            if arg.startswith('--'):
+                if '=' in arg:
+                    key, value = arg.split('=', 1)
+                    key = '--' + key[len('--'):].replace('_', '-')
+                    processed_args.append(f'{key}={value}')
+                else:
+                    processed_args.append('--' +
+                                          arg[len('--'):].replace('_', '-'))
+            else:
+                processed_args.append(arg)
+
+        return super().parse_args(processed_args, namespace)
+
+    @staticmethod
+    def _pull_args_from_config(args: List[str]) -> List[str]:
+        """Method to pull arguments specified in the config file
+        into the command-line args variable.
+        
+        The arguments in config file will be inserted between 
+        the argument list.
+        
+        example:
+        ```yaml
+            port: 12323
+            tensor-parallel-size: 4
+        ```
+        ```python
+        $: vllm {serve,chat,complete} "facebook/opt-12B" \
+            --config config.yaml -tp 2
+        $: args = [
+            "serve,chat,complete",
+            "facebook/opt-12B", 
+            '--config', 'config.yaml', 
+            '-tp', '2'
+        ]
+        $: args = [
+            "serve,chat,complete",
+            "facebook/opt-12B", 
+            '--port', '12323', 
+            '--tensor-parallel-size', '4', 
+            '-tp', '2'
+            ]
+        ```
+
+        Please note how the config args are inserted after the sub command.
+        this way the order of priorities is maintained when these are args 
+        parsed by super().
+        """
+        assert args.count(
+            '--config') <= 1, "More than one config file specified!"
+
+        index = args.index('--config')
+        if index == len(args) - 1:
+            raise ValueError("No config file specified! \
+                             Please check your command-line arguments.")
+
+        file_path = args[index + 1]
+
+        config_args = FlexibleArgumentParser._load_config_file(file_path)
+
+        # 0th index is for {serve,chat,complete}
+        # followed by config args
+        # followed by rest of cli args.
+        # maintaining this order will enforce the precedence
+        # of cli > config > defaults
+        args = [args[0]] + config_args + args[1:index] + args[index + 2:]
+
+        return args
+
+    @staticmethod
+    def _load_config_file(file_path: str) -> List[str]:
+        """Loads a yaml file and returns the key value pairs as a 
+        flattened list with argparse like pattern
+        ```yaml
+            port: 12323
+            tensor-parallel-size: 4
+        ```
+        returns:
+            processed_args: list[str] = [
+                '--port': '12323',
+                '--tensor-parallel-size': '4'
+            ]
+        
+        """
+
+        extension: str = file_path.split('.')[-1]
+        if extension not in ('yaml', 'yml'):
+            raise ValueError(
+                "Config file must be of a yaml/yml type.\
+                              %s supplied", extension)
+
+        # only expecting a flat dictionary of atomic types
+        processed_args: List[str] = []
+
+        config: Dict[str, Union[int, str]] = {}
+        try:
+            with open(file_path, 'r') as config_file:
+                config = yaml.safe_load(config_file)
+        except Exception as ex:
+            logger.error(
+                "Unable to read the config file at %s. \
+                Make sure path is correct", file_path)
+            raise ex
+
+        for key, value in config.items():
+            processed_args.append('--' + key)
+            processed_args.append(str(value))
+
+        return processed_args
+
+
+async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
+                              **kwargs):
+    """Utility function to run async task in a lock"""
+    async with lock:
+        return await task(*args, **kwargs)
+
+
+# Using dynamo with vLLM doesn't really work well with PyTorch versions < 2.4.0.
+# In particular, the FakeScalarType is not supported for earlier versions of
+# PyTorch which breaks dynamo for any ops registered using ScalarType.
+def supports_dynamo() -> bool:
+    base_torch_version = Version(Version(torch.__version__).base_version)
+    return base_torch_version >= Version("2.4.0")

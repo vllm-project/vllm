@@ -31,19 +31,21 @@ vLLM is fast with:
 * Efficient management of attention key and value memory with **PagedAttention**
 * Continuous batching of incoming requests
 * Fast model execution with CUDA/HIP graph
-* Quantization: `GPTQ <https://arxiv.org/abs/2210.17323>`_, `AWQ <https://arxiv.org/abs/2306.00978>`_, `SqueezeLLM <https://arxiv.org/abs/2306.07629>`_, FP8 KV Cache
-* Optimized CUDA kernels
+* Quantization: `GPTQ <https://arxiv.org/abs/2210.17323>`_, `AWQ <https://arxiv.org/abs/2306.00978>`_, INT4, INT8, and FP8
+* Optimized CUDA kernels, including integration with FlashAttention and FlashInfer.
+* Speculative decoding
+* Chunked prefill
 
 vLLM is flexible and easy to use with:
 
 * Seamless integration with popular HuggingFace models
 * High-throughput serving with various decoding algorithms, including *parallel sampling*, *beam search*, and more
-* Tensor parallelism support for distributed inference
+* Tensor parallelism and pipeline parallelism support for distributed inference
 * Streaming outputs
 * OpenAI-compatible API server
-* Support NVIDIA GPUs and AMD GPUs
-* (Experimental) Prefix caching support
-* (Experimental) Multi-lora support
+* Support NVIDIA GPUs, AMD CPUs and GPUs, Intel CPUs and GPUs, PowerPC CPUs, TPU, and AWS Neuron.
+* Prefix caching support
+* Multi-lora support
 
 For more information, check out the following:
 
@@ -51,7 +53,6 @@ For more information, check out the following:
 * `vLLM paper <https://arxiv.org/abs/2309.06180>`_ (SOSP 2023)
 * `How continuous batching enables 23x throughput in LLM inference while reducing p50 latency <https://www.anyscale.com/blog/continuous-batching-llm-inference>`_ by Cade Daniel et al.
 * :ref:`vLLM Meetups <meetups>`.
-
 
 
 Documentation
@@ -63,9 +64,13 @@ Documentation
 
    getting_started/installation
    getting_started/amd-installation
-   getting_started/neuron-installation
+   getting_started/openvino-installation
    getting_started/cpu-installation
+   getting_started/neuron-installation
+   getting_started/tpu-installation
+   getting_started/xpu-installation
    getting_started/quickstart
+   getting_started/debugging
    getting_started/examples/examples_index
 
 .. toctree::
@@ -79,6 +84,8 @@ Documentation
    serving/env_vars
    serving/usage_stats
    serving/integrations
+   serving/tensorizer
+   serving/faq
 
 .. toctree::
    :maxdepth: 1
@@ -86,30 +93,53 @@ Documentation
 
    models/supported_models
    models/adding_model
+   models/enabling_multimodal_inputs
    models/engine_args
    models/lora
+   models/vlm
+   models/spec_decode
    models/performance
 
 .. toctree::
    :maxdepth: 1
    :caption: Quantization
 
+   quantization/supported_hardware
    quantization/auto_awq
+   quantization/bnb
+   quantization/int8
+   quantization/fp8
    quantization/fp8_e5m2_kvcache
    quantization/fp8_e4m3_kvcache
 
 .. toctree::
+   :maxdepth: 1
+   :caption: Automatic Prefix Caching
+
+   automatic_prefix_caching/apc
+   automatic_prefix_caching/details
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Performance benchmarks
+
+   performance_benchmark/benchmarks
+
+.. toctree::
    :maxdepth: 2
    :caption: Developer Documentation
-   
+
    dev/sampling_params
    dev/offline_inference/offline_index
    dev/engine/engine_index
    dev/kernel/paged_attention
+   dev/input_processing/model_inputs_index
+   dev/multimodal/multimodal_index
    dev/dockerfile/dockerfile
+   dev/profiling/profiling_index
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
    :caption: Community
 
    community/meetups

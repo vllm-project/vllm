@@ -2,13 +2,15 @@ import torch
 import triton
 import triton.language as tl
 
+AWQ_TRITON_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
+
 
 @triton.jit
 def awq_dequantize_kernel(
         qweight_ptr,  # quantized matrix
         scales_ptr,  # scales, per group
         zeros_ptr,  # zeros, per group
-        group_size,  # currently is always 128 when model quantized
+        group_size,  # Should always be one of the supported group sizes
         result_ptr,  # Output matrix
         num_cols,  # input num cols in qweight
         num_rows,  # input num rows in qweight
@@ -96,7 +98,7 @@ def awq_dequantize_kernel(
 
 @triton.jit
 def awq_gemm_kernel(a_ptr, b_ptr, c_ptr, zeros_ptr, scales_ptr, M, N, K,
-                    awq_group_size, BLOCK_SIZE_M: tl.constexpr,
+                    group_size, BLOCK_SIZE_M: tl.constexpr,
                     BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
                     SPLIT_K: tl.constexpr):
     pid = tl.program_id(axis=0)
@@ -165,17 +167,17 @@ def awq_gemm_kernel(a_ptr, b_ptr, c_ptr, zeros_ptr, scales_ptr, M, N, K,
         b = tl.load(b_ptrs, mask=masks_b)
 
         # Dequantize b.
-        offsets_szk = ((BLOCK_SIZE_K * SPLIT_K * k + pid_z * BLOCK_SIZE_K) //
-                       awq_group_size +
-                       tl.arange(0, BLOCK_SIZE_K) // awq_group_size)
+        offsets_szk = (
+            (BLOCK_SIZE_K * SPLIT_K * k + pid_z * BLOCK_SIZE_K) // group_size +
+            tl.arange(0, BLOCK_SIZE_K) // group_size)
         offsets_z = (N // 8) * offsets_szk[:, None] + offsets_zn[None, :]
-        masks_zk = offsets_szk < K // awq_group_size
+        masks_zk = offsets_szk < K // group_size
         masks_z = masks_zk[:, None] & masks_zn[None, :]
         zeros_ptrs = zeros_ptr + offsets_z
         zeros = tl.load(zeros_ptrs, mask=masks_z)
 
         offsets_s = N * offsets_szk[:, None] + offsets_sn[None, :]
-        masks_sk = offsets_szk < K // awq_group_size
+        masks_sk = offsets_szk < K // group_size
         masks_s = masks_sk[:, None] & masks_sn[None, :]
         scales_ptrs = scales_ptr + offsets_s
         scales = tl.load(scales_ptrs, mask=masks_s)
@@ -203,33 +205,23 @@ def awq_gemm_kernel(a_ptr, b_ptr, c_ptr, zeros_ptr, scales_ptr, M, N, K,
         tl.atomic_add(c_ptrs, c, mask=c_mask)
 
 
-# Example input:
-#   qweight.size=torch.Size([3584, 576]),
-#   qweight.dtype = torch.int32,
-#   scales.size=torch.Size([28, 4608]),
-#   scales.dtype=torch.float16,
-#   zeros.size=torch.Size([28, 576]),
-#   zeros.dtype=torch.int32
-#   split_k_iters=0
-#   thx=0
-#   thy=0
-
-
 # qweights - [K     , M // 8], int32
 # scales   - [K // G, M     ], float16
 # zeros    - [K // G, M // 8], int32
-def awq_dequantize_triton(
-    qweight: torch.Tensor,
-    scales: torch.Tensor,
-    zeros: torch.Tensor,
-) -> torch.Tensor:
+def awq_dequantize_triton(qweight: torch.Tensor,
+                          scales: torch.Tensor,
+                          zeros: torch.Tensor,
+                          block_size_x: int = 32,
+                          block_size_y: int = 32) -> torch.Tensor:
     K = qweight.shape[0]
     M = scales.shape[1]
-    awq_group_size = 128
+    group_size = qweight.shape[0] // scales.shape[0]
 
     assert K > 0 and M > 0
-    assert scales.shape[0] == K // awq_group_size and scales.shape[1] == M
-    assert zeros.shape[0] == K // awq_group_size and zeros.shape[1] == M // 8
+    assert scales.shape[0] == K // group_size and scales.shape[1] == M
+    assert zeros.shape[0] == K // group_size and zeros.shape[1] == M // 8
+    assert group_size <= K
+    assert group_size in AWQ_TRITON_SUPPORTED_GROUP_SIZES or group_size == K
 
     # Result tensor:
     # number of rows = same as input tensor
@@ -239,12 +231,9 @@ def awq_dequantize_triton(
                          device=qweight.device,
                          dtype=scales.dtype)
 
-    block_size_x = 32
-    block_size_y = 32
-
     Y = qweight.shape[0]  # num rows
     X = qweight.shape[1]  # num cols
-    group_size = 128
+
     grid = lambda META: (
         triton.cdiv(X, META['BLOCK_SIZE_X']),
         triton.cdiv(Y, META['BLOCK_SIZE_Y']),
@@ -267,28 +256,32 @@ def awq_dequantize_triton(
 # qzeros  - [K // G, N // 8]
 # scales  - [K // G, N]
 # split_k_iters - parallelism along K-dimension, int, power of 2.
-def awq_gemm_triton(input: torch.Tensor, qweight: torch.Tensor,
-                    scales: torch.Tensor, qzeros: torch.Tensor,
-                    split_k_iters: int) -> torch.Tensor:
+def awq_gemm_triton(input: torch.Tensor,
+                    qweight: torch.Tensor,
+                    scales: torch.Tensor,
+                    qzeros: torch.Tensor,
+                    split_k_iters: int,
+                    block_size_m: int = 32,
+                    block_size_n: int = 32,
+                    block_size_k: int = 32) -> torch.Tensor:
     M, K = input.shape
     N = qweight.shape[1] * 8
-    awq_group_size = 128
+    group_size = qweight.shape[0] // qzeros.shape[0]
 
     assert N > 0 and K > 0 and M > 0
     assert qweight.shape[0] == K and qweight.shape[1] == N // 8
-    assert qzeros.shape[0] == K // awq_group_size and qzeros.shape[1] == N // 8
-    assert scales.shape[0] == K // awq_group_size and scales.shape[1] == N
+    assert qzeros.shape[0] == K // group_size and qzeros.shape[1] == N // 8
+    assert scales.shape[0] == K // group_size and scales.shape[1] == N
     assert split_k_iters & (split_k_iters - 1) == 0 and split_k_iters != 0
     assert split_k_iters <= 32
+    assert group_size <= K
+    assert group_size in AWQ_TRITON_SUPPORTED_GROUP_SIZES or group_size == K
 
     grid = lambda META: (
         triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(
             N, META['BLOCK_SIZE_N']),
         split_k_iters,
     )
-    block_size_m = 32
-    block_size_n = 32
-    block_size_k = 32
 
     result = torch.zeros((M, N), dtype=scales.dtype, device=input.device)
 
@@ -302,7 +295,7 @@ def awq_gemm_triton(input: torch.Tensor, qweight: torch.Tensor,
                           M,
                           N,
                           K,
-                          awq_group_size,
+                          group_size,
                           BLOCK_SIZE_M=block_size_m,
                           BLOCK_SIZE_N=block_size_n,
                           BLOCK_SIZE_K=block_size_k,

@@ -6,7 +6,7 @@ https://github.com/qwopqwop200/GPTQ-for-LLaMa
 #include <cstdint>
 #include <cstdio>
 
-#include <torch/extension.h>
+#include <torch/all.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_runtime.h>
@@ -1823,7 +1823,7 @@ void shuffle_exllama_weight(uint32_t* q_weight, int* q_perm, int height,
 torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
                         torch::Tensor b_gptq_qzeros,
                         torch::Tensor b_gptq_scales, torch::Tensor b_g_idx,
-                        bool use_exllama, int bit) {
+                        bool use_exllama, int64_t bit) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
   auto options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
   at::Tensor c = torch::empty({a.size(0), b_q_weight.size(1)}, options);
@@ -1845,7 +1845,7 @@ torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
   return c;
 }
 
-void gptq_shuffle(torch::Tensor q_weight, torch::Tensor q_perm, int bit) {
+void gptq_shuffle(torch::Tensor q_weight, torch::Tensor q_perm, int64_t bit) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(q_weight));
   vllm::gptq::shuffle_exllama_weight(
       (uint32_t*)q_weight.data_ptr(),

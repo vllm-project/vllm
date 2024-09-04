@@ -21,7 +21,7 @@ def append_new_token(seq_group, token_id: int):
 
 
 def schedule_and_update_computed_tokens(scheduler):
-    metas, out = scheduler.schedule()
+    metas, out, _ = scheduler.schedule()
     for s, meta in zip(out.scheduled_seq_groups, metas):
         s.seq_group.update_num_computed_tokens(meta.token_chunk_size)
     return metas, out
@@ -149,7 +149,7 @@ def test_complex():
     # Only the first seq group has a new token appended.
     append_new_token(running[0], 1)
 
-    # Add 2 more requsets.
+    # Add 2 more requests.
     for i in range(2, 4):
         _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
         scheduler.add_seq_group(seq_group)
@@ -180,7 +180,7 @@ def test_maximal_decoding():
     """Verify decoding requests are prioritized."""
     block_size = 4
     max_seqs = 2
-    max_model_len = 2
+    max_model_len = 8
     max_num_batched_tokens = 2
     scheduler_config = SchedulerConfig(max_num_batched_tokens,
                                        max_seqs,
@@ -483,11 +483,11 @@ def test_chunked_prefill_preempt():
     # The request should be preempted.
     scheduler.block_manager.can_append_slots = MagicMock()
 
-    def cannot_append_second_group(seq_group, num_lookahead_slots):
+    def cannot_append_second_group1(seq_group, num_lookahead_slots):
         return seq_group.request_id != "1"
 
     scheduler.block_manager.can_append_slots.side_effect = (
-        cannot_append_second_group)
+        cannot_append_second_group1)
 
     # The running prefill is now preempted.
     _, out = schedule_and_update_computed_tokens(scheduler)
@@ -505,11 +505,11 @@ def test_chunked_prefill_preempt():
     assert seq_group.get_num_uncomputed_tokens() == 30
 
     # We should be able to run prefill twice as it is chunked.
-    def cannot_append_second_group(seq_group, num_lookahead_slots):
+    def cannot_append_second_group2(seq_group, num_lookahead_slots):
         return True
 
     scheduler.block_manager.can_append_slots.side_effect = (
-        cannot_append_second_group)
+        cannot_append_second_group2)
     _, out = schedule_and_update_computed_tokens(scheduler)
     assert len(out.scheduled_seq_groups) == 1
     assert out.num_prefill_groups == 1
@@ -530,7 +530,7 @@ def test_chunked_prefill_max_seqs():
     cache_config.num_cpu_blocks = 8
     cache_config.num_gpu_blocks = 8
     scheduler = Scheduler(scheduler_config, cache_config, None)
-    running = []
+    running: List[SequenceGroup] = []
 
     _, seq_group = create_dummy_prompt("1", prompt_length=65)
     scheduler.add_seq_group(seq_group)
@@ -562,3 +562,42 @@ def test_chunked_prefill_max_seqs():
     assert len(get_sequence_groups(out)) == max_seqs
     assert not running[0].is_prefill()
     assert not running[1].is_prefill()
+
+
+def test_perfix_caching():
+    """Verify allocating full blocks when prefix caching is enabled."""
+    block_size = 4
+    max_seqs = 10
+    max_model_len = 80
+    max_num_batched_tokens = 64
+    scheduler_config = SchedulerConfig(max_num_batched_tokens,
+                                       max_seqs,
+                                       max_model_len,
+                                       enable_chunked_prefill=True)
+    cache_config = CacheConfig(block_size,
+                               1.0,
+                               1,
+                               "auto",
+                               enable_prefix_caching=True)
+    cache_config.num_cpu_blocks = 0
+    cache_config.num_gpu_blocks = 32
+    scheduler = Scheduler(scheduler_config, cache_config, None)
+    running: List[SequenceGroup] = []
+
+    # Add seq groups to scheduler.
+    for i in range(2):
+        _, seq_group = create_dummy_prompt(str(i),
+                                           block_size=block_size,
+                                           prompt_length=50)
+        scheduler.add_seq_group(seq_group)
+        running.append(seq_group)
+
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
+    assert set(get_sequence_groups(out)) == set(running)
+    assert seq_group_meta[0].token_chunk_size == 50
+    # Verify it is chunked. Note that although the budget is 64-50=14,
+    # we only allocate full blocks for prefix caching, so only 4*(14//4)=12
+    # tokens are allocated.
+    assert seq_group_meta[1].token_chunk_size == 12
+    assert out.num_prefill_groups == 2
+    assert out.num_batched_tokens == 62

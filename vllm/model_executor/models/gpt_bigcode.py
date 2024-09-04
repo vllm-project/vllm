@@ -34,12 +34,14 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
+    ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import SamplerOutput
+from vllm.sequence import IntermediateTensors
+
+from .interfaces import SupportsLoRA
 
 
 class GPTBigCodeAttention(nn.Module):
@@ -230,10 +232,10 @@ class GPTBigCodeModel(nn.Module):
         return hidden_states
 
 
-class GPTBigCodeForCausalLM(nn.Module):
+class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA):
     packed_modules_mapping = {"c_attn": ["c_attn"]}
 
-    supported_lora_modules = ["c_fc", "c_proj", "wte", "lm_head", "c_attn"]
+    supported_lora_modules = ["c_fc", "c_proj", "wte", "c_attn"]
 
     embedding_modules = {
         "wte": "input_embeddings",
@@ -250,11 +252,20 @@ class GPTBigCodeForCausalLM(nn.Module):
         lora_config: Optional[LoRAConfig] = None,
     ):
         super().__init__()
+
         self.config = config
+        self.lora_config = lora_config
+
         self.quant_config = quant_config
         self.transformer = GPTBigCodeModel(config, cache_config, quant_config,
                                            lora_config)
-        self.lm_head_weight = self.transformer.wte.weight
+        if self.config.tie_word_embeddings:
+            self.lm_head = self.transformer.wte
+        else:
+            self.lm_head = ParallelLMHead(
+                self.transformer.vocab_size,
+                self.transformer.embed_dim,
+                org_num_embeddings=self.config.vocab_size)
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
@@ -268,14 +279,18 @@ class GPTBigCodeForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
                                          attn_metadata)
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head_weight, hidden_states,
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
+        logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
 
@@ -299,4 +314,10 @@ class GPTBigCodeForCausalLM(nn.Module):
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
-            weight_loader(param, loaded_weight)
+            # TODO (@robertgshaw2-neuralmagic): move to fp8 linear method
+            if "c_attn.input_scale" in name or "c_attn.weight_scale" in name:
+                weight_loader(param, loaded_weight, 'q')
+                weight_loader(param, loaded_weight, 'k')
+                weight_loader(param, loaded_weight, 'v')
+            else:
+                weight_loader(param, loaded_weight)
