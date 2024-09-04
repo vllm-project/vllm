@@ -101,8 +101,8 @@ class FastSyncLLM:
                     broadcast_tensor_dict({}, src=0)
                     self.need_restart = True
                 for output in step_outputs:
-                    assert len(output.outputs) == 1 # type: ignore
-                    first_out = output.outputs[0] # type: ignore
+                    assert len(output.outputs) == 1  # type: ignore
+                    first_out = output.outputs[0]  # type: ignore
                     output_len = len(first_out.text)
                     stats = None
                     if output_len >= 0 and (output.request_id

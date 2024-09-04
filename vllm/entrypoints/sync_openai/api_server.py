@@ -235,10 +235,9 @@ async def completions(request: CompletionRequest, raw_request: Request):
     guided_decode_logits_processor = (await _guided_decode_logits_processor(
         request, runner.tokenizer))
     sampling_params = request.to_sampling_params(
-        runner.tokenizer,
-        guided_decode_logits_processor,
-        runner.engine_config.model_config.
-        max_model_len  # TODO: gshtras add len(prompt_inputs["prompt_token_ids"])
+        runner.tokenizer, guided_decode_logits_processor,
+        runner.engine_config.model_config.max_model_len
+        # TODO: gshtras add - len(prompt_inputs["prompt_token_ids"])
     )
     ids, result_queue = await runner.add_request(request.prompt,
                                                  sampling_params)
@@ -346,10 +345,9 @@ async def chat_completions(request: ChatCompletionRequest,
     guided_decode_logits_processor = (await _guided_decode_logits_processor(
         request, runner.tokenizer))
     sampling_params = request.to_sampling_params(
-        runner.tokenizer,
-        guided_decode_logits_processor,
-        runner.engine_config.model_config.
-        max_model_len  # TODO: gshtras add len(prompt_inputs["prompt_token_ids"])
+        runner.tokenizer, guided_decode_logits_processor,
+        runner.engine_config.model_config.max_model_len
+        # TODO: gshtras add len(prompt_inputs["prompt_token_ids"])
     )
     conversation: List[ConversationMessage] = []
 
