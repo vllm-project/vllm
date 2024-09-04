@@ -8,8 +8,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     fused_marlin_moe)
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE,
-                                                        FusedMoEMethodBase,
-                                                        GPTQFusedMoE)
+                                                        FusedMoEMethodBase)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (
@@ -124,7 +123,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         if isinstance(layer, LinearBase) or (isinstance(layer, ParallelLMHead)
                                              and self.lm_head_quantized):
             return GPTQMarlinLinearMethod(self)
-        elif isinstance(layer, GPTQFusedMoE):
+        elif isinstance(layer, FusedMoE):
             return GPTQMarlinMoEMethod(self)
         return None
 
