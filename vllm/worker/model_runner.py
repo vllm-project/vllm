@@ -2177,3 +2177,4 @@ class CUDAGraphRunner(nn.Module):
             return self.output_buffers["hidden_states"]
 
         return self.output_buffers
+
