@@ -10,7 +10,7 @@ import pytest
 from tests.kernels.utils import override_backend_env_variable
 from tests.quantization.utils import is_quant_method_supported
 
-from ..models.utils import check_logprobs_close
+from ...utils import check_logprobs_close
 
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
