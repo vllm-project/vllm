@@ -619,16 +619,16 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal):
                 inputs_embeds_masks: Optional[torch.Tensor] = None,
                 **kwargs: object):
         image_input = self._parse_and_validate_image_input(**kwargs)
-        inputs_embeds = get_inputs_embeds(input_ids,
-                                          self.model.get_input_embeddings,
-                                          inputs_embeds, inputs_embeds_masks)
         if image_input is not None:
+            inputs_embeds = get_inputs_embeds(input_ids,
+                                            self.model.get_input_embeddings,
+                                            inputs_embeds, inputs_embeds_masks)
             vision_embeddings = self._process_image_input(image_input)
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, vision_embeddings,
                 self.image_token_id)
+            inputs_embeds_masks = torch.ones_like(input_ids, dtype=torch.bool)
             input_ids = None
-            inputs_embeds_masks.fill_(1)
 
         hidden_states = self.model(input_ids,
                                    positions,

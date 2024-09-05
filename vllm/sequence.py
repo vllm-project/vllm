@@ -201,6 +201,7 @@ class SequenceData(msgspec.Struct,
     def prompt_embeds(self, new_prompt_embeds: Optional[torch.Tensor]) -> None:
         self._prompt_embeds = new_prompt_embeds
 
+    @property
     def prompt_token_ids_array(self) -> array:
         """Return the prompt token ids in array type.
 
