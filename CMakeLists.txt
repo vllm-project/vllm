@@ -93,7 +93,7 @@ set(VLLM_EXT_SRC
 
 define_gpu_extension_target(
   _core_C
-  DESTINATION vllm
+  DESTINATION .
   LANGUAGE CXX
   SOURCES ${VLLM_EXT_SRC}
   COMPILE_FLAGS ${CXX_COMPILE_FLAGS}
@@ -183,13 +183,17 @@ else()
   FetchContent_Declare(
           flash-attention
           GIT_REPOSITORY https://github.com/neuralmagic/flash-attention.git
-          GIT_TAG 0836f4aae65b768d6e55e070b6070b6bde67da02
+          GIT_TAG 4cfd4b803f2f13060bbf1e06fb85f4c43b21fc59
           GIT_PROGRESS TRUE
   )
 endif()
 
+# Set the parent build flag so that the flash-attention library does not redo compile flag and arch initialization.
 set(VLLM_PARENT_BUILD ON)
+
+# Fetch the flash-attention library
 FetchContent_MakeAvailable(flash-attention)
+add_dependencies(default vllm_flash_attn_c)
 message(STATUS "Flash-attention is available at ${flash-attention_SOURCE_DIR}")
 
 # Copy over the flash-attention python files
@@ -313,7 +317,7 @@ endif()
 
 define_gpu_extension_target(
   _C
-  DESTINATION vllm
+  DESTINATION .
   LANGUAGE ${VLLM_GPU_LANG}
   SOURCES ${VLLM_EXT_SRC}
   COMPILE_FLAGS ${VLLM_GPU_FLAGS}
@@ -337,7 +341,7 @@ endif()
 
 define_gpu_extension_target(
   _moe_C
-  DESTINATION vllm
+  DESTINATION .
   LANGUAGE ${VLLM_GPU_LANG}
   SOURCES ${VLLM_MOE_EXT_SRC}
   COMPILE_FLAGS ${VLLM_GPU_FLAGS}

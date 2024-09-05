@@ -214,11 +214,15 @@ class cmake_build_ext(build_ext):
         if not os.path.exists(self.build_temp):
             os.makedirs(self.build_temp)
 
+        # outdir = Path(self.get_ext_fullpath(self.extensions[0].name)).parent.parent.absolute()
+        # raise Exception(outdir)
+
         targets = []
+        target_name = lambda s: remove_prefix(remove_prefix(s, "vllm."), "vllm_flash_attn.")
         # Build all the extensions
         for ext in self.extensions:
             self.configure(ext)
-            targets.append(remove_prefix(ext.name, "vllm."))
+            targets.append(target_name(ext.name))
 
         num_jobs, _ = self.compute_num_jobs()
 
@@ -233,14 +237,12 @@ class cmake_build_ext(build_ext):
 
         # Install the libraries
         for ext in self.extensions:
-            name = remove_prefix(ext.name, "vllm.")
-
-            # CMake install targets already include the vllm/ prefix, so remove it
-            outdir = Path(self.get_ext_fullpath(ext.name)).parent.parent.absolute()
+            # Install the extension into the proper location
+            outdir = Path(self.get_ext_fullpath(ext.name)).parent.absolute()
 
             install_args = [
                 "cmake", "--install", ".", "--prefix", outdir, "--component",
-                name
+                target_name(ext.name)
             ]
             subprocess.check_call(install_args, cwd=self.build_temp)
 
@@ -464,6 +466,7 @@ if _build_core_ext():
 
 if _is_cuda() or _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._moe_C"))
+    ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn.vllm_flash_attn_c"))
 
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
