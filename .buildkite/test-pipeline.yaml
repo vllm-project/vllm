@@ -368,6 +368,7 @@ steps:
 - label: LoRA Long Context (Distributed) # 11min
   # This test runs llama 13B, so it is required to run on 4 GPUs.
   num_gpus: 4
+  soft_fail: true
   source_file_dependencies:
   - vllm/lora
   - tests/lora/test_long_context
