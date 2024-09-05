@@ -32,15 +32,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
-# from vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
-from flash_attn import flash_attn_varlen_func
 from PIL import Image
 from transformers import Qwen2VLConfig
 from transformers.models.qwen2_vl.configuration_qwen2_vl import (
     Qwen2VLVisionConfig)
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 
+import vllm.envs as envs
 from vllm.attention import AttentionMetadata
+from vllm.attention.selector import (_Backend, backend_name_to_enum,
+                                     get_global_forced_attn_backend)
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
@@ -61,6 +62,7 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataDict,
                              MultiModalInputs)
 from vllm.multimodal.base import MultiModalData
 from vllm.multimodal.image import cached_get_image_processor
+from vllm.platforms import current_platform
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
                            SequenceData)
 from vllm.transformers_utils.processor import get_processor
@@ -194,6 +196,26 @@ class Qwen2VisionAttention(nn.Module):
                                       output_size=embed_dim,
                                       quant_config=quant_config)
 
+        # Detect attention implementation.
+        selected_backend: Optional[_Backend] = get_global_forced_attn_backend()
+        if selected_backend is None:
+            backend_by_env_var: Optional[str] = envs.VLLM_ATTENTION_BACKEND
+            if backend_by_env_var is not None:
+                selected_backend = backend_name_to_enum(backend_by_env_var)
+        if selected_backend is None:
+            # For Volta and Turing GPUs, use xformers instead.
+            self._use_flash_attn = current_platform.get_device_capability(
+            )[0] >= 8
+        else:
+            if selected_backend == _Backend.FLASH_ATTN:
+                self._use_flash_attn = True
+            elif selected_backend == _Backend.XFORMERS:
+                self._use_flash_attn = False
+            else:
+                raise RuntimeError(
+                    f"Qwen2-VL does not support {selected_backend} backend now."
+                )
+
     def forward(
         self,
         x: torch.Tensor,
@@ -220,20 +242,36 @@ class Qwen2VisionAttention(nn.Module):
         if rotary_pos_emb is not None:
             q = apply_rotary_pos_emb_vision(q, rotary_pos_emb)
             k = apply_rotary_pos_emb_vision(k, rotary_pos_emb)
-        q, k, v = [rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v]]
 
-        max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-        output = flash_attn_varlen_func(q,
-                                        k,
-                                        v,
-                                        cu_seqlens,
-                                        cu_seqlens,
-                                        max_seqlen,
-                                        max_seqlen,
-                                        0,
-                                        causal=False)
+        if self._use_flash_attn:
+            # from vllm_flash_attn.flash_attn_interface import (
+            #   flash_attn_varlen_func)
+            from flash_attn import flash_attn_varlen_func
 
-        context_layer = rearrange(output, "(b s) ... -> b s ...", b=batch_size)
+            q, k, v = [rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v]]
+
+            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+            output = flash_attn_varlen_func(q,
+                                            k,
+                                            v,
+                                            cu_seqlens_q=cu_seqlens,
+                                            cu_seqlens_k=cu_seqlens,
+                                            max_seqlen_q=max_seqlen,
+                                            max_seqlen_k=max_seqlen,
+                                            dropout_p=0,
+                                            causal=False)
+
+            context_layer = rearrange(output,
+                                      "(b s) ... -> b s ...",
+                                      b=batch_size)
+        else:
+            from xformers import ops as xops
+
+            context_layer = xops.memory_efficient_attention_forward(q,
+                                                                    k,
+                                                                    v,
+                                                                    p=0,
+                                                                    scale=None)
         context_layer = rearrange(context_layer,
                                   "b s h d -> s b (h d)").contiguous()
 
