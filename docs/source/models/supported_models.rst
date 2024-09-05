@@ -249,7 +249,7 @@ Multimodal Language Models
     -
 
 | :sup:`E` Pre-computed embeddings can be inputted for this modality.
-| :sup:`+` Multiple items can be inputted for this modality.
+| :sup:`+` Multiple items can be inputted per text prompt for this modality.
 
 .. note::
   For :code:`openbmb/MiniCPM-V-2`, the official repo doesn't work yet, so we need to use a fork (:code:`HwwwH/MiniCPM-V-2`) for now.
