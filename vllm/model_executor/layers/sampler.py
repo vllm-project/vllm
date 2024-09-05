@@ -60,6 +60,7 @@ class SampleResultArgsType:
     multinomial_samples: MultinomialSamplesType
     sample_results_dict: SampleResultsDictType
     sampling_metadata: SamplingMetadata
+    forced_samples: Optional[torch.Tensor]
     greedy_samples: Optional[torch.Tensor]
     beam_search_logprobs: Optional[torch.Tensor]
 
@@ -800,6 +801,7 @@ def _sample_with_torch(
     sample_results_dict: SampleResultsDictType = {}
     sample_metadata: SampleMetadataType = {}
     multinomial_samples: MultinomialSamplesType = {}
+    forced_samples: Optional[torch.Tensor] = None
     greedy_samples: Optional[torch.Tensor] = None
     beam_search_logprobs: Optional[torch.Tensor] = None
 
@@ -827,9 +829,10 @@ def _sample_with_torch(
         if sampling_type == SamplingType.FORCED:
             if (seq_groups[0].sampling_params.future_context is not None):
                 forced_samples = torch.tensor([
-                    seq_groups[0].sampling_params.future_context[0][len(
+                    seq_groups[0].sampling_params.future_context[0][min(len(
                         sampling_metadata.seq_groups[0].seq_data[
-                            sampling_params.cntr].output_token_ids)]
+                        sampling_params.cntr].output_token_ids), 
+                        len(seq_groups[0].sampling_params.future_context[0])-1)]
                 ])
             else:
                 forced_samples = torch.argmax(logprobs[long_sample_indices],
