@@ -731,8 +731,11 @@ if __name__ == "__main__":
         "--logprobs",
         type=int,
         default=None,
-        help=("Number of logprobs-per-token to return as part of the request "
-              "(default 1)"),
+        help=("Number of logprobs-per-token to compute & return as part of "
+              "the request. If unspecified, then either (1) if beam search "
+              "is disabled, no logprobs are computed & a single dummy "
+              "logprob is returned for each token; or (2) if beam search "
+              "is enabled 1 logprob per token is computed"),
     )
     parser.add_argument(
         "--sonnet-prefix-len",
