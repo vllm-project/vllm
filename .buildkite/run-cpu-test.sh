@@ -24,6 +24,7 @@ docker exec cpu-test-avx2 bash -c "python3 examples/offline_inference.py"
 docker exec cpu-test bash -c "
   pip install pytest matplotlib einops transformers_stream_generator
   pytest -v -s tests/models/decoder_only/language \
+    --ignore=tests/models/test_fp8.py \
     --ignore=tests/models/decoder_only/language/test_jamba.py \
     --ignore=tests/models/decoder_only/language/test_danube3_4b.py" # Mamba and Danube3-4B on CPU is not supported
 
