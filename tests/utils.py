@@ -178,7 +178,12 @@ def compare_two_settings(model: str,
         env2: The second set of environment variables to pass to the API server.
     """
 
-    tokenizer = AutoTokenizer.from_pretrained(model)
+    trust_remote_code = "--trust-remote-code"
+    if trust_remote_code in arg1 or trust_remote_code in arg2:
+        tokenizer = AutoTokenizer.from_pretrained(model,
+                                                  trust_remote_code=True)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(model)
 
     prompt = "Hello, my name is"
     token_ids = tokenizer(prompt)["input_ids"]
@@ -441,6 +446,7 @@ async def completions_with_server_args(
     model_name: str,
     server_cli_args: List[str],
     num_logprobs: Optional[int],
+    max_wait_seconds: int = 240,
 ) -> Completion:
     '''Construct a remote OpenAI server, obtain an async client to the
     server & invoke the completions API to obtain completions.
@@ -450,6 +456,8 @@ async def completions_with_server_args(
       model_name: model to spin up on the vLLM server
       server_cli_args: CLI args for starting the server
       num_logprobs: Number of logprobs to report (or `None`)
+      max_wait_seconds: timeout interval for bringing up server.
+                        Default: 240sec
 
     Returns:
       OpenAI Completion instance

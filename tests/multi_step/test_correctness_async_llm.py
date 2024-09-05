@@ -34,11 +34,19 @@ DEFAULT_SERVER_ARGS: List[str] = [
 @pytest.mark.parametrize("num_scheduler_steps", NUM_SCHEDULER_STEPS)
 @pytest.mark.parametrize("num_prompts", NUM_PROMPTS)
 @pytest.mark.parametrize("num_logprobs", [None, 5])
+@pytest.mark.parametrize("is_async", [False, True])
 @pytest.mark.asyncio
-async def test_multi_step(example_prompts, model: str, tp_size: int,
-                          pp_size: int, eager_mode: int,
-                          num_scheduler_steps: int, num_prompts: int,
-                          num_logprobs: Optional[int]):
+async def test_multi_step(
+    example_prompts,
+    model: str,
+    tp_size: int,
+    pp_size: int,
+    eager_mode: int,
+    num_scheduler_steps: int,
+    num_prompts: int,
+    is_async: bool,
+    num_logprobs: Optional[int],
+) -> None:
     """Test vLLM engine with multi-step scheduling in an OpenAI-protocol
     client/server environment.
 
@@ -73,9 +81,9 @@ async def test_multi_step(example_prompts, model: str, tp_size: int,
     ms_server_args = DEFAULT_SERVER_ARGS + \
         ["--num-scheduler-steps", f"{num_scheduler_steps}"]
 
-    # Disable output proc callback as its not supported
-    # with multi-step right now
-    ms_server_args += ["--disable-async-output-proc"]
+    if not is_async:
+        ms_server_args += ["--disable-async-output-proc"]
+
     if eager_mode:
         ms_server_args.append("--enforce-eager")
 
@@ -86,10 +94,22 @@ async def test_multi_step(example_prompts, model: str, tp_size: int,
         str(pp_size),
     ]
 
+    # Spin up client/server & issue completion API requests.
+    # Default `max_wait_seconds` is 240 but was empirically
+    # was raised 3x to 720 *just for this test* due to
+    # observed timeouts in GHA CI
     ref_completions = await completions_with_server_args(
-        prompts, model, server_args + distributed_args, num_logprobs)
+        prompts,
+        model,
+        server_args + distributed_args,
+        num_logprobs,
+        max_wait_seconds=5 * 240)
     test_completions = await completions_with_server_args(
-        prompts, model, ms_server_args + distributed_args, num_logprobs)
+        prompts,
+        model,
+        ms_server_args + distributed_args,
+        num_logprobs,
+        max_wait_seconds=5 * 240)
 
     # Assert multi-step scheduling produces identical tokens
     # to single-step scheduling.

@@ -40,13 +40,13 @@ BLIP2_IMAGE_TOKEN_ID = 50265
 class Blip2ImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     data: torch.Tensor
-    """Shape: (batch_size, num_channels, height, width)"""
+    """Shape: `(batch_size * num_images, num_channels, height, width)`"""
 
 
 class Blip2ImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
     data: torch.Tensor
-    """Shape: `(batch_size, image_feature_size, hidden_size)`
+    """Shape: `(batch_size * num_images, image_feature_size, hidden_size)`
 
     `hidden_size` must match the hidden size of language model backbone.
     """
@@ -714,8 +714,7 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal):
             use_default_weight_loading = False
             if "vision" in name:
                 if self.vision_model is not None:
-                    # We only do sharding for language model and
-                    # not vision model for now.
+                    # BlipVisionModel does not need sharding
                     use_default_weight_loading = True
             else:
                 for (param_name, weight_name,
