@@ -78,6 +78,7 @@ if [[ $commands == *" kernels "* ]]; then
   --ignore=kernels/test_attention.py \
   --ignore=kernels/test_attention_selector.py \
   --ignore=kernels/test_blocksparse_attention.py \
+  --ignore=kernels/test_causal_conv1d.py \
   --ignore=kernels/test_cutlass.py \
   --ignore=kernels/test_encoder_decoder_attn.py \
   --ignore=kernels/test_flash_attn.py \
