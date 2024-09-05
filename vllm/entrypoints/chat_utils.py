@@ -150,6 +150,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             if model_type in ("blip-2", "chatglm", "fuyu", "paligemma"):
                 # These models do not use image tokens in the prompt
                 return None
+            if model_type == "qwen":
+                return f"Picture {current_count}: <img></img>"
             if model_type.startswith("llava"):
                 return self._cached_token_str(self._tokenizer,
                                               hf_config.image_token_index)
