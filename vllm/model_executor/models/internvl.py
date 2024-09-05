@@ -124,11 +124,12 @@ def calculate_num_blocks(orig_width: int, orig_height: int, min_num: int,
 # adapted from https://huggingface.co/OpenGVLab/InternVL2-1B
 def dynamic_preprocess(image: Image.Image, min_num: int, max_num: int,
                        image_size: int,
-                       use_thumbnail: int) -> List[Image.Image]:
+                       use_thumbnail: bool) -> List[Image.Image]:
     orig_width, orig_height = image.size
 
+    # calculate the number of blocks without thumbnail
     blocks, target_width, target_height = calculate_num_blocks(
-        orig_width, orig_height, min_num, max_num, image_size)
+        orig_width, orig_height, min_num, max_num, image_size, use_thumbnail=False)
     # resize the image
     resized_img = image.resize((target_width, target_height))
     processed_images = []
@@ -209,15 +210,15 @@ def input_processor_for_internvl(ctx: InputContext, llm_inputs: LLMInputs):
         num_blocks, _, _ = calculate_num_blocks(width, height, min_num,
                                                 max_num, image_size,
                                                 use_thumbnail)
-        image_feature_size = num_blocks * num_patches
+        image_feature_size = [num_blocks * num_patches]
     elif is_list_of(image_data, Image.Image):
-        image_feature_size = 0
+        image_feature_size = []
         for image in image_data:
             width, height = image.size
             num_blocks, _, _ = calculate_num_blocks(width, height, min_num,
                                                     max_num, image_size,
                                                     use_thumbnail)
-            image_feature_size += num_blocks * num_patches
+            image_feature_size.append(num_blocks * num_patches)
     elif isinstance(image_data, torch.Tensor):
         image_feature_size = image_data.shape[0]
     else:
@@ -230,8 +231,11 @@ def input_processor_for_internvl(ctx: InputContext, llm_inputs: LLMInputs):
     prompt_token_ids = llm_inputs["prompt_token_ids"]
     if prompt is None:
         prompt = tokenizer.decode(prompt_token_ids)
-    image_prompt = IMG_START + IMG_CONTEXT * image_feature_size + IMG_END
-    new_prompt = prompt.replace('<image>', image_prompt, 1)
+
+    new_prompt = prompt
+    for feature_size in image_feature_size:
+        image_prompt = IMG_START + IMG_CONTEXT * feature_size + IMG_END
+        new_prompt = new_prompt.replace('<image>', image_prompt, 1)
     new_prompt_token_ids = tokenizer.encode(new_prompt)
 
     return LLMInputs(prompt=prompt,
