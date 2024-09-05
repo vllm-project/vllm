@@ -128,7 +128,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         layer.register_parameter("weight_shape", weight_shape)
 
         # group index (for activation reordering)
-        if self.has_g_idx == ActivationOrdering.GROUP:
+        if self.has_g_idx:
             weight_g_idx = BasevLLMParameter(data=torch.full(
                 (input_size_per_partition, ), -1, dtype=torch.int32),
                                              weight_loader=weight_loader)
