@@ -490,7 +490,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
     def __del__(self):
         try:
             self.shutdown()
-        except Exception as e:
+        except Exception:
             pass
 
 
@@ -567,5 +567,5 @@ class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
     def __del__(self):
         try:
             self.shutdown()
-        except Exception as e:
+        except Exception:
             pass
