@@ -242,6 +242,11 @@ Multimodal Language Models
     - Image\ :sup:`+`
     - :code:`openbmb/MiniCPM-V-2` (see note), :code:`openbmb/MiniCPM-Llama3-V-2_5`, :code:`openbmb/MiniCPM-V-2_6`, etc.
     -
+  * - :code:`QWenLMHeadModel`
+    - Qwen
+    - Image
+    - :code:`Qwen/Qwen-VL`, :code:`Qwen/Qwen-VL-Chat`, etc.
+    -
   * - :code:`UltravoxModel`
     - Ultravox
     - Audio\ :sup:`E+`
