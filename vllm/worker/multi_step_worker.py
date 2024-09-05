@@ -5,7 +5,8 @@ from typing import Dict, List, Optional, Tuple
 import torch
 
 from vllm.distributed import broadcast_tensor_dict, get_pp_group
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.sequence import ExecuteModelRequest
 from vllm.worker.model_runner_base import BroadcastableModelInput
 from vllm.worker.multi_step_model_runner import (MultiStepModelRunner,
                                                  StatefulModelInput)
@@ -66,9 +67,7 @@ class MultiStepWorker(Worker):
             if execute_model_req.async_callback:
                 model_input.frozen_model_input = dataclasses.replace(  # type: ignore
                     model_input.frozen_model_input,
-                    async_callback=execute_model_req.async_callback,
-                    use_async_and_multi_step=execute_model_req.
-                    use_async_and_multi_step)
+                    async_callback=execute_model_req.async_callback)
         else:
             # on subsequent steps we reuse the worker input and model input
             multi_step_state = self.multi_step_states[virtual_engine]

@@ -11,13 +11,13 @@ from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.gemma import GemmaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.utils import cached_get_tokenizer
-from vllm.sequence import IntermediateTensors, SamplerOutput
+from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsMultiModal
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
@@ -145,7 +145,6 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal):
         self.config = config
         self.multimodal_config = multimodal_config
 
-        # TODO(ywang96): Port over SiglipVisionModel & TP
         self.vision_tower = SiglipVisionModel(config.vision_config)
         self.multi_modal_projector = PaliGemmaMultiModalProjector(
             vision_hidden_size=config.vision_config.hidden_size,
@@ -308,12 +307,7 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal):
                 if key_to_modify in name:
                     name = name.replace(key_to_modify, new_key)
             use_default_weight_loading = False
-            if "vision" in name:
-                if self.vision_tower is not None:
-                    # We only do sharding for language model and
-                    # not vision model for now.
-                    use_default_weight_loading = True
-            else:
+            if "vision" not in name or self.vision_tower.shard_weight:
                 for (param_name, shard_name,
                      shard_id) in stacked_params_mapping:
                     if shard_name not in name:
@@ -336,6 +330,8 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal):
                     if name.endswith(".bias") and name not in params_dict:
                         continue
                     use_default_weight_loading = True
+            else:
+                use_default_weight_loading = True
 
             if use_default_weight_loading:
                 param = params_dict[name]
