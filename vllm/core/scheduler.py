@@ -763,6 +763,94 @@ class Scheduler:
         else:
             return prompt_limit
 
+
+    def _get_priority(self, seq_group: SequenceGroup) -> float:
+        """ Get the priority of the sequence group. Highest preference to user-defined priority, followed by arrival time.
+        Args:
+            seq_group: The sequence group input.
+        Returns:
+            The priority of the sequence group.
+        """
+        return (seq_group.priority,seq_group.arrival_time)
+
+    def _schedule_priority_preemption(
+        self,
+        budget: SchedulingBudget,
+    ) -> Tuple[deque, deque, int]:
+        """Force preempt requests from the running queue
+        if their priority is lower.
+        Args:
+            policy: Scheduling policy for sorting waiting and running queues.
+            budget: The scheduling budget. The argument is in-place updated
+                when any requests are scheduled.
+        Returns:
+            A count of priority-based preemptions.
+        """
+
+        running_queue = self.running
+        waiting_queue = self.waiting
+
+        running_queue = deque(sorted(running_queue, key=lambda x: self._get_priority(x)))
+        waiting_queue = deque(sorted(waiting_queue, key=lambda x: self._get_priority(x)))
+
+        blocks_to_swap_out: List[Tuple[int, int]] = []
+        force_preemption_cnt = 0
+
+
+        #print("Initial waiting queue is ", [x.request_id for x in waiting_queue])
+        while waiting_queue:
+            print("waiting queue priority is ", [x.priority for x in waiting_queue])
+            print("front of waiting queue is ", waiting_queue[0].request_id)
+            seq_group = waiting_queue[0]
+            waiting_queue.popleft()
+            num_new_seqs = seq_group.get_max_num_running_seqs()
+            num_new_tokens = self._get_num_new_tokens(seq_group,
+                                                      SequenceStatus.WAITING,
+                                                      False, budget)
+            
+            now = time.time()
+            # Only preempt if priority inversion exists
+            while running_queue and self._get_priority(running_queue[-1]) > self._get_priority(seq_group):
+                print("priority inversion exists")
+                import pdb; pdb.set_trace()
+                #Only preempt if waiting sequence cannot be allocated
+                print("Number of new tokens is ", num_new_tokens)
+                print("Number of new seqs is ", num_new_seqs)
+                can_allocate = self.block_manager.can_allocate(seq_group)
+                print("Allocation status is ", can_allocate)
+                if (num_new_tokens > 0
+                        and budget.can_schedule(num_new_tokens=num_new_tokens,
+                                                num_new_seqs=num_new_seqs)
+                        and can_allocate == AllocStatus.OK):
+                    break
+
+                #Adjust budget to remove the victim sequence group
+                print("victim sequence group is ", running_queue[-1].request_id)
+                vseq_group = running_queue.pop()
+                num_running_tokens = self._get_num_new_tokens(
+                    vseq_group, SequenceStatus.RUNNING, False, budget)
+                budget.subtract_num_batched_tokens(vseq_group.request_id,
+                                                   num_running_tokens)
+                num_running_seqs = vseq_group.get_max_num_running_seqs()
+                budget.subtract_num_seqs(vseq_group.request_id,
+                                         num_running_seqs)
+
+                #Preempt out the victim sequence group
+                self._preempt(vseq_group, blocks_to_swap_out,
+                              PreemptionMode.RECOMPUTE)
+                waiting_queue.appendleft(vseq_group)
+                force_preemption_cnt += 1
+            #Put the sequence back into the waiting queue
+            waiting_queue.appendleft(seq_group)
+            
+
+        waiting_queue  = deque(sorted(waiting_queue, key=lambda x: self._get_priority(x)))
+
+        self.waiting = waiting_queue
+        self.running = running_queue
+        #print("Final waiting queue is ", [x.request_id for x in self.waiting])
+        return force_preemption_cnt
+    
     def _schedule_prefills(
         self,
         budget: SchedulingBudget,
@@ -913,6 +1001,9 @@ class Scheduler:
             prefills = self._schedule_prefills(budget,
                                                curr_loras,
                                                enable_chunking=False)
+        
+        if len(prefills.seq_groups)==0 and self.scheduler_config.policy == "sp":
+            forced_preemptions = self._schedule_priority_preemption(budget)
 
         # Don't schedule decodes if prefills are scheduled.
         # NOTE: If `_schedule_prefills` doesn't enable chunking, self.running

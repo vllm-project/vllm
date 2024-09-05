@@ -934,7 +934,7 @@ class SchedulerConfig:
             workers instead of an entire data. It should be enabled only
             when SPMD worker architecture is enabled. I.e.,
             VLLM_USE_RAY_SPMD_WORKER=1
-
+        policy: The scheduling policy to use. "fcfs" (default) or "priority".
     """
 
     def __init__(self,
@@ -948,7 +948,8 @@ class SchedulerConfig:
                  embedding_mode: Optional[bool] = False,
                  preemption_mode: Optional[str] = None,
                  num_scheduler_steps: int = 1,
-                 send_delta_data: bool = False) -> None:
+                 send_delta_data: bool = False,
+                 policy: str = "sp") -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
         else:
@@ -979,6 +980,7 @@ class SchedulerConfig:
         self.preemption_mode = preemption_mode
         self.num_scheduler_steps = num_scheduler_steps
         self.send_delta_data = send_delta_data
+        self.policy = policy
         self._verify_args()
 
     def _verify_args(self) -> None:

@@ -581,6 +581,7 @@ class SequenceGroup:
                      unless you are working with an encoder/decoder model.
         trace_headers: OpenTelemetry trace headers.
         prompt_adapter_request: Prompt Adapter request.
+        priority: User-defined priority of the request.
     """
 
     def __init__(
@@ -595,9 +596,11 @@ class SequenceGroup:
         encoder_seq: Optional[Sequence] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: Optional[int] = None,
     ) -> None:
         self.request_id = request_id
         self.seqs = seqs
+        self.arrival_time = arrival_time
         self.is_single_seq = len(seqs) == 1
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
 
@@ -615,6 +618,7 @@ class SequenceGroup:
         self.prompt_adapter_request = prompt_adapter_request
         self.encoder_seq = encoder_seq
         self.trace_headers = trace_headers
+        self.priority = priority
 
     @property
     def prompt(self) -> Optional[str]:
