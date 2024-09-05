@@ -5,6 +5,8 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
+from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
+    ActivationOrdering)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     apply_gptq_marlin_linear, marlin_make_empty_g_idx, marlin_make_workspace,
     marlin_permute_scales, marlin_sort_g_idx, replace_tensor,
@@ -28,11 +30,13 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
     def __init__(self,
                  strategy: str,
                  num_bits: int,
-                 group_size: Optional[int] = None):
+                 group_size: Optional[int] = None,
+                 actorder: Optional[ActivationOrdering] = None):
 
         self.pack_factor = 32 // num_bits
         self.strategy = strategy
         self.group_size = -1 if group_size is None else group_size
+        self.has_g_idx = actorder == ActivationOrdering.GROUP
 
         if self.group_size == -1 and self.strategy != "channel":
             raise ValueError("Marlin kernels require group quantization or "
@@ -119,15 +123,16 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                                                           dtype=torch.int64),
                                          weight_loader=weight_loader)
 
-        # group index (for activation reordering)
-        weight_g_idx = BasevLLMParameter(data=torch.full(
-            (input_size_per_partition, ), -1, dtype=torch.int32),
-                                         weight_loader=weight_loader)
-
         layer.register_parameter("weight_packed", weight)
         layer.register_parameter("weight_scale", weight_scale)
         layer.register_parameter("weight_shape", weight_shape)
-        layer.register_parameter("weight_g_idx", weight_g_idx)
+
+        # group index (for activation reordering)
+        if self.has_g_idx == ActivationOrdering.GROUP:
+            weight_g_idx = BasevLLMParameter(data=torch.full(
+                (input_size_per_partition, ), -1, dtype=torch.int32),
+                                             weight_loader=weight_loader)
+            layer.register_parameter("weight_g_idx", weight_g_idx)
 
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
@@ -144,8 +149,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             layer.output_size_per_partition, device)
 
         # Handle sorting for activation reordering if needed.
-        has_g_idx = -1 not in layer.weight_g_idx
-        if has_g_idx:
+        if self.has_g_idx:
             g_idx, g_idx_sort_indices = marlin_sort_g_idx(layer.weight_g_idx)
             layer.g_idx_sort_indices = g_idx_sort_indices
             replace_tensor(layer, "weight_g_idx", g_idx)
@@ -174,7 +178,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         marlin_scales = marlin_permute_scales(
             layer.weight_scale,
             size_k=(layer.input_size
-                    if has_g_idx else layer.input_size_per_partition),
+                    if self.has_g_idx else layer.input_size_per_partition),
             size_n=layer.output_size_per_partition,
             group_size=layer.group_size)
         replace_tensor(layer, "weight_scale", marlin_scales)
