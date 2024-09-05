@@ -140,8 +140,7 @@ def compute_max_diff(output, output_ref):
 @pytest.mark.parametrize("topk", [2, 6])
 @pytest.mark.parametrize("group_size", [-1, 32, 64, 128])
 @pytest.mark.parametrize("act_order", [True, False])
-@pytest.mark.parametrize("num_bits", [4])
-# @pytest.mark.parametrize("num_bits", [4, 8])
+@pytest.mark.parametrize("num_bits", [4, 8])
 def test_fused_marlin_moe(
     m: int,
     n: int,
@@ -170,8 +169,6 @@ def test_fused_marlin_moe(
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
     w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
-    for i in range(w2.shape[0]):
-        w2[0] = torch.eye(k, n, device="cuda", dtype=dtype)
 
     w_ref1_l = []
     qweight1_l = []

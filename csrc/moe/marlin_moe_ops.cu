@@ -481,9 +481,10 @@ __device__ inline void MarlinMoESingle(
   // Scale sizes/strides without act_order
   int s_gl_stride = prob_n / 8;
   constexpr int s_sh_stride = 16 * thread_n_blocks / 8;
-  constexpr int s_tb_groups = !has_act_order && group_blocks < thread_k_blocks
-                                  ? thread_k_blocks / group_blocks
-                                  : 1;
+  constexpr int s_tb_groups =
+      !has_act_order && group_blocks != -1 && group_blocks < thread_k_blocks
+          ? thread_k_blocks / group_blocks
+          : 1;
   constexpr int s_sh_stage = s_tb_groups * s_sh_stride;
   int s_gl_rd_delta = s_gl_stride;
   // Scale size/strides with act_order
@@ -527,11 +528,13 @@ __device__ inline void MarlinMoESingle(
 
   // No act_order
   int s_gl_rd;
-  if constexpr (group_blocks == -1 || group_blocks == 0) {
-    s_gl_rd = s_sh_stride * slice_col + threadIdx.x;
-  } else {
-    s_gl_rd = s_gl_stride * ((thread_k_blocks * slice_row) / group_blocks) +
-              s_sh_stride * slice_col + threadIdx.x;
+  if constexpr (!has_act_order) {
+    if constexpr (group_blocks == -1) {
+      s_gl_rd = s_sh_stride * slice_col + threadIdx.x;
+    } else {
+      s_gl_rd = s_gl_stride * ((thread_k_blocks * slice_row) / group_blocks) +
+                s_sh_stride * slice_col + threadIdx.x;
+    }
   }
   int s_sh_wr = threadIdx.x;
   bool s_sh_wr_pred = threadIdx.x < s_sh_stride;
@@ -776,6 +779,12 @@ __device__ inline void MarlinMoESingle(
   int same_group_id[stages];
 
   auto init_same_group = [&](int pipe) {
+    if constexpr (!has_act_order) {
+      is_same_group[pipe] = false;
+      same_group_id[pipe] = 0;
+      return;
+    }
+
     int4* sh_g_idx_stage = sh_g_idx + g_idx_stage * pipe;
     int* sh_g_idx_int_ptr = reinterpret_cast<int*>(sh_g_idx_stage);
 
@@ -1150,9 +1159,9 @@ __device__ inline void MarlinMoESingle(
 
   // Start global fetch and register load pipelines.
   auto start_pipes = [&]() {
-    // TODO re-enable after fixing this function
-    // fetch_sorted_ids_to_shared();
-    __syncthreads();
+  // TODO re-enable after fixing this function
+  // fetch_sorted_ids_to_shared();
+  // __syncthreads();
 
   #pragma unroll
     for (int i = 0; i < stages - 1; i++) {
