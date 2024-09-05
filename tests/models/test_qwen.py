@@ -75,6 +75,7 @@ def run_test(
     # Qwen encodes images into a fixed content size of 256
     with vllm_runner(model,
                      max_model_len=300,
+                     max_num_seqs=5,
                      dtype=dtype,
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,

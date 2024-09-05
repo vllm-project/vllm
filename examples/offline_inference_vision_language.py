@@ -162,7 +162,12 @@ def run_blip2(question):
 # Qwen
 def run_qwen_vl(question):
 
-    llm = LLM(model="Qwen/Qwen-VL", trust_remote_code=True)
+    llm = LLM(
+        model="Qwen/Qwen-VL",
+        trust_remote_code=True,
+        max_num_seqs=5,
+    )
+
     prompt = f"{question}Picture 1: <img></img>\n"
     stop_token_ids = None
     return llm, prompt, stop_token_ids
