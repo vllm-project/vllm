@@ -21,6 +21,10 @@ On the client side, run:
     when using tgi backend, add
         --endpoint /generate_stream
     to the end of the command above.
+
+Use --logprobs <num logprobs> to specify the number of logprobs-per-token
+to return as part of the request (or leave the argument unspecified
+to default to 1 logprob-per-token.
 """
 import argparse
 import asyncio
@@ -319,7 +323,6 @@ async def benchmark(
     tokenizer: PreTrainedTokenizerBase,
     input_requests: List[Tuple[str, int, int]],
     logprobs: Optional[int],
-    prompt_logprobs: Optional[int],
     best_of: int,
     use_beam_search: bool,
     request_rate: float,
@@ -342,7 +345,6 @@ async def benchmark(
         prompt_len=test_prompt_len,
         output_len=test_output_len,
         logprobs=logprobs,
-        prompt_logprobs=prompt_logprobs,
         best_of=best_of,
         use_beam_search=use_beam_search,
     )
@@ -363,7 +365,6 @@ async def benchmark(
             prompt_len=test_prompt_len,
             output_len=test_output_len,
             logprobs=logprobs,
-            prompt_logprobs=prompt_logprobs,
             best_of=best_of,
             use_beam_search=use_beam_search,
         )
@@ -386,7 +387,6 @@ async def benchmark(
             prompt_len=prompt_len,
             output_len=output_len,
             logprobs=logprobs,
-            prompt_logprobs=prompt_logprobs,
             best_of=best_of,
             use_beam_search=use_beam_search,
         )
@@ -405,7 +405,6 @@ async def benchmark(
             prompt_len=test_prompt_len,
             output_len=test_output_len,
             logprobs=logprobs,
-            prompt_logprobs=prompt_logprobs,
             best_of=best_of,
             use_beam_search=use_beam_search,
         )
@@ -591,7 +590,6 @@ def main(args: argparse.Namespace):
             tokenizer=tokenizer,
             input_requests=input_requests,
             logprobs=args.logprobs,
-            prompt_logprobs=args.prompt_logprobs,
             best_of=args.best_of,
             use_beam_search=args.use_beam_search,
             request_rate=args.request_rate,
@@ -738,13 +736,6 @@ if __name__ == "__main__":
         type=int,
         default=None,
         help="Number of logprobs-per-token to return as part of the request.",
-    )
-    parser.add_argument(
-        "--prompt-logprobs",
-        type=int,
-        default=None,
-        help=
-        "Number of prompt-logprobs-per-token to return as part of the request.",
     )
     parser.add_argument(
         "--sonnet-prefix-len",
