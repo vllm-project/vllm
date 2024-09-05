@@ -197,12 +197,12 @@ add_dependencies(default vllm_flash_attn_c)
 message(STATUS "Flash-attention is available at ${flash-attention_SOURCE_DIR}")
 
 # Copy over the flash-attention python files
-set(VLLM_FA_PY_OUTDIR ${CMAKE_CURRENT_SOURCE_DIR}/vllm/vllm_flash_attn)
-file(GLOB VLLM_FA_PY_FILES ${flash-attention_SOURCE_DIR}/vllm_flash_attn/*.py)
-foreach(VLLM_FA_PY_FILE ${VLLM_FA_PY_FILES})
-  get_filename_component(VLLM_FA_PY_FILENAME ${VLLM_FA_PY_FILE} NAME)
-  configure_file(${VLLM_FA_PY_FILE} ${VLLM_FA_PY_OUTDIR}/${VLLM_FA_PY_FILENAME} COPYONLY)
-endforeach()
+install(
+        DIRECTORY ${flash-attention_SOURCE_DIR}/vllm_flash_attn/
+        DESTINATION .
+        COMPONENT vllm_flash_attn_c
+        FILES_MATCHING PATTERN "*.py"
+)
 
 #
 # Define other extension targets
