@@ -266,12 +266,14 @@ class Qwen2VisionAttention(nn.Module):
                                       b=batch_size)
         else:
             from xformers import ops as xops
+            from xformers.ops.fmha.attn_bias import BlockDiagonalMask
 
-            context_layer = xops.memory_efficient_attention_forward(q,
-                                                                    k,
-                                                                    v,
-                                                                    p=0,
-                                                                    scale=None)
+            seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+            attn_bias = BlockDiagonalMask.from_seqlens(q_seqlen=seqlens,
+                                                       kv_seqlen=None)
+
+            context_layer = xops.memory_efficient_attention_forward(
+                q, k, v, attn_bias=attn_bias, p=0, scale=None)
         context_layer = rearrange(context_layer,
                                   "b s h d -> s b (h d)").contiguous()
 
