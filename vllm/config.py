@@ -120,7 +120,7 @@ class ModelConfig:
             this argument will be used to configure the neuron config that 
             can not be gathered from the vllm arguments. 
         config_format: The config format which shall be loaded.
-            Defaults to 'auto' which defaults toh 'hf'.
+            Defaults to 'auto' which defaults to 'hf'.
     """
 
     def __init__(self,
