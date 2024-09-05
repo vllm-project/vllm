@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+MULTI_STEP_ATTENTION_BACKENDS = ["flash-attn", "flashinfer"]
 
 def seq_output_builder():
     return SequenceOutput(
@@ -550,6 +551,28 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
 
     def _advance_step(self, model_input: StatefulModelInput,
                       out: SamplerOutput) -> StatefulModelInput:
+        if self.attn_backend.get_name() not in MULTI_STEP_ATTENTION_BACKENDS:
+            raise ValueError(
+                f"Multi-step not supported for attention backend: "
+                f"{self.attn_backend.get_name()}. Set VLLM_ATTENTION_BACKEND "
+                "to 'flash-attn' or 'flashinfer'.")
+
+        sampled_token_ids = model_input.cached_outputs[-1].sampled_token_ids
+        num_seqs = model_input.num_seqs
+        num_queries = model_input.num_queries
+        frozen_model_input = model_input.frozen_model_input
+        assert frozen_model_input is not None
+
+        self.attn_backend.advance_step(
+            frozen_model_input,
+            sampled_token_ids,
+            self.block_size,
+            num_seqs,
+            num_queries,
+        )
+
+        return
+
         if self.attn_backend.get_name() == "flash-attn":
             return self._advance_step_flashattn(model_input, out)
         elif self.attn_backend.get_name() == "flashinfer":

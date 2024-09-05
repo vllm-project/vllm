@@ -30,7 +30,8 @@ from vllm.utils import (async_tensor_h2d, get_kv_cache_torch_dtype,
                         make_tensor_with_pad)
 
 if TYPE_CHECKING:
-    from vllm.worker.model_runner import ModelInputForGPUBuilder
+    from vllm.worker.model_runner import (ModelInputForGPUBuilder,
+                                          ModelInputForGPUWithSamplingMetadata)
 
 
 class FlashInferBackend(AttentionBackend):
@@ -402,6 +403,48 @@ class FlashInferMetadata(AttentionMetadata):
             return None
 
         return self
+    
+    def advance_step(
+        self,
+        model_input: "ModelInputForGPUWithSamplingMetadata",
+        sampled_token_ids: Optional[torch.Tensor],
+        block_size: int,
+        num_seqs: int,
+        num_queries: int,
+    ):
+        """
+        Update metadata in-place to advance one decode step.
+        """
+
+        assert num_seqs > 0
+        assert num_queries > 0
+        assert model_input.attn_metadata is not None
+        assert sampled_token_ids is not None
+
+        # When using cudagraph, the num_seqs is padded to the next captured
+        # batch sized, but num_queries tracks the actual number of requests in
+        # the batch. For --enforce-eager mode, num_seqs == num_queries
+        if num_seqs != num_queries:
+            assert num_seqs > num_queries
+            assert self.use_cuda_graph
+
+        model_input.input_tokens[:num_queries] = sampled_token_ids.flatten()
+
+        # Update GPU tensors
+        ops.advance_step_flashinfer(
+            num_seqs=num_seqs,
+            num_queries=num_queries,
+            block_size=block_size,
+            input_tokens=model_input.input_tokens,
+            sampled_token_ids=model_input.input_tokens,
+            input_positions=model_input.input_positions,
+            seq_lens=self.seq_lens_tensor,
+            slot_mapping=self.slot_mapping,
+            block_tables=self.block_tables,
+            paged_kv_indices=self.paged_kv_indices,
+            paged_kv_indptr=self.paged_kv_indptr,
+            paged_kv_last_page_len=self.paged_kv_last_page_len,
+            block_table_bound=self.block_table_bound)
 
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
