@@ -85,8 +85,9 @@ if __name__ == "__main__":
     parser = FlexibleArgumentParser(
         description='Demo on using vLLM for offline inference with '
         'vision language models that support multi-image input')
-    parser.add_argument("method",
+    parser.add_argument("--method",
                         type=str,
+                        default="generate",
                         choices=["generate", "chat"],
                         help="The method to run in `vllm.LLM`.")
 
