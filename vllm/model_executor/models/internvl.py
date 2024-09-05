@@ -26,6 +26,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.base import MultiModalInputs
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors
+from vllm.utils import is_list_of
 
 from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
                    get_clip_num_patches)
@@ -95,8 +96,8 @@ def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height,
 
 
 def calculate_num_blocks(orig_width: int, orig_height: int, min_num: int,
-                         max_num: int,
-                         image_size: int) -> Tuple[int, int, int]:
+                         max_num: int, image_size: int,
+                         use_thumbnail: bool) -> Tuple[int, int, int]:
     aspect_ratio = orig_width / orig_height
 
     # calculate the existing image aspect ratio
@@ -114,6 +115,9 @@ def calculate_num_blocks(orig_width: int, orig_height: int, min_num: int,
     target_width = image_size * target_aspect_ratio[0]
     target_height = image_size * target_aspect_ratio[1]
     blocks = target_aspect_ratio[0] * target_aspect_ratio[1]
+    # add thumbnail image if num_blocks > 1
+    if use_thumbnail and blocks > 1:
+        blocks += 1
     return blocks, target_width, target_height
 
 
@@ -197,17 +201,23 @@ def input_processor_for_internvl(ctx: InputContext, llm_inputs: LLMInputs):
                                            downsample_ratio)
 
     image_data = multi_modal_data["image"]
+    min_num = hf_config.min_dynamic_patch
+    max_num = hf_config.max_dynamic_patch
+    use_thumbnail = hf_config.use_thumbnail
     if isinstance(image_data, Image.Image):
         width, height = image_data.size
-        min_num = hf_config.min_dynamic_patch
-        max_num = hf_config.max_dynamic_patch
         num_blocks, _, _ = calculate_num_blocks(width, height, min_num,
-                                                max_num, image_size)
-        # add thumbnail image if num_blocks > 1
-        if hf_config.use_thumbnail and num_blocks > 1:
-            num_blocks += 1
+                                                max_num, image_size,
+                                                use_thumbnail)
         image_feature_size = num_blocks * num_patches
-
+    elif is_list_of(image_data, Image.Image):
+        image_feature_size = 0
+        for image in image_data:
+            width, height = image.size
+            num_blocks, _, _ = calculate_num_blocks(width, height, min_num,
+                                                    max_num, image_size,
+                                                    use_thumbnail)
+            image_feature_size += num_blocks * num_patches
     elif isinstance(image_data, torch.Tensor):
         image_feature_size = image_data.shape[0]
     else:
@@ -245,6 +255,15 @@ def input_mapper_for_internvl(ctx: InputContext, data: object):
                                      use_thumbnail=use_thumbnail)
         # Add an N dimension for number of images per prompt (currently 1).
         data = data.unsqueeze(0)
+    elif is_list_of(data, Image.Image):
+        data = [
+            image_to_pixel_values(img,
+                                  image_size,
+                                  min_num,
+                                  max_num,
+                                  use_thumbnail=use_thumbnail) for img in data
+        ]
+        data = torch.stack(data)
     model_config = ctx.model_config
     tokenizer = cached_get_tokenizer(model_config.tokenizer,
                                      trust_remote_code=True)
