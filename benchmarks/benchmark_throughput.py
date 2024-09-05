@@ -331,11 +331,10 @@ def main(args: argparse.Namespace):
             args.block_size, args.enforce_eager, args.kv_cache_dtype,
             args.quantization_param_path, args.device,
             args.enable_prefix_caching, args.enable_chunked_prefill,
-            args.max_num_seqs,
-            args.max_num_batched_tokens, args.distributed_executor_backend,
-            args.gpu_memory_utilization, args.num_scheduler_steps,
-            args.use_v2_block_manager, args.download_dir, args.load_format,
-            args.disable_async_output_proc
+            args.max_num_seqs, args.max_num_batched_tokens,
+            args.distributed_executor_backend, args.gpu_memory_utilization,
+            args.num_scheduler_steps, args.use_v2_block_manager,
+            args.download_dir, args.load_format, args.disable_async_output_proc
         ]
 
         if args.async_engine:
