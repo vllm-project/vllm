@@ -30,8 +30,8 @@ def test_models(
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs)
 
-    # test that both HF format and consolidated format work
-    load_format = "consolidated" if model.endswith("v0.3") else "auto"
+    # test that both HF format and mistral format work
+    load_format = "mistral" if model.endswith("v0.3") else "auto"
 
     with vllm_runner(model,
                      dtype=dtype,

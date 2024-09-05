@@ -112,7 +112,7 @@ def get_config(
 
 def load_params_config(model, revision) -> PretrainedConfig:
     # This function loads a params.json config which
-    # should be used when loading models in consolidated format
+    # should be used when loading models in mistral format
 
     config_file_name = "params.json"
 

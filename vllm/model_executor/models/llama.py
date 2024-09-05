@@ -375,9 +375,9 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
         "gate_proj": ("gate_up_proj", 0),
         "up_proj": ("gate_up_proj", 1),
     }
-    # Mistral/Llama models can also be loaded with --load-format consolidated
+    # Mistral/Llama models can also be loaded with --load-format mistral
     # from consolidated.safetensors checkpoints
-    consolidated_mapping = {
+    mistral_mapping = {
         "layers": "model.layers",
         "attention": "self_attn",
         "wq": "q_proj",
@@ -491,7 +491,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
         ]
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
-            name, loaded_weight = self.maybe_remap_consolidated(
+            name, loaded_weight = self.maybe_remap_mistral(
                 name, loaded_weight)
 
             if "rotary_emb.inv_freq" in name:
@@ -572,9 +572,9 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
                 raise RuntimeError("Self attention has no KV cache scaling "
                                    "factor attribute!")
 
-    # This function is used to remap the consolidated format as
+    # This function is used to remap the mistral format as
     # used by Mistral and Llama <=2
-    def maybe_remap_consolidated(
+    def maybe_remap_mistral(
             self, name: str,
             loaded_weight: torch.Tensor) -> Tuple[str, torch.Tensor]:
 
@@ -585,7 +585,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
             return w.view(n_heads, attn_in // n_heads // 2, 2,
                           attn_out).transpose(1, 2).reshape(attn_in, attn_out)
 
-        mapping = self.consolidated_mapping
+        mapping = self.mistral_mapping
         modules = name.split(".")
 
         # rotary embeds should be sliced

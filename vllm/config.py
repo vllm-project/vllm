@@ -119,7 +119,7 @@ class ModelConfig:
             override default neuron config that are specific to Neuron devices, 
             this argument will be used to configure the neuron config that 
             can not be gathered from the vllm arguments. 
-        load_params_config: Load the config from consolidated format 
+        load_params_config: Load the config from mistral format 
             (params.json) instead of config.json.
     """
 
@@ -747,7 +747,7 @@ class LoadFormat(str, enum.Enum):
     SHARDED_STATE = "sharded_state"
     GGUF = "gguf"
     BITSANDBYTES = "bitsandbytes"
-    CONSOLIDATED = "consolidated"
+    MISTRAL = "mistral"
 
 
 @dataclass

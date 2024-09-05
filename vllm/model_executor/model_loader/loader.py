@@ -249,7 +249,7 @@ class DefaultModelLoader(BaseModelLoader):
         elif load_format == LoadFormat.SAFETENSORS:
             use_safetensors = True
             allow_patterns = ["*.safetensors"]
-        elif load_format == LoadFormat.CONSOLIDATED:
+        elif load_format == LoadFormat.MISTRAL:
             use_safetensors = True
             allow_patterns = ["consolidated*.safetensors"]
             index_file = "consolidated.safetensors.index.json"
