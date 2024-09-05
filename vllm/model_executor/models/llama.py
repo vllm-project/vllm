@@ -491,8 +491,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
         ]
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
-            name, loaded_weight = self.maybe_remap_mistral(
-                name, loaded_weight)
+            name, loaded_weight = self.maybe_remap_mistral(name, loaded_weight)
 
             if "rotary_emb.inv_freq" in name:
                 continue
