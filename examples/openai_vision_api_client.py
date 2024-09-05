@@ -52,7 +52,7 @@ chat_completion_from_url = client.chat.completions.create(
 )
 
 result = chat_completion_from_url.choices[0].message.content
-print(f"Chat completion output:{result}")
+print("Chat completion output:", result)
 
 
 # Use base64 encoded image in the payload
@@ -122,4 +122,4 @@ chat_completion_from_url = client.chat.completions.create(
 )
 
 result = chat_completion_from_url.choices[0].message.content
-print(f"Chat completion output:{result}")
+print("Chat completion output:", result)
