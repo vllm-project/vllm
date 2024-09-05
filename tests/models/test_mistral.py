@@ -30,13 +30,8 @@ def test_models(
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs)
 
-    # test that both HF format and mistral format work
-    load_format = "mistral" if model.endswith("v0.3") else "auto"
-
-    with vllm_runner(model,
-                     dtype=dtype,
-                     tokenizer_mode="mistral",
-                     load_format=load_format) as vllm_model:
+    with vllm_runner(model, dtype=dtype,
+                     tokenizer_mode="mistral") as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
@@ -60,20 +55,23 @@ def test_mistral_format(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-    with vllm_runner(model,
-                     dtype=dtype,
-                     tokenizer_mode="auto",
-                     load_format="safetensors",
-                     config_format="hf") as hf_format_model:
+    with vllm_runner(
+            model,
+            dtype=dtype,
+            tokenizer_mode="auto",
+            load_format="safetensors",
+            config_format="hf",
+    ) as hf_format_model:
         hf_format_outputs = hf_format_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
-
-    with vllm_runner(model,
-                     dtype=dtype,
-                     tokenizer_mode="mistral",
-                     load_format="mistral",
-                     config_format="mistral") as mistral_format_model:
+    with vllm_runner(
+            model,
+            dtype=dtype,
+            tokenizer_mode="mistral",
+            load_format="mistral",
+            config_format="mistral",
+    ) as mistral_format_model:
         mistral_format_outputs = mistral_format_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 

@@ -57,7 +57,6 @@ class ConfigFormat(str, enum.Enum):
     MISTRAL = "mistral"
 
 
-
 def get_config(
     model: Union[str, Path],
     trust_remote_code: bool,
@@ -76,7 +75,10 @@ def get_config(
         model = Path(model).parent
 
     if config_format == ConfigFormat.AUTO:
-        if file_exists(model, "config.json", revision=revision, token=kwargs.get("token")):
+        if file_exists(model,
+                       "config.json",
+                       revision=revision,
+                       token=kwargs.get("token")):
             config_format = ConfigFormat.HF
         else:
             config_format = ConfigFormat.MISTRAL
