@@ -16,7 +16,8 @@ from vllm.model_executor.layers.typical_acceptance_sampler import (
 from vllm.sequence import (VLLM_INVALID_TOKEN_ID,
                            CompletionSequenceGroupOutput, ExecuteModelRequest,
                            HiddenStates, SequenceGroupMetadata,
-                           get_all_seq_ids, get_all_seq_ids_and_request_ids)
+                           get_all_seq_data_entries,
+                           get_all_seq_ids_and_request_ids)
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
 from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
@@ -29,7 +30,8 @@ from vllm.spec_decode.ngram_worker import NGramWorker
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 from vllm.spec_decode.smaller_tp_proposer_worker import SmallerTpProposerWorker
 from vllm.spec_decode.target_model_runner import TargetModelRunner
-from vllm.spec_decode.util import (Timer, create_sequence_group_output,
+from vllm.spec_decode.util import (Timer, create_logprobs_output,
+                                   create_sequence_group_output,
                                    get_all_num_logprobs,
                                    get_sampled_token_logprobs, nvtx_range,
                                    split_batch_by_proposal_len)
@@ -439,8 +441,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             self, execute_model_req: ExecuteModelRequest,
             sampler_output: SamplerOutput) -> SamplerOutput:
         """
-        Creates and returns a `SamplerOutput` with only the sampled token IDs 
-        being serialized to CPU & populated in `CompletionSequenceGroupOutput`.
+        Creates and returns a `SamplerOutput` with only the token IDs being
+        serialized to CPU and populated in `CompletionSequenceGroupOutput`.
         All other parameters in `CompletionSequenceGroupOutput` related to log 
         probabilities are skipped.
 
@@ -452,19 +454,43 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         Returns:
             SamplerOutput: A new `SamplerOutput` instance containing a list of 
-            `CompletionSequenceGroupOutput` objects with only sampled token
-            IDs populated.
+            `CompletionSequenceGroupOutput` objects with only token IDs
+            populated.
         """
-        seq_ids = get_all_seq_ids(execute_model_req.seq_group_metadata_list)
+        seq_output_prompt_logprobs = [
+            seq.is_prompt and seq.sampling_params.prompt_logprobs is not None
+            and seq.sampling_params.prompt_logprobs > 0
+            for seq in execute_model_req.seq_group_metadata_list
+        ]
         # ignore slots for prompt tokens that are filled with INVALID_TOKEN_ID
         sampled_token_ids_list = (sampler_output.sampled_token_ids[torch.where(
+            # subtracting is faster than testing for equality
             sampler_output.sampled_token_ids - VLLM_INVALID_TOKEN_ID)[0]] \
-            if any(seq.is_prompt
-                for seq in execute_model_req.seq_group_metadata_list) else \
+            if any(seq_output_prompt_logprobs) else \
                 sampler_output.sampled_token_ids).tolist()
+
+        seq_data_entries = get_all_seq_data_entries(
+            execute_model_req.seq_group_metadata_list)
         completion_seq_group_output_list: List[
             CompletionSequenceGroupOutput] = []
-        for index, seq_id in enumerate(seq_ids):
+        for index, ((seq_id, seq_data), needs_prompt_logprobs) in \
+            enumerate(zip(seq_data_entries, seq_output_prompt_logprobs)):
+            if needs_prompt_logprobs:
+                prompt_token_ids = seq_data.get_prompt_token_ids()
+                prompt_logprobs = [
+                    create_logprobs_output(
+                        token_id=p_token_id,
+                        token_id_logprob_rank=-1,
+                        token_id_logprob=0.0,
+                        topk_token_ids=[],
+                        topk_logprobs=[],
+                    )
+                    # no prompt logprobs for the first token
+                    for p_token_id in prompt_token_ids[1:]
+                ]
+            else:
+                prompt_logprobs = None
+
             completion_seq_group_output_list.append(
                 create_sequence_group_output(
                     token_id=sampled_token_ids_list[index][0],
@@ -473,7 +499,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                     seq_id=seq_id,
                     topk_token_ids=[],
                     topk_logprobs=[],
-                ))
+                    prompt_logprobs=prompt_logprobs))
         return SamplerOutput(outputs=completion_seq_group_output_list)
 
     @nvtx_range("spec_decode_worker._run_no_spec")
