@@ -27,9 +27,10 @@ client = OpenAI(
 models = client.models.list()
 model = models.data[0].id
 
+# Single-image input inference
 image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
 
-# Use image url in the payload
+## Use image url in the payload
 chat_completion_from_url = client.chat.completions.create(
     messages=[{
         "role":
@@ -55,7 +56,7 @@ result = chat_completion_from_url.choices[0].message.content
 print("Chat completion output:", result)
 
 
-# Use base64 encoded image in the payload
+## Use base64 encoded image in the payload
 def encode_image_base64_from_url(image_url: str) -> str:
     """Encode an image retrieved from a remote url to base64 format."""
 

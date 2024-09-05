@@ -18,8 +18,7 @@ def run_phi3v(image_urls: List[str]):
         model="microsoft/Phi-3.5-vision-instruct",
         trust_remote_code=True,  # Required to load Phi-3.5-vision
         max_model_len=4096,  # Otherwise, it may not fit in smaller GPUs
-        # Set the value to the maximum number you want to support
-        limit_mm_per_prompt={"image": 2},
+        limit_mm_per_prompt={"image": 2},  # The maximum number to accept
     )
 
     # It's quite tedious to create the prompt with multiple image placeholders

@@ -11,8 +11,8 @@ This document shows you how to run and serve these models using vLLM.
 
     We are continuously improving user & developer experience for VLMs. Please `open an issue on GitHub <https://github.com/vllm-project/vllm/issues/new/choose>`_ if you have any feedback or feature requests.
 
-Offline Batched Inference
--------------------------
+Offline Inference
+-----------------
 
 Single-image input
 ^^^^^^^^^^^^^^^^^^
@@ -25,7 +25,7 @@ The :class:`~vllm.LLM` class can be instantiated in much the same way as languag
 
 .. note::
     We have removed all vision language related CLI args in the ``0.5.1`` release. **This is a breaking change**, so please update your code to follow
-    the above snippet. Specifically, ``image_feature_size`` is no longer required to be specified as we now calculate that internally for each model.
+    the above snippet. Specifically, ``image_feature_size`` can no longer be specified as we now calculate that internally for each model.
 
 To pass an image to the model, note the following in :class:`vllm.inputs.PromptInputs`:
 
@@ -84,7 +84,7 @@ To pass an image to the model, note the following in :class:`vllm.inputs.PromptI
 A code example can be found in `examples/offline_inference_vision_language.py <https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_vision_language.py>`_.
 
 Multi-image input
-^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^
 
 Multi-image input is only supported for a subset of VLMs, as shown :ref:`here <supported_vlms>`.
 
@@ -96,14 +96,15 @@ To enable multiple multi-modal items per text prompt, you have to set ``limit_mm
         model="microsoft/Phi-3.5-vision-instruct",
         trust_remote_code=True,  # Required to load Phi-3.5-vision
         max_model_len=4096,  # Otherwise, it may not fit in smaller GPUs
-        # Set the value to the maximum number you want to support
-        limit_mm_per_prompt={"image": 2},
+        limit_mm_per_prompt={"image": 2},  # The maximum number to accept
     )
 
     # It's quite tedious to create the prompt with multiple image placeholders
     # Let's instead use the chat template that is built into Phi-3.5-vision
     image_url_duck = "https://upload.wikimedia.org/wikipedia/commons/d/da/2015_Kaczka_krzy%C5%BCowka_w_wodzie_%28samiec%29.jpg"
     image_url_lion = "https://upload.wikimedia.org/wikipedia/commons/7/77/002_The_lion_king_Snyggve_in_the_Serengeti_National_Park_Photo_by_Giles_Laurent.jpg"
+
+    # Multi-image input inference
     outputs = llm.chat([{
         "role": "user",
         "content": [
@@ -128,8 +129,11 @@ To enable multiple multi-modal items per text prompt, you have to set ``limit_mm
 
 A code example can be found in `examples/offline_inference_vision_language_multi_image.py <https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_vision_language_multi_image.py>`_.
 
-Online OpenAI Vision API Compatible Inference
-----------------------------------------------
+Online Inference
+----------------
+
+OpenAI Vision API
+^^^^^^^^^^^^^^^^^
 
 You can serve vision language models with vLLM's HTTP server that is compatible with `OpenAI Vision API <https://platform.openai.com/docs/guides/vision>`_.
 
@@ -168,9 +172,9 @@ To consume the server, you can use the OpenAI client like in the example below:
     model = models.data[0].id
     assert model == "microsoft/Phi-3.5-vision-instruct"
 
+    # Single-image input inference
     image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
 
-    # Use image url in the payload
     chat_response = client.chat.completions.create(
         messages=[{
             "role": "user",
@@ -193,6 +197,7 @@ To consume the server, you can use the OpenAI client like in the example below:
     # Multi-image input inference
     image_url_duck = "https://upload.wikimedia.org/wikipedia/commons/d/da/2015_Kaczka_krzy%C5%BCowka_w_wodzie_%28samiec%29.jpg"
     image_url_lion = "https://upload.wikimedia.org/wikipedia/commons/7/77/002_The_lion_king_Snyggve_in_the_Serengeti_National_Park_Photo_by_Giles_Laurent.jpg"
+
     chat_response = client.chat.completions.create(
         messages=[{
             "role": "user",
