@@ -15,7 +15,7 @@ from vllm.platforms import current_platform
 from vllm.tracing import is_otel_available, otel_import_error_traceback
 from vllm.transformers_utils.config import (get_config,
                                             get_hf_image_processor_config,
-                                            get_hf_text_config)
+                                            get_hf_text_config, ConfigFormat)
 from vllm.utils import (STR_NOT_IMPL_ENC_DEC_CUDAGRAPH, GiB_bytes,
                         cuda_device_count_stateless, get_cpu_memory, is_cpu,
                         is_hip, is_neuron, is_openvino, is_xpu,
@@ -119,8 +119,8 @@ class ModelConfig:
             override default neuron config that are specific to Neuron devices, 
             this argument will be used to configure the neuron config that 
             can not be gathered from the vllm arguments. 
-        load_params_config: Load the config from mistral format 
-            (params.json) instead of config.json.
+        config_format: The config format which shall be loaded.
+            Defaults to 'auto' which defaults toh 'hf'.
     """
 
     def __init__(self,
@@ -149,7 +149,7 @@ class ModelConfig:
                  limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
                  use_async_output_proc: bool = True,
                  override_neuron_config: Optional[Dict[str, Any]] = None,
-                 load_params_config: bool = False) -> None:
+                 config_format: ConfigFormat = ConfigFormat.AUTO) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
@@ -177,7 +177,7 @@ class ModelConfig:
 
         self.hf_config = get_config(self.model, trust_remote_code, revision,
                                     code_revision, rope_scaling, rope_theta,
-                                    load_params_config)
+                                    config_format)
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, revision)

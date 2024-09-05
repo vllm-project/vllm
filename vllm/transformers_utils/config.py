@@ -1,9 +1,12 @@
 import contextlib
+import enum
 import json
 from pathlib import Path
+from huggingface_hub import file_exists
 from typing import Any, Dict, Optional, Type, Union
 
 from huggingface_hub import hf_hub_download
+from torch import Value
 from transformers import GenerationConfig, PretrainedConfig
 from transformers.models.auto.image_processing_auto import (
     get_image_processor_config)
@@ -48,6 +51,13 @@ for name, cls in _CONFIG_REGISTRY.items():
         AutoConfig.register(name, cls)
 
 
+class ConfigFormat(str, enum.Enum):
+    AUTO = "auto"
+    HF = "hf"
+    MISTRAL = "mistral"
+
+
+
 def get_config(
     model: Union[str, Path],
     trust_remote_code: bool,
@@ -55,7 +65,7 @@ def get_config(
     code_revision: Optional[str] = None,
     rope_scaling: Optional[dict] = None,
     rope_theta: Optional[float] = None,
-    load_from_params: bool = False,
+    config_format: ConfigFormat = ConfigFormat.AUTO,
     **kwargs,
 ) -> PretrainedConfig:
     # Separate model folder from file path for GGUF models
@@ -65,16 +75,24 @@ def get_config(
         kwargs["gguf_file"] = Path(model).name
         model = Path(model).parent
 
-    try:
-        if load_from_params:
-            config = load_params_config(model, revision)
+    if config_format == ConfigFormat.AUTO:
+        if file_exists(model, "config.json", revision=revision, token=kwargs.get("token")):
+            config_format = ConfigFormat.HF
         else:
+            config_format = ConfigFormat.MISTRAL
+
+    try:
+        if config_format == ConfigFormat.HF:
             config = AutoConfig.from_pretrained(
                 model,
                 trust_remote_code=trust_remote_code,
                 revision=revision,
                 code_revision=code_revision,
                 **kwargs)
+        elif config_format == ConfigFormat.MISTRAL:
+            config = load_params_config(model, revision)
+        else:
+            raise ValueError(f"Unsupported config format: {config_format}")
     except ValueError as e:
         if (not trust_remote_code and
                 "requires you to execute the configuration file" in str(e)):
