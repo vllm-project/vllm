@@ -142,6 +142,9 @@ def _bgmv_shrink(
     return
 
 
-bgmv_shrink = torch.library.custom_op("lora::bgmv_shrink",
-                                      _bgmv_shrink,
-                                      mutates_args=["output_tensor"])
+try:
+    bgmv_shrink = torch.library.custom_op("lora::bgmv_shrink",
+                                          _bgmv_shrink,
+                                          mutates_args=["output_tensor"])
+except AttributeError:
+    bgmv_shrink = _bgmv_shrink
