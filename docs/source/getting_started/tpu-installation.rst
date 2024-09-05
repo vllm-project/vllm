@@ -8,7 +8,7 @@ vLLM supports Google Cloud TPUs using PyTorch XLA.
 Requirements
 ------------
 
-* Google Cloud TPU VM (single host)
+* Google Cloud TPU VM (single & multi host)
 * TPU versions: v5e, v5p, v4
 * Python: 3.10
 
@@ -56,9 +56,10 @@ First, install the dependencies:
     $ pip uninstall torch torch-xla -y
 
     $ # Install PyTorch and PyTorch XLA.
-    $ export DATE="+20240808"
-    $ pip install https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch-nightly${DATE}-cp310-cp310-linux_x86_64.whl
-    $ pip install https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-nightly${DATE}-cp310-cp310-linux_x86_64.whl
+    $ export DATE="20240828"
+    $ export TORCH_VERSION="2.5.0"
+    $ pip install https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch-${TORCH_VERSION}.dev${DATE}-cp310-cp310-linux_x86_64.whl
+    $ pip install https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-${TORCH_VERSION}.dev${DATE}-cp310-cp310-linux_x86_64.whl
 
     $ # Install JAX and Pallas.
     $ pip install torch_xla[tpu] -f https://storage.googleapis.com/libtpu-releases/index.html

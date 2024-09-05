@@ -133,6 +133,21 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("gptq_marlin_24_gemm", &gptq_marlin_24_gemm);
   ops.impl("gptq_marlin_24_gemm", torch::kCUDA, &gptq_marlin_24_gemm);
 
+  // Machete (Dense) Optimized Mixed Precision GEMM for Hopper.
+  ops.def("machete_supported_schedules", &machete::supported_schedules);
+  ops.def(
+      "machete_gemm(Tensor A, Tensor B,"
+      "             __torch__.torch.classes._core_C.ScalarType btype,"
+      "             Tensor? scales, Tensor? zeros, int? group_size,"
+      "             Tensor? C, float? alpha, float? beta, str? schedule)"
+      "-> Tensor");
+  ops.impl("machete_gemm", torch::kCUDA, &machete::gemm);
+  ops.def(
+      "machete_prepack_B(Tensor B,"
+      "                  __torch__.torch.classes._core_C.ScalarType btype)"
+      "-> Tensor");
+  ops.impl("machete_prepack_B", torch::kCUDA, &machete::prepack_B);
+
   // gptq_marlin Optimized Quantized GEMM for GPTQ.
   ops.def("gptq_marlin_gemm", &gptq_marlin_gemm);
   ops.impl("gptq_marlin_gemm", torch::kCUDA, &gptq_marlin_gemm);
@@ -187,6 +202,31 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("cutlass_scaled_mm_supports_fp8", &cutlass_scaled_mm_supports_fp8);
   ops.impl("cutlass_scaled_mm_supports_fp8", torch::kCUDA,
            &cutlass_scaled_mm_supports_fp8);
+  // Mamba selective scan kernel
+  ops.def(
+      "selective_scan_fwd(Tensor! u, Tensor! delta,"
+      "Tensor! A, Tensor! B, Tensor! C,"
+      "Tensor? D_, Tensor? z_, Tensor? delta_bias_,"
+      "bool delta_softplus,"
+      "Tensor? index_, Tensor? x) -> Tensor[]");
+  ops.impl("selective_scan_fwd", torch::kCUDA, &selective_scan_fwd);
+
+  ops.def(
+      "causal_conv1d_update(Tensor! x,"
+      "Tensor! conv_state,"
+      "Tensor! weight,"
+      "Tensor? bias_,"
+      "bool silu_activation) -> Tensor");
+  ops.impl("causal_conv1d_update", torch::kCUDA, &causal_conv1d_update);
+
+  ops.def(
+      "causal_conv1d_fwd(Tensor! x, Tensor! weight,"
+      "Tensor? bias_,"
+      "Tensor? seq_idx_,"
+      "Tensor? initial_states_,"
+      "Tensor? final_states_out_,"
+      "bool silu_activation) -> Tensor");
+  ops.impl("causal_conv1d_fwd", torch::kCUDA, &causal_conv1d_fwd);
 #endif
 
   // Quantized GEMM for GPTQ.

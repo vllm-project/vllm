@@ -13,7 +13,6 @@ import threading
 import uuid
 import warnings
 from asyncio import FIRST_COMPLETED, ensure_future
-from collections import defaultdict
 from functools import lru_cache, partial, wraps
 from platform import uname
 from typing import (Any, AsyncGenerator, Awaitable, Callable, Dict, Generic,
@@ -26,10 +25,11 @@ import numpy.typing as npt
 import psutil
 import torch
 import torch.types
+import yaml
+from packaging.version import Version
 from typing_extensions import ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
-from vllm import _custom_ops as ops
 from vllm.logger import enable_trace_function_call, init_logger
 
 logger = init_logger(__name__)
@@ -114,6 +114,9 @@ STR_ROCM_FLASH_ATTN_VAL: str = "ROCM_FLASH"
 STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
 STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
+
+GiB_bytes = 1 << 30
+"""The number of bytes in one gibibyte (GiB)."""
 
 STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.half,
@@ -331,18 +334,12 @@ def is_neuron() -> bool:
 
 
 @lru_cache(maxsize=None)
-def is_tpu() -> bool:
-    try:
-        import libtpu
-    except ImportError:
-        libtpu = None
-    return libtpu is not None
-
-
-@lru_cache(maxsize=None)
 def is_xpu() -> bool:
-    from importlib.metadata import version
-    is_xpu_flag = "xpu" in version("vllm")
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        is_xpu_flag = "xpu" in version("vllm")
+    except PackageNotFoundError:
+        return False
     # vllm is not build with xpu
     if not is_xpu_flag:
         return False
@@ -362,6 +359,7 @@ def is_xpu() -> bool:
 @lru_cache(maxsize=None)
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
+    from vllm import _custom_ops as ops
     max_shared_mem = (
         ops.get_max_shared_memory_per_block_device_attribute(gpu))
     # value 0 will cause MAX_SEQ_LEN become negative and test_attention.py
@@ -549,6 +547,16 @@ def get_open_port() -> int:
         with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
             s.bind(("", 0))
             return s.getsockname()[1]
+
+
+def find_process_using_port(port: int) -> Optional[psutil.Process]:
+    for conn in psutil.net_connections():
+        if conn.laddr.port == port:
+            try:
+                return psutil.Process(conn.pid)
+            except psutil.NoSuchProcess:
+                return None
+    return None
 
 
 def update_environment_variables(envs: Dict[str, str]):
@@ -763,16 +771,6 @@ class CudaMemoryProfiler:
         gc.collect()
 
 
-def str_to_int_tuple(s: str) -> Tuple[int, ...]:
-    """Convert a string to a tuple of integers."""
-    try:
-        return tuple(map(int, s.split(",")))
-    except ValueError as e:
-        raise ValueError(
-            "String must be a series of integers separated by commas "
-            f"(e.g., 1, 2, 3). Given input: {s}") from e
-
-
 def make_ndarray_with_pad(
     x: List[List[T]],
     pad: T,
@@ -864,23 +862,6 @@ def is_list_of(
         return all(isinstance(v, typ) for v in value)
 
     assert_never(check)
-
-
-def merge_dicts(dict1: Dict[K, List[T]],
-                dict2: Dict[K, List[T]]) -> Dict[K, List[T]]:
-    """Merge 2 dicts that have key -> List of items.
-
-    When a key conflicts, the values in dict1 is prioritized.
-    """
-    merged_dict: Dict[K, List[T]] = defaultdict(list)
-
-    for key, value in dict1.items():
-        merged_dict[key].extend(value)
-
-    for key, value in dict2.items():
-        merged_dict[key].extend(value)
-
-    return dict(merged_dict)
 
 
 JSONTree = Union[Dict[str, "JSONTree[T]"], List["JSONTree[T]"],
@@ -1095,9 +1076,9 @@ def cuda_device_count_stateless() -> int:
 
 
 #From: https://stackoverflow.com/a/4104188/2749989
-def run_once(f):
+def run_once(f: Callable[P, None]) -> Callable[P, None]:
 
-    def wrapper(*args, **kwargs) -> Any:
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
         if not wrapper.has_run:  # type: ignore[attr-defined]
             wrapper.has_run = True  # type: ignore[attr-defined]
             return f(*args, **kwargs)
@@ -1112,6 +1093,9 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
     def parse_args(self, args=None, namespace=None):
         if args is None:
             args = sys.argv[1:]
+
+        if '--config' in args:
+            args = FlexibleArgumentParser._pull_args_from_config(args)
 
         # Convert underscores to dashes and vice versa in argument names
         processed_args = []
@@ -1129,9 +1113,114 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
 
         return super().parse_args(processed_args, namespace)
 
+    @staticmethod
+    def _pull_args_from_config(args: List[str]) -> List[str]:
+        """Method to pull arguments specified in the config file
+        into the command-line args variable.
+        
+        The arguments in config file will be inserted between 
+        the argument list.
+        
+        example:
+        ```yaml
+            port: 12323
+            tensor-parallel-size: 4
+        ```
+        ```python
+        $: vllm {serve,chat,complete} "facebook/opt-12B" \
+            --config config.yaml -tp 2
+        $: args = [
+            "serve,chat,complete",
+            "facebook/opt-12B", 
+            '--config', 'config.yaml', 
+            '-tp', '2'
+        ]
+        $: args = [
+            "serve,chat,complete",
+            "facebook/opt-12B", 
+            '--port', '12323', 
+            '--tensor-parallel-size', '4', 
+            '-tp', '2'
+            ]
+        ```
+
+        Please note how the config args are inserted after the sub command.
+        this way the order of priorities is maintained when these are args 
+        parsed by super().
+        """
+        assert args.count(
+            '--config') <= 1, "More than one config file specified!"
+
+        index = args.index('--config')
+        if index == len(args) - 1:
+            raise ValueError("No config file specified! \
+                             Please check your command-line arguments.")
+
+        file_path = args[index + 1]
+
+        config_args = FlexibleArgumentParser._load_config_file(file_path)
+
+        # 0th index is for {serve,chat,complete}
+        # followed by config args
+        # followed by rest of cli args.
+        # maintaining this order will enforce the precedence
+        # of cli > config > defaults
+        args = [args[0]] + config_args + args[1:index] + args[index + 2:]
+
+        return args
+
+    @staticmethod
+    def _load_config_file(file_path: str) -> List[str]:
+        """Loads a yaml file and returns the key value pairs as a 
+        flattened list with argparse like pattern
+        ```yaml
+            port: 12323
+            tensor-parallel-size: 4
+        ```
+        returns:
+            processed_args: list[str] = [
+                '--port': '12323',
+                '--tensor-parallel-size': '4'
+            ]
+        
+        """
+
+        extension: str = file_path.split('.')[-1]
+        if extension not in ('yaml', 'yml'):
+            raise ValueError(
+                "Config file must be of a yaml/yml type.\
+                              %s supplied", extension)
+
+        # only expecting a flat dictionary of atomic types
+        processed_args: List[str] = []
+
+        config: Dict[str, Union[int, str]] = {}
+        try:
+            with open(file_path, 'r') as config_file:
+                config = yaml.safe_load(config_file)
+        except Exception as ex:
+            logger.error(
+                "Unable to read the config file at %s. \
+                Make sure path is correct", file_path)
+            raise ex
+
+        for key, value in config.items():
+            processed_args.append('--' + key)
+            processed_args.append(str(value))
+
+        return processed_args
+
 
 async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
                               **kwargs):
     """Utility function to run async task in a lock"""
     async with lock:
         return await task(*args, **kwargs)
+
+
+# Using dynamo with vLLM doesn't really work well with PyTorch versions < 2.4.0.
+# In particular, the FakeScalarType is not supported for earlier versions of
+# PyTorch which breaks dynamo for any ops registered using ScalarType.
+def supports_dynamo() -> bool:
+    base_torch_version = Version(Version(torch.__version__).base_version)
+    return base_torch_version >= Version("2.4.0")

@@ -1,6 +1,8 @@
 import time
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional
+from typing import Sequence as GenericSequence
+from typing import Union
 
 from vllm.lora.request import LoRARequest
 from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
@@ -28,7 +30,7 @@ class CompletionOutput:
 
     index: int
     text: str
-    token_ids: Tuple[int, ...]
+    token_ids: GenericSequence[int]
     cumulative_logprob: Optional[float]
     logprobs: Optional[SampleLogprobs]
     finish_reason: Optional[str] = None
@@ -139,7 +141,7 @@ class RequestOutput:
             CompletionOutput(
                 seqs.index(seq),
                 seq.get_output_text_to_return(text_buffer_length),
-                seq.data._output_token_ids,  # type: ignore
+                seq.data._output_token_ids,
                 seq.get_cumulative_logprob() if include_logprobs else None,
                 seq.output_logprobs if include_logprobs else None,
                 SequenceStatus.get_finished_reason(seq.status),

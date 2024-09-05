@@ -1,8 +1,10 @@
 import contextlib
 from pathlib import Path
-from typing import Dict, Optional, Type, Union
+from typing import Any, Dict, Optional, Type, Union
 
 from transformers import GenerationConfig, PretrainedConfig
+from transformers.models.auto.image_processing_auto import (
+    get_image_processor_config)
 from transformers.models.auto.modeling_auto import (
     MODEL_FOR_CAUSAL_LM_MAPPING_NAMES)
 
@@ -11,10 +13,12 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
                                              JAISConfig, MLPSpeculatorConfig,
                                              MPTConfig, RWConfig, RWKV5Config,
+                                             EAGLEConfig, ExaoneConfig,
                                              InternVLChatConfig, JAISConfig,
                                              MedusaConfig, MLPSpeculatorConfig,
                                              MPTConfig, NemotronConfig,
-                                             RWConfig)
+                                             RWConfig, UltravoxConfig)
+from vllm.transformers_utils.utils import check_gguf_file
 
 if VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
@@ -33,8 +37,11 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "mlp_speculator": MLPSpeculatorConfig,
     "rwkv5": RWKV5Config,
     "medusa": MedusaConfig,
+    "eagle": EAGLEConfig,
+    "exaone": ExaoneConfig,
     "internvl_chat": InternVLChatConfig,
     "nemotron": NemotronConfig,
+    "ultravox": UltravoxConfig,
 }
 
 for name, cls in _CONFIG_REGISTRY.items():
@@ -53,7 +60,7 @@ def get_config(
 ) -> PretrainedConfig:
 
     # Separate model folder from file path for GGUF models
-    is_gguf = Path(model).is_file() and Path(model).suffix == ".gguf"
+    is_gguf = check_gguf_file(model)
     if is_gguf:
         kwargs["gguf_file"] = Path(model).name
         model = Path(model).parent
@@ -98,6 +105,20 @@ def get_config(
             config.update({key: value})
 
     return config
+
+
+def get_hf_image_processor_config(
+    model: Union[str, Path],
+    revision: Optional[str] = None,
+    **kwargs,
+) -> Dict[str, Any]:
+    # ModelScope does not provide an interface for image_processor
+    if VLLM_USE_MODELSCOPE:
+        return dict()
+    # Separate model folder from file path for GGUF models
+    if check_gguf_file(model):
+        model = Path(model).parent
+    return get_image_processor_config(model, revision=revision, **kwargs)
 
 
 def get_hf_text_config(config: PretrainedConfig):

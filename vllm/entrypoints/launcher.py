@@ -10,6 +10,7 @@ from vllm import envs
 from vllm.engine.async_llm_engine import AsyncEngineDeadError
 from vllm.engine.protocol import AsyncEngineClient
 from vllm.logger import init_logger
+from vllm.utils import find_process_using_port
 
 logger = init_logger(__name__)
 
@@ -25,6 +26,15 @@ async def serve_http(app: FastAPI, engine: AsyncEngineClient,
             continue
 
         logger.info("Route: %s, Methods: %s", path, ', '.join(methods))
+
+    # Set concurrency limits in uvicorn if running in multiprocessing mode
+    # since zmq has maximum socket limit of zmq.constants.SOCKET_LIMIT (65536).
+    if engine.limit_concurrency is not None:
+        logger.info(
+            "Launching Uvicorn with --limit_concurrency %s. To avoid this "
+            "limit at the expense of performance run with "
+            "--disable-frontend-multiprocessing", engine.limit_concurrency)
+        uvicorn_kwargs["limit_concurrency"] = engine.limit_concurrency
 
     config = uvicorn.Config(app, **uvicorn_kwargs)
     server = uvicorn.Server(config)
@@ -48,6 +58,12 @@ async def serve_http(app: FastAPI, engine: AsyncEngineClient,
         await server_task
         return dummy_shutdown()
     except asyncio.CancelledError:
+        port = uvicorn_kwargs["port"]
+        process = find_process_using_port(port)
+        if process is not None:
+            logger.debug(
+                "port %s is used by process %s launched with command:\n%s",
+                port, process, " ".join(process.cmdline()))
         logger.info("Gracefully stopping http server")
         return server.shutdown()
 
