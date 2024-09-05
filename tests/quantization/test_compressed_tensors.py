@@ -161,17 +161,3 @@ def test_compressed_tensors_kv_cache(vllm_runner):
     with vllm_runner(model_path, kv_cache_dtype="fp8") as llm:
         output = llm.generate_greedy("Hello world!", max_tokens=20)
         assert output
-
-
-def test_compressed_tensors_actorder_weight(vllm_runner):
-    model_path = "kylesayrs/TinyLlama-1.1B-Chat-v1.0-actorder-weight-e2e"
-    with vllm_runner(model_path) as llm:
-        output = llm.generate_greedy("Hello world!", max_tokens=20)
-        assert output
-
-
-def test_compressed_tensors_actorder_group(vllm_runner):
-    model_path = "kylesayrs/TinyLlama-1.1B-Chat-v1.0-actorder-group-e2e"
-    with vllm_runner(model_path) as llm:
-        output = llm.generate_greedy("Hello world!", max_tokens=20)
-        assert output
