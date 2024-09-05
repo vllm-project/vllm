@@ -99,29 +99,23 @@ To enable multiple multi-modal items per text prompt, you have to set ``limit_mm
         limit_mm_per_prompt={"image": 2},  # The maximum number to accept
     )
 
-    # It's quite tedious to create the prompt with multiple image placeholders
-    # Let's instead use the chat template that is built into Phi-3.5-vision
-    image_url_duck = "https://upload.wikimedia.org/wikipedia/commons/d/da/2015_Kaczka_krzy%C5%BCowka_w_wodzie_%28samiec%29.jpg"
-    image_url_lion = "https://upload.wikimedia.org/wikipedia/commons/7/77/002_The_lion_king_Snyggve_in_the_Serengeti_National_Park_Photo_by_Giles_Laurent.jpg"
+Instead of passing in a single image, you can pass in a list of images.
 
-    # Multi-image input inference
-    outputs = llm.chat([{
-        "role": "user",
-        "content": [
-            {
-                "type": "text",
-                "text": "What are the animals in these images?"
-            },
-            {
-                "type": "image_url",
-                "image_url": {"url": image_url_duck},
-            },
-            {
-                "type": "image_url",
-                "image_url": {"url": image_url_lion},
-            },
-        ],
-    }])
+.. code-block:: python
+
+    # Refer to the HuggingFace repo for the correct format to use
+    prompt = "<|user|>\n<image_1>\n<image_2>\nWhat is the content of each image?<|end|>\n<|assistant|>\n"
+
+    # Load the images using PIL.Image
+    image1 = PIL.Image.open(...)
+    image2 = PIL.Image.open(...)
+
+    outputs = llm.generate({
+        "prompt": prompt,
+        "multi_modal_data": {
+            "image": [image1, image2]
+        },
+    })
 
     for o in outputs:
         generated_text = o.outputs[0].text
