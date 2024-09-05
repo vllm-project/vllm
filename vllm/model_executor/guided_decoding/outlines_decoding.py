@@ -8,8 +8,9 @@ from typing import Tuple, Union
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              CompletionRequest)
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionNamedToolChoiceParam, ChatCompletionRequest,
+    CompletionRequest)
 from vllm.model_executor.guided_decoding.guided_fields import (
     GuidedDecodingRequest)
 from vllm.model_executor.guided_decoding.outlines_logits_processors import (
@@ -101,16 +102,30 @@ def _get_guide_and_mode(
     request: Union[CompletionRequest, ChatCompletionRequest,
                    GuidedDecodingRequest]
 ) -> Union[Tuple[str, GuidedDecodingMode], Tuple[None, None]]:
+    # if the request is a chat completion request, AND the tool choice is a
+    # named tool choice, do guided decoding
+    #   using that tool as the JSON schema
+    if isinstance(request, ChatCompletionRequest) and isinstance(
+            request.tool_choice, ChatCompletionNamedToolChoiceParam):
+        # Guided generation for tools/functions parameters
+        if request.tool_choice.type == "function":
+            for tool in request.tools:
+                if (tool.type == "function" and tool.function.name
+                        == request.tool_choice.function.name):
+                    json = json_dumps(tool.function.parameters, sort_keys=True)
+                    return json, GuidedDecodingMode.JSON
+        return None, None
 
-    if request.guided_json:
-        json = request.guided_json
-        if isinstance(json, dict):
+    elif request.guided_json:
+        if isinstance(request.guided_json, dict):
             # turn dict into hashable string
-            json = json_dumps(json)
-        elif isinstance(json, BaseModel):
+            json = json_dumps(request.guided_json)
+        elif isinstance(request.guided_json, BaseModel):
             # use pydantic signature so that different model classes
             # with the same fields will get hashed the same
-            json = str(json.__signature__)
+            json = str(request.guided_json.__signature__)
+        else:
+            json = request.guided_json
         return json, GuidedDecodingMode.JSON
     elif request.guided_regex:
         return request.guided_regex, GuidedDecodingMode.REGEX

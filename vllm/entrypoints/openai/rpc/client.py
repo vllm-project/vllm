@@ -7,6 +7,7 @@ from uuid import uuid4
 import cloudpickle
 import zmq
 import zmq.asyncio
+from zmq import Frame  # type: ignore[attr-defined]
 from zmq.asyncio import Socket
 
 from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
@@ -214,6 +215,7 @@ class AsyncEngineRPCClient:
 
             # Await the data from the Server.
             frame = await socket.recv(copy=False)
+            assert isinstance(frame, Frame)
             data = pickle.loads(frame.buffer)
 
         if isinstance(data, Exception):
@@ -247,6 +249,7 @@ class AsyncEngineRPCClient:
                                    f"{self._data_timeout} ms")
 
             frame = await socket.recv(copy=False)
+            assert isinstance(frame, Frame)
             return pickle.loads(frame.buffer)
 
         # Make a new socket connection.
@@ -395,6 +398,7 @@ class AsyncEngineRPCClient:
                 # Stream back the results from the RPC Server.
                 while not finished:
                     message = await socket.recv(copy=False)
+                    assert isinstance(message, Frame)
                     request_output = pickle.loads(message.buffer)
 
                     if isinstance(request_output, Exception):
