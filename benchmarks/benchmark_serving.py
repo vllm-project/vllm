@@ -21,10 +21,6 @@ On the client side, run:
     when using tgi backend, add
         --endpoint /generate_stream
     to the end of the command above.
-
-Use --logprobs <num logprobs> to specify the number of logprobs-per-token
-to return as part of the request (or leave the argument unspecified
-to default to 1 logprob-per-token.
 """
 import argparse
 import asyncio
@@ -735,7 +731,8 @@ if __name__ == "__main__":
         "--logprobs",
         type=int,
         default=None,
-        help="Number of logprobs-per-token to return as part of the request.",
+        help=("Number of logprobs-per-token to return as part of the request "
+              "(default 1)"),
     )
     parser.add_argument(
         "--sonnet-prefix-len",
