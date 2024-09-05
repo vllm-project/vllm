@@ -113,7 +113,7 @@ Dynamically serving LoRA Adapters
 ---------------------------------
 
 In addition to serving LoRA adapters at server startup, the vLLM server now supports dynamically loading and unloading
-LoRA adapters at runtime through dedicated API endpoints.This feature can be particularly useful when the flexibility
+LoRA adapters at runtime through dedicated API endpoints. This feature can be particularly useful when the flexibility
 to change models on-the-fly is needed.
 
 Note: Enabling this feature in production environments is risky as user may participate model adapter management.
