@@ -129,16 +129,16 @@ def marlin_make_workspace(output_size_per_partition: int,
                        requires_grad=False)
 
 
-def marlin_is_k_full(has_g_idx: bool, is_row_parallel: bool) -> bool:
-    return (not has_g_idx) or (not is_row_parallel)
+def marlin_is_k_full(act_order: bool, is_row_parallel: bool) -> bool:
+    return (not act_order) or (act_order and not is_row_parallel)
 
 
-def marlin_repeat_scales_on_all_ranks(has_g_idx: bool, group_size: int,
+def marlin_repeat_scales_on_all_ranks(act_order: bool, group_size: int,
                                       is_row_parallel: bool) -> bool:
-    # Need to repeat scales on every rank if actorder or
+    # Need to repeat scales on every rank if act_ordering or
     # channelwise and RowParallelLinear
     is_channelwise = group_size == -1
-    return has_g_idx or (is_channelwise and is_row_parallel)
+    return act_order or (is_channelwise and is_row_parallel)
 
 
 def marlin_make_empty_g_idx(device: torch.device) -> torch.Tensor:
