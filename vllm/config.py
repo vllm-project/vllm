@@ -1,8 +1,8 @@
 import enum
 import json
 from dataclasses import dataclass, field, fields
-from typing import (TYPE_CHECKING, ClassVar, List, Mapping, Optional, Tuple,
-                    Type, Union)
+from typing import (TYPE_CHECKING, Any, ClassVar, Dict, List, Mapping,
+                    Optional, Tuple, Type, Union)
 
 import torch
 from transformers import PretrainedConfig
@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
+_MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 4096
 
 _PP_SUPPORTED_MODELS = [
     "AquilaModel",
@@ -114,35 +115,39 @@ class ModelConfig:
             the model name will be the same as `model`.
         limit_mm_per_prompt: Maximum number of data instances per modality 
             per prompt. Only applicable for multimodal models.
+        override_neuron_config: Initialize non default neuron config or 
+            override default neuron config that are specific to Neuron devices, 
+            this argument will be used to configure the neuron config that 
+            can not be gathered from the vllm arguments. 
     """
 
     def __init__(
-        self,
-        model: str,
-        tokenizer: str,
-        tokenizer_mode: str,
-        trust_remote_code: bool,
-        dtype: Union[str, torch.dtype],
-        seed: int,
-        revision: Optional[str] = None,
-        code_revision: Optional[str] = None,
-        rope_scaling: Optional[dict] = None,
-        rope_theta: Optional[float] = None,
-        tokenizer_revision: Optional[str] = None,
-        max_model_len: Optional[int] = None,
-        spec_target_max_model_len: Optional[int] = None,
-        quantization: Optional[str] = None,
-        quantization_param_path: Optional[str] = None,
-        enforce_eager: Optional[bool] = None,
-        max_context_len_to_capture: Optional[int] = None,
-        max_seq_len_to_capture: Optional[int] = None,
-        max_logprobs: int = 20,
-        disable_sliding_window: bool = False,
-        skip_tokenizer_init: bool = False,
-        served_model_name: Optional[Union[str, List[str]]] = None,
-        limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
-        use_async_output_proc: bool = True,
-    ) -> None:
+            self,
+            model: str,
+            tokenizer: str,
+            tokenizer_mode: str,
+            trust_remote_code: bool,
+            dtype: Union[str, torch.dtype],
+            seed: int,
+            revision: Optional[str] = None,
+            code_revision: Optional[str] = None,
+            rope_scaling: Optional[dict] = None,
+            rope_theta: Optional[float] = None,
+            tokenizer_revision: Optional[str] = None,
+            max_model_len: Optional[int] = None,
+            spec_target_max_model_len: Optional[int] = None,
+            quantization: Optional[str] = None,
+            quantization_param_path: Optional[str] = None,
+            enforce_eager: Optional[bool] = None,
+            max_context_len_to_capture: Optional[int] = None,
+            max_seq_len_to_capture: Optional[int] = None,
+            max_logprobs: int = 20,
+            disable_sliding_window: bool = False,
+            skip_tokenizer_init: bool = False,
+            served_model_name: Optional[Union[str, List[str]]] = None,
+            limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
+            use_async_output_proc: bool = True,
+            override_neuron_config: Optional[Dict[str, Any]] = None) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
@@ -226,6 +231,9 @@ class ModelConfig:
             limit_mm_per_prompt)
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
+
+        self.override_neuron_config = override_neuron_config if is_neuron(
+        ) else None
         self._verify_embedding_mode()
         self._verify_quantization()
         self._verify_cuda_graph()
@@ -267,13 +275,14 @@ class ModelConfig:
 
     def _verify_quantization(self) -> None:
         supported_quantization = [*QUANTIZATION_METHODS]
-        rocm_supported_quantization = ["gptq", "squeezellm", "fp8"]
+        rocm_supported_quantization = ["awq", "gptq", "squeezellm", "fp8"]
         optimized_quantization_methods = [
             "fp8", "marlin", "gptq_marlin_24", "gptq_marlin", "awq_marlin",
             "fbgemm_fp8", "compressed_tensors", "compressed-tensors",
             "experts_int8"
         ]
         tpu_supported_quantization = ["tpu_int8"]
+        neuron_supported_quantization = ["neuron_quant"]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
 
@@ -322,6 +331,17 @@ class ModelConfig:
                     "%s quantization is not fully "
                     "optimized yet. The speed can be slower than "
                     "non-quantized models.", self.quantization)
+            if (self.quantization == "awq" and is_hip()
+                    and not envs.VLLM_USE_TRITON_AWQ):
+                logger.warning(
+                    "Using AWQ quantization with ROCm, but VLLM_USE_TRITON_AWQ"
+                    " is not set, enabling VLLM_USE_TRITON_AWQ.")
+                envs.VLLM_USE_TRITON_AWQ = True
+            if is_neuron(
+            ) and self.quantization not in neuron_supported_quantization:
+                raise ValueError(
+                    f"{self.quantization} quantization is currently not "
+                    f"supported in Neuron Backend.")
 
     def _verify_cuda_graph(self) -> None:
         if self.max_seq_len_to_capture is None:
@@ -341,10 +361,10 @@ class ModelConfig:
             self.use_async_output_proc = False
             return
 
-        if device_config.device_type != "cuda":
+        if device_config.device_type not in ("cuda", "tpu"):
             logger.warning(
-                "Async output processing is only supported for CUDA."
-                " Disabling it for other platforms.")
+                "Async output processing is only supported for CUDA or TPU. "
+                "Disabling it for other platforms.")
             self.use_async_output_proc = False
             return
 
@@ -399,6 +419,8 @@ class ModelConfig:
             raise ValueError(
                 "BitAndBytes quantization with TP or PP is not supported yet.")
 
+        # Remove the constraint after the bitsandbytes issue is fixed:
+        # https://github.com/bitsandbytes-foundation/bitsandbytes/issues/1308
         if self.quantization == "bitsandbytes" and self.enforce_eager is False:
             logger.warning("CUDA graph is not supported on BitAndBytes yet, "
                            "fallback to the eager mode.")
@@ -562,6 +584,10 @@ class ModelConfig:
     def is_embedding_model(self) -> bool:
         """Extract the embedding model flag."""
         return self.embedding_mode
+
+    @property
+    def is_multimodal_model(self) -> bool:
+        return self.multimodal_config is not None
 
 
 class CacheConfig:
@@ -939,25 +965,36 @@ class SchedulerConfig:
                  num_lookahead_slots: int = 0,
                  delay_factor: float = 0.0,
                  enable_chunked_prefill: bool = False,
-                 embedding_mode: Optional[bool] = False,
+                 embedding_mode: bool = False,
+                 is_multimodal_model: bool = False,
                  preemption_mode: Optional[str] = None,
                  num_scheduler_steps: int = 1,
                  send_delta_data: bool = False) -> None:
-        if max_num_batched_tokens is not None:
-            self.max_num_batched_tokens = max_num_batched_tokens
-        else:
+        if max_num_batched_tokens is None:
             if enable_chunked_prefill:
                 # It is the values that have the best balance between ITL
                 # and TTFT on A100. Note it is not optimized for throughput.
-                self.max_num_batched_tokens = 512
-            elif embedding_mode:
-                # For embedding, choose specific value for higher throughput
-                self.max_num_batched_tokens = max(
-                    max_model_len, _EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS)
+                max_num_batched_tokens = 512
             else:
                 # If max_model_len is too short, use 2048 as the default value
                 # for higher throughput.
-                self.max_num_batched_tokens = max(max_model_len, 2048)
+                max_num_batched_tokens = max(max_model_len, 2048)
+
+            if embedding_mode:
+                # For embedding, choose specific value for higher throughput
+                max_num_batched_tokens = max(
+                    max_num_batched_tokens,
+                    _EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS,
+                )
+            if is_multimodal_model:
+                # The value needs to be at least the number of multimodal tokens
+                max_num_batched_tokens = max(
+                    max_num_batched_tokens,
+                    _MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
+                )
+
+        self.max_num_batched_tokens = max_num_batched_tokens
+
         if enable_chunked_prefill:
             logger.info(
                 "Chunked prefill is enabled with max_num_batched_tokens=%d.",
