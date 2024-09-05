@@ -327,8 +327,8 @@ def main(args: argparse.Namespace):
         run_args = [
             requests, args.model, args.tokenizer, args.quantization,
             args.tensor_parallel_size, args.seed, args.n, args.use_beam_search,
-            args.trust_remote_code, args.dtype, args.max_model_len, args.block_size,
-            args.enforce_eager, args.kv_cache_dtype,
+            args.trust_remote_code, args.dtype, args.max_model_len,
+            args.block_size, args.enforce_eager, args.kv_cache_dtype,
             args.quantization_param_path, args.device,
             args.enable_prefix_caching, args.enable_chunked_prefill,
             args.max_num_seqs,
