@@ -9,7 +9,6 @@ import pytest
 import torch
 
 from vllm.attention import AttentionBackend, AttentionMetadata, AttentionType
-from vllm.attention.backends.xformers import XFormersBackend
 from vllm.utils import (STR_BACKEND_ENV_VAR, STR_XFORMERS_ATTN_VAL,
                         make_tensor_with_pad)
 
@@ -505,6 +504,9 @@ def make_backend(backend_name: str) -> AttentionBackend:
     * Backend instance
     '''
     if backend_name == STR_XFORMERS_ATTN_VAL:
+        # Avoid import error during test collection on CPU
+        from vllm.attention.backends.xformers import XFormersBackend
+
         return XFormersBackend()
     raise AssertionError(
         f"Unrecognized backend_name {backend_name} for unit test")
