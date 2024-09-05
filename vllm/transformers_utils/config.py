@@ -146,6 +146,8 @@ def load_params_config(model, revision) -> PretrainedConfig:
 
     config_dict["model_type"] = config_dict.get("model_type", "transformer")
     config_dict["hidden_act"] = config_dict.get("activation", "silu")
+    config_dict["tie_word_embeddings"] = config_dict.get(
+        "tie_embeddings", False)
 
     if config_dict["model_type"] == "transformer":
         if "moe" in config_dict:
