@@ -10,10 +10,16 @@ from transformers.models.auto.modeling_auto import (
 
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
-from vllm.transformers_utils.configs import (
-    ChatGLMConfig, DbrxConfig, EAGLEConfig, ExaoneConfig, GraniteConfig,
-    InternVLChatConfig, JAISConfig, MedusaConfig, MLPSpeculatorConfig,
-    MPTConfig, NemotronConfig, RWConfig, UltravoxConfig)
+# yapf conflicts with isort for this block
+# yapf: disable
+from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
+                                             EAGLEConfig, ExaoneConfig,
+                                             GraniteConfig, InternVLChatConfig,
+                                             JAISConfig, MedusaConfig,
+                                             MLPSpeculatorConfig, MPTConfig,
+                                             NemotronConfig, RWConfig,
+                                             UltravoxConfig)
+# yapf: enable
 from vllm.transformers_utils.utils import check_gguf_file
 
 if VLLM_USE_MODELSCOPE:
