@@ -804,9 +804,7 @@ def dummy_data_for_qwen(
 
     Args:
         ctx: Context of the loaded model.
-        seq_len: Number of tokens in the text sequence. If this is a visual
-            model, sequence length will be ignored, and the input sequence 
-            will be determined by the number of images.
+        seq_len: Number of tokens in the text sequence.
         mm_counts: multimodal data counts.
     
     Returns:
@@ -830,9 +828,7 @@ def dummy_data_for_qwen(
     # Build the image prompts with no imgpads; the tokenizer will add img pads
     image_prompt = ''.join(
         [get_image_text(idx, False) for idx in range(1, num_images + 1)])
-    toks = tokenizer.encode(image_prompt,
-                            add_special_tokens=False,
-                            return_tensors="pt")[0].tolist()
+    toks = tokenizer.encode(image_prompt, add_special_tokens=False)
 
     # Make sure we actually get the fixed context size per tok padding
     num_pads = toks.count(tokenizer.encode(IMG_PAD)[0])
@@ -841,6 +837,10 @@ def dummy_data_for_qwen(
             f"Tokenized dummy data should encode {MAX_QWEN_IMG_TOKENS} pads"
             f" per image, but got {num_pads} pads for {num_images} image(s)"
             " in total. Are you using a qwen tokenizer?")
+
+    # Ensure the number of tokens is at minimum the sequence length provided
+    if len(toks) < seq_len:
+        toks += [0] * (seq_len - len(toks))
 
     # Build the input images; width/height doesn't actually matter here since
     # the data will get resized and the # of tokens per image is constant
