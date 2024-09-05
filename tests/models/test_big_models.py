@@ -11,6 +11,7 @@ from .utils import check_outputs_equal
 
 MODELS = [
     "meta-llama/Llama-2-7b-hf",
+    "meta-llama/Meta-Llama-3-8B-Instruct",
     # "mistralai/Mistral-7B-v0.1",  # Tested by test_mistral.py
     # "Deci/DeciLM-7b",  # Broken
     # "tiiuae/falcon-7b",  # Broken
