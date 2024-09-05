@@ -152,24 +152,19 @@ To consume the server, you can use the OpenAI client like in the example below:
 
     from openai import OpenAI
 
-    # Modify OpenAI's API key and API base to use vLLM's API server.
     openai_api_key = "EMPTY"
     openai_api_base = "http://localhost:8000/v1"
 
     client = OpenAI(
-        # defaults to os.environ.get("OPENAI_API_KEY")
         api_key=openai_api_key,
         base_url=openai_api_base,
     )
-
-    models = client.models.list()
-    model = models.data[0].id
-    assert model == "microsoft/Phi-3.5-vision-instruct"
 
     # Single-image input inference
     image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
 
     chat_response = client.chat.completions.create(
+        "microsoft/Phi-3.5-vision-instruct",
         messages=[{
             "role": "user",
             "content": [
@@ -183,8 +178,6 @@ To consume the server, you can use the OpenAI client like in the example below:
                 },
             ],
         }],
-        model=model,
-        max_tokens=64,
     )
     print("Chat completion output:", chat_response.choices[0].message.content)
 
@@ -193,6 +186,7 @@ To consume the server, you can use the OpenAI client like in the example below:
     image_url_lion = "https://upload.wikimedia.org/wikipedia/commons/7/77/002_The_lion_king_Snyggve_in_the_Serengeti_National_Park_Photo_by_Giles_Laurent.jpg"
 
     chat_response = client.chat.completions.create(
+        "microsoft/Phi-3.5-vision-instruct",
         messages=[{
             "role": "user",
             "content": [
@@ -210,8 +204,6 @@ To consume the server, you can use the OpenAI client like in the example below:
                 },
             ],
         }],
-        model=model,
-        max_tokens=64,
     )
     print("Chat completion output:", chat_response.choices[0].message.content)
 
