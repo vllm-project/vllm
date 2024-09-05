@@ -76,12 +76,14 @@ def run_vllm(
     trust_remote_code: bool,
     dtype: str,
     max_model_len: Optional[int],
+    block_size: Optional[int],
     enforce_eager: bool,
     kv_cache_dtype: str,
     quantization_param_path: Optional[str],
     device: str,
     enable_prefix_caching: bool,
     enable_chunked_prefill: bool,
+    max_num_seqs: Optional[int],
     max_num_batched_tokens: int,
     distributed_executor_backend: Optional[str],
     gpu_memory_utilization: float = 0.9,
@@ -101,6 +103,7 @@ def run_vllm(
         trust_remote_code=trust_remote_code,
         dtype=dtype,
         max_model_len=max_model_len,
+        block_size=block_size,
         gpu_memory_utilization=gpu_memory_utilization,
         enforce_eager=enforce_eager,
         kv_cache_dtype=kv_cache_dtype,
@@ -109,6 +112,7 @@ def run_vllm(
         enable_prefix_caching=enable_prefix_caching,
         download_dir=download_dir,
         enable_chunked_prefill=enable_chunked_prefill,
+        max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
         distributed_executor_backend=distributed_executor_backend,
         load_format=load_format,
@@ -323,10 +327,11 @@ def main(args: argparse.Namespace):
         run_args = [
             requests, args.model, args.tokenizer, args.quantization,
             args.tensor_parallel_size, args.seed, args.n, args.use_beam_search,
-            args.trust_remote_code, args.dtype, args.max_model_len,
+            args.trust_remote_code, args.dtype, args.max_model_len, args.block_size,
             args.enforce_eager, args.kv_cache_dtype,
             args.quantization_param_path, args.device,
             args.enable_prefix_caching, args.enable_chunked_prefill,
+            args.max_num_seqs,
             args.max_num_batched_tokens, args.distributed_executor_backend,
             args.gpu_memory_utilization, args.num_scheduler_steps,
             args.use_v2_block_manager, args.download_dir, args.load_format,
@@ -415,6 +420,12 @@ if __name__ == "__main__":
         default=None,
         help='Maximum length of a sequence (including prompt and output). '
         'If None, will be derived from the model.')
+    parser.add_argument('--block-size',
+                        type=int,
+                        default=EngineArgs.block_size,
+                        choices=[8, 16, 32, 64, 128],
+                        help='Token block size for contiguous chunks of '
+                        'tokens.')
     parser.add_argument(
         '--dtype',
         type=str,
@@ -455,7 +466,7 @@ if __name__ == "__main__":
         "--device",
         type=str,
         default="auto",
-        choices=["auto", "cuda", "cpu", "openvino", "tpu", "xpu"],
+        choices=["auto", "cuda", "cpu", "openvino", "tpu", "xpu", "neuron"],
         help='device type for vLLM execution, supporting CUDA, OpenVINO and '
         'CPU.')
     parser.add_argument(
@@ -473,6 +484,10 @@ if __name__ == "__main__":
     parser.add_argument("--enable-chunked-prefill",
                         action='store_true',
                         help="enable chunked prefill for vLLM backend.")
+    parser.add_argument('--max-num-seqs',
+                        type=int,
+                        default=EngineArgs.max_num_seqs,
+                        help='Maximum number of sequences per iteration.')
     parser.add_argument('--max-num-batched-tokens',
                         type=int,
                         default=None,
