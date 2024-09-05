@@ -1,5 +1,5 @@
 from transformers import PretrainedConfig
-from typing import Optional
+from typing import Optional, Any
 
 
 class LlamaVLConfig(PretrainedConfig):
@@ -28,6 +28,8 @@ class LlamaVLConfig(PretrainedConfig):
     architectures: list[str] = ["LlamaVLForCausalLM"]
 
     torch_dtype: str = "bfloat16"
+
+    rope_scaling: Optional[dict[str, Any]] = None
 
     attribute_map = {
         "num_hidden_layers": "n_layers",

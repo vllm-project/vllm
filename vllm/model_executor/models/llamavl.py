@@ -12,11 +12,13 @@ import torch.nn.functional as F
 import torchvision.transforms as tv
 from PIL import Image
 
-from vllm.attention import AttentionMetadata
+from vllm.attention import Attention, AttentionMetadata
+from vllm.attention.ops.paged_attn import PagedAttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
@@ -26,10 +28,10 @@ from vllm.sequence import IntermediateTensors
 from .interfaces import SupportsMultiModal
 from .llama import LlamaAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
-# from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
-#                                                QKVParallelLinear,
-#                                                RowParallelLinear,
-#                                                ColumnParallelLinear)
+from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
+                                               QKVParallelLinear,
+                                               RowParallelLinear,
+                                               ColumnParallelLinear)
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 
@@ -824,9 +826,41 @@ class FeedForward(nn.Module):
             fc2_weight = state_dict.pop(prefix + "mlp.fc2_weight")
             state_dict[prefix + "w2.weight"] = fc2_weight
 
+class LlamaVLAttention(LlamaAttention):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._register_load_state_dict_pre_hook(self.load_hook)
+
+
+    def load_hook(
+        self,
+        state_dict: Dict[str, Any],
+        prefix: str,
+        local_metadata: Dict[str, Any],
+        strict: bool,
+        missing_keys: List[str],
+        unexpected_keys: List[str],
+        error_msgs: List[str],
+    ) -> None:
+        # print("state_dict", state_dict.keys())
+        # print("params", [x[0] for x in self.named_parameters()])
+        if prefix + "wqkv.weight" in state_dict:
+            state_dict[prefix + "qkv_proj.weight"] = state_dict.pop(prefix + "wqkv.weight")
+        if prefix + "wo.weight" in state_dict:
+            state_dict[prefix + "o_proj.weight"] = state_dict.pop(prefix + "wo.weight")
+        # raise NotImplementedError
+        # if prefix + "feed_forward.mlp.layer_norm_weight" in state_dict:
+        #     state_dict[prefix + "ffn_norm.weight"] = state_dict.pop(
+        #         prefix + "feed_forward.mlp.layer_norm_weight"
+        #     )
+        # if prefix + "attention.wqkv.layer_norm_weight" in state_dict:
+        #     state_dict[prefix + "attention_norm.weight"] = state_dict.pop(
+        #         prefix + "attention.wqkv.layer_norm_weight"
+        #     )
+
 
 class TransformerBlock(nn.Module):
-    def __init__(self, layer_id: int, args):
+    def __init__(self, layer_id: int, args, cache_config: Optional[CacheConfig] = None):
         """
         Initialize a TransformerBlock.
         Args:
@@ -846,8 +880,21 @@ class TransformerBlock(nn.Module):
         self.n_heads = args.n_heads
         self.dim = args.dim
         self.head_dim = args.dim // args.n_heads
-        # self.attention = Attention(args)
-        logger.warning("skip attention")
+        # TODO: remove "use_scaled_rope" from args
+        self.attention = LlamaVLAttention(
+            config=args,
+            hidden_size=args.dim,
+            num_heads=self.n_heads,
+            num_kv_heads=args.n_kv_heads,
+            rope_theta=args.rope_theta,
+            rope_scaling=args.rope_scaling,
+            max_position_embeddings=512,
+            quant_config=None,
+            bias=False,
+            cache_config=cache_config,
+            prefix=f"tb.{layer_id}.self_attn",
+        )
+        # logger.warning("skip attention")
         self.feed_forward = FeedForward(
             dim=args.dim,
             hidden_dim=4 * args.dim,
@@ -878,15 +925,12 @@ class TransformerBlock(nn.Module):
                 prefix + "attention.wqkv.layer_norm_weight"
             )
 
-    def setup_cache(self, max_batch_size: int, dtype: torch.dtype):
-        self.attention.setup_cache(max_batch_size, dtype)
-
     def forward(
         self,
         x: torch.Tensor,
-        freqs_cis: torch.Tensor,
-        mask: torch.Tensor,
-        position_ids: torch.LongTensor,
+        positions: torch.LongTensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         """
         Perform a forward pass through the TransformerBlock.
@@ -898,15 +942,14 @@ class TransformerBlock(nn.Module):
         Returns:
             torch.Tensor: Output tensor after applying attention and feedforward layers.
         """
-        # h = self.attention.forward(
-        #     x=self.attention_norm(x),
-        #     freqs_cis=freqs_cis,
-        #     mask=mask,
-        #     position_ids=position_ids,
-        # )
-        # h = h + x
-        h = x
-        logger.warning("skip attention")
+        # TODO: need to compute qkv and then do attention
+        h = self.attention.forward(
+            positions=positions,
+            hidden_states=self.attention_norm(x),
+            kv_cache=kv_cache,
+            attn_metadata=attn_metadata,
+        )
+        h = h + x
         out = h + self.feed_forward.forward(self.ffn_norm(h))
         return out
 
@@ -1182,7 +1225,7 @@ class CrossAttentionTransformerBlock(torch.nn.Module):
         )
         self.gate_ffwd = torch.nn.Parameter(torch.zeros(1))
 
-        logger.warning("todo hook")
+        logger.warning("todo put hook in correct place")
         self._register_load_state_dict_pre_hook(self.load_hook)
         self.no_ffn = no_ffn
 
@@ -1318,7 +1361,7 @@ class CrossAttentionTransformerVision(torch.nn.Module):
 class CrossAttentionTransformerText(torch.nn.Module):
     INFERENCE_IMAGE_TOKEN_ID = 128010
 
-    def __init__(self, args) -> None:
+    def __init__(self, args, cache_config:Optional[CacheConfig]) -> None:
         super().__init__()
         self.model_parallel_size = get_tensor_model_parallel_world_size()
         assert args.vocab_size > 0
@@ -1364,7 +1407,7 @@ class CrossAttentionTransformerText(torch.nn.Module):
         self.cross_attention_layers = torch.nn.ModuleList()
         for i in range(args.n_layers):
             layer_id = i
-            block = TransformerBlock(args=args, layer_id=layer_id)
+            block = TransformerBlock(args=args, layer_id=layer_id, cache_config=cache_config)
             self.layers.append(block)
             if layer_id in self.fusion_schedule:
                 xa_layer_id = self.fusion_schedule.index(layer_id) + args.n_layers
@@ -1446,21 +1489,24 @@ class CrossAttentionTransformerText(torch.nn.Module):
 
     def forward(
         self,
-        position_ids: torch.LongTensor,
+        positions: torch.LongTensor,
         h: torch.Tensor,
         xattn_mask: torch.Tensor,
         full_text_row_masked_out_mask: torch.Tensor,
         xattn_caches: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
     ):
-        assert self.cache_is_setup, "Please set up cache before calling forward"
-        mask = self.mask_cache.index_select(2, position_ids)
-        freqs_cis = self.freqs_cis.index_select(0, position_ids)
+        # assert self.cache_is_setup, "Please set up cache before calling forward"
+        # mask = self.mask_cache.index_select(2, positions)
+        # freqs_cis = self.freqs_cis.index_select(0, positions)
 
         for idx, (
             layer,
             xattn_layer,
             xattn_layer_idx,
         ) in enumerate(self.text_and_xattn_layers):
+            print("running layer", type(layer), type(xattn_layer))
             h = xattn_layer(
                 x=h,
                 xattn_mask=xattn_mask,
@@ -1469,37 +1515,19 @@ class CrossAttentionTransformerText(torch.nn.Module):
             )
             h = layer(
                 x=h,
-                mask=mask,
-                freqs_cis=freqs_cis,
-                position_ids=position_ids,
+                # mask=mask,
+                # freqs_cis=freqs_cis,
+                positions=positions,
+                kv_cache=kv_caches[idx],
+                attn_metadata=attn_metadata,
             )
 
         h = self.norm(h)
+        exit(1)
 
         output = F.linear(h, self.output.weight)
         # output = gather_from_tensor_model_parallel_region(output)
         return output.float()
-
-    def setup_cache(self, max_batch_size: int, dtype=torch.bfloat16):
-        # Set up the text kv caches
-        device = next(self.parameters()).device
-        ones = torch.ones(
-            (self.max_seq_len, self.max_seq_len),
-            dtype=torch.bool,
-            device=device,
-        )
-        self.register_buffer(
-            "mask_cache",
-            torch.tril(
-                ones,
-            )
-            .unsqueeze(0)
-            .unsqueeze(0),
-            persistent=False,
-        )
-        for layer in self.layers:
-            layer.setup_cache(max_batch_size, dtype=dtype)
-        self.cache_is_setup = True
 
     def _get_xattn_mask(
         self,
@@ -1786,7 +1814,7 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
         args = config
         self.model_dim = args.dim
         self.vision_model = CrossAttentionTransformerVision(args)
-        self.text_model = CrossAttentionTransformerText(args)
+        self.text_model = CrossAttentionTransformerText(args, cache_config=cache_config)
         self.image_res = args.vision_chunk_size
         self.max_num_chunks = args.vision_max_num_chunks
         self.image_transform = partial(
@@ -1794,13 +1822,10 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
             max_num_chunks=args.vision_max_num_chunks,
         )
 
-    def setup_cache(self, max_batch_size: int, dtype: torch.dtype):
-        self.text_model.setup_cache(max_batch_size, dtype)
-
-
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         state_dict = {name: weight for name, weight in weights}
-        self.load_state_dict(state_dict, strict=False)
+        state_dict.pop('text_model.rope.freqs')
+        self.load_state_dict(state_dict, strict=True)
 
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[LlavaImageInputs]:
@@ -1871,24 +1896,79 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: object,
     ) -> torch.Tensor:
-        print("input_ids", input_ids)
-        print("positions", positions)
-        print("kv_caches", len(kv_caches), kv_caches[0].shape)
+        # print("input_ids", input_ids)
+        # print("positions", positions)
+        # print("kv_caches", len(kv_caches), kv_caches[0].shape)
+        # print("attn_metadata", attn_metadata)
+        # print("intermediate_tensors", intermediate_tensors)
+        # print("kwargs", kwargs)
         print("attn_metadata", attn_metadata)
-        print("intermediate_tensors", intermediate_tensors)
-        print("kwargs", kwargs)
-        image = self._parse_and_validate_image_input(**kwargs)
-        if image is None:
+        image_inputs = self._parse_and_validate_image_input(**kwargs)
+        if image_inputs is None:
             raise ValueError("No images provided")
         else:
             # llama's reference implementation runs the vision model on CPU
-            cuda_images = image['data'].cuda()
-            cuda_aspect_ratios = image['aspect_ratios'].cuda()
+            cuda_images = image_inputs['data'].cuda()
+            cuda_aspect_ratios = image_inputs['aspect_ratios'].cuda()
             vision_tokens = self.vision_model(cuda_images, cuda_aspect_ratios)
-            print("vision_tokens", vision_tokens.shape, vision_tokens)
+            batch_masks = []
+            # TODO: get the sequence of each query without hack? 1) better attn metadata 2) better input processor to create vision mask during preprocess
+            # assert isinstance(attn_metadata, PagedAttentionMetadata)
+            start_pos = 0
+            for seq_len in attn_metadata.seq_lens_tensor:
+                end_pos = start_pos + seq_len
+                batch_masks.append(create_vision_mask(input_ids[start_pos:end_pos]))
+                start_pos = end_pos
+            print("batch_masks", batch_masks)
+            # print("vision_tokens", vision_tokens.shape, vision_tokens)
+        
+            bsz, nimg, nchunk, ntok, image_token_dim = tuple(vision_tokens.shape)
+            xattn_caches = torch.stack(
+                [
+                    layer.compute_xattn_kv_cache(
+                        vision_tokens.view(bsz, -1, image_token_dim)
+                    )
+                    for layer in self.text_model.cross_attention_layers
+                ]
+            )
+            # TODO: remove this hardcode
+            total_len = 512
+            padded_masks = _pad_masks(
+                batch_masks,
+                image_inputs['num_chunks'],
+                total_len,
+                self.max_num_chunks,
+            )
+
+            cross_attention_masks, full_text_row_masked_out_mask = (
+                self.text_model._get_xattn_mask(
+                    num_tokens=total_len,
+                    text_device="cuda",
+                    text_dtype=next(self.text_model.parameters()).dtype,
+                    vision_tokens=vision_tokens,
+                    cross_attention_masks=padded_masks,
+                )
+            )
+            print("cross_attention_masks", cross_attention_masks.shape, cross_attention_masks)
+            print("full_text_row_masked_out_mask", full_text_row_masked_out_mask.shape, full_text_row_masked_out_mask)
+
+        h = self.text_model.get_partially_trainable_embedding(input_ids)
+        print("h", h.shape, h)
+        print("positions", positions.shape, positions)
+        logits = self.text_model.forward(
+            positions=positions,
+            h=h,
+            xattn_mask=cross_attention_masks,
+            full_text_row_masked_out_mask=full_text_row_masked_out_mask,
+            xattn_caches=xattn_caches,
+            kv_caches=kv_caches,
+            attn_metadata=attn_metadata,
+        )
+        print("prefill logits", logits.shape, logits)
+        exit(1)
+
         # pixel_values = kwargs.pop("pixel_values", None)
         # if pixel_values is not None:
-
         # h = self.text_model.get_partially_trainable_embedding(tokens[:, position_ids])
         # logits = self.text_model.forward(
         #     position_ids=position_ids,
@@ -1902,33 +1982,40 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
         return logits
 
 
-def _stack_images(
-    images: List[List[Image.Image]],
-    max_num_chunks: int,
-    image_res: int,
-    max_num_images: int,
-) -> Tuple[torch.Tensor, List[int]]:
-    """
-    Takes a list of list of images and stacks them into a tensor.
-    This function is needed since images can be of completely
-    different resolutions and aspect ratios.
-    """
-    out_images, out_num_chunks = [], []
-    for imgs_sample in images:
-        out_images_i = torch.zeros(
-            max_num_images,
-            max_num_chunks,
-            3,
-            image_res,
-            image_res,
-        )
-        _num_chunks = []
-        for j, chunks_image in enumerate(imgs_sample):
-            out_images_i[j, : chunks_image.shape[0]] = chunks_image
-            _num_chunks.append(chunks_image.shape[0])
-        out_images.append(out_images_i)
-        out_num_chunks.append(_num_chunks)
-    return torch.stack(out_images), out_num_chunks
+def create_vision_mask(
+    tokens: List[int],
+    vision_token: int=128256,
+) -> List[List[int]]:
+    # import pdb; pdb.set_trace()
+#     (Pdb) p tokens
+# [128011, 128011, 128000, 644, 264, 11914, 11, 1521, 1403, 5448, 6308]
+    print("tokens", tokens)
+    vision_token_locations = [
+        i for i, token in enumerate(tokens) if token == vision_token
+    ]
+    if len(vision_token_locations) == 0:
+        return []
+
+    if len(vision_token_locations) == 1:
+        # only one image present, unmask until end of sequence
+        return [[vision_token_locations[0], -1]]
+    vision_masks = [
+        [loc1, loc2]
+        for loc1, loc2 in zip(vision_token_locations[:-1], vision_token_locations[1:])
+    ]
+    # last image will attend to all subsequent text
+    vision_masks.append([vision_token_locations[-1], len(tokens)])
+
+    # if there are two or more consecutive vision tokens,
+    # they should all attend to all subsequent
+    # text present
+    last_mask_end = vision_masks[-1][1]
+    for vision_mask in vision_masks[::-1]:
+        if vision_mask[0] == vision_mask[1] - 1:
+            vision_mask[1] = last_mask_end
+        last_mask_end = vision_mask[1]
+    return vision_masks
+
 
 
 def _pad_masks(
@@ -1961,3 +2048,30 @@ def _pad_masks(
 
     return out_masks
 
+
+
+# def _encode_content(
+#         self, content: InterleavedTextAttachment, bos: bool = False
+#     ) -> Tuple[List[int], List[PIL_Image.Image]]:
+#         tokens = []
+#         images = []
+
+#         added_bos = False
+
+#         def _process(c):
+#             nonlocal added_bos
+
+#             if isinstance(c, str):
+#                 tokens.extend(
+#                     self.tokenizer.encode(c, bos=False if added_bos else bos, eos=False)
+#                 )
+#                 added_bos = True
+#             elif isinstance(c, ImageMedia):
+#                 tokens.append(self.vision_token)
+#                 images.append(c.image)
+
+#         if isinstance(content, str):
+#             _process(content)
+#         elif isinstance(content, list):
+#             for c in content:
+#                 _process(c)

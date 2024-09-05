@@ -78,6 +78,7 @@ class LlamaVLTokenizer:
         self.special_tokens = {
             token: num_base_tokens + i for i, token in enumerate(special_tokens)
         }
+        self.special_tokens["<|image|>"] = 128256 
         self.model = tiktoken.Encoding(
             name=Path(model_path).name,
             pat_str=self.pat_str,
@@ -129,7 +130,7 @@ class LlamaVLTokenizer:
         - Setting `allowed_special` to "all" will treat all text corresponding
           to special tokens to be encoded as special tokens.
         """
-        bos = True
+        bos = False
         eos = False
         assert type(s) is str
 
@@ -145,7 +146,7 @@ class LlamaVLTokenizer:
             t.extend(
                 self.model.encode(
                     substr,
-                    allowed_special=set(),
+                    allowed_special="all",
                     disallowed_special=set(),
                 )
             )
