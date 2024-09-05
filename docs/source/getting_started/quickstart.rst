@@ -24,7 +24,9 @@ Offline Batched Inference
 
 We first show an example of using vLLM for offline batched inference on a dataset. In other words, we use vLLM to generate texts for a list of input prompts.
 
-Import ``LLM`` and ``SamplingParams`` from vLLM. The ``LLM`` class is the main class for running offline inference with vLLM engine. The ``SamplingParams`` class specifies the parameters for the sampling process.
+Import :class:`~vllm.LLM` and :class:`~vllm.SamplingParams` from vLLM.
+The :class:`~vllm.LLM` class is the main class for running offline inference with vLLM engine.
+The :class:`~vllm.SamplingParams` class specifies the parameters for the sampling process.
 
 .. code-block:: python
 
@@ -42,7 +44,7 @@ Define the list of input prompts and the sampling parameters for generation. The
     ]
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
-Initialize vLLM's engine for offline inference with the ``LLM`` class and the `OPT-125M model <https://arxiv.org/abs/2205.01068>`_. The list of supported models can be found at :ref:`supported models <supported_models>`.
+Initialize vLLM's engine for offline inference with the :class:`~vllm.LLM` class and the `OPT-125M model <https://arxiv.org/abs/2205.01068>`_. The list of supported models can be found at :ref:`supported models <supported_models>`.
 
 .. code-block:: python
 
