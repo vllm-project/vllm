@@ -12,6 +12,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.loader import build_model
 from vllm.model_executor.models import ModelRegistry
 from vllm.multimodal.base import NestedTensors
+from vllm.sequence import IntermediateTensors
 from vllm.utils import is_pin_memory_available
 
 
@@ -297,3 +298,18 @@ def get_inputs_embeds(
     else:
         hidden_states = embeddings(input_ids)
     return hidden_states
+
+
+def make_empty_intermediate_tensors_factory(keys: List[str], hidden_size: int):
+
+    def make_empty_intermediate_tensors(
+            batch_size: int, dtype: torch.dtype,
+            device: torch.device) -> IntermediateTensors:
+        return IntermediateTensors({
+            key: torch.zeros((batch_size, hidden_size),
+                             dtype=dtype,
+                             device=device)
+            for key in keys
+        })
+
+    return make_empty_intermediate_tensors

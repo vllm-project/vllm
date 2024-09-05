@@ -621,8 +621,9 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal):
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is not None:
             inputs_embeds = get_inputs_embeds(input_ids,
-                                            self.model.get_input_embeddings,
-                                            inputs_embeds, inputs_embeds_masks)
+                                              self.model.get_input_embeddings,
+                                              inputs_embeds,
+                                              inputs_embeds_masks)
             vision_embeddings = self._process_image_input(image_input)
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, vision_embeddings,
