@@ -272,17 +272,17 @@ class GroupCoordinator:
 
         # Bypass the function if we are using only 1 GPU.
         if self.world_size == 1:
-            return input_.clone()
+            return input_
 
         # For TPUs, use TPU communicator.
         tpu_comm = self.tpu_communicator
         if tpu_comm is not None and not tpu_comm.disabled:
-            return tpu_comm.all_reduce(input_).clone()
+            return tpu_comm.all_reduce(input_)
 
         if ca_comm is not None:
             out = ca_comm.custom_all_reduce(input_)
             if out is not None:
-                return out.clone()
+                return out
         pynccl_comm = self.pynccl_comm
         if (pynccl_comm is not None and not pynccl_comm.disabled):
             pynccl_comm.all_reduce(input_)
@@ -291,7 +291,7 @@ class GroupCoordinator:
             ipex.distributed.all_reduce(input_, group=self.device_group)
         else:
             torch.distributed.all_reduce(input_, group=self.device_group)
-        return input_.clone()
+        return input_
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         world_size = self.world_size
