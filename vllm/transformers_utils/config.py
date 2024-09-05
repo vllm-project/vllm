@@ -7,29 +7,19 @@ from typing import Any, Dict, Optional, Type, Union
 from huggingface_hub import file_exists, hf_hub_download
 from transformers import GenerationConfig, PretrainedConfig
 from transformers.models.auto.image_processing_auto import (
-    get_image_processor_config,
-)
-from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
+    get_image_processor_config)
 from transformers.models.auto.modeling_auto import (
-    MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
-)
+    MODEL_FOR_CAUSAL_LM_MAPPING_NAMES)
+from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
-from vllm.transformers_utils.configs import (
-    ChatGLMConfig,
-    DbrxConfig,
-    EAGLEConfig,
-    ExaoneConfig,
-    InternVLChatConfig,
-    JAISConfig,
-    MedusaConfig,
-    MLPSpeculatorConfig,
-    MPTConfig,
-    NemotronConfig,
-    RWConfig,
-    UltravoxConfig,
-)
+from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
+                                             EAGLEConfig, ExaoneConfig,
+                                             InternVLChatConfig, JAISConfig,
+                                             MedusaConfig, MLPSpeculatorConfig,
+                                             MPTConfig, NemotronConfig,
+                                             RWConfig, UltravoxConfig)
 from vllm.transformers_utils.utils import check_gguf_file
 
 if VLLM_USE_MODELSCOPE:
@@ -86,13 +76,15 @@ def get_config(
         model = Path(model).parent
 
     if config_format == ConfigFormat.AUTO:
-        if file_exists(
-            model, HF_CONFIG_NAME, revision=revision, token=kwargs.get("token")
-        ):
+        if file_exists(model,
+                       HF_CONFIG_NAME,
+                       revision=revision,
+                       token=kwargs.get("token")):
             config_format = ConfigFormat.HF
-        elif file_exists(
-            model, MISTRAL_CONFIG_NAME, revision=revision, token=kwargs.get("token")
-        ):
+        elif file_exists(model,
+                         MISTRAL_CONFIG_NAME,
+                         revision=revision,
+                         token=kwargs.get("token")):
             config_format = ConfigFormat.MISTRAL
         else:
             raise ValueError(f"No supported config format found in {model}")
@@ -111,31 +103,27 @@ def get_config(
         else:
             raise ValueError(f"Unsupported config format: {config_format}")
     except ValueError as e:
-        if (
-            not trust_remote_code
-            and "requires you to execute the configuration file" in str(e)
-        ):
+        if (not trust_remote_code and
+                "requires you to execute the configuration file" in str(e)):
             err_msg = (
                 "Failed to load the model config. If the model is a custom "
                 "model not yet available in the HuggingFace transformers "
                 "library, consider setting `trust_remote_code=True` in LLM "
-                "or using the `--trust-remote-code` flag in the CLI."
-            )
+                "or using the `--trust-remote-code` flag in the CLI.")
             raise RuntimeError(err_msg) from e
         else:
             raise e
     if config.model_type in _CONFIG_REGISTRY:
         config_class = _CONFIG_REGISTRY[config.model_type]
-        config = config_class.from_pretrained(
-            model, revision=revision, code_revision=code_revision
-        )
+        config = config_class.from_pretrained(model,
+                                              revision=revision,
+                                              code_revision=code_revision)
 
     # Special architecture mapping check for GGUF models
     if is_gguf:
         if config.model_type not in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
             raise RuntimeError(
-                f"Can't get gguf config for {config.model_type}."
-            )
+                f"Can't get gguf config for {config.model_type}.")
         model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
         config.update({"architectures": [model_type]})
 
@@ -165,8 +153,7 @@ def load_params_config(model, revision) -> PretrainedConfig:
 
     if not config_path.is_file():
         config_path = Path(
-            hf_hub_download(model, config_file_name, revision=revision)
-        )
+            hf_hub_download(model, config_file_name, revision=revision))
 
     with open(config_path, "r") as file:
         config_dict = json.load(file)
@@ -193,8 +180,7 @@ def load_params_config(model, revision) -> PretrainedConfig:
     config_dict["model_type"] = config_dict.get("model_type", "transformer")
     config_dict["hidden_act"] = config_dict.get("activation", "silu")
     config_dict["tie_word_embeddings"] = config_dict.get(
-        "tie_embeddings", False
-    )
+        "tie_embeddings", False)
 
     if config_dict["model_type"] == "transformer":
         if "moe" in config_dict:
