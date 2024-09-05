@@ -541,8 +541,6 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
             torch.zeros_like(num_orig_input_tokens_tensor),
             torch.full_like(num_orig_input_tokens_tensor,
                             self.max_position_embeddings))
-        long_prompt_offset = (torch.any(positions > k).float() *
-                              torch.full_like(positions, k)).long()
         idx = (torch.add(positions, long_prompt_offset)
                if long_prompt_offset is not None else positions)
         self.long_short_cos_sin_cache: torch.Tensor = (
