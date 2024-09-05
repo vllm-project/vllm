@@ -1,6 +1,7 @@
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
+                    Type, Union)
 from unittest.mock import patch
 
 import numpy as np
@@ -10,14 +11,15 @@ import torch_xla.core.xla_model as xm
 import torch_xla.runtime as xr
 
 from vllm.attention import AttentionMetadata, get_attn_backend
+from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispacther
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.logger import init_logger
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
-                           Logprob, SamplerOutput, SequenceGroupMetadata,
-                           SequenceOutput)
+                           Logprob, SequenceGroupMetadata, SequenceOutput)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase,
     _add_attn_metadata_broadcastable_dict,
@@ -50,6 +52,7 @@ class ModelInputForTPU(ModelRunnerInputBase):
     best_of: List[int]
     seq_groups: List[List[int]]
     virtual_engine: int = 0
+    async_callback: Optional[Callable] = None
 
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:
@@ -144,11 +147,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             )
         model = model.eval()
         xm.wait_device_ops()
-        model = ModelWrapper(model)
-        self.model = torch.compile(model,
-                                   backend="openxla",
-                                   fullgraph=True,
-                                   dynamic=False)
+        self.model = ModelWrapper(model)
 
     def _dummy_run(
         self,
@@ -235,8 +234,15 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             torch._dynamo.mark_dynamic(t, 0)
             torch._dynamo.mark_dynamic(p, 0)
         # Dummy run.
-        self.model(token_ids, position_ids, attn_metadata, input_lens, t, p,
-                   num_samples, kv_caches)
+        self.model(token_ids,
+                   position_ids,
+                   attn_metadata,
+                   input_lens,
+                   t,
+                   p,
+                   num_samples,
+                   kv_caches,
+                   is_prompt=is_prompt)
 
     def warmup_model(
         self,
@@ -530,7 +536,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                     if getattr(arg, "context_lens", None) is not None:
                         arg.context_lens = arg.context_lens.to(self.device)
                 new_args.append(arg)
-            return self.model(*new_args)
+            return self.model(*new_args, is_prompt=is_prompt)
 
         num_prefills = model_input.attn_metadata.num_prefills
         is_prompt = num_prefills > 0
@@ -558,6 +564,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                     model_input.attn_metadata, model_input.input_lens[i:i + 1],
                     model_input.t[i:i + 1], model_input.p[i:i + 1],
                     model_input.num_samples, kv_caches)
+                if i == 0 and model_input.async_callback is not None:
+                    model_input.async_callback()
                 # Retrieve the outputs to CPU.
                 next_token_ids += output_token_ids.cpu().tolist()
                 start_idx = end_idx
@@ -568,6 +576,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 model_input.attn_metadata, model_input.input_lens,
                 model_input.t, model_input.p, model_input.num_samples,
                 kv_caches)
+            if model_input.async_callback is not None:
+                model_input.async_callback()
             # Retrieve the outputs to CPU.
             next_token_ids = output_token_ids.cpu().tolist()
 
@@ -591,7 +601,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 batch_idx += 1
             else:
                 for seq_id in seq_ids:
-                    next_token_id = next_token_ids[batch_idx][0]
+                    next_token_id = next_token_ids[batch_idx]
                     seq_outputs.append(
                         SequenceOutput(seq_id, next_token_id,
                                        {next_token_id: zero_logprob}))
@@ -601,11 +611,32 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         return [SamplerOutput(sampler_outputs)]
 
 
-class ModelWrapper(nn.Module):
+class ModelWrapper(TorchCompileWrapperWithCustomDispacther):
 
     def __init__(self, model: nn.Module):
-        super().__init__()
         self.model = model
+        compiled_callable = torch.compile(self.forward,
+                                          backend="openxla",
+                                          fullgraph=True,
+                                          dynamic=False)
+        super().__init__(compiled_callable)
+
+    def __call__(self, *args, is_prompt: bool, **kwargs):
+        if len(self.compiled_codes) < 3 or not self.use_custom_dispatcher:
+            # not fully compiled yet, or not using the custom dispatcher,
+            # let PyTorch handle it
+            return self.compiled_callable(*args, **kwargs)
+        # the 3 compiled codes are:
+        # 0: for profiling
+        # 1: for prompt
+        # 2: for decode
+        # dispatch to the compiled code directly, skip PyTorch
+        if is_prompt:
+            with self.dispatch_to_code(1):
+                return self.forward(*args, **kwargs)
+        else:
+            with self.dispatch_to_code(2):
+                return self.forward(*args, **kwargs)
 
     def forward(
         self,
@@ -691,6 +722,9 @@ class ModelWrapper(nn.Module):
         sampled_token_ids = torch.multinomial(probs,
                                               num_samples,
                                               replacement=True)
+        if num_samples == 1:
+            argmax_token_ids = argmax_token_ids.squeeze(dim=-1)
+            sampled_token_ids = sampled_token_ids.squeeze(dim=-1)
         next_token_ids = torch.where(t != 0, sampled_token_ids,
                                      argmax_token_ids)
         return next_token_ids

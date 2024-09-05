@@ -51,10 +51,6 @@ class GPTQMarlinConfig(QuantizationConfig):
 
         self.quant_type = self.TYPE_MAP[(weight_bits, is_sym)]
 
-        # Verify supported on platform.
-        verify_marlin_supported(quant_type=self.quant_type,
-                                group_size=self.group_size)
-
     def __repr__(self) -> str:
         return (f"GPTQMarlinConfig(quant_type={self.quant_type}, "
                 f"group_size={self.group_size}, "
@@ -152,6 +148,10 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: GPTQMarlinConfig) -> None:
         self.quant_config = quant_config
+
+        # Verify supported on platform.
+        verify_marlin_supported(quant_type=self.quant_config.quant_type,
+                                group_size=self.quant_config.group_size)
 
     def create_weights(
         self,
