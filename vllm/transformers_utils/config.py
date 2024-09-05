@@ -11,8 +11,8 @@ from transformers.models.auto.modeling_auto import (
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
-                                             JAISConfig, MLPSpeculatorConfig,
-                                             MPTConfig, RWConfig, RWKV5Config,
+                                             MLPSpeculatorConfig,
+                                             RWKV5Config,
                                              EAGLEConfig, ExaoneConfig,
                                              InternVLChatConfig, JAISConfig,
                                              MedusaConfig, MLPSpeculatorConfig,
