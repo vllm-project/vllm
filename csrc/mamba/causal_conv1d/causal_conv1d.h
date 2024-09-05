@@ -35,6 +35,7 @@ struct ConvParamsBase {
     void *__restrict__ out_ptr;
 
     void *__restrict__ conv_state_ptr;
+    void *__restrict__ cu_seq_len_ptr;
 
     void *__restrict__ seq_idx_ptr;
 

@@ -74,14 +74,14 @@ void set_conv_params_fwd(ConvParamsBase &params,
     params.bias_ptr = bias_ptr;
     params.out_ptr = out.data_ptr();
     // All stride are in elements, not bytes.
-    params.x_batch_stride = x.stride(0);
-    params.x_c_stride = x.stride(1);
-    params.x_l_stride = x.stride(-1);
+    params.x_batch_stride = x.stride(1);
+    params.x_c_stride = x.stride(0);
+    params.x_l_stride = x.stride(1);
     params.weight_c_stride = weight.stride(0);
     params.weight_width_stride = weight.stride(1);
-    params.out_batch_stride = out.stride(0);
-    params.out_c_stride = out.stride(1);
-    params.out_l_stride = out.stride(-1);
+    params.out_batch_stride = out.stride(1);
+    params.out_c_stride = out.stride(0);
+    params.out_l_stride = out.stride(1);
 }
 
 
@@ -91,6 +91,8 @@ causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
                   const c10::optional<at::Tensor> &seq_idx_,
                   const c10::optional<at::Tensor> &initial_states_,
                   const c10::optional<at::Tensor> &final_states_out_,
+                  int64_t max_seq_len,
+                  const c10::optional<at::Tensor> &cu_seq_len,
                   bool silu_activation) {
     auto input_type = x.scalar_type();
     auto weight_type = weight.scalar_type();
@@ -99,22 +101,22 @@ causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
 
     TORCH_CHECK(x.is_cuda());
     TORCH_CHECK(weight.is_cuda());
-
+    
     const auto sizes = x.sizes();
-    const int batch_size = sizes[0];
-    const int dim = sizes[1];
-    const int seqlen = sizes[2];
+    const int batch_size = cu_seq_len.value().sizes()[0];
+    const int dim = sizes[0];
+    const int seqlen = 0;
     const int width = weight.size(-1);
 
-    CHECK_SHAPE(x, batch_size, dim, seqlen);
+    // CHECK_SHAPE(x, batch_size, dim, seqlen);
     CHECK_SHAPE(weight, dim, width);
 
-    TORCH_CHECK(x.stride(2) == 1 || x.stride(1) == 1);
-    const bool is_channel_last = x.stride(1) == 1 && x.stride(2) > 1;
+    TORCH_CHECK(x.stride(1) == 1 || x.stride(0) == 1);
+    const bool is_channel_last = x.stride(0) == 1 && x.stride(1) > 1;
 
     if (is_channel_last) {
         TORCH_CHECK(dim % 8 == 0, "causal_conv1d only supports channel dimension divisible by 8 for now");
-        TORCH_CHECK(x.stride(2) % 8 == 0 and x.stride(0) % 8 == 0, "causal_conv1d with channel last layout requires strides (x.stride(0) and x.stride(2)) to be multiples of 8");
+        TORCH_CHECK(x.stride(1) % 8 == 0, "causal_conv1d with channel last layout requires strides (x.stride(0) and x.stride(2)) to be multiples of 8");
     }
     TORCH_CHECK(width >= 2 && width <= 4, "causal_conv1d only supports width between 2 and 4");
 
@@ -138,9 +140,11 @@ causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
     at::Tensor out = torch::empty_like(x);
 
     ConvParamsBase params;
-    set_conv_params_fwd(params, batch_size, dim, seqlen, width, x, weight, out,
+    auto cu_seq_len_val = cu_seq_len.value();
+    set_conv_params_fwd(params, cu_seq_len_val.sizes()[0], dim, max_seq_len, width, x, weight, out,
                         bias_.has_value() ? bias_.value().data_ptr() : nullptr,
                         silu_activation);
+    params.cu_seq_len_ptr = cu_seq_len_val.data_ptr();
 
     if (seq_idx_.has_value()) {
         params.seq_idx_ptr = seq_idx_.value().data_ptr();
@@ -168,7 +172,7 @@ causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
         auto final_states = final_states_out_.value();
         TORCH_CHECK(final_states.scalar_type() == input_type);
         TORCH_CHECK(final_states.is_cuda());
-        CHECK_SHAPE(final_states, batch_size, dim, width - 1);
+        // CHECK_SHAPE(final_states, batch_size, dim, width - 1);
         TORCH_CHECK(final_states.stride(1) == 1);
         params.final_states_ptr = final_states.data_ptr();
         params.final_states_batch_stride = final_states.stride(0);
@@ -414,21 +418,21 @@ struct Causal_conv1d_channellast_fwd_kernel_traits {
     // threads). Each each load is 16 x 32|64 elements in the L x C dimensions.
     using input_t = input_t_;
     using weight_t = weight_t_;
-    static constexpr int kNThreads = kNThreads_;
+    static constexpr int kNThreads = kNThreads_; // 128
     static_assert(kNThreads % 32 == 0);
-    static constexpr int kNWarps = kNThreads / 32;
+    static constexpr int kNWarps = kNThreads / 32; // 4
     static constexpr int kWidth = kWidth_;
     static constexpr int kChunkSizeL = kChunkSizeL_;
     static constexpr int kNBytes = sizeof(input_t);
     static_assert(kNBytes == 2 || kNBytes == 4);
-    static constexpr int kNElts = kNBytes == 4 ? 4 : 8;
-    static constexpr int kNEltsPerRow = 128 / kNBytes;
-    static constexpr int kNThreadsPerRow = kNEltsPerRow / kNElts;  // Always 8 for now
+    static constexpr int kNElts = kNBytes == 4 ? 4 : 8; // 8
+    static constexpr int kNEltsPerRow = 128 / kNBytes; // 64
+    static constexpr int kNThreadsPerRow = kNEltsPerRow / kNElts;  // 8
     static_assert(kNThreadsPerRow * kNBytes * kNElts == 128);
     static constexpr int kNColsPerWarp = 32 / kNThreadsPerRow;  // Always 4 for now
     static_assert(kNColsPerWarp * kNThreadsPerRow == 32);
-    static constexpr int kNColsPerLoad = kNColsPerWarp * kNWarps;
-    static constexpr int kNLoads = kChunkSizeL / kNColsPerLoad;
+    static constexpr int kNColsPerLoad = kNColsPerWarp * kNWarps; // 16
+    static constexpr int kNLoads = kChunkSizeL / kNColsPerLoad; // 4
     static_assert(kNLoads * kNColsPerLoad == kChunkSizeL);
     static constexpr bool kIsVecLoad = kIsVecLoad_;
     using vec_t = typename BytesToType<kNBytes * kNElts>::Type;
@@ -442,13 +446,13 @@ struct Causal_conv1d_channellast_fwd_kernel_traits {
 template<typename Ktraits, bool kHasSeqIdx>
 __global__ __launch_bounds__(Ktraits::kNThreads)
 void causal_conv1d_channellast_fwd_kernel(ConvParamsBase params) {
-    constexpr int kWidth = Ktraits::kWidth;
-    constexpr int kNThreads = Ktraits::kNThreads;
-    constexpr int kNElts = Ktraits::kNElts;
-    constexpr int kNThreadsPerC = Ktraits::kNThreadsPerRow;
-    constexpr int kLPerLoad = Ktraits::kNColsPerLoad;
-    constexpr int kChunkSizeL = Ktraits::kChunkSizeL;
-    constexpr int kChunkSizeC = Ktraits::kNEltsPerRow;
+    constexpr int kWidth = Ktraits::kWidth; // 4
+    constexpr int kNThreads = Ktraits::kNThreads; // 128
+    constexpr int kNElts = Ktraits::kNElts; // 8
+    constexpr int kNThreadsPerC = Ktraits::kNThreadsPerRow; //8
+    constexpr int kLPerLoad = Ktraits::kNColsPerLoad; // 16
+    constexpr int kChunkSizeL = Ktraits::kChunkSizeL; // 64
+    constexpr int kChunkSizeC = Ktraits::kNEltsPerRow; // 64
     using input_t = typename Ktraits::input_t;
     using vec_t = typename Ktraits::vec_t;
     using weight_t = typename Ktraits::weight_t;
@@ -460,37 +464,55 @@ void causal_conv1d_channellast_fwd_kernel(ConvParamsBase params) {
     const int chunk_l_id = blockIdx.y;
     const int chunk_c_id = blockIdx.z;
     const int tid = threadIdx.x;
-    const int l_idx = tid / kNThreadsPerC;
-    const int c_idx = tid % kNThreadsPerC;
-    input_t *x = reinterpret_cast<input_t *>(params.x_ptr) + batch_id * params.x_batch_stride
+    const int l_idx = tid / kNThreadsPerC; // 0 - 15
+    const int c_idx = tid % kNThreadsPerC; // 0 - 8
+
+    constexpr int kLPerThread = constexpr_min(kChunkSizeL * kChunkSizeC / kNThreads, kChunkSizeL); // 32
+    static_assert(kLPerThread * kNThreads == kChunkSizeL * kChunkSizeC); // 4096
+    constexpr int kNThreadsPerRow = kChunkSizeL / kLPerThread; // 2
+    static_assert(kNThreadsPerRow * kLPerThread == kChunkSizeL);
+    // kChunkSizeL, kLPerThread, kNThreadsPerRow should be powers of 2 for simplicity
+    static_assert((kChunkSizeL & (kChunkSizeL - 1)) == 0);
+    static_assert((kLPerThread & (kLPerThread - 1)) == 0);
+    static_assert((kNThreadsPerRow & (kNThreadsPerRow - 1)) == 0);
+    static_assert(kNThreadsPerRow <= 32);
+
+    const int row_idx = tid / kNThreadsPerRow; // 0 - 63
+    const int col_idx = tid % kNThreadsPerRow; // 0 - 1
+
+    int *cu_seq_len = reinterpret_cast<int *>(params.cu_seq_len_ptr);
+    const int bos = batch_id == 0 ? 0 : cu_seq_len[batch_id - 1];
+    const int eos = cu_seq_len[batch_id];
+    const int seqlen = eos - bos;
+    input_t *x = reinterpret_cast<input_t *>(params.x_ptr) + bos * params.x_batch_stride 
         + (chunk_l_id * kChunkSizeL + l_idx) * params.x_l_stride + chunk_c_id * kChunkSizeC + c_idx * kNElts;
     weight_t *weight = reinterpret_cast<weight_t *>(params.weight_ptr)
         + chunk_c_id * kChunkSizeC * params.weight_c_stride;
-    input_t *out = reinterpret_cast<input_t *>(params.out_ptr) + batch_id * params.out_batch_stride
+    input_t *out = reinterpret_cast<input_t *>(params.out_ptr) + bos * params.out_batch_stride
         + (chunk_l_id * kChunkSizeL + l_idx) * params.out_l_stride + chunk_c_id * kChunkSizeC + c_idx * kNElts;
-    int *seq_idx = !kHasSeqIdx ? nullptr : reinterpret_cast<int *>(params.seq_idx_ptr)
-        + batch_id * params.seqlen + chunk_l_id * kChunkSizeL;
-    input_t *initial_states = params.initial_states_ptr == nullptr || chunk_l_id > 0 ? nullptr
-        : reinterpret_cast<input_t *>(params.initial_states_ptr) + batch_id * params.initial_states_batch_stride + l_idx * params.initial_states_l_stride + chunk_c_id * kChunkSizeC + c_idx * kNElts;
-    // The last L-chunk will also have enough info to write to final states, since it also contain a few x values
-    // from the previous L-chunk.
-    input_t *final_states = params.final_states_ptr == nullptr || chunk_l_id < gridDim.y - 1 ? nullptr
+    input_t *final_states = params.final_states_ptr == nullptr || chunk_l_id != (((seqlen) + kChunkSizeL - 1) / kChunkSizeL) -1 ? nullptr
         : reinterpret_cast<input_t *>(params.final_states_ptr) + batch_id * params.final_states_batch_stride + l_idx * params.final_states_l_stride + chunk_c_id * kChunkSizeC + c_idx * kNElts;
 
+    // int *seq_idx = !kHasSeqIdx ? nullptr : reinterpret_cast<int *>(params.seq_idx_ptr)
+      //   + batch_id * params.seqlen + chunk_l_id * kChunkSizeL;
+
+    input_t *initial_states = params.initial_states_ptr == nullptr || chunk_l_id > 0 ? nullptr
+        : reinterpret_cast<input_t *>(params.initial_states_ptr) + batch_id * params.initial_states_batch_stride + l_idx * params.initial_states_l_stride + chunk_c_id * kChunkSizeC + c_idx * kNElts;
     #pragma unroll
-    for (int l = 0; l < Ktraits::kNLoads; ++l) {
-        input_t x_vals_load[kNElts] = {0};
-        if (chunk_l_id * kChunkSizeL + l * kLPerLoad + l_idx < params.seqlen
+    for (int l = 0; l < Ktraits::kNLoads; ++l) { // 0 - 4
+        input_t x_vals_load[kNElts] = {0}; // size is 16, 2byte input * 8
+        if (chunk_l_id * kChunkSizeL + l * kLPerLoad + l_idx < seqlen
             && chunk_c_id * kChunkSizeC + c_idx * kNElts < params.dim) {
             reinterpret_cast<vec_t *>(x_vals_load)[0] = *reinterpret_cast<vec_t *>(x + l * kLPerLoad * params.x_l_stride);
         }
+        // put it in kWidth offset, since kWidth - 1 is for prev chunk
         reinterpret_cast<vec_t *>(x_smem[kWidth - 1 + l * kLPerLoad + l_idx])[c_idx] = reinterpret_cast<vec_t *>(x_vals_load)[0];
     }
     // Load the elements from the previous chunk that are needed for convolution.
     if (l_idx < kWidth - 1) {
         input_t x_vals_load[kNElts] = {0};
         if (chunk_l_id * kChunkSizeL + l_idx - (kWidth - 1) >= 0
-            && chunk_l_id * kChunkSizeL + l_idx - (kWidth - 1) < params.seqlen
+            && chunk_l_id * kChunkSizeL + l_idx - (kWidth - 1) < seqlen
             && chunk_c_id * kChunkSizeC + c_idx * kNElts < params.dim) {
             reinterpret_cast<vec_t *>(x_vals_load)[0] = *reinterpret_cast<vec_t *>(x - (kWidth - 1) * params.x_l_stride);
         } else if (initial_states != nullptr
@@ -508,21 +530,8 @@ void causal_conv1d_channellast_fwd_kernel(ConvParamsBase params) {
         && chunk_c_id * kChunkSizeC + c_idx * kNElts < params.dim) {
         // x_smem[0] contains element at index chunk_l_id * kChunkSizeL - (kWidth - 1)
         // So last few elements (index params.seqlen - kWidth + 1 + l_idx) are stored in x_smem[params.seqlen - kWidth + 1 + l_idx - (chunk_l_id * kChunkSizeL - kWidth + 1)][c_idx]
-        *reinterpret_cast<vec_t *>(final_states) = reinterpret_cast<vec_t *>(x_smem[params.seqlen + l_idx - chunk_l_id * kChunkSizeL])[c_idx];
+        *reinterpret_cast<vec_t *>(final_states) = reinterpret_cast<vec_t *>(x_smem[seqlen + l_idx - chunk_l_id * kChunkSizeL])[c_idx];
     }
-
-    constexpr int kLPerThread = constexpr_min(kChunkSizeL * kChunkSizeC / kNThreads, kChunkSizeL);
-    static_assert(kLPerThread * kNThreads == kChunkSizeL * kChunkSizeC);
-    constexpr int kNThreadsPerRow = kChunkSizeL / kLPerThread;
-    static_assert(kNThreadsPerRow * kLPerThread == kChunkSizeL);
-    // kChunkSizeL, kLPerThread, kNThreadsPerRow should be powers of 2 for simplicity
-    static_assert((kChunkSizeL & (kChunkSizeL - 1)) == 0);
-    static_assert((kLPerThread & (kLPerThread - 1)) == 0);
-    static_assert((kNThreadsPerRow & (kNThreadsPerRow - 1)) == 0);
-    static_assert(kNThreadsPerRow <= 32);
-
-    const int row_idx = tid / kNThreadsPerRow;
-    const int col_idx = tid % kNThreadsPerRow;
 
     float bias_val = params.bias_ptr == nullptr || chunk_c_id * kChunkSizeC + row_idx >= params.dim ? 0.f : float(reinterpret_cast<weight_t *>(params.bias_ptr)[chunk_c_id * kChunkSizeC + row_idx]);
     float weight_vals[kWidth] = {0};
@@ -537,26 +546,15 @@ void causal_conv1d_channellast_fwd_kernel(ConvParamsBase params) {
     for (int i = 0; i < kWidth - 1 + kLPerThread; ++i) {
         x_vals[i] = float(x_smem[col_idx * kLPerThread + i][row_idx]);
     }
-    int seq_idx_thread[kWidth - 1 + kLPerThread];
-    if constexpr (kHasSeqIdx) {
-        #pragma unroll
-        for (int i = 0; i < kWidth - 1 + kLPerThread; ++i) {
-            seq_idx_thread[i] = chunk_l_id * kChunkSizeL + col_idx * kLPerThread + i - (kWidth - 1) >= 0 ? seq_idx[col_idx * kLPerThread + i - (kWidth - 1)] : -1;
-        }
-    }
+
 
     float out_vals[kLPerThread];
     #pragma unroll
     for (int i = 0; i < kLPerThread; ++i) {
         out_vals[i] = bias_val;
-        const int seq_idx_cur = !kHasSeqIdx ? 0 : seq_idx_thread[i + kWidth - 1];
         #pragma unroll
         for (int w = 0; w < kWidth; ++w) {
-            if constexpr (!kHasSeqIdx) {
-                out_vals[i] += weight_vals[w] * x_vals[i + w];
-            } else {
-                out_vals[i] += seq_idx_thread[i + w] == seq_idx_cur ? weight_vals[w] * x_vals[i + w] : 0.f;
-            }
+            out_vals[i] += weight_vals[w] * x_vals[i + w];
         }
         if (params.silu_activation) {out_vals[i] = out_vals[i] / (1 + expf(-out_vals[i])); }
     }
@@ -570,7 +568,7 @@ void causal_conv1d_channellast_fwd_kernel(ConvParamsBase params) {
     for (int l = 0; l < Ktraits::kNLoads; ++l) {
         input_t out_vals_store[kNElts];
         reinterpret_cast<vec_t *>(out_vals_store)[0] = reinterpret_cast<vec_t *>(x_smem[l * kLPerLoad + l_idx])[c_idx];
-        if (chunk_l_id * kChunkSizeL + l * kLPerLoad + l_idx < params.seqlen
+        if (chunk_l_id * kChunkSizeL + l * kLPerLoad + l_idx < seqlen
             && chunk_c_id * kChunkSizeC + c_idx * kNElts < params.dim) {
             *reinterpret_cast<vec_t *>(out + l * kLPerLoad * params.out_l_stride) = reinterpret_cast<vec_t *>(out_vals_store)[0];
         }

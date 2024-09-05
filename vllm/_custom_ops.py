@@ -751,9 +751,12 @@ def causal_conv1d_fwd(x: torch.Tensor, weight: torch.Tensor,
                       seq_idx_: Optional[torch.Tensor],
                       initial_states_: Optional[torch.Tensor],
                       final_states_out_: Optional[torch.Tensor],
+                      max_seq_len:int,
+                      cu_seq_len: Optional[torch.Tensor],
                       silu_activation: bool) -> torch.Tensor:
     return torch.ops._C.causal_conv1d_fwd(x, weight, bias_, seq_idx_,
                                           initial_states_, final_states_out_,
+                                          max_seq_len, cu_seq_len,
                                           silu_activation)
 
 

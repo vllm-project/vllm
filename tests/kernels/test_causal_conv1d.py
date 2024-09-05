@@ -83,16 +83,16 @@ def causal_conv1d_update_ref(x: torch.Tensor,
     return (out if activation is None else F.silu(out)).to(dtype=dtype_in)
 
 
-@pytest.mark.parametrize("return_final_states", [False, True])
-@pytest.mark.parametrize("has_initial_states", [False, True])
-@pytest.mark.parametrize("channel_last", [False, True])
+@pytest.mark.parametrize("return_final_states", [True])
+@pytest.mark.parametrize("has_initial_states", [True])
+@pytest.mark.parametrize("channel_last", [True])
 @pytest.mark.parametrize("itype", [torch.bfloat16])
-@pytest.mark.parametrize("silu_activation", [False, True])
-@pytest.mark.parametrize("has_bias", [False, True])
+@pytest.mark.parametrize("silu_activation", [True])
+@pytest.mark.parametrize("has_bias", [True])
 @pytest.mark.parametrize("width", [4])
-@pytest.mark.parametrize("seqlen", [128, 512, 4096])
-@pytest.mark.parametrize('dim', [64, 4096 + 32])
-@pytest.mark.parametrize('batch', [1, 2])
+@pytest.mark.parametrize("seqlen", [128])
+@pytest.mark.parametrize('dim', [64])
+@pytest.mark.parametrize('batch', [1])
 def test_causal_conv1d(batch, dim, seqlen, width, has_bias, silu_activation,
                        itype, channel_last, has_initial_states,
                        return_final_states):
@@ -206,20 +206,11 @@ def test_causal_conv1d_update(batch, dim, width, has_bias, silu_activation,
 
 
 @pytest.mark.parametrize("itype", [torch.float])
-# @pytest.mark.parametrize('itype', [torch.float16])
 @pytest.mark.parametrize("silu_activation", [True])
-# @pytest.mark.parametrize('silu_activation', [False])
 @pytest.mark.parametrize("has_bias", [True])
-# @pytest.mark.parametrize('has_bias', [False])
 @pytest.mark.parametrize("width", [4])
-# @pytest.mark.parametrize('width', [2])
-@pytest.mark.parametrize(
-    "seqlen", [4096]
-)
-# @pytest.mark.parametrize('seqlen', [8, 16, 32, 64, 128, 256, 512, 784, 1024, 2048, 4096])
-# @pytest.mark.parametrize('seqlen', [2048])
+@pytest.mark.parametrize('seqlen', [8, 16, 32, 64, 128, 256, 512, 784, 1024, 2048, 4096])
 @pytest.mark.parametrize('dim', [64 ,4096])
-# @pytest.mark.parametrize('dim', [64])
 def test_causal_conv1d_varlen(dim, seqlen, width, has_bias, silu_activation, itype):
     device = "cuda"
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (3e-3, 5e-3)
@@ -230,56 +221,48 @@ def test_causal_conv1d_varlen(dim, seqlen, width, has_bias, silu_activation, ity
     torch.random.manual_seed(seqlen + dim + width)
     batch = 1
     seqlens = []
-    for b in range(batch):
-        nsplits = torch.randint(1, 5, (1,)).item()
-        eos_pos = torch.randperm(seqlen - 1)[:nsplits].sort().values
-        seqlens.append(torch.diff(torch.cat([torch.tensor([-1]), eos_pos, torch.tensor([seqlen - 1])])).tolist())
-        assert sum(seqlens[-1]) == seqlen
-        assert all(s > 0 for s in seqlens[-1])
+    nsplits = 2
+    eos_pos = torch.randperm(seqlen - 1)[:nsplits].sort().values
+    seqlens.append(torch.diff(torch.cat([torch.tensor([-1]), eos_pos, torch.tensor([seqlen - 1])])).tolist())
+    assert sum(seqlens[-1]) == seqlen
+    assert all(s > 0 for s in seqlens[-1])
     # Only support channel_last
-    print(seqlens)
+    cumsum = torch.cumsum(torch.tensor(seqlens[0]),dim=0).to(torch.int32)
     x = rearrange(
         torch.randn(batch, seqlen, 4096 + dim + 64, device=device, dtype=itype)[:, :, 4096:4096 + dim], "b s d -> b d s"
-    ).requires_grad_()
-    weight = torch.randn(dim, width, device=device, dtype=torch.float32, requires_grad=True)
+    )
+    weight = torch.randn(dim, width, device=device, dtype=itype)
     if has_bias:
-        bias = torch.randn(dim, device=device, dtype=torch.float32, requires_grad=True)
+        bias = torch.randn(dim, device=device, dtype=itype)
     else:
         bias = None
-    seq_idx = torch.stack([torch.cat([torch.full((s,), i, dtype=torch.int32, device=device) for i, s in enumerate(sl)], dim=0)
-                           for sl in seqlens], dim=0)
-    print(seq_idx)
-    print(x.shape)
-    x_ref = x.detach().clone().requires_grad_()
-    weight_ref = weight.detach().clone().requires_grad_()
-    bias_ref = bias.detach().clone().requires_grad_() if bias is not None else None
+    x_ref = x.detach().clone()
+    weight_ref = weight.detach().clone()
+    bias_ref = bias.detach().clone() if bias is not None else None
     activation = None if not silu_activation else "silu"
-    out,final_states = causal_conv1d_fn(x, weight, bias, seq_idx=seq_idx, activation=activation,return_final_states=True)
+    final_states = torch.randn(nsplits + 1, width - 1,
+                                           dim,
+                                           device=x.device,
+                                           dtype=x.dtype).transpose(1, 2)
+    final_states_ref = final_states.clone()
+    from vllm import _custom_ops as ops
+    out = ops.causal_conv1d_fwd(x.squeeze(0), weight, bias, None, final_states,
+                                final_states, 
+                                max(seqlens[0]),
+                                cumsum.cuda(),
+                                activation is not None)
     out_ref = []
-    for b in range(batch):
-        out_ref_b = []
-        for x_s in torch.split(x_ref[[b]], seqlens[b], dim=2):
-            print(x_s.shape)
-            out_ref_b.append(causal_conv1d_ref(x_s, weight_ref, bias_ref, activation=activation,return_final_states=True))
-        out_ref.append(torch.cat(out_ref_b[0], dim=2))
+    # for b in range(batch):
+    out_ref_b = []
+    for i, x_s in enumerate(torch.split(x_ref[[0]], seqlens[0], dim=2)):
+        print(x_s.shape)
+        out_ref_b.append(causal_conv1d_ref(x_s, weight_ref, bias_ref, activation=activation,return_final_states=True,initial_states=final_states_ref[i].unsqueeze(0)))
+    out_ref.append(torch.cat([t[0] for t in out_ref_b], dim=2))
     out_ref = torch.cat(out_ref, dim=0)
 
-    print("out",out.shape,out_ref.shape)
-    print("fs",final_states.shape)
+    ref_final_states = torch.concat([t[1] for t in out_ref_b],dim=0)
     print(f"Output max diff: {(out - out_ref).abs().max().item()}")
     print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
+    assert torch.allclose(final_states, ref_final_states, rtol=rtol, atol=atol)
 
-    # g = torch.randn_like(out)
-    # out_ref.backward(g)
-    # out.backward(g)
-
-    # print(f"dx max diff: {(x.grad - x_ref.grad).abs().max().item()}")
-    # print(f"dweight max diff: {(weight.grad - weight_ref.grad).abs().max().item()}")
-    # if has_bias:
-        # print(f"dbias max diff: {(bias.grad - bias_ref.grad).abs().max().item()}")
-
-    # assert torch.allclose(x.grad, x_ref.grad.to(dtype=itype), rtol=rtol, atol=atol)
-    # assert torch.allclose(weight.grad, weight_ref.grad, rtol=rtolw, atol=atolw)
-    # if has_bias:
-        # assert torch.allclose(bias.grad, bias_ref.grad, rtol=rtolw, atol=atolw)

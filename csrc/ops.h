@@ -226,12 +226,14 @@ at::Tensor causal_conv1d_update(const at::Tensor& x,
                                 const c10::optional<at::Tensor>& bias_,
                                 bool silu_activation);
 
-at::Tensor causal_conv1d_fwd(const at::Tensor& x, const at::Tensor& weight,
-                             const c10::optional<at::Tensor>& bias_,
-                             const c10::optional<at::Tensor>& seq_idx_,
-                             const c10::optional<at::Tensor>& initial_states_,
-                             const c10::optional<at::Tensor>& final_states_out_,
-                             bool silu_activation);
+at::Tensor causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
+                  const c10::optional<at::Tensor> &bias_,
+                  const c10::optional<at::Tensor> &seq_idx_,
+                  const c10::optional<at::Tensor> &initial_states_,
+                  const c10::optional<at::Tensor> &final_states_out_,
+                  int64_t max_seq_len,
+                  const c10::optional<at::Tensor> &cu_seq_len,
+                  bool silu_activation);
 
 #ifndef USE_ROCM
 using fptr_t = int64_t;
