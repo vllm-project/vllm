@@ -2,10 +2,9 @@ import contextlib
 import enum
 import json
 from pathlib import Path
-from huggingface_hub import file_exists
 from typing import Any, Dict, Optional, Type, Union
 
-from huggingface_hub import hf_hub_download
+from huggingface_hub import file_exists, hf_hub_download
 from torch import Value
 from transformers import GenerationConfig, PretrainedConfig
 from transformers.models.auto.image_processing_auto import (

@@ -13,9 +13,9 @@ from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import current_platform
 from vllm.tracing import is_otel_available, otel_import_error_traceback
-from vllm.transformers_utils.config import (get_config,
+from vllm.transformers_utils.config import (ConfigFormat, get_config,
                                             get_hf_image_processor_config,
-                                            get_hf_text_config, ConfigFormat)
+                                            get_hf_text_config)
 from vllm.utils import (STR_NOT_IMPL_ENC_DEC_CUDAGRAPH, GiB_bytes,
                         cuda_device_count_stateless, get_cpu_memory, is_cpu,
                         is_hip, is_neuron, is_openvino, is_xpu,
