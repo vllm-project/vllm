@@ -164,18 +164,14 @@ To consume the server, you can use the OpenAI client like in the example below:
     image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
 
     chat_response = client.chat.completions.create(
-        "microsoft/Phi-3.5-vision-instruct",
+        model="microsoft/Phi-3.5-vision-instruct",
         messages=[{
             "role": "user",
             "content": [
-                {
-                    "type": "text",
-                    "text": "What’s in this image?"
-                },
-                {
-                    "type": "image_url",
-                    "image_url": {"url": image_url},
-                },
+                # NOTE: The prompt formatting with the image token `<image>` is not needed
+                # since the prompt will be processed automatically by the API server.
+                {"type": "text", "text": "What’s in this image?"},
+                {"type": "image_url", "image_url": {"url": image_url}},
             ],
         }],
     )
@@ -186,22 +182,13 @@ To consume the server, you can use the OpenAI client like in the example below:
     image_url_lion = "https://upload.wikimedia.org/wikipedia/commons/7/77/002_The_lion_king_Snyggve_in_the_Serengeti_National_Park_Photo_by_Giles_Laurent.jpg"
 
     chat_response = client.chat.completions.create(
-        "microsoft/Phi-3.5-vision-instruct",
+        model="microsoft/Phi-3.5-vision-instruct",
         messages=[{
             "role": "user",
             "content": [
-                {
-                    "type": "text",
-                    "text": "What are the animals in these images?"
-                },
-                {
-                    "type": "image_url",
-                    "image_url": {"url": image_url_duck},
-                },
-                {
-                    "type": "image_url",
-                    "image_url": {"url": image_url_lion},
-                },
+                {"type": "text", "text": "What are the animals in these images?"},
+                {"type": "image_url", "image_url": {"url": image_url_duck}},
+                {"type": "image_url", "image_url": {"url": image_url_lion}},
             ],
         }],
     )
