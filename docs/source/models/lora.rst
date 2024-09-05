@@ -128,7 +128,7 @@ is set to `True`. When this option is enabled, the API server will log a warning
 
 Loading a LoRA Adapter:
 
-To dynamically load a LoRA adapter, send a POST request to the `/v1/load_lora_adapter`` endpoint with the necessary
+To dynamically load a LoRA adapter, send a POST request to the `/v1/load_lora_adapter` endpoint with the necessary
 details of the adapter to be loaded. The request payload should include the name and path to the LoRA adapter.
 
 Example request to load a LoRA adapter:
