@@ -178,7 +178,12 @@ def compare_two_settings(model: str,
         env2: The second set of environment variables to pass to the API server.
     """
 
-    tokenizer = AutoTokenizer.from_pretrained(model)
+    trust_remote_code = "--trust-remote-code"
+    if trust_remote_code in arg1 or trust_remote_code in arg2:
+        tokenizer = AutoTokenizer.from_pretrained(model,
+                                                  trust_remote_code=True)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(model)
 
     prompt = "Hello, my name is"
     token_ids = tokenizer(prompt)["input_ids"]

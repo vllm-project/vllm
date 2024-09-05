@@ -18,23 +18,26 @@ logger = init_logger("test_pipeline_parallel")
 VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
 
 
-@pytest.mark.parametrize(("TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, "
-                          "MODEL_NAME, DIST_BACKEND"),
-                         [
-                             (2, 2, 0, 1, "meta-llama/Meta-Llama-3-8B", "mp"),
-                             (2, 2, 1, 0, "meta-llama/Meta-Llama-3-8B", "mp"),
-                             (1, 3, 0, 0, "meta-llama/Meta-Llama-3-8B", "mp"),
-                             (1, 4, 0, 1, "meta-llama/Meta-Llama-3-8B", "mp"),
-                             (1, 4, 1, 0, "meta-llama/Meta-Llama-3-8B", "mp"),
-                             (1, 3, 0, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
-                             (1, 4, 0, 1, "meta-llama/Meta-Llama-3-8B", "ray"),
-                             (1, 4, 1, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
-                             (2, 2, 1, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
-                             (2, 2, 0, 1, "meta-llama/Meta-Llama-3-8B", "ray"),
-                         ])
+@pytest.mark.parametrize(
+    ("TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, TRUST_REMOTE_CODE, "
+     "MODEL_NAME, DIST_BACKEND"),
+    [
+        (2, 2, 0, 1, 0, "meta-llama/Meta-Llama-3-8B", "mp"),
+        (2, 2, 1, 0, 0, "meta-llama/Meta-Llama-3-8B", "mp"),
+        (1, 3, 0, 0, 0, "meta-llama/Meta-Llama-3-8B", "mp"),
+        (1, 4, 0, 1, 0, "meta-llama/Meta-Llama-3-8B", "mp"),
+        (1, 4, 1, 0, 0, "meta-llama/Meta-Llama-3-8B", "mp"),
+        (1, 3, 0, 0, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
+        (1, 4, 0, 1, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
+        (1, 4, 1, 0, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
+        (2, 2, 1, 0, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
+        (2, 2, 0, 1, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
+        (2, 2, 1, 1, 1, "internlm/internlm2_5-7b-chat", "ray"),
+    ],
+)
 @fork_new_process_for_each_test
-def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME,
-                    DIST_BACKEND):
+def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL,
+                    TRUST_REMOTE_CODE, MODEL_NAME, DIST_BACKEND):
     if VLLM_MULTI_NODE and DIST_BACKEND == "mp":
         pytest.skip("Skipping multi-node pipeline parallel test for "
                     "multiprocessing distributed backend")
@@ -71,6 +74,9 @@ def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL, MODEL_NAME,
     if EAGER_MODE:
         pp_args.append("--enforce-eager")
         tp_args.append("--enforce-eager")
+    if TRUST_REMOTE_CODE:
+        pp_args.append("--trust-remote-code")
+        tp_args.append("--trust-remote-code")
     pp_env = None
     if (DIST_BACKEND == "ray" and TP_SIZE == 2 and PP_SIZE == 2
             and CHUNKED_PREFILL):

@@ -35,18 +35,20 @@ _EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 _MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 4096
 
 _PP_SUPPORTED_MODELS = [
-    "AquilaModel",
     "AquilaForCausalLM",
+    "AquilaModel",
     "DeepseekV2ForCausalLM",
+    "GPT2LMHeadModel",
+    "InternLM2ForCausalLM",
     "InternLMForCausalLM",
+    "InternVLChatModel",
     "JAISLMHeadModel",
     "LlamaForCausalLM",
     "LLaMAForCausalLM",
     "MistralForCausalLM",
-    "Phi3ForCausalLM",
-    "GPT2LMHeadModel",
     "MixtralForCausalLM",
     "NemotronForCausalLM",
+    "Phi3ForCausalLM",
     "Qwen2ForCausalLM",
     "Qwen2MoeForCausalLM",
     "QWenLMHeadModel",
