@@ -8,12 +8,13 @@ from vllm.config import ParallelConfig, SpeculativeConfig
 from vllm.distributed.communication_op import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.layers.spec_decode_base_sampler import (
     SpecDecodeBaseSampler, SpecDecodeStochasticBaseSampler)
 from vllm.model_executor.layers.typical_acceptance_sampler import (
     TypicalAcceptanceSampler)
 from vllm.sequence import (CompletionSequenceGroupOutput, ExecuteModelRequest,
-                           HiddenStates, SamplerOutput, SequenceGroupMetadata,
+                           HiddenStates, SequenceGroupMetadata,
                            get_all_seq_ids, get_all_seq_ids_and_request_ids)
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
 from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
@@ -365,12 +366,13 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         #    used during the prefill phase.
         # 2. Auto-disable enabled: The running queue size exceeds
         #    the specified threshold.
-        # 3. No request: There are no requests in the batch.
+        # 3. No request: There are no requests in the batch, or
+        #    none of the requests in the batch have spec decoding enabled.
         # In any of these cases, the proposer and scorer workers
         # are called normally.
-        no_spec = num_lookahead_slots == 0 or len(
-            execute_model_req.seq_group_metadata_list
-        ) == 0 or disable_all_speculation
+        no_spec = num_lookahead_slots == 0 or disable_all_speculation or all(
+            sgm.num_speculative_tokens == 0
+            for sgm in execute_model_req.seq_group_metadata_list)
 
         # Broadcast how many lookahead slots are scheduled for this step, and
         # whether all speculation is disabled, to all non-driver workers.
@@ -415,10 +417,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             self, execute_model_req: ExecuteModelRequest) -> bool:
         # When the batch size is too large, disable speculative decoding
         # to stop trading off throughput for latency.
-        disable_all_speculation = (execute_model_req.running_queue_size >=
-                                   self.disable_by_batch_size)
-
-        return disable_all_speculation
+        return (execute_model_req.running_queue_size >=
+                self.disable_by_batch_size)
 
     def _maybe_disable_speculative_tokens(
             self, disable_all_speculation: bool,
@@ -621,18 +621,12 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # proposal len. This adds some complexity (splitting the batch into spec
         # and non spec sequences) and should be removed in the future. It can be
         # done by supporting per-sequence proposal lens.
-        _, spec_indices = split_batch_by_proposal_len(
-            seq_group_metadata_list,
-            proposal_lens_list,
-            select_proposal_len_zero=False)
-        _, non_spec_indices = split_batch_by_proposal_len(
-            seq_group_metadata_list,
-            proposal_lens_list,
-            select_proposal_len_zero=True)
+        (_, spec_indices), (_, non_spec_indices) = split_batch_by_proposal_len(
+            seq_group_metadata_list, proposal_lens_list)
         original_indices = spec_indices + non_spec_indices
 
-        # Get probabilities of target model, excluding bonus token.
-        proposal_verifier_probs = proposal_scores.probs[spec_indices, :-1]
+        # Get probabilities of target model, including bonus tokens.
+        proposal_verifier_probs = proposal_scores.probs[spec_indices]
 
         # Get non-speculative sampled tokens from target model.
         non_spec_token_ids = proposal_scores.token_ids[non_spec_indices]
@@ -657,13 +651,12 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             }
 
         accepted_token_ids = self.spec_decode_sampler(
-            target_probs=proposal_verifier_probs,
+            target_with_bonus_probs=proposal_verifier_probs,
             bonus_token_ids=bonus_token_ids,
             draft_probs=proposal_probs,
             draft_token_ids=proposal_token_ids,
             **sampler_extra_kwargs,
         )
-
         # Append output tokens from non-speculative sequences to
         # the accepted token ids tensor.
         non_spec_token_ids = non_spec_token_ids.expand(-1, max_proposal_len +

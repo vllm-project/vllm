@@ -87,8 +87,11 @@ steps:
   commands:
   - pip install -e ./plugins/vllm_add_dummy_model
   - pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git@a4987bba6e9e9b3f22bd3a6c1ecf0abd04fd5622#egg=lm_eval[api]
-  - pytest -v -s entrypoints/llm
+  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py
+  - pytest -v -s entrypoints/llm/test_lazy_outlines.py # it needs a clean process
   - pytest -v -s entrypoints/openai
+  - pytest -v -s entrypoints/test_chat_utils.py
+
 
 - label: Distributed Tests (4 GPUs) # 10min
   working_dir: "/vllm-workspace/tests"
@@ -155,6 +158,7 @@ steps:
     - python3 offline_inference_with_prefix.py
     - python3 llm_engine_example.py
     - python3 offline_inference_vision_language.py
+    - python3 offline_inference_vision_language_multi_image.py
     - python3 tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
     - python3 offline_inference_encoder_decoder.py
 
@@ -172,6 +176,7 @@ steps:
   - vllm/
   commands:
     - pytest -v -s ./compile/test_full_graph.py
+    - pytest -v -s ./compile/test_wrapper.py
 
 
 - label: Vision Language Models Test # 42min
@@ -215,9 +220,9 @@ steps:
     - pytest -v -s spec_decode
 
 - label: LoRA Test %N # 30min each
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/lora
-  - csrc/punica
   - tests/lora
   command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_long_context.py
   parallelism: 4
@@ -232,12 +237,13 @@ steps:
   parallelism: 4
 
 - label: Tensorizer Test # 11min
+  mirror_hardwares: [amd]
   soft_fail: true
   source_file_dependencies:
   - vllm/model_executor/model_loader
   - tests/tensorizer_loader
   commands:
-    - apt-get install -y curl libsodium23
+    - apt-get update && apt-get install -y curl libsodium23
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s tensorizer_loader
 
@@ -266,6 +272,15 @@ steps:
   - pip install lm-eval
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - bash ./run-tests.sh -c configs/models-small.txt -t 1
+
+- label: OpenAI-Compatible Tool Use # 20 min
+  fast_check: false
+  mirror_hardwares: [ amd ]
+  source_file_dependencies:
+    - vllm/
+    - tests/tool_use
+  commands:
+    - pytest -v -s tool_use
 
 #####  1 GPU test  #####
 #####  multi gpus test  #####
@@ -354,9 +369,9 @@ steps:
 - label: LoRA Long Context (Distributed) # 11min
   # This test runs llama 13B, so it is required to run on 4 GPUs.
   num_gpus: 4
+  soft_fail: true
   source_file_dependencies:
   - vllm/lora
-  - csrc/punica
   - tests/lora/test_long_context
   commands:
     # FIXIT: find out which code initialize cuda before running the test
