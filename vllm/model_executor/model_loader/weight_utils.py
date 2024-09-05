@@ -250,8 +250,8 @@ def download_weights_from_hf(
 
 def download_safetensors_index_file_from_hf(
     model_name_or_path: str,
-    cache_dir: Optional[str],
     index_file: str,
+    cache_dir: Optional[str],
     revision: Optional[str] = None,
 ) -> None:
     """Download hf safetensors index file from Hugging Face Hub.
