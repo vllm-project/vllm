@@ -11,6 +11,7 @@ from vllm.config import CacheConfig, LoRAConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.inputs.registry import InputContext
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.multi_head_sampler import MultiheadSampler
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding
@@ -21,6 +22,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.speech import SpeechPlugin
 from vllm.sequence import IntermediateTensors, SamplerOutput
 
+from einops import rearrange
+from transformers.generation import TopKLogitsWarper, TopPLogitsWarper
 
 import lzma
 import numpy as np
@@ -65,7 +68,8 @@ class ChatTtsLlm(nn.Module):
             nn.Linear(self.model_dim, self.num_audio_tokens, bias=False) for _ in range(self.num_output_head)
         ])
         self.logits_processor = LogitsProcessor(self.num_audio_tokens)
-        self.samplers = [Sampler(head_idx) for head_idx in range(self.num_output_head)]
+        self.sampler = MultiheadSampler()
+        # self.samplers = [Sampler(head_idx) for head_idx in range(self.num_output_head)]
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
@@ -123,12 +127,13 @@ class ChatTtsLlm(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        head_logits = logits.permute(1, 0, 2)
-        next_tokens = self.samplers[0](head_logits[0], sampling_metadata)
-        for i in range(self.num_output_head - 1):
-            output = self.samplers[i](head_logits[i + 1], sampling_metadata)
-            self.merge_sample_results(next_tokens, output)
+        # head_logits = logits.permute(1, 0, 2)
+        # next_tokens = self.samplers[0](head_logits[0], sampling_metadata)
+        # for i in range(self.num_output_head - 1):
+        #     output = self.samplers[i](head_logits[i + 1], sampling_metadata)
+        #     self.merge_sample_results(next_tokens, output)
 
+        next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
     def forward(
@@ -184,3 +189,4 @@ class ChatTtsLlm(nn.Module):
         for o_a, o_b in zip(source.outputs, target.outputs):
             for s_a, s_b in zip(o_a.samples, o_b.samples):
                 s_a.output_tokens.append(s_b.output_token)
+    

@@ -103,7 +103,7 @@ async def generate_streaming(llm: AsyncLLMEngine, request_func_input: RequestFun
     ttft = 0.0
     st = time.perf_counter()
     most_recent_timestamp = st
-    sampling_params = SamplingParams(n=1, temperature=1, detokenize=False, stop_token_ids=[21803], max_tokens=2048, top_k=1)
+    sampling_params = SamplingParams(n=1, temperature=1, detokenize=False, stop_token_ids=[625], max_tokens=2048, top_k=1)
     results_generator = llm.generate(request_func_input.prompt, sampling_params, request_id=request_id)
     async for request_output in results_generator:
         token_ids = request_output.outputs[0].token_ids
@@ -298,7 +298,7 @@ def run_vllm(
                 n=1,
                 temperature=1,
                 detokenize=False,
-                stop_token_ids=[21803],
+                stop_token_ids=[625],
                 max_tokens=2048,
                 top_k=1
             ))
