@@ -227,6 +227,11 @@ Multimodal Language Models
     - Image\ :sup:`E+`
     - :code:`llava-hf/llava-v1.6-mistral-7b-hf`, :code:`llava-hf/llava-v1.6-vicuna-7b-hf`, etc.
     -
+  * - :code:`MiniCPMV`
+    - MiniCPM-V
+    - Image\ :sup:`+`
+    - :code:`openbmb/MiniCPM-V-2` (see note), :code:`openbmb/MiniCPM-Llama3-V-2_5`, :code:`openbmb/MiniCPM-V-2_6`, etc.
+    -
   * - :code:`PaliGemmaForConditionalGeneration`
     - PaliGemma
     - Image\ :sup:`E`
@@ -237,14 +242,9 @@ Multimodal Language Models
     - Image\ :sup:`E+`
     - :code:`microsoft/Phi-3-vision-128k-instruct`, :code:`microsoft/Phi-3.5-vision-instruct` etc.
     -
-  * - :code:`MiniCPMV`
-    - MiniCPM-V
-    - Image\ :sup:`+`
-    - :code:`openbmb/MiniCPM-V-2` (see note), :code:`openbmb/MiniCPM-Llama3-V-2_5`, :code:`openbmb/MiniCPM-V-2_6`, etc.
-    -
   * - :code:`QWenLMHeadModel`
-    - Qwen
-    - Image
+    - Qwen-VL
+    - Image\ :sup:`E`
     - :code:`Qwen/Qwen-VL`, :code:`Qwen/Qwen-VL-Chat`, etc.
     -
   * - :code:`UltravoxModel`
