@@ -9,7 +9,7 @@ tokenizers >= 0.19.1  # Required for Llama 3.
 protobuf # Required by LlamaTokenizer.
 fastapi
 aiohttp
-openai >= 1.0 # Ensure modern openai package (ensure types module present)
+openai >= 1.40.0 # Ensure modern openai package (ensure types module present)
 uvicorn[standard]
 pydantic >= 2.8  # Required for OpenAI server.
 pillow  # Required for image processing
