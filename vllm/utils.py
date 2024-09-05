@@ -623,6 +623,41 @@ def get_kv_cache_torch_dtype(
     return torch_dtype
 
 
+def create_kv_caches_with_random_xqa(
+    num_blocks: int,
+    block_size: int,
+    num_layers: int,
+    num_heads: int,
+    head_size: int,
+    cache_dtype: Optional[Union[str, torch.dtype]],
+    model_dtype: Optional[Union[str, torch.dtype]] = None,
+    seed: int = 0,
+    device: Optional[str] = "cuda",
+) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+    torch.random.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+
+    torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
+    key_value_cache_shape = (num_blocks, 2, num_heads, block_size, head_size)
+    scale = head_size**-0.5
+
+    kv_caches: List[torch.Tensor] = []
+    for _ in range(num_layers):
+        key_value_cache = torch.empty(size=key_value_cache_shape,
+                                      dtype=torch_dtype,
+                                      device=device)
+        if cache_dtype in ["auto", "half", "bfloat16", "float"]:
+            key_value_cache.uniform_(-scale, scale)
+        elif cache_dtype == 'fp8':
+            _generate_random_fp8(key_value_cache, -scale, scale)
+        else:
+            raise ValueError(
+                f"Does not support key cache of type {cache_dtype}")
+        kv_caches.append(key_value_cache)
+    return kv_caches
+
+
 def create_kv_caches_with_random_flash(
     num_blocks: int,
     block_size: int,
