@@ -388,6 +388,7 @@ async def chat_completions(request: ChatCompletionRequest,
 
     while True:
         _, token, stats = await result_queue.get()
+        assert res.choices[0].message.content is not None
         res.choices[0].message.content += str(token)
         if stats is not None:
             res.usage.completion_tokens += stats["tokens"]  # type: ignore
