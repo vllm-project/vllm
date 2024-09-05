@@ -2,8 +2,8 @@ import argparse
 import dataclasses
 import json
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Dict, List, Mapping, Optional, Tuple, Type,
-                    Union)
+from typing import (TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Tuple,
+                    Type, Union)
 
 import torch
 
@@ -150,6 +150,7 @@ class EngineArgs:
     otlp_traces_endpoint: Optional[str] = None
     collect_detailed_traces: Optional[str] = None
     disable_async_output_proc: bool = False
+    override_neuron_config: Optional[Dict[str, Any]] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -747,6 +748,16 @@ class EngineArgs:
             default=EngineArgs.disable_async_output_proc,
             help="Disable async output processing. This may result in "
             "lower performance.")
+        parser.add_argument(
+            '--override-neuron-config',
+            type=lambda configs: {
+                str(key): value
+                for key, value in
+                (config.split(':') for config in configs.split(','))
+            },
+            default=None,
+            help="override or set neuron device configuration.")
+
         return parser
 
     @classmethod
@@ -808,7 +819,7 @@ class EngineArgs:
             served_model_name=self.served_model_name,
             limit_mm_per_prompt=self.limit_mm_per_prompt,
             use_async_output_proc=not self.disable_async_output_proc,
-        )
+            override_neuron_config=self.override_neuron_config)
         cache_config = CacheConfig(
             block_size=self.block_size if self.device != "neuron" else
             self.max_model_len,  # neuron needs block_size = max_model_len

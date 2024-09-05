@@ -92,6 +92,7 @@ steps:
   - pytest -v -s entrypoints/openai
   - pytest -v -s entrypoints/test_chat_utils.py
 
+
 - label: Distributed Tests (4 GPUs) # 10min
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
@@ -218,9 +219,9 @@ steps:
     - pytest -v -s spec_decode
 
 - label: LoRA Test %N # 30min each
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/lora
-  - csrc/punica
   - tests/lora
   command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_long_context.py
   parallelism: 4
@@ -270,6 +271,15 @@ steps:
   - pip install lm-eval
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - bash ./run-tests.sh -c configs/models-small.txt -t 1
+
+- label: OpenAI-Compatible Tool Use # 20 min
+  fast_check: false
+  mirror_hardwares: [ amd ]
+  source_file_dependencies:
+    - vllm/
+    - tests/tool_use
+  commands:
+    - pytest -v -s tool_use
 
 #####  1 GPU test  #####
 #####  multi gpus test  #####
@@ -358,9 +368,9 @@ steps:
 - label: LoRA Long Context (Distributed) # 11min
   # This test runs llama 13B, so it is required to run on 4 GPUs.
   num_gpus: 4
+  soft_fail: true
   source_file_dependencies:
   - vllm/lora
-  - csrc/punica
   - tests/lora/test_long_context
   commands:
     # FIXIT: find out which code initialize cuda before running the test

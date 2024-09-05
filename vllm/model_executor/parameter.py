@@ -1,3 +1,4 @@
+from fractions import Fraction
 from typing import Callable, Optional, Union
 
 import torch
@@ -257,7 +258,7 @@ class PackedColumnParameter(_ColumnvLLMParameter):
     """
 
     def __init__(self,
-                 packed_factor: int,
+                 packed_factor: Union[int, Fraction],
                  packed_dim: int,
                  marlin_tile_size: Optional[int] = None,
                  **kwargs):
@@ -298,7 +299,7 @@ class PackedvLLMParameter(ModelWeightParameter):
     """
 
     def __init__(self,
-                 packed_factor: int,
+                 packed_factor: Union[int, Fraction],
                  packed_dim: int,
                  marlin_tile_size: Optional[int] = None,
                  **kwargs):
