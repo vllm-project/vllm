@@ -38,6 +38,7 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, cuda_device_count_stateless,
                         identity, is_cpu)
+from vllm.lora.request import LoRARequest
 
 logger = init_logger(__name__)
 
@@ -235,8 +236,7 @@ def video_assets() -> _VideoAssets:
 
 
 _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature)
-
-
+        
 class HfRunner:
 
     def wrap_device(self, x: _T, device: Optional[str] = None) -> _T:
@@ -650,11 +650,35 @@ class PeftRunner(HfRunner):
         self.model = PeftModel.from_pretrained(self.model,
                                                model_id=adapter_name)
 
+class PeftRunner(HfRunner):
+    def __init__(
+        self,
+        model_name: str,
+        adapter_name: str,
+        dtype: str = "half",
+        *,
+        model_kwargs: Optional[Dict[str, Any]] = None,
+        auto_cls=AutoModelForCausalLM,
+        postprocess_inputs: Callable[[BatchEncoding],
+                                     BatchEncoding] = identity,
+    ) -> None:
+        super().__init__(model_name, 
+                         dtype, 
+                         model_kwargs=model_kwargs, 
+                         is_embedding_model = False, 
+                         auto_cls=auto_cls, 
+                         postprocess_inputs=postprocess_inputs)
+        
+        self.model=PeftModel.from_pretrained(self.model, model_id=adapter_name)
+        
 
 @pytest.fixture(scope="session")
 def hf_runner():
     return HfRunner
 
+@pytest.fixture(scope="session")
+def peft_runner():
+    return PeftRunner
 
 @pytest.fixture(scope="session")
 def peft_runner():
@@ -864,6 +888,8 @@ class VllmRunner:
         outputs = self.generate(prompts,
                                 greedy_params,
                                 images=images,
+                                videos=videos,
+                                audios=audios,
                                 lora_requests=lora_requests)
         return [(output_ids[0], output_str[0])
                 for output_ids, output_str in outputs]

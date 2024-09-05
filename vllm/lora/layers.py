@@ -8,6 +8,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
 
+import opt_einsum as oe
+
 from vllm.adapter_commons.layers import AdapterMapping
 from vllm.config import LoRAConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
@@ -1061,10 +1063,6 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
 
 
 
-<<<<<<< HEAD
-
-=======
->>>>>>> d1b7e97d (almost_works)
 class LogitsProcessorWithLoRA(BaseLayerWithLoRA, TensorPropertiesMixin):
     """
     LoRA wrapper for LogitsProcessor, with extra logic to handle the
@@ -1372,13 +1370,9 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
     so clients can call ModuleToSave exactly as base_layer module
     
     Args:
-<<<<<<< HEAD
         base_layer: layer to replace by Wrapper: 
           VocabParallelEmbedding (for embed_tokens)
           or ParallelLMHead (for lm_head)
-=======
-        base_layer: layer to replace by Wrapper: VocabParallelEmbedding (for embed_tokens) or ParallelLMHead (for lm_head)
->>>>>>> 69f80fe9 (loading_weights)
     """
 
     implemented_layers = ['lm_head', 'embed_tokens']
@@ -1388,26 +1382,17 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
                                     ParallelLMHead]) -> None:
         super().__init__()
         self.base_layer = base_layer
-
-<<<<<<< HEAD
         self.device = _get_lora_device(self.base_layer)
 
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
 
-=======
         self._base_layer_replacement=None
 
 
         self._base_layer_kwargs={"num_embeddings":base_layer.num_embeddings,
                  "embedding_dim":base_layer.embedding_dim}
-                 
-        self.device=_get_lora_device(self.base_layer)
         
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tensor_model_parallel_rank()
-        
->>>>>>> 69f80fe9 (loading_weights)
     @property
     def padded_vocab_size(self):
         # number of embeddings with paddings and with max_lora_extra_vocab_size
@@ -1437,7 +1422,6 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
     def linear_method(self):
         if self.punica_wrapper.no_lora:
             return self.base_layer.linear_method
-
         return self
 
     @property
@@ -1485,14 +1469,6 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
             dtype=lora_config.lora_dtype,
             device=self.device,
         )
-
-        self._base_layer_replacement=ParallelLMHead(num_embeddings=self.padded_vocab_size,
-                                                    org_num_embeddings=self.padded_vocab_size,
-                 embedding_dim=self.embedding_dim,
-                 bias=self.bias,
-                 params_dtype=self.dtype)
-        
-        self._base_layer_replacement.to(self.device)
         
     def reset_lora(self, index: int):
         weights = self.base_layer.weight
@@ -1514,15 +1490,6 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
         self.lm_head_tensors[index,
                             :lora_b.shape[0], :lora_b.shape[1]].copy_(
                                 lora_b, non_blocking=True)
-        loaded_tensor=lora_b
-        if loaded_tensor.shape[0]<=self._base_layer_replacement.org_vocab_size:
-            diff_tokens=self._base_layer_replacement.org_vocab_size-loaded_tensor.shape[0]
-            if diff_tokens:
-                loaded_tensor=F.pad(loaded_tensor, (0,0, 0, diff_tokens), mode='constant', value=0)
-        else:
-            raise ValueError(f'lora_b num of tokens {loaded_tensor.shape[0]} must be less of org_vocab_size {self._base_layer_replacement.org_vocab_size}')
-
-        self._base_layer_replacement.weight.weight_loader(self._base_layer_replacement.weight, loaded_tensor)
         
     def forward(self, *args, **kwargs):
         return type(self.base_layer).forward(self, *args, **kwargs)
