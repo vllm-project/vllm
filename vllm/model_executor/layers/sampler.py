@@ -731,6 +731,7 @@ def get_pythonized_sample_results(
     (
         sample_metadata,
         sampling_metadata,
+        forced_samples,
         greedy_samples,
         multinomial_samples,
         beam_search_logprobs,
@@ -738,6 +739,7 @@ def get_pythonized_sample_results(
     ) = (
         sample_result_args.sample_metadata,
         sample_result_args.sampling_metadata,
+        sample_result_args.forced_samples,
         sample_result_args.greedy_samples,
         sample_result_args.multinomial_samples,
         sample_result_args.beam_search_logprobs,
@@ -890,6 +892,7 @@ def _sample_with_torch(
         sampling_metadata=sampling_metadata,
         sample_metadata=sample_metadata,
         multinomial_samples=multinomial_samples,
+        forced_samples=forced_samples,
         greedy_samples=greedy_samples,
         beam_search_logprobs=beam_search_logprobs,
         sample_results_dict=sample_results_dict)
