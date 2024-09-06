@@ -174,8 +174,9 @@ def awq_gemm_kernel(a_ptr, b_ptr, c_ptr, zeros_ptr, scales_ptr, M, N, K,
         b = tl.interleave(b, b)
 
         # Dequantize b.
-        offsets_szk = ((BLOCK_SIZE_K * SPLIT_K * k + pid_z * BLOCK_SIZE_K) // 
-                        group_size + tl.arange(0, 1))
+        offsets_szk = (
+            (BLOCK_SIZE_K * SPLIT_K * k + pid_z * BLOCK_SIZE_K) // group_size +
+            tl.arange(0, 1))
         offsets_z = (N // 8) * offsets_szk[:, None] + offsets_zn[None, :]
         masks_zk = offsets_szk < K // group_size
         masks_z = masks_zk[:, None] & masks_zn[None, :]
