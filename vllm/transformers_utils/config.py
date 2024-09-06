@@ -14,12 +14,16 @@ from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
                                              EAGLEConfig, ExaoneConfig,
-                                             InternVLChatConfig, JAISConfig,
-                                             MedusaConfig, MLPSpeculatorConfig,
-                                             MPTConfig, NemotronConfig,
-                                             RWConfig, UltravoxConfig)
+                                             GraniteConfig, InternVLChatConfig,
+                                             JAISConfig, MedusaConfig,
+                                             MLPSpeculatorConfig, MPTConfig,
+                                             NemotronConfig, RWConfig,
+                                             UltravoxConfig)
+# yapf: enable
 from vllm.transformers_utils.utils import check_gguf_file
 
 if VLLM_USE_MODELSCOPE:
@@ -45,6 +49,9 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "internvl_chat": InternVLChatConfig,
     "nemotron": NemotronConfig,
     "ultravox": UltravoxConfig,
+    # Granite can be removed from here once we have upgraded to
+    # transformers 4.45+
+    "granite": GraniteConfig,
 }
 
 for name, cls in _CONFIG_REGISTRY.items():
@@ -90,6 +97,14 @@ def get_config(
             raise ValueError(f"No supported config format found in {model}")
 
     try:
+        config_dict, _ = PretrainedConfig.get_config_dict(
+        model, revision=revision, code_revision=code_revision, **kwargs)
+
+        # Use custom model class if it's in our registry
+        model_type = config_dict.get("model_type")
+        if model_type in _CONFIG_REGISTRY:
+            config_class = _CONFIG_REGISTRY[model_type]
+        
         if config_format == ConfigFormat.HF:
             config = AutoConfig.from_pretrained(
                 model,
@@ -113,11 +128,6 @@ def get_config(
             raise RuntimeError(err_msg) from e
         else:
             raise e
-    if config.model_type in _CONFIG_REGISTRY:
-        config_class = _CONFIG_REGISTRY[config.model_type]
-        config = config_class.from_pretrained(model,
-                                              revision=revision,
-                                              code_revision=code_revision)
 
     # Special architecture mapping check for GGUF models
     if is_gguf:
