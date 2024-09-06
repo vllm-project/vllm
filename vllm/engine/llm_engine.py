@@ -1246,23 +1246,15 @@ class LLMEngine:
 
         return
 
-    def _process_model_outputs(self, ctx: SchedulerContext) -> None:
-        """Apply the model output to the sequences in the scheduled seq groups.
+    def _process_model_outputs(self,
+                               ctx: SchedulerContext,
+                               request_id: Optional[str] = None) -> None:
+        """Apply the model output to the sequences in the scheduled seq groups
+        and return responses.
 
-        virtual_engine: The engine id to operate on
+        ctx: The virtual engine context to work on
+        request_id: If provided, then only this request is going to be processed
         
-        is_async: Indicates whether this postprocessor runs in 
-            parallel with the GPU forward pass and is processing 
-            tokens from the previous step. If this is true, then
-            no tokens need to be appended since it is already done
-            externally (before the next schedule() call)
-        
-        sampler_output: Used with multi-step execution to provide 
-            sampler_output of each step
-        is_last_output: Used with multi-step execution to indicate
-            the last step (of each multi-step group)
-            
-        Returns RequestOutputs that can be returned to the client.
         """
         now = time.time()
 
@@ -1270,8 +1262,17 @@ class LLMEngine:
             return None
 
         # Get pending async postprocessor
-        (outputs, seq_group_metadata_list, scheduler_outputs, is_async,
-         is_last_step) = ctx.output_queue.popleft()
+        if request_id:
+            # Sanity
+            assert len(ctx.request_outputs) == 0
+
+            # When we process only one request, no pop is required
+            # (since later we will process all of the rest)
+            (outputs, seq_group_metadata_list, scheduler_outputs, is_async,
+             is_last_step) = ctx.output_queue[0]
+        else:
+            (outputs, seq_group_metadata_list, scheduler_outputs, is_async,
+             is_last_step) = ctx.output_queue.popleft()
         assert outputs is not None
 
         # Sanity check
@@ -1286,9 +1287,21 @@ class LLMEngine:
         else:
             outputs_by_sequence_group = outputs
 
+        # Determine the requests we need to operate on
+        if request_id:
+            indices = []
+            for i, seq_group_meta in enumerate(seq_group_metadata_list):
+                if seq_group_meta.request_id == request_id:
+                    indices.append(i)
+                    break
+            assert indices
+        else:
+            indices = range(len(seq_group_metadata_list))
+
         finished_before: List[int] = []
         finished_now: List[int] = []
-        for i, seq_group_meta in enumerate(seq_group_metadata_list):
+        for i in indices:
+            seq_group_meta = seq_group_metadata_list[i]
             scheduled_seq_group = scheduler_outputs.scheduled_seq_groups[i]
 
             seq_group = scheduled_seq_group.seq_group
@@ -1343,6 +1356,19 @@ class LLMEngine:
             request_output = RequestOutputFactory.create(seq_group)
             ctx.request_outputs.append(request_output)
 
+        # When we process a single request, we remove it, so it won't be later
+        # processed again, and invoke the request output callback
+        # (if there was final output)
+        if request_id:
+            assert len(indices) == 1
+            del seq_group_metadata_list[indices[0]]
+            del scheduler_outputs.scheduled_seq_groups[indices[0]]
+            if (finished_now
+                    and self.process_request_outputs_callback is not None):
+                self.process_request_outputs_callback(ctx.request_outputs)
+                ctx.request_outputs.clear()
+            return
+
         # Free currently finished requests
         if finished_now:
             for scheduler in self.scheduler:
@@ -1354,13 +1380,14 @@ class LLMEngine:
             if (finished_now
                     and self.process_request_outputs_callback is not None):
                 self.process_request_outputs_callback(ctx.request_outputs)
+                ctx.request_outputs.clear()
             return
 
         # Create the outputs
         # Note: scheduled_seq_groups and seq_group_metadata_list
         # must match with the indices
-        for i, scheduled_seq_group in enumerate(
-                scheduler_outputs.scheduled_seq_groups):
+        for i in indices:
+            scheduled_seq_group = scheduler_outputs.scheduled_seq_groups[i]
 
             if i in finished_before or i in finished_now:
                 continue  # Avoids double processing
@@ -1380,6 +1407,7 @@ class LLMEngine:
         if (ctx.request_outputs
                 and self.process_request_outputs_callback is not None):
             self.process_request_outputs_callback(ctx.request_outputs)
+            ctx.request_outputs.clear()
 
         # For async case, we need to record the stats here.
         # For non-async case, the stats are done in the

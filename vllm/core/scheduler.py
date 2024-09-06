@@ -541,8 +541,8 @@ class Scheduler:
         # to keep all the sequence groups in the RUNNING state.
 
         # Store original running requests for the case of async + preemption
-        if self.use_async_output_proc:
-            orig_running = self.running.copy()
+        # if self.use_async_output_proc:
+        #     orig_running = self.running.copy()
 
         running_queue = self.running
         assert len(self._async_stopped) == 0
@@ -569,13 +569,13 @@ class Scheduler:
             # first to drain the async postprocessor, so that all async
             # block_table freeing is applied before the preemption freeing
             # is applied.
-            if self.use_async_output_proc and not self._can_append_slots(
-                    seq_group):
-                tmp = self.running
-                self.running = orig_running
-                assert self.output_proc_callback is not None
-                self.output_proc_callback()
-                self.running = tmp
+            # if self.use_async_output_proc and not self._can_append_slots(
+            #         seq_group):
+            #     tmp = self.running
+            #     self.running = orig_running
+            #     assert self.output_proc_callback is not None
+            #     self.output_proc_callback()
+            #     self.running = tmp
 
             while not self._can_append_slots(seq_group):
                 budget.subtract_num_batched_tokens(seq_group.request_id,
@@ -591,6 +591,12 @@ class Scheduler:
                 if running_queue:
                     # Preempt the lowest-priority sequence groups.
                     victim_seq_group = running_queue.pop()
+
+                    if self.use_async_output_proc:
+                        self.output_proc_callback(sync_request_id=victim_seq_group.request_id)
+                        if victim_seq_group.is_finished():
+                            continue
+                        
                     preempted_mode = self._preempt(victim_seq_group,
                                                    blocks_to_swap_out)
                     if preempted_mode == PreemptionMode.RECOMPUTE:
@@ -600,6 +606,11 @@ class Scheduler:
                 else:
                     # No other sequence groups can be preempted.
                     # Preempt the current sequence group.
+                    if self.use_async_output_proc:
+                        self.output_proc_callback(sync_request_id=victim_seq_group.request_id)
+                        if victim_seq_group.is_finished():
+                            continue
+
                     preempted_mode = self._preempt(seq_group,
                                                    blocks_to_swap_out)
                     if preempted_mode == PreemptionMode.RECOMPUTE:
