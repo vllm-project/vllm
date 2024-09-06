@@ -102,8 +102,9 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         # NOTE(woosuk): Set per-rank cache path since different ranks
         # can have slightly different XLA graphs.
         world_size = self.parallel_config.world_size
+        rank = xr.global_ordinal()
         per_rank_path = os.path.join(envs.VLLM_XLA_CACHE_PATH,
-                                     f"tp{world_size}_rank{self.rank}")
+                                     f"tp{world_size}_rank{rank}")
         xr.initialize_cache(per_rank_path, readonly=False)
 
     def load_model(self):
@@ -143,10 +144,6 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         num_cpu_blocks = int(self.cache_config.swap_space_bytes //
                              block_size_bytes)
         num_cpu_blocks = (num_cpu_blocks // 8) * 8  # Round down to 8.
-
-        # reset and discard the guard and compiled bytecode for profiling runs
-        torch._dynamo.reset()
-
         return num_tpu_blocks, num_cpu_blocks
 
     def initialize_cache(

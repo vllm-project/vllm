@@ -10,12 +10,17 @@ from transformers.models.auto.modeling_auto import (
 
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
-                                             EAGLEConfig, InternVLChatConfig,
+                                             EAGLEConfig, ExaoneConfig,
+                                             GraniteConfig, InternVLChatConfig,
                                              JAISConfig, MedusaConfig,
                                              MLPSpeculatorConfig, MPTConfig,
                                              NemotronConfig, RWConfig,
                                              UltravoxConfig)
+# yapf: enable
+from vllm.transformers_utils.utils import check_gguf_file
 
 if VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
@@ -34,9 +39,13 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "mlp_speculator": MLPSpeculatorConfig,
     "medusa": MedusaConfig,
     "eagle": EAGLEConfig,
+    "exaone": ExaoneConfig,
     "internvl_chat": InternVLChatConfig,
     "nemotron": NemotronConfig,
     "ultravox": UltravoxConfig,
+    # Granite can be removed from here once we have upgraded to
+    # transformers 4.45+
+    "granite": GraniteConfig,
 }
 
 for name, cls in _CONFIG_REGISTRY.items():
@@ -55,34 +64,41 @@ def get_config(
 ) -> PretrainedConfig:
 
     # Separate model folder from file path for GGUF models
-    is_gguf = Path(model).is_file() and Path(model).suffix == ".gguf"
+    is_gguf = check_gguf_file(model)
     if is_gguf:
         kwargs["gguf_file"] = Path(model).name
         model = Path(model).parent
 
-    try:
-        config = AutoConfig.from_pretrained(
-            model,
-            trust_remote_code=trust_remote_code,
-            revision=revision,
-            code_revision=code_revision,
-            **kwargs)
-    except ValueError as e:
-        if (not trust_remote_code and
-                "requires you to execute the configuration file" in str(e)):
-            err_msg = (
-                "Failed to load the model config. If the model is a custom "
-                "model not yet available in the HuggingFace transformers "
-                "library, consider setting `trust_remote_code=True` in LLM "
-                "or using the `--trust-remote-code` flag in the CLI.")
-            raise RuntimeError(err_msg) from e
-        else:
-            raise e
-    if config.model_type in _CONFIG_REGISTRY:
-        config_class = _CONFIG_REGISTRY[config.model_type]
+    config_dict, _ = PretrainedConfig.get_config_dict(
+        model, revision=revision, code_revision=code_revision, **kwargs)
+
+    # Use custom model class if it's in our registry
+    model_type = config_dict.get("model_type")
+    if model_type in _CONFIG_REGISTRY:
+        config_class = _CONFIG_REGISTRY[model_type]
         config = config_class.from_pretrained(model,
                                               revision=revision,
                                               code_revision=code_revision)
+    else:
+        try:
+            config = AutoConfig.from_pretrained(
+                model,
+                trust_remote_code=trust_remote_code,
+                revision=revision,
+                code_revision=code_revision,
+                **kwargs)
+        except ValueError as e:
+            if (not trust_remote_code
+                    and "requires you to execute the configuration file"
+                    in str(e)):
+                err_msg = (
+                    "Failed to load the model config. If the model is a custom "
+                    "model not yet available in the HuggingFace transformers "
+                    "library, consider setting `trust_remote_code=True` in LLM "
+                    "or using the `--trust-remote-code` flag in the CLI.")
+                raise RuntimeError(err_msg) from e
+            else:
+                raise e
 
     # Special architecture mapping check for GGUF models
     if is_gguf:
@@ -107,8 +123,11 @@ def get_hf_image_processor_config(
     revision: Optional[str] = None,
     **kwargs,
 ) -> Dict[str, Any]:
+    # ModelScope does not provide an interface for image_processor
+    if VLLM_USE_MODELSCOPE:
+        return dict()
     # Separate model folder from file path for GGUF models
-    if Path(model).is_file() and Path(model).suffix == ".gguf":
+    if check_gguf_file(model):
         model = Path(model).parent
     return get_image_processor_config(model, revision=revision, **kwargs)
 

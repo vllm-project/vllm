@@ -90,7 +90,7 @@ class FlashInferBackend(AttentionBackend):
         elif kv_cache_dtype == "fp8_e5m2":
             return torch.float8_e5m2
         else:
-            return ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
+            raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
 
 
 class FlashInferState(AttentionState):
@@ -186,9 +186,13 @@ class FlashInferState(AttentionState):
             self._graph_decode_workspace_buffer, _indptr_buffer,
             self._graph_indices_buffer, _last_page_len_buffer, "NHD",
             use_tensor_cores)
+        if self.runner.kv_cache_dtype.startswith("fp8"):
+            kv_cache_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
+                self.runner.kv_cache_dtype)
+        else:
+            kv_cache_dtype = get_kv_cache_torch_dtype(
+                self.runner.kv_cache_dtype, self.runner.model_config.dtype)
 
-        kv_cache_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
-            self.runner.kv_cache_dtype)
         paged_kv_indptr_tensor_host = torch.arange(0,
                                                    batch_size + 1,
                                                    dtype=torch.int32)
@@ -220,6 +224,7 @@ class FlashInferState(AttentionState):
             query_start_loc=query_start_loc_host,
             device=self.runner.device,
             data_type=kv_cache_dtype,
+            q_data_type=self.runner.model_config.dtype,
             use_cuda_graph=True,
             decode_wrapper=self._graph_decode_wrapper,
             prefill_wrapper=None)
@@ -288,6 +293,8 @@ class FlashInferMetadata(AttentionMetadata):
     page_size: Optional[int] = None
     # The data type of the paged kv cache
     data_type: torch.dtype = None
+    # The data type of the query
+    q_data_type: torch.dtype = None
     device: torch.device = torch.device("cuda")
     is_profile_run: bool = False
 
@@ -349,7 +356,10 @@ class FlashInferMetadata(AttentionMetadata):
                 self.page_size,
                 # Disable flashinfer's pos encoding and use vllm's rope.
                 pos_encoding_mode="NONE",
-            )
+                # kv-cache data type.
+                data_type=self.data_type,
+                # query data type.
+                q_data_type=self.q_data_type)
 
     def asdict_zerocopy(self,
                         skip_fields: Optional[Set[str]] = None
@@ -586,8 +596,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             paged_kv_indptr_tensor = None
             paged_kv_last_page_len_tensor = None
 
-        kv_cache_dtype = get_kv_cache_torch_dtype(
-            self.runner.kv_cache_dtype, self.runner.model_config.dtype)
+        if self.runner.kv_cache_dtype.startswith("fp8"):
+            kv_cache_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
+                self.runner.kv_cache_dtype)
+        else:
+            kv_cache_dtype = get_kv_cache_torch_dtype(
+                self.runner.kv_cache_dtype, self.runner.model_config.dtype)
 
         return FlashInferMetadata(
             num_prefills=self.num_prefills,
@@ -609,6 +623,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             query_start_loc=query_start_loc,
             device=device,
             data_type=kv_cache_dtype,
+            q_data_type=self.runner.model_config.dtype,
             use_cuda_graph=use_captured_graph,
             is_profile_run=self.is_profile_run)
 
@@ -685,10 +700,11 @@ class FlashInferImpl(AttentionImpl):
                 v_scale,
             )
             # The FlashInfer api requires data to be in fp8_e4m3 or fp8_e5m2
-            # to process the cache in fp8
-            torch_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
-                self.kv_cache_dtype)
-            kv_cache = kv_cache.view(torch_dtype)
+            # to process the cache when the kv_cache_dtype is fp8
+            if self.kv_cache_dtype.startswith("fp8"):
+                torch_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
+                    self.kv_cache_dtype)
+                kv_cache = kv_cache.view(torch_dtype)
 
         query = query.contiguous(
         )  # Flashinfer requires query to be contiguous
