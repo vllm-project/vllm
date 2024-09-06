@@ -39,7 +39,7 @@ steps:
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
       - "docker build --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg PYTHON_VERSION={{ python_version }} --build-arg USE_SCCACHE=1 --tag {{ docker_image }}-{{ python_version | replace(".", "") }} --target test --progress plain ."
-      - "docker push {{ docker_image }}-{{ python_version}}"
+      - "docker push {{ docker_image }}-{{ python_version | replace(".", "") }}"
     env:
       DOCKER_BUILDKIT: "1"
     retry:
@@ -61,7 +61,7 @@ steps:
       queue: gpu_1_queue
     plugins:
       - docker#v5.2.0: {# for GPU test #}
-          image: {{ docker_image }}-{{ python_version }}
+          image: {{ docker_image }}-{{ python_version | replace(".", "") }}
           always-pull: true
           propagate-environment: true
           command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd {{ (step.working_dir or default_working_dir) | safe  }} && {{ step.command  or (step.commands | join(' && ')) | safe }}"]
