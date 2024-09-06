@@ -16,7 +16,9 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, CommonAttentionState,
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
 if TYPE_CHECKING:
-    from vllm.worker.model_runner import ModelInputForGPUBuilder, ModelInputForGPUWithSamplingMetadata, SamplerOutput
+    from vllm.worker.model_runner import (ModelInputForGPUBuilder,
+                                          ModelInputForGPUWithSamplingMetadata,
+                                          SamplerOutput)
 
 from vllm_flash_attn import flash_attn_varlen_func as _flash_attn_varlen_func
 from vllm_flash_attn import flash_attn_with_kvcache as _flash_attn_with_kvcache
@@ -302,14 +304,12 @@ class FlashAttentionMetadata(AttentionMetadata):
         )
         return self._cached_decode_metadata
 
-    def advance_step(self, model_input: "ModelInputForGPUWithSamplingMetadata", last_output: "SamplerOutput", block_size: int, num_seqs: int, num_queries: int):
+    def advance_step(self, model_input: "ModelInputForGPUWithSamplingMetadata",
+                     last_output: "SamplerOutput", block_size: int,
+                     num_seqs: int, num_queries: int):
         """
         Update metadata in-place to advance one decode step.
         """
-        # GPU in-place update is currently called separately through
-        # custom_ops.advance_step(). See draft_model_runner. TODO(will): Move
-        # this logic to the backend.
-
         # When using cudagraph, the num_seqs is padded to the next captured
         # batch sized, but num_queries tracks the actual number of requests in
         # the batch. For --enforce-eager mode, num_seqs == num_queries
