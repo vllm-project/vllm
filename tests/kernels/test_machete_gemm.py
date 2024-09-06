@@ -31,6 +31,8 @@ MNK_SHAPES = [
     (257, 4224, 4160),
     (257, 4096, 4096),
     (64, 4096, 4096),
+    (1024, 4096, 8192),
+    (1024, 8192, 4096),
 ]
 
 ACT_TYPES = [torch.float16, torch.bfloat16]
@@ -139,6 +141,7 @@ def test_machete_all_schedules(shape, atype: torch.dtype,
     output_ref = torch.matmul(a, w_ref)
 
     for schedule in ops.machete_supported_schedules(wtype):
+        print(f"Testing schedule {schedule}")
         output = ops.machete_gemm(
             a,
             b_q=w_q_machete,
