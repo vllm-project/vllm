@@ -3,7 +3,9 @@
 ###############################################################################
 
 import collections
+import contextlib
 import dataclasses
+import functools
 import gc
 import itertools
 import math
@@ -1404,7 +1406,21 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         start_mem = HabanaMemoryProfiler.current_device_memory_usage()
         start_time = time.perf_counter()
 
-        with bc.env_setting("PT_COMPILE_ONLY_MODE", True):
+        compile_only_mode_context = functools.partial(bc.env_setting,
+                                                      "PT_COMPILE_ONLY_MODE",
+                                                      True)
+        can_use_compile_only_mode = True
+        try:
+            with compile_only_mode_context():
+                pass
+            logger.debug("Using PT_COMPILE_ONLY_MODE.")
+        except KeyError:
+            can_use_compile_only_mode = False
+            logger.warning('Cannot use PT_COMPILE_ONLY_MODE. '
+                           'Warmup time will be negatively impacted. '
+                           'Please update Gaudi Software Suite.')
+        with compile_only_mode_context(
+        ) if can_use_compile_only_mode else contextlib.nullcontext():
             self.warmup_all_buckets(self.prompt_buckets, True, kv_caches)
             self.warmup_all_buckets(self.decode_buckets, False, kv_caches)
 
