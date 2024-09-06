@@ -30,11 +30,7 @@ Example commands and usage:
 Offline Inference:
 ------------------
 
-Source https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_with_profiler.py.
-
-.. literalinclude:: ../../../../examples/offline_inference_with_profiler.py
-    :language: python
-    :linenos:
+Refer to `examples/offline_inference_with_profiler.py <https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_with_profiler.py>`_ for an example.
 
 
 OpenAI Server:
