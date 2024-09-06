@@ -1,5 +1,6 @@
 """Sampling parameters for text generation."""
 import copy
+from dataclasses import dataclass
 from enum import IntEnum
 from functools import cached_property
 from typing import Any, Callable, Dict, List, Optional, Set, Union
@@ -31,6 +32,34 @@ of previously generated tokens, the logits tensor
 for the next token and, optionally, prompt tokens as a
 first argument, and returns a modified tensor of logits
 to sample from."""
+
+
+# maybe make msgspec?
+@dataclass
+class GuidedDecodingParams:
+    """One of these fields will be used to build a logit processor."""
+    json: Optional[Union[Dict, BaseModel, str]] = None
+    regex: Optional[str] = None
+    choice: Optional[List[str]] = None
+    grammar: Optional[str] = None
+    json_object: Optional[bool] = None
+
+    """These are other options that can be set"""
+    backend: Optional[str] = None
+    whitespace_pattern: Optional[str] = None
+
+    def __post_init__(self):
+        """Validate that some fields are mutually exclusive."""
+        guide_count = sum([
+            self.json is not None, self.regex is not None,
+            self.choice is not None, self.grammar is not None,
+            self.json_object is not None
+        ])
+        if guide_count > 1:
+            raise ValueError(
+                "You can only use one kind of guided decoding but multiple are "
+                f"specified: {self.__dict__}")
+
 
 
 class SamplingParams(
@@ -152,6 +181,12 @@ class SamplingParams(
     # They are set in post_init.
     output_text_buffer_length: int = 0
     _all_stop_token_ids: Set[int] = msgspec.field(default_factory=set)
+
+    # Fields used to construct logits processors
+    guided_decoding: Optional[GuidedDecodingParams] = None
+    logit_bias: Optional[Union[Dict[int, float], Dict[str, float]]] = None
+    allowed_token_ids: Optional[List[int]] = None
+
 
     @staticmethod
     def from_optional(
