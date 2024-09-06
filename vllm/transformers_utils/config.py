@@ -65,14 +65,12 @@ class ConfigFormat(str, enum.Enum):
     MISTRAL = "mistral"
 
 
-def file_or_path_exists(model: Union[str, Path], config_name, revision, token) -> bool:
+def file_or_path_exists(model: Union[str, Path], config_name, revision,
+                        token) -> bool:
     if Path(model).exists():
         return (Path(model) / config_name).is_file()
 
-    return file_exists(model,
-                       HF_CONFIG_NAME,
-                       revision=revision,
-                       token=token)
+    return file_exists(model, HF_CONFIG_NAME, revision=revision, token=token)
 
 
 def get_config(
@@ -99,9 +97,9 @@ def get_config(
                        token=kwargs.get("token")):
             config_format = ConfigFormat.HF
         elif file_or_path_exists(model,
-                         MISTRAL_CONFIG_NAME,
-                         revision=revision,
-                         token=kwargs.get("token")):
+                                 MISTRAL_CONFIG_NAME,
+                                 revision=revision,
+                                 token=kwargs.get("token")):
             config_format = ConfigFormat.MISTRAL
         else:
             raise ValueError(f"No supported config format found in {model}")
