@@ -596,7 +596,7 @@ def fused_experts(hidden_states: torch.Tensor,
     get_config_func = functools.partial(
         try_get_optimal_moe_config,
         w1.shape,
-        w2.shape,
+        (w2.shape[0], w2.shape[1], w2.shape[2] - padding_size),
         topk_ids.shape[1],
         config_dtype,
         override_config=override_config,
