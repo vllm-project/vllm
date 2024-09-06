@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
     VLLM_USE_FLASHINFER_SAMPLER: bool = False
+    VLLM_USE_FLASHINFER_REJECTION_SAMPLER: bool = False
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
@@ -60,6 +61,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_ENGINE_USE_RAY: bool = False
     VLLM_PLUGINS: Optional[List[str]] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
+    VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
 
 
 def get_default_cache_root():
@@ -196,6 +198,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Internal flag to enable Dynamo graph capture
     "VLLM_TEST_DYNAMO_GRAPH_CAPTURE":
     lambda: int(os.environ.get("VLLM_TEST_DYNAMO_GRAPH_CAPTURE", "0")),
+    "VLLM_DYNAMO_USE_CUSTOM_DISPATCHER":
+    lambda:
+    (os.environ.get("VLLM_DYNAMO_USE_CUSTOM_DISPATCHER", "True").lower() in
+     ("true", "1")),
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
@@ -348,7 +354,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
             os.path.join(get_default_cache_root(), "vllm", "xla_cache"),
         )),
     "VLLM_FUSED_MOE_CHUNK_SIZE":
-    lambda: int(os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", "65536")),
+    lambda: int(os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", "32768")),
 
     # If set, vllm will skip the deprecation warnings.
     "VLLM_NO_DEPRECATION_WARNING":
@@ -400,6 +406,16 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_TORCH_PROFILER_DIR":
     lambda: (None if os.getenv("VLLM_TORCH_PROFILER_DIR", None) is None else os
              .path.expanduser(os.getenv("VLLM_TORCH_PROFILER_DIR", "."))),
+
+    # If set, vLLM will use Triton implementations of AWQ.
+    "VLLM_USE_TRITON_AWQ":
+    lambda: bool(int(os.getenv("VLLM_USE_TRITON_AWQ", "0"))),
+
+    # If set, allow loading or unloading lora adapters in runtime,
+    "VLLM_ALLOW_RUNTIME_LORA_UPDATING":
+    lambda:
+    (os.environ.get("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "0").strip().lower() in
+     ("1", "true")),
 }
 
 # end-env-vars-definition
