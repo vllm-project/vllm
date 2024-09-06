@@ -1390,11 +1390,23 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
     def apply(self, lm_head: 'ModulesToSaveWrapper', hidden_states: torch.Tensor, bias: Optional[torch.Tensor])->torch.Tensor:
         
         indices=self.punica_wrapper.sampler_indices
+        '''
+        inputs: torch.Tensor,
+        lora_a_weights: torch.Tensor,
+        output_tensor: torch.Tensor,
+        lora_indices_tensor: torch.Tensor,
+        scaling: float = 1.0,
+        '''
+        #logits_=self.punica_wrapper.bgmv_sampling(hidden_states,self.lm_head_tensors)
+        #max_loras=len(self.lm_head_tensors)
+        #indices_one_hot=F.one_hot(indices, max_loras)
+        vocab_size=self.lm_head_tensors.shape[-2]
+        logits = torch.zeros((hidden_states.size(0), vocab_size),
+                                 dtype=torch.float32,
+                                 device=hidden_states.device)
+        for i in range(len(hidden_states)):
+            logits[i]=self.lm_head_tensors[indices[i]] @ hidden_states[i]
         
-        max_loras=len(self.lm_head_tensors)
-        indices_one_hot=F.one_hot(indices, max_loras)
-        
-        logits = oe.contract("b h, b x, x m h -> b m", hidden_states,indices_one_hot,self.lm_head_tensors) 
         if bias is not None:
             logits+=bias
         

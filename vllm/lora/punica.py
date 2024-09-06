@@ -602,3 +602,18 @@ class PunicaWrapper:
         bgmv_shrink(x, wa_t_all, buffer, self.sampler_indices, scale)
         bgmv_expand(buffer, wb_t_all, y, self.sampler_indices, add_inputs=True)
         y = y.view_as(y_org)
+
+    def bgmv_sampling(self, y: torch.Tensor,
+             wb_t_all: torch.Tensor): #TODO does not work for large vocab need to be reimplemented in triton
+        # wb_t_all - [num_loras, vocab_size, hidden_dim]
+        indices=self.sampler_indices
+        vocab_size=wb_t_all.shape[-2]
+        buffer = torch.zeros((y.size(0), vocab_size),
+                                 dtype=torch.float32,
+                                 device=y.device)
+
+        bgmv_shrink(y, wb_t_all, buffer, indices)
+        return buffer
+        
+
+        
