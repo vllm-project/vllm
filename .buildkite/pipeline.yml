@@ -32,7 +32,7 @@ steps:
     
   
   - label: ":docker: build image {{matrix}}"
-    key: image-build-{{matrix}}
+    key: image-build
     agents:
       queue: cpu_queue
     commands:
@@ -68,7 +68,7 @@ steps:
     
       
   - label: "Async Engine, Inputs, Utils, Worker Test {{matrix}}"
-    depends_on: image-build-{{matrix}}
+    depends_on: image-build
     agents:
       queue: gpu_1_queue
     plugins:
