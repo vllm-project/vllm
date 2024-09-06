@@ -42,7 +42,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     get_compressed_tensors_cache_scale)
-from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.rotary_embedding import XPRotaryEmbedding, get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
@@ -84,15 +84,15 @@ class LlamaMLP(nn.Module):
                              "Only silu is supported for now.")
         self.act_fn = SiluAndMul()
         
-        self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
-        self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
-        self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
+        # self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+        # self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+        # self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
 
     def forward(self, x):
-        y1 = F.silu(self.gate_proj(x))
-        y2 = self.up_proj(x)
-        y = y1 * y2
-        return self.down_proj(y)
+        gate_up, _ = self.gate_up_proj(x)
+        x = self.act_fn(gate_up)
+        x, _ = self.down_proj(x)
+        return x
 
 
 class LlamaAttention(nn.Module):
@@ -158,14 +158,19 @@ class LlamaAttention(nn.Module):
         if quant_config is not None and quant_config.get_name() == "gguf":
             is_neox_style = False
 
-        self.rotary_emb = get_rope(
-            self.head_dim,
-            rotary_dim=self.head_dim,
-            max_position=max_position_embeddings,
-            base=rope_theta,
-            rope_scaling=rope_scaling,
-            is_neox_style=is_neox_style,
-        )
+        if config.use_xp_rope:
+            self.rotary_emb = XPRotaryEmbedding(
+                self.head_dim, self.head_dim, max_position_embeddings, rope_theta,
+                is_neox_style)
+        else:
+            self.rotary_emb = get_rope(
+                self.head_dim,
+                rotary_dim=self.head_dim,
+                max_position=max_position_embeddings,
+                base=rope_theta,
+                rope_scaling=rope_scaling,
+                is_neox_style=is_neox_style,
+            )
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.scaling,
@@ -246,17 +251,25 @@ class LlamaDecoderLayer(nn.Module):
         attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        x = hidden_states
-        n = self.input_layernorm(hidden_states)
-        h = self.self_attn(
+        # Self Attention
+        if residual is None:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = self.input_layernorm(
+                hidden_states, residual)
+        hidden_states = self.self_attn(
             positions=positions,
-            hidden_states=n,
+            hidden_states=hidden_states,
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
         )
-        h = x + h
-        out = h + self.mlp(self.post_attention_layernorm(h))
-        return out, None
+
+        # Fully Connected
+        hidden_states, residual = self.post_attention_layernorm(
+            hidden_states, residual)
+        hidden_states = self.mlp(hidden_states)
+        return hidden_states, residual
 
 class LlamaModel(nn.Module):
 
@@ -336,7 +349,7 @@ class LlamaModel(nn.Module):
                 "residual": residual
             })
 
-        hidden_states = self.norm(hidden_states, residual)
+        hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
 

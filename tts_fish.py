@@ -72,7 +72,7 @@ torch.random.manual_seed(999)
 
 # torch.save(llama, '/home/zhn/fishtts/llama.pt')
 
-llm = LLM(model='/home/zhn/fishtts', gpu_memory_utilization=0.5, dtype=torch.float32, enforce_eager=True)
+llm = LLM(model='/home/zhn/fishtts', gpu_memory_utilization=0.5, dtype=torch.float32)
 prompts = [
     {
         "prompt_token_ids": [7001, 5023,   16,   62, 4550, 4557, 4790, 4963,    7, 4676, 4697,   17,
@@ -85,7 +85,7 @@ prompts = [
     }
 ]
 
-sampling_params = SamplingParams(temperature=1, detokenize=False, stop_token_ids=[1025], max_tokens=2048, top_k=1)
+sampling_params = SamplingParams(temperature=1, detokenize=False, stop_token_ids=[1025], max_tokens=2048, top_k=1, repetition_penalty=1.5, repetition_window=16)
 outputs = llm.generate(prompts, sampling_params)
 for output in outputs:
     print(output.prompt)

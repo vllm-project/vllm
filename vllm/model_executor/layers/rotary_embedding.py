@@ -111,15 +111,6 @@ class RotaryEmbedding(CustomOp):
             cos, sin = cache.chunk(2, dim=-1)
             freqs_cis = cos + 1j * sin
             self.register_buffer("freqs_cis", freqs_cis, persistent=False)
-            
-        self.register_buffer(
-            "freqs_cis",
-            precompute_freqs_cis(
-                self.max_position_embeddings,
-                self.rotary_dim,
-                self.base,
-            ),
-        )
 
     def _compute_inv_freq(self, base: Union[int, float]) -> torch.Tensor:
         """Compute the inverse frequency."""
@@ -221,14 +212,14 @@ class RotaryEmbedding(CustomOp):
         query = query.view(batch_size, seq_len, -1, self.head_size)
         query_rot = query[..., :self.rotary_dim]
         query_pass = query[..., self.rotary_dim:]
-        query_rot = apply_rotary_emb(query_rot, freqs_cis)
+        query_rot = _apply_rotary_emb(query_rot, freqs_cis)
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
         key_shape = key.shape
         key = key.view(batch_size, seq_len, -1, self.head_size)
         key_rot = key[..., :self.rotary_dim]
         key_pass = key[..., self.rotary_dim:]
-        key_rot = apply_rotary_emb(key_rot, freqs_cis)
+        key_rot = _apply_rotary_emb(key_rot, freqs_cis)
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 
@@ -241,7 +232,19 @@ class RotaryEmbedding(CustomOp):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         from vllm import _custom_ops as ops
 
-        return self.forward_native2(positions, query, key, offsets)
+        self.cos_sin_cache = self.cos_sin_cache.to(positions.device,
+                                                   dtype=query.dtype)
+        # ops.rotary_embedding()/batched_rotary_embedding()
+        # are in-place operations that update the query and key tensors.
+        if offsets is not None:
+            ops.batched_rotary_embedding(positions, query, key, self.head_size,
+                                         self.cos_sin_cache,
+                                         self.is_neox_style, self.rotary_dim,
+                                         offsets)
+        else:
+            ops.rotary_embedding(positions, query, key, self.head_size,
+                                 self.cos_sin_cache, self.is_neox_style)
+        return query, key
 
     def forward_xpu(
         self,
@@ -283,6 +286,66 @@ class RotaryEmbedding(CustomOp):
         s += f", base={self.base}, is_neox_style={self.is_neox_style}"
         return s
 
+class XPRotaryEmbedding(nn.Module):
+    def __init__(
+        self,
+        head_size: int,
+        rotary_dim: int,
+        max_position_embeddings: int,
+        base: int,
+        is_neox_style: bool,
+        dtype: torch.dtype = None,
+    ) -> None:
+        super().__init__()
+        if dtype is None:
+            dtype = torch.get_default_dtype()
+        self.head_size = head_size
+        self.rotary_dim = rotary_dim
+        self.max_position_embeddings = max_position_embeddings
+        self.base = base
+        self.is_neox_style = is_neox_style
+        self.dtype = dtype
+
+        self.register_buffer(
+            "freqs_cis",
+            precompute_freqs_cis(
+                self.max_position_embeddings,
+                self.rotary_dim,
+                self.base,
+            ),
+        )
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        offsets: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if positions.dim() == 1:
+            batch_size = 1
+            seq_len = positions.shape[0]
+        else:
+            batch_size, seq_len = positions.shape
+        if offsets is not None:
+            positions = positions + offsets
+        freqs_cis = self.freqs_cis.index_select(0, positions.flatten())
+        freqs_cis = freqs_cis.view(batch_size, 1, seq_len, -1)
+
+        query_shape = query.shape
+        query = query.view(batch_size, seq_len, -1, self.head_size)
+        query_rot = query[..., :self.rotary_dim]
+        query_pass = query[..., self.rotary_dim:]
+        query_rot = apply_rotary_emb(query_rot, freqs_cis)
+        query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
+
+        key_shape = key.shape
+        key = key.view(batch_size, seq_len, -1, self.head_size)
+        key_rot = key[..., :self.rotary_dim]
+        key_pass = key[..., self.rotary_dim:]
+        key_rot = apply_rotary_emb(key_rot, freqs_cis)
+        key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
+        return query, key
 
 class LinearScalingRotaryEmbedding(RotaryEmbedding):
     """RotaryEmbedding extended with linear scaling.
