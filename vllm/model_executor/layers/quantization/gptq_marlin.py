@@ -5,8 +5,6 @@ from torch.nn import Parameter
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
-    fused_marlin_moe)
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
@@ -583,6 +581,8 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         topk_group: Optional[int] = None,
         custom_routing_function: Optional[Callable] = None,
     ) -> torch.Tensor:
+        from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+            fused_marlin_moe)
 
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
