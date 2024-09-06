@@ -50,7 +50,7 @@ def zephyr_lora_files():
 @pytest.mark.skip_global_cleanup
 def test_multiple_lora_requests(llm: LLM, zephyr_lora_files):
     lora_request = [
-        LoRARequest(LORA_NAME, idx + 1, zephyr_lora_files)
+        LoRARequest(LORA_NAME + str(idx), idx + 1, zephyr_lora_files)
         for idx in range(len(PROMPTS))
     ]
     # Multiple SamplingParams should be matched with each prompt
