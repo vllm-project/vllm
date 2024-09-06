@@ -221,7 +221,7 @@ async def main(args):
     openai_serving_embedding = OpenAIServingEmbedding(
         engine,
         model_config,
-        served_model_names,
+        base_model_paths,
         request_logger=request_logger,
     )
 

@@ -31,6 +31,8 @@ class LoRAParserAction(argparse.Action):
 
         lora_list: List[LoRAModulePath] = []
         for item in values:
+            if item in [None, '']:  # Skip if item is None or empty string
+                continue
             if '=' in item and ',' not in item:  # Old format: name=path
                 name, path = item.split('=')
                 lora_list.append(LoRAModulePath(name, path))

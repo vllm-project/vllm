@@ -8,7 +8,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.protocol import (ErrorResponse,
                                               LoadLoraAdapterRequest,
                                               UnloadLoraAdapterRequest)
-from vllm.entrypoints.openai.serving_engine import (BaseModelPath, OpenAIServing)
+from vllm.entrypoints.openai.serving_engine import BaseModelPath, OpenAIServing
 
 MODEL_NAME = "meta-llama/Llama-2-7b"
 BASE_MODEL_PATHS = [BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME)]
