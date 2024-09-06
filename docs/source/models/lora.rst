@@ -177,7 +177,7 @@ Now, you can specify a base_model_name alongside the name and path using JSON fo
 
     --lora-modules '{"name": "sql-lora", "path": "/path/to/lora", "base_model_name": "meta-llama/Llama-2-7b"}'
 
-To provide the backforward compability support, you can still use the old key-value format (name=path), but the `base_model_name` will remain unspecified in that case.
+To provide the backforward compatibility support, you can still use the old key-value format (name=path), but the `base_model_name` will remain unspecified in that case.
 
 
 Lora model lineage in model card
