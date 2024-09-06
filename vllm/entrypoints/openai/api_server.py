@@ -8,14 +8,14 @@ import tempfile
 from argparse import Namespace
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import AsyncIterator, Optional, Set, Annotated
+from typing import AsyncIterator, Optional, Set
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Mount
-from typing_extensions import assert_never
+from typing_extensions import assert_never, Annotated
 
 import vllm.envs as envs
 from vllm.config import ModelConfig
