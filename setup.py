@@ -214,9 +214,6 @@ class cmake_build_ext(build_ext):
         if not os.path.exists(self.build_temp):
             os.makedirs(self.build_temp)
 
-        # outdir = Path(self.get_ext_fullpath(self.extensions[0].name)).parent.parent.absolute()
-        # raise Exception(outdir)
-
         targets = []
         target_name = lambda s: remove_prefix(remove_prefix(s, "vllm."), "vllm_flash_attn.")
         # Build all the extensions
