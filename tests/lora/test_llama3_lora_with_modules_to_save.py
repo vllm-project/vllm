@@ -8,10 +8,15 @@ from tests.models.utils import check_logprobs_close
 from vllm.lora.request import LoRARequest
 
 MODELS = [
-    "/workspace/meta-llama3-8b-instruct"
+    #"/workspace/meta-llama3-8b-instruct"
+    "/workspace/t-lite/backbone"
+
 ]
 
-LORAS=['/workspace/llama3_lora']
+LORAS=[
+    #'/workspace/llama3_lora'
+    "/workspace/t-lite/lora_shopping"
+    ]
 
 
 @pytest.mark.parametrize("model", MODELS)
