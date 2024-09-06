@@ -39,7 +39,7 @@ def _get_lora_device(base_layer: nn.Module) -> torch.device:
     # unquantizedLinear
     if hasattr(base_layer, "weight"):
         return base_layer.weight.device
-    # GPTQ/AWQ/SqueezeLLM
+    # GPTQ/AWQ
     elif hasattr(base_layer, "qweight"):
         return base_layer.qweight.device
     # marlin

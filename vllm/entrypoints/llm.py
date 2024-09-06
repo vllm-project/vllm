@@ -55,7 +55,7 @@ class LLM:
             However, if the `torch_dtype` in the config is `float32`, we will
             use `float16` instead.
         quantization: The method used to quantize the model weights. Currently,
-            we support "awq", "gptq", "squeezellm", and "fp8" (experimental).
+            we support "awq", "gptq", and "fp8" (experimental).
             If None, we first check the `quantization_config` attribute in the
             model config file. If that is None, we assume the model weights are
             not quantized and use `dtype` to determine the data type of
