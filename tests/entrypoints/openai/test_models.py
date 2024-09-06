@@ -51,12 +51,59 @@ async def client(server):
 
 
 @pytest.mark.asyncio
-async def test_check_models(client: openai.AsyncOpenAI):
+async def test_check_models(client: openai.AsyncOpenAI, zephyr_lora_files):
     models = await client.models.list()
     models = models.data
     served_model = models[0]
     lora_models = models[1:]
     assert served_model.id == MODEL_NAME
-    assert all(model.root == MODEL_NAME for model in models)
+    assert served_model.root == MODEL_NAME
+    assert all(lora_model.root == zephyr_lora_files for lora_model in lora_models)
+    assert lora_models[0].id == "zephyr-lora"
+    assert lora_models[1].id == "zephyr-lora2"
+
+
+@pytest.fixture(scope="module")
+def server_with_lora_modules_json(zephyr_lora_files):
+    args = [
+        # use half precision for speed and memory savings in CI environment
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "8192",
+        "--enforce-eager",
+        # lora config below
+        "--enable-lora",
+        "--lora-modules",
+        f'{{"name": "zephyr-lora", "path": "{zephyr_lora_files}", "root": "{MODEL_NAME}"}}'
+        f'{{"name": "zephyr-lora2", "path": "{zephyr_lora_files}", "root": "{MODEL_NAME}"}}'
+        "--max-lora-rank",
+        "64",
+        "--max-cpu-loras",
+        "2",
+        "--max-num-seqs",
+        "128",
+    ]
+
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+        yield remote_server
+
+
+@pytest_asyncio.fixture
+async def client_for_lora_lineage(server_with_lora_modules_json):
+    async with server.get_async_client() as async_client:
+        yield async_client
+
+
+@pytest.mark.asyncio
+async def test_check_lora_lineage(client_for_lora_lineage: openai.AsyncOpenAI):
+    models = await client.models.list()
+    models = models.data
+    served_model = models[0]
+    lora_models = models[1:]
+    assert served_model.id == MODEL_NAME
+    assert served_model.root == MODEL_NAME
+    assert all(lora_model.root == zephyr_lora_files for lora_model in lora_models)
+    assert all(lora_model.parent == MODEL_NAME for lora_model in lora_models)
     assert lora_models[0].id == "zephyr-lora"
     assert lora_models[1].id == "zephyr-lora2"
