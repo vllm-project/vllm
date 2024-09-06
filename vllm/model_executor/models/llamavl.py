@@ -52,10 +52,13 @@ class LlamaImagePixelInputs(TypedDict):
 
 LlavaImageInputs = LlamaImagePixelInputs
 
+
+def input_processor_for_llamavl(ctx: InputContext, llm_inputs: LLMInputs):
+    # TODO: move image preprocessing here
+    return llm_inputs
+
 def get_max_llama_image_tokens(ctx: InputContext) -> int:
     logger.warning("need further check on max llama image tokens")
-    print("ctx", type(ctx))
-    print(ctx)
     return 1025 * 2
 
 
@@ -842,22 +845,10 @@ class LlamaVLAttention(LlamaAttention):
         unexpected_keys: List[str],
         error_msgs: List[str],
     ) -> None:
-        # print("state_dict", state_dict.keys())
-        # print("params", [x[0] for x in self.named_parameters()])
         if prefix + "wqkv.weight" in state_dict:
             state_dict[prefix + "qkv_proj.weight"] = state_dict.pop(prefix + "wqkv.weight")
         if prefix + "wo.weight" in state_dict:
             state_dict[prefix + "o_proj.weight"] = state_dict.pop(prefix + "wo.weight")
-        # raise NotImplementedError
-        # if prefix + "feed_forward.mlp.layer_norm_weight" in state_dict:
-        #     state_dict[prefix + "ffn_norm.weight"] = state_dict.pop(
-        #         prefix + "feed_forward.mlp.layer_norm_weight"
-        #     )
-        # if prefix + "attention.wqkv.layer_norm_weight" in state_dict:
-        #     state_dict[prefix + "attention_norm.weight"] = state_dict.pop(
-        #         prefix + "attention.wqkv.layer_norm_weight"
-        #     )
-
 
 class TransformerBlock(nn.Module):
     def __init__(self, layer_id: int, args, cache_config: Optional[CacheConfig] = None):
@@ -1157,30 +1148,60 @@ class CrossAttention(torch.nn.Module):
     def compute_xattn_kv_cache(self, xattn_tokens: torch.Tensor) -> torch.Tensor:
         return self._compute_xattn_kv_cache(xattn_tokens)
 
+    def unpack_value(self, x: torch.Tensor, positions: torch.LongTensor, attn_metadata: AttentionMetadata, xattn_mask: torch.Tensor, full_text_row_masked_out_mask: torch.Tensor):
+        x_unpacked = torch.zeros(attn_metadata.num_prefills, attn_metadata.max_query_len, x.shape[-1], device=x.device, dtype=x.dtype)
+        positions_unpacked = torch.zeros(attn_metadata.num_prefills, attn_metadata.max_query_len, device=positions.device, dtype=positions.dtype)
+        xattn_mask = xattn_mask[:, :, :attn_metadata.max_query_len]
+        # position
+        start_pos = 0
+        for i, seq_len in enumerate(attn_metadata.seq_lens_tensor):
+            end_pos = start_pos + seq_len
+            x_unpacked[i, :seq_len] = x[start_pos:end_pos]
+            positions_unpacked[i, :seq_len] = positions[start_pos:end_pos]
+            xattn_mask[i, 0, seq_len:] = torch.finfo(xattn_mask.dtype).min
+            start_pos = end_pos
+        # xattn_mask = xattn_mask[:, :, :attn_metadata.max_query_len]
+        # full_text_row_masked_out_mask = full_text_row_masked_out_mask[:, :, :attn_metadata.max_query_len]
+        return x_unpacked, positions_unpacked, xattn_mask, full_text_row_masked_out_mask
+
+    def pack_value(self, x:torch.Tensor, attn_metadata: AttentionMetadata):
+        x_packed = torch.zeros(attn_metadata.num_prefill_tokens, x.shape[-1], device=x.device, dtype=x.dtype)
+        start_pos = 0
+        for i, seq_len in enumerate(attn_metadata.seq_lens_tensor):
+            end_pos = start_pos + seq_len
+            x_packed[start_pos:end_pos] = x[i, :seq_len]
+            start_pos = end_pos
+        return x_packed
+
     def forward(
         self,
         x: torch.Tensor,
         xattn_mask: torch.Tensor,
         full_text_row_masked_out_mask: torch.Tensor,
         xattn_cache: torch.Tensor,
+        positions: torch.LongTensor,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         xq = F.linear(x, self.wq.weight)
-        bsz, seqlen, _ = x.shape
+        n_token = xq.shape[0]
+        xq, positions, xattn_mask, full_text_row_masked_out_mask = self.unpack_value(xq, positions, attn_metadata, xattn_mask, full_text_row_masked_out_mask)
+        bsz, seqlen, _ = xq.shape
 
         xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
         xq = self.q_norm(xq)
-        xq = xq.transpose(1, 2)
+        xq = xq.transpose(1, 2) # [bs, n_head, seq_len, head_dim]
 
         xk, xv = xattn_cache
 
         output = F.scaled_dot_product_attention(
             xq, xk, xv, attn_mask=xattn_mask, dropout_p=0.0
         )
-        output = output * full_text_row_masked_out_mask
-        output = output.transpose(1, 2).contiguous().reshape(bsz, seqlen, -1)
+        
+        output = output.transpose(1, 2).reshape(bsz, seqlen, -1).contiguous()
+        output = self.pack_value(output, attn_metadata)
 
+        output = output * full_text_row_masked_out_mask
         out = F.linear(output, self.wo.weight)
-        # out = reduce_from_tensor_model_parallel_region(out)
         return out
 
 
@@ -1269,18 +1290,22 @@ class CrossAttentionTransformerBlock(torch.nn.Module):
         self,
         x: torch.Tensor,
         xattn_mask: torch.Tensor,
-        full_text_row_masked_out_mask: Tuple[torch.Tensor, torch.Tensor],
+        full_text_row_masked_out_mask: torch.Tensor,
         xattn_cache: torch.Tensor,
+        positions: torch.LongTensor,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         _attn_out = self.attention(
             x=self.attention_norm(x),
             xattn_mask=xattn_mask,
-            xattn_cache=xattn_cache,
             full_text_row_masked_out_mask=full_text_row_masked_out_mask,
+            xattn_cache=xattn_cache,
+            positions=positions,
+            attn_metadata=attn_metadata
         )
         h = x + self.gate_attn.tanh() * _attn_out
         _ffn = self.feed_forward(self.ffn_norm(h))
-        _ffn = full_text_row_masked_out_mask[:, 0] * _ffn  # type: ignore
+        _ffn = full_text_row_masked_out_mask * _ffn  # type: ignore
         h = h + self.gate_ffwd.tanh() * _ffn * float(not self.no_ffn)
         return h
 
@@ -1506,12 +1531,13 @@ class CrossAttentionTransformerText(torch.nn.Module):
             xattn_layer,
             xattn_layer_idx,
         ) in enumerate(self.text_and_xattn_layers):
-            print("running layer", type(layer), type(xattn_layer))
             h = xattn_layer(
                 x=h,
                 xattn_mask=xattn_mask,
-                xattn_cache=xattn_caches[xattn_layer_idx],
                 full_text_row_masked_out_mask=full_text_row_masked_out_mask,
+                xattn_cache=xattn_caches[xattn_layer_idx],
+                positions=positions,
+                attn_metadata=attn_metadata,
             )
             h = layer(
                 x=h,
@@ -1523,8 +1549,6 @@ class CrossAttentionTransformerText(torch.nn.Module):
             )
 
         h = self.norm(h)
-        exit(1)
-
         output = F.linear(h, self.output.weight)
         # output = gather_from_tensor_model_parallel_region(output)
         return output.float()
@@ -1795,6 +1819,7 @@ class VariableSizeImageTransform(object):
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_llama_image_tokens)
+@INPUT_REGISTRY.register_input_processor(input_processor_for_llamavl)
 class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
     def __init__(self, config,
                  multimodal_config: MultiModalConfig,
@@ -1840,7 +1865,6 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
             raise ValueError("Both pixel values and image embeds are provided.")
 
         if pixel_values is not None:
-            print("pixel shapes", [x.shape for x in pixel_values])
             # tensor with the same shape will be batched together by MultiModalInputs.batch, so pixel_values here can be: 
             #   - List[List[torch.Tensor]]: with shape (num_chunks, 3, image_res, image_res)
             #   - List[torch.Tensor]: with shape (num_image_in_batch, num_chunks, 3, image_res, image_res)
@@ -1896,13 +1920,6 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: object,
     ) -> torch.Tensor:
-        # print("input_ids", input_ids)
-        # print("positions", positions)
-        # print("kv_caches", len(kv_caches), kv_caches[0].shape)
-        # print("attn_metadata", attn_metadata)
-        # print("intermediate_tensors", intermediate_tensors)
-        # print("kwargs", kwargs)
-        print("attn_metadata", attn_metadata)
         image_inputs = self._parse_and_validate_image_input(**kwargs)
         if image_inputs is None:
             raise ValueError("No images provided")
@@ -1919,9 +1936,7 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
                 end_pos = start_pos + seq_len
                 batch_masks.append(create_vision_mask(input_ids[start_pos:end_pos]))
                 start_pos = end_pos
-            print("batch_masks", batch_masks)
-            # print("vision_tokens", vision_tokens.shape, vision_tokens)
-        
+
             bsz, nimg, nchunk, ntok, image_token_dim = tuple(vision_tokens.shape)
             xattn_caches = torch.stack(
                 [
@@ -1949,12 +1964,15 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
                     cross_attention_masks=padded_masks,
                 )
             )
-            print("cross_attention_masks", cross_attention_masks.shape, cross_attention_masks)
-            print("full_text_row_masked_out_mask", full_text_row_masked_out_mask.shape, full_text_row_masked_out_mask)
 
+            full_text_row_masked_out_mask_plain = torch.zeros(attn_metadata.num_prefill_tokens, 1, dtype=full_text_row_masked_out_mask.dtype)
+            start_pos = 0
+            for i, seq_len in enumerate(attn_metadata.seq_lens_tensor):
+                end_pos = start_pos + seq_len
+                full_text_row_masked_out_mask_plain[start_pos:end_pos, 0] = full_text_row_masked_out_mask[i, 0, :seq_len, 0]
+                start_pos = end_pos
+            full_text_row_masked_out_mask = full_text_row_masked_out_mask_plain.cuda()
         h = self.text_model.get_partially_trainable_embedding(input_ids)
-        print("h", h.shape, h)
-        print("positions", positions.shape, positions)
         logits = self.text_model.forward(
             positions=positions,
             h=h,
@@ -1964,23 +1982,7 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
         )
-        print("prefill logits", logits.shape, logits)
-        exit(1)
-
-        # pixel_values = kwargs.pop("pixel_values", None)
-        # if pixel_values is not None:
-        # h = self.text_model.get_partially_trainable_embedding(tokens[:, position_ids])
-        # logits = self.text_model.forward(
-        #     position_ids=position_ids,
-        #     h=h,
-        #     xattn_mask=cross_attention_masks[:, :, position_ids],
-        #     full_text_row_masked_out_mask=full_text_row_masked_out_mask[
-        #         :, :, position_ids
-        #     ],
-        #     xattn_caches=xattn_caches,
-        # )
         return logits
-
 
 def create_vision_mask(
     tokens: List[int],
@@ -1989,7 +1991,6 @@ def create_vision_mask(
     # import pdb; pdb.set_trace()
 #     (Pdb) p tokens
 # [128011, 128011, 128000, 644, 264, 11914, 11, 1521, 1403, 5448, 6308]
-    print("tokens", tokens)
     vision_token_locations = [
         i for i, token in enumerate(tokens) if token == vision_token
     ]
