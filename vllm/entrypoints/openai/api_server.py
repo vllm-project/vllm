@@ -8,7 +8,7 @@ import tempfile
 from argparse import Namespace
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import AsyncIterator, Optional, Set
+from typing import AsyncIterator, Optional, Set, Annotated
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -247,7 +247,7 @@ async def health() -> Response:
 
 
 @router.post("/tokenize")
-async def tokenize(request: TokenizeRequest):
+async def tokenize(request: Annotated[dict, TokenizeRequest]):
     generator = await openai_serving_tokenization.create_tokenize(request)
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
@@ -259,7 +259,7 @@ async def tokenize(request: TokenizeRequest):
 
 
 @router.post("/detokenize")
-async def detokenize(request: DetokenizeRequest):
+async def detokenize(request: Annotated[dict, DetokenizeRequest]):
     generator = await openai_serving_tokenization.create_detokenize(request)
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
@@ -283,7 +283,7 @@ async def show_version():
 
 
 @router.post("/v1/chat/completions")
-async def create_chat_completion(request: ChatCompletionRequest,
+async def create_chat_completion(request: Annotated[dict, ChatCompletionRequest],
                                  raw_request: Request):
 
     generator = await openai_serving_chat.create_chat_completion(
@@ -300,7 +300,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
 
 
 @router.post("/v1/completions")
-async def create_completion(request: CompletionRequest, raw_request: Request):
+async def create_completion(request: Annotated[dict, CompletionRequest], raw_request: Request):
     generator = await openai_serving_completion.create_completion(
         request, raw_request)
     if isinstance(generator, ErrorResponse):
@@ -313,7 +313,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 
 
 @router.post("/v1/embeddings")
-async def create_embedding(request: EmbeddingRequest, raw_request: Request):
+async def create_embedding(request: Annotated[dict, EmbeddingRequest], raw_request: Request):
     generator = await openai_serving_embedding.create_embedding(
         request, raw_request)
     if isinstance(generator, ErrorResponse):
@@ -351,7 +351,7 @@ if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
         "This should ONLY be used for local development!")
 
     @router.post("/v1/load_lora_adapter")
-    async def load_lora_adapter(request: LoadLoraAdapterRequest):
+    async def load_lora_adapter(request: Annotated[dict, LoadLoraAdapterRequest]):
         response = await openai_serving_chat.load_lora_adapter(request)
         if isinstance(response, ErrorResponse):
             return JSONResponse(content=response.model_dump(),
@@ -365,7 +365,7 @@ if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
         return Response(status_code=200, content=response)
 
     @router.post("/v1/unload_lora_adapter")
-    async def unload_lora_adapter(request: UnloadLoraAdapterRequest):
+    async def unload_lora_adapter(request: Annotated[dict, UnloadLoraAdapterRequest]):
         response = await openai_serving_chat.unload_lora_adapter(request)
         if isinstance(response, ErrorResponse):
             return JSONResponse(content=response.model_dump(),
