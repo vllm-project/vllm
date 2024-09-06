@@ -357,6 +357,7 @@ class FlashAttentionMetadata(AttentionMetadata):
                          slot_mapping=self.slot_mapping,
                          block_tables=self.block_tables)
 
+
 class FlashAttentionMetadataBuilder(
         AttentionMetadataBuilder[FlashAttentionMetadata]):
 
