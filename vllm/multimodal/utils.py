@@ -120,6 +120,16 @@ async def async_fetch_audio(
     return librosa.load(BytesIO(audio_bytes), sr=None)
 
 
+def get_and_parse_audio(audio_url: str) -> MultiModalDataDict:
+    audio, sr = fetch_audio(audio_url)
+    return {"audio": (audio, sr)}
+
+
+def get_and_parse_image(image_url: str) -> MultiModalDataDict:
+    image = fetch_image(image_url)
+    return {"image": image}
+
+
 async def async_get_and_parse_audio(audio_url: str) -> MultiModalDataDict:
     audio, sr = await async_fetch_audio(audio_url)
     return {"audio": (audio, sr)}
