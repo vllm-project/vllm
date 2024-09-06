@@ -140,7 +140,6 @@ def compute_max_diff(output, output_ref):
 @pytest.mark.parametrize("topk", [2, 6])
 @pytest.mark.parametrize("group_size", [-1, 32, 64, 128])
 @pytest.mark.parametrize("act_order", [True, False])
-@pytest.mark.parametrize("num_bits", [4, 8])
 def test_fused_marlin_moe(
     m: int,
     n: int,
@@ -149,7 +148,6 @@ def test_fused_marlin_moe(
     topk: int,
     group_size: int,
     act_order: bool,
-    num_bits: int,
 ):
     torch.manual_seed(7)
 
@@ -163,8 +161,7 @@ def test_fused_marlin_moe(
         if group_size in (k, n):
             return
 
-    quant_type = (scalar_types.uint4b8
-                  if num_bits == 4 else scalar_types.uint8b128)
+    quant_type = scalar_types.uint4b8
     dtype = torch.float16
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
@@ -243,7 +240,6 @@ def test_fused_marlin_moe(
         topk_ids,
         w1_scale=scales1,
         w2_scale=scales2,
-        num_bits=num_bits,
     )
 
     assert compute_max_diff(marlin_output, triton_output) < 4e-2
@@ -258,7 +254,6 @@ def test_fused_marlin_moe(
 @pytest.mark.parametrize("topk", [2, 6])
 @pytest.mark.parametrize("group_size", [-1, 32, 64, 128])
 @pytest.mark.parametrize("act_order", [True, False])
-@pytest.mark.parametrize("num_bits", [4, 8])
 def test_marlin_moe_mmm(
     m: int,
     n: int,
@@ -267,7 +262,6 @@ def test_marlin_moe_mmm(
     topk: int,
     group_size: int,
     act_order: bool,
-    num_bits: int,
 ):
     if topk > e:
         return
@@ -279,8 +273,7 @@ def test_marlin_moe_mmm(
         if group_size == k:
             return
 
-    quant_type = (scalar_types.uint4b8
-                  if num_bits == 4 else scalar_types.uint8b128)
+    quant_type = scalar_types.uint4b8
     dtype = torch.float16
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w = torch.randn((e, n, k), device="cuda", dtype=dtype) / 10
@@ -315,8 +308,7 @@ def test_marlin_moe_mmm(
                                       g_idx,
                                       sort_indices,
                                       topk,
-                                      renormalize=False,
-                                      num_bits=num_bits)
+                                      renormalize=False)
     torch_output = torch_moe_single(a, w_ref.transpose(1, 2), score, topk)
 
     assert compute_max_diff(marlin_output, torch_output) < 1e-2
