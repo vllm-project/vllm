@@ -22,7 +22,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Qwen2-VL model compatible with HuggingFace weights."""
-
+import importlib.util
 from array import array
 from functools import lru_cache, partial
 from typing import (Iterable, List, Mapping, Optional, Tuple, Type, TypedDict,
@@ -204,8 +204,26 @@ class Qwen2VisionAttention(nn.Module):
                 selected_backend = backend_name_to_enum(backend_by_env_var)
         if selected_backend is None:
             # For Volta and Turing GPUs, use xformers instead.
-            self._use_flash_attn = current_platform.get_device_capability(
-            )[0] >= 8
+            device_available = current_platform.get_device_capability()[0] >= 8
+            if device_available:
+                if spec := importlib.util.find_spec("flash_attn") is not None:
+                    flash_attn = importlib.util.module_from_spec(spec)
+                    flash_attn_available = hasattr(flash_attn,
+                                                   "flash_attn_varlen_func")
+                else:
+                    flash_attn_available = False
+
+                if flash_attn_available:
+                    self._use_flash_attn = True
+                else:
+                    logger.warning(
+                        "Current Qwen2-VL implementation has a bug with "
+                        "`vllm-flash-attn` inside vision module, so we use "
+                        "xformers backend instead. You can run `pip install "
+                        "flash-attn to use flash-attention backend.")
+                    self._use_flash_attn = False
+            else:
+                self._use_flash_attn = False
         else:
             if selected_backend == _Backend.FLASH_ATTN:
                 self._use_flash_attn = True
