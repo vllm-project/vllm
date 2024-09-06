@@ -1323,7 +1323,9 @@ class LLMEngine:
             if self.model_config.embedding_mode:
                 self._process_sequence_group_outputs(seq_group, output)
             else:
-                self.output_processor.process_hidden_states(seq_group, output)
+                if self.model_config.return_hidden_states:
+                    self.output_processor.process_hidden_states(
+                        seq_group, output)
                 self.output_processor.process_prompt_logprob(seq_group, output)
                 if seq_group_meta.do_sample:
                     self.output_processor.process_outputs(
