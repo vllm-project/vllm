@@ -217,6 +217,9 @@ class SamplingParams(
         logits_processors: Optional[List[LogitsProcessor]] = None,
         truncate_prompt_tokens: Optional[Annotated[int,
                                                    msgspec.Meta(ge=1)]] = None,
+        guided_decoding: Optional[GuidedDecodingParams] = None,
+        logit_bias: Optional[Union[Dict[int, float], Dict[str, float]]] = None,
+        allowed_token_ids: Optional[List[int]] = None,
     ) -> "SamplingParams":
         return SamplingParams(
             n=1 if n is None else n,
@@ -248,6 +251,9 @@ class SamplingParams(
             spaces_between_special_tokens=spaces_between_special_tokens,
             logits_processors=logits_processors,
             truncate_prompt_tokens=truncate_prompt_tokens,
+            guided_decoding=guided_decoding,
+            logit_bias=logit_bias,
+            allowed_token_ids=allowed_token_ids,
         )
 
     def __post_init__(self) -> None:

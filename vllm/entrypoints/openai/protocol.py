@@ -10,11 +10,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Annotated, Required, TypedDict
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
-from vllm.entrypoints.openai.logits_processors import get_logits_processors
 from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import LogitsProcessor, SamplingParams
+from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 from vllm.sequence import Logprob
-from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
 
 # torch is mocked during docs generation,
@@ -270,8 +268,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
     # doc: end-chat-completion-extra-params
 
     def to_sampling_params(
-            self, tokenizer: AnyTokenizer,
-            guided_decode_logits_processor: Optional[LogitsProcessor],
+            self,
+            guided_decoding: Optional[GuidedDecodingParams],
             default_max_tokens: int) -> SamplingParams:
         max_tokens = self.max_tokens
         if max_tokens is None:
@@ -280,15 +278,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
         prompt_logprobs = self.prompt_logprobs
         if prompt_logprobs is None and self.echo:
             prompt_logprobs = self.top_logprobs
-
-        # We now allow logprobs being true without top_logrobs.
-        logits_processors = get_logits_processors(
-            logit_bias=self.logit_bias,
-            allowed_token_ids=None,
-            tokenizer=tokenizer,
-        )
-        if guided_decode_logits_processor:
-            logits_processors.append(guided_decode_logits_processor)
 
         return SamplingParams.from_optional(
             n=self.n,
@@ -314,8 +303,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
             length_penalty=self.length_penalty,
-            logits_processors=logits_processors,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
+            guided_decoding=guided_decoding,
+            logit_bias=self.logit_bias
         )
 
     @model_validator(mode="before")
@@ -512,8 +502,8 @@ class CompletionRequest(OpenAIBaseModel):
     # doc: end-completion-extra-params
 
     def to_sampling_params(
-            self, tokenizer: AnyTokenizer,
-            guided_decode_logits_processor: Optional[LogitsProcessor],
+            self,
+            guided_decoding: Optional[GuidedDecodingParams],
             default_max_tokens: int) -> SamplingParams:
         max_tokens = self.max_tokens
         if max_tokens is None:
@@ -524,14 +514,6 @@ class CompletionRequest(OpenAIBaseModel):
             prompt_logprobs = self.logprobs
 
         echo_without_generation = self.echo and self.max_tokens == 0
-
-        logits_processors = get_logits_processors(
-            logit_bias=self.logit_bias,
-            allowed_token_ids=self.allowed_token_ids,
-            tokenizer=tokenizer,
-        )
-        if guided_decode_logits_processor:
-            logits_processors.append(guided_decode_logits_processor)
 
         return SamplingParams.from_optional(
             n=self.n,
@@ -557,8 +539,10 @@ class CompletionRequest(OpenAIBaseModel):
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
             length_penalty=self.length_penalty,
-            logits_processors=logits_processors,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
+            guided_decoding=guided_decoding,
+            logit_bias=self.logit_bias,
+            allowed_token_ids=self.allowed_token_ids
         )
 
     @model_validator(mode="before")
