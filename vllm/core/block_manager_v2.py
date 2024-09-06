@@ -149,7 +149,9 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             block_allocator=self.block_allocator,
             max_block_sliding_window=self.max_block_sliding_window,
         )
-        block_table.allocate(seq.get_token_ids())
+
+        contextual_hash = hash((seq.prompt_adapter_id, seq.lora_int_id))
+        block_table.allocate(token_ids=seq.get_token_ids(), contextual_hash=contextual_hash)
 
         return block_table
 
