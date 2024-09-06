@@ -190,7 +190,6 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,
                       bias: Optional[torch.Tensor]) -> torch.Tensor:
 
-        breakpoint()
         return apply_gptq_marlin_linear(
             input=x,
             weight=layer.weight_packed,
