@@ -3,111 +3,80 @@ ARG BASE_UBI_IMAGE_TAG=9.4
 ARG PYTHON_VERSION=3.11
 # Default ROCm ARCHes to build vLLM for.
 ARG PYTORCH_ROCM_ARCH="gfx908;gfx90a;gfx942;gfx1100"
-
-## Base Layer ##################################################################
-FROM registry.access.redhat.com/ubi9/ubi-minimal:${BASE_UBI_IMAGE_TAG} as rocm-base
-
-# Max jobs for parallel build
 ARG MAX_JOBS=12
 
-ENV BUILD_TARGET='rocm'
+FROM registry.access.redhat.com/ubi9/ubi-minimal:${BASE_UBI_IMAGE_TAG} AS base
 
-USER root
-
-ENV ROCM_VERSION=6.1.2
-
-# Set up ROCm repository and install necessary packages
-
-RUN echo "[amdgpu]" > /etc/yum.repos.d/amdgpu.repo && \
-echo "name=amdgpu" >> /etc/yum.repos.d/amdgpu.repo && \
-echo "baseurl=https://repo.radeon.com/amdgpu/${ROCM_VERSION}/rhel/9.4/main/x86_64/" >> /etc/yum.repos.d/amdgpu.repo && \
-echo "enabled=1" >> /etc/yum.repos.d/amdgpu.repo && \
-echo "priority=50" >> /etc/yum.repos.d/amdgpu.repo && \
-echo "gpgcheck=1" >> /etc/yum.repos.d/amdgpu.repo && \
-echo "gpgkey=https://repo.radeon.com/rocm/rocm.gpg.key" >> /etc/yum.repos.d/amdgpu.repo && \
-echo "[ROCm-${ROCM_VERSION}]" >> /etc/yum.repos.d/amdgpu.repo && \
-echo "name=ROCm${ROCM_VERSION}" >> /etc/yum.repos.d/amdgpu.repo && \
-echo "baseurl=https://repo.radeon.com/rocm/rhel9/${ROCM_VERSION}/main" >> /etc/yum.repos.d/amdgpu.repo && \
-echo "enabled=1" >> /etc/yum.repos.d/amdgpu.repo && \
-echo "priority=50" >> /etc/yum.repos.d/amdgpu.repo && \
-echo "gpgcheck=1" >> /etc/yum.repos.d/amdgpu.repo && \
-echo "gpgkey=https://repo.radeon.com/rocm/rocm.gpg.key" >> /etc/yum.repos.d/amdgpu.repo
-
-RUN microdnf -y update && \
-    microdnf -y install rocm hipcc git which && \
-    microdnf clean all
-
-WORKDIR /workspace
-
-##################################################################################################
-
-FROM rocm-base as python-install
 ARG PYTHON_VERSION
 
 ENV VIRTUAL_ENV=/opt/vllm
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
-RUN microdnf install -y --setopt=install_weak_deps=0 --nodocs \
-    python${PYTHON_VERSION}-devel python${PYTHON_VERSION}-pip python${PYTHON_VERSION}-wheel && \
-    python${PYTHON_VERSION} -m venv $VIRTUAL_ENV --system-site-packages && \
-    $VIRTUAL_ENV/bin/pip install --no-cache -U pip wheel && \
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+ microdnf install -y --setopt=install_weak_deps=0 --nodocs \
+    python${PYTHON_VERSION}-devel \
+    python${PYTHON_VERSION}-pip \
+    python${PYTHON_VERSION}-wheel && \
+    python${PYTHON_VERSION} -m venv $VIRTUAL_ENV && \
+    pip install -U pip wheel setuptools uv
+
+
+FROM base AS rocm_base
+ENV ROCM_VERSION=6.1.2
+
+RUN printf "[amdgpu]\n\
+name=amdgpu\n\
+baseurl=https://repo.radeon.com/amdgpu/${ROCM_VERSION}/rhel/9.4/main/x86_64/\n\
+enabled=1\n\
+priority=50\n\
+gpgcheck=1\n\
+gpgkey=https://repo.radeon.com/rocm/rocm.gpg.key\n\
+[ROCm-${ROCM_VERSION}]\n\
+name=ROCm${ROCM_VERSION}\n\
+baseurl=https://repo.radeon.com/rocm/rhel9/${ROCM_VERSION}/main\n\
+enabled=1\n\
+priority=50\n\
+gpgcheck=1\n\
+gpgkey=https://repo.radeon.com/rocm/rocm.gpg.key" > /etc/yum.repos.d/amdgpu.repo
+
+
+RUN microdnf -y update && \
+    microdnf -y install \
+        rocm-hip-libraries rocm-hip-runtime \
+        miopen-hip && \
     microdnf clean all
 
-##################################################################################################
-
-FROM python-install as python-rocm-base
-
-# install common dependencies
 RUN --mount=type=cache,target=/root/.cache/pip \
-    --mount=type=bind,source=requirements-common.txt,target=requirements-common.txt,readonly \
-    --mount=type=bind,source=requirements-rocm.txt,target=requirements-rocm.txt,readonly \
-    pip install -r requirements-rocm.txt
+    --mount=type=cache,target=/root/.cache/uv \
+    uv pip install -v --index-url "https://download.pytorch.org/whl/nightly/rocm6.1" \
+        torch==2.5.0.dev20240726+rocm6.1 \
+        torchvision==0.20.0.dev20240726+rocm6.1
 
-##################################################################################################
 
-FROM python-rocm-base as base
+FROM rocm_base as rocm_devel
 
-# Set the application mount point
-ARG APP_MOUNT=/vllm-workspace
-WORKDIR ${APP_MOUNT}
-
-# Upgrade pip and remove unnecessary packages
-RUN python3 -m pip install --upgrade --no-cache-dir pip && \
-    microdnf -y remove sccache || true && \
-    python3 -m pip uninstall -y sccache || true && \
-    rm -f "$(which sccache)" && \
-    microdnf clean all && \
-    rm -rf /var/cache/yum /var/cache/dnf
-
-# Install torch == 2.5.0 on ROCm
-RUN case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \
-    *"rocm-6.1"*) \
-    python3 -m pip uninstall -y torch torchvision \
-    && python3 -m pip install --no-cache-dir --pre \
-    torch==2.5.0.dev20240726 \
-    torchvision==0.20.0.dev20240726 \
-    --index-url https://download.pytorch.org/whl/nightly/rocm6.1;; \
-    *) ;; esac
-
-# Set environment variables
-ENV LLVM_SYMBOLIZER_PATH=/opt/rocm/llvm/bin/llvm-symbolizer
-ENV PATH=$PATH:/opt/rocm/bin:/libtorch/bin
-ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/rocm/lib:/libtorch/lib
-ENV CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/libtorch/include:/libtorch/include/torch/csrc/api/include:/opt/rocm/include
-ENV PYTORCH_ROCM_ARCH="gfx908;gfx90a;gfx942;gfx1100"
 ENV CCACHE_DIR=/root/.cache/ccache
 
-##################################################################################################
+RUN rpm -ivh https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm && \
+    rpm -ql epel-release && \
+    microdnf -y update && \
+    microdnf -y install \
+        ccache \
+        git \
+        rocm \
+        hipcc \
+        wget \
+        which && \
+    microdnf clean all
 
-FROM base as build_base
+WORKDIR /workspace
 
-RUN python3 -m pip install --upgrade --no-cache-dir ninja cmake>=3.26
+ENV LLVM_SYMBOLIZER_PATH=/opt/rocm/llvm/bin/llvm-symbolizer
+ENV PATH=$PATH:/opt/rocm/bin:/libtorch/bin
+ENV CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/libtorch/include:/libtorch/include/torch/csrc/api/include:/opt/rocm/include
 
-##################################################################################################
 
-##################################################################################################
-
-### AMD-SMI build stage
-FROM build_base AS build_amdsmi
+FROM rocm_devel AS build_amdsmi
 
 # Build AMD SMI wheel
 RUN cd /opt/rocm/share/amd_smi && \
@@ -115,21 +84,25 @@ RUN cd /opt/rocm/share/amd_smi && \
 
 ##################################################################################################
 
-### Flash-Attention wheel build stage
-FROM build_base AS build_fa
+FROM rocm_devel AS build_flashattention
 
 # Whether to install CK-based flash-attention
 ARG BUILD_FA="1"
 ARG TRY_FA_WHEEL="1"
+# Note: The ROCm fork provides a wheel built for ROCm but only for 2.5.9 and python 3.9, so this will be incompatible with the current build
 ARG FA_WHEEL_URL="https://github.com/ROCm/flash-attention/releases/download/v2.5.9post1-cktile-vllm/flash_attn-2.5.9.post1-cp39-cp39-linux_x86_64.whl"
+# only required when not using triton backend
 ARG FA_GFX_ARCHS="gfx90a;gfx942"
-ARG FA_BRANCH="23a2b1c2"
-
-# Ensure necessary tools are installed
-RUN microdnf install -y wget git && microdnf clean all
+ARG FLASH_ATTENTION_USE_TRITON_ROCM="TRUE"
+# FA_BRANCH is the main_perf branch as of Sep 4 2024 which includes triton backend support, see https://github.com/Dao-AILab/flash-attention/pull/1203
+ARG FA_BRANCH="75b5360"
+ARG MAX_JOBS
+ENV MAX_JOBS=${MAX_JOBS}
+ENV FLASH_ATTENTION_USE_TRITON_ROCM=${FLASH_ATTENTION_USE_TRITON_ROCM}
 
 # Build ROCm flash-attention wheel if `BUILD_FA` is set to 1
-RUN --mount=type=cache,target=${CCACHE_DIR} \
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/workspace/build \
     if [ "$BUILD_FA" = "1" ]; then \
         if [ "$TRY_FA_WHEEL" = "1" ] && python3 -m pip install "${FA_WHEEL_URL}"; then \
 	    # If a suitable wheel exists, download it instead of building FA
@@ -139,132 +112,97 @@ RUN --mount=type=cache,target=${CCACHE_DIR} \
             cd /libs && \
             git clone https://github.com/ROCm/flash-attention.git && \
             cd flash-attention && \
-            git checkout "${FA_BRANCH}" && \
+            git checkout ${FA_BRANCH} && \
             git submodule update --init && \
-            GPU_ARCHS="${FA_GFX_ARCHS}" python3 setup.py bdist_wheel --dist-dir=/install; \
+            uv pip install cmake ninja packaging && \
+            env \
+                GPU_ARCHS="${FA_GFX_ARCHS}" \
+                BUILD_TARGET="rocm" \
+                python3 setup.py bdist_wheel --dist-dir=/install; \
         fi; \
     else \
-        # Create an empty directory otherwise as later build stages expect one
+        # Create an empty directory otherwise AS later build stages expect one
         mkdir -p /install; \
     fi
 
 ##################################################################################################
 
-### Triton wheel build stage
-FROM build_base AS build_triton
+FROM rocm_devel AS build_triton
 
 # Whether to build triton on rocm
-ARG BUILD_TRITON="1"
+ARG BUILD_TRITON="0"
 ARG TRITON_BRANCH="e0fc12c"
+ARG TRITON_WHEEL_SHA=21eae954ef
 
 # Build triton wheel if `BUILD_TRITON` is set to 1
-RUN --mount=type=cache,target=${CCACHE_DIR} \
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=cache,target=/root/.cache/uv \
     if [ "$BUILD_TRITON" = "1" ]; then \
         mkdir -p /libs && cd /libs && \
         git clone https://github.com/OpenAI/triton.git && \
         cd triton && \
         git checkout "${TRITON_BRANCH}" && \
         cd python && \
+        uv pip install -v cmake ninja && \
         python3 setup.py bdist_wheel --dist-dir=/install; \
     else \
-        # Create an empty directory otherwise as later build stages expect one
-        mkdir -p /install; \
+        mkdir -p /install && \
+        wget -P /install "https://download.pytorch.org/whl/nightly/pytorch_triton_rocm-3.0.0%2B${TRITON_WHEEL_SHA}-cp311-cp311-linux_x86_64.whl"; \
     fi
 
 ##################################################################################################
 
-### Final vLLM build stage
-FROM build_base AS final
+FROM rocm_devel AS build_vllm
+ARG PYTORCH_ROCM_ARCH
+ARG MAX_JOBS
+ENV MAX_JOBS=${MAX_JOBS}
+ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
 
-# Import the vLLM development directory from the build context
+
 COPY . .
 
-# Install wget only if it is needed
-RUN microdnf -y install wget && microdnf clean all
 
-# Package upgrades to avoid dependency issues and add functionality
-RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install --upgrade numba scipy huggingface-hub[cli] && \
-    microdnf clean all
+ENV VLLM_TARGET_DEVICE="rocm"
+ENV MAX_JOBS=${MAX_JOBS}
+# Make sure punica kernels are built (for LoRA)
+ENV VLLM_INSTALL_PUNICA_KERNELS=1
 
-ARG PYTORCH_ROCM_ARCH="gfx908;gfx90a;gfx942;gfx1100"
-
-# Set environment variables for runtime
-ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
-# Silences the HF Tokenizers warning
-ENV TOKENIZERS_PARALLELISM=false
-
-# Install dependencies from requirements file and apply ROCm specific patches
-RUN --mount=type=cache,target=${CCACHE_DIR} \
+RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install -Ur requirements-rocm.txt && \
-    ROCM_VERSION=$(ls /opt | grep -Po 'rocm-[0-9]+\.[0-9]+') && \
-    case "$ROCM_VERSION" in \
-        "rocm-6.1") \
-            # Apply patch for ROCm 6.1
-            wget -N https://github.com/ROCm/vllm/raw/fa78403/rocm_patch/libamdhip64.so.6 -P /opt/rocm/lib && \
-            # Remove potentially conflicting HIP runtime from torch
-            rm -f "$(python3 -c 'import torch; print(torch.__path__[0])')"/lib/libamdhip64.so* || true ;; \
-        *) \
-            echo "ROCm version $ROCM_VERSION is not supported for patching." ;; \
-    esac && \
-    python3 setup.py clean --all && \
+    --mount=type=cache,target=/root/.cache/uv \
+    uv pip install -v -U \
+        ninja "cmake>=3.26" packaging && \
     python3 setup.py bdist_wheel --dist-dir=dist
 
 ##################################################################################################
 
-FROM base AS vllm-openai
+FROM rocm_base AS vllm-openai
+ARG MAX_JOBS
+ARG PYTHON_VERSION
 
 WORKDIR /workspace
 
-# Set up the virtual environment and update PATH
 ENV VIRTUAL_ENV=/opt/vllm
 ENV PATH=$VIRTUAL_ENV/bin:$PATH
 
-# Install necessary build tools
+# Required for triton
 RUN microdnf install -y --setopt=install_weak_deps=0 --nodocs gcc && \
     microdnf clean all
 
-# Copy amdsmi wheel into final image
-RUN --mount=type=bind,from=build_amdsmi,src=/install,target=/install \
-    mkdir -p libs \
-    && cp /install/*.whl libs \
-    # Preemptively uninstall to avoid same-version no-installs
-    && python3 -m pip uninstall -y amdsmi;
-
-# Copy triton wheel(s) into final image if they were built
-RUN --mount=type=bind,from=build_triton,src=/install,target=/install \
-    mkdir -p libs \
-    && if ls /install/*.whl; then \
-    cp /install/*.whl libs \
-    # Preemptively uninstall to avoid same-version no-installs
-    && python3 -m pip uninstall -y triton; fi
-
-# Copy flash-attn wheel(s) into final image if they were built
-RUN --mount=type=bind,from=build_fa,src=/install,target=/install \
-    mkdir -p libs \
-    && if ls /install/*.whl; then \
-    cp /install/*.whl libs \
-    # Preemptively uninstall to avoid same-version no-installs
-    && python3 -m pip uninstall -y flash-attn; fi
-
-# Copy vLLM wheel(s) into the final image
-RUN --mount=type=bind,from=final,src=/vllm-workspace/dist,target=/dist \
+RUN --mount=type=bind,from=build_amdsmi,src=/install,target=/install/amdsmi/ \
+    --mount=type=bind,from=build_triton,src=/install,target=/install/triton \
+    --mount=type=bind,from=build_flashattention,src=/install,target=/install/flashattention \
+    --mount=type=bind,from=build_vllm,src=/workspace/dist,target=/install/vllm/ \
     --mount=type=cache,target=/root/.cache/pip \
-    cp /dist/*.whl libs \
-    # Preemptively uninstall to avoid same-version no-installs
-    && python3 -m pip uninstall -y vllm
-
-# Install wheels that were built to the final image
-RUN --mount=type=cache,target=/root/.cache/pip \
-    if ls libs/*.whl; then \
-    python3 -m pip install libs/*.whl; fi
-
-# Environment variables for runtime configuration
-ENV HF_HUB_OFFLINE=1 \
-    PORT=8000 \
-    HOME=/home/vllm \
-    VLLM_USAGE_SOURCE=production-docker-image
+    --mount=type=cache,target=/root/.cache/uv \
+    uv pip install -v  \
+        --index-strategy=unsafe-best-match \
+        --extra-index-url "https://download.pytorch.org/whl/nightly/rocm6.1" \
+        /install/amdsmi/*.whl\
+        /install/triton/*.whl\
+        /install/flashattention/*.whl\
+        /install/vllm/*.whl
 
 # Set up a non-root user for OpenShift
 RUN umask 002 && \
@@ -273,8 +211,10 @@ RUN umask 002 && \
     chmod g+rwx $HOME /usr/src /workspace
 
 COPY LICENSE /licenses/vllm.md
+COPY examples/*.jinja /app/data/template/
 
 ENV HF_HUB_OFFLINE=1 \
+    PORT=8000 \
     HOME=/home/vllm \
     # Allow requested max length to exceed what is extracted from the
     # config.json
@@ -282,7 +222,14 @@ ENV HF_HUB_OFFLINE=1 \
     VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
     VLLM_USAGE_SOURCE=production-docker-image \
     VLLM_WORKER_MULTIPROC_METHOD=fork \
-    VLLM_NO_USAGE_STATS=1
+    VLLM_NO_USAGE_STATS=1 \
+    # Silences the HF Tokenizers warning
+    TOKENIZERS_PARALLELISM=false  \
+    RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1 \
+    FLASH_ATTENTION_USE_TRITON_ROCM="TRUE" \
+    OUTLINES_CACHE_DIR=/tmp/outlines \
+    NUMBA_CACHE_DIR=/tmp/numba \
+    TRITON_CACHE_DIR=/tmp/triton
 
 # Switch to the non-root user
 USER 2000
