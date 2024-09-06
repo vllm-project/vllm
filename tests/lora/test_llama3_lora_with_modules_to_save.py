@@ -51,7 +51,6 @@ def test_llama3_models(
 def test_llama3_loras_benchmarks(
     vllm_runner,
     example_prompts,
-    benchmark,
     model: str,
     adapter_name: str,
     dtype: str,
