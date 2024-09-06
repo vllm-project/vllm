@@ -80,7 +80,8 @@ class BlockTable:
 
     def allocate(self,
                  token_ids: List[int],
-                 device: Device = Device.GPU) -> None:
+                 device: Device = Device.GPU,
+                 contextual_hash: Optional[int] = 0) -> None:
         """Allocates memory blocks for storing the given sequence of token IDs.
 
         This method allocates the required number of blocks to store the given
@@ -90,12 +91,16 @@ class BlockTable:
             token_ids (List[int]): The sequence of token IDs to be stored.
             device (Device, optional): The device on which the blocks should be
                 allocated. Defaults to Device.GPU.
+            contextual_hash (Optional[int]): The hash value of additional
+                factors, such as adapters, that influence the block hash
+                in the prefixcaching block.
         """
         assert not self._is_allocated
         assert token_ids
         blocks = self._allocate_blocks_for_token_ids(prev_block=None,
                                                      token_ids=token_ids,
-                                                     device=device)
+                                                     device=device,
+                                                     contextual_hash=contextual_hash)
         self.update(blocks)
         self._num_full_slots = len(token_ids)
 
@@ -261,7 +266,8 @@ class BlockTable:
 
     def _allocate_blocks_for_token_ids(self, prev_block: Optional[Block],
                                        token_ids: List[int],
-                                       device: Device) -> List[Block]:
+                                       device: Device,
+                                       contextual_hash: Optional[int]) -> List[Block]:
         blocks: List[Block] = []
 
         block_token_ids = []
@@ -276,7 +282,7 @@ class BlockTable:
             blocks.extend(
                 self._allocator.allocate_immutable_blocks(
                     prev_block, block_token_ids=block_token_ids,
-                    device=device))
+                    device=device, contextual_hash=contextual_hash))
             prev_block = blocks[-1]
 
         if tail_token_ids:
@@ -284,7 +290,7 @@ class BlockTable:
             cur_token_ids = tail_token_ids[0]
 
             block = self._allocator.allocate_mutable_block(
-                prev_block=prev_block, device=device)
+                prev_block=prev_block, device=device, contextual_hash=contextual_hash)
             block.append_token_ids(cur_token_ids)
 
             blocks.append(block)

@@ -52,6 +52,11 @@ class Block(ABC):
 
     @property
     @abstractmethod
+    def contextual_hash(self):
+        return None
+
+    @property
+    @abstractmethod
     def computed(self) -> bool:
         raise NotImplementedError
 
@@ -99,18 +104,18 @@ class Block(ABC):
 class BlockAllocator(ABC):
 
     @abstractmethod
-    def allocate_mutable_block(self, prev_block: Optional[Block]) -> Block:
+    def allocate_mutable_block(self, prev_block: Optional[Block], contextual_hash: Optional[int]) -> Block:
         pass
 
     @abstractmethod
     def allocate_immutable_block(self, prev_block: Optional[Block],
-                                 token_ids: List[int]) -> Block:
+                                 token_ids: List[int], contextual_hash: Optional[int]) -> Block:
         pass
 
     @abstractmethod
     def allocate_immutable_blocks(
             self, prev_block: Optional[Block],
-            block_token_ids: List[List[int]]) -> List[Block]:
+            block_token_ids: List[List[int]], contextual_hash: Optional[int]) -> List[Block]:
         pass
 
     @abstractmethod
@@ -198,13 +203,15 @@ class DeviceAwareBlockAllocator(ABC):
 
     @abstractmethod
     def allocate_mutable_block(self, prev_block: Optional[Block],
-                               device: Device) -> Block:
+                               device: Device,
+                               contextual_hash: Optional[int] = 0) -> Block:
         pass
 
     @abstractmethod
     def allocate_immutable_block(self, prev_block: Optional[Block],
                                  token_ids: List[int],
-                                 device: Device) -> Block:
+                                 device: Device,
+                                 contextual_hash: Optional[int]) -> Block:
         pass
 
     @abstractmethod
@@ -213,6 +220,7 @@ class DeviceAwareBlockAllocator(ABC):
         prev_block: Optional[Block],
         block_token_ids: List[List[int]],
         device: Device,
+        contextual_hash: Optional[int],
     ) -> List[Block]:
         pass
 

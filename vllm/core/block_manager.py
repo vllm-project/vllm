@@ -151,8 +151,9 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             max_block_sliding_window=self.max_block_sliding_window,
         )
         if seq.get_token_ids():
+            contextual_hash = hash((seq.prompt_adapter_id, seq.lora_int_id))
             # Add blocks to the block table only if the sequence is non empty.
-            block_table.allocate(seq.get_token_ids())
+            block_table.allocate(token_ids=seq.get_token_ids(), contextual_hash=contextual_hash)
 
         return block_table
 
