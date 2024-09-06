@@ -1,6 +1,3 @@
-# Needed for Ray accelerated DAG tests
--r requirements-adag.txt
-
 # testing
 pytest
 tensorizer>=2.9.0
@@ -16,7 +13,7 @@ httpx
 librosa # required for audio test
 peft
 requests
-ray
+ray[adag]>=2.35
 sentence-transformers # required for embedding
 soundfile # required for audio test
 compressed-tensors==0.4.0 # required for compressed-tensors
