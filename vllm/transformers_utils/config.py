@@ -93,7 +93,7 @@ def get_config(
         model = Path(model).parent
 
     if config_format == ConfigFormat.AUTO:
-        if file_or_path_exists(model,
+        if is_gguf or file_or_path_exists(model,
                        HF_CONFIG_NAME,
                        revision=revision,
                        token=kwargs.get("token")):
