@@ -169,41 +169,6 @@ endif()
 
 include(FetchContent)
 
-# If VLLM_FLASH_ATTN_SRC_DIR is set, vllm-flash-attn is installed from that directory instead of downloading.
-# This is to enable local development of vllm-flash-attn within vLLM.
-# It can be set as an environment variable or passed as a cmake argument.
-if (DEFINED ENV{VLLM_FLASH_ATTN_SRC_DIR})
-  set(VLLM_FLASH_ATTN_SRC_DIR $ENV{VLLM_FLASH_ATTN_SRC_DIR})
-endif()
-
-if(VLLM_FLASH_ATTN_SRC_DIR)
-  FetchContent_Declare(flash-attention SOURCE_DIR ${VLLM_FLASH_ATTN_SRC_DIR})
-else()
-# TODO(luka) use vllm-project version
-  FetchContent_Declare(
-          flash-attention
-          GIT_REPOSITORY https://github.com/neuralmagic/flash-attention.git
-          GIT_TAG 7c087df2c487f140529be66a0f99ef3fd82ddb64
-          GIT_PROGRESS TRUE
-  )
-endif()
-
-# Set the parent build flag so that the flash-attention library does not redo compile flag and arch initialization.
-set(VLLM_PARENT_BUILD ON)
-
-# Fetch the flash-attention library
-FetchContent_MakeAvailable(flash-attention)
-add_dependencies(default vllm_flash_attn_c)
-message(STATUS "Flash-attention is available at ${flash-attention_SOURCE_DIR}")
-
-# Copy over the flash-attention python files
-install(
-        DIRECTORY ${flash-attention_SOURCE_DIR}/vllm_flash_attn/
-        DESTINATION .
-        COMPONENT vllm_flash_attn_c
-        FILES_MATCHING PATTERN "*.py"
-)
-
 #
 # Define other extension targets
 #
@@ -359,3 +324,48 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   add_dependencies(default _moe_C)
 
 endif()
+
+#
+# Build flash attention from source
+#
+# IMPORTANT: This has to be the last thing we do, because flash-attention uses the same macros/fuctions as vLLM.
+# Because functions all belong to the global scope, flash-attention's funcitons overwrite vLLMs.
+# They should be identical but if they aren't, this is a massive footgun.
+#
+
+# If VLLM_FLASH_ATTN_SRC_DIR is set, vllm-flash-attn is installed from that directory instead of downloading.
+# This is to enable local development of vllm-flash-attn within vLLM.
+# It can be set as an environment variable or passed as a cmake argument.
+if (DEFINED ENV{VLLM_FLASH_ATTN_SRC_DIR})
+  set(VLLM_FLASH_ATTN_SRC_DIR $ENV{VLLM_FLASH_ATTN_SRC_DIR})
+endif()
+
+if(VLLM_FLASH_ATTN_SRC_DIR)
+  FetchContent_Declare(flash-attention SOURCE_DIR ${VLLM_FLASH_ATTN_SRC_DIR})
+else()
+  # TODO(luka) use vllm-project version
+  FetchContent_Declare(
+          flash-attention
+          GIT_REPOSITORY https://github.com/neuralmagic/flash-attention.git
+          GIT_TAG 7c087df2c487f140529be66a0f99ef3fd82ddb64
+          GIT_PROGRESS TRUE
+  )
+endif()
+
+# Set the parent build flag so that the flash-attention library does not redo compile flag and arch initialization.
+set(VLLM_PARENT_BUILD ON)
+
+# Fetch the flash-attention library
+FetchContent_MakeAvailable(flash-attention)
+add_dependencies(default vllm_flash_attn_c)
+message(STATUS "Flash-attention is available at ${flash-attention_SOURCE_DIR}")
+
+# Copy over the flash-attention python files
+install(
+        DIRECTORY ${flash-attention_SOURCE_DIR}/vllm_flash_attn/
+        DESTINATION .
+        COMPONENT vllm_flash_attn_c
+        FILES_MATCHING PATTERN "*.py"
+)
+
+# Nothing after flash-attention, see comment about macros abocve
