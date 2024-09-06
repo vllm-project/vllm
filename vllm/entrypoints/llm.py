@@ -286,7 +286,6 @@ class LLM:
                                                GuidedDecodingRequest]] = None,
         priority: Optional[List[int]] = None,
     ) -> List[RequestOutput]:
-        print("Priority is:", priority)
         """Generates the completions for the input prompts.
 
         This class automatically batches the given prompts, considering

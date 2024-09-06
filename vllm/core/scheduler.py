@@ -780,8 +780,7 @@ class Scheduler:
     ) -> int:
         """Sorts waiting and running queue. Also, force preempt requests
         from the running queue if their priority is lower.
-        Priority-based preemption is used with the strict priority
-        (sp) policy.
+        Priority-based preemption is used with the priority policy.
         Args:
             budget: The scheduling budget. The argument is in-place updated
                 when any requests are scheduled.
@@ -794,8 +793,6 @@ class Scheduler:
 
         running_queue = deque(
             sorted(running_queue, key=lambda x: self._get_priority(x)))
-        waiting_queue = deque(
-            sorted(waiting_queue, key=lambda x: self._get_priority(x)))
 
         blocks_to_swap_out: List[Tuple[int, int]] = []
         force_preemption_cnt = 0
@@ -836,6 +833,9 @@ class Scheduler:
                 force_preemption_cnt += 1
             #Put the sequence back into the waiting queue
             waiting_queue.appendleft(seq_group)
+
+        waiting_queue = deque(
+            sorted(waiting_queue, key=lambda x: self._get_priority(x)))
 
         self.waiting = waiting_queue
         self.running = running_queue
@@ -993,7 +993,7 @@ class Scheduler:
                                                enable_chunking=False)
 
         if len(prefills.seq_groups
-               ) == 0 and self.scheduler_config.policy == "sp":
+               ) == 0 and self.scheduler_config.policy == "priority":
             self._schedule_priority_preemption(budget)
 
         # Don't schedule decodes if prefills are scheduled.

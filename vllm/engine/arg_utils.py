@@ -562,6 +562,7 @@ class EngineArgs:
             default=EngineArgs.scheduler_delay_factor,
             help='Apply a delay (of delay factor multiplied by previous'
             'prompt latency) before scheduling next prompt.')
+
         parser.add_argument(
             '--enable-chunked-prefill',
             action=StoreBoolean,

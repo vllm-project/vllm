@@ -122,10 +122,7 @@ def run_vllm(
             ))
 
     start = time.perf_counter()
-    llm.generate(prompts,
-                 sampling_params,
-                 priority=priority,
-                 use_tqdm=True)
+    llm.generate(prompts, sampling_params, priority=priority, use_tqdm=True)
     end = time.perf_counter()
     return end - start
 
@@ -195,9 +192,7 @@ if __name__ == "__main__":
                         default=None,
                         help="Output length for each request. Overrides the "
                         "output length from the dataset.")
-    parser.add_argument("--model",
-                        type=str,
-                        default="facebook/opt-125m")
+    parser.add_argument("--model", type=str, default="facebook/opt-125m")
     parser.add_argument("--tokenizer", type=str, default=None)
     parser.add_argument('--quantization',
                         '-q',
@@ -287,12 +282,6 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help='Path to save the throughput results in JSON format.')
-
-    parser.add_argument(
-        '--scheduling-policy',
-        type=bool,
-        default='sp',
-        help='sp: Strict Priority, fcfs: First Come First Serve')
 
     args = parser.parse_args()
     if args.tokenizer is None:
