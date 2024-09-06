@@ -142,7 +142,9 @@ def input_processor_for_llava(ctx: InputContext, llm_inputs: LLMInputs):
         image_feature_size = [get_max_llava_image_tokens(ctx)
                               ] * len(image_data)
     elif isinstance(image_data, torch.Tensor):
-        image_feature_size = image_data.shape[0]
+        num_images, image_feature_size, hidden_size = image_data.shape
+    elif is_list_of(image_data, torch.Tensor):
+        image_feature_size = [item.shape[1] for item in image_data]
     else:
         raise TypeError(f"Invalid image type: {type(image_data)}")
 
