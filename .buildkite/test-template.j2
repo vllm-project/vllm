@@ -31,47 +31,37 @@ steps:
           limit: 2
     
   {% if run_all == "1" %}
-  - label: ":docker: build image {{ '{{' }}matrix{{ '}}' }}"
-    key: image-build-py
+  {% for python_version in ["3.8", "3.9", "3.10", "3.11", "3.12"] %}
+  - label: ":docker: build image {{ python_version }}"
+    key: image-build-py{{ python_version }}
     agents:
       queue: cpu_queue
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-      - |
-        #!/bin/bash
-        if [[ -z $(docker manifest inspect {{ docker_image }}) ]]; then
-          echo "Image not found, proceeding with build..."
-        else
-          echo "Image found"
-          exit 0
-        fi
-      - docker build --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg PYTHON_VERSION={{ matrix }} --build-arg USE_SCCACHE=1 --tag {{ docker_image }}-{{ '{{' }}matrix{{ '}}' }} --target test --progress plain .
-      - "docker push {{ docker_image }}-{{ '{{' }}matrix{{ '}}' }}"
+      - docker build --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg PYTHON_VERSION={{ matrix }} --build-arg USE_SCCACHE=1 --tag {{ docker_image }}-{{ python_version }}--target test --progress plain .
+      - "docker push {{ docker_image }}-{{ python_version}}"
     env:
       DOCKER_BUILDKIT: "1"
-    matrix:
-      - "3.8"
-      - "3.9"
-      - "3.10"
-      - "3.11"
     retry:
       automatic:
         - exit_status: -1  # Agent was lost
           limit: 2
         - exit_status: -10  # Agent was lost
           limit: 2
+  {% endfor %}
   {% endif %}
 
   {% if run_all == "1" %}
     {% for step in steps %}
       {% if step.essential %}
-  - label: "{{ step.label }} {{ '{{' }}matrix{{ '}}' }}"
-    depends_on: image-build-py
+      {% for python_version in ["3.8", "3.9", "3.10", "3.11", "3.12"]%}
+  - label: "{{ step.label }} {{ python_version}}"
+    depends_on: image-build-py{{ python_version }}
     agents:
       queue: gpu_1_queue
     plugins:
       - docker#v5.2.0: {# for GPU test #}
-          image: {{ docker_image }}-{{ '{{' }}matrix{{ '}}' }}
+          image: {{ docker_image }}-{{ python_version }}
           always-pull: true
           propagate-environment: true
           command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd {{ (step.working_dir or default_working_dir) | safe  }} && {{ step.command  or (step.commands | join(' && ')) | safe }}"]
@@ -83,6 +73,7 @@ steps:
           volumes:
             - /dev/shm:/dev/shm
                 - {{ hf_home }}:{{ hf_home }}
+      {% endfor %}
       {% endif %}
     {% endfor %}
   {% endif %}
