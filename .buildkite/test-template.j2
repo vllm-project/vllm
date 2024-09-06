@@ -33,12 +33,12 @@ steps:
   {% if run_all == "1" %}
   {% for python_version in ["3.8", "3.9", "3.10", "3.11", "3.12"] %}
   - label: ":docker: build image {{ python_version }}"
-    key: image-build-py{{ python_version }}
+    key: image-build-py{{ python_version | replace(".", "") }}
     agents:
       queue: cpu_queue
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-      - docker build --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg PYTHON_VERSION={{ matrix }} --build-arg USE_SCCACHE=1 --tag {{ docker_image }}-{{ python_version }}--target test --progress plain .
+      - docker build --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg PYTHON_VERSION={{ python_version }} --build-arg USE_SCCACHE=1 --tag {{ docker_image }}-{{ python_version }}--target test --progress plain .
       - "docker push {{ docker_image }}-{{ python_version}}"
     env:
       DOCKER_BUILDKIT: "1"
@@ -56,7 +56,7 @@ steps:
       {% if step.essential %}
       {% for python_version in ["3.8", "3.9", "3.10", "3.11", "3.12"]%}
   - label: "{{ step.label }} {{ python_version}}"
-    depends_on: image-build-py{{ python_version }}
+    depends_on: image-build-py{{ python_version | replace(".", "") }}
     agents:
       queue: gpu_1_queue
     plugins:

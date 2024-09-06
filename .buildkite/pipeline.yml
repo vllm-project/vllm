@@ -31,29 +31,17 @@ steps:
           limit: 2
     
   
-  - label: ":docker: build image {{matrix}}"
-    key: image-build
+  
+  - label: ":docker: build image 3.8"
+    key: image-build-py38
     agents:
       queue: cpu_queue
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-      - |
-        #!/bin/bash
-        if [[ -z $(docker manifest inspect public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT) ]]; then
-          echo "Image not found, proceeding with build..."
-        else
-          echo "Image found"
-          exit 0
-        fi
-      - docker build --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg PYTHON_VERSION= --build-arg USE_SCCACHE=1 --tag public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-{{matrix}} --target test --progress plain .
-      - "docker push public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-{{matrix}}"
+      - docker build --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg PYTHON_VERSION=3.8 --build-arg USE_SCCACHE=1 --tag public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-3.8--target test --progress plain .
+      - "docker push public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-3.8"
     env:
       DOCKER_BUILDKIT: "1"
-    matrix:
-      - "3.8"
-      - "3.9"
-      - "3.10"
-      - "3.11"
     retry:
       automatic:
         - exit_status: -1  # Agent was lost
@@ -61,19 +49,89 @@ steps:
         - exit_status: -10  # Agent was lost
           limit: 2
   
+  - label: ":docker: build image 3.9"
+    key: image-build-py39
+    agents:
+      queue: cpu_queue
+    commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - docker build --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg PYTHON_VERSION=3.9 --build-arg USE_SCCACHE=1 --tag public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-3.9--target test --progress plain .
+      - "docker push public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-3.9"
+    env:
+      DOCKER_BUILDKIT: "1"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 2
+        - exit_status: -10  # Agent was lost
+          limit: 2
+  
+  - label: ":docker: build image 3.10"
+    key: image-build-py310
+    agents:
+      queue: cpu_queue
+    commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - docker build --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg PYTHON_VERSION=3.10 --build-arg USE_SCCACHE=1 --tag public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-3.10--target test --progress plain .
+      - "docker push public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-3.10"
+    env:
+      DOCKER_BUILDKIT: "1"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 2
+        - exit_status: -10  # Agent was lost
+          limit: 2
+  
+  - label: ":docker: build image 3.11"
+    key: image-build-py311
+    agents:
+      queue: cpu_queue
+    commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - docker build --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg PYTHON_VERSION=3.11 --build-arg USE_SCCACHE=1 --tag public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-3.11--target test --progress plain .
+      - "docker push public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-3.11"
+    env:
+      DOCKER_BUILDKIT: "1"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 2
+        - exit_status: -10  # Agent was lost
+          limit: 2
+  
+  - label: ":docker: build image 3.12"
+    key: image-build-py312
+    agents:
+      queue: cpu_queue
+    commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - docker build --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg PYTHON_VERSION=3.12 --build-arg USE_SCCACHE=1 --tag public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-3.12--target test --progress plain .
+      - "docker push public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-3.12"
+    env:
+      DOCKER_BUILDKIT: "1"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 2
+        - exit_status: -10  # Agent was lost
+          limit: 2
+  
+  
 
   
     
       
     
       
-  - label: "Async Engine, Inputs, Utils, Worker Test {{matrix}}"
-    depends_on: image-build
+      
+  - label: "Async Engine, Inputs, Utils, Worker Test 3.8"
+    depends_on: image-build-py38
     agents:
       queue: gpu_1_queue
     plugins:
       - docker#v5.2.0: 
-          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-{{matrix}}
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-3.8
           always-pull: true
           propagate-environment: true
           command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s async_engine && pytest -v -s test_inputs.py && pytest -v -s multimodal && pytest -v -s test_utils.py && pytest -v -s worker"]
@@ -86,15 +144,93 @@ steps:
             - /dev/shm:/dev/shm
                 - /root/.cache/huggingface:/root/.cache/huggingface
       
-    
-      
-  - label: "Basic Correctness Test {{matrix}}"
-    depends_on: image-build-{{matrix}}
+  - label: "Async Engine, Inputs, Utils, Worker Test 3.9"
+    depends_on: image-build-py39
     agents:
       queue: gpu_1_queue
     plugins:
       - docker#v5.2.0: 
-          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-{{matrix}}
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-3.9
+          always-pull: true
+          propagate-environment: true
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s async_engine && pytest -v -s test_inputs.py && pytest -v -s multimodal && pytest -v -s test_utils.py && pytest -v -s worker"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+          volumes:
+            - /dev/shm:/dev/shm
+                - /root/.cache/huggingface:/root/.cache/huggingface
+      
+  - label: "Async Engine, Inputs, Utils, Worker Test 3.10"
+    depends_on: image-build-py310
+    agents:
+      queue: gpu_1_queue
+    plugins:
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-3.10
+          always-pull: true
+          propagate-environment: true
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s async_engine && pytest -v -s test_inputs.py && pytest -v -s multimodal && pytest -v -s test_utils.py && pytest -v -s worker"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+          volumes:
+            - /dev/shm:/dev/shm
+                - /root/.cache/huggingface:/root/.cache/huggingface
+      
+  - label: "Async Engine, Inputs, Utils, Worker Test 3.11"
+    depends_on: image-build-py311
+    agents:
+      queue: gpu_1_queue
+    plugins:
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-3.11
+          always-pull: true
+          propagate-environment: true
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s async_engine && pytest -v -s test_inputs.py && pytest -v -s multimodal && pytest -v -s test_utils.py && pytest -v -s worker"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+          volumes:
+            - /dev/shm:/dev/shm
+                - /root/.cache/huggingface:/root/.cache/huggingface
+      
+  - label: "Async Engine, Inputs, Utils, Worker Test 3.12"
+    depends_on: image-build-py312
+    agents:
+      queue: gpu_1_queue
+    plugins:
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-3.12
+          always-pull: true
+          propagate-environment: true
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s async_engine && pytest -v -s test_inputs.py && pytest -v -s multimodal && pytest -v -s test_utils.py && pytest -v -s worker"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+          volumes:
+            - /dev/shm:/dev/shm
+                - /root/.cache/huggingface:/root/.cache/huggingface
+      
+      
+    
+      
+      
+  - label: "Basic Correctness Test 3.8"
+    depends_on: image-build-py38
+    agents:
+      queue: gpu_1_queue
+    plugins:
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-3.8
           always-pull: true
           propagate-environment: true
           command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s basic_correctness/test_basic_correctness.py && pytest -v -s basic_correctness/test_cpu_offload.py && VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_chunked_prefill.py && VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_chunked_prefill.py && VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py"]
@@ -107,15 +243,93 @@ steps:
             - /dev/shm:/dev/shm
                 - /root/.cache/huggingface:/root/.cache/huggingface
       
-    
-      
-  - label: "Core Test {{matrix}}"
-    depends_on: image-build-{{matrix}}
+  - label: "Basic Correctness Test 3.9"
+    depends_on: image-build-py39
     agents:
       queue: gpu_1_queue
     plugins:
       - docker#v5.2.0: 
-          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-{{matrix}}
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-3.9
+          always-pull: true
+          propagate-environment: true
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s basic_correctness/test_basic_correctness.py && pytest -v -s basic_correctness/test_cpu_offload.py && VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_chunked_prefill.py && VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_chunked_prefill.py && VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+          volumes:
+            - /dev/shm:/dev/shm
+                - /root/.cache/huggingface:/root/.cache/huggingface
+      
+  - label: "Basic Correctness Test 3.10"
+    depends_on: image-build-py310
+    agents:
+      queue: gpu_1_queue
+    plugins:
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-3.10
+          always-pull: true
+          propagate-environment: true
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s basic_correctness/test_basic_correctness.py && pytest -v -s basic_correctness/test_cpu_offload.py && VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_chunked_prefill.py && VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_chunked_prefill.py && VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+          volumes:
+            - /dev/shm:/dev/shm
+                - /root/.cache/huggingface:/root/.cache/huggingface
+      
+  - label: "Basic Correctness Test 3.11"
+    depends_on: image-build-py311
+    agents:
+      queue: gpu_1_queue
+    plugins:
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-3.11
+          always-pull: true
+          propagate-environment: true
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s basic_correctness/test_basic_correctness.py && pytest -v -s basic_correctness/test_cpu_offload.py && VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_chunked_prefill.py && VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_chunked_prefill.py && VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+          volumes:
+            - /dev/shm:/dev/shm
+                - /root/.cache/huggingface:/root/.cache/huggingface
+      
+  - label: "Basic Correctness Test 3.12"
+    depends_on: image-build-py312
+    agents:
+      queue: gpu_1_queue
+    plugins:
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-3.12
+          always-pull: true
+          propagate-environment: true
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s basic_correctness/test_basic_correctness.py && pytest -v -s basic_correctness/test_cpu_offload.py && VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_chunked_prefill.py && VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_chunked_prefill.py && VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+          volumes:
+            - /dev/shm:/dev/shm
+                - /root/.cache/huggingface:/root/.cache/huggingface
+      
+      
+    
+      
+      
+  - label: "Core Test 3.8"
+    depends_on: image-build-py38
+    agents:
+      queue: gpu_1_queue
+    plugins:
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-3.8
           always-pull: true
           propagate-environment: true
           command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s core"]
@@ -128,15 +342,93 @@ steps:
             - /dev/shm:/dev/shm
                 - /root/.cache/huggingface:/root/.cache/huggingface
       
-    
-      
-  - label: "Entrypoints Test {{matrix}}"
-    depends_on: image-build-{{matrix}}
+  - label: "Core Test 3.9"
+    depends_on: image-build-py39
     agents:
       queue: gpu_1_queue
     plugins:
       - docker#v5.2.0: 
-          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-{{matrix}}
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-3.9
+          always-pull: true
+          propagate-environment: true
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s core"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+          volumes:
+            - /dev/shm:/dev/shm
+                - /root/.cache/huggingface:/root/.cache/huggingface
+      
+  - label: "Core Test 3.10"
+    depends_on: image-build-py310
+    agents:
+      queue: gpu_1_queue
+    plugins:
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-3.10
+          always-pull: true
+          propagate-environment: true
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s core"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+          volumes:
+            - /dev/shm:/dev/shm
+                - /root/.cache/huggingface:/root/.cache/huggingface
+      
+  - label: "Core Test 3.11"
+    depends_on: image-build-py311
+    agents:
+      queue: gpu_1_queue
+    plugins:
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-3.11
+          always-pull: true
+          propagate-environment: true
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s core"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+          volumes:
+            - /dev/shm:/dev/shm
+                - /root/.cache/huggingface:/root/.cache/huggingface
+      
+  - label: "Core Test 3.12"
+    depends_on: image-build-py312
+    agents:
+      queue: gpu_1_queue
+    plugins:
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-3.12
+          always-pull: true
+          propagate-environment: true
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s core"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+          volumes:
+            - /dev/shm:/dev/shm
+                - /root/.cache/huggingface:/root/.cache/huggingface
+      
+      
+    
+      
+      
+  - label: "Entrypoints Test 3.8"
+    depends_on: image-build-py38
+    agents:
+      queue: gpu_1_queue
+    plugins:
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-3.8
           always-pull: true
           propagate-environment: true
           command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pip install -e ./plugins/vllm_add_dummy_model && pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git@a4987bba6e9e9b3f22bd3a6c1ecf0abd04fd5622#egg=lm_eval[api] && pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py && pytest -v -s entrypoints/llm/test_lazy_outlines.py && pytest -v -s entrypoints/openai && pytest -v -s entrypoints/test_chat_utils.py"]
@@ -148,6 +440,83 @@ steps:
           volumes:
             - /dev/shm:/dev/shm
                 - /root/.cache/huggingface:/root/.cache/huggingface
+      
+  - label: "Entrypoints Test 3.9"
+    depends_on: image-build-py39
+    agents:
+      queue: gpu_1_queue
+    plugins:
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-3.9
+          always-pull: true
+          propagate-environment: true
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pip install -e ./plugins/vllm_add_dummy_model && pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git@a4987bba6e9e9b3f22bd3a6c1ecf0abd04fd5622#egg=lm_eval[api] && pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py && pytest -v -s entrypoints/llm/test_lazy_outlines.py && pytest -v -s entrypoints/openai && pytest -v -s entrypoints/test_chat_utils.py"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+          volumes:
+            - /dev/shm:/dev/shm
+                - /root/.cache/huggingface:/root/.cache/huggingface
+      
+  - label: "Entrypoints Test 3.10"
+    depends_on: image-build-py310
+    agents:
+      queue: gpu_1_queue
+    plugins:
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-3.10
+          always-pull: true
+          propagate-environment: true
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pip install -e ./plugins/vllm_add_dummy_model && pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git@a4987bba6e9e9b3f22bd3a6c1ecf0abd04fd5622#egg=lm_eval[api] && pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py && pytest -v -s entrypoints/llm/test_lazy_outlines.py && pytest -v -s entrypoints/openai && pytest -v -s entrypoints/test_chat_utils.py"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+          volumes:
+            - /dev/shm:/dev/shm
+                - /root/.cache/huggingface:/root/.cache/huggingface
+      
+  - label: "Entrypoints Test 3.11"
+    depends_on: image-build-py311
+    agents:
+      queue: gpu_1_queue
+    plugins:
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-3.11
+          always-pull: true
+          propagate-environment: true
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pip install -e ./plugins/vllm_add_dummy_model && pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git@a4987bba6e9e9b3f22bd3a6c1ecf0abd04fd5622#egg=lm_eval[api] && pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py && pytest -v -s entrypoints/llm/test_lazy_outlines.py && pytest -v -s entrypoints/openai && pytest -v -s entrypoints/test_chat_utils.py"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+          volumes:
+            - /dev/shm:/dev/shm
+                - /root/.cache/huggingface:/root/.cache/huggingface
+      
+  - label: "Entrypoints Test 3.12"
+    depends_on: image-build-py312
+    agents:
+      queue: gpu_1_queue
+    plugins:
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-3.12
+          always-pull: true
+          propagate-environment: true
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pip install -e ./plugins/vllm_add_dummy_model && pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git@a4987bba6e9e9b3f22bd3a6c1ecf0abd04fd5622#egg=lm_eval[api] && pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py && pytest -v -s entrypoints/llm/test_lazy_outlines.py && pytest -v -s entrypoints/openai && pytest -v -s entrypoints/test_chat_utils.py"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+          volumes:
+            - /dev/shm:/dev/shm
+                - /root/.cache/huggingface:/root/.cache/huggingface
+      
       
     
       
