@@ -97,19 +97,19 @@ def get_config(
             raise ValueError(f"No supported config format found in {model}")
 
 
-    try:
-        if config_format == ConfigFormat.HF:
-            config_dict, _ = PretrainedConfig.get_config_dict(
-                model, revision=revision, code_revision=code_revision, **kwargs)
+    if config_format == ConfigFormat.HF:
+        config_dict, _ = PretrainedConfig.get_config_dict(
+            model, revision=revision, code_revision=code_revision, **kwargs)
 
-            # Use custom model class if it's in our registry
-            model_type = config_dict.get("model_type")
-            if model_type in _CONFIG_REGISTRY:
-                config_class = _CONFIG_REGISTRY[model_type]
-                config = config_class.from_pretrained(model,
-                                        revision=revision,
-                                        code_revision=code_revision)
-            else:
+        # Use custom model class if it's in our registry
+        model_type = config_dict.get("model_type")
+        if model_type in _CONFIG_REGISTRY:
+            config_class = _CONFIG_REGISTRY[model_type]
+            config = config_class.from_pretrained(model,
+                                    revision=revision,
+                                    code_revision=code_revision)
+        else:
+            try:
                 config = AutoConfig.from_pretrained(
                     model,
                     trust_remote_code=trust_remote_code,
@@ -117,21 +117,22 @@ def get_config(
                     code_revision=code_revision,
                     **kwargs,
                 )
-        elif config_format == ConfigFormat.MISTRAL:
-            config = load_params_config(model, revision)
-        else:
-            raise ValueError(f"Unsupported config format: {config_format}")
-    except ValueError as e:
-        if (not trust_remote_code and
-                "requires you to execute the configuration file" in str(e)):
-            err_msg = (
-                "Failed to load the model config. If the model is a custom "
-                "model not yet available in the HuggingFace transformers "
-                "library, consider setting `trust_remote_code=True` in LLM "
-                "or using the `--trust-remote-code` flag in the CLI.")
-            raise RuntimeError(err_msg) from e
-        else:
-            raise e
+            except ValueError as e:
+                if (not trust_remote_code and
+                        "requires you to execute the configuration file" in str(e)):
+                    err_msg = (
+                        "Failed to load the model config. If the model is a custom "
+                        "model not yet available in the HuggingFace transformers "
+                        "library, consider setting `trust_remote_code=True` in LLM "
+                        "or using the `--trust-remote-code` flag in the CLI.")
+                    raise RuntimeError(err_msg) from e
+                else:
+                    raise e
+
+    elif config_format == ConfigFormat.MISTRAL:
+        config = load_params_config(model, revision)
+    else:
+        raise ValueError(f"Unsupported config format: {config_format}")
 
     # Special architecture mapping check for GGUF models
     if is_gguf:
