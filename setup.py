@@ -238,6 +238,10 @@ class cmake_build_ext(build_ext):
             # Install the extension into the proper location
             outdir = Path(self.get_ext_fullpath(ext.name)).parent.absolute()
 
+            # Skip if the install directory is the same as the build directory
+            if outdir == self.build_temp:
+                continue
+
             install_args = [
                 "cmake", "--install", ".", "--prefix", outdir, "--component",
                 target_name(ext.name)
