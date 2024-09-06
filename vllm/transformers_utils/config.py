@@ -92,9 +92,9 @@ def get_config(
 
     if config_format == ConfigFormat.AUTO:
         if is_gguf or file_or_path_exists(model,
-                       HF_CONFIG_NAME,
-                       revision=revision,
-                       token=kwargs.get("token")):
+                                          HF_CONFIG_NAME,
+                                          revision=revision,
+                                          token=kwargs.get("token")):
             config_format = ConfigFormat.HF
         elif file_or_path_exists(model,
                                  MISTRAL_CONFIG_NAME,
