@@ -107,3 +107,55 @@ The following is an example request
             "max_tokens": 7,
             "temperature": 0
         }' | jq
+
+
+Dynamically serving LoRA Adapters
+---------------------------------
+
+In addition to serving LoRA adapters at server startup, the vLLM server now supports dynamically loading and unloading
+LoRA adapters at runtime through dedicated API endpoints. This feature can be particularly useful when the flexibility
+to change models on-the-fly is needed.
+
+Note: Enabling this feature in production environments is risky as user may participate model adapter management.
+
+To enable dynamic LoRA loading and unloading, ensure that the environment variable `VLLM_ALLOW_RUNTIME_LORA_UPDATING`
+is set to `True`. When this option is enabled, the API server will log a warning to indicate that dynamic loading is active.
+
+.. code-block:: bash
+
+    export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
+
+
+Loading a LoRA Adapter:
+
+To dynamically load a LoRA adapter, send a POST request to the `/v1/load_lora_adapter` endpoint with the necessary
+details of the adapter to be loaded. The request payload should include the name and path to the LoRA adapter.
+
+Example request to load a LoRA adapter:
+
+.. code-block:: bash
+
+    curl -X POST http://localhost:8000/v1/load_lora_adapter \
+    -H "Content-Type: application/json" \
+    -d '{
+        "lora_name": "sql_adapter",
+        "lora_path": "/path/to/sql-lora-adapter"
+    }'
+
+Upon a successful request, the API will respond with a 200 OK status code. If an error occurs, such as if the adapter
+cannot be found or loaded, an appropriate error message will be returned.
+
+Unloading a LoRA Adapter:
+
+To unload a LoRA adapter that has been previously loaded, send a POST request to the `/v1/unload_lora_adapter` endpoint
+with the name or ID of the adapter to be unloaded.
+
+Example request to unload a LoRA adapter:
+
+.. code-block:: bash
+
+    curl -X POST http://localhost:8000/v1/unload_lora_adapter \
+    -H "Content-Type: application/json" \
+    -d '{
+        "lora_name": "sql_adapter"
+    }'
