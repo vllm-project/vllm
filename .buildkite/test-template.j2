@@ -31,8 +31,8 @@ steps:
           limit: 2
     
   {% if run_all == "1" %}
-  - label: ":docker: build image {{ matrix }}"
-    key: image-build-{{ matrix }}
+  - label: ":docker: build image {{ '{{' }}matrix{{ '}}' }}"
+    key: image-build-{{ '{{' }}matrix{{ '}}' }}
     agents:
       queue: cpu_queue
     commands:
@@ -45,8 +45,8 @@ steps:
           echo "Image found"
           exit 0
         fi
-      - docker build --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg PYTHON_VERSION={{ matrix }} --build-arg USE_SCCACHE=1 --tag {{ docker_image }}-{{ matrix }} --target test --progress plain .
-      - "docker push {{ docker_image }}-{{ matrix}}"
+      - docker build --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg PYTHON_VERSION={{ matrix }} --build-arg USE_SCCACHE=1 --tag {{ docker_image }}-{{ '{{' }}matrix{{ '}}' }} --target test --progress plain .
+      - "docker push {{ docker_image }}-{{ '{{' }}matrix{{ '}}' }}"
     env:
       DOCKER_BUILDKIT: "1"
     matrix:
@@ -65,13 +65,13 @@ steps:
   {% if run_all == "1" %}
     {% for step in steps %}
       {% if step.essential %}
-      - label: "{{ step.label }} {{matrix}}"
-        depends_on: image-build-{{ matrix }}
-        agents:
-          queue: gpu_1_queue
-        plugins:
-          - docker#v5.2.0: {# for GPU test #}
-          image: {{ docker_image }}-{{ matrix }}
+  - label: "{{ step.label }} {{ '{{' }}matrix{{ '}}' }}"
+    depends_on: image-build-{{ '{{' }}matrix{{ '}}' }}
+    agents:
+      queue: gpu_1_queue
+    plugins:
+      - docker#v5.2.0: {# for GPU test #}
+          image: {{ docker_image }}-{{ '{{' }}matrix{{ '}}' }}
           always-pull: true
           propagate-environment: true
           command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd {{ (step.working_dir or default_working_dir) | safe  }} && {{ step.command  or (step.commands | join(' && ')) | safe }}"]
@@ -82,7 +82,7 @@ steps:
             - BUILDKITE_ANALYTICS_TOKEN
           volumes:
             - /dev/shm:/dev/shm
-            - {{ hf_home }}:{{ hf_home }}
+                - {{ hf_home }}:{{ hf_home }}
       {% endif %}
     {% endfor %}
   {% endif %}

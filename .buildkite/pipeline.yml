@@ -1,0 +1,2918 @@
+
+
+
+
+
+
+steps:
+  - label: ":docker: build image"
+    key: image-build
+    agents:
+      queue: cpu_queue
+    commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - |
+        #!/bin/bash
+        if [[ -z $(docker manifest inspect public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT) ]]; then
+          echo "Image not found, proceeding with build..."
+        else
+          echo "Image found"
+          exit 0
+        fi
+      - "docker build --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg USE_SCCACHE=1 --tag public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT --target test --progress plain ."
+      - "docker push public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT"
+    env:
+      DOCKER_BUILDKIT: "1"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 2
+        - exit_status: -10  # Agent was lost
+          limit: 2
+    
+  
+  - label: ":docker: build image {{matrix}}"
+    key: image-build-{{matrix}}
+    agents:
+      queue: cpu_queue
+    commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - |
+        #!/bin/bash
+        if [[ -z $(docker manifest inspect public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT) ]]; then
+          echo "Image not found, proceeding with build..."
+        else
+          echo "Image found"
+          exit 0
+        fi
+      - docker build --build-arg max_jobs=16 --build-arg buildkite_commit=$BUILDKITE_COMMIT --build-arg PYTHON_VERSION= --build-arg USE_SCCACHE=1 --tag public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-{{matrix}} --target test --progress plain .
+      - "docker push public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-{{matrix}}"
+    env:
+      DOCKER_BUILDKIT: "1"
+    matrix:
+      - "3.8"
+      - "3.9"
+      - "3.10"
+      - "3.11"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 2
+        - exit_status: -10  # Agent was lost
+          limit: 2
+  
+
+  
+    
+      
+    
+      
+  - label: "Async Engine, Inputs, Utils, Worker Test {{matrix}}"
+    depends_on: image-build-{{matrix}}
+    agents:
+      queue: gpu_1_queue
+    plugins:
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-{{matrix}}
+          always-pull: true
+          propagate-environment: true
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s async_engine && pytest -v -s test_inputs.py && pytest -v -s multimodal && pytest -v -s test_utils.py && pytest -v -s worker"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+          volumes:
+            - /dev/shm:/dev/shm
+                - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+      
+  - label: "Basic Correctness Test {{matrix}}"
+    depends_on: image-build-{{matrix}}
+    agents:
+      queue: gpu_1_queue
+    plugins:
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-{{matrix}}
+          always-pull: true
+          propagate-environment: true
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s basic_correctness/test_basic_correctness.py && pytest -v -s basic_correctness/test_cpu_offload.py && VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_chunked_prefill.py && VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_chunked_prefill.py && VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+          volumes:
+            - /dev/shm:/dev/shm
+                - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+      
+  - label: "Core Test {{matrix}}"
+    depends_on: image-build-{{matrix}}
+    agents:
+      queue: gpu_1_queue
+    plugins:
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-{{matrix}}
+          always-pull: true
+          propagate-environment: true
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s core"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+          volumes:
+            - /dev/shm:/dev/shm
+                - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+      
+  - label: "Entrypoints Test {{matrix}}"
+    depends_on: image-build-{{matrix}}
+    agents:
+      queue: gpu_1_queue
+    plugins:
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT-{{matrix}}
+          always-pull: true
+          propagate-environment: true
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pip install -e ./plugins/vllm_add_dummy_model && pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git@a4987bba6e9e9b3f22bd3a6c1ecf0abd04fd5622#egg=lm_eval[api] && pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py && pytest -v -s entrypoints/llm/test_lazy_outlines.py && pytest -v -s entrypoints/openai && pytest -v -s entrypoints/test_chat_utils.py"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+          volumes:
+            - /dev/shm:/dev/shm
+                - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+      
+    
+  
+
+  
+  
+  
+
+  
+
+  
+  
+  
+
+  
+    
+  
+
+  
+
+  
+
+  - label: "Documentation Build"
+    
+    depends_on: image-build
+    
+    agents:
+      
+      queue: small_cpu_queue
+      
+    
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+    
+    plugins:
+      
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+          always-pull: true
+          propagate-environment: true
+          
+          
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/test_docs/docs && pip install -r requirements-docs.txt && SPHINXOPTS=\"-W\" make html && grep \"sig sig-object py\" build/html/dev/sampling_params.html"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+            
+          volumes:
+            - /dev/shm:/dev/shm
+            - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+  
+  
+  
+
+  
+
+  
+  
+  
+
+  
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+  
+
+  
+
+  
+
+  - label: "Async Engine, Inputs, Utils, Worker Test"
+    
+    depends_on: image-build
+    
+    agents:
+      
+      queue: gpu_1_queue
+      
+    
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+    
+    plugins:
+      
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+          always-pull: true
+          propagate-environment: true
+          
+          gpus: all
+          
+          
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s async_engine && pytest -v -s test_inputs.py && pytest -v -s multimodal && pytest -v -s test_utils.py && pytest -v -s worker"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+            
+          volumes:
+            - /dev/shm:/dev/shm
+            - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+  
+  
+  
+
+  
+
+  
+  
+  
+
+  
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+  
+
+  
+
+  
+
+  - label: "Basic Correctness Test"
+    
+    depends_on: image-build
+    
+    agents:
+      
+      queue: gpu_1_queue
+      
+    
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+    
+    plugins:
+      
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+          always-pull: true
+          propagate-environment: true
+          
+          gpus: all
+          
+          
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s basic_correctness/test_basic_correctness.py && pytest -v -s basic_correctness/test_cpu_offload.py && VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_chunked_prefill.py && VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_chunked_prefill.py && VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+            
+          volumes:
+            - /dev/shm:/dev/shm
+            - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+  
+  
+  
+
+  
+
+  
+  
+  
+
+  
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+  
+
+  
+
+  
+
+  - label: "Core Test"
+    
+    depends_on: image-build
+    
+    agents:
+      
+      queue: gpu_1_queue
+      
+    
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+    
+    plugins:
+      
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+          always-pull: true
+          propagate-environment: true
+          
+          gpus: all
+          
+          
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s core"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+            
+          volumes:
+            - /dev/shm:/dev/shm
+            - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+  
+  
+  
+
+  
+
+  
+  
+  
+
+  
+    
+      
+        
+      
+        
+      
+    
+  
+
+  
+
+  
+
+  - label: "Entrypoints Test"
+    
+    depends_on: image-build
+    
+    agents:
+      
+      queue: gpu_1_queue
+      
+    
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+    
+    plugins:
+      
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+          always-pull: true
+          propagate-environment: true
+          
+          gpus: all
+          
+          
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pip install -e ./plugins/vllm_add_dummy_model && pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git@a4987bba6e9e9b3f22bd3a6c1ecf0abd04fd5622#egg=lm_eval[api] && pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py && pytest -v -s entrypoints/llm/test_lazy_outlines.py && pytest -v -s entrypoints/openai && pytest -v -s entrypoints/test_chat_utils.py"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+            
+          volumes:
+            - /dev/shm:/dev/shm
+            - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+  
+  
+  
+
+  
+
+  
+  
+  
+
+  
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+  
+
+  
+
+  
+
+  - label: "Distributed Tests (4 GPUs)"
+    
+    depends_on: image-build
+    
+    agents:
+      
+      queue: gpu_4_queue
+      
+    
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+    
+    plugins:
+      
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+          always-pull: true
+          propagate-environment: true
+          
+          gpus: all
+          
+          
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s distributed/test_pynccl.py && pytest -v -s spec_decode/e2e/test_integration_dist_tp4.py"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+            
+          volumes:
+            - /dev/shm:/dev/shm
+            - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+  
+  
+  
+
+  
+
+  
+  
+  
+
+  
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+  
+
+  
+
+  
+
+  - label: "Metrics, Tracing Test"
+    
+    depends_on: image-build
+    
+    agents:
+      
+      queue: gpu_4_queue
+      
+    
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+    
+    plugins:
+      
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+          always-pull: true
+          propagate-environment: true
+          
+          gpus: all
+          
+          
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s metrics && pip install 'opentelemetry-sdk>=1.26.0,<1.27.0' 'opentelemetry-api>=1.26.0,<1.27.0' 'opentelemetry-exporter-otlp>=1.26.0,<1.27.0' 'opentelemetry-semantic-conventions-ai>=0.4.1,<0.5.0' && pytest -v -s tracing"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+            
+          volumes:
+            - /dev/shm:/dev/shm
+            - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+  
+  
+  
+
+  
+
+  
+  
+  
+
+  
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+  
+
+  
+
+  
+
+  - label: "Regression Test"
+    
+    depends_on: image-build
+    
+    agents:
+      
+      queue: gpu_1_queue
+      
+    
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+    
+    plugins:
+      
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+          always-pull: true
+          propagate-environment: true
+          
+          gpus: all
+          
+          
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s test_regression.py"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+            
+          volumes:
+            - /dev/shm:/dev/shm
+            - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+  
+  
+  
+
+  
+
+  
+  
+  
+
+  
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+  
+
+  
+
+  
+
+  - label: "Engine Test"
+    
+    depends_on: image-build
+    
+    agents:
+      
+      queue: gpu_1_queue
+      
+    
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+    
+    plugins:
+      
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+          always-pull: true
+          propagate-environment: true
+          
+          gpus: all
+          
+          
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s engine test_sequence.py test_config.py test_logger.py && pytest -v -s tokenization"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+            
+          volumes:
+            - /dev/shm:/dev/shm
+            - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+  
+  
+  
+
+  
+
+  
+  
+  
+
+  
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+  
+
+  
+
+  
+
+  - label: "Examples Test"
+    
+    depends_on: image-build
+    
+    agents:
+      
+      queue: gpu_1_queue
+      
+    
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+    
+    plugins:
+      
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+          always-pull: true
+          propagate-environment: true
+          
+          gpus: all
+          
+          
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/examples && pip install awscli tensorizer && python3 offline_inference.py && python3 cpu_offload.py && python3 offline_inference_chat.py && python3 offline_inference_with_prefix.py && python3 llm_engine_example.py && python3 offline_inference_vision_language.py && python3 offline_inference_vision_language_multi_image.py && python3 tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors && python3 offline_inference_encoder_decoder.py"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+            
+          volumes:
+            - /dev/shm:/dev/shm
+            - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+  
+  
+  
+
+  
+
+  
+  
+  
+
+  
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+  
+
+  
+
+  
+
+  - label: "Models Test"
+    
+    depends_on: image-build
+    
+    agents:
+      
+      queue: gpu_1_queue
+      
+    
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+    
+    plugins:
+      
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+          always-pull: true
+          propagate-environment: true
+          
+          gpus: all
+          
+          
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pip install -e ./plugins/vllm_add_dummy_model && pytest -v -s models/test_oot_registration.py && pytest -v -s models -m \"not vlm\" --ignore=models/test_oot_registration.py"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+            
+          volumes:
+            - /dev/shm:/dev/shm
+            - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+  
+  
+  
+
+  
+
+  
+  
+  
+
+  
+    
+      
+        
+      
+        
+      
+    
+  
+
+  
+
+  
+
+  - label: "torch compile integration test"
+    
+    depends_on: image-build
+    
+    agents:
+      
+      queue: gpu_1_queue
+      
+    
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+    
+    plugins:
+      
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+          always-pull: true
+          propagate-environment: true
+          
+          gpus: all
+          
+          
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s ./compile/test_full_graph.py && pytest -v -s ./compile/test_wrapper.py"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+            
+          volumes:
+            - /dev/shm:/dev/shm
+            - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+  
+  
+  
+
+  
+
+  
+  
+  
+
+  
+    
+      
+        
+      
+        
+      
+    
+  
+
+  
+
+  
+
+  - label: "Vision Language Models Test"
+    
+    depends_on: image-build
+    
+    agents:
+      
+      queue: gpu_1_queue
+      
+    
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+    
+    plugins:
+      
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+          always-pull: true
+          propagate-environment: true
+          
+          gpus: all
+          
+          
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s models -m vlm"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+            
+          volumes:
+            - /dev/shm:/dev/shm
+            - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+  
+  
+  
+
+  
+
+  
+  
+  
+
+  
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+  
+
+  
+
+  
+
+  - label: "Prefix Caching Test"
+    
+    depends_on: image-build
+    
+    agents:
+      
+      queue: gpu_1_queue
+      
+    
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+    
+    plugins:
+      
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+          always-pull: true
+          propagate-environment: true
+          
+          gpus: all
+          
+          
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s prefix_caching"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+            
+          volumes:
+            - /dev/shm:/dev/shm
+            - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+  
+  
+  
+
+  
+
+  
+  
+  
+
+  
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+  
+
+  
+
+  
+
+  - label: "Samplers Test"
+    
+    depends_on: image-build
+    
+    agents:
+      
+      queue: gpu_1_queue
+      
+    
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+    
+    plugins:
+      
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+          always-pull: true
+          propagate-environment: true
+          
+          gpus: all
+          
+          
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s samplers && VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+            
+          volumes:
+            - /dev/shm:/dev/shm
+            - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+  
+  
+  
+
+  
+
+  
+  
+  
+
+  
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+  
+
+  
+
+  
+
+  - label: "LogitsProcessor Test"
+    
+    depends_on: image-build
+    
+    agents:
+      
+      queue: gpu_1_queue
+      
+    
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+    
+    plugins:
+      
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+          always-pull: true
+          propagate-environment: true
+          
+          gpus: all
+          
+          
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s test_logits_processor.py"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+            
+          volumes:
+            - /dev/shm:/dev/shm
+            - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+  
+  
+  
+
+  
+
+  
+  
+  
+
+  
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+  
+
+  
+
+  
+
+  - label: "Speculative decoding tests"
+    
+    depends_on: image-build
+    
+    agents:
+      
+      queue: gpu_1_queue
+      
+    
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+    
+    plugins:
+      
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+          always-pull: true
+          propagate-environment: true
+          
+          gpus: all
+          
+          
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && export VLLM_ATTENTION_BACKEND=XFORMERS && pytest -v -s spec_decode"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+            
+            - VLLM_ATTENTION_BACKEND=XFORMERS
+            
+          volumes:
+            - /dev/shm:/dev/shm
+            - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+  
+  
+  
+
+  
+
+  
+  
+  
+
+  
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+  
+
+  
+
+  
+
+  - label: "LoRA Test %N"
+    
+    depends_on: image-build
+    
+    agents:
+      
+      queue: gpu_1_queue
+      
+    
+    soft_fail: false
+    
+    parallelism: 4
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+    
+    plugins:
+      
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+          always-pull: true
+          propagate-environment: true
+          
+          gpus: all
+          
+          
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_long_context.py"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+            
+          volumes:
+            - /dev/shm:/dev/shm
+            - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+  
+  
+  
+
+  
+
+  
+  
+  
+
+  
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+  
+
+  
+
+  
+
+  - label: "Kernels Test %N"
+    
+    depends_on: image-build
+    
+    agents:
+      
+      queue: gpu_1_queue
+      
+    
+    soft_fail: false
+    
+    parallelism: 4
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+    
+    plugins:
+      
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+          always-pull: true
+          propagate-environment: true
+          
+          gpus: all
+          
+          
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s kernels --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+            
+          volumes:
+            - /dev/shm:/dev/shm
+            - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+  
+  
+  
+
+  
+
+  
+  
+  
+
+  
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+  
+
+  
+
+  
+
+  - label: "Tensorizer Test"
+    
+    depends_on: image-build
+    
+    agents:
+      
+      queue: gpu_1_queue
+      
+    
+    soft_fail: true
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+    
+    plugins:
+      
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+          always-pull: true
+          propagate-environment: true
+          
+          gpus: all
+          
+          
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && apt-get update && apt-get install -y curl libsodium23 && export VLLM_WORKER_MULTIPROC_METHOD=spawn && pytest -v -s tensorizer_loader"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+            
+          volumes:
+            - /dev/shm:/dev/shm
+            - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+  
+  
+  
+
+  
+
+  
+  
+  
+
+  
+    
+      
+        
+      
+        
+      
+    
+  
+
+  
+
+  
+
+  - label: "Benchmarks"
+    
+    depends_on: image-build
+    
+    agents:
+      
+      queue: gpu_1_queue
+      
+    
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+    
+    plugins:
+      
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+          always-pull: true
+          propagate-environment: true
+          
+          gpus: all
+          
+          
+          mount-buildkite-agent: true
+          
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/.buildkite && pip install aiohttp && bash run-benchmarks.sh"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+            
+          volumes:
+            - /dev/shm:/dev/shm
+            - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+  
+  
+  
+
+  
+
+  
+  
+  
+
+  
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+  
+
+  
+
+  
+
+  - label: "Quantization Test"
+    
+    depends_on: image-build
+    
+    agents:
+      
+      queue: gpu_1_queue
+      
+    
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+    
+    plugins:
+      
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+          always-pull: true
+          propagate-environment: true
+          
+          gpus: all
+          
+          
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s quantization"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+            
+          volumes:
+            - /dev/shm:/dev/shm
+            - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+  
+  
+  
+
+  
+
+  
+  
+  
+
+  
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+  
+
+  
+
+  
+
+  - label: "LM Eval Small Models"
+    
+    depends_on: image-build
+    
+    agents:
+      
+      queue: gpu_1_queue
+      
+    
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+    
+    plugins:
+      
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+          always-pull: true
+          propagate-environment: true
+          
+          gpus: all
+          
+          
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/.buildkite/lm-eval-harness && pip install lm-eval && export VLLM_WORKER_MULTIPROC_METHOD=spawn && bash ./run-tests.sh -c configs/models-small.txt -t 1"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+            
+          volumes:
+            - /dev/shm:/dev/shm
+            - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+  
+  
+  
+
+  
+
+  
+  
+  
+
+  
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+  
+
+  
+
+  
+
+  - label: "OpenAI-Compatible Tool Use"
+    
+    depends_on: image-build
+    
+    agents:
+      
+      queue: gpu_1_queue
+      
+    
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+    
+    plugins:
+      
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+          always-pull: true
+          propagate-environment: true
+          
+          gpus: all
+          
+          
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s tool_use"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+            
+          volumes:
+            - /dev/shm:/dev/shm
+            - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+  
+  
+  
+
+  
+
+  
+  
+  
+
+  
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+  
+
+  
+
+  
+
+  - label: "Distributed Comm Ops Test"
+    
+    depends_on: image-build
+    
+    agents:
+      
+      queue: gpu_4_queue
+      
+    
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+    
+    plugins:
+      
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+          always-pull: true
+          propagate-environment: true
+          
+          gpus: all
+          
+          
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s distributed/test_comm_ops.py && pytest -v -s distributed/test_shm_broadcast.py"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+            
+          volumes:
+            - /dev/shm:/dev/shm
+            - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+  
+  
+  
+
+  
+
+  
+  
+  
+
+  
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+  
+
+  
+
+  
+
+  - label: "2 Node Tests (4 GPUs in total)"
+    
+    depends_on: image-build
+    
+    agents:
+      
+      queue: gpu_4_queue
+      
+     
+    commands:
+      - ./.buildkite/run-multi-node-test.sh /vllm-workspace/tests 2 2 public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT "VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py && VLLM_MULTI_NODE=1 pytest -v -s distributed/test_multi_node_assignment.py && VLLM_MULTI_NODE=1 pytest -v -s distributed/test_pipeline_parallel.py" "VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py" 
+    
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+    
+  
+  
+  
+
+  
+
+  
+  
+  
+
+  
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+  
+
+  
+
+  
+
+  - label: "Distributed Tests (2 GPUs)"
+    
+    depends_on: image-build
+    
+    agents:
+      
+      queue: gpu_4_queue
+      
+    
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+    
+    plugins:
+      
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+          always-pull: true
+          propagate-environment: true
+          
+          gpus: all
+          
+          
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py && TARGET_TEST_SUITE=L4 pytest -v -s distributed/test_basic_distributed_correctness.py && pytest -v -s distributed/test_basic_distributed_correctness_enc_dec.py && pytest -v -s distributed/test_chunked_prefill_distributed.py && pytest -v -s distributed/test_multimodal_broadcast.py && pytest -v -s spec_decode/e2e/test_integration_dist_tp2.py && pip install -e ./plugins/vllm_add_dummy_model && pytest -v -s distributed/test_distributed_oot.py && CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py && CUDA_VISIBLE_DEVICES=0,1 pytest -v -s distributed/test_utils.py"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+            
+          volumes:
+            - /dev/shm:/dev/shm
+            - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+  
+  
+  
+
+  
+
+  
+  
+  
+
+  
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+  
+
+  
+
+  
+
+  - label: "Multi-step Tests (4 GPUs)"
+    
+    depends_on: image-build
+    
+    agents:
+      
+      queue: gpu_4_queue
+      
+    
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+    
+    plugins:
+      
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+          always-pull: true
+          propagate-environment: true
+          
+          gpus: all
+          
+          
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s multi_step/test_correctness_async_llm.py && pytest -v -s multi_step/test_correctness_llm.py"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+            
+          volumes:
+            - /dev/shm:/dev/shm
+            - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+  
+  
+  
+
+  
+
+  
+  
+  
+
+  
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+  
+
+  
+
+  
+
+  - label: "Pipeline Parallelism Test"
+    
+    depends_on: image-build
+    
+    agents:
+      
+      queue: gpu_4_queue
+      
+    
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+    
+    plugins:
+      
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+          always-pull: true
+          propagate-environment: true
+          
+          gpus: all
+          
+          
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && pytest -v -s distributed/test_pp_cudagraph.py && pytest -v -s distributed/test_pipeline_parallel.py"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+            
+          volumes:
+            - /dev/shm:/dev/shm
+            - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+  
+  
+  
+
+  
+
+  
+  
+  
+
+  
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+  
+
+  
+
+  
+
+  - label: "LoRA Long Context (Distributed)"
+    
+    depends_on: image-build
+    
+    agents:
+      
+      queue: gpu_4_queue
+      
+    
+    soft_fail: true
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+    
+    plugins:
+      
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+          always-pull: true
+          propagate-environment: true
+          
+          gpus: all
+          
+          
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && export VLLM_WORKER_MULTIPROC_METHOD=spawn && pytest -v -s -x lora/test_long_context.py"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+            
+          volumes:
+            - /dev/shm:/dev/shm
+            - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+  
+  
+  
+
+  
+
+  
+  
+  
+
+  
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+  
+
+  
+
+  
+
+  - label: "Weight Loading Multiple GPU Test"
+    
+    depends_on: image-build
+    
+    agents:
+      
+      queue: gpu_4_queue
+      
+    
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+    
+    plugins:
+      
+      - docker#v5.2.0: 
+          image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+          always-pull: true
+          propagate-environment: true
+          
+          gpus: all
+          
+          
+          command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd /vllm-workspace/tests && bash weight_loading/run_model_weight_loading_test.sh"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+            - HF_HOME=/root/.cache/huggingface
+            - HF_TOKEN
+            - BUILDKITE_ANALYTICS_TOKEN
+            
+          volumes:
+            - /dev/shm:/dev/shm
+            - /root/.cache/huggingface:/root/.cache/huggingface
+      
+    
+  
+  
+  
+
+  
+
+  
+  
+  
+
+  
+    
+      
+        
+      
+        
+      
+    
+  
+
+  
+  
+  
+
+  
+  - block: "Run Distributed Tests (A100)"
+    depends_on: image-build
+    key: block-distributed-tests-a100
+  
+
+  - label: "Distributed Tests (A100)"
+    
+    depends_on: block-distributed-tests-a100
+    
+    agents:
+      
+      queue: a100-queue
+      
+    
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+    
+    plugins:
+       
+      - kubernetes:
+          podSpec:
+            priorityClassName: ci
+            containers:
+            - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+              command: ["bash"]
+              args:
+              - '-c'
+              - "'cd /vllm-workspace/tests && pytest -v -s distributed/test_custom_all_reduce.py && TARGET_TEST_SUITE=A100 pytest -v -s distributed/test_basic_distributed_correctness.py && pytest -v -s -x lora/test_mixtral.py'"
+              resources:
+                limits:
+                  nvidia.com/gpu: 4
+              volumeMounts:
+              - name: devshm
+                mountPath: /dev/shm
+              - name: hf-cache
+                mountPath: /root/.cache/huggingface
+              env:
+              - name: VLLM_USAGE_SOURCE
+                value: ci-test
+              - name: HF_HOME
+                value: /root/.cache/huggingface
+              - name: HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: hf-token-secret
+                    key: token
+            nodeSelector:
+              nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
+            volumes:
+            - name: devshm
+              emptyDir:
+                medium: Memory
+            - name: hf-cache
+              hostPath:
+                path: /root/.cache/huggingface
+                type: Directory
+      
+    
+  
+  
+  
+
+  
+
+  
+  
+  
+
+  
+    
+      
+        
+      
+        
+      
+    
+      
+        
+      
+        
+      
+    
+  
+
+  
+  
+  
+
+  
+  - block: "Run LM Eval Large Models"
+    depends_on: image-build
+    key: block-lm-eval-large-models
+  
+
+  - label: "LM Eval Large Models"
+    
+    depends_on: block-lm-eval-large-models
+    
+    agents:
+      
+      queue: a100-queue
+      
+    
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+    
+    plugins:
+       
+      - kubernetes:
+          podSpec:
+            priorityClassName: ci
+            containers:
+            - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+              command: ["bash"]
+              args:
+              - '-c'
+              - "'cd /vllm-workspace/.buildkite/lm-eval-harness && pip install lm-eval && export VLLM_WORKER_MULTIPROC_METHOD=spawn && bash ./run-tests.sh -c configs/models-large.txt -t 4'"
+              resources:
+                limits:
+                  nvidia.com/gpu: 4
+              volumeMounts:
+              - name: devshm
+                mountPath: /dev/shm
+              - name: hf-cache
+                mountPath: /root/.cache/huggingface
+              env:
+              - name: VLLM_USAGE_SOURCE
+                value: ci-test
+              - name: HF_HOME
+                value: /root/.cache/huggingface
+              - name: HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: hf-token-secret
+                    key: token
+            nodeSelector:
+              nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
+            volumes:
+            - name: devshm
+              emptyDir:
+                medium: Memory
+            - name: hf-cache
+              hostPath:
+                path: /root/.cache/huggingface
+                type: Directory
+      
+    
+  
+  
+  
+  - group: "AMD Tests"
+    depends_on: ~
+    steps:
+      - label: "AMD: :docker: build image"
+        depends_on: ~
+        commands:
+          - "docker build --build-arg max_jobs=16 --tag rocm/vllm-ci:$BUILDKITE_COMMIT -f Dockerfile.rocm --progress plain ."
+          - "docker push rocm/vllm-ci:$BUILDKITE_COMMIT"
+        plugins:
+          - docker-login#v3.0.0:
+              username: rocmshared
+        key: "amd-build"
+        env:
+          DOCKER_BUILDKIT: "1"
+        retry:
+          automatic:
+            - exit_status: -1  # Agent was lost
+              limit: 2
+            - exit_status: -10  # Agent was lost
+              limit: 2
+        agents:
+          queue: amd-cpu
+
+    
+    
+    
+    
+    
+    
+    
+    
+      - label: "AMD: Core Test"
+        depends_on: 
+          - "amd-build"
+        agents:
+          queue: amd
+        command: bash .buildkite/run-amd-test.sh "cd /vllm-workspace/tests ; pytest -v -s core"
+        env:
+          DOCKER_BUILDKIT: "1"
+        priority: 100
+        
+        soft_fail: false
+        
+    
+    
+    
+    
+    
+    
+    
+    
+    
+      - label: "AMD: Regression Test"
+        depends_on: 
+          - "amd-build"
+        agents:
+          queue: amd
+        command: bash .buildkite/run-amd-test.sh "cd /vllm-workspace/tests ; pytest -v -s test_regression.py"
+        env:
+          DOCKER_BUILDKIT: "1"
+        priority: 100
+        
+        soft_fail: false
+        
+    
+    
+    
+      - label: "AMD: Engine Test"
+        depends_on: 
+          - "amd-build"
+        agents:
+          queue: amd
+        command: bash .buildkite/run-amd-test.sh "cd /vllm-workspace/tests ; pytest -v -s engine test_sequence.py test_config.py test_logger.py && pytest -v -s tokenization"
+        env:
+          DOCKER_BUILDKIT: "1"
+        priority: 100
+        
+        soft_fail: true
+        
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+      - label: "AMD: LogitsProcessor Test"
+        depends_on: 
+          - "amd-build"
+        agents:
+          queue: amd
+        command: bash .buildkite/run-amd-test.sh "cd /vllm-workspace/tests ; pytest -v -s test_logits_processor.py"
+        env:
+          DOCKER_BUILDKIT: "1"
+        priority: 100
+        
+        soft_fail: false
+        
+    
+    
+    
+    
+    
+      - label: "AMD: LoRA Test %N"
+        depends_on: 
+          - "amd-build"
+        agents:
+          queue: amd
+        command: bash .buildkite/run-amd-test.sh "cd /vllm-workspace/tests ; pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_long_context.py"
+        env:
+          DOCKER_BUILDKIT: "1"
+        priority: 100
+        
+        soft_fail: false
+        
+    
+    
+    
+    
+    
+      - label: "AMD: Tensorizer Test"
+        depends_on: 
+          - "amd-build"
+        agents:
+          queue: amd
+        command: bash .buildkite/run-amd-test.sh "cd /vllm-workspace/tests ; apt-get update && apt-get install -y curl libsodium23 && export VLLM_WORKER_MULTIPROC_METHOD=spawn && pytest -v -s tensorizer_loader"
+        env:
+          DOCKER_BUILDKIT: "1"
+        priority: 100
+        
+        soft_fail: true
+        
+    
+    
+    
+      - label: "AMD: Benchmarks"
+        depends_on: 
+          - "amd-build"
+        agents:
+          queue: amd
+        command: bash .buildkite/run-amd-test.sh "cd /vllm-workspace/.buildkite ; pip install aiohttp && bash run-benchmarks.sh"
+        env:
+          DOCKER_BUILDKIT: "1"
+        priority: 100
+        
+        soft_fail: false
+        
+    
+    
+    
+    
+    
+    
+    
+      - label: "AMD: OpenAI-Compatible Tool Use"
+        depends_on: 
+          - "amd-build"
+        agents:
+          queue: amd
+        command: bash .buildkite/run-amd-test.sh "cd /vllm-workspace/tests ; pytest -v -s tool_use"
+        env:
+          DOCKER_BUILDKIT: "1"
+        priority: 100
+        
+        soft_fail: false
+        
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+
+  - block: Run Neuron Test
+    depends_on: ~
+    key: run-neuron-test
+  
+  - label: "Neuron Test"
+    depends_on: run-neuron-test
+    agents:
+      queue: neuron
+    command: bash .buildkite/run-neuron-test.sh
+    soft_fail: false
+
+  - label: "Intel CPU Test"
+    depends_on: ~
+    agents:
+      queue: intel-cpu
+    command: bash .buildkite/run-cpu-test.sh
+
+  - label: "Intel GPU Test"
+    soft_fail: true
+    depends_on: ~
+    agents:
+      queue: intel-gpu
+    command: bash .buildkite/run-xpu-test.sh
+
+  - label: "TPU Test"
+    depends_on: ~
+    agents:
+      queue: tpu
+    commands: 
+    - if [[ -f ".buildkite/run-tpu-test.sh" ]]; then bash .buildkite/run-tpu-test.sh; fi 
+    - yes | docker system prune -a
