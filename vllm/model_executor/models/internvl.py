@@ -129,7 +129,12 @@ def dynamic_preprocess(image: Image.Image, min_num: int, max_num: int,
 
     # calculate the number of blocks without thumbnail
     blocks, target_width, target_height = calculate_num_blocks(
-        orig_width, orig_height, min_num, max_num, image_size, use_thumbnail=False)
+        orig_width,
+        orig_height,
+        min_num,
+        max_num,
+        image_size,
+        use_thumbnail=False)
     # resize the image
     resized_img = image.resize((target_width, target_height))
     processed_images = []
