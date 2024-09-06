@@ -57,7 +57,7 @@ def test_multi_step_llm(
                            GPU -> CPU output transfer
       num_prompts: number of example prompts under test
       num_logprobs: corresponds to the `logprobs` argument to the OpenAI
-                    completions endpoint; `None` -> no logprobs
+                    completions endpoint; `None` -> 1 logprob returned.
     """
 
     prompts = example_prompts
