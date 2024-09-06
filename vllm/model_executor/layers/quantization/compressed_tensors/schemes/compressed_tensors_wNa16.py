@@ -9,12 +9,14 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     ActivationOrdering)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     apply_gptq_marlin_linear, marlin_make_empty_g_idx, marlin_make_workspace,
-    marlin_permute_scales, marlin_sort_g_idx, replace_tensor,
-    verify_marlin_supported, verify_marlin_supports_shape)
+    marlin_permute_scales, marlin_repeat_scales_on_all_ranks,
+    marlin_sort_g_idx, replace_tensor, verify_marlin_supported,
+    verify_marlin_supports_shape)
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            ChannelQuantScaleParameter,
                                            GroupQuantScaleParameter,
-                                           PackedvLLMParameter)
+                                           PackedvLLMParameter,
+                                           RowvLLMParameter)
 from vllm.scalar_type import scalar_types
 
 __all__ = ["CompressedTensorsWNA16"]
@@ -68,12 +70,10 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         output_size_per_partition = sum(output_partition_sizes)
 
         # If group_size is -1, we are in channelwise case.
-        channelwise = (self.group_size == -1)
         group_size = self.group_size if self.group_size != -1 else input_size
         row_parallel = (input_size != input_size_per_partition)
-        # In the case of channelwise quantization, we need to replicate the
-        # scales across all gpus.
-        partition_scales = (row_parallel and not channelwise)
+        partition_scales = not marlin_repeat_scales_on_all_ranks(
+            self.has_g_idx, self.group_size, row_parallel)
 
         verify_marlin_supports_shape(
             output_size_per_partition=output_size_per_partition,
@@ -129,9 +129,12 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
 
         # group index (for activation reordering)
         if self.has_g_idx:
-            weight_g_idx = BasevLLMParameter(data=torch.full(
-                (input_size_per_partition, ), -1, dtype=torch.int32),
-                                             weight_loader=weight_loader)
+            weight_g_idx = RowvLLMParameter(data=torch.empty(
+                input_size_per_partition,
+                dtype=torch.int32,
+            ),
+                                            input_dim=0,
+                                            weight_loader=weight_loader)
             layer.register_parameter("weight_g_idx", weight_g_idx)
 
         layer.input_size_per_partition = input_size_per_partition
@@ -186,6 +189,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,
                       bias: Optional[torch.Tensor]) -> torch.Tensor:
 
+        breakpoint()
         return apply_gptq_marlin_linear(
             input=x,
             weight=layer.weight_packed,
