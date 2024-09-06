@@ -9,24 +9,32 @@ import time
 
 
 def test_run(my_rank, buffer):
-    # test run
-    tokens = torch.tensor([1,2,3]).to(buffer.pipe.device)
     
+    # buffer should be empty in the beginning    
+    if my_rank == 0:
+        assert buffer.buffer_size == 0
+        assert len(buffer.buffer) == 0
+
+
+    # insert
+    tokens = torch.tensor([1,2,3]).to(buffer.pipe.device)
+    roi = (tokens > 0)
     if my_rank == 0:
         key = 2.0 * torch.ones([5, 6]).to(buffer.pipe.device)
         value = 3.0 * torch.ones([5, 6]).to(buffer.pipe.device)
 
         placeholder = torch.tensor([1]).to(buffer.pipe.device)
 
-        buffer.insert(tokens, placeholder, key, value, placeholder)
+        buffer.insert(tokens, roi, key, value, placeholder)
+    torch.distributed.barrier()
         
-    else:
-        placeholder = torch.tensor([1]).to(buffer.pipe.device)
-        tok, roi, key, value, hidden = buffer.drop_select(tokens, placeholder)
+    # drop_select
+    if my_rank == 1:
+        tok, roi_, key, value, hidden = buffer.drop_select(tokens, roi)
         assert torch.allclose(tokens, tok)
+        assert torch.allclose(roi, roi_)
         assert torch.allclose(key, 2.0 * torch.ones([5, 6]))
         assert torch.allclose(value, 3.0 * torch.ones([5, 6]))
-        
     torch.distributed.barrier()
     
     if my_rank == 0:
@@ -34,84 +42,72 @@ def test_run(my_rank, buffer):
         assert len(buffer.buffer) == 0
 
 
-def stress_test(my_rank, pipe):
+def stress_test(my_rank, buf):
     
     torch.distributed.barrier()
-    
-    tensors = []
-    
-    for i in tqdm(range(2000)):
-        mean = random.randint(1, 10)
-        std = random.randint(1, 10)
-        size = [random.randint(900, 1000), random.randint(900, 1000)]
-        x = torch.normal(mean * 1.0, std * 1.0, size=size).to(pipe.device)
-        
-        # 5% probability of sending a None
-        if random.randint(1, 100) < 5:
-            tensors.append(None)
-            tensors.append(None)
-            tensors.append(None)
-        else:
-            tensors.append(x)
-            tensors.append(x.mean())
-            tensors.append(x.std())
-        
-    torch.distributed.barrier()
-    
-    for i in tqdm(range(2000)):
-        if my_rank == int((i % 10) > 3):
-            pipe.send_tensor(tensors[3*i])
-            pipe.send_tensor(tensors[3*i+1])
-            pipe.send_tensor(tensors[3*i+2])
-        else:
-            x = pipe.recv_tensor()
-            mean = pipe.recv_tensor()
-            std = pipe.recv_tensor()
-            if x is None:
-                assert mean is None
-                assert std is None
-            else:
-                assert x.mean() == mean
-                assert x.std() == std
+    torch.manual_seed(100)
 
-    torch.distributed.barrier()
+    device = buf.pipe.device
+    
+    reqs = [
+        (
+         torch.rand(100).to(device),   # tokens
+         torch.ones(100).bool().to(device),    # roi
+         torch.rand(100).to(device),   # key
+         torch.rand(100).to(device),   # value
+         torch.rand(100).to(device),   # hidden
+         ) for i in range(200)]
 
-    print("Stress test passed.")
-    
-    
-    
-def latency_test(my_rank, pipe, nelement, ntensor):
-    
-    latencies = []
+    random.seed(my_rank)
+    random.shuffle(reqs)
     
     torch.distributed.barrier()
     
-    for i in tqdm(range(1000)):
-        
-        tensors = []
-        
+    n = 0
+    
+    # the buffer size can only store 100 reqs
+    # so the sender will occasionally block.needs to wait for the receiver.
+    for req in tqdm(reqs):
         if my_rank == 0:
-            # create tensor
-            tensors = [torch.rand(nelement).to(pipe.device) for _ in range(ntensor)]
-        
-        torch.distributed.barrier()
-        
-        if my_rank == 0:
-            t = torch.tensor(time.time(), dtype=torch.float64).to(pipe.device)
-            for tensor in tensors:
-                pipe.send_tensor(tensor)
-            pipe.send_tensor(t)
+            buf.insert(*req)
         else:
-            for _ in range(ntensor):
-                pipe.recv_tensor()
-            t = pipe.recv_tensor()
-            latencies.append(time.time() - t.item())
-
-    torch.distributed.barrier()
+            tok, roi, k, v, h = req
+            tok_, roi_, k_, v_, h_ = buf.drop_select(tok, roi)
             
-    print('Latency test passed.')
-    print('Latency:', torch.tensor(latencies).mean().item() * 1000, 'ms')
+            if tok_ is None:
+                assert roi_ is None
+                assert k_ is None
+                assert v_ is None
+                assert h_ is None
+                n += 1
+            else:
+                assert torch.allclose(tok, tok_)
+                assert torch.allclose(roi, roi_)
+                assert torch.allclose(k, k_)
+                assert torch.allclose(v, v_)
+                assert torch.allclose(h, h_)
+    print('Rand %d done' % my_rank)
+    torch.distributed.barrier()
+    
+    
+    if my_rank == 0:
+        x = torch.tensor([0])
+        torch.distributed.recv(x, 1)
+        # the # of None received is the kv that are not selected
+        assert x.item() == len(buf.buffer)
+        # and the size of the buffer should be 2000 * buffer len
+        print(buf.buffer_size)
+        assert buf.buffer_size == 1700 * len(buf.buffer)
+    else:
+        torch.distributed.send(torch.tensor([n]), 0)
 
+        
+    
+            
+            
+    
+    
+    
 
 if __name__ == "__main__":
 
@@ -127,6 +123,10 @@ if __name__ == "__main__":
 
 
     pipe = tdp.TorchDistributedPipe([[0,1]], my_rank, "nccl")
-    buffer = sklb.SimpleKVLookupBuffer(pipe)
+    buffer = sklb.SimpleKVLookupBuffer(pipe, 170000)
 
     test_run(my_rank, buffer)
+    
+    stress_test(my_rank, buffer)
+    
+    print('Done')
