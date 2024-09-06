@@ -155,7 +155,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
     Args:
         quant_config: The GPTQ Marlin quantization config.
     """
-    
+
     _kernel_backends_being_used: Set[str] = set()
 
     def __init__(self, quant_config: GPTQMarlinConfig) -> None:
@@ -193,8 +193,8 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
 
         if kernel_type.__name__ not in self._kernel_backends_being_used:
-            logger.info(
-                f"Using {kernel_type.__name__} for GPTQMarlinLinearMethod")
+            logger.info("Using %s for GPTQMarlinLinearMethod",
+                        kernel_type.__name__)
             self._kernel_backends_being_used.add(kernel_type.__name__)
 
         # Normalize group_size
