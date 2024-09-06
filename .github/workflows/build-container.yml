@@ -1,4 +1,4 @@
-name: Build Container Image
+name: Container Image
 on:
   pull_request:
 
@@ -6,6 +6,17 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          build-mount-path: /var/lib/docker/
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+      - name: Restart docker
+        run: sudo service docker restart
       - name: Checkout repository
         uses: actions/checkout@v4
       - name: Set up Docker Buildx
