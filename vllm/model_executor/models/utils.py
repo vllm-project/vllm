@@ -284,7 +284,7 @@ def is_pp_missing_parameter(name: str, model: torch.nn.Module) -> bool:
 
 def get_inputs_embeds(
     input_ids: torch.Tensor,
-    embeddings: torch.nn.Module,
+    embeddings_module: torch.nn.Module,
     inputs_embeds: Optional[torch.Tensor] = None,
     inputs_embeds_masks: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
@@ -293,10 +293,10 @@ def get_inputs_embeds(
         if all(inputs_embeds_masks):
             hidden_states = inputs_embeds
         else:
-            hidden_states = embeddings(input_ids)
+            hidden_states = embeddings_module(input_ids)
             hidden_states[inputs_embeds_masks] = inputs_embeds
     else:
-        hidden_states = embeddings(input_ids)
+        hidden_states = embeddings_module(input_ids)
     return hidden_states
 
 
