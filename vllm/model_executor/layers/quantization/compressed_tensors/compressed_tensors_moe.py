@@ -295,5 +295,4 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             topk_ids,
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
-            num_bits=self.num_bits,
         )
