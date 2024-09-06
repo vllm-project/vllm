@@ -227,11 +227,6 @@ Multimodal Language Models
     - Image\ :sup:`E+`
     - :code:`llava-hf/llava-v1.6-mistral-7b-hf`, :code:`llava-hf/llava-v1.6-vicuna-7b-hf`, etc.
     -
-  * - :code:`Qwen2VLForConditionalGeneration`
-    - Qwen2-VL
-    - Image / Video
-    - :code:`Qwen/Qwen2-VL-2B-Instruct`, :code:`Qwen/Qwen2-VL-7B-Instruct`, :code:`Qwen/Qwen2-VL-72B-Instruct`, etc.
-    -
   * - :code:`PaliGemmaForConditionalGeneration`
     - PaliGemma
     - Image\ :sup:`E`
@@ -251,6 +246,11 @@ Multimodal Language Models
     - Qwen
     - Image
     - :code:`Qwen/Qwen-VL`, :code:`Qwen/Qwen-VL-Chat`, etc.
+    -
+  * - :code:`Qwen2VLForConditionalGeneration`
+    - Qwen2-VL
+    - Image\ :sup:`+` / Video\ :sup:`+`
+    - :code:`Qwen/Qwen2-VL-2B-Instruct`, :code:`Qwen/Qwen2-VL-7B-Instruct`, :code:`Qwen/Qwen2-VL-72B-Instruct`, etc.
     -
   * - :code:`UltravoxModel`
     - Ultravox
