@@ -8,8 +8,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
 
-import opt_einsum as oe
-
 from vllm.adapter_commons.layers import AdapterMapping
 from vllm.config import LoRAConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
