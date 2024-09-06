@@ -77,8 +77,8 @@ class ChatTtsLlm(nn.Module):
             (".qkv_proj", ".q_proj", "q"),
             (".qkv_proj", ".k_proj", "k"),
             (".qkv_proj", ".v_proj", "v"),
-            (".gate_up_proj", ".gate_proj", 0),
-            (".gate_up_proj", ".up_proj", 1),
+            # (".gate_up_proj", ".gate_proj", 0),
+            # (".gate_up_proj", ".up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
@@ -105,10 +105,17 @@ class ChatTtsLlm(nn.Module):
     def get_input_embeddings(self, input_ids: torch.Tensor, is_prompt: bool) -> torch.Tensor:
         if is_prompt:
             emb = self.emb_text(input_ids)
+            audio_start = torch.tensor([1024, 1022], device=input_ids.device)
+            code_emb = [
+                self.emb_code[i](audio_start[i])
+                for i in range(self.num_output_head)
+            ]
+            code_emb = torch.stack(code_emb, 1).sum(1)
+            emb[-1] = code_emb
         else:
             code_emb = [
-                self.emb_code[i](input_ids[:,i])
-                for i in range(self.num_output_head)
+                self.emb_code[0](input_ids[:,0]),
+                self.emb_code[1](input_ids[:,1] - 2)
             ]
             emb = torch.stack(code_emb, 2).sum(2)
         return emb
@@ -151,9 +158,9 @@ class ChatTtsLlm(nn.Module):
             hidden_states = inputs_embeds
         else:
             hidden_states = self.get_input_embeddings(input_ids, is_prompt)
-            spk_emb = kwargs.get("speech", None)
-            if spk_emb is not None:
-                self.apply_spk_emb(hidden_states, spk_emb, attn_metadata, input_ids)
+            # spk_emb = kwargs.get("speech", None)
+            # if spk_emb is not None:
+            #     self.apply_spk_emb(hidden_states, spk_emb, attn_metadata, input_ids)
         model_output = self.gpt(
             input_ids=input_ids,
             inputs_embeds=hidden_states,

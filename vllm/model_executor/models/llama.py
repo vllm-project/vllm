@@ -25,6 +25,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 from transformers import LlamaConfig
 
 from vllm.attention import Attention, AttentionMetadata
@@ -82,12 +83,16 @@ class LlamaMLP(nn.Module):
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
         self.act_fn = SiluAndMul()
+        
+        self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+        self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+        self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
 
     def forward(self, x):
-        gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
-        x, _ = self.down_proj(x)
-        return x
+        y1 = F.silu(self.gate_proj(x))
+        y2 = self.up_proj(x)
+        y = y1 * y2
+        return self.down_proj(y)
 
 
 class LlamaAttention(nn.Module):
@@ -241,26 +246,17 @@ class LlamaDecoderLayer(nn.Module):
         attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # Self Attention
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-        else:
-            hidden_states, residual = self.input_layernorm(
-                hidden_states, residual)
-        hidden_states = self.self_attn(
+        x = hidden_states
+        n = self.input_layernorm(hidden_states)
+        h = self.self_attn(
             positions=positions,
-            hidden_states=hidden_states,
+            hidden_states=n,
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
         )
-
-        # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual)
-        hidden_states = self.mlp(hidden_states)
-        return hidden_states, residual
-
+        h = x + h
+        out = h + self.mlp(self.post_attention_layernorm(h))
+        return out, None
 
 class LlamaModel(nn.Module):
 
@@ -340,7 +336,7 @@ class LlamaModel(nn.Module):
                 "residual": residual
             })
 
-        hidden_states, _ = self.norm(hidden_states, residual)
+        hidden_states = self.norm(hidden_states, residual)
         return hidden_states
 
 
