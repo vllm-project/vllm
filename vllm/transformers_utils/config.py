@@ -65,6 +65,16 @@ class ConfigFormat(str, enum.Enum):
     MISTRAL = "mistral"
 
 
+def file_or_path_exists(model: Union[str, Path], config_name, revision, token) -> bool:
+    if Path(model).exists():
+        return (Path(model) / config_name).is_file()
+
+    return file_exists(model,
+                       HF_CONFIG_NAME,
+                       revision=revision,
+                       token=token)
+
+
 def get_config(
     model: Union[str, Path],
     trust_remote_code: bool,
@@ -83,12 +93,12 @@ def get_config(
         model = Path(model).parent
 
     if config_format == ConfigFormat.AUTO:
-        if file_exists(model,
+        if file_or_path_exists(model,
                        HF_CONFIG_NAME,
                        revision=revision,
                        token=kwargs.get("token")):
             config_format = ConfigFormat.HF
-        elif file_exists(model,
+        elif file_or_path_exists(model,
                          MISTRAL_CONFIG_NAME,
                          revision=revision,
                          token=kwargs.get("token")):
