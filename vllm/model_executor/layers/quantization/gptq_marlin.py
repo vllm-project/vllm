@@ -7,8 +7,8 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     fused_marlin_moe)
-from vllm.model_executor.layers.fused_moe.layer import (FusedMoE,
-                                                        FusedMoEMethodBase)
+from vllm.model_executor.layers.fused_moe.layer import (
+    FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (
@@ -372,9 +372,16 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         if self.quant_config.group_size != -1:
             scales_size13 = hidden_size // self.quant_config.group_size
             scales_size2 = intermediate_size // self.quant_config.group_size
+            strategy = FusedMoeWeightScaleSupported.GROUP.value
         else:
             scales_size13 = 1
             scales_size2 = 1
+            strategy = FusedMoeWeightScaleSupported.CHANNEL.value
+
+        extra_weight_attrs.update({
+            "quant_method": strategy,
+            "is_transposed": True
+        })
         # Fused gate_up_proj (column parallel)
         w13_qweight = torch.nn.Parameter(
             torch.empty(
