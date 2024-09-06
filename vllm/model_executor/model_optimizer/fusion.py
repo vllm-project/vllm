@@ -75,7 +75,10 @@ def fuse_graph_nodes(cc: CodeCache, sub: SubGraph):
 
     # Lookup or create the fused operation.
     try:
-        fn_key = simplify_mangled_name(f"{mangle_name(nodes_to_fuse)}_fused")
+        mangled_name = mangle_name(nodes_to_fuse)
+        fn_key = simplify_mangled_name(f"{mangled_name}_fused")
+        # print(mangled_name)
+        # fn_key = mangle_name(nodes_to_fuse)
 
         def generate() -> Optional[Callable]:
             fgen = NaiveFusedOpGenerator()

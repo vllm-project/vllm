@@ -8,8 +8,8 @@ from vllm.logger import init_logger
 
 from .code_cache import CodeCache
 from .fusion import pointwise_fusion
-#from .fused_rms_quant import setup_fused_rms_norm
-# from .silu_mul_quant import setup_silu_mul_quant
+from .fused_rms_quant import setup_fused_rms_norm, setup_fused_rms_norm_2
+from .silu_mul_quant import setup_silu_mul_quant
 from .utils import lazy_graph_print_tabular, lazy_module_print_readable
 
 logger = init_logger(__name__)
@@ -82,8 +82,9 @@ class backend_class:
 
     def __init__(self, backend: Optional[str] = 'inductor'):
         self.backend = backend
-        # setup_fused_rms_norm(backend_class.cc)
-        # setup_silu_mul_quant(backend_class.cc)
+        setup_fused_rms_norm(backend_class.cc)
+        setup_silu_mul_quant(backend_class.cc)
+        setup_fused_rms_norm_2(backend_class.cc)
 
     def __call__(self, gm: torch.fx.GraphModule,
                  example_inputs: List[torch.Tensor]) -> Callable:

@@ -949,11 +949,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     "provided. Defaulting to scaling factors of 1.0. "
                     "This may lead to less accurate results!")
 
-        if envs.VLLM_TEST_DYNAMO_GRAPH_CAPTURE:
-            self.model = optimizer(
-                self.model,
-                fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
-                backend="eager")
+        # if envs.VLLM_TEST_DYNAMO_GRAPH_CAPTURE:
+        self.model = optimizer(
+            self.model,
+            fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+            backend="eager")
 
     def save_sharded_state(
         self,

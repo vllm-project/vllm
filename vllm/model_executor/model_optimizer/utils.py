@@ -15,6 +15,8 @@ except ImportError:
 
 from collections import OrderedDict, deque
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
+from .silu_mul_quant import silu_mul_quant_name
+from .fused_rms_quant import rms_norm_quant_name, rms_norm_quant_name_2
 
 from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.fx.passes.fake_tensor_prop import FakeTensorProp
@@ -213,11 +215,32 @@ def mangle_name(nodes: List[torch.fx.Node],
 
 
 SIMPLIFIED_NAMES: Dict[str, str] = dict()
+SILU_MUL_QUANT_NAMES: List[str] = [
+    "torch_P_ops_P__C_P_cutlass_scaled_mm_float16_float8_e4m3fn_float8_e4m3fn_float32_float32_None_torch_P_empty_T_int_8192_int_14336K_dtype_float16_K_device_D_cuda_0_torch_P_empty_T_int_8192_int_14336K_device_D_cuda_0_K_dtype_float8_e4m3fn_torch_P_ops_P__C_P_silu_and_mul_float16_float16_torch_P_ops_P__C_P_static_scaled_fp8_quant_float8_e4m3fn_float16_float32",
+    "torch_P_empty_T_int_8192_int_28672K_dtype_float16_K_device_D_cuda_0_torch_P_empty_T_int_8192_int_14336K_dtype_float16_K_device_D_cuda_0_torch_P_empty_T_int_8192_int_14336K_device_D_cuda_0_K_dtype_float8_e4m3fn_torch_P_ops_P__C_P_cutlass_scaled_mm_float16_float8_e4m3fn_float8_e4m3fn_float32_float32_None_torch_P_ops_P__C_P_silu_and_mul_float16_float16_torch_P_ops_P__C_P_static_scaled_fp8_quant_float8_e4m3fn_float16_float32_fused",
+    "torch_P_empty_T_int_3_int_28672K_dtype_float16_K_device_D_cuda_0_torch_P_empty_T_int_3_int_14336K_dtype_float16_K_device_D_cuda_0_torch_P_empty_T_int_3_int_14336K_device_D_cuda_0_K_dtype_float8_e4m3fn_torch_P_ops_P__C_P_cutlass_scaled_mm_float16_float8_e4m3fn_float8_e4m3fn_float32_float32_None_torch_P_ops_P__C_P_silu_and_mul_float16_float16_torch_P_ops_P__C_P_static_scaled_fp8_quant_float8_e4m3fn_float16_float32_fused",
+]
 
-
+RMS_NORM_QUANT_NAMES: List[str] = [
+    "torch_P_empty_like_float16_torch_P_empty_T_int_8192_int_4096K_device_D_cuda_0_K_dtype_float8_e4m3fn_torch_P_ops_P__C_P_rms_norm_float16_float16_float16_float_1e_05_torch_P_ops_P__C_P_static_scaled_fp8_quant_float8_e4m3fn_float16_float32_fused",
+]
+RMS_NORM_QUANT_2_NAMES: List[str] = [
+    "torch_P_empty_like_float16_torch_P_ops_P__C_P_rms_norm_float16_float16_float16_float_1e_05_size_float16_torch_P_empty_SizeK_device_D_cuda_0_K_dtype_float8_e4m3fn_torch_P_ops_P__C_P_static_scaled_fp8_quant_float8_e4m3fn_float16_float32_size_float8_e4m3fn_int_0_torch_P_empty_T_SymInt_int_6144K_dtype_float16_K_device_D_cuda_0_fused",
+    "torch_P_empty_like_float16_torch_P_ops_P__C_P_rms_norm_float16_float16_float16_float_1e_05_size_float16_torch_P_empty_SizeK_device_D_cuda_0_K_dtype_float8_e4m3fn_torch_P_ops_P__C_P_static_scaled_fp8_quant_float8_e4m3fn_float16_float32_size_float8_e4m3fn_int_0_torch_P_empty_T_int_int_6144K_dtype_float16_K_device_D_cuda_0_fused",
+]
 # This is not really necessary but helps debugging
 def simplify_mangled_name(name: str) -> str:
+    if name in SILU_MUL_QUANT_NAMES:
+        simple_name = silu_mul_quant_name
+        SIMPLIFIED_NAMES[name] = simple_name
+    if name in RMS_NORM_QUANT_NAMES:
+        simple_name = rms_norm_quant_name
+        SIMPLIFIED_NAMES[name] = simple_name
+    if name in RMS_NORM_QUANT_2_NAMES:
+        simple_name = rms_norm_quant_name_2
+        SIMPLIFIED_NAMES[name] = simple_name
     if name not in SIMPLIFIED_NAMES:
+        print(f"NAME: {name}")
         simple_name = f"mangled_{len(SIMPLIFIED_NAMES)}"
         SIMPLIFIED_NAMES[name] = simple_name
     return SIMPLIFIED_NAMES[name]

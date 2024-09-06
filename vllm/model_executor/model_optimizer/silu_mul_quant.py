@@ -2,54 +2,53 @@ import torch
 
 from .code_cache import CodeCache
 
-silu_mul_quant_name = "torch_P_empty_T_int_3_int_1K_device_D_cuda_0_K_dtype_float32_torch_P_ops_P__C_P_cutlass_scaled_mm_float16_int8_int8_float32_float32_None__operator_P_getitem_float16_T_Ellipsis_S_None_14336_None__operator_P_getitem_float16_T_Ellipsis_S_14336_None_None_torch_P_nn_P_functional_P_silu_float16__operator_P_mul_float16_float16_torch_P_empty_like_float16K_dtype_int8_torch_P_ops_P__C_P_dynamic_scaled_int8_quant_int8_float16_float32_fused"  # noqa: E501
+# silu_mul_quant_name = "torch_P_ops_P__C_P_cutlass_scaled_mm_float16_float8_e4m3fn_float8_e4m3fn_float32_float32_None_torch_P_empty_T_int_8192_int_14336K_dtype_float16_K_device_D_cuda_0_torch_P_empty_T_int_8192_int_14336K_device_D_cuda_0_K_dtype_float8_e4m3fn_torch_P_ops_P__C_P_silu_and_mul_float16_float16_torch_P_ops_P__C_P_static_scaled_fp8_quant_float8_e4m3fn_float16_float32"  # noqa: E501
+silu_mul_quant_name = "fused_silu_mul_quant"
 
 register_silu_mul_quant = False
 
 
-def silu_mul_quant(output: torch.Tensor, input: torch.Tensor,
-                   weight: torch.Tensor, input_scale: torch.Tensor,
-                   weight_scale: torch.Tensor):
-    torch.ops._C.cutlass_scaled_mm(output, input, weight, input_scale,
+def silu_mul_quant(weight: torch.Tensor, weight_scale: torch.Tensor,
+                   input_scale: torch.Tensor, input_: torch.Tensor,
+                   output_scale: torch.Tensor):
+    output = torch.empty((input_.size(0), weight.size(1)), 
+                         dtype=torch.float16, 
+                         device="cuda")
+    torch.ops._C.cutlass_scaled_mm(output, input_, weight, input_scale,
                                    weight_scale, None)
 
     silu_mul_output = torch.empty((output.size(0), output.size(1) // 2),
-                                  dtype=torch.int8,
+                                  dtype=torch.float8_e4m3fn,
                                   device="cuda")
-    tmp = torch.empty_like(silu_mul_output, dtype=torch.float32)
-    output_scale = torch.empty((output.size(0), 1),
-                               dtype=torch.float32,
-                               device="cuda")
+    tmp = torch.empty_like(silu_mul_output, dtype=torch.float32, device="cuda")
     torch.ops._C.silu_and_mul_quant(silu_mul_output, output, output_scale, tmp)
-    return (output_scale, silu_mul_output)
+    return silu_mul_output
 
 
-def silu_mul_quant_meta(output: torch.Tensor, input: torch.Tensor,
-                        weight: torch.Tensor, input_scale: torch.Tensor,
-                        weight_scale: torch.Tensor):
-    full_output = torch.empty((output.size(0), output.size(1) // 2),
-                              dtype=torch.int8,
+def silu_mul_quant_meta(weight: torch.Tensor, weight_scale: torch.Tensor,
+                   input_scale: torch.Tensor, input_: torch.Tensor,
+                   output_scale: torch.Tensor):
+    full_output = torch.empty((input_.size(0), weight.size(1) // 2),
+                              dtype=torch.float8_e4m3fn,
                               device="cuda")
-    output_scale = torch.empty((output.size(0), 1),
-                               dtype=torch.float32,
-                               device="cuda")
-    return (output_scale, full_output)
+    return full_output
 
 
 def setup_silu_mul_quant(cc: CodeCache):
-    global register_silu_mul_quant
-    if not register_silu_mul_quant:
-        return
-    register_silu_mul_quant = True
-    namespace = "dogfood"
+    # global register_silu_mul_quant
+    # if not register_silu_mul_quant:
+    #     return
+    # register_silu_mul_quant = True
+    print("SILU MUL QUANT SUB")
+    namespace = "vllm"
     ns_op = f"{namespace}::silu_mul_quant"
-    sig = ("(Tensor gate_up_31, "
-           "Tensor x_q_126, "
-           "Tensor l__self___layers_31_mlp_gate_up_proj_weight, "
+    sig = ("(Tensor weight, "
+           "Tensor weight_scale, "
            "Tensor x_scale_126, "
-           "Tensor l__self___layers_31_mlp_gate_up_proj_weight_scale) "
-           "-> (Tensor, Tensor)")
+           "Tensor output,"
+           "Tensor x_scale_127) "
+           "-> Tensor")
     torch.library.define(f"{ns_op}", sig)
     torch.library.impl(f"{ns_op}", "CUDA", func=silu_mul_quant)
     torch.library.impl(f"{ns_op}", "Meta", func=silu_mul_quant_meta)
-    cc.add(silu_mul_quant_name, torch.ops.dogfood.silu_mul_quant)
+    cc.add(silu_mul_quant_name, torch.ops.vllm.silu_mul_quant)
