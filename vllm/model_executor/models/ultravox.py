@@ -426,9 +426,11 @@ class UltravoxModel(nn.Module, SupportsMultiModal):
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, audio_embeddings,
                 _AUDIO_PLACEHOLDER_TOKEN)
+            inputs_embeds_masks = torch.ones_like(input_ids, dtype=torch.bool)
             input_ids = None
         else:
             inputs_embeds = None
+            inputs_embeds_masks = None
 
         hidden_states = self.language_model.model(
             input_ids=input_ids,
@@ -436,7 +438,8 @@ class UltravoxModel(nn.Module, SupportsMultiModal):
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
             intermediate_tensors=intermediate_tensors,
-            inputs_embeds=inputs_embeds)
+            inputs_embeds=inputs_embeds,
+            inputs_embeds_masks=inputs_embeds_masks)
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,
