@@ -224,6 +224,7 @@ class FlashInferState(AttentionState):
             query_start_loc=query_start_loc_host,
             device=self.runner.device,
             data_type=kv_cache_dtype,
+            q_data_type=self.runner.model_config.dtype,
             use_cuda_graph=True,
             decode_wrapper=self._graph_decode_wrapper,
             prefill_wrapper=None)
@@ -292,6 +293,8 @@ class FlashInferMetadata(AttentionMetadata):
     page_size: Optional[int] = None
     # The data type of the paged kv cache
     data_type: torch.dtype = None
+    # The data type of the query
+    q_data_type: torch.dtype = None
     device: torch.device = torch.device("cuda")
     is_profile_run: bool = False
 
@@ -353,7 +356,10 @@ class FlashInferMetadata(AttentionMetadata):
                 self.page_size,
                 # Disable flashinfer's pos encoding and use vllm's rope.
                 pos_encoding_mode="NONE",
-                data_type=self.data_type)
+                # kv-cache data type.
+                data_type=self.data_type,
+                # query data type.
+                q_data_type=self.q_data_type)
 
     def asdict_zerocopy(self,
                         skip_fields: Optional[Set[str]] = None
@@ -617,6 +623,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             query_start_loc=query_start_loc,
             device=device,
             data_type=kv_cache_dtype,
+            q_data_type=self.runner.model_config.dtype,
             use_cuda_graph=use_captured_graph,
             is_profile_run=self.is_profile_run)
 
