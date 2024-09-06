@@ -206,14 +206,9 @@ class Qwen2VisionAttention(nn.Module):
             # For Volta and Turing GPUs, use xformers instead.
             device_available = current_platform.get_device_capability()[0] >= 8
             if device_available:
-                if spec := importlib.util.find_spec("flash_attn"):
-                    flash_attn = importlib.util.module_from_spec(spec)
-                    flash_attn_available = hasattr(flash_attn,
-                                                   "flash_attn_varlen_func")
-                else:
-                    flash_attn_available = False
+                from transformers.utils import is_flash_attn_2_available
 
-                if flash_attn_available:
+                if is_flash_attn_2_available():
                     self._use_flash_attn = True
                 else:
                     logger.warning(
