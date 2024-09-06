@@ -9,7 +9,6 @@ ARG CUDA_VERSION=12.4.1
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS base
-
 ARG CUDA_VERSION=12.4.1
 ARG PYTHON_VERSION=3.10
 ENV DEBIAN_FRONTEND=noninteractive
