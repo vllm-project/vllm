@@ -94,7 +94,6 @@ void cutlass_scaled_mm(torch::Tensor& c, torch::Tensor const& a,
                        torch::Tensor const& b_scales,
                        c10::optional<torch::Tensor> const& bias) {
   // Checks for conformality
-  printf("A DIM: %d B DIM: %d C DIM %d", a.dim(), b.dim(), c.dim());
   TORCH_CHECK(a.dim() == 2 && b.dim() == 2 && c.dim() == 2);
   TORCH_CHECK(c.size(0) == a.size(0) && a.size(1) == b.size(0) &&
               b.size(1) == c.size(1));
