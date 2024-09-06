@@ -198,8 +198,12 @@ class BlockPool:
                                    block_id=None,
                                    contextual_hash=0))
 
-    def init_block(self, prev_block: Optional[Block], token_ids: List[int],
-                   block_size: int, physical_block_id: Optional[int], contextual_hash: Optional[int] = 0) -> Block:
+    def init_block(self,
+                   prev_block: Optional[Block],
+                   token_ids: List[int],
+                   block_size: int,
+                   physical_block_id: Optional[int],
+                   contextual_hash: Optional[int] = 0) -> Block:
         if len(self._free_ids) == 0:
             self.increase_pool()
             assert len(self._free_ids) > 0
