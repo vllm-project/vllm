@@ -237,12 +237,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("gptq_shuffle(Tensor! q_weight, Tensor q_perm, int bit) -> ()");
   ops.impl("gptq_shuffle", torch::kCUDA, &gptq_shuffle);
 
-  // Quantized GEMM for SqueezeLLM.
-  ops.def(
-      "squeezellm_gemm(Tensor vec, Tensor mat, Tensor! mul, Tensor "
-      "lookup_table) -> ()");
-  ops.impl("squeezellm_gemm", torch::kCUDA, &squeezellm_gemm);
-
   // Compute FP8 quantized tensor for given scaling factor.
   ops.def(
       "static_scaled_fp8_quant(Tensor! out, Tensor input, Tensor scale) -> ()");

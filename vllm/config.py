@@ -277,7 +277,7 @@ class ModelConfig:
 
     def _verify_quantization(self) -> None:
         supported_quantization = [*QUANTIZATION_METHODS]
-        rocm_supported_quantization = ["awq", "gptq", "squeezellm", "fp8"]
+        rocm_supported_quantization = ["awq", "gptq", "fp8"]
         optimized_quantization_methods = [
             "fp8", "marlin", "gptq_marlin_24", "gptq_marlin", "awq_marlin",
             "fbgemm_fp8", "compressed_tensors", "compressed-tensors",
@@ -1537,7 +1537,7 @@ class LoRAConfig:
         if model_config.quantization and model_config.quantization not in [
                 "awq", "gptq"
         ]:
-            # TODO support marlin and squeezellm
+            # TODO support marlin
             logger.warning("%s quantization is not tested with LoRA yet.",
                            model_config.quantization)
 
