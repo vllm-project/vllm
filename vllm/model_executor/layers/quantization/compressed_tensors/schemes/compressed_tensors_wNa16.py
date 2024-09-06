@@ -178,6 +178,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         replace_tensor(layer, "weight_packed", marlin_qweight)
 
         # Permute scales from compressed-tensors format to marlin format.
+        # scale is required on all partitions if activation reordering
         marlin_scales = marlin_permute_scales(
             layer.weight_scale,
             size_k=(layer.input_size
