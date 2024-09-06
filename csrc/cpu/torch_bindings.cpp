@@ -91,6 +91,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("rotary_embedding", torch::kCPU, &rotary_embedding);
 
   // Quantization
+#ifdef __AVX512F__
   // Compute int8 quantized tensor for given scaling factor.
   ops.def(
       "static_scaled_int8_quant(Tensor! out, Tensor input, Tensor scale) -> "
@@ -109,6 +110,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                  Tensor b, Tensor a_scales,"
       "                  Tensor b_scales, Tensor? bias) -> ()");
   ops.impl("cutlass_scaled_mm", torch::kCPU, &int8_scaled_mm);
+#endif
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
