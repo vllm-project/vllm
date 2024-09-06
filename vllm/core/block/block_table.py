@@ -97,10 +97,11 @@ class BlockTable:
         """
         assert not self._is_allocated
         assert token_ids
-        blocks = self._allocate_blocks_for_token_ids(prev_block=None,
-                                                     token_ids=token_ids,
-                                                     device=device,
-                                                     contextual_hash=contextual_hash)
+        blocks = self._allocate_blocks_for_token_ids(
+            prev_block=None,
+            token_ids=token_ids,
+            device=device,
+            contextual_hash=contextual_hash)
         self.update(blocks)
         self._num_full_slots = len(token_ids)
 
@@ -264,10 +265,9 @@ class BlockTable:
         # ones after the appended ones.
         return sequence_token_ids[self.num_full_slots:]
 
-    def _allocate_blocks_for_token_ids(self, prev_block: Optional[Block],
-                                       token_ids: List[int],
-                                       device: Device,
-                                       contextual_hash: Optional[int]) -> List[Block]:
+    def _allocate_blocks_for_token_ids(
+            self, prev_block: Optional[Block], token_ids: List[int],
+            device: Device, contextual_hash: Optional[int]) -> List[Block]:
         blocks: List[Block] = []
 
         block_token_ids = []
@@ -281,8 +281,10 @@ class BlockTable:
         if block_token_ids:
             blocks.extend(
                 self._allocator.allocate_immutable_blocks(
-                    prev_block, block_token_ids=block_token_ids,
-                    device=device, contextual_hash=contextual_hash))
+                    prev_block,
+                    block_token_ids=block_token_ids,
+                    device=device,
+                    contextual_hash=contextual_hash))
             prev_block = blocks[-1]
 
         if tail_token_ids:
@@ -290,7 +292,9 @@ class BlockTable:
             cur_token_ids = tail_token_ids[0]
 
             block = self._allocator.allocate_mutable_block(
-                prev_block=prev_block, device=device, contextual_hash=contextual_hash)
+                prev_block=prev_block,
+                device=device,
+                contextual_hash=contextual_hash)
             block.append_token_ids(cur_token_ids)
 
             blocks.append(block)

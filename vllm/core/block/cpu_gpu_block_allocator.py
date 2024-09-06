@@ -121,8 +121,10 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
                 self.allocate_mutable_block(None, Device.GPU))
         return self._null_block
 
-    def allocate_mutable_block(self, prev_block: Optional[Block],
-                               device: Device, contextual_hash: Optional[int] = 0) -> Block:
+    def allocate_mutable_block(self,
+                               prev_block: Optional[Block],
+                               device: Device,
+                               contextual_hash: Optional[int] = 0) -> Block:
         """Allocates a new mutable block on the specified device.
 
         Args:
@@ -136,12 +138,13 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         Returns:
             Block: The newly allocated mutable block.
         """
-        return self._allocators[device].allocate_mutable_block(prev_block, contextual_hash=contextual_hash)
+        return self._allocators[device].allocate_mutable_block(
+            prev_block, contextual_hash=contextual_hash)
 
-    def allocate_immutable_blocks(self, prev_block: Optional[Block],
-                                  block_token_ids: List[List[int]],
-                                  device: Optional[Device],
-                                  contextual_hash: Optional[int]) -> List[Block]:
+    def allocate_immutable_blocks(
+            self, prev_block: Optional[Block],
+            block_token_ids: List[List[int]], device: Device,
+            contextual_hash: Optional[int]) -> List[Block]:
         """Allocates a new group of immutable blocks with the provided block 
         token IDs on the specified device.
 
@@ -163,8 +166,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             prev_block, block_token_ids, contextual_hash=contextual_hash)
 
     def allocate_immutable_block(self, prev_block: Optional[Block],
-                                 token_ids: List[int],
-                                 device: Device,
+                                 token_ids: List[int], device: Device,
                                  contextual_hash: Optional[int]) -> Block:
         """Allocates a new immutable block with the provided token IDs on the
         specified device.
@@ -397,6 +399,10 @@ class NullBlock(Block):
     @property
     def prev_block(self):
         return self._proxy.prev_block
+
+    @property
+    def contextual_hash(self):
+        return None
 
     @property
     def computed(self):

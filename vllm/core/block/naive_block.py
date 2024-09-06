@@ -108,8 +108,8 @@ class NaiveBlockAllocator(BlockAllocator):
 
     def allocate_mutable_block(self,
                                prev_block: Optional[Block],
-                               device: Optional[Device] = None,
-                               contextual_hash: Optional[int] = 0) -> Block:
+                               contextual_hash: Optional[int] = 0,
+                               device: Optional[Device] = None) -> Block:
         """Allocates a new mutable block, linked to the previous block.
 
         Args:

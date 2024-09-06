@@ -144,8 +144,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
     def allocate_immutable_block(self,
                                  prev_block: Optional[Block],
                                  token_ids: List[int],
-                                 device: Optional[Device] = None,
-                                 contextual_hash: Optional[int] = 0) -> Block:
+                                 contextual_hash: Optional[int] = 0,
+                                 device: Optional[Device] = None) -> Block:
         """Allocates an immutable block with the given token IDs, reusing cached
         blocks if possible.
 
@@ -177,7 +177,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         self._block_pool.free_block(block)
 
         # No cached block => Allocate a new block
-        block = self.allocate_mutable_block(prev_block, contextual_hash=contextual_hash)
+        block = self.allocate_mutable_block(prev_block,
+                                            contextual_hash=contextual_hash)
         block.append_token_ids(token_ids)
         return block
 
@@ -189,17 +190,18 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             device: Optional[Device] = None) -> List[Block]:
         blocks = []
         for token_ids in block_token_ids:
-            prev_block = self.allocate_immutable_block(prev_block=prev_block,
-                                                       token_ids=token_ids,
-                                                       device=device,
-                                                       contextual_hash=contextual_hash)
+            prev_block = self.allocate_immutable_block(
+                prev_block=prev_block,
+                token_ids=token_ids,
+                device=device,
+                contextual_hash=contextual_hash)
             blocks.append(prev_block)
         return blocks
 
     def allocate_mutable_block(self,
                                prev_block: Optional[Block],
-                               device: Optional[Device] = None,
-                               contextual_hash: Optional[int] = 0) -> Block:
+                               contextual_hash: Optional[int] = 0,
+                               device: Optional[Device] = None) -> Block:
         """Allocates a mutable block. If there are no free blocks, this will
         evict unused cached blocks.
 
@@ -617,10 +619,13 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             # existing "block" object
             if block.is_full:
                 tmp_block = self.allocate_immutable_block(
-                    prev_block=block.prev_block, token_ids=block.token_ids, contextual_hash=block.contextual_hash)
+                    prev_block=block.prev_block,
+                    token_ids=block.token_ids,
+                    contextual_hash=block.contextual_hash)
             else:
                 tmp_block = self.allocate_mutable_block(
-                    prev_block=block.prev_block, contextual_hash=block.contextual_hash)
+                    prev_block=block.prev_block,
+                    contextual_hash=block.contextual_hash)
                 tmp_block.append_token_ids(block.token_ids)
 
             block_id = tmp_block.block_id
@@ -864,7 +869,8 @@ class PrefixCachingBlock(Block):
 
     @staticmethod
     def hash_block_tokens(is_first_block: bool, prev_block_hash: Optional[int],
-                          cur_block_token_ids: List[int], contextual_hash: Optional[int]) -> int:
+                          cur_block_token_ids: List[int],
+                          contextual_hash: Optional[int]) -> int:
         """Computes a hash value corresponding to the contents of a block and
         the contents of the preceding block(s). The hash value is used for
         prefix caching.
@@ -883,7 +889,8 @@ class PrefixCachingBlock(Block):
         - int: The computed hash value for the block.
         """
         assert (prev_block_hash is None) == is_first_block
-        return hash((is_first_block, prev_block_hash, *cur_block_token_ids, contextual_hash))
+        return hash((is_first_block, prev_block_hash, *cur_block_token_ids,
+                     contextual_hash))
 
 
 class ComputedBlocksTracker:

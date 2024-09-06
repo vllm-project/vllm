@@ -153,7 +153,8 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         if seq.get_token_ids():
             contextual_hash = hash((seq.prompt_adapter_id, seq.lora_int_id))
             # Add blocks to the block table only if the sequence is non empty.
-            block_table.allocate(token_ids=seq.get_token_ids(), contextual_hash=contextual_hash)
+            block_table.allocate(token_ids=seq.get_token_ids(),
+                                 contextual_hash=contextual_hash)
 
         return block_table
 

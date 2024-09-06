@@ -86,6 +86,8 @@ class Block(ABC):
             block_size: int,
             allocator: "BlockAllocator",
             block_id: Optional[int] = None,
+            computed: bool = False,
+            contextual_hash: Optional[int] = 0,
         ) -> "Block":
             pass
 
@@ -104,18 +106,21 @@ class Block(ABC):
 class BlockAllocator(ABC):
 
     @abstractmethod
-    def allocate_mutable_block(self, prev_block: Optional[Block], contextual_hash: Optional[int]) -> Block:
+    def allocate_mutable_block(self, prev_block: Optional[Block],
+                               contextual_hash: Optional[int]) -> Block:
         pass
 
     @abstractmethod
     def allocate_immutable_block(self, prev_block: Optional[Block],
-                                 token_ids: List[int], contextual_hash: Optional[int]) -> Block:
+                                 token_ids: List[int],
+                                 contextual_hash: Optional[int]) -> Block:
         pass
 
     @abstractmethod
     def allocate_immutable_blocks(
             self, prev_block: Optional[Block],
-            block_token_ids: List[List[int]], contextual_hash: Optional[int]) -> List[Block]:
+            block_token_ids: List[List[int]],
+            contextual_hash: Optional[int]) -> List[Block]:
         pass
 
     @abstractmethod
@@ -202,15 +207,15 @@ class BlockAllocator(ABC):
 class DeviceAwareBlockAllocator(ABC):
 
     @abstractmethod
-    def allocate_mutable_block(self, prev_block: Optional[Block],
+    def allocate_mutable_block(self,
+                               prev_block: Optional[Block],
                                device: Device,
                                contextual_hash: Optional[int] = 0) -> Block:
         pass
 
     @abstractmethod
     def allocate_immutable_block(self, prev_block: Optional[Block],
-                                 token_ids: List[int],
-                                 device: Device,
+                                 token_ids: List[int], device: Device,
                                  contextual_hash: Optional[int]) -> Block:
         pass
 
