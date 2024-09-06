@@ -141,7 +141,7 @@ def compute_max_diff(output, output_ref):
 # @pytest.mark.parametrize("group_size", [-1, 32, 64, 128])
 # @pytest.mark.parametrize("act_order", [True, False])
 # @pytest.mark.parametrize("num_bits", [4, 8])
-@pytest.mark.parametrize("m", [1])
+@pytest.mark.parametrize("m", [64, 512, 222, 33, 1])
 @pytest.mark.parametrize("n", [128])
 @pytest.mark.parametrize("k", [128])
 @pytest.mark.parametrize("e", [4])
