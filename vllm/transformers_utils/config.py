@@ -96,23 +96,27 @@ def get_config(
         else:
             raise ValueError(f"No supported config format found in {model}")
 
-    try:
-        config_dict, _ = PretrainedConfig.get_config_dict(
-        model, revision=revision, code_revision=code_revision, **kwargs)
 
-        # Use custom model class if it's in our registry
-        model_type = config_dict.get("model_type")
-        if model_type in _CONFIG_REGISTRY:
-            config_class = _CONFIG_REGISTRY[model_type]
-        
+    try:
         if config_format == ConfigFormat.HF:
-            config = AutoConfig.from_pretrained(
-                model,
-                trust_remote_code=trust_remote_code,
-                revision=revision,
-                code_revision=code_revision,
-                **kwargs,
-            )
+            config_dict, _ = PretrainedConfig.get_config_dict(
+                model, revision=revision, code_revision=code_revision, **kwargs)
+
+            # Use custom model class if it's in our registry
+            model_type = config_dict.get("model_type")
+            if model_type in _CONFIG_REGISTRY:
+                config_class = _CONFIG_REGISTRY[model_type]
+                config = config_class.from_pretrained(model,
+                                        revision=revision,
+                                        code_revision=code_revision)
+            else:
+                config = AutoConfig.from_pretrained(
+                    model,
+                    trust_remote_code=trust_remote_code,
+                    revision=revision,
+                    code_revision=code_revision,
+                    **kwargs,
+                )
         elif config_format == ConfigFormat.MISTRAL:
             config = load_params_config(model, revision)
         else:
