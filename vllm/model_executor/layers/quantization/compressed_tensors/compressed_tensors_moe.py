@@ -6,8 +6,6 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
-from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
-    WNA16_SUPPORTED_BITS)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     CompressionFormat)
 from vllm.model_executor.utils import set_weight_attrs
@@ -40,11 +38,10 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
 
         if not (self.quant_config.quant_format
                 == CompressionFormat.pack_quantized.value
-                and self.num_bits in WNA16_SUPPORTED_BITS):
+                and self.num_bits == 4):
             raise ValueError("For Fused MoE layers, only ",
                              f"{CompressionFormat.pack_quantized.value} ",
-                             "is supported for the following bits: ",
-                             f"{WNA16_SUPPORTED_BITS}")
+                             "is supported for 4 bits")
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size: int,
