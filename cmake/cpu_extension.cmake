@@ -96,13 +96,8 @@ set(VLLM_EXT_SRC
     "csrc/cpu/utils.cpp"
     "csrc/cpu/layernorm.cpp"
     "csrc/cpu/pos_encoding.cpp"
+    "csrc/cpu/quant.cpp"
     "csrc/cpu/torch_bindings.cpp")
-
-if (AVX512_FOUND AND NOT AVX512_DISABLED)
-    set(VLLM_EXT_SRC
-        "csrc/cpu/quant.cpp"
-        ${VLLM_EXT_SRC})
-endif()
 
 #
 # Define extension targets
