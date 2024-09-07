@@ -39,7 +39,7 @@ from torch.distributed import Backend, ProcessGroup
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.distributed.group_coordinator import GroupCoordinator
-import vllm.distributed.distributed_kv as dist_kv
+import vllm.distributed.kv_transfer.vllm_adapter as dist_kv
 
 
 
@@ -350,19 +350,11 @@ def initialize_model_parallel(
             # decode global rank: i + world_size
             group_ranks.append([i, i + world_size])
         logger.debug("Distributed group is %s", str(group_ranks))
-        _DISAGG = dist_kv.DistributedKVCoordinator(
+        _DISAGG = dist_kv.KV_transfer_agent(
             group_ranks=group_ranks,
             local_rank=get_world_group().local_rank,
             torch_distributed_backend=backend,
         )
-        # follow by a warmup, to warmup nccl
-        # necessary, as NCCL may not be warmed up when tp and pp are both 1.
-        temp_tensor = torch.tensor([1.]).to(_DISAGG.device)
-        if dist_kv.IS_KV_PREFILL_INSTANCE:
-            _DISAGG.send(temp_tensor)
-        else:
-            recv_tensor = _DISAGG.recv(temp_tensor.shape, temp_tensor.dtype)
-            assert torch.allclose(temp_tensor, recv_tensor)
         logger.debug("_DISAGG initialized for rank %d",
                      torch.distributed.get_rank())
 
