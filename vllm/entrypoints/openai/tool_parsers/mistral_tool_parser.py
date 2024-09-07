@@ -193,19 +193,9 @@ class MistralToolParser(ToolParser):
 
             # case: update an existing tool - this is handled below
 
-            # if the current tool initial data incl. the id, type=function
-            # and idx not sent, send that
-            if not self.current_tool_initial_sent:
-                self.current_tool_initial_sent = True
-                delta = DeltaMessage(tool_calls=[
-                    InitialDeltaToolCall(
-                        index=self.current_tool_id).model_dump(
-                            exclude_none=True)
-                ])
-
             # if the current tool name hasn't been sent, send if available
             # - otherwise send nothing
-            elif not self.current_tool_name_sent:
+            if not self.current_tool_name_sent:
                 function_name = current_tool_call.get("name")
                 if function_name:
 

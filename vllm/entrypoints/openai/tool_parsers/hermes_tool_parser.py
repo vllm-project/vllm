@@ -9,7 +9,7 @@ from vllm.entrypoints.openai.protocol import (DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
                                               ExtractedToolCallInformation,
                                               FunctionCall,
-                                              InitialDeltaToolCall, ToolCall)
+                                              ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser)
 from vllm.entrypoints.openai.tool_parsers.utils import (
@@ -34,7 +34,6 @@ class Hermes2ProToolParser(ToolParser):
         self.prev_tool_call_arr: List[Dict] = []
         self.current_tool_id: int = -1
         self.current_tool_name_sent = False
-        self.current_tool_initial_sent: bool = False
         self.streamed_args_for_tool: List[str] = [
         ]  # map what has been streamed for each tool so far to a list
 
@@ -95,7 +94,7 @@ class Hermes2ProToolParser(ToolParser):
                 ]
 
                 content = model_output[:model_output.
-                                       find(self.tool_call_start_token)]
+                find(self.tool_call_start_token)]
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=tool_calls,
@@ -109,13 +108,13 @@ class Hermes2ProToolParser(ToolParser):
                                                     content=model_output)
 
     def extract_tool_calls_streaming(
-        self,
-        previous_text: str,
-        current_text: str,
-        delta_text: str,
-        previous_token_ids: Sequence[int],
-        current_token_ids: Sequence[int],
-        delta_token_ids: Sequence[int],
+            self,
+            previous_text: str,
+            current_text: str,
+            delta_text: str,
+            previous_token_ids: Sequence[int],
+            current_token_ids: Sequence[int],
+            delta_token_ids: Sequence[int],
     ) -> Union[DeltaMessage, None]:
 
         logger.debug("delta_text: %s", delta_text)
@@ -168,7 +167,6 @@ class Hermes2ProToolParser(ToolParser):
                 # set cursors and state appropriately
                 self.current_tool_id += 1
                 self.current_tool_name_sent = False
-                self.current_tool_initial_sent = False
                 self.streamed_args_for_tool.append("")
                 logger.debug("Starting on a new tool %s", self.current_tool_id)
 
@@ -198,7 +196,7 @@ class Hermes2ProToolParser(ToolParser):
                         DeltaToolCall(index=self.current_tool_id,
                                       function=DeltaFunctionCall(
                                           arguments=diff).model_dump(
-                                              exclude_none=True))
+                                          exclude_none=True))
                     ])
 
             # case -- otherwise we're just generating text
@@ -218,27 +216,19 @@ class Hermes2ProToolParser(ToolParser):
                 logger.debug('not enough tokens to parse into JSON yet')
                 return None
 
-            # case - we haven't sent the initial delta with the tool call ID
-            #   (it will be sent)
-            if not self.current_tool_initial_sent:
-                self.current_tool_initial_sent = True
-                return DeltaMessage(tool_calls=[
-                    InitialDeltaToolCall(
-                        index=self.current_tool_id).model_dump(
-                            exclude_none=True)
-                ])
-
             # case - we haven't sent the tool name yet. If it's available, send
             #   it. otherwise, wait until it's available.
-            elif not self.current_tool_name_sent:
+            if not self.current_tool_name_sent:
                 function_name: Union[str, None] = current_tool_call.get("name")
                 if function_name:
                     self.current_tool_name_sent = True
                     return DeltaMessage(tool_calls=[
-                        DeltaToolCall(index=self.current_tool_id,
-                                      function=DeltaFunctionCall(
-                                          name=function_name).model_dump(
-                                              exclude_none=True))
+                        DeltaToolCall(
+                            index=self.current_tool_id,
+                            function=DeltaFunctionCall(
+                                name=function_name
+                            ).model_dump(exclude_none=True)
+                        )
                     ])
                 else:
                     return None
@@ -305,7 +295,7 @@ class Hermes2ProToolParser(ToolParser):
                     DeltaToolCall(index=self.current_tool_id,
                                   function=DeltaFunctionCall(
                                       arguments=arguments_delta).model_dump(
-                                          exclude_none=True))
+                                      exclude_none=True))
                 ])
                 self.streamed_args_for_tool[self.current_tool_id] \
                     += arguments_delta
@@ -324,7 +314,7 @@ class Hermes2ProToolParser(ToolParser):
                     DeltaToolCall(index=self.current_tool_id,
                                   function=DeltaFunctionCall(
                                       arguments=argument_diff).model_dump(
-                                          exclude_none=True))
+                                      exclude_none=True))
                 ])
                 self.streamed_args_for_tool[self.current_tool_id] \
                     += argument_diff

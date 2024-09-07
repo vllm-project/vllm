@@ -271,11 +271,17 @@ class OpenAIServingChat(OpenAIServing):
                     # NOTE num_choices defaults to 1 so this usually executes
                     # once per request
                     for i in range(num_choices):
+
+                        # TODO - this breaks, it needs to include ALL fields
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=i,
-                            delta=DeltaMessage(role=role),
+                            delta=DeltaMessage(
+                                role=role,
+                                content="",
+                            ),
                             logprobs=None,
-                            finish_reason=None)
+                            finish_reason=None
+                        )
                         chunk = ChatCompletionStreamResponse(
                             id=request_id,
                             object=chunk_object_type,
