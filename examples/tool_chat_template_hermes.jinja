@@ -99,7 +99,7 @@
             {{- tool_call.name }}
             {{- '"' }}
             {%- if tool_call.arguments is defined %}
-                {{- '", ' }}
+                {{- ', ' }}
                 {{- '"arguments": ' }}
                 {{- tool_call.arguments|tojson }}
             {%- endif %}
