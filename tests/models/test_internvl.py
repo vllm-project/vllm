@@ -9,7 +9,8 @@ from transformers import AutoConfig
 from vllm.multimodal.utils import rescale_image_size
 from vllm.utils import is_cpu
 
-from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
+from ..conftest import (IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets,
+                        PromptImageInput)
 from .utils import check_logprobs_close
 
 pytestmark = pytest.mark.vlm
@@ -65,7 +66,7 @@ def generate(
 def run_test(
     hf_runner: Type[HfRunner],
     vllm_runner: Type[VllmRunner],
-    inputs: List[Tuple[List[str], Union[List[Image], List[List[Image]]]]],
+    inputs: List[Tuple[List[str], PromptImageInput]],
     model: str,
     *,
     dtype: str,

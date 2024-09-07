@@ -34,8 +34,7 @@ def load_phi3v(question, image_urls: List[str]):
 
 
 def load_internvl(question, image_urls: List[str]):
-    # model_name = "OpenGVLab/InternVL2-2B"
-    model_name = "/data/LLM-model/InternVL2-2B"
+    model_name = "OpenGVLab/InternVL2-2B"
 
     llm = LLM(
         model=model_name,
