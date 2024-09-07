@@ -11,7 +11,7 @@ import torch_xla.core.xla_model as xm
 import torch_xla.runtime as xr
 
 from vllm.attention import AttentionMetadata, get_attn_backend
-from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispacther
+from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.logger import init_logger
@@ -681,7 +681,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 return [self.cached_outputs[self.current_step]]
 
 
-class ModelWrapper(TorchCompileWrapperWithCustomDispacther):
+class ModelWrapper(TorchCompileWrapperWithCustomDispatcher):
 
     def __init__(self, model: nn.Module):
         self.model = model
