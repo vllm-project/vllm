@@ -1,10 +1,9 @@
 from abc import ABC, abstractmethod
 from typing import List, Optional, Set, Tuple, Type
 
-from vllm.config import (CacheConfig, DeviceConfig, EngineConfig,
-                         LoadConfig, LoRAConfig, ModelConfig, 
-                         ObservabilityConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig,
+from vllm.config import (CacheConfig, DeviceConfig, EngineConfig, LoadConfig,
+                         LoRAConfig, ModelConfig, ObservabilityConfig,
+                         ParallelConfig, PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig)
 from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.lora.request import LoRARequest
@@ -150,10 +149,9 @@ class ExecutorAsyncBase(ExecutorBase):
         """Checks if the executor is healthy. If not, it should raise an
         exception."""
         self.check_health()
-    
 
-def get_executor_cls(
-        engine_config: EngineConfig) -> Type["ExecutorAsyncBase"]:
+
+def get_executor_cls(engine_config: EngineConfig) -> Type["ExecutorAsyncBase"]:
     distributed_executor_backend = (
         engine_config.parallel_config.distributed_executor_backend)
     if isinstance(distributed_executor_backend, type):

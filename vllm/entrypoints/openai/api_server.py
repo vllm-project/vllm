@@ -21,8 +21,8 @@ import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.engine.multiprocessing.mp_client import MQLLMEngineClient
-from vllm.engine.multiprocessing.mp_llm_engine import run_mp_engine
+from vllm.engine.multiprocessing.client import MQLLMEngineClient
+from vllm.engine.multiprocessing.engine import run_mp_engine
 from vllm.engine.protocol import AsyncEngineClient
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger

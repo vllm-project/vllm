@@ -3,11 +3,10 @@ from enum import Enum
 from typing import List, Mapping, Optional, Union
 
 from vllm.inputs import PromptInputs
-from vllm.outputs import RequestOutput
 from vllm.lora.request import LoRARequest
+from vllm.outputs import RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-
 
 VLLM_RPC_SUCCESS_STR = "SUCCESS"
 VLLM_RPC_FAILED_STR = "FAILED"
@@ -33,7 +32,7 @@ class RPCGenerateRequest:
 
 
 @dataclass
-class RPCGenerateError:
+class RPCGenerateError(BaseException):
     request_id: Optional[str]
     is_engine_errored: bool
     exception: BaseException
@@ -60,13 +59,12 @@ class RPCStartupRequest(Enum):
     CLIENT_IS_READY = 8
 
 
-RPC_REQUEST_T = Union[RPCGenerateRequest, RPCAbortRequest,
-                         RPCUtilityRequest, RPCStartupRequest]
+RPC_REQUEST_T = Union[RPCGenerateRequest, RPCAbortRequest, RPCUtilityRequest,
+                      RPCStartupRequest]
 
-REQUEST_OUTPUTS_T = Union[List[RequestOutput], RPCGenerateError]
+REQUEST_OUTPUTS_T = Union[List[RequestOutput], BaseException]
 
 ENGINE_DEAD_ERROR = MQEngineDeadError(
     "Engine loop is not running. Inspect the output to find "
     "the stacktrace of the error that caused the engine loop "
     "to stop (MQEngineDeadError).")
-

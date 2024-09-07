@@ -1,8 +1,8 @@
 import asyncio
 import pickle
 from contextlib import contextmanager, suppress
-from typing import (Any, AsyncGenerator, Dict, Iterator, List, Mapping,
-                    Optional, Union)
+from typing import (Any, AsyncGenerator, Dict, Iterator, Mapping, Optional,
+                    Union)
 
 import cloudpickle
 import zmq
@@ -12,13 +12,13 @@ from zmq.asyncio import Socket
 
 from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
-from vllm.engine.multiprocessing import (IPC_INPUT_EXT, IPC_OUTPUT_EXT,
-                                         IPC_HEALTH_EXT, IPC_DATA_EXT,
-                                         RPC_REQUEST_T, REQUEST_OUTPUTS_T,
-                                         VLLM_RPC_SUCCESS_STR, 
-                                         ENGINE_DEAD_ERROR, RPCAbortRequest,
-                                         RPCGenerateRequest, RPCGenerateError, 
-                                         RPCStartupRequest, RPCUtilityRequest)
+from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
+                                         IPC_HEALTH_EXT, IPC_INPUT_EXT,
+                                         IPC_OUTPUT_EXT, REQUEST_OUTPUTS_T,
+                                         RPC_REQUEST_T, VLLM_RPC_SUCCESS_STR,
+                                         RPCAbortRequest, RPCGenerateError,
+                                         RPCGenerateRequest, RPCStartupRequest,
+                                         RPCUtilityRequest)
 from vllm.envs import VLLM_RPC_GET_DATA_TIMEOUT_MS
 from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
@@ -87,12 +87,10 @@ class MQLLMEngineClient:
 
         # Stream for each individual request.
         self.output_queues: Dict[str, asyncio.Queue] = {}
-        self.output_loop = asyncio.create_task(
-            self.run_output_handler_loop())
-        
+        self.output_loop = asyncio.create_task(self.run_output_handler_loop())
+
         # Loop to check health of the LLMEngine periodically.
-        self.health_loop = asyncio.create_task(
-            self.run_check_health_loop(timeout=VLLM_RPC_GET_DATA_TIMEOUT_MS))
+        self.health_loop: Optional[asyncio.Task] = None
 
     @contextmanager
     def get_data_socket(self) -> Iterator[Socket]:
@@ -104,15 +102,33 @@ class MQLLMEngineClient:
             socket.close(linger=0)
 
     async def run_check_health_loop(self, timeout: int):
+        """Background loop that continually probes the RPCServer for health.
+        
+        The loop sends CHECK_HEALTH requests to the INPUT_SOCKET, which
+        the MQLLMEngine server is blocking on.
+
+        The Server replies on the HEALTH_SOCKET (rather than on the 
+        OUTPUT_SOCKET such that the messages are not intermingled with
+        output streaming).
+        """
+
         try:
             while True:
                 if await self.health_socket.poll(timeout=timeout) == 0:
                     # Wakeup every N seconds and do a health probe.
-                    await self._check_health_rpc(self.health_socket)
+                    await self._send_one_way_rpc_request(
+                        RPCUtilityRequest.CHECK_HEALTH, self.input_socket)
+
+                    # Wait for ack from the health socket.
+                    await self._await_ack(error_message="Health check failed.",
+                                          socket=self.health_socket)
                 else:
                     # Server sent a health status message unprompted.
-                    self._check_success(error_message="Health check failed",
-                                        socket=self.health_socket)
+                    await self._check_success(
+                        error_message="Health check failed.",
+                        socket=self.health_socket)
+
+                logger.debug("Health probe complete.")
 
         except asyncio.CancelledError:
             logger.info("Shutting down MQLLMEngineClient check health loop.")
@@ -121,28 +137,27 @@ class MQLLMEngineClient:
             logger.exception(repr(e))
             self._errored = True
 
-
     async def run_output_handler_loop(self):
         """Get RequestOutputs from Engine and stream to request Queues"""
-        
+
         try:
             while True:
                 message: Frame = await self.output_socket.recv(copy=False)
-                request_outputs: REQUEST_OUTPUTS_T = pickle.loads(message.buffer)
+                request_outputs: REQUEST_OUTPUTS_T = pickle.loads(
+                    message.buffer)
 
                 if isinstance(request_outputs, BaseException):
-                    
                     if isinstance(request_outputs, RPCGenerateError):
-                        error: RPCGenerateError = request_outputs
-                        request_id = error.request_id
-                        if error.is_engine_errored:
+                        generate_error: RPCGenerateError = request_outputs
+                        request_id = generate_error.request_id
+                        if generate_error.is_engine_errored:
                             self._errored = True
-                        exception = error.exception
+                        exception = generate_error.exception
                     else:
                         # MPLLMEngine should always return an RPCGenerateError
                         # if the error handling is graceful. If we are here,
                         # we are in a bad state and should shut down the server.
-                        error: BaseException = request_output
+                        error: BaseException = request_outputs
                         logger.warning(
                             "Got raw Exception {error} from MPLLMEngine. "
                             "This should never happen.")
@@ -151,27 +166,22 @@ class MQLLMEngineClient:
                         exception = error
 
                     if request_id is None:
-                        for queue in tuple(self.output_queues.values()):
-                            queue.put_nowait(exception)
+                        for queue_i in tuple(self.output_queues.values()):
+                            queue_i.put_nowait(exception)
                     else:
                         queue = self.output_queues.get(request_id)
                         if queue is not None:
                             queue.put_nowait(exception)
                 else:
-                    # TODO: what should we do if the RPCServer sends back a raw exception?
-                    assert not isinstance(request_outputs, BaseException), (
-                        "Got unhandled raw unhandled Exception from RPCServer. "
-                        "This should never happen.")
-                    
                     # Put each output into the appropriate steam.
                     for request_output in request_outputs:
-                        queue = self.output_queues.get(request_output.request_id)
+                        queue = self.output_queues.get(
+                            request_output.request_id)
                         if queue is not None:
                             queue.put_nowait(request_output)
-        
+
         except asyncio.CancelledError:
             logger.info("Shutting down MQLLMEngineClient output handler.")
-
 
     async def setup(self):
         """Setup the client before it starts sending server requests."""
@@ -196,6 +206,11 @@ class MQLLMEngineClient:
                 enable_lora=bool(await self._get_lora_config_rpc(socket)),
             )
 
+            # Start health_loop.
+            self.health_loop = asyncio.create_task(
+                self.run_check_health_loop(
+                    timeout=VLLM_RPC_GET_DATA_TIMEOUT_MS))
+
             # Notify MQLLMEngine client is ready to start sending requests.
             await self._notify_ready(socket)
 
@@ -209,7 +224,8 @@ class MQLLMEngineClient:
         self.context.destroy(linger=0)
 
         # Cancel background tasks.
-        self.health_loop.cancel()
+        if self.health_loop is not None:
+            self.health_loop.cancel()
         self.output_loop.cancel()
 
     async def _send_get_data_rpc_request(self, request: RPCStartupRequest,
@@ -246,23 +262,14 @@ class MQLLMEngineClient:
 
         return data
 
-    async def _send_one_way_rpc_request(
-        self,
-        request: RPC_REQUEST_T, 
-        socket: Socket, 
-        await_ack: bool = False, 
-        error_message: str = "RPCRequest Failed."):
+    async def _send_one_way_rpc_request(self, request: RPC_REQUEST_T,
+                                        socket: Socket):
         """Send one-way RPC request to trigger an action."""
 
         await socket.send_multipart((cloudpickle.dumps(request), ))
 
-        if await_ack:
-            await self._await_ack(
-                error_message=error_message,
-                socket=socket)
-
     async def _await_ack(self, error_message: str, socket: Socket):
-        "Await acknoledgement that a request succeeded."
+        "Await acknowledgement that a request succeeded."
 
         if await socket.poll(timeout=VLLM_RPC_GET_DATA_TIMEOUT_MS) == 0:
             raise TimeoutError("MQLLMEngine didn't reply within "
@@ -295,27 +302,17 @@ class MQLLMEngineClient:
     async def _wait_for_server_rpc(self, socket: Socket):
         """Wait for the RPCServer to start up."""
 
-        self._send_one_way_rpc_request(
-            request=RPCStartupRequest.IS_SERVER_READY,
-            socket=socket,
-            await_ack=True,
-            error_message="Unable to start RPC Server")
+        await self._send_one_way_rpc_request(
+            request=RPCStartupRequest.IS_SERVER_READY, socket=socket)
 
-    async def _check_health_rpc(self, socket: Socket):
-        """Get current health status from the RPCServer"""
-
-        self._send_one_way_rpc_request(
-            request=RPCUtilityRequest.CHECK_HEALTH,
-            socket=socket,
-            await_ack=True,
-            error_message="Check health failed.")
+        await self._await_ack(error_message="Unable to start RPC Server",
+                              socket=socket)
 
     async def _notify_ready(self, socket: Socket):
         """Get the RPCServer that the RPCClient is ready"""
 
         await self._send_one_way_rpc_request(
-            request=RPCStartupRequest.CLIENT_IS_READY,
-            socket=socket)
+            request=RPCStartupRequest.CLIENT_IS_READY, socket=socket)
 
     async def _get_model_config_rpc(self, socket: Socket) -> ModelConfig:
         """Get the ModelConfig object from the RPC Server"""
@@ -377,8 +374,7 @@ class MQLLMEngineClient:
 
         with suppress(MPClientClosedError):
             await self._send_one_way_rpc_request(
-                request=RPCAbortRequest(request_id), 
-                socket=self.input_socket)
+                request=RPCAbortRequest(request_id), socket=self.input_socket)
 
     async def do_log_stats(self):
         """Send a DO_LOG_STATS signal to the RPC Server"""
@@ -424,7 +420,8 @@ class MQLLMEngineClient:
             raise ENGINE_DEAD_ERROR
 
         # 1) Create output queue for this requests.
-        queue: asyncio.Queue[Union[RequestOutput, BaseException]] = asyncio.Queue()
+        queue: asyncio.Queue[Union[RequestOutput,
+                                   BaseException]] = asyncio.Queue()
         self.output_queues[request_id] = queue
 
         try:
@@ -456,7 +453,7 @@ class MQLLMEngineClient:
             # TODO: check if aborted requests are getting here.
 
             self.output_queues.pop(request_id)
-            
+
             # Request was canceled by the client.
             if not finished and not self._errored:
                 await self.abort(request_id)

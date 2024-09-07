@@ -650,7 +650,6 @@ class AsyncLLMEngine:
         # Lazy initialized fields
         self._request_tracker: RequestTracker
 
-
     @classmethod
     def from_engine_args(
         cls,
