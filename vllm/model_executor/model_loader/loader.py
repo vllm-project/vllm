@@ -481,6 +481,8 @@ class TensorizerLoader(BaseModelLoader):
         return model.eval()
 
     def download_model(self, model_config: ModelConfig) -> None:
+        self.tensorizer_config.verify_with_model_config(model_config)
+
         with self.tensorizer_config.open_stream():
             pass
 
