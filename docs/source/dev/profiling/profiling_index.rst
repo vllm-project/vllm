@@ -17,14 +17,28 @@ Traces can be visualized using https://ui.perfetto.dev/.
 .. tip::
 
    Only send a few requests through vLLM when profiling, as the traces can get quite large. Also, no need to untar the traces, they can be viewed directly.
-   
-Example commands:
+
+.. tip::
+
+   To stop the profiler - it flushes out all the profile trace files to the directory. This takes time, for example for about 100 requests worth of data for a llama 70b, it takes about 10 minutes to flush out on a H100.
+   Set the env variable VLLM_RPC_GET_DATA_TIMEOUT_MS to a big number before you start the server. Say something like 30 minutes.
+   ``export VLLM_RPC_GET_DATA_TIMEOUT_MS=1800000``
+  
+Example commands and usage:
+===========================
+
+Offline Inference:
+------------------
+
+Refer to `examples/offline_inference_with_profiler.py <https://github.com/vllm-project/vllm/blob/main/examples/offline_inference_with_profiler.py>`_ for an example.
+
 
 OpenAI Server:
+--------------
 
 .. code-block:: bash
 
-    VLLM_TORCH_PROFILER_DIR=/mnt/traces/ python -m vllm.entrypoints.openai.api_server --model meta-llama/Meta-Llama-3-70B 
+    VLLM_TORCH_PROFILER_DIR=./vllm_profile python -m vllm.entrypoints.openai.api_server --model meta-llama/Meta-Llama-3-70B 
 
 benchmark_serving.py:
 

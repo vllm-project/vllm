@@ -560,6 +560,12 @@ class LLM:
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return LLMEngine.validate_outputs(outputs, EmbeddingRequestOutput)
 
+    def start_profile(self) -> None:
+        self.llm_engine.start_profile()
+
+    def stop_profile(self) -> None:
+        self.llm_engine.stop_profile()
+
     # LEGACY
     def _convert_v1_inputs(
         self,
