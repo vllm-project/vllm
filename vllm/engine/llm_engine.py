@@ -4,7 +4,7 @@ from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, ClassVar, Deque, Dict, Iterable, List,
-                    Mapping, Optional)
+                    Mapping, NamedTuple, Optional)
 from typing import Sequence as GenericSequence
 from typing import Set, Tuple, Type, Union
 
@@ -90,8 +90,7 @@ class SchedulerOutputState:
     last_output: Optional[SamplerOutput] = None
 
 
-@dataclass
-class OutputData:
+class OutputData(NamedTuple):
     outputs: List[SamplerOutput]
     seq_group_metadata_list: List[SequenceGroupMetadata]
     scheduler_outputs: SchedulerOutputs
@@ -1285,16 +1284,11 @@ class LLMEngine:
         if request_id:
             # When we process only one request, no pop is required
             # (since later we will process all of the rest)
-            output_data: OutputData = ctx.output_queue[0]
+            (outputs, seq_group_metadata_list, scheduler_outputs, is_async,
+             is_last_step, skip) = ctx.output_queue[0]
         else:
-            output_data = ctx.output_queue.popleft()
-
-        outputs = output_data.outputs
-        seq_group_metadata_list = output_data.seq_group_metadata_list
-        scheduler_outputs = output_data.scheduler_outputs
-        is_async = output_data.is_async
-        is_last_step = output_data.is_last_step
-        skip = output_data.skip
+            (outputs, seq_group_metadata_list, scheduler_outputs, is_async,
+             is_last_step, skip) = ctx.output_queue.popleft()
 
         # Sanity check
         assert len(seq_group_metadata_list) == len(
@@ -1320,7 +1314,7 @@ class LLMEngine:
             # If the request_id was not found, then it means that
             # this is a new request that has no pending async
             # postprocessor
-            if len(indices) == 0:
+            if not indices:
                 return
         else:
             indices = range(len(seq_group_metadata_list))  # type: ignore
@@ -1414,13 +1408,10 @@ class LLMEngine:
 
         # Create the outputs
         for i in indices:
-            if i in skip:
-                continue
+            if i in skip or i in finished_before or i in finished_now:
+                continue  # Avoids double processing
 
             scheduled_seq_group = scheduler_outputs.scheduled_seq_groups[i]
-
-            if i in finished_before or i in finished_now:
-                continue  # Avoids double processing
 
             seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
