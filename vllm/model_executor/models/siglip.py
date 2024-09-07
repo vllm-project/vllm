@@ -110,7 +110,7 @@ def input_processor_for_siglip(
         if isinstance(image_data, Image.Image):
             image_feature_size = get_siglip_image_feature_size(hf_config)
         elif isinstance(image_data, torch.Tensor):
-            image_feature_size = image_data.shape[0]
+            num_images, image_feature_size, hidden_size = image_data.shape
         else:
             raise TypeError(f"Invalid image type: {type(image_data)}")
     else:
