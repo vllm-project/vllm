@@ -549,7 +549,7 @@ class SiglipVisionModel(nn.Module):
                 layer_idx = int(name.split(".")[3])
                 if layer_idx >= layer_count:
                     continue
-            
+
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
