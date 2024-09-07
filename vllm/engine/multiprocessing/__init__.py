@@ -63,7 +63,7 @@ class RPCStartupRequest(Enum):
 RPC_REQUEST_T = Union[RPCGenerateRequest, RPCAbortRequest,
                          RPCUtilityRequest, RPCStartupRequest]
 
-REQUEST_OUTPUTS_T = Union[List[RequestOutput, RPCGenerateError]]
+REQUEST_OUTPUTS_T = Union[List[RequestOutput], RPCGenerateError]
 
 ENGINE_DEAD_ERROR = MQEngineDeadError(
     "Engine loop is not running. Inspect the output to find "

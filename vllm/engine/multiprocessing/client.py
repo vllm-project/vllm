@@ -113,8 +113,10 @@ class MQLLMEngineClient:
                     # Server sent a health status message unprompted.
                     self._check_success(error_message="Health check failed",
                                         socket=self.health_socket)
+
         except asyncio.CancelledError:
             logger.info("Shutting down MQLLMEngineClient check health loop.")
+
         except Exception as e:
             logger.exception(repr(e))
             self._errored = True
@@ -128,23 +130,33 @@ class MQLLMEngineClient:
                 message: Frame = await self.output_socket.recv(copy=False)
                 request_outputs: REQUEST_OUTPUTS_T = pickle.loads(message.buffer)
 
-                if isinstance(request_outputs, RPCGenerateError):
-                    error: RPCGenerateError = request_outputs
+                if isinstance(request_outputs, BaseException):
                     
-                    if error.is_engine_errored:
-                        self._errored = True
-
-                    if error.request_id is None:
-                        # Apply exception to all active requests.
-
-                        # TODO: this sends the exceptions to the PENDING requests too.
-                        # Do we want this? Shouldn't we be sending EngineDeadError to PENDING?
-                        for queue in tuple(self.output_queues.values()):
-                            queue.put_nowait(error.exception)
+                    if isinstance(request_outputs, RPCGenerateError):
+                        error: RPCGenerateError = request_outputs
+                        request_id = error.request_id
+                        if error.is_engine_errored:
+                            self._errored = True
+                        exception = error.exception
                     else:
-                        queue = self.output_queues.get(error.request_id)
+                        # MPLLMEngine should always return an RPCGenerateError
+                        # if the error handling is graceful. If we are here,
+                        # we are in a bad state and should shut down the server.
+                        error: BaseException = request_output
+                        logger.warning(
+                            "Got raw Exception {error} from MPLLMEngine. "
+                            "This should never happen.")
+                        self._errored = True
+                        request_id = None
+                        exception = error
+
+                    if request_id is None:
+                        for queue in tuple(self.output_queues.values()):
+                            queue.put_nowait(exception)
+                    else:
+                        queue = self.output_queues.get(request_id)
                         if queue is not None:
-                            queue.put_nowait(error.exception)
+                            queue.put_nowait(exception)
                 else:
                     # TODO: what should we do if the RPCServer sends back a raw exception?
                     assert not isinstance(request_outputs, BaseException), (
@@ -408,12 +420,15 @@ class MQLLMEngineClient:
     ) -> AsyncGenerator[RequestOutput, None]:
         """Send an RPCGenerateRequest to the RPCServer and stream responses."""
 
-        queue: asyncio.Queue[Union[RequestOutput,
-                                   BaseException]] = asyncio.Queue()
+        if self._errored:
+            raise ENGINE_DEAD_ERROR
+
+        # 1) Create output queue for this requests.
+        queue: asyncio.Queue[Union[RequestOutput, BaseException]] = asyncio.Queue()
         self.output_queues[request_id] = queue
 
         try:
-            # Send RPCGenerateRequest to the RPCServer.
+            # 2) Send the RPCGenerateRequest to the MQLLMEngine.
             await self.input_socket.send_multipart((cloudpickle.dumps(
                 RPCGenerateRequest(
                     inputs=inputs,
@@ -423,7 +438,9 @@ class MQLLMEngineClient:
                     trace_headers=trace_headers,
                     prompt_adapter_request=prompt_adapter_request)), ))
 
-            # Stream from the output queue.
+            # 3) Stream the RequestOutputs from the output queue. Note
+            # that the output_loop pushes RequestOutput objects to this
+            # queue after pulling them from the zmq socket.
             finished = False
             while not finished:
                 request_output = await queue.get()
@@ -435,12 +452,11 @@ class MQLLMEngineClient:
                 yield request_output
 
         finally:
+            # TODO: check if excepted requests are getting here.
             # TODO: check if aborted requests are getting here.
-            # TODO: check if requests 
 
-            # Remove output stream.
             self.output_queues.pop(request_id)
-
+            
             # Request was canceled by the client.
             if not finished and not self._errored:
                 await self.abort(request_id)
