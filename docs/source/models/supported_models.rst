@@ -219,7 +219,7 @@ Multimodal Language Models
     - 
   * - :code:`LlavaForConditionalGeneration`
     - LLaVA-1.5
-    - Image\ :sup:`E`
+    - Image\ :sup:`E+`
     - :code:`llava-hf/llava-1.5-7b-hf`, :code:`llava-hf/llava-1.5-13b-hf`, etc.
     -
   * - :code:`LlavaNextForConditionalGeneration`
