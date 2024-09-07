@@ -95,7 +95,7 @@ def test_logger_configuring_can_be_disabled():
     config behavior, however mocks are used to ensure no changes in behavior or
     configuration occur."""
 
-    with patch("logging.config.dictConfig") as dict_config_mock:
+    with patch("vllm.logger.dictConfig") as dict_config_mock:
         _configure_vllm_root_logger()
     dict_config_mock.assert_not_called()
 
@@ -175,9 +175,9 @@ def test_custom_logging_config_is_parsed_and_used_when_provided():
         logging_config_file.flush()
         with patch("vllm.logger.VLLM_LOGGING_CONFIG_PATH",
                    logging_config_file.name), patch(
-                       "logging.config.dictConfig") as dict_config_mock:
+                       "vllm.logger.dictConfig") as dict_config_mock:
             _configure_vllm_root_logger()
-            assert dict_config_mock.called_with(valid_logging_config)
+            dict_config_mock.assert_called_with(valid_logging_config)
 
 
 @patch("vllm.logger.VLLM_CONFIGURE_LOGGING", 0)
