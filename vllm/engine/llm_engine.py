@@ -1914,6 +1914,12 @@ class LLMEngine:
             self.tokenizer.check_health()
         self.model_executor.check_health()
 
+    def start_profile(self) -> None:
+        self.model_executor.start_profile()
+
+    def stop_profile(self) -> None:
+        self.model_executor.stop_profile()
+
     def is_tracing_enabled(self) -> bool:
         return self.tracer is not None
 

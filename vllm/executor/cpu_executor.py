@@ -296,6 +296,12 @@ class CPUExecutor(ExecutorBase):
         for result in parallel_worker_tasks:
             result.get()
 
+    def start_profile(self) -> None:
+        self.driver_method_invoker(self.driver_worker, "start_profile")
+
+    def stop_profile(self) -> None:
+        self.driver_method_invoker(self.driver_worker, "stop_profile")
+
 
 class CPUExecutorAsync(CPUExecutor, ExecutorAsyncBase):
 
