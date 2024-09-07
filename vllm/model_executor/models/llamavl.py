@@ -1534,14 +1534,16 @@ class CrossAttentionTransformerText(torch.nn.Module):
             xattn_layer,
             xattn_layer_idx,
         ) in enumerate(self.text_and_xattn_layers):
-            h = xattn_layer(
-                x=h,
-                xattn_mask=xattn_mask,
-                full_text_row_masked_out_mask=full_text_row_masked_out_mask,
-                xattn_cache=xattn_caches[xattn_layer_idx],
-                positions=positions,
-                attn_metadata=attn_metadata,
-            )
+            # TODO: a hack now. skip decode cross attention
+            if xattn_mask is not None:
+                h = xattn_layer(
+                    x=h,
+                    xattn_mask=xattn_mask,
+                    full_text_row_masked_out_mask=full_text_row_masked_out_mask,
+                    xattn_cache=xattn_caches[xattn_layer_idx],
+                    positions=positions,
+                    attn_metadata=attn_metadata,
+                )
             h = layer(
                 x=h,
                 # mask=mask,
@@ -1954,7 +1956,9 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
     ) -> torch.Tensor:
         image_inputs = self._parse_and_validate_image_input(**kwargs)
         if image_inputs is None:
-            raise ValueError("No images provided")
+            cross_attention_masks = None
+            full_text_row_masked_out_mask = None
+            xattn_caches = None
         else:
             # llama's reference implementation runs the vision model on CPU
             cuda_images = image_inputs['data'].cuda()
