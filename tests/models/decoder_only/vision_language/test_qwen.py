@@ -8,8 +8,6 @@ from vllm.multimodal.utils import rescale_image_size
 from ....conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
 from ...utils import check_logprobs_close
 
-pytestmark = pytest.mark.vlm
-
 text_only_models = [
     "Qwen/Qwen-7B-Chat"  # Has no visual component
 ]
