@@ -1296,7 +1296,7 @@ class LLMEngine:
                     break
             assert indices
         else:
-            indices = range(len(seq_group_metadata_list))
+            indices = range(len(seq_group_metadata_list))  # type: ignore
 
         finished_before: List[int] = []
         finished_now: List[int] = []

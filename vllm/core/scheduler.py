@@ -558,9 +558,9 @@ class Scheduler:
             ) > self.scheduler_config.max_model_len:
                 self._async_stopped.append(seq_group)
                 continue
-            
-            # NOTE(woosuk): Preemption happens only when there is no available slot
-            # to keep all the sequence groups in the RUNNING state.
+
+            # NOTE(woosuk): Preemption happens only when there is no available
+            # slot to keep all the sequence groups in the RUNNING state.
             while not self._can_append_slots(seq_group):
                 budget.subtract_num_batched_tokens(seq_group.request_id,
                                                    num_running_tokens)
@@ -585,6 +585,7 @@ class Scheduler:
                 # we need to ensure it has no pending async postprocessor
                 do_preempt = True
                 if self.use_async_output_proc:
+                    assert self.output_proc_callback is not None
                     self.output_proc_callback(
                         request_id=victim_seq_group.request_id)
 
