@@ -1316,7 +1316,12 @@ class LLMEngine:
                     assert i not in skip  # Cannot be called twice
                     indices.append(i)
                     break
-            assert indices
+
+            # If the request_id was not found, then it means that
+            # this is a new request that has no pending async
+            # postprocessor
+            if len(indices) == 0:
+                return
         else:
             indices = range(len(seq_group_metadata_list))  # type: ignore
 
