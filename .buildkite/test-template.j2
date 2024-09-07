@@ -63,6 +63,7 @@ steps:
       - docker#v5.2.0: {# for GPU test #}
           image: {{ docker_image }}-{{ python_version | replace(".", "") }}
           always-pull: true
+          gpus: all
           propagate-environment: true
           command: ["bash", "-c", "(command nvidia-smi || true) && export VLLM_LOGGING_LEVEL=DEBUG && cd {{ (step.working_dir or default_working_dir) | safe  }} && {{ step.command  or (step.commands | join(' && ')) | safe }}"]
           environment:
@@ -72,7 +73,7 @@ steps:
             - BUILDKITE_ANALYTICS_TOKEN
           volumes:
             - /dev/shm:/dev/shm
-                - {{ hf_home }}:{{ hf_home }}
+            - {{ hf_home }}:{{ hf_home }}
       {% endfor %}
       {% endif %}
     {% endfor %}
