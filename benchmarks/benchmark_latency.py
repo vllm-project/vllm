@@ -16,11 +16,18 @@ from vllm.inputs import PromptType
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.utils import FlexibleArgumentParser
+from vllm.lora.request import LoRARequest
 
 
 def main(args: argparse.Namespace):
     
     engine_args = EngineArgs.from_cli_args(args)
+
+    lora_kwargs={}
+    if args.lora_path is not None:
+        lora_kwargs['enable_lora']=True
+        lora_kwargs['max_loras']=args.max_loras
+        lora_kwargs['max_lora_rank']=args.max_lora_rank
 
     # NOTE(woosuk): If the request cannot be processed in a single batch,
     # the engine will automatically process the request in multiple batches.

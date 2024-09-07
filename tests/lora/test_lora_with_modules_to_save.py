@@ -14,7 +14,6 @@ MODELS = [
 
 LORAS = ["SergeyKochetkovT/llama3-lora-with-modules-to-save"]
 
-os.environ['CUDA_VISIBLE_DEVICES']="1"
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
@@ -29,7 +28,6 @@ def test_llama3_models(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs)
@@ -44,7 +42,6 @@ def test_llama3_models(
         name_0="hf",
         name_1="vllm",
     )
-
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("adapter_name", LORAS)
@@ -132,7 +129,6 @@ def test_llama3_loras_switches(
     with peft_runner(model, adapter_name, dtype=dtype) as peft_model:
         peft_outputs = peft_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs)
-
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs)
