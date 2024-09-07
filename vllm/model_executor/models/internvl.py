@@ -5,6 +5,7 @@
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
 import itertools
+import re
 from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
                     TypedDict, Union)
 
@@ -238,8 +239,11 @@ def input_processor_for_internvl(ctx: InputContext, llm_inputs: LLMInputs):
         prompt = tokenizer.decode(prompt_token_ids)
 
     new_prompt = prompt
-    for feature_size in image_feature_size:
+    image_idx = sorted(map(int, re.findall(r"Image-(\d+): <image>\n", prompt)))
+    for idx, feature_size in enumerate(image_feature_size, start=1):
         image_prompt = IMG_START + IMG_CONTEXT * feature_size + IMG_END
+        if not image_idx:
+            image_prompt = f"Image-{idx}: {image_prompt}"
         new_prompt = new_prompt.replace('<image>', image_prompt, 1)
     new_prompt_token_ids = tokenizer.encode(new_prompt)
 
