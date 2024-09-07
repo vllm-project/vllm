@@ -4,7 +4,7 @@ from vllm.config import ModelConfig
 from vllm.engine.protocol import AsyncEngineClient
 from vllm.entrypoints.chat_utils import (apply_chat_template,
                                          load_chat_template,
-                                         parse_chat_messages)
+                                         parse_chat_messages_futures)
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -43,7 +43,11 @@ class OpenAIServingTokenization(OpenAIServing):
                          request_logger=request_logger)
 
         # If this is None we use the tokenizer's default chat template
-        self.chat_template = load_chat_template(chat_template)
+        # the list of commonly-used chat template names for HF named templates
+        hf_chat_templates: List[str] = ['default', 'tool_use']
+        self.chat_template = chat_template \
+            if chat_template in hf_chat_templates \
+            else load_chat_template(chat_template)
 
     async def create_tokenize(
         self,
@@ -65,10 +69,11 @@ class OpenAIServingTokenization(OpenAIServing):
         if isinstance(request, TokenizeChatRequest):
             model_config = self.model_config
 
-            conversation, mm_data_future = parse_chat_messages(
+            conversation, mm_data_future = parse_chat_messages_futures(
                 request.messages, model_config, tokenizer)
 
-            if mm_data_future:
+            mm_data = await mm_data_future
+            if mm_data:
                 logger.warning(
                     "Multi-modal inputs are ignored during tokenization")
 

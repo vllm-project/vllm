@@ -209,7 +209,7 @@ def input_processor_for_internvl(ctx: InputContext, llm_inputs: LLMInputs):
         image_feature_size = num_blocks * num_patches
 
     elif isinstance(image_data, torch.Tensor):
-        image_feature_size = image_data.shape[0]
+        num_images, image_feature_size, hidden_size = image_data.shape
     else:
         raise TypeError(f"Invalid image type: {type(image_data)}")
 
@@ -341,6 +341,8 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
             nn.Linear(llm_hidden_size, llm_hidden_size))
 
         self.img_context_token_id = None
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors)
 
     def pixel_shuffle(self, x, scale_factor=0.5):
         n, w, h, c = x.size()
@@ -461,7 +463,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
                                                   positions,
                                                   kv_caches,
                                                   attn_metadata,
-                                                  None,
+                                                  intermediate_tensors,
                                                   inputs_embeds=inputs_embeds)
         return hidden_states
 
