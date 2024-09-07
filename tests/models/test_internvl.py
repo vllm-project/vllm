@@ -9,8 +9,8 @@ from transformers import AutoConfig
 from vllm.multimodal.utils import rescale_image_size
 from vllm.utils import is_cpu
 
-from ..conftest import (IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets,
-                        PromptImageInput)
+from ..conftest import (IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner,
+                        _ImageAssets)
 from .utils import check_logprobs_close
 
 pytestmark = pytest.mark.vlm

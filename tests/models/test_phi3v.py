@@ -9,7 +9,7 @@ from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
 from vllm.utils import is_cpu, is_hip
 
-from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, PromptImageInput
+from ..conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
 from .utils import check_logprobs_close
 
 pytestmark = pytest.mark.vlm
