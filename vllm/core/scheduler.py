@@ -573,13 +573,17 @@ class Scheduler:
                     curr_loras.remove(seq_group.lora_int_id)
 
                 # Determine victim sequence
+                cont_loop = True
                 if running_queue:
                     # Preempt the lowest-priority sequence group.
                     victim_seq_group = running_queue.pop()
                 else:
                     # No other sequence group can be preempted.
                     # Preempt the current sequence group.
+                    # Note: This is also where we stop this loop
+                    # (since there is nothing else to preempt)
                     victim_seq_group = seq_group
+                    cont_loop = False
 
                 # With async postprocessor, before preempting a sequence
                 # we need to ensure it has no pending async postprocessor
@@ -590,8 +594,7 @@ class Scheduler:
                         request_id=victim_seq_group.request_id)
 
                     # It may be that the async pending "victim_seq_group"
-                    # becomes finished, in which case we simply free its
-                    # memory
+                    # becomes finished, in which case we simply free it
                     if victim_seq_group.is_finished():
                         self._free_finished_seq_group(victim_seq_group)
                         do_preempt = False
@@ -605,7 +608,7 @@ class Scheduler:
                     else:
                         swapped_out.append(victim_seq_group)
 
-                if not running_queue:
+                if not cont_loop:
                     break
             else:
                 self._append_slots(seq_group, blocks_to_copy)

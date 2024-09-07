@@ -57,14 +57,12 @@ def test_chunked_prefill_recompute(
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
 
-    with vllm_runner(
-            model,
-            dtype=dtype,
-            max_num_batched_tokens=max_num_batched_tokens,
-            enable_chunked_prefill=enable_chunked_prefill,
-            max_num_seqs=max_num_seqs,
-            worker_use_ray=worker_use_ray,
-    ) as vllm_model:
+    with vllm_runner(model,
+                     dtype=dtype,
+                     max_num_batched_tokens=max_num_batched_tokens,
+                     enable_chunked_prefill=enable_chunked_prefill,
+                     max_num_seqs=max_num_seqs,
+                     worker_use_ray=worker_use_ray) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
         assert (vllm_model.model.llm_engine.scheduler[0].artificial_preempt_cnt
                 < ARTIFICIAL_PREEMPTION_MAX_CNT)
