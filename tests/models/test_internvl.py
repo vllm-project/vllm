@@ -21,7 +21,7 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "cherry_blossom":
     "<|im_start|>User\n<image>\nWhat is the season?<|im_end|>\n<|im_start|>Assistant\n",  # noqa: E501
 })
-HF_MULTIIMAGE_IMAGE_PROMPT = "Image-1: <image>\nImage-2: <image>\nDescribe these images.<|end|>\n<|assistant|>\n"  # noqa: E501
+HF_MULTIIMAGE_IMAGE_PROMPT = "<|im_start|>User\nImage-1: <image>\nImage-2: <image>\nDescribe the two images in detail.<|im_end|>\n<|im_start|>Assistant\n"  # noqa: E501
 
 models = [
     "OpenGVLab/InternVL2-1B",
@@ -300,7 +300,7 @@ def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
         # Single-scale, batched
         [1.0, 1.0, 1.0],
         # Multi-scale
-        [0.25, 0.5, 1.0],
+        [0.5, 0.75, 1.0],
     ],
 )
 @pytest.mark.parametrize("dtype", [target_dtype])
