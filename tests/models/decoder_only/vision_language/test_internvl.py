@@ -10,7 +10,7 @@ from vllm.multimodal.utils import rescale_image_size
 from vllm.utils import is_cpu
 
 from ....conftest import (IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner,
-                        _ImageAssets)
+                          _ImageAssets)
 from ...utils import check_logprobs_close
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
