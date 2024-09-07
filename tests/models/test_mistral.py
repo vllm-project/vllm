@@ -41,3 +41,43 @@ def test_models(
         name_0="hf",
         name_1="vllm",
     )
+
+
+@pytest.mark.parametrize("model", MODELS[1:])
+@pytest.mark.parametrize("dtype", ["bfloat16"])
+@pytest.mark.parametrize("max_tokens", [64])
+@pytest.mark.parametrize("num_logprobs", [5])
+def test_mistral_format(
+    vllm_runner,
+    example_prompts,
+    model: str,
+    dtype: str,
+    max_tokens: int,
+    num_logprobs: int,
+) -> None:
+    with vllm_runner(
+            model,
+            dtype=dtype,
+            tokenizer_mode="auto",
+            load_format="safetensors",
+            config_format="hf",
+    ) as hf_format_model:
+        hf_format_outputs = hf_format_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs)
+
+    with vllm_runner(
+            model,
+            dtype=dtype,
+            tokenizer_mode="mistral",
+            load_format="mistral",
+            config_format="mistral",
+    ) as mistral_format_model:
+        mistral_format_outputs = mistral_format_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs)
+
+    check_logprobs_close(
+        outputs_0_lst=hf_format_outputs,
+        outputs_1_lst=mistral_format_outputs,
+        name_0="hf",
+        name_1="mistral",
+    )
