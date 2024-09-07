@@ -12,10 +12,11 @@ from typing import (
     Optional,
     Sequence,
     Union,
+    Any,
 )
 from transformers.tokenization_utils import PreTrainedTokenizer
 
-
+# TODO: now use tiktoken, but I believe it should be replaced with tokenizer in huggingface
 import tiktoken
 
 from tiktoken.load import load_tiktoken_bpe
@@ -105,6 +106,16 @@ class LlamaVLTokenizer:
         print("need to replace tokenizer with official release")
         print("warning: recheck add bos and add eos of encode function")
 
+         # the following attributes are set to fit VLLM's design (copied from MistralTokenizer)
+        self.is_fast = False
+        self.chat_template = True
+        self.all_special_ids: List[Any] = []
+        self.all_special_tokens: List[Any] = []
+        self.all_special_tokens_extended: List[Any] = []
+
+    def get_added_vocab(self) -> List[str]:
+        return []
+
     def encode(
         self,
         s: str,
@@ -155,19 +166,26 @@ class LlamaVLTokenizer:
         if eos:
             t.append(self.eos_id)
         return t
+    
+    def convert_ids_to_tokens(
+            self,
+            tokens: List[int],
+            skip_special_tokens: Optional[bool] = True) -> List[str]:
+        # TODO(Patrick) - potentially allow special tokens to not be skipped
+        assert (
+            skip_special_tokens
+        ), "Skipping special tokens is not supported for Mistral tokenizers."
 
-    def decode(self, t: Sequence[int]) -> str:
-        """
-        Decodes a list of token IDs into a string.
+        # assert isinstance(self.tokenizer,
+        #                   (Tekkenizer, SentencePieceTokenizer)), type(
+        #                       self.tokenizer)
 
-        Args:
-            t (List[int]): The list of token IDs to be decoded.
-
-        Returns:
-            str: The decoded string.
-        """
-        # Typecast is safe here. Tiktoken doesn't do anything list-related with the sequence.
-        return self.model.decode(cast(List[int], t))
+        # TODO: handle skip_special_tokens
+        # TODO: self.model.decode returns a string, but the interface expects a list of words
+        return [self.model.decode(tokens)]
+    
+    def convert_tokens_to_string(self, tokens: List[str]) -> str:
+        return "".join(tokens)
 
     @staticmethod
     def _split_whitespaces_or_nonwhitespaces(
@@ -198,3 +216,6 @@ class LlamaVLTokenizer:
     @classmethod
     def from_pretrained(cls, model_path: str) -> "LlamaVLTokenizer":
         return cls(os.path.join(model_path, "tokenizer.model"))
+    
+    def __len__(self):
+        return self.n_words

@@ -21,8 +21,11 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from .interfaces import SupportsMultiModal
@@ -1406,7 +1409,7 @@ class CrossAttentionTransformerText(torch.nn.Module):
         self.norm = RMSNorm(args.dim, eps=args.norm_eps)
 
         # output layer
-        self.output = nn.Linear(args.dim, args.vocab_size, bias=False)
+        # self.output = nn.Linear(args.dim, args.vocab_size, bias=False)
         # self.output = ColumnParallelLinear(
         #     args.dim, args.vocab_size, bias=False, init_method=lambda x: x
         # )
@@ -1549,9 +1552,10 @@ class CrossAttentionTransformerText(torch.nn.Module):
             )
 
         h = self.norm(h)
-        output = F.linear(h, self.output.weight)
+        return h
+        # output = F.linear(h, self.output.weight)
         # output = gather_from_tensor_model_parallel_region(output)
-        return output.float()
+        # return output.float()
 
     def _get_xattn_mask(
         self,
@@ -1846,10 +1850,20 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
             VariableSizeImageTransform(size=args.vision_chunk_size),
             max_num_chunks=args.vision_max_num_chunks,
         )
+        self.lm_head = ParallelLMHead(
+            args.vocab_size,
+            args.dim,
+            org_num_embeddings=args.vocab_size,
+            padding_size=DEFAULT_VOCAB_PADDING_SIZE,
+            quant_config=quant_config,
+        )
+        self.logits_processor = LogitsProcessor(args.dim, args.vocab_size)
+        self.sampler = Sampler()
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         state_dict = {name: weight for name, weight in weights}
         state_dict.pop('text_model.rope.freqs')
+        state_dict['lm_head.weight'] = state_dict.pop('text_model.output.weight')
         self.load_state_dict(state_dict, strict=True)
 
     def _parse_and_validate_image_input(
@@ -1910,6 +1924,24 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
             raise NotImplementedError
 
         raise AssertionError("This line should be unreachable.")
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
+        logits = self.logits_processor(self.lm_head, hidden_states,
+                                       sampling_metadata)
+        return logits
+    
+    def sample(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[SamplerOutput]:
+        next_tokens = self.sampler(logits, sampling_metadata)
+        return next_tokens
+
 
     def forward(
         self,
@@ -2048,31 +2080,3 @@ def _pad_masks(
                 ].fill_(0.0)
 
     return out_masks
-
-
-
-# def _encode_content(
-#         self, content: InterleavedTextAttachment, bos: bool = False
-#     ) -> Tuple[List[int], List[PIL_Image.Image]]:
-#         tokens = []
-#         images = []
-
-#         added_bos = False
-
-#         def _process(c):
-#             nonlocal added_bos
-
-#             if isinstance(c, str):
-#                 tokens.extend(
-#                     self.tokenizer.encode(c, bos=False if added_bos else bos, eos=False)
-#                 )
-#                 added_bos = True
-#             elif isinstance(c, ImageMedia):
-#                 tokens.append(self.vision_token)
-#                 images.append(c.image)
-
-#         if isinstance(content, str):
-#             _process(content)
-#         elif isinstance(content, list):
-#             for c in content:
-#                 _process(c)
