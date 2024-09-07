@@ -584,6 +584,9 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
             fused_marlin_moe)
 
+        # The input must currently be float16
+        x = x.half()
+
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
