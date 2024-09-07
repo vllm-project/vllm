@@ -585,6 +585,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             fused_marlin_moe)
 
         # The input must currently be float16
+        orig_dtype = x.dtype
         x = x.half()
 
         topk_weights, topk_ids = FusedMoE.select_experts(
@@ -610,4 +611,4 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             topk_ids,
             w1_scale=layer.w13_scales,
             w2_scale=layer.w2_scales,
-        )
+        ).to(orig_dtype)
