@@ -186,6 +186,11 @@ class BaseModelLoader(ABC):
         self.load_config = load_config
 
     @abstractmethod
+    def download_model(self, model_config: ModelConfig) -> None:
+        """Download a model so that it can be immediately loaded."""
+        raise NotImplementedError
+
+    @abstractmethod
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
                    lora_config: Optional[LoRAConfig],
@@ -193,7 +198,7 @@ class BaseModelLoader(ABC):
                    scheduler_config: SchedulerConfig,
                    cache_config: CacheConfig) -> nn.Module:
         """Load a model with the given configurations."""
-        ...
+        raise NotImplementedError
 
 
 class DefaultModelLoader(BaseModelLoader):
@@ -335,6 +340,11 @@ class DefaultModelLoader(BaseModelLoader):
             weights_iterator = _xla_weights_iterator(weights_iterator)
         return weights_iterator
 
+    def download_model(self, model_config: ModelConfig) -> None:
+        self._prepare_weights(model_config.model,
+                              model_config.revision,
+                              fall_back_to_pt=True)
+
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
                    lora_config: Optional[LoRAConfig],
@@ -376,6 +386,9 @@ class DummyModelLoader(BaseModelLoader):
         if load_config.model_loader_extra_config:
             raise ValueError(f"Model loader extra config is not supported for "
                              f"load format {load_config.load_format}")
+
+    def download_model(self, model_config: ModelConfig) -> None:
+        pass  # Nothing to download
 
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
@@ -466,6 +479,12 @@ class TensorizerLoader(BaseModelLoader):
 
                 model = load_with_tensorizer(tensorizer_config, **extra_kwargs)
         return model.eval()
+
+    def download_model(self, model_config: ModelConfig) -> None:
+        self.tensorizer_config.verify_with_model_config(model_config)
+
+        with self.tensorizer_config.open_stream():
+            pass
 
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
@@ -567,6 +586,9 @@ class ShardedStateLoader(BaseModelLoader):
                 revision,
                 ignore_patterns=self.load_config.ignore_patterns,
             )
+
+    def download_model(self, model_config: ModelConfig) -> None:
+        self._prepare_weights(model_config.model, model_config.revision)
 
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
@@ -995,6 +1017,9 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     set_weight_attrs(
                         param, {"matmul_state": [None] * len(quant_states)})
 
+    def download_model(self, model_config: ModelConfig) -> None:
+        self._prepare_weights(model_config.model, model_config.revision)
+
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
                    lora_config: Optional[LoRAConfig],
@@ -1069,6 +1094,9 @@ class GGUFModelLoader(BaseModelLoader):
     ) -> Generator[Tuple[str, torch.Tensor], None, None]:
         return gguf_quant_weights_iterator(model_name_or_path,
                                            gguf_to_hf_name_map)
+
+    def download_model(self, model_config: ModelConfig) -> None:
+        self._prepare_weights(model_config.model)
 
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
