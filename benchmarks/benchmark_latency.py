@@ -14,13 +14,21 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import PromptInputs
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.utils import FlexibleArgumentParser
+from vllm.lora.request import LoRARequest
 
 
 def main(args: argparse.Namespace):
     print(args)
 
+    lora_kwargs={}
+    if args.lora_path is not None:
+        lora_kwargs['enable_lora']=True
+        lora_kwargs['max_loras']=args.max_loras
+        lora_kwargs['max_lora_rank']=args.max_lora_rank
+
     # NOTE(woosuk): If the request cannot be processed in a single batch,
     # the engine will automatically process the request in multiple batches.
+    
     llm = LLM(
         model=args.model,
         speculative_model=args.speculative_model,
@@ -47,6 +55,7 @@ def main(args: argparse.Namespace):
         distributed_executor_backend=args.distributed_executor_backend,
         otlp_traces_endpoint=args.otlp_traces_endpoint,
         enable_prefix_caching=args.enable_prefix_caching,
+        **lora_kwargs
     )
 
     sampling_params = SamplingParams(
@@ -58,6 +67,9 @@ def main(args: argparse.Namespace):
         max_tokens=args.output_len,
     )
     print(sampling_params)
+
+    lora_request=LoRARequest(lora_name='lora', lora_int_id=0, lora_path=args.lora_path) if args.lora_path else None
+
     dummy_prompt_token_ids = np.random.randint(10000,
                                                size=(args.batch_size,
                                                      args.input_len))
@@ -76,7 +88,8 @@ def main(args: argparse.Namespace):
                         str(profile_dir))) as p:
                 llm.generate(dummy_inputs,
                              sampling_params=sampling_params,
-                             use_tqdm=False)
+                             use_tqdm=False,
+                             lora_request=lora_request)
             print(p.key_averages())
         else:
             start_time = time.perf_counter()
@@ -128,6 +141,9 @@ if __name__ == '__main__':
         description='Benchmark the latency of processing a single batch of '
         'requests till completion.')
     parser.add_argument('--model', type=str, default='facebook/opt-125m')
+    parser.add_argument('--lora-path', type=str, default=None)
+    parser.add_argument('--max-loras', type=int, default=4)
+    parser.add_argument('--max-lora-rank', type=int, default=64)
     parser.add_argument('--speculative-model', type=str, default=None)
     parser.add_argument('--num-speculative-tokens', type=int, default=None)
     parser.add_argument('--speculative-draft-tensor-parallel-size',

@@ -2,8 +2,6 @@
 
 """
 import pytest
-from time import time
-import warnings
 from tests.models.utils import check_logprobs_close
 from vllm.lora.request import LoRARequest
 
@@ -48,38 +46,6 @@ def test_llama3_models(
         name_1="vllm",
     )
 
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("adapter_name", LORAS)
-@pytest.mark.parametrize("dtype", ["bfloat16"])
-@pytest.mark.parametrize("max_tokens", [64])
-@pytest.mark.parametrize("num_logprobs", [5])
-def test_llama3_loras_benchmarks(
-    vllm_runner,
-    example_prompts,
-    model: str,
-    adapter_name: str,
-    dtype: str,
-    max_tokens: int,
-    num_logprobs: int,
-) -> None:
-    import os
-    os.environ['CUDA_VISIBLE_DEVICES']="3"
-    
-    with vllm_runner(model, dtype=dtype, enable_lora=True, gpu_memory_utilization=0.5) as vllm_lora_model:
-        for i in range(len(example_prompts)):
-            lora_request=None if i%2==0 else LoRARequest('lora',1,lora_local_path=adapter_name)
-            start=time()
-            vllm_lora_model.generate_greedy_logprobs(
-            [example_prompts[i]], max_tokens, num_logprobs, lora_requests=lora_request)
-            stop=time()
-            inference_time=stop-start
-            msg=f"{lora_request=} {inference_time}"
-            with warnings.catch_warnings():
-                # This ensures that repeated warnings are shown
-                # in the output, not just the first occurrence
-                warnings.simplefilter("always")
-                warnings.warn(msg)
-
                 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("adapter_name", LORAS)
@@ -97,8 +63,6 @@ def test_llama3_loras_switches(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-    import os
-    os.environ['CUDA_VISIBLE_DEVICES']="2"
     
     with vllm_runner(model, dtype=dtype, enable_lora=True, gpu_memory_utilization=0.5) as vllm_lora_model:
         vllm_outputs = []
@@ -125,5 +89,3 @@ def test_llama3_loras_switches(
         name_0="peft_hf",
         name_1="vllm_lora",
     )
-
-# AI has made significant progress since its inception in 1950. Here are some major milestones in its development from 1950 to 2020:\n1. **1950s:** The Dartmouth Summer Research Project on Artificial Intelligence (1956) led by John McCarthy, Marvin Minsky, Nathaniel Rochester, and' 
