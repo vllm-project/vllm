@@ -9,6 +9,7 @@ from vllm.sampling_params import SamplingParams
 
 # Success string used for RPC instructions.
 VLLM_RPC_SUCCESS_STR = "SUCCESS"
+VLLM_RPC_FAILED_STR = "FAILED"
 
 
 @dataclass
@@ -19,6 +20,13 @@ class RPCGenerateRequest:
     lora_request: Optional[LoRARequest] = None
     trace_headers: Optional[Mapping[str, str]] = None
     prompt_adapter_request: Optional[PromptAdapterRequest] = None
+
+
+@dataclass
+class RPCGenerateError:
+    request_id: str
+    is_errored: bool
+    exception: BaseException
 
 
 @dataclass

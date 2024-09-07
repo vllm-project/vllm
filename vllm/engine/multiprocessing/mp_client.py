@@ -12,12 +12,10 @@ from zmq.asyncio import Socket
 
 from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
-# yapf: disable
 from vllm.engine.multiprocessing import (RPC_REQUEST_TYPE,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCGenerateRequest, RPCStartupRequest,
                                          RPCUtilityRequest)
-# yapf: enable
 from vllm.envs import VLLM_RPC_GET_DATA_TIMEOUT_MS
 from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
@@ -29,6 +27,7 @@ from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 
 logger = init_logger(__name__)
 
+CHECK_HEALTH_INTERVAL_S = 10.
 
 class MPClientClosedError(Exception):
     """Exception class raised when the client is used post-close.
@@ -46,12 +45,13 @@ class MPEngineClient:
     def __init__(self, ipc_path: str):
         self.context = zmq.asyncio.Context()
         self._errored = False
+        self._errored_with: Optional[BaseException] = None
 
-        # Send RPCGenerateRequest to the MPLLMEngine.
+        # Send RPCGenerateRequest to the MQLLMEngine.
         self.input_socket: Socket = self.context.socket(zmq.constants.PUSH)
         self.input_socket.connect(f"{ipc_path}_input_socket")
 
-        # Receive streams of RequestOutput from the MPLLMEngine.
+        # Receive streams of RequestOutput from the MQLLMEngine.
         self.output_socket: Socket = self.context.socket(zmq.constants.PULL)
         self.output_socket.connect(f"{ipc_path}_output_socket")
 
@@ -75,8 +75,18 @@ class MPEngineClient:
         finally:
             socket.close(linger=0)
 
+    async def run_check_health_loop(self):
+        # Check health periodically.
+        while True:
+            await asyncio.sleep(CHECK_HEALTH_INTERVAL_S)
+            try:
+                await self._check_health_rpc(self.health_socket)
+            except Exception as e:
+                self._errored = True
+                self._errored_with = e
+
     async def run_output_handler(self):
-        # Stream lists of RequestOutput from MPLLMEngine.
+        # Stream lists of RequestOutput from MQLLMEngine.
         while True:
             message: Frame = await self.output_socket.recv(copy=False)
             request_outputs: List[RequestOutput] = pickle.loads(message.buffer)
@@ -120,7 +130,7 @@ class MPEngineClient:
                 enable_lora=bool(await self._get_lora_config_rpc(socket)),
             )
 
-            # Notify MPLLMEngine client is ready to start sending requests.
+            # Notify MQLLMEngine client is ready to start sending requests.
             await self._notify_ready(socket)
 
     def close(self):
@@ -145,7 +155,7 @@ class MPEngineClient:
 
         # Make sure the server responds
         if await socket.poll(timeout=VLLM_RPC_GET_DATA_TIMEOUT_MS) == 0:
-            raise TimeoutError("Server didn't reply within "
+            raise TimeoutError("RPCServer didn't reply within "
                                f"{VLLM_RPC_GET_DATA_TIMEOUT_MS} ms")
 
         # Await the data from the Server.
@@ -168,25 +178,29 @@ class MPEngineClient:
 
         return data
 
-    async def _send_one_way_rpc_request(self, request: RPC_REQUEST_TYPE,
-                                        socket: Socket):
+    async def _send_one_way_rpc_request(
+        self, request: RPC_REQUEST_TYPE, 
+        socket: Socket, 
+        await_ack: bool = False, 
+        error_message: str = "RPCRequest Failed."):
         """Send one-way RPC request to trigger an action."""
 
         await socket.send_multipart((cloudpickle.dumps(request), ))
 
-        # TODO: is there a way to ack this if we are using the input_socket?
-        # I don't think so, b/c we are using PUSH/PULL w/out identities so no
-        # way to preserve order.
+        if await_ack:
+            await self._ack_one_way_rpc_request(
+                expected_str=VLLM_RPC_SUCCESS_STR,
+                timeout=VLLM_RPC_GET_DATA_TIMEOUT_MS,
+                error_message=error_message,
+                socket=socket)
+
 
     async def _ack_one_way_rpc_request(
-        self,
-        timeout: int,
-        expected_str: str,
-        error_message: str,
-        socket: Socket,
-    ):
+        self, timeout: int, expected_str: str, error_message: str, socket: Socket):
+        "Await acknoledgement that a request succeeded."
+
         if await socket.poll(timeout=timeout) == 0:
-            raise TimeoutError(f"MPLLMEngine didn't reply within {timeout}ms")
+            raise TimeoutError(f"MQLLMEngine didn't reply within {timeout}ms")
 
         frame = await socket.recv(copy=False)
         response = pickle.loads(frame.buffer)
@@ -212,22 +226,27 @@ class MPEngineClient:
     async def _wait_for_server_rpc(self, socket: Socket):
         """Wait for the RPCServer to start up."""
 
-        # Readiness probe.
-        request = RPCStartupRequest.IS_SERVER_READY
-        await socket.send_multipart((cloudpickle.dumps(request), ))
+        self._send_one_way_rpc_request(
+            request=RPCStartupRequest.IS_SERVER_READY,
+            socket=socket,
+            await_ack=True,
+            error_message="Unable to start RPC Server")
 
-        # Raises TimeoutError if not ack, causing a retry.
-        await self._ack_one_way_rpc_request(
-            expected_str=VLLM_RPC_SUCCESS_STR,
-            timeout=VLLM_RPC_GET_DATA_TIMEOUT_MS,
-            error_message="Unable to start RPC Server",
-            socket=socket)
+    async def _check_health_rpc(self, socket: Socket):
+        """Get current health status from the RPCServer"""
+
+        self._send_one_way_rpc_request(
+            request=RPCUtilityRequest.CHECK_HEALTH,
+            socket=socket,
+            await_ack=True,
+            error_message="Check health failed.")
 
     async def _notify_ready(self, socket: Socket):
         """Get the RPCServer that the RPCClient is ready"""
 
         await self._send_one_way_rpc_request(
-            request=RPCStartupRequest.CLIENT_IS_READY, socket=socket)
+            request=RPCStartupRequest.CLIENT_IS_READY,
+            socket=socket)
 
     async def _get_model_config_rpc(self, socket: Socket) -> ModelConfig:
         """Get the ModelConfig object from the RPC Server"""
@@ -349,6 +368,8 @@ class MPEngineClient:
 
             while not finished:
                 request_output = await queue.get()
+                # todo: convert message to include status of whether the engine is errored
+                # such that we dont need another RPC call
                 if isinstance(request_output, BaseException):
                     finished = True
                     # On exception, check if the server is still healthy
@@ -369,23 +390,6 @@ class MPEngineClient:
             # Request was canceled by the client.
             if not finished and not self._errored:
                 await self.abort(request_id)
-
-    async def check_health(self) -> None:
-        """Raise if unhealthy"""
-
-        await self._send_one_way_rpc_request(
-            request=RPCUtilityRequest.CHECK_HEALTH, socket=self.input_socket)
-
-        # Await acknowledgement from MPLLMEngine.
-        # Note: these requests are not necessarily serial.
-        # I.e. if two clients A, B send CHECK_HEALTH, the
-        # response to A could actually be the call send by B.
-        # TODO: is this bad?
-        await self._ack_one_way_rpc_request(
-            timeout=VLLM_RPC_GET_DATA_TIMEOUT_MS,
-            expected_str=VLLM_RPC_SUCCESS_STR,
-            error_message="Check health timeout.",
-            socket=self.health_socket)
 
     async def encode(self, *args,
                      **kwargs) -> AsyncGenerator[EmbeddingRequestOutput, None]:

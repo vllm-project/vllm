@@ -6,12 +6,14 @@ import cloudpickle
 import ray
 import zmq
 
-from vllm import AsyncEngineArgs, AsyncLLMEngine, LLMEngine
+from vllm import AsyncEngineArgs, LLMEngine
+from vllm.executor.executor_base import get_executor_cls
 from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
-from vllm.engine.multiprocessing import (VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
-                                         RPCGenerateRequest, RPCStartupRequest,
-                                         RPCUtilityRequest)
+from vllm.engine.multiprocessing import (VLLM_RPC_SUCCESS_STR, VLLM_RPC_FAILED_STR,
+                                         RPCStartupRequest, RPCUtilityRequest,
+                                         RPCGenerateRequest, RPCGenerateError,
+                                         RPCAbortRequest)
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
@@ -24,9 +26,18 @@ logger = init_logger(__name__)
 POLLING_TIMEOUT_MS = 10000
 
 HEALTHY_RESPONSE = (pickle.dumps(VLLM_RPC_SUCCESS_STR), )
+UNHEALTHY_RESPONSE = (pickle.dumps(VLLM_RPC_FAILED_STR), )
+REQUEST_OUTPUTS_T = Union[List[RequestOutput], Tuple[str, RPCGenerateError]]
 
+class MQEngineDeadError(RuntimeError):
+    pass
 
-class MPLLMEngine:
+ENGINE_DEAD_ERROR = MQEngineDeadError(
+    "Engine loop is not running. Inspect the output to find "
+    "the stacktrace of the error that caused the engine loop "
+    "to stop (MQEngineDeadError).")
+
+class MQLLMEngine:
     """A multiprocessing wrapper for :class:`LLMEngine`.
 
     This class is used to wrap the :class:`LLMEngine` class to enable use
@@ -39,37 +50,34 @@ class MPLLMEngine:
     The self.engine_loop checks the input_socket for new requests,
     adds them to the LLMEngine if there are any, calls the internal
     :class:`LLMEngine.step()` and sends the RequestOutputs back over
-    the output_socket. 
+    the output_socket.
+
+    If use_async_sockets is set, the logic associated with reading new
+    requests from the socket and sending data to the socket is passed
+    as a callback to the llm_engine, which calls the logic asynchronously
+    such that the IPC can be overlapped with the GPU.
 
     Args:
-        worker_use_ray: Whether to use Ray for model workers. Required for
-            distributed execution. Should be the same as
-            `parallel_config.worker_use_ray`.
-        engine_use_ray: Whether to make LLMEngine a Ray actor. If so, the
-            async frontend will be executed in a separate process as the
-            model workers.
-        async_engine_args: AsyncLLMEngine args
+        ipc_path: Base path for zeromq interprocess messaging
+        use_async_sockets: Whether to make send/recv async with GPU
         log_requests: Whether to log the requests.
+        *args: Arguments for :class:`LLMEngine`.
+        **kwargs: Arguments for :class:`LLMEngine`.
     """
 
-    _engine_class: Type[LLMEngine] = LLMEngine
-
     def __init__(self,
-                 worker_use_ray: bool,
-                 engine_use_ray: bool,
                  *args,
                  ipc_path: str,
                  use_async_sockets: bool,
                  log_requests: bool = True,
                  **kwargs) -> None:
-
-        if engine_use_ray:
-            raise NotImplementedError("Not yet supported.")
-
-        self.worker_use_ray = worker_use_ray
-        self.engine_use_ray = engine_use_ray
+        self.engine = LLMEngine(*args, **kwargs)
         self.log_requests = log_requests
-        self.engine = self._init_engine(*args, **kwargs)
+
+        self.use_async_sockets = use_async_sockets
+        if self.use_async_sockets:
+            self.engine.process_request_outputs_callback = \
+                self._async_socket_engine_callback
 
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
 
@@ -88,27 +96,26 @@ class MPLLMEngine:
         # IPC path for the data socket.
         self.data_ipc_path = f"{ipc_path}_data_socket"
 
-        # Indicates if we do socket read/write async with
-        # the GPU forward pass
-        self.use_async_sockets = use_async_sockets
+        # Error state.
+        self._errored = False
 
     @classmethod
     def from_engine_args(cls, engine_args: AsyncEngineArgs,
                          usage_context: UsageContext, ipc_path: str):
-        """Creates an MPLLMEngine from the engine arguments."""
+        """Creates an MQLLMEngine from the engine arguments."""
 
         engine_config = engine_args.create_engine_config()
 
         if engine_args.engine_use_ray:
-            from vllm.executor import ray_utils
-            ray_utils.assert_ray_available()
+            raise NotImplementedError(
+                "--engine-use-ray is not supported for MQLLMEngine. "
+                "Launch with --disable-frontend-multiprocessing if you "
+                "need to deploy with this flag (not recommended).")
 
-        # TODO: better abstraction?
-        executor_class = AsyncLLMEngine._get_executor_cls(engine_config)
+        executor_class = get_executor_cls(engine_config)
 
         return cls(
             executor_class.uses_ray,
-            engine_args.engine_use_ray,
             **engine_config.to_dict(),
             executor_class=executor_class,
             log_requests=not engine_args.disable_log_requests,
@@ -124,27 +131,6 @@ class MPLLMEngine:
         self.health_socket.close()
         self.ctx.destroy(linger=0)
         del self.engine
-
-    def _init_engine(self, *args,
-                     **kwargs) -> Union[LLMEngine, "ray.ObjectRef"]:
-        """Initialize the LLMEngine"""
-
-        if not self.engine_use_ray:
-            engine_class = self._engine_class
-        elif self.worker_use_ray:
-            engine_class = ray.remote(num_cpus=0)(self._engine_class).remote
-        else:
-            raise NotImplementedError("Not supported yet!")
-        return engine_class(*args, **kwargs)
-
-    def run_background_loop(self):
-        """Entrypoint that kicks off the background processing loop."""
-
-        # Allow RPCClient to query data in startup phase.
-        self.run_startup_loop()
-
-        # Kick off core processing loop.
-        self.run_engine_loop()
 
     @contextmanager
     def make_data_socket(
@@ -195,65 +181,74 @@ class MPLLMEngine:
                     socket.send_multipart((identity, pickle.dumps(e)),
                                           copy=False)
 
-    def run_engine_loop(self) -> None:
-        if self.use_async_sockets:
-            self.engine.process_request_outputs_callback = \
-                self.stream_outputs_and_get_inputs
-
+    def run_engine_loop(self):
+        """Entrypoint for core busy loop"""
         while True:
-            # Block until there is a new request.
-            if not self.engine.has_unfinished_requests():
-                self.wait_for_new_input()
+            # Poll until there is work to do.
+            self.poll_for_work()
 
-            # Handle any new input from the input socket.
-            self.maybe_handle_new_input()
+            # Handle any new data.
+            self.handle_new_input()
 
             # Engine step.
-            try:
-                request_outputs = self.engine.step()
-            except Exception as e:
-                # Fail all requests with this exception.
-                request_outputs = (None, e)
+            request_outputs = self.engine_step()
 
-            if not self.use_async_sockets:
-                # Stream results to output socket.
-                self.send_outputs(request_outputs)
+            # Stream results if neeeded
+            if (not self.use_async_sockets or 
+                isinstance(request_outputs, RPCGenerateError)):
+                self._send_request_outputs(request_outputs)
 
-    def wait_for_new_input(self):
-        while self.input_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
-            logger.debug("Waiting for new request.")
 
-    def send_outputs(self, request_outputs: Union[List[RequestOutput],
-                                                  Tuple[Optional[str],
-                                                        BaseException]]):
-        output_bytes = pickle.dumps(request_outputs)
-        self.output_socket.send_multipart((output_bytes, ), copy=False)
+    def poll_for_work(self):
+        """Poll the socket until there is work to do."""
+        if not self.engine.has_unfinished_requests():
+            while self.input_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
+                logger.debug("Waiting for new requests.")
 
-    def stream_outputs_and_get_inputs(self,
-                                      request_outputs: List[RequestOutput]):
-        self.send_outputs(request_outputs)
-        self.maybe_handle_new_input()
 
-    def ack_check_health(self):
-        self.health_socket.send_multipart(HEALTHY_RESPONSE, copy=False)
+    def engine_step(self) -> REQUEST_OUTPUTS_T:
+        """Engine step wrapper with error handling."""
+        try:
+            request_outputs = self.engine.step()    
+        except Exception as e:
+            self._errored = True
+            request_outputs = RPCGenerateError(request_id=None,
+                                               is_errored=self._errored,
+                                               exception=e)
+        finally:
+            return request_outputs
 
-    def maybe_handle_new_input(self):
-        """Handle new input with non-blocking IO"""
-        while self.input_socket.poll(timeout=0) != 0:
-            message = self.input_socket.recv(copy=False)
-            request = cloudpickle.loads(message.buffer)
+    def handle_new_input(self):
+        """Handle new input from the socket"""
+        try:
+            while self.input_socket.poll(timeout=0) != 0:
+                message = self.input_socket.recv(copy=False)
+                request = cloudpickle.loads(message.buffer)
 
-            if isinstance(request, RPCGenerateRequest):
-                self._handle_generate_request(request)
-            elif isinstance(request, RPCAbortRequest):
-                self._handle_abort_request(request)
-            elif isinstance(request, RPCUtilityRequest):
-                self._handle_utility_request(request)
-            else:
-                raise ValueError(f"Unknown RPCRequest: {request}")
+                if isinstance(request, RPCGenerateRequest):
+                    # Exceptions in RPCGenerateRequest will be caught
+                    # by the handler, meaning any recoverable exceptions
+                    # to only impact that request (and not crash the server)
+                    self._handle_generate_request(request)
+                elif isinstance(request, RPCAbortRequest):
+                    self._handle_abort_request(request)
+                elif isinstance(request, RPCUtilityRequest):
+                    self._handle_utility_request(request)
+                else:
+                    raise ValueError(f"Unknown RPCRequest: {request}")
+
+        except Exception as e:
+            self._errored = True
+            logger.exception(repr(e))
+            self._send_unhealthy()
 
     def _handle_generate_request(self, request: RPCGenerateRequest):
         request_id = request.request_id
+
+        if self._errored:
+            e = RPCGenerateError(request_id, self._errored, ENGINE_DEAD_ERROR)
+            self._send_request_outputs(e)
+
         try:
             self.engine.add_request(
                 request_id=request_id,
@@ -261,27 +256,63 @@ class MPLLMEngine:
                 params=request.sampling_params,
                 lora_request=request.lora_request,
                 trace_headers=request.trace_headers,
-                prompt_adapter_request=request.prompt_adapter_request,
-            )
-        except Exception as e:
+                prompt_adapter_request=request.prompt_adapter_request)
+
+            if self.log_requests:
+                logger.info("Added request %s.", request.request_id)
+
+        except Exception as err:
             self.engine.abort_request(request_id)
-            self.send_outputs((request_id, e))
+            
+            # We do not set self._errored = True here,
+            # since the error is due to an issue adding this
+            # request to the engine, rather than an issue with
+            # the engine itself.
+            e = RPCGenerateError(request_id, self._errored, err)
+            self._send_request_outputs(e)
+
 
     def _handle_abort_request(self, request: RPCAbortRequest):
         self.engine.abort_request(request.request_id)
 
-    def _handle_utility_request(self, request: RPCUtilityRequest):
+        if self.log_requests:
+            logger.info("Aborted request %s.", request.request_id)
+
+
+    def _handle_utility_request(self, request: RPCUtilityRequest):        
         if request == RPCUtilityRequest.DO_LOG_STATS:
             self.engine.do_log_stats()
         elif request == RPCUtilityRequest.CHECK_HEALTH:
             self.engine.check_health()
-            self.ack_check_health()
+            self._send_healthy()
+
+
+    def _send_request_outputs(self, request_outputs: REQUEST_OUTPUTS_T):
+        """Send List of RequestOutput to RPCClient."""
+
+        output_bytes = pickle.dumps(request_outputs)
+        self.output_socket.send_multipart((output_bytes, ), copy=False)
+
+
+    def _send_healthy(self):
+        """Send HEALTHY message to RPCClient."""
+        self.health_socket.send_multipart(HEALTHY_RESPONSE, copy=False)
+    
+    def _send_unhealthy(self):
+        """Send UNHEALTHY message to RPCClient."""
+        self.health_socket.send_multipart(UNHEALTHY_RESPONSE, copy=False)
+
+    def _async_socket_engine_callback(self, request_outputs: REQUEST_OUTPUTS_T):
+        """Callback used by engine to make socket handling async with GPU."""
+        self._send_request_outputs(request_outputs)
+        self.handle_new_input()
 
 
 def run_mp_engine(engine_args: AsyncEngineArgs, usage_context: UsageContext,
                   ipc_path: str):
-    engine = MPLLMEngine.from_engine_args(engine_args=engine_args,
+    engine = MQLLMEngine.from_engine_args(engine_args=engine_args,
                                           usage_context=usage_context,
                                           ipc_path=ipc_path)
 
-    engine.run_background_loop()
+    engine.run_startup_loop()
+    engine.run_engine_loop()
