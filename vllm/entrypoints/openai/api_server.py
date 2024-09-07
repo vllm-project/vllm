@@ -21,7 +21,7 @@ import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.engine.multiprocessing.mp_client import MPEngineClient
+from vllm.engine.multiprocessing.mp_client import MQLLMEngineClient
 from vllm.engine.multiprocessing.mp_llm_engine import run_mp_engine
 from vllm.engine.protocol import AsyncEngineClient
 from vllm.entrypoints.launcher import serve_http
@@ -167,7 +167,7 @@ async def build_async_engine_client_from_engine_args(
         # Build RPCClient, which conforms to AsyncEngineClient Protocol.
         # NOTE: Actually, this is not true yet. We still need to support
         # embedding models via RPC (see TODO above)
-        mp_engine_client = MPEngineClient(ipc_path)
+        mp_engine_client = MQLLMEngineClient(ipc_path)
 
         # Start RPCServer in separate process (holds the LLMEngine).
         # the current process might have CUDA context,
