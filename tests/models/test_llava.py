@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple, Type
+from typing import List, Optional, Tuple, Type, overload
 
 import pytest
 from transformers import (AutoConfig, AutoModelForVision2Seq, AutoTokenizer,
@@ -8,10 +8,13 @@ from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 
-from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
+from ..conftest import (IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner,
+                        _ImageAssets)
 from .utils import check_logprobs_close
 
 pytestmark = pytest.mark.vlm
+
+_LIMIT_IMAGE_PER_PROMPT = 4
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "stop_sign":
@@ -52,6 +55,7 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
     return hf_output_ids, hf_output_str, out_logprobs
 
 
+@overload
 def run_test(
     hf_runner: Type[HfRunner],
     vllm_runner: Type[VllmRunner],
@@ -59,6 +63,78 @@ def run_test(
     model: str,
     *,
     size_factors: List[float],
+    dtype: str,
+    max_tokens: int,
+    num_logprobs: int,
+    tensor_parallel_size: int,
+    distributed_executor_backend: Optional[str] = None,
+):
+    ...
+
+
+@overload
+def run_test(
+    hf_runner: Type[HfRunner],
+    vllm_runner: Type[VllmRunner],
+    image_assets: _ImageAssets,
+    model: str,
+    *,
+    sizes: List[Tuple[int, int]],
+    dtype: str,
+    max_tokens: int,
+    num_logprobs: int,
+    tensor_parallel_size: int,
+    distributed_executor_backend: Optional[str] = None,
+):
+    ...
+
+
+def run_test(
+    hf_runner: Type[HfRunner],
+    vllm_runner: Type[VllmRunner],
+    image_assets: _ImageAssets,
+    model: str,
+    *,
+    size_factors: Optional[List[float]] = None,
+    sizes: Optional[List[Tuple[int, int]]] = None,
+    dtype: str,
+    max_tokens: int,
+    num_logprobs: int,
+    tensor_parallel_size: int,
+    distributed_executor_backend: Optional[str] = None,
+):
+    images = [asset.pil_image for asset in image_assets]
+
+    if size_factors is not None:
+        inputs_per_image = [(
+            [prompt for _ in size_factors],
+            [rescale_image_size(image, factor) for factor in size_factors],
+        ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
+    elif sizes is not None:
+        inputs_per_image = [(
+            [prompt for _ in sizes],
+            [image.resize(size) for size in sizes],
+        ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
+    else:
+        raise ValueError("You must provide either `size_factors` or `sizes`")
+
+    _run_test(hf_runner,
+              vllm_runner,
+              inputs_per_image,
+              model,
+              dtype=dtype,
+              max_tokens=max_tokens,
+              num_logprobs=num_logprobs,
+              tensor_parallel_size=tensor_parallel_size,
+              distributed_executor_backend=distributed_executor_backend)
+
+
+def _run_test(
+    hf_runner: Type[HfRunner],
+    vllm_runner: Type[VllmRunner],
+    inputs: List[Tuple[List[str], PromptImageInput]],
+    model: str,
+    *,
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
@@ -85,13 +161,6 @@ def run_test(
     else:
         mantis_processor = None
 
-    images = [asset.pil_image for asset in image_assets]
-
-    inputs_per_image = [(
-        [prompt for _ in size_factors],
-        [rescale_image_size(image, factor) for factor in size_factors],
-    ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
-
     # NOTE: take care of the order. run vLLM first, and then run HF.
     # vLLM needs a fresh new process without cuda initialization.
     # if we run HF first, the cuda initialization will be done and it
@@ -100,15 +169,18 @@ def run_test(
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model,
                      dtype=dtype,
+                     max_model_len=4096,
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
-                     enforce_eager=True) as vllm_model:
+                     enforce_eager=True,
+                     limit_mm_per_prompt={"image": _LIMIT_IMAGE_PER_PROMPT
+                                          }) as vllm_model:
         vllm_outputs_per_image = [
             vllm_model.generate_greedy_logprobs(prompts,
                                                 max_tokens,
                                                 num_logprobs=num_logprobs,
                                                 images=images)
-            for prompts, images in inputs_per_image
+            for prompts, images in inputs
         ]
 
     if mantis_processor is not None:
@@ -131,7 +203,7 @@ def run_test(
                                                     max_tokens,
                                                     num_logprobs=num_logprobs,
                                                     images=images)
-            for prompts, images in inputs_per_image
+            for prompts, images in inputs
         ]
 
     for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
@@ -174,6 +246,51 @@ def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
         image_assets,
         model,
         size_factors=size_factors,
+        dtype=dtype,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        tensor_parallel_size=1,
+    )
+
+
+@pytest.mark.parametrize("model", models)
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("num_logprobs", [5])
+def test_models_multiple_image_inputs(hf_runner, vllm_runner, image_assets,
+                                      model, dtype, max_tokens,
+                                      num_logprobs) -> None:
+    stop_sign = image_assets[0].pil_image
+    cherry_blossom = image_assets[1].pil_image
+
+    inputs = [(
+        [
+            "USER: <image><image>\nDescribe 2 images.\nASSISTANT:",
+            "USER: <image><image>\nDescribe 2 images.\nASSISTANT:",
+            "USER: <image><image><image><image>\nDescribe 4 images.\nASSISTANT:",  # noqa: E501
+            "USER: <image>\nWhat is the season?\nASSISTANT:",
+        ],
+        [
+            [stop_sign, cherry_blossom],
+            # Images with different sizes and aspect-ratios
+            [
+                rescale_image_size(stop_sign, 0.1),
+                stop_sign,
+            ],
+            [
+                stop_sign,
+                rescale_image_size(stop_sign, 0.25),
+                cherry_blossom.resize((183, 488)),
+                cherry_blossom.resize((488, 183))
+            ],
+            cherry_blossom,
+        ])]
+
+    _run_test(
+        hf_runner,
+        vllm_runner,
+        inputs,
+        model,
         dtype=dtype,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,

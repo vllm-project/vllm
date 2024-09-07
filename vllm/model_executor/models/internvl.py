@@ -209,7 +209,7 @@ def input_processor_for_internvl(ctx: InputContext, llm_inputs: LLMInputs):
         image_feature_size = num_blocks * num_patches
 
     elif isinstance(image_data, torch.Tensor):
-        image_feature_size = image_data.shape[0]
+        num_images, image_feature_size, hidden_size = image_data.shape
     else:
         raise TypeError(f"Invalid image type: {type(image_data)}")
 
