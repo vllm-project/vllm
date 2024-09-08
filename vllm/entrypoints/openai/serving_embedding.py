@@ -118,8 +118,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                 prompt_adapter_request,
             ) = self._maybe_get_adapters(request)
 
-            tokenizer = await self.engine_client.get_tokenizer(
-                lora_request)
+            tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
             pooling_params = request.to_pooling_params()
 

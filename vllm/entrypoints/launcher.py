@@ -92,7 +92,7 @@ def _add_shutdown_handlers(app: FastAPI, server: uvicorn.Server,
             server.should_exit = True
 
         return Response(status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
-    
+
     @app.exception_handler(MQEngineDeadError)
     async def mq_engine_dead_handler(_, __):
         """Kill the server if the mq engine is already dead. It will

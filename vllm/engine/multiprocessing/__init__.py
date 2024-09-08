@@ -9,7 +9,6 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 
 VLLM_RPC_SUCCESS_STR = "SUCCESS"
-VLLM_RPC_FAILED_STR = "FAILED"
 
 IPC_INPUT_EXT = "_input_socket"
 IPC_OUTPUT_EXT = "_output_socket"
@@ -62,7 +61,7 @@ class RPCStartupRequest(Enum):
 RPC_REQUEST_T = Union[RPCGenerateRequest, RPCAbortRequest, RPCUtilityRequest,
                       RPCStartupRequest]
 
-REQUEST_OUTPUTS_T = Union[List[RequestOutput], BaseException]
+REQUEST_OUTPUTS_T = Union[List[RequestOutput], RPCError]
 
 ENGINE_DEAD_ERROR = MQEngineDeadError(
     "Engine loop is not running. Inspect the output to find "

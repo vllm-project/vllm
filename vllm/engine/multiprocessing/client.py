@@ -14,11 +14,10 @@ from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_HEALTH_EXT, IPC_INPUT_EXT,
-                                         IPC_OUTPUT_EXT, REQUEST_OUTPUTS_T,
-                                         RPC_REQUEST_T, VLLM_RPC_SUCCESS_STR,
-                                         RPCAbortRequest, RPCError,
-                                         RPCGenerateRequest, RPCStartupRequest,
-                                         RPCUtilityRequest)
+                                         IPC_OUTPUT_EXT, RPC_REQUEST_T,
+                                         VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
+                                         RPCError, RPCGenerateRequest,
+                                         RPCStartupRequest, RPCUtilityRequest)
 from vllm.envs import VLLM_RPC_GET_DATA_TIMEOUT_MS
 from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
@@ -144,12 +143,10 @@ class MQLLMEngineClient:
         try:
             while True:
                 message: Frame = await self.output_socket.recv(copy=False)
-                request_outputs: REQUEST_OUTPUTS_T = pickle.loads(
-                    message.buffer)
+                request_outputs = pickle.loads(message.buffer)
 
-                is_error = (isinstance(request_outputs, BaseException) or
-                            isinstance(request_outputs, RPCError))
-                            
+                is_error = isinstance(request_outputs,
+                                      (BaseException, RPCError))
                 if is_error:
                     if isinstance(request_outputs, RPCError):
                         rpc_error: RPCError = request_outputs
@@ -159,12 +156,12 @@ class MQLLMEngineClient:
                         exception = rpc_error.exception
                     else:
                         # MPLLMEngine should always return an RPCError
-                        # when an issue arises. If we are here, we are in a 
+                        # when an issue arises. If we are here, we are in a
                         # bad state and should shut down the server.
                         error: BaseException = request_outputs
-                        logger.warning(
-                            f"Recieved raw Exception {error} rather than "
-                            "RPCError from MPLLMEngine. This should never happen.")
+                        logger.error(
+                            "Received raw Exception %s rather than RPCError "
+                            "from MPLLMEngine. This should never happen.", error)
                         self._errored = True
                         request_id = None
                         exception = error

@@ -17,7 +17,6 @@ from vllm.engine.llm_engine import (DecoderPromptComponents, LLMEngine,
 from vllm.engine.metrics_types import StatLoggerBase
 from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.ray_utils import initialize_ray_cluster, ray
-from vllm.executor.ray_utils import ray
 from vllm.inputs import (EncoderDecoderLLMInputs, LLMInputs, PromptInputs,
                          SingletonPromptInputs)
 from vllm.inputs.parse import is_explicit_encoder_decoder_prompt

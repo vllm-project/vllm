@@ -1,6 +1,6 @@
 import pickle
 from contextlib import contextmanager
-from typing import List, Iterator, Union
+from typing import Iterator, List, Union
 
 import cloudpickle
 import zmq
@@ -11,7 +11,6 @@ from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
 from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_HEALTH_EXT, IPC_INPUT_EXT,
                                          IPC_OUTPUT_EXT, REQUEST_OUTPUTS_T,
-                                         VLLM_RPC_FAILED_STR,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCError, RPCGenerateRequest,
                                          RPCStartupRequest, RPCUtilityRequest)
@@ -208,22 +207,20 @@ class MQLLMEngine:
 
             # Send request outputs (if async, done in engine_step callback).
             if not self.use_async_sockets:
-                self._send_request_outputs(request_outputs)
-
+                self._send_outputs(request_outputs)
 
     def run_engine_dead_loop(self):
         """Loop for replying to all requests that we are dead."""
         if not self._errored:
             raise ValueError("In dead loop, but found _errored=False")
-        
+
         while True:
             # Poll until there is a request
             while self.input_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
                 logger.debug("Waiting for new requests in dead loop.")
-            
+
             # Handle any new data, replying with EngineDeadError
             self.handle_new_input()
-
 
     def engine_step(self) -> List[RequestOutput]:
         """Engine step wrapper with error handling."""
@@ -232,11 +229,11 @@ class MQLLMEngine:
             return self.engine.step()
         except Exception as e:
             self._errored = True
-            err = RPCError(request_id=None,
-                           is_engine_errored=True,
-                           exception=e)
+            rpc_err = RPCError(request_id=None,
+                               is_engine_errored=True,
+                               exception=e)
             logger.exception(repr(e))
-            self._send_request_outputs(err)
+            self._send_outputs(rpc_err)
             raise e
 
     def handle_new_input(self):
@@ -258,7 +255,7 @@ class MQLLMEngine:
         except Exception as e:
             self._errored = True
             logger.exception(repr(e))
-            self._send_unhealthy()
+            self._send_unhealthy(e)
             raise e
 
     def _handle_generate_request(self, request: RPCGenerateRequest):
@@ -266,8 +263,10 @@ class MQLLMEngine:
         request_id = request.request_id
 
         if self._errored:
-            e = RPCError(request_id, self._errored, ENGINE_DEAD_ERROR)
-            self._send_request_outputs(e)
+            rpc_err = RPCError(request_id=request_id,
+                               is_engine_errored=True,
+                               exception=ENGINE_DEAD_ERROR)
+            self._send_outputs(rpc_err)
 
         try:
             self.engine.add_request(
@@ -281,12 +280,14 @@ class MQLLMEngine:
             if self.log_requests:
                 logger.info("Added request %s.", request.request_id)
 
-        except Exception as err:
-            # We do not set self._errored = True here, since the error 
-            # is due to an issue adding this request to the engine, 
+        except Exception as e:
+            # We do not set self._errored = True here, since the error
+            # is due to an issue adding this request to the engine,
             # rather than an issue with the engine itself.
-            e = RPCError(request_id, self._errored, err)
-            self._send_request_outputs(e)
+            rpc_err = RPCError(request_id=request_id,
+                               is_engine_errored=self._errored,
+                               exception=e)
+            self._send_outputs(rpc_err)
 
             # Remove request from the engine.
             self.engine.abort_request(request_id)
@@ -309,9 +310,9 @@ class MQLLMEngine:
             except Exception as e:
                 self._send_unhealthy(e)
 
-    def _send_request_outputs(self, request_outputs: REQUEST_OUTPUTS_T):
+    def _send_outputs(self, outputs: REQUEST_OUTPUTS_T):
         """Send List of RequestOutput to RPCClient."""
-        output_bytes = pickle.dumps(request_outputs)
+        output_bytes = pickle.dumps(outputs)
         self.output_socket.send_multipart((output_bytes, ), copy=False)
 
     def _send_healthy(self):
@@ -326,7 +327,7 @@ class MQLLMEngine:
     def _async_socket_engine_callback(self,
                                       request_outputs: REQUEST_OUTPUTS_T):
         """Callback used by engine to make socket handling async with GPU."""
-        self._send_request_outputs(request_outputs)
+        self._send_outputs(request_outputs)
         self.handle_new_input()
 
 
