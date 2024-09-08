@@ -90,7 +90,6 @@ class MistralToolParser(ToolParser):
 
         except Exception as e:
             logger.error("Error in extracting tool call from response: %s", e)
-            print("ERROR", e)
             # return information to just treat the tool call as regular JSON
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
@@ -106,12 +105,9 @@ class MistralToolParser(ToolParser):
         delta_token_ids: Sequence[int],
     ) -> Union[DeltaMessage, None]:
 
-        print('CURRENT TEXT', current_text)
-
         # if the tool call token is not in the tokens generated so far, append
         # output to contents since it's not a tool
         if self.bot_token not in current_text:
-            print('BOT token not found')
             return DeltaMessage(content=delta_text)
 
         # if the tool call token ID IS in the tokens generated so far, that
@@ -131,7 +127,6 @@ class MistralToolParser(ToolParser):
         # seen) allows sending the entire tool/ function name at once.
         flags = Allow.ALL if self.current_tool_name_sent \
             else Allow.ALL & ~Allow.STR
-        print('starting parsing')
         try:
 
             # replace BOT token with empty string, and convert single quotes
