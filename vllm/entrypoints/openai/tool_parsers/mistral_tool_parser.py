@@ -170,7 +170,7 @@ class MistralToolParser(ToolParser):
                                       id=f"chatcmpl-tool-{random_uuid()}",
                                       function=DeltaFunctionCall(
                                           name=function_name).model_dump(
-                                          exclude_none=True))
+                                              exclude_none=True))
                     ])
                     self.current_tool_name_sent = True
                 else:

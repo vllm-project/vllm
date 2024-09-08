@@ -280,8 +280,7 @@ class OpenAIServingChat(OpenAIServing):
                                 content="",
                             ),
                             logprobs=None,
-                            finish_reason=None
-                        )
+                            finish_reason=None)
                         chunk = ChatCompletionStreamResponse(
                             id=request_id,
                             object=chunk_object_type,
