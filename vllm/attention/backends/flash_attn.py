@@ -17,8 +17,7 @@ from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
-                                          ModelInputForGPUWithSamplingMetadata,
-                                          SamplerOutput)
+                                          ModelInputForGPUWithSamplingMetadata)
 
 from vllm_flash_attn import flash_attn_varlen_func as _flash_attn_varlen_func
 from vllm_flash_attn import flash_attn_with_kvcache as _flash_attn_with_kvcache
@@ -305,8 +304,8 @@ class FlashAttentionMetadata(AttentionMetadata):
         return self._cached_decode_metadata
 
     def advance_step(self, model_input: "ModelInputForGPUWithSamplingMetadata",
-                     last_output: "SamplerOutput", block_size: int,
-                     num_seqs: int, num_queries: int):
+                     sampled_token_ids: Optional[torch.Tensor],
+                     block_size: int, num_seqs: int, num_queries: int):
         """
         Update metadata in-place to advance one decode step.
         """
@@ -351,7 +350,7 @@ class FlashAttentionMetadata(AttentionMetadata):
                          num_queries=num_queries,
                          block_size=block_size,
                          input_tokens=model_input.input_tokens,
-                         sampled_token_ids=last_output.sampled_token_ids,
+                         sampled_token_ids=sampled_token_ids,
                          input_positions=model_input.input_positions,
                          seq_lens=self.seq_lens_tensor,
                          slot_mapping=self.slot_mapping,

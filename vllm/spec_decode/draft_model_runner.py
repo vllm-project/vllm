@@ -116,8 +116,8 @@ class TP1DraftModelRunner(ModelRunner):
         attn_metadata = model_input.attn_metadata
         assert isinstance(attn_metadata, FlashAttentionMetadata)
 
-        attn_metadata.advance_step(model_input, last_output, self.block_size,
-                                   num_seqs, num_queries)
+        attn_metadata.advance_step(model_input, sampled_token_ids,
+                                   self.block_size, num_seqs, num_queries)
 
         # Update sampling_metadata
         sampling_metadata = model_input.sampling_metadata

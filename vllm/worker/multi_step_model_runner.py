@@ -499,8 +499,10 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         attn_metadata = frozen_model_input.attn_metadata
         assert isinstance(attn_metadata, FlashAttentionMetadata)
 
-        attn_metadata.advance_step(frozen_model_input, out, self.block_size,
-                                   num_seqs, num_queries)
+        attn_metadata.advance_step(
+            frozen_model_input,
+            model_input.cached_outputs[-1].sampled_token_ids, self.block_size,
+            num_seqs, num_queries)
 
         if frozen_model_input.seq_lens is not None:
             for i in range(num_queries):
