@@ -160,8 +160,8 @@ class MQLLMEngineClient:
                         # bad state and should shut down the server.
                         error: BaseException = request_outputs
                         logger.error(
-                            "Received raw Exception %s rather than RPCError "
-                            "from MPLLMEngine. This should never happen.", error)
+                            "Received raw Exception %s rather than RPCError from "
+                            "MPLLMEngine. This should never happen.", error)
                         self._errored = True
                         request_id = None
                         exception = error
