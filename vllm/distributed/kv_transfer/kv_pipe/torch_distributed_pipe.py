@@ -18,34 +18,6 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-# auxilary function to send tensordict
-TensorMetadata = namedtuple("TensorMetadata", ["device", "dtype", "size"])
-
-def _split_tensor_dict(
-    tensor_dict: Dict[str, Union[torch.Tensor, Any]]
-) -> Tuple[List[Tuple[str, Any]], List[torch.Tensor]]:
-    """Split the tensor dictionary into two parts:
-    1. A list of (key, value) pairs. If the value is a tensor, it is replaced
-         by its metadata.
-    2. A list of tensors.
-    """
-    metadata_list: List[Tuple[str, Any]] = []
-    tensor_list: List[torch.Tensor] = []
-    for key, value in tensor_dict.items():
-        if isinstance(value, torch.Tensor):
-            # Note: we cannot use `value.device` here,
-            # because it contains not only the device type but also the device
-            # index (e.g. "cuda:0"). We only need the device type.
-            # receiving side will set the device index.
-            device = value.device.type
-            metadata_list.append(
-                (key, TensorMetadata(device, value.dtype, value.size())))
-            tensor_list.append(value)
-        else:
-            metadata_list.append((key, value))
-    return metadata_list, tensor_list
-
-
 # if the tensor is only one-element and only contains this number
 # this means that the sended object is None.
 NONE_INT = -150886311
@@ -131,119 +103,58 @@ class TorchDistributedPipe(KVPipeBase):
         self.none_tensor = torch.tensor([NONE_INT]).to(self.device)
         self.broken = False
 
-        # create a dummy tensor
-        # this tensor is used 
-        self.dummy_cpu_tensor_for_send = torch.tensor([1],device='cpu')
-        self.dummy_cpu_tensor_for_recv = torch.tensor([1],device='cpu')
-
-        self.dtype_tensor_for_recv = torch.tensor([0]).to(self.device)
-        self.numdim_tensor_for_recv = torch.tensor([-1]).to(self.device)
-        self.dims_tensor_for_recv = torch.ones([100], dtype=int).to(self.device)
-
         
-    def quick_send(self, tensor, prep):
+    def quick_send(self, tensor):
 
         group = self.device_group
 
         # NCCL is NOT fully duplex
-        # need to explicitly sync using CPU
-        # to guarantee that there is only 1-directional data happening now
-        torch.distributed.send(
-            self.dummy_cpu_tensor_for_send,
+        # so CPU communication is ALWAYS necessary
+        torch.distributed.send_object_list(
+            [tensor.dtype, tensor.shape, str(tensor.device)],
             dst=self.target_rank_for_send,
             group=self.cpu_group
         )
 
         torch.distributed.send(
-            prep['dtype'],
-            dst=self.target_rank_for_send,
-            group=group
-        )
-        torch.distributed.send(
-            prep['numdim'],
-            dst=self.target_rank_for_send,
-            group=group
-        )
-        torch.distributed.send(
-            prep['dims'],
-            dst=self.target_rank_for_send,
-            group=group
-        )
-        torch.distributed.send(
             tensor,
             dst=self.target_rank_for_send,
-            group=group
+            group=self.device_group
         )
 
 
     def quick_recv(self):
 
-        # receive is sequential, so we can reuse the GPU buffer
-        group = self.device_group
-
         # NCCL is NOT fully duplex
-        # need to explicitly sync using CPU
-        # to guarantee that there is only 1-directional data happening now
-        torch.distributed.recv(
-            self.dummy_cpu_tensor_for_recv,
+        # so CPU communication is necessary
+        metadata = [None, None, None]
+        torch.distributed.recv_object_list(
+            metadata,
             src=self.target_rank_for_recv,
             group=self.cpu_group
         )
         
-        torch.distributed.recv(
-            self.dtype_tensor_for_recv,
-            src=self.target_rank_for_recv,
-            group=group
-        )
-        torch.distributed.recv(
-            self.numdim_tensor_for_recv,
-            src=self.target_rank_for_recv,
-            group=group
-        )
-
-        numdim = self.numdim_tensor_for_recv.item()
-        torch.distributed.recv(
-            self.dims_tensor_for_recv[:numdim],
-            src=self.target_rank_for_recv,
-            group=group
-        )
-
-        dtype = INT2DTYPE[self.dtype_tensor_for_recv.item()]
-        shape = self.dims_tensor_for_recv[:numdim].tolist()
-
-        buffer = torch.zeros(shape, dtype=dtype).to(self.device)
+        dtype, shape, device = metadata
+        if 'cuda' in device:
+            device = self.device
+        else:
+            device = 'cpu'
+        buffer = torch.zeros(shape, dtype=dtype).to(device, non_blocking=True)
         
         torch.distributed.recv(
             buffer,
             src=self.target_rank_for_recv,
-            group=group
+            group=self.device_group
         )
-
         return buffer
         
-        
-        
-    def prep_send(self, tensor):
-        
-        # prepare a series of tensor before send
-        dtype_tensor = torch.tensor([DTYPE2INT[tensor.dtype]]).to(self.device, non_blocking=True)
-        numdim_tensor = torch.tensor(len(tensor.shape)).to(self.device, non_blocking=True)
-        dims_tensor = torch.tensor(tensor.shape).to(self.device, non_blocking=True)
-
-        return {
-            'dtype': dtype_tensor,
-            'numdim': numdim_tensor,
-            'dims': dims_tensor
-        }
 
         
-    def send_tensor_wrapper(self, tensor, prep) -> None:
+    def send_tensor_wrapper(self, tensor) -> None:
 
         try:
-            """Wrapper for send_tensor_dict"""
             tensor_size = tensor.element_size() * tensor.numel()
-            # self.send_tensor_dict({'tensor': tensor})
-            self.quick_send(tensor, prep)
+            self.quick_send(tensor)
             
             with self.buffer_size_lock:
                 self.buffer_size = self.buffer_size - tensor_size
@@ -280,11 +191,10 @@ class TorchDistributedPipe(KVPipeBase):
         with self.buffer_size_lock:
             self.buffer_size = self.buffer_size + tensor_size
             
-        # self.kv_sending_thread.submit(self.send_tensor_wrapper, tensor)
-        prep = self.prep_send(tensor)
+        # prepare the metadata before sending the tensor.
         self.kv_sending_thread.submit(
             self.send_tensor_wrapper, 
-            tensor, prep)
+            tensor)
     
     def recv_tensor(self) -> Optional[torch.Tensor]:
         """Receives a tensor from the src rank. Blocking."""
