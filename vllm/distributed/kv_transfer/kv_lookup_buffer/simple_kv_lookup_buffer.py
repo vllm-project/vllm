@@ -7,6 +7,10 @@ import torch
 from collections import deque
 import time
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 class SimpleKVLookupBuffer(KVLookupBufferBase):
     
     def __init__(self, pipe, buffer_size_thresh):
@@ -157,6 +161,7 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
     def insert(self, input_tokens, roi, key, value, hidden) -> None:
 
         while self.buffer_size > self.buffer_size_threshold:
+            logger.debug("KV transfer buffer is full. Handling...")
             self.full_handler()
         
         self._add_to_buffer(input_tokens, roi, key, value, hidden)

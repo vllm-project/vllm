@@ -63,10 +63,6 @@ class KV_transfer_agent:
         group_ranks: List[List[int]],
         local_rank: int,
         torch_distributed_backend: Union[str, Backend],
-        use_pynccl: bool = False,
-        use_custom_allreduce: bool = False,
-        use_tpu_communicator: bool = True,
-        use_message_queue_broadcaster: bool = False
     ):
         
         # init pipe
@@ -74,13 +70,9 @@ class KV_transfer_agent:
             group_ranks,
             local_rank,
             torch_distributed_backend,
-            use_pynccl,
-            use_custom_allreduce,
-            use_tpu_communicator,
-            use_message_queue_broadcaster,
         )
         # init lookup buffer
-        self.buffer = SimpleKVLookupBuffer(self.pipe, 1000**3)
+        self.buffer = SimpleKVLookupBuffer(self.pipe, 1000**3 * 10)
 
     def send_kv_caches_and_hidden_states(
         self,
