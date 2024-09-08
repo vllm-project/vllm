@@ -8,14 +8,14 @@ from partial_json_parser.core.options import Allow
 from vllm.entrypoints.openai.protocol import (DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
                                               ExtractedToolCallInformation,
-                                              FunctionCall,
-                                              ToolCall)
+                                              FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser)
 from vllm.entrypoints.openai.tool_parsers.utils import (
     extract_intermediate_diff)
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
+from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
@@ -94,7 +94,7 @@ class Hermes2ProToolParser(ToolParser):
                 ]
 
                 content = model_output[:model_output.
-                find(self.tool_call_start_token)]
+                                       find(self.tool_call_start_token)]
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=tool_calls,
@@ -108,13 +108,13 @@ class Hermes2ProToolParser(ToolParser):
                                                     content=model_output)
 
     def extract_tool_calls_streaming(
-            self,
-            previous_text: str,
-            current_text: str,
-            delta_text: str,
-            previous_token_ids: Sequence[int],
-            current_token_ids: Sequence[int],
-            delta_token_ids: Sequence[int],
+        self,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
     ) -> Union[DeltaMessage, None]:
 
         logger.debug("delta_text: %s", delta_text)
@@ -196,7 +196,7 @@ class Hermes2ProToolParser(ToolParser):
                         DeltaToolCall(index=self.current_tool_id,
                                       function=DeltaFunctionCall(
                                           arguments=diff).model_dump(
-                                          exclude_none=True))
+                                              exclude_none=True))
                     ])
 
             # case -- otherwise we're just generating text
@@ -223,12 +223,12 @@ class Hermes2ProToolParser(ToolParser):
                 if function_name:
                     self.current_tool_name_sent = True
                     return DeltaMessage(tool_calls=[
-                        DeltaToolCall(
-                            index=self.current_tool_id,
-                            function=DeltaFunctionCall(
-                                name=function_name
-                            ).model_dump(exclude_none=True)
-                        )
+                        DeltaToolCall(index=self.current_tool_id,
+                                      type="function",
+                                      id=f"chatcmpl-tool-{random_uuid()}",
+                                      function=DeltaFunctionCall(
+                                          name=function_name).model_dump(
+                                              exclude_none=True))
                     ])
                 else:
                     return None
@@ -295,7 +295,7 @@ class Hermes2ProToolParser(ToolParser):
                     DeltaToolCall(index=self.current_tool_id,
                                   function=DeltaFunctionCall(
                                       arguments=arguments_delta).model_dump(
-                                      exclude_none=True))
+                                          exclude_none=True))
                 ])
                 self.streamed_args_for_tool[self.current_tool_id] \
                     += arguments_delta
@@ -314,7 +314,7 @@ class Hermes2ProToolParser(ToolParser):
                     DeltaToolCall(index=self.current_tool_id,
                                   function=DeltaFunctionCall(
                                       arguments=argument_diff).model_dump(
-                                      exclude_none=True))
+                                          exclude_none=True))
                 ])
                 self.streamed_args_for_tool[self.current_tool_id] \
                     += argument_diff
