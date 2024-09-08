@@ -698,6 +698,14 @@ class AsyncLLMEngine:
     def errored(self) -> bool:
         return self._errored_with is not None
 
+    @property
+    def dead_error(self) -> BaseException:
+        return AsyncEngineDeadError(
+            "Background loop is not running. If it was running, "
+            "inspect the output to find the stacktrace of the "
+            "error that caused the background loop to stop "
+            "(AsyncEngineDeadError).")
+
     def set_errored(self, exc: Exception) -> None:
         self._errored_with = exc
 
