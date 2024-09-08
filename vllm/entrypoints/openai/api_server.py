@@ -193,7 +193,7 @@ async def build_async_engine_client_from_engine_args(
 
             yield mp_engine_client  # type: ignore[misc]
         finally:
-            # Shutdown engine process 
+            # Shutdown engine process
             # NOTE: terminate() (which sends SIGTERM), does not work here
             # when tp>1. TODO: discuss with @njhill how we can have cleaner
             # shutdown with terminate() rather than kill()
