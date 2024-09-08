@@ -7,7 +7,7 @@ from typing import (Any, AsyncGenerator, Callable, Dict, Iterable, List,
 from typing_extensions import assert_never
 
 import vllm.envs as envs
-from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
+from vllm.config import (DecodingConfig, EngineConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -15,7 +15,8 @@ from vllm.engine.async_timeout import asyncio_timeout
 from vllm.engine.llm_engine import (DecoderPromptComponents, LLMEngine,
                                     PromptComponents, SchedulerOutputState)
 from vllm.engine.metrics_types import StatLoggerBase
-from vllm.executor.executor_base import get_executor_cls
+from vllm.executor.executor_base import ExecutorAsyncBase
+from vllm.executor.ray_utils import initialize_ray_cluster, ray
 from vllm.executor.ray_utils import ray
 from vllm.inputs import (EncoderDecoderLLMInputs, LLMInputs, PromptInputs,
                          SingletonPromptInputs)
@@ -649,6 +650,69 @@ class AsyncLLMEngine:
 
         # Lazy initialized fields
         self._request_tracker: RequestTracker
+    
+    @classmethod
+    def _get_executor_cls(
+            cls, engine_config: EngineConfig) -> Type[ExecutorAsyncBase]:
+        distributed_executor_backend = (
+            engine_config.parallel_config.distributed_executor_backend)
+        if isinstance(distributed_executor_backend, type):
+            if not issubclass(distributed_executor_backend, ExecutorAsyncBase):
+                raise TypeError(
+                    "distributed_executor_backend must be a subclass of "
+                    f"ExecutorAsyncBase. Got {distributed_executor_backend}.")
+            if distributed_executor_backend.uses_ray:  # type: ignore
+                initialize_ray_cluster(engine_config.parallel_config)
+            executor_class = distributed_executor_backend
+        elif engine_config.device_config.device_type == "neuron":
+            from vllm.executor.neuron_executor import NeuronExecutorAsync
+            executor_class = NeuronExecutorAsync
+        elif engine_config.device_config.device_type == "tpu":
+            if distributed_executor_backend == "ray":
+                initialize_ray_cluster(engine_config.parallel_config)
+                from vllm.executor.ray_tpu_executor import RayTPUExecutorAsync
+                executor_class = RayTPUExecutorAsync
+            else:
+                assert distributed_executor_backend is None
+                from vllm.executor.tpu_executor import TPUExecutorAsync
+                executor_class = TPUExecutorAsync
+        elif engine_config.device_config.device_type == "cpu":
+            from vllm.executor.cpu_executor import CPUExecutorAsync
+            executor_class = CPUExecutorAsync
+        elif engine_config.device_config.device_type == "openvino":
+            assert distributed_executor_backend is None, (
+                "Distributed execution is not supported with "
+                "the OpenVINO backend.")
+            from vllm.executor.openvino_executor import OpenVINOExecutorAsync
+            executor_class = OpenVINOExecutorAsync
+        elif engine_config.device_config.device_type == "xpu":
+            if distributed_executor_backend is None:
+                from vllm.executor.xpu_executor import XPUExecutorAsync
+                executor_class = XPUExecutorAsync
+            elif distributed_executor_backend == "ray":
+                initialize_ray_cluster(engine_config.parallel_config)
+                from vllm.executor.ray_xpu_executor import RayXPUExecutorAsync
+                executor_class = RayXPUExecutorAsync
+            elif distributed_executor_backend == "mp":
+                initialize_ray_cluster(engine_config.parallel_config)
+                from vllm.executor.multiproc_xpu_executor import (
+                    MultiprocessingXPUExecutorAsync)
+                executor_class = MultiprocessingXPUExecutorAsync
+            else:
+                raise RuntimeError(
+                    "Not supported distributed execution model on XPU device.")
+        elif distributed_executor_backend == "ray":
+            initialize_ray_cluster(engine_config.parallel_config)
+            from vllm.executor.ray_gpu_executor import RayGPUExecutorAsync
+            executor_class = RayGPUExecutorAsync
+        elif distributed_executor_backend == "mp":
+            from vllm.executor.multiproc_gpu_executor import (
+                MultiprocessingGPUExecutorAsync)
+            executor_class = MultiprocessingGPUExecutorAsync
+        else:
+            from vllm.executor.gpu_executor import GPUExecutorAsync
+            executor_class = GPUExecutorAsync
+        return executor_class
 
     @classmethod
     def from_engine_args(
