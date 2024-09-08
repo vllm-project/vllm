@@ -44,7 +44,7 @@ class MPClientClosedError(Exception):
 
 class MQLLMEngineClient:
     """A client wrapper for MQLLMEngine that conforms to the
-    AsyncEngineClient protocol.
+    EngineClient protocol.
 
     MQLLMEngine and MQLLMEngineClient are intended to run in separate
     processes communicating via zeromq ipc sockets.

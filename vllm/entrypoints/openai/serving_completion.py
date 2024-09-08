@@ -8,7 +8,7 @@ from typing import Tuple, Union, cast
 from fastapi import Request
 
 from vllm.config import ModelConfig
-from vllm.engine.protocol import AsyncEngineClient
+from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -43,7 +43,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
     def __init__(
         self,
-        async_engine_client: AsyncEngineClient,
+        async_engine_client: EngineClient,
         model_config: ModelConfig,
         served_model_names: List[str],
         *,

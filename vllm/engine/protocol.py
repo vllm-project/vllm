@@ -14,7 +14,7 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 
 @runtime_checkable
-class AsyncEngineClient(Protocol):
+class EngineClient(Protocol):
     """Protocol class for Clients to Engine"""
 
     @property

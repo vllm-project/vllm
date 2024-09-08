@@ -9,7 +9,7 @@ from typing import Union
 from fastapi import Request
 
 from vllm.config import ModelConfig
-from vllm.engine.protocol import AsyncEngineClient
+from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (ConversationMessage,
                                          apply_chat_template,
                                          load_chat_template,
@@ -44,7 +44,7 @@ logger = init_logger(__name__)
 class OpenAIServingChat(OpenAIServing):
 
     def __init__(self,
-                 async_engine_client: AsyncEngineClient,
+                 async_engine_client: EngineClient,
                  model_config: ModelConfig,
                  served_model_names: List[str],
                  response_role: str,

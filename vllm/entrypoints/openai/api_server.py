@@ -23,7 +23,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.engine.multiprocessing.engine import run_mp_engine
-from vllm.engine.protocol import AsyncEngineClient
+from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import make_arg_parser
@@ -54,7 +54,7 @@ from vllm.version import __version__ as VLLM_VERSION
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
-async_engine_client: AsyncEngineClient
+async_engine_client: EngineClient
 engine_args: AsyncEngineArgs
 openai_serving_chat: OpenAIServingChat
 openai_serving_completion: OpenAIServingCompletion
@@ -97,7 +97,7 @@ async def lifespan(app: FastAPI):
 
 @asynccontextmanager
 async def build_async_engine_client(
-        args: Namespace) -> AsyncIterator[Optional[AsyncEngineClient]]:
+        args: Namespace) -> AsyncIterator[Optional[EngineClient]]:
 
     # Context manager to handle async_engine_client lifecycle
     # Ensures everything is shutdown and cleaned up on error/exit
@@ -118,9 +118,9 @@ async def build_async_engine_client(
 async def build_async_engine_client_from_engine_args(
     engine_args: AsyncEngineArgs,
     disable_frontend_multiprocessing: bool = False,
-) -> AsyncIterator[Optional[AsyncEngineClient]]:
+) -> AsyncIterator[Optional[EngineClient]]:
     """
-    Create AsyncEngineClient, either:
+    Create EngineClient, either:
         - in-process using the AsyncLLMEngine Directly
         - multiprocess using AsyncLLMEngine RPC
 
@@ -162,7 +162,7 @@ async def build_async_engine_client_from_engine_args(
         logger.info("Multiprocessing frontend to use %s for IPC Path.",
                     ipc_path)
 
-        # Build RPCClient, which conforms to AsyncEngineClient Protocol.
+        # Build RPCClient, which conforms to EngineClient Protocol.
         # NOTE: Actually, this is not true yet. We still need to support
         # embedding models via RPC (see TODO above)
         mp_engine_client = MQLLMEngineClient(ipc_path)
@@ -429,7 +429,7 @@ def build_app(args: Namespace) -> FastAPI:
 
 
 async def init_app(
-    async_engine_client: AsyncEngineClient,
+    async_engine_client: EngineClient,
     args: Namespace,
 ) -> FastAPI:
     app = build_app(args)

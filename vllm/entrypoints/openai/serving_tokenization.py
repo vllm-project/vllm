@@ -1,7 +1,7 @@
 from typing import List, Optional, Union
 
 from vllm.config import ModelConfig
-from vllm.engine.protocol import AsyncEngineClient
+from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (apply_chat_template,
                                          load_chat_template,
                                          parse_chat_messages_futures)
@@ -27,7 +27,7 @@ class OpenAIServingTokenization(OpenAIServing):
 
     def __init__(
         self,
-        async_engine_client: AsyncEngineClient,
+        async_engine_client: EngineClient,
         model_config: ModelConfig,
         served_model_names: List[str],
         *,

@@ -9,14 +9,14 @@ from fastapi import FastAPI, Response
 from vllm import envs
 from vllm.engine.async_llm_engine import AsyncEngineDeadError
 from vllm.engine.multiprocessing import MQEngineDeadError
-from vllm.engine.protocol import AsyncEngineClient
+from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
 from vllm.utils import find_process_using_port
 
 logger = init_logger(__name__)
 
 
-async def serve_http(app: FastAPI, engine: AsyncEngineClient,
+async def serve_http(app: FastAPI, engine: EngineClient,
                      **uvicorn_kwargs: Any):
     logger.info("Available routes are:")
     for route in app.routes:
@@ -61,7 +61,7 @@ async def serve_http(app: FastAPI, engine: AsyncEngineClient,
 
 
 def _add_shutdown_handlers(app: FastAPI, server: uvicorn.Server,
-                           engine: AsyncEngineClient) -> None:
+                           engine: EngineClient) -> None:
     """Adds handlers for fatal errors that should crash the server"""
 
     @app.exception_handler(RuntimeError)
