@@ -8,14 +8,14 @@ from partial_json_parser.core.options import Allow
 from vllm.entrypoints.openai.protocol import (DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
                                               ExtractedToolCallInformation,
-                                              FunctionCall,
-                                              InitialDeltaToolCall, ToolCall)
+                                              FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser)
 from vllm.entrypoints.openai.tool_parsers.utils import (
     extract_intermediate_diff)
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
+from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
@@ -42,7 +42,6 @@ class MistralToolParser(ToolParser):
         self.prev_tool_call_arr: List[Dict] = []
         self.current_tool_id: int = -1
         self.current_tool_name_sent: bool = False
-        self.current_tool_initial_sent: bool = False
         self.streamed_args_for_tool: List[str] = [
         ]  # map what has been streamed for each tool so far to a list
         self.bot_token = "[TOOL_CALLS]"
@@ -107,9 +106,12 @@ class MistralToolParser(ToolParser):
         delta_token_ids: Sequence[int],
     ) -> Union[DeltaMessage, None]:
 
+        print('CURRENT TEXT', current_text)
+
         # if the tool call token is not in the tokens generated so far, append
         # output to contents since it's not a tool
-        if self.bot_token_id not in current_token_ids:
+        if self.bot_token not in current_text:
+            print('BOT token not found')
             return DeltaMessage(content=delta_text)
 
         # if the tool call token ID IS in the tokens generated so far, that
@@ -129,12 +131,13 @@ class MistralToolParser(ToolParser):
         # seen) allows sending the entire tool/ function name at once.
         flags = Allow.ALL if self.current_tool_name_sent \
             else Allow.ALL & ~Allow.STR
+        print('starting parsing')
         try:
 
             # replace BOT token with empty string, and convert single quotes
             # to double to allow parsing as JSON since mistral uses single
             # quotes instead of double for tool calls
-            parsable_arr = current_text.split(self.bot_token)[1]
+            parsable_arr = current_text.split(self.bot_token)[-1]
 
             # tool calls are generated in an array, so do partial JSON
             # parsing on the entire array
@@ -155,6 +158,23 @@ class MistralToolParser(ToolParser):
             if len(tool_call_arr) == 0:
                 return None
 
+            # if the current tool name hasn't been sent, send if available
+            # - otherwise send nothing
+            if not self.current_tool_name_sent:
+                function_name = current_tool_call.get("name")
+                if function_name:
+
+                    delta = DeltaMessage(tool_calls=[
+                        DeltaToolCall(index=self.current_tool_id,
+                                      type="function",
+                                      id=f"chatcmpl-tool-{random_uuid()}",
+                                      function=DeltaFunctionCall(
+                                          name=function_name).model_dump(
+                                          exclude_none=True))
+                    ])
+                    self.current_tool_name_sent = True
+                else:
+                    delta = None
             # case: we are starting a new tool in the array
             #   -> array has > 0 length AND length has moved past cursor
             elif (len(tool_call_arr) > 0
@@ -186,28 +206,11 @@ class MistralToolParser(ToolParser):
                 # re-set stuff pertaining to progress in the current tool
                 self.current_tool_id = len(tool_call_arr) - 1
                 self.current_tool_name_sent = False
-                self.current_tool_initial_sent = False
                 self.streamed_args_for_tool.append("")
                 logger.debug("starting on new tool %d", self.current_tool_id)
                 return delta
 
             # case: update an existing tool - this is handled below
-
-            # if the current tool name hasn't been sent, send if available
-            # - otherwise send nothing
-            if not self.current_tool_name_sent:
-                function_name = current_tool_call.get("name")
-                if function_name:
-
-                    delta = DeltaMessage(tool_calls=[
-                        DeltaToolCall(index=self.current_tool_id,
-                                      function=DeltaFunctionCall(
-                                          name=function_name).model_dump(
-                                              exclude_none=True))
-                    ])
-                    self.current_tool_name_sent = True
-                else:
-                    delta = None
 
             # now we know we're on the same tool call and we're streaming
             # arguments
