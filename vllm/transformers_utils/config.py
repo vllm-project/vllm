@@ -1,12 +1,16 @@
 import contextlib
+import enum
+import json
 from pathlib import Path
 from typing import Any, Dict, Optional, Type, Union
 
+from huggingface_hub import file_exists, hf_hub_download
 from transformers import GenerationConfig, PretrainedConfig
 from transformers.models.auto.image_processing_auto import (
     get_image_processor_config)
 from transformers.models.auto.modeling_auto import (
     MODEL_FOR_CAUSAL_LM_MAPPING_NAMES)
+from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
@@ -26,6 +30,8 @@ if VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
 else:
     from transformers import AutoConfig
+
+MISTRAL_CONFIG_NAME = "params.json"
 
 logger = init_logger(__name__)
 
@@ -53,6 +59,20 @@ for name, cls in _CONFIG_REGISTRY.items():
         AutoConfig.register(name, cls)
 
 
+class ConfigFormat(str, enum.Enum):
+    AUTO = "auto"
+    HF = "hf"
+    MISTRAL = "mistral"
+
+
+def file_or_path_exists(model: Union[str, Path], config_name, revision,
+                        token) -> bool:
+    if Path(model).exists():
+        return (Path(model) / config_name).is_file()
+
+    return file_exists(model, HF_CONFIG_NAME, revision=revision, token=token)
+
+
 def get_config(
     model: Union[str, Path],
     trust_remote_code: bool,
@@ -60,45 +80,68 @@ def get_config(
     code_revision: Optional[str] = None,
     rope_scaling: Optional[dict] = None,
     rope_theta: Optional[float] = None,
+    config_format: ConfigFormat = ConfigFormat.AUTO,
     **kwargs,
 ) -> PretrainedConfig:
-
     # Separate model folder from file path for GGUF models
+
     is_gguf = check_gguf_file(model)
     if is_gguf:
         kwargs["gguf_file"] = Path(model).name
         model = Path(model).parent
 
-    config_dict, _ = PretrainedConfig.get_config_dict(
-        model, revision=revision, code_revision=code_revision, **kwargs)
+    if config_format == ConfigFormat.AUTO:
+        if is_gguf or file_or_path_exists(model,
+                                          HF_CONFIG_NAME,
+                                          revision=revision,
+                                          token=kwargs.get("token")):
+            config_format = ConfigFormat.HF
+        elif file_or_path_exists(model,
+                                 MISTRAL_CONFIG_NAME,
+                                 revision=revision,
+                                 token=kwargs.get("token")):
+            config_format = ConfigFormat.MISTRAL
+        else:
+            raise ValueError(f"No supported config format found in {model}")
 
-    # Use custom model class if it's in our registry
-    model_type = config_dict.get("model_type")
-    if model_type in _CONFIG_REGISTRY:
-        config_class = _CONFIG_REGISTRY[model_type]
-        config = config_class.from_pretrained(model,
-                                              revision=revision,
-                                              code_revision=code_revision)
+    if config_format == ConfigFormat.HF:
+        config_dict, _ = PretrainedConfig.get_config_dict(
+            model, revision=revision, code_revision=code_revision, **kwargs)
+
+        # Use custom model class if it's in our registry
+        model_type = config_dict.get("model_type")
+        if model_type in _CONFIG_REGISTRY:
+            config_class = _CONFIG_REGISTRY[model_type]
+            config = config_class.from_pretrained(model,
+                                                  revision=revision,
+                                                  code_revision=code_revision)
+        else:
+            try:
+                config = AutoConfig.from_pretrained(
+                    model,
+                    trust_remote_code=trust_remote_code,
+                    revision=revision,
+                    code_revision=code_revision,
+                    **kwargs,
+                )
+            except ValueError as e:
+                if (not trust_remote_code
+                        and "requires you to execute the configuration file"
+                        in str(e)):
+                    err_msg = (
+                        "Failed to load the model config. If the model "
+                        "is a custom model not yet available in the "
+                        "HuggingFace transformers library, consider setting "
+                        "`trust_remote_code=True` in LLM or using the "
+                        "`--trust-remote-code` flag in the CLI.")
+                    raise RuntimeError(err_msg) from e
+                else:
+                    raise e
+
+    elif config_format == ConfigFormat.MISTRAL:
+        config = load_params_config(model, revision)
     else:
-        try:
-            config = AutoConfig.from_pretrained(
-                model,
-                trust_remote_code=trust_remote_code,
-                revision=revision,
-                code_revision=code_revision,
-                **kwargs)
-        except ValueError as e:
-            if (not trust_remote_code
-                    and "requires you to execute the configuration file"
-                    in str(e)):
-                err_msg = (
-                    "Failed to load the model config. If the model is a custom "
-                    "model not yet available in the HuggingFace transformers "
-                    "library, consider setting `trust_remote_code=True` in LLM "
-                    "or using the `--trust-remote-code` flag in the CLI.")
-                raise RuntimeError(err_msg) from e
-            else:
-                raise e
+        raise ValueError(f"Unsupported config format: {config_format}")
 
     # Special architecture mapping check for GGUF models
     if is_gguf:
@@ -108,14 +151,68 @@ def get_config(
         model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
         config.update({"architectures": [model_type]})
 
-    for key, value in [("rope_scaling", rope_scaling),
-                       ("rope_theta", rope_theta)]:
+    for key, value in [
+        ("rope_scaling", rope_scaling),
+        ("rope_theta", rope_theta),
+    ]:
         if value is not None:
-            logger.info("Updating %s from %r to %r", key,
-                        getattr(config, key, None), value)
+            logger.info(
+                "Updating %s from %r to %r",
+                key,
+                getattr(config, key, None),
+                value,
+            )
             config.update({key: value})
 
     return config
+
+
+def load_params_config(model, revision) -> PretrainedConfig:
+    # This function loads a params.json config which
+    # should be used when loading models in mistral format
+
+    config_file_name = "params.json"
+
+    config_path = Path(model) / config_file_name
+
+    if not config_path.is_file():
+        config_path = Path(
+            hf_hub_download(model, config_file_name, revision=revision))
+
+    with open(config_path, "r") as file:
+        config_dict = json.load(file)
+
+    config_mapping = {
+        "dim": "hidden_size",
+        "norm_eps": "rms_norm_eps",
+        "n_kv_heads": "num_key_value_heads",
+        "n_layers": "num_hidden_layers",
+        "n_heads": "num_attention_heads",
+        "hidden_dim": "intermediate_size",
+    }
+
+    def recurse_elems(elem: Any):
+        if isinstance(elem, dict):
+            config_dict = {}
+            for key, value in elem.items():
+                key = config_mapping.get(key, key)
+                config_dict[key] = recurse_elems(value)
+            return PretrainedConfig(**config_dict)
+        else:
+            return elem
+
+    config_dict["model_type"] = config_dict.get("model_type", "transformer")
+    config_dict["hidden_act"] = config_dict.get("activation", "silu")
+    config_dict["tie_word_embeddings"] = config_dict.get(
+        "tie_embeddings", False)
+
+    if config_dict["model_type"] == "transformer":
+        if "moe" in config_dict:
+            config_dict["architectures"] = ["MixtralForCausalLM"]
+        else:
+            config_dict["architectures"] = ["MistralForCausalLM"]
+
+    return recurse_elems(config_dict)
 
 
 def get_hf_image_processor_config(
@@ -134,7 +231,7 @@ def get_hf_image_processor_config(
 
 def get_hf_text_config(config: PretrainedConfig):
     """Get the "sub" config relevant to llm for multi modal models.
-        No op for pure text models.
+    No op for pure text models.
     """
     if hasattr(config, "text_config"):
         # The code operates under the assumption that text_config should have
