@@ -650,7 +650,7 @@ class AsyncLLMEngine:
 
         # Lazy initialized fields
         self._request_tracker: RequestTracker
-    
+
     @classmethod
     def _get_executor_cls(
             cls, engine_config: EngineConfig) -> Type[ExecutorAsyncBase]:
@@ -730,7 +730,7 @@ class AsyncLLMEngine:
             from vllm.executor import ray_utils
             ray_utils.assert_ray_available()
 
-        executor_class = get_executor_cls(engine_config)
+        executor_class = cls._get_executor_cls(engine_config)
 
         # Create the async LLM engine.
         engine = cls(
