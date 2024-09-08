@@ -594,7 +594,7 @@ class Scheduler:
                         request_id=victim_seq_group.request_id)
 
                     # It may be that the async pending "victim_seq_group"
-                    # becomes finished, in which case we simply free it
+                    # becomes finished, in which case we simply free it.
                     if victim_seq_group.is_finished():
                         self._free_finished_seq_group(victim_seq_group)
                         do_preempt = False
