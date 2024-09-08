@@ -2,25 +2,26 @@ from openai import OpenAI
 
 # Modify OpenAI's API key and API base to use vLLM's API server.
 openai_api_key = "EMPTY"
-openai_api_base = "http://localhost:8001/v1"
+openai_api_base = "http://localhost:8000/v1"
 
 client = OpenAI(
     # defaults to os.environ.get("OPENAI_API_KEY")
     api_key=openai_api_key,
     base_url=openai_api_base,
-    max_retries=0)
+)
 
 models = client.models.list()
 model = models.data[0].id
 
 # Completion API
-stream = True
+stream = False
 completion = client.completions.create(
     model=model,
     prompt="A robot may not injure a human being",
+    echo=False,
+    n=2,
     stream=stream,
-    max_tokens=1000,
-)
+    logprobs=3)
 
 print("Completion results:")
 if stream:
