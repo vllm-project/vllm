@@ -44,6 +44,7 @@ from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
 from vllm.utils import Counter
 from vllm.version import __version__ as VLLM_VERSION
+from vllm.worker.swap.interface import SwapSpaceManagerBuilder
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -246,6 +247,13 @@ class LLMEngine:
         self.input_processor = INPUT_REGISTRY.create_input_processor(
             self.model_config)
 
+        # Create the SwapManager
+        if cache_config.enable_disk_swap:
+            version = "default"
+            self.swap_manager = SwapSpaceManagerBuilder.build(version)
+        else:
+            self.swap_manager = None
+
         self.model_executor = executor_class(
             model_config=model_config,
             cache_config=cache_config,
@@ -304,12 +312,17 @@ class LLMEngine:
             # different process.
             self.tokenizer.ping()
 
+        # Add device to the SwapManager
+        if cache_config.enable_disk_swap:
+            self.swap_manager.parse_and_add_swap_device(cache_config)
+
         # Create the scheduler.
         # NOTE: the cache_config here have been updated with the numbers of
         # GPU and CPU blocks, which are profiled in the distributed executor.
         self.scheduler = [
             Scheduler(scheduler_config, cache_config, lora_config,
-                      parallel_config.pipeline_parallel_size)
+                      parallel_config.pipeline_parallel_size,
+                      self.swap_manager)
             for _ in range(parallel_config.pipeline_parallel_size)
         ]
 
@@ -915,7 +928,11 @@ class LLMEngine:
                 blocks_to_copy=scheduler_outputs.blocks_to_copy,
                 num_lookahead_slots=scheduler_outputs.num_lookahead_slots,
                 running_queue_size=scheduler_outputs.running_queue_size,
-                finished_requests_ids=finished_requests_ids)
+                finished_requests_ids=finished_requests_ids,
+                blocks_to_swap_in_from_disk=scheduler_outputs.
+                blocks_to_swap_in_from_disk,
+                blocks_to_swap_out_to_disk=scheduler_outputs.
+                blocks_to_swap_out_to_disk)
             output = self.model_executor.execute_model(
                 execute_model_req=execute_model_req)
         else:

@@ -56,6 +56,8 @@ class EngineArgs:
     enable_prefix_caching: bool = False
     enable_memory_tiering: bool = False
     enable_layered_transfer: bool = False
+    enable_disk_swap: bool = False
+    disk_swap_config: str = "swap.cfg"
     disable_sliding_window: bool = False
     use_v2_block_manager: bool = False
     swap_space: int = 4  # GiB
@@ -309,6 +311,14 @@ class EngineArgs:
             action='store_true',
             help='Enable layer-by-layer transfer for KV cache blocks '
             'only support for GPU now. ')
+        parser.add_argument('--enable-disk-swap',
+                            action='store_true',
+                            help='Enable swap to disk or other block devices.')
+        parser.add_argument(
+            '--disk-swap-config',
+            type=str,
+            default=EngineArgs.disk_swap_config,
+            help='The config file for multiple disk swap devices.')
         parser.add_argument('--disable-sliding-window',
                             action='store_true',
                             help='Disables sliding window, '
@@ -740,6 +750,8 @@ class EngineArgs:
             sliding_window=model_config.get_sliding_window(),
             enable_prefix_caching=self.enable_prefix_caching,
             enable_memory_tiering=self.enable_memory_tiering,
+            enable_disk_swap=self.enable_disk_swap,
+            disk_swap_config=self.disk_swap_config,
             enable_layered_transfer=self.enable_layered_transfer,
             cpu_offload_gb=self.cpu_offload_gb,
         )

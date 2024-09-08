@@ -127,6 +127,11 @@ class WorkerInput:
     blocks_to_swap_out: Optional[torch.Tensor] = None
     blocks_to_copy: Optional[torch.Tensor] = None
     virtual_engine: int = 0
+    # TODO: We put list here for now. We will check later the correctness
+    blocks_to_swap_in_from_disk: Optional[List[Tuple[int, int, int,
+                                                     int]]] = None
+    blocks_to_swap_out_to_disk: Optional[List[Tuple[int, int, int,
+                                                    int]]] = None
 
     @classmethod
     def from_broadcasted_tensor_dict(
@@ -143,10 +148,15 @@ class WorkerInput:
             blocks_to_swap_out=tensor_dict.pop("blocks_to_swap_out"),
             blocks_to_copy=tensor_dict.pop("blocks_to_copy"),
             virtual_engine=tensor_dict["virtual_engine"],
+            blocks_to_swap_in_from_disk=tensor_dict.pop(
+                "blocks_to_swap_in_from_disk"),
+            blocks_to_swap_out_to_disk=tensor_dict.pop(
+                "blocks_to_swap_out_to_disk"),
         )
 
     def as_broadcastable_tensor_dict(
-            self) -> Dict[str, Union[int, torch.Tensor]]:
+        self
+    ) -> Dict[str, Union[int, torch.Tensor, List[Tuple[int, int, int, int]]]]:
         """
         Extract broadcastable fields.
         """
@@ -156,6 +166,8 @@ class WorkerInput:
             "blocks_to_swap_out": self.blocks_to_swap_out,
             "blocks_to_copy": self.blocks_to_copy,
             "virtual_engine": self.virtual_engine,
+            "blocks_to_swap_in_from_disk": self.blocks_to_swap_in_from_disk,
+            "blocks_to_swap_out_to_disk": self.blocks_to_swap_out_to_disk
         }
 
         return tensor_dict

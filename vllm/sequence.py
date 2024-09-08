@@ -987,6 +987,13 @@ class ExecuteModelRequest:
     num_steps: int = 1
     # Finished request ids since last step.
     finished_requests_ids: List[str] = field(default_factory=list)
+    # Blocks to disk.
+    # NOTE: Add as additional field as we don't fix the format yet
+    # For now, the format is block_id, block_id, from_dev, to_dev
+    blocks_to_swap_in_from_disk: List[Tuple[int, int, int,
+                                            int]] = field(default_factory=list)
+    blocks_to_swap_out_to_disk: List[Tuple[int, int, int,
+                                           int]] = field(default_factory=list)
 
     def clone(
         self, seq_group_metadata_list: List[SequenceGroupMetadata]
@@ -1002,4 +1009,6 @@ class ExecuteModelRequest:
             running_queue_size=self.running_queue_size,
             previous_hidden_states=self.previous_hidden_states,
             num_steps=self.num_steps,
-            finished_requests_ids=self.finished_requests_ids)
+            finished_requests_ids=self.finished_requests_ids,
+            blocks_to_swap_in_from_disk=self.blocks_to_swap_in_from_disk,
+            blocks_to_swap_out_to_disk=self.blocks_to_swap_out_to_disk)

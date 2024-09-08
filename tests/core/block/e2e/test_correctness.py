@@ -631,6 +631,102 @@ def test_auto_prefix_caching_with_memory_tiering(baseline_llm_generator,
         # skip cuda graph creation for fast test.
         "enforce_eager": True,
 
+        # Allow only 5 sequences of ~1024 tokens in worst case.
+        "max_model_len": 2048,  #192
+        "block_size": 16,
+        "num_gpu_blocks_override": 5 * (32 + 1),  #3
+        "swap_space": 1,
+
+        # Test APC in v2 block
+        "use_v2_block_manager": False,
+    }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
+@pytest.mark.parametrize("baseline_llm_kwargs",
+                         [{
+                             "enable_prefix_caching": True,
+                             "enable_memory_tiering": False,
+                         }])
+@pytest.mark.parametrize("test_llm_kwargs", [{
+    "enable_prefix_caching": True,
+    "preemption_mode": "swap",
+    "enable_memory_tiering": True,
+    "swap_space": 1,
+    "enable_disk_swap": True
+}])
+@pytest.mark.parametrize("batch_size", [10])
+@pytest.mark.parametrize("seed", [1])
+def test_auto_prefix_caching_with_disk_swap(baseline_llm_generator,
+                                            test_llm_generator, batch_size):
+    """Verify block manager v2 with auto prefix caching enabled produces same
+    outputs as auto prefix caching disabled, even when there is preemption.
+
+    This constructs two LLM, each with limited number of GPU blocks. The limit
+    is decided such that as the sequences in the batch grow, sequences must be
+    preempted and removed from cache.
+
+    If the output token ids are equivalent, then we have confidence that auto
+    prefix caching itself at least don't cause result error.
+    """
+    output_len = 1024  #102
+    temperature = 0.0
+
+    # We want to ensure equality even with preemption.
+    # We force the total block size to be 1 + cdiv(output_len, block_size)
+    # so that only one sequence can fit at a time (once the sequences grow).
+    prompts = [
+        "Hi You are a helpful assistant. Please answer truthfully and write "
+        "out your thinking step by step to be sure you get the right answer. "
+        "If you make a mistake, attempt to correct it. who are you?",
+        "Test You are a helpful assistant. Please answer truthfully and write "
+        "out your thinking step by step to be sure you get the right answer. "
+        "If you make a mistake, attempt to correct it. who are you?",
+        "Hello You are a helpful assistant. Please answer truthfully and write "
+        "out your thinking step by step to be sure you get the right answer. "
+        "If you make a mistake, attempt to correct it. who are you?",
+        "Now You are a helpful assistant. Please answer truthfully and write "
+        "out your thinking step by step to be sure you get the right answer. "
+        "If you make a mistake, attempt to correct it. who are you?",
+        "You are a helpful assistant. Please answer truthfully and write "
+        "out your thinking step by step to be sure you get the right answer. "
+        "If you make a mistake, attempt to correct it. who are you?",
+        "You are a helpful assistant. Please answer truthfully and write out "
+        "your thinking step by step to be sure you get the right answer. You "
+        "are helpful and harmless and you follow ethical guidelines. "
+        "who are you?"
+    ]
+
+    prompts = [prompt for prompt, _ in zip(cycle(prompts), range(batch_size))]
+
+    sampling_params = SamplingParams(
+        max_tokens=output_len,
+        ignore_eos=True,
+        temperature=temperature,
+    )
+
+    print('Getting token ids with memory tiering disabled')
+    baseline_token_ids = get_token_ids_from_llm_generator(
+        baseline_llm_generator, prompts, sampling_params)
+
+    print('Getting token ids with memory tiering enabled')
+    test_token_ids = get_token_ids_from_llm_generator(test_llm_generator,
+                                                      prompts, sampling_params)
+
+    for expected_token_ids, actual_token_ids in zip(baseline_token_ids,
+                                                    test_token_ids):
+        assert expected_token_ids == actual_token_ids
+
+    assert baseline_token_ids == test_token_ids
+
+
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [{
+        # Use a small model for a fast test.
+        "model": "facebook/opt-125m",
+
+        # skip cuda graph creation for fast test.
+        "enforce_eager": True,
+
         # we keep the blocks small, so that hit eviction quickly
         "max_model_len": 48,
         "block_size": 16,

@@ -250,7 +250,12 @@ class _AsyncLLMEngine(LLMEngine):
                 virtual_engine=virtual_engine,
                 num_lookahead_slots=scheduler_outputs.num_lookahead_slots,
                 running_queue_size=scheduler_outputs.running_queue_size,
-                finished_requests_ids=finished_requests_ids)
+                finished_requests_ids=finished_requests_ids,
+                blocks_to_swap_in_from_disk=scheduler_outputs.
+                blocks_to_swap_in_from_disk,
+                blocks_to_swap_out_to_disk=scheduler_outputs.
+                blocks_to_swap_out_to_disk,
+            )
             output = await self.model_executor.execute_model_async(
                 execute_model_req)
         else:
