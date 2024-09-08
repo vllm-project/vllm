@@ -256,7 +256,7 @@ def test_append_slot_cow():
     assert block_manager.can_append_slots(seq_group)
     before_blocks = block_manager.get_num_free_gpu_blocks()
 
-    cows, _, _ = block_manager.append_slots(child)
+    cows, _, _, _, _ = block_manager.append_slots(child)
     assert cows
     dict_cows = defaultdict(list)
     for src_block, dst_block in cows:
@@ -333,7 +333,7 @@ def test_swap():
     assert block_manager.can_swap_in(seq_group) == AllocStatus.OK
     before_cpu_blocks = block_manager.get_num_free_cpu_blocks()
     before_gpu_blocks = block_manager.get_num_free_gpu_blocks()
-    mapping, _ = block_manager.swap_in(seq_group)
+    mapping, _, _, _ = block_manager.swap_in(seq_group)
     assert [x[0] for x in mapping] == cpu_blocks
     after_cpu_blocks = block_manager.get_num_free_cpu_blocks()
     after_gpu_blocks = block_manager.get_num_free_gpu_blocks()
@@ -389,7 +389,7 @@ def test_swap_encoder_decoder():
     assert block_manager.can_swap_in(seq_group) == AllocStatus.OK
     before_cpu_blocks = block_manager.get_num_free_cpu_blocks()
     before_gpu_blocks = block_manager.get_num_free_gpu_blocks()
-    mapping, _ = block_manager.swap_in(seq_group)
+    mapping, _, _, _ = block_manager.swap_in(seq_group)
     assert [x[0] for x in mapping] == cpu_blocks
     after_cpu_blocks = block_manager.get_num_free_cpu_blocks()
     after_gpu_blocks = block_manager.get_num_free_gpu_blocks()

@@ -330,7 +330,12 @@ class _AsyncLLMEngine(LLMEngine):
                 finished_requests_ids=finished_requests_ids,
                 # We use ExecuteModelRequest to pass the last sampled_token_ids
                 # to each of the non-last PP stages for in-place prepare_input.
-                last_sampled_token_ids=last_sampled_token_ids)
+                last_sampled_token_ids=last_sampled_token_ids,
+                blocks_to_swap_in_from_disk=scheduler_outputs.
+                blocks_to_swap_in_from_disk,
+                blocks_to_swap_out_to_disk=scheduler_outputs.
+                blocks_to_swap_out_to_disk,
+            )
 
             if allow_async_output_proc:
                 execute_model_req.async_callback = self.async_callbacks[

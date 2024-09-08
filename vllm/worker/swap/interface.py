@@ -1,0 +1,177 @@
+import enum
+from abc import ABC, abstractmethod
+from typing import Dict, List, Optional, Tuple
+
+import torch
+
+from vllm.block import BlockTable, PhysicalTokenBlock
+from vllm.config import CacheConfig
+
+
+class DeviceStatus(enum.Enum):
+    OK = enum.auto()
+    ERROR = enum.auto()
+
+
+class SwapDevice(ABC):
+
+    @property
+    @abstractmethod
+    def dev_id(self) -> int:
+        pass
+
+    @abstractmethod
+    def attach_device(self):
+        pass
+
+    @property
+    @abstractmethod
+    def is_attached(self) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
+    def detach_device(self):
+        pass
+
+    @abstractmethod
+    def can_allocate_block(self) -> bool:
+        pass
+
+    @abstractmethod
+    def allocate(self, block_hash: int,
+                 num_hashed_tokens: int) -> PhysicalTokenBlock:
+        pass
+
+    @abstractmethod
+    def free(self, block: PhysicalTokenBlock):
+        pass
+
+    @abstractmethod
+    def get_num_total_blocks(self) -> int:
+        pass
+
+    @abstractmethod
+    def contains_block(self, block_hash: int, num_hashed_tokens: int):
+        pass
+
+    @abstractmethod
+    def update_hash(self, block_hash: int, block: PhysicalTokenBlock):
+        pass
+
+    @abstractmethod
+    def read_block_content(self, caches: List[torch.Tensor],
+                           blocks_to_swap_in: List[Tuple[int, int]],
+                           layers: List[int]):
+        pass
+
+    @abstractmethod
+    def write_block_content(self, caches: List[torch.Tensor],
+                            blocks_to_swap_in: List[Tuple[int, int]],
+                            layers: List[int]):
+        pass
+
+    @abstractmethod
+    def write_block_content_one_layer(self, cache: torch.Tensor,
+                                      blocks_to_swap_out: List[Tuple[int,
+                                                                     int]],
+                                      layer: int) -> None:
+        pass
+
+    @abstractmethod
+    def read_block_content_one_layer(self, cache: torch.Tensor,
+                                     blocks_to_swap_in: List[Tuple[int, int]],
+                                     layer: int) -> None:
+        pass
+
+
+class SwapSpaceManagerBase(ABC):
+
+    @staticmethod
+    def get_swap_space_manager_class(version: str):
+        if version == "default":
+            from vllm.worker.swap.swap_manager import SwapSpaceManager
+            return SwapSpaceManager
+        return ValueError(f"Unknown version {version}")
+
+    @abstractmethod
+    def parse_and_add_swap_device(self, cache_config: CacheConfig):
+        pass
+
+    @abstractmethod
+    def add_swap_device(self, swap_device: SwapDevice) -> DeviceStatus:
+        pass
+
+    @abstractmethod
+    def remove_swap_device(self, swap_device: SwapDevice) -> DeviceStatus:
+        pass
+
+    @abstractmethod
+    def contains_block(self,
+                       block_hash: int,
+                       num_hashed_tokens: int = 0) -> bool:
+        pass
+
+    @abstractmethod
+    def can_allocate(self,
+                     block_hash: int,
+                     num_hashed_tokens: int = 0) -> bool:
+        pass
+
+    @abstractmethod
+    def allocate(self,
+                 block_hash: int,
+                 num_hashed_tokens: int = 0,
+                 swap_dev_id: Optional[int] = None) -> PhysicalTokenBlock:
+        pass
+
+    @abstractmethod
+    def free(self, block: PhysicalTokenBlock) -> None:
+        pass
+
+    @abstractmethod
+    def update_hash(self, block_hash: int, block: PhysicalTokenBlock):
+        pass
+
+    @abstractmethod
+    def read_blocks(self, caches: List[torch.Tensor],
+                    blocks_to_swap_in: Dict[int, List[Tuple[int, int]]],
+                    layers: List[int]):
+        pass
+
+    @abstractmethod
+    def write_blocks(self, caches: List[torch.Tensor],
+                     blocks_to_swap_out: Dict[int, List[Tuple[int, int]]],
+                     layers: List[int]):
+        pass
+
+    @abstractmethod
+    def update_block_tables(self, seq_id: int,
+                            disk_block_table: Dict[int, BlockTable]):
+        pass
+
+    @abstractmethod
+    def free_block_tables(self):
+        pass
+
+
+class SwapSpaceManagerBuilder:
+    _swap_space_manager: Optional[SwapSpaceManagerBase] = None
+
+    @classmethod
+    def build(cls, version) -> Optional[SwapSpaceManagerBase]:
+        SwapManagerImpl = SwapSpaceManagerBase.get_swap_space_manager_class(
+            version)
+        cls._swap_space_manager = SwapManagerImpl()
+        return cls._swap_space_manager
+
+    @classmethod
+    def get(cls) -> Optional[SwapSpaceManagerBase]:
+        return cls._swap_space_manager
+
+
+class SwapDeviceSelectorBase(ABC):
+
+    @abstractmethod
+    def select_device_for_allocation(
+            self, device_table: List[SwapDevice]) -> SwapDevice:
+        pass

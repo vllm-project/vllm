@@ -23,10 +23,12 @@ from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta)
+from vllm.utils import Device
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
+from vllm.worker.swap.interface import SwapSpaceManagerBuilder
 from vllm.worker.worker_base import LocalOrDistributedWorkerBase, WorkerInput
 
 logger = init_logger(__name__)
@@ -149,6 +151,9 @@ class Worker(LocalOrDistributedWorkerBase):
 
     def _is_embedding_model(self):
         return self.model_config.is_embedding_model
+
+        # Get a reference to the swap_manager
+        self.swap_manager = SwapSpaceManagerBuilder.get()
 
     def init_device(self) -> None:
         if self.device_config.device.type == "cuda":
@@ -329,6 +334,10 @@ class Worker(LocalOrDistributedWorkerBase):
             blocks_to_copy=blocks_to_copy,
             virtual_engine=virtual_engine,
             num_steps=num_steps,
+            blocks_to_swap_in_from_disk=execute_model_req.
+            blocks_to_swap_in_from_disk,
+            blocks_to_swap_out_to_disk=execute_model_req.
+            blocks_to_swap_out_to_disk,
         )
 
     @torch.inference_mode()
@@ -336,6 +345,78 @@ class Worker(LocalOrDistributedWorkerBase):
         virtual_engine = worker_input.virtual_engine
         #NOTE: Here we change the order to prevent overlap
         # Issue cache operations.
+        start, end = self.model_config.get_layers(self.parallel_config)
+        layers: List[int] = list(range(start, end))
+
+        blocks_to_swap_out_gpu_to_dev: Dict[int, List[Tuple[int, int]]] = {}
+        blocks_to_swap_out_cpu_to_dev: Dict[int, List[Tuple[int, int]]] = {}
+        blocks_to_swap_in_gpu_from_dev: Dict[int, List[Tuple[int, int]]] = {}
+        blocks_to_swap_in_cpu_from_dev: Dict[int, List[Tuple[int, int]]] = {}
+
+        print("Worker move data")
+
+        if (self.cache_config.enable_disk_swap
+                and worker_input.blocks_to_swap_out_to_disk):
+            if self.cache_config.enable_layered_transfer:
+                raise NotImplementedError(
+                    "Layered transfer not implemented for disk yet")
+            else:
+                for tuple in worker_input.blocks_to_swap_out_to_disk:
+                    if tuple[2] == Device.CPU:
+                        blocks_to_swap_out_cpu_to_dev.setdefault(
+                            tuple[3] - Device.SWAP, []).append(
+                                (tuple[0], tuple[1]))
+                    elif tuple[2] == Device.GPU:
+                        blocks_to_swap_out_gpu_to_dev.setdefault(
+                            tuple[3] - Device.SWAP, []).append(
+                                (tuple[0], tuple[1]))
+                    else:
+                        raise ValueError(
+                            f"Swap out from unsupported device {tuple[2]}")
+        if (self.cache_config.enable_disk_swap
+                and worker_input.blocks_to_swap_in_from_disk):
+            if self.cache_config.enable_layered_transfer:
+                raise NotImplementedError(
+                    "Layered transfer not implemented for disk yet")
+            else:
+                for tuple in worker_input.blocks_to_swap_in_from_disk:
+                    if tuple[3] == Device.CPU:
+                        blocks_to_swap_in_cpu_from_dev.setdefault(
+                            tuple[2] - Device.SWAP, []).append(
+                                (tuple[0], tuple[1]))
+                    elif tuple[3] == Device.GPU:
+                        blocks_to_swap_in_gpu_from_dev.setdefault(
+                            tuple[2] - Device.SWAP, []).append(
+                                (tuple[0], tuple[1]))
+                    else:
+                        raise ValueError(
+                            f"Swap out from unsupported device {tuple[3]}")
+
+        # 1. Swap from CPU to disk [Async in future]
+        if (self.swap_manager is not None
+                and blocks_to_swap_out_cpu_to_dev != {}):
+            print("CPU to disk")
+            if self.cache_config.enable_layered_transfer:
+                raise NotImplementedError(
+                    "Layered transfer not implemented for disk yet")
+            else:
+                self.swap_manager.write_blocks(
+                    self.cache_engine[virtual_engine].cpu_cache,
+                    blocks_to_swap_out_cpu_to_dev, layers)
+
+        # 2. Swap from GPU to disk [Async in future]
+        if (self.swap_manager is not None
+                and blocks_to_swap_out_gpu_to_dev != {}):
+            print("GPU to disk")
+            if self.cache_config.enable_layered_transfer:
+                raise NotImplementedError(
+                    "Layered transfer not implemented for disk yet")
+            else:
+                self.swap_manager.write_blocks(
+                    self.cache_engine[virtual_engine].gpu_cache,
+                    blocks_to_swap_out_gpu_to_dev, layers)
+
+        # 3. Swap from GPU to CPU
         if (worker_input.blocks_to_swap_out is not None
                 and worker_input.blocks_to_swap_out.numel() > 0):
             if self.cache_config.enable_layered_transfer:
@@ -344,6 +425,8 @@ class Worker(LocalOrDistributedWorkerBase):
             else:
                 self.cache_engine[virtual_engine].swap_out(
                     worker_input.blocks_to_swap_out)
+
+        # 4. Copy from GPU to GPU
         if (worker_input.blocks_to_copy is not None
                 and worker_input.blocks_to_copy.numel() > 0):
             if self.cache_config.enable_layered_transfer:
@@ -352,6 +435,8 @@ class Worker(LocalOrDistributedWorkerBase):
             else:
                 self.cache_engine[virtual_engine].copy(
                     worker_input.blocks_to_copy)
+
+        # 5. Copy from CPU to GPU
         if (worker_input.blocks_to_swap_in is not None
                 and worker_input.blocks_to_swap_in.numel() > 0):
             if self.cache_config.enable_layered_transfer:
@@ -360,6 +445,32 @@ class Worker(LocalOrDistributedWorkerBase):
             else:
                 self.cache_engine[virtual_engine].swap_in(
                     worker_input.blocks_to_swap_in)
+
+        # 6. Copy from Disk to CPU
+        if (self.swap_manager is not None
+                and blocks_to_swap_in_cpu_from_dev != {}):
+            print("Disk to CPU")
+            if self.cache_config.enable_layered_transfer:
+                raise NotImplementedError(
+                    "Layered transfer not implemented for disk yet")
+            else:
+                self.swap_manager.read_blocks(
+                    self.cache_engine[virtual_engine].cpu_cache,
+                    blocks_to_swap_in_cpu_from_dev, layers)
+
+        # 7. Copy from Disk to GPU
+        if (self.swap_manager is not None
+                and blocks_to_swap_in_gpu_from_dev != {}):
+            print("Disk to GPU")
+            if self.cache_config.enable_layered_transfer:
+                raise NotImplementedError(
+                    "Layered transfer not implemented for disk yet")
+            else:
+                self.swap_manager.read_blocks(
+                    self.cache_engine[virtual_engine].gpu_cache,
+                    blocks_to_swap_in_gpu_from_dev, layers)
+
+        print("Worker move data end")
 
     def _get_cached_seq_group_metadata(
             self,

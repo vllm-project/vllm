@@ -53,6 +53,7 @@ from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
 from vllm.utils import Counter, Device
 from vllm.version import __version__ as VLLM_VERSION
+from vllm.worker.swap.interface import SwapSpaceManagerBuilder
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -314,6 +315,13 @@ class LLMEngine:
         self.input_processor = input_registry.create_input_processor(
             model_config)
 
+        # Create the SwapManager
+        if cache_config.enable_disk_swap:
+            version = "default"
+            self.swap_manager = SwapSpaceManagerBuilder.build(version)
+        else:
+            self.swap_manager = None
+
         self.model_executor = executor_class(
             model_config=model_config,
             cache_config=cache_config,
@@ -392,6 +400,10 @@ class LLMEngine:
         # of request outputs to asyncio queues
         self.process_request_outputs_callback: Optional[Callable] = None
 
+        # Add device to the SwapManager
+        if cache_config.enable_disk_swap:
+            self.swap_manager.parse_and_add_swap_device(cache_config)
+
         # Create the scheduler.
         # NOTE: the cache_config here have been updated with the numbers of
         # GPU and CPU blocks, which are profiled in the distributed executor.
@@ -400,7 +412,8 @@ class LLMEngine:
                 scheduler_config, cache_config, lora_config,
                 parallel_config.pipeline_parallel_size,
                 self.async_callbacks[v_id]
-                if model_config.use_async_output_proc else None)
+                if model_config.use_async_output_proc else None,
+                self.swap_manager)
             for v_id in range(parallel_config.pipeline_parallel_size)
         ]
 
@@ -1214,7 +1227,11 @@ class LLMEngine:
                 finished_requests_ids=finished_requests_ids,
                 # We use ExecuteModelRequest to pass the last sampled_token_ids
                 # to each of the non-last PP stages for in-place prepare_input.
-                last_sampled_token_ids=last_sampled_token_ids)
+                last_sampled_token_ids=last_sampled_token_ids,
+                blocks_to_swap_in_from_disk=scheduler_outputs.
+                blocks_to_swap_in_from_disk,
+                blocks_to_swap_out_to_disk=scheduler_outputs.
+                blocks_to_swap_out_to_disk)
 
             if allow_async_output_proc:
                 execute_model_req.async_callback = self.async_callbacks[

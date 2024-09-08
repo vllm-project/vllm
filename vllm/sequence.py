@@ -1268,6 +1268,14 @@ class ExecuteModelRequest(
     # Async callback
     async_callback: Optional[Callable] = None
 
+    # Blocks to disk.
+    # NOTE: Add as additional field as we don't fix the format yet
+    # For now, the format is block_id, block_id, from_dev, to_dev
+    blocks_to_swap_in_from_disk: List[Tuple[int, int, int,
+                                            int]] = msgspec.spec(default_factory=list)
+    blocks_to_swap_out_to_disk: List[Tuple[int, int, int,
+                                           int]] = msgspec.spec(default_factory=list)
+
     @property
     def is_first_multi_step(self) -> bool:
         # TODO(will) make this be able to handle batches with variable number of
@@ -1313,4 +1321,6 @@ class ExecuteModelRequest(
             finished_requests_ids=self.finished_requests_ids,
             last_sampled_token_ids=self.last_sampled_token_ids.clone()
             if self.last_sampled_token_ids is not None else None,
-            async_callback=self.async_callback)
+            async_callback=self.async_callback,
+            blocks_to_swap_in_from_disk=self.blocks_to_swap_in_from_disk,
+            blocks_to_swap_out_to_disk=self.blocks_to_swap_out_to_disk)

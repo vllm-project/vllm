@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     VLLM_USE_TRITON_FLASH_ATTN: bool = False
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: Optional[str] = None
-    VLLM_ENGINE_ITERATION_TIMEOUT_S: int = 60
+    VLLM_ENGINE_ITERATION_TIMEOUT_S: int = 600
     VLLM_API_KEY: Optional[str] = None
     S3_ACCESS_KEY_ID: Optional[str] = None
     S3_SECRET_ACCESS_KEY: Optional[str] = None
@@ -218,7 +218,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 
     # timeout for each iteration in the engine
     "VLLM_ENGINE_ITERATION_TIMEOUT_S":
-    lambda: int(os.environ.get("VLLM_ENGINE_ITERATION_TIMEOUT_S", "60")),
+    lambda: int(os.environ.get("VLLM_ENGINE_ITERATION_TIMEOUT_S", "600")),
 
     # API key for VLLM API server
     "VLLM_API_KEY":

@@ -27,9 +27,10 @@ class EmbeddingModelBlockSpaceManager(BlockSpaceManager):
 
     def allocate(
         self, seq_group: SequenceGroup
-    ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]:
+    ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]], List[Tuple[
+            int, int, int, int]], List[Tuple[int, int, int, int]]]:
         # No actual allocation logic needed
-        return [], []
+        return [], [], [], []
 
     def can_append_slots(self, seq_group: SequenceGroup,
                          num_lookahead_slots: int) -> bool:
@@ -39,9 +40,10 @@ class EmbeddingModelBlockSpaceManager(BlockSpaceManager):
         self,
         seq: Sequence,
         num_lookahead_slots: int,
-    ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]], List[Tuple[int,
-                                                                        int]]]:
-        return None, None, None  # type: ignore
+    ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]], List[Tuple[
+            int, int]], List[Tuple[int, int, int, int]], List[Tuple[
+                int, int, int, int]]]:
+        return None, None, None, None, None  # type: ignore
 
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         pass
@@ -52,8 +54,9 @@ class EmbeddingModelBlockSpaceManager(BlockSpaceManager):
 
     def swap_in(
         self, seq_group: SequenceGroup
-    ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]:
-        return None, None, None  # type: ignore
+    ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]], List[Tuple[
+            int, int, int, int]], List[Tuple[int, int, int, int]]]:
+        return None, None, None, None  # type: ignore
 
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:
         return True

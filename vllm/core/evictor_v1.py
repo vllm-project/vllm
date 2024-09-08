@@ -97,6 +97,7 @@ class LRUEvictor(Evictor):
                 "Attempting to remove block that's not in the evictor")
         block: PhysicalTokenBlock = self.free_table[block_hash]
         self.free_table.pop(block_hash)
+        block.is_evicted = False
         return block
 
     @property
