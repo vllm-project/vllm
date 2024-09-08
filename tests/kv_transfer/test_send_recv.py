@@ -9,12 +9,15 @@ import time
 
 def test_run(my_rank, pipe):
     # test run
+    x = torch.tensor([1]).to(pipe.device)
+    y = torch.tensor([[2., 3., 4., 8.]]).to(pipe.device)
     if my_rank == 0:
-        x = torch.tensor([1]).to(pipe.device)
+        
         pipe.send_tensor(x)
+        pipe.send_tensor(y)
     else:
-        y = pipe.recv_tensor()    
-        assert y.item() == 1
+        assert torch.allclose(x, pipe.recv_tensor())
+        assert torch.allclose(y, pipe.recv_tensor())
 
 
 def stress_test(my_rank, pipe):
@@ -23,21 +26,24 @@ def stress_test(my_rank, pipe):
     
     tensors = []
     
+    
     for i in tqdm(range(2000)):
-        mean = random.randint(1, 10)
-        std = random.randint(1, 10)
-        size = [random.randint(900, 1000), random.randint(900, 1000)]
-        x = torch.normal(mean * 1.0, std * 1.0, size=size).to(pipe.device)
+        mean = torch.rand(1).item()
+        std = torch.rand(1).item()
+        size = torch.randint(900, 1000, (2,))
+        x = torch.normal(mean * 1.0, std * 1.0, size=size.tolist()).to(pipe.device)
         
         # 5% probability of sending a None
-        if random.randint(1, 100) < 5:
+        if torch.rand(1).item() < 0.05:
             tensors.append(None)
             tensors.append(None)
             tensors.append(None)
         else:
             tensors.append(x)
-            tensors.append(x.mean())
-            tensors.append(x.std())
+            tensors.append(x.mean().unsqueeze(0))
+            tensors.append(x.std().unsqueeze(0))
+
+        
         
     torch.distributed.barrier()
     
@@ -54,8 +60,9 @@ def stress_test(my_rank, pipe):
                 assert mean is None
                 assert std is None
             else:
-                assert x.mean() == mean
-                assert x.std() == std
+                assert torch.allclose(x, tensors[3*i])
+                assert x.mean() == mean[0]
+                assert x.std() == std[0]
 
     torch.distributed.barrier()
 
@@ -80,7 +87,7 @@ def latency_test(my_rank, pipe, nelement, ntensor):
         torch.distributed.barrier()
         
         if my_rank == 0:
-            t = torch.tensor(time.time(), dtype=torch.float64).to(pipe.device)
+            t = torch.tensor([time.time()], dtype=torch.float64).to(pipe.device)
             for tensor in tensors:
                 pipe.send_tensor(tensor)
             pipe.send_tensor(t)
@@ -110,7 +117,8 @@ if __name__ == "__main__":
 
 
     pipe = tdp.TorchDistributedPipe([[0,1]], my_rank, "nccl")
-    
+
+    torch.manual_seed(0) 
     test_run(my_rank, pipe)
     stress_test(my_rank, pipe)
     latency_test(my_rank, pipe, 1024*8*128, 80)
