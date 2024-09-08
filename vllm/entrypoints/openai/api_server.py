@@ -54,7 +54,7 @@ from vllm.version import __version__ as VLLM_VERSION
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
-async_engine_client: EngineClient
+engine_client: EngineClient
 engine_args: AsyncEngineArgs
 openai_serving_chat: OpenAIServingChat
 openai_serving_completion: OpenAIServingCompletion
@@ -85,7 +85,7 @@ async def lifespan(app: FastAPI):
     async def _force_log():
         while True:
             await asyncio.sleep(10)
-            await async_engine_client.do_log_stats()
+            await engine_client.do_log_stats()
 
     if not engine_args.disable_log_stats:
         task = asyncio.create_task(_force_log())
@@ -99,18 +99,18 @@ async def lifespan(app: FastAPI):
 async def build_async_engine_client(
         args: Namespace) -> AsyncIterator[Optional[EngineClient]]:
 
-    # Context manager to handle async_engine_client lifecycle
+    # Context manager to handle engine_client lifecycle
     # Ensures everything is shutdown and cleaned up on error/exit
     global engine_args
     engine_args = AsyncEngineArgs.from_cli_args(args)
 
     # Backend itself still global for the silly lil' health handler
-    global async_engine_client
+    global engine_client
 
     async with build_async_engine_client_from_engine_args(
             engine_args, args.disable_frontend_multiprocessing) as engine:
 
-        async_engine_client = engine  # type: ignore[assignment]
+        engine_client = engine  # type: ignore[assignment]
         yield engine
 
 
@@ -242,7 +242,7 @@ def mount_metrics(app: FastAPI):
 @router.get("/health")
 async def health() -> Response:
     """Health check."""
-    await async_engine_client.check_health()
+    await engine_client.check_health()
     return Response(status_code=200)
 
 
@@ -333,14 +333,14 @@ if envs.VLLM_TORCH_PROFILER_DIR:
     @router.post("/start_profile")
     async def start_profile():
         logger.info("Starting profiler...")
-        await async_engine_client.start_profile()
+        await engine_client.start_profile()
         logger.info("Profiler started.")
         return Response(status_code=200)
 
     @router.post("/stop_profile")
     async def stop_profile():
         logger.info("Stopping profiler...")
-        await async_engine_client.stop_profile()
+        await engine_client.stop_profile()
         logger.info("Profiler stopped.")
         return Response(status_code=200)
 
@@ -429,7 +429,7 @@ def build_app(args: Namespace) -> FastAPI:
 
 
 async def init_app(
-    async_engine_client: EngineClient,
+    engine_client: EngineClient,
     args: Namespace,
 ) -> FastAPI:
     app = build_app(args)
@@ -439,7 +439,7 @@ async def init_app(
     else:
         served_model_names = [args.model]
 
-    model_config = await async_engine_client.get_model_config()
+    model_config = await engine_client.get_model_config()
 
     if args.disable_log_requests:
         request_logger = None
@@ -452,7 +452,7 @@ async def init_app(
     global openai_serving_tokenization
 
     openai_serving_chat = OpenAIServingChat(
-        async_engine_client,
+        engine_client,
         model_config,
         served_model_names,
         args.response_role,
@@ -464,7 +464,7 @@ async def init_app(
         enable_auto_tools=args.enable_auto_tool_choice,
         tool_parser=args.tool_call_parser)
     openai_serving_completion = OpenAIServingCompletion(
-        async_engine_client,
+        engine_client,
         model_config,
         served_model_names,
         lora_modules=args.lora_modules,
@@ -473,13 +473,13 @@ async def init_app(
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
     )
     openai_serving_embedding = OpenAIServingEmbedding(
-        async_engine_client,
+        engine_client,
         model_config,
         served_model_names,
         request_logger=request_logger,
     )
     openai_serving_tokenization = OpenAIServingTokenization(
-        async_engine_client,
+        engine_client,
         model_config,
         served_model_names,
         lora_modules=args.lora_modules,
@@ -495,16 +495,16 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     logger.info("vLLM API server version %s", VLLM_VERSION)
     logger.info("args: %s", args)
 
-    async with build_async_engine_client(args) as async_engine_client:
+    async with build_async_engine_client(args) as engine_client:
         # If None, creation of the client failed and we exit.
-        if async_engine_client is None:
+        if engine_client is None:
             return
 
-        app = await init_app(async_engine_client, args)
+        app = await init_app(engine_client, args)
 
         shutdown_task = await serve_http(
             app,
-            engine=async_engine_client,
+            engine=engine_client,
             host=args.host,
             port=args.port,
             log_level=args.uvicorn_log_level,
