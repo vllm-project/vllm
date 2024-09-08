@@ -107,10 +107,10 @@ def get_pp_group() -> GroupCoordinator:
 # kept for backward compatibility
 get_pipeline_model_parallel_group = get_pp_group
 
-_DISAGG: Optional[dist_kv.DistributedKVCoordinator] = None
+_DISAGG: Optional[dist_kv.KV_transfer_agent] = None
 
 
-def get_disagg_group() -> dist_kv.DistributedKVCoordinator:
+def get_disagg_group() -> dist_kv.KV_transfer_agent:
     assert _DISAGG is not None, (
         "disaggregated prefill parallel group is not initialized")
     return _DISAGG

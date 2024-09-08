@@ -12,7 +12,6 @@ import torch
 import torch.distributed
 import torch.nn as nn
 
-import vllm.distributed.distributed_kv as dist_kv
 
 try:
     from flashinfer import BatchDecodeWithPagedKVCacheWrapper
@@ -1366,56 +1365,25 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
         } if self.has_seqlen_agnostic else {}
 
-        # check if the current run is profiling
-        is_profile_run = (kv_caches is None) or (kv_caches[0] is None)
-        # check if the current run is prefill
-        is_prefill_run = prefill_meta is not None
+        hidden_or_intermediate_states = model_executable(
+        input_ids=model_input.input_tokens,
+        positions=model_input.input_positions,
+        kv_caches=kv_caches,
+        attn_metadata=model_input.attn_metadata,
+        intermediate_tensors=intermediate_tensors,
+        **MultiModalInputs.as_kwargs(multi_modal_kwargs,
+                                        device=self.device),
+        **seqlen_agnostic_kwargs)
         
-        # for disaggregated prefilling: allow bypassing model execution
-        bypass_model_exec = False
+        return hidden_or_intermediate_states
+
+    @torch.inference_mode()
+    def postprocess_model(
+        self,
+        model_input,
+        hidden_or_intermediate_states,
         
-        # Recv kv cache for disaggregated prefill
-        # Skip model execution if all required KV cache are received
-        if all([
-            is_prefill_run,
-            dist_kv.IS_KV_DECODE_INSTANCE,
-            not is_profile_run]):
-            
-            hidden_or_intermediate_states, bypass = \
-                dist_kv.recv_kv_caches_and_hidden_states(
-                    model_executable,
-                    model_input,
-                    kv_caches,
-                )
-            if bypass:
-                bypass_model_exec = True
-
-        if not bypass_model_exec:
-            hidden_or_intermediate_states = model_executable(
-            input_ids=model_input.input_tokens,
-            positions=model_input.input_positions,
-            kv_caches=kv_caches,
-            attn_metadata=model_input.attn_metadata,
-            intermediate_tensors=intermediate_tensors,
-            **MultiModalInputs.as_kwargs(multi_modal_kwargs,
-                                            device=self.device),
-            **seqlen_agnostic_kwargs)
-        
-        # Send KV cache for disaggregated prefill
-        if all([
-            is_prefill_run,
-            dist_kv.IS_KV_PREFILL_INSTANCE,
-            not is_profile_run]):
-            
-            dist_kv.send_kv_caches_and_hidden_states(
-                model_executable,
-                model_input,
-                kv_caches,
-                hidden_or_intermediate_states,
-            )
-
-
-        # Compute the logits in the last pipeline stage.
+    ):
         if not get_pp_group().is_last_rank:
             return hidden_or_intermediate_states
         
@@ -1431,7 +1399,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             sampling_metadata=model_input.sampling_metadata,
         )
 
-
+        decode_meta = model_input.attn_metadata.decode_metadata
         if self.return_hidden_states:
             # we only need to pass hidden states of most recent token
             assert model_input.sampling_metadata is not None
@@ -1447,7 +1415,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             output.hidden_states = hidden_states
 
         return [output]
-
+    
+    
+    
 
 class CUDAGraphRunner:
 

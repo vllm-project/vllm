@@ -387,7 +387,6 @@ class GroupCoordinator:
         """Broadcast the input object list.
         NOTE: `src` is the local rank of the source rank.
         """
-        assert src < self.world_size, f"Invalid src rank ({src})"
 
         # Bypass the function if we are using only 1 GPU.
         if self.world_size == 1:
@@ -402,7 +401,6 @@ class GroupCoordinator:
         """Send the input object list to the destination rank."""
         """NOTE: `dst` is the local rank of the destination rank."""
 
-        assert dst < self.world_size, f"Invalid dst rank ({dst})"
 
         assert dst != self.rank_in_group, (
             "Invalid destination rank. Destination rank is the same "
@@ -432,7 +430,6 @@ class GroupCoordinator:
         """Receive the input object list from the source rank."""
         """NOTE: `src` is the local rank of the source rank."""
 
-        assert src < self.world_size, f"Invalid src rank ({src})"
 
         assert src != self.rank_in_group, (
             "Invalid source rank. Source rank is the same as the current rank."
@@ -570,7 +567,6 @@ class GroupCoordinator:
 
         if dst is None:
             dst = (self.rank_in_group + 1) % self.world_size
-        assert dst < self.world_size, f"Invalid dst rank ({dst})"
 
         metadata_list: List[Tuple[Any, Any]] = []
         assert isinstance(
@@ -625,7 +621,6 @@ class GroupCoordinator:
 
         if src is None:
             src = (self.rank_in_group - 1) % self.world_size
-        assert src < self.world_size, f"Invalid src rank ({src})"
 
         recv_metadata_list = self.recv_object(src=src)
         tensor_dict: Dict[str, Any] = {}

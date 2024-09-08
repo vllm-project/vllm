@@ -5,7 +5,7 @@ from itertools import islice, repeat
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import vllm.envs as envs
-import vllm.distributed.distributed_kv as dist_kv
+import vllm.distributed.kv_transfer.vllm_adapter as dist_kv
 from vllm.executor.distributed_gpu_executor import (  # yapf: disable
     DistributedGPUExecutor, DistributedGPUExecutorAsync)
 from vllm.executor.ray_utils import RayWorkerWrapper, ray

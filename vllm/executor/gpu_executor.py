@@ -1,6 +1,6 @@
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
-import vllm.distributed.distributed_kv as dist_kv
+import vllm.distributed.kv_transfer.vllm_adapter as dist_kv
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest

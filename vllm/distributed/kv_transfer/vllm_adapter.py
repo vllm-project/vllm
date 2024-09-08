@@ -30,19 +30,19 @@ from vllm.sequence import IntermediateTensors
 from vllm.distributed.kv_transfer.kv_pipe.torch_distributed_pipe import TorchDistributedPipe
 from vllm.distributed.kv_transfer.kv_lookup_buffer.simple_kv_lookup_buffer import SimpleKVLookupBuffer
 
-assert envs.VLLM_DISAGG_PREFILL_ROLE in [None, "prefill", "decode", "lmc"], \
-    "VLLM_DISAGG_PREFILL_ROLE can only be prefill or decode."
+assert envs.VLLM_DISAGG_PREFILL_ROLE in [None, "prefill", "decode", "lmcache"], \
+    "VLLM_DISAGG_PREFILL_ROLE can only be prefill, decode or lmcache."
 
+
+# currently the connections are hard-coded.
+# we only handle 2 cases:
+# - prefill vLLM --> decode vLLM
+# - vLLM --> LMCache
 IS_DISTRIBUTED_KV_INSTANCE: bool = (envs.VLLM_DISAGG_PREFILL_ROLE in ["prefill", "decode"])
 IS_KV_PREFILL_INSTANCE: bool = (envs.VLLM_DISAGG_PREFILL_ROLE == "prefill")
 IS_KV_DECODE_INSTANCE: bool = (envs.VLLM_DISAGG_PREFILL_ROLE == "decode")
+IS_LMCACHE_INSTANCE: bool = (envs.VLLM_DISAGG_PREFILL_ROLE == "lmcache")
 
-'''Jiayi starts here'''
-IS_LMC_INSTANCE: bool = (envs.VLLM_DISAGG_PREFILL_ROLE == "lmc")
-'''Jiayi ends here'''
-
-# add a tag when sending/recving input hash
-DISTRIBUTED_KV_GLOO_TAG = 24857323
 
 logger = init_logger(__name__)
 
@@ -80,7 +80,7 @@ class KV_transfer_agent:
             use_message_queue_broadcaster,
         )
         # init lookup buffer
-        self.buffer = SimpleKVLookupBuffer(self.pipe)
+        self.buffer = SimpleKVLookupBuffer(self.pipe, 1000**3)
 
     def send_kv_caches_and_hidden_states(
         self,
@@ -90,7 +90,6 @@ class KV_transfer_agent:
         hidden_or_intermediate_states: Union[torch.Tensor, IntermediateTensors],
     ) -> None:
 
-        #input_tokens_tuple = tuple(model_input.input_tokens.tolist())
         input_tokens_tensor = model_input.input_tokens
         seq_lens = model_input.attn_metadata.seq_lens
         slot_mapping_flat = model_input.attn_metadata.slot_mapping.flatten()
@@ -99,16 +98,15 @@ class KV_transfer_agent:
         # so we will send them to decode instance
         # FIXME(Kuntai): This assume that all requests are prefill.
         for idx, slen in enumerate(seq_lens):
-            logger.debug(f"sending request {idx}")
             start_pos = sum(seq_lens[:idx])
             end_pos = start_pos + slen
+            current_tokens = input_tokens_tensor[start_pos:end_pos]
             
             keys, values = [], []
             
             
             for l in range(model_executable.model.start_layer,
                         model_executable.model.end_layer):
-                logger.debug(f"sending layer {l}")
                 kv_cache = kv_caches[l - model_executable.model.start_layer]
 
                 _, _, num_heads, head_size = kv_cache[0].shape
@@ -118,14 +116,14 @@ class KV_transfer_agent:
 
                 current_slot_mapping = slot_mapping_flat[start_pos:end_pos]
 
-                keys.append(key_cache[current_slot_mapping].unsqeeze(0))
+                keys.append(key_cache[current_slot_mapping].unsqueeze(0))
                 values.append(value_cache[current_slot_mapping].unsqueeze(0))
                 
             keys = torch.cat(keys, dim=0)
             values = torch.cat(values, dim=0)
             self.buffer.insert(
-                input_tokens_tensor[start_pos:end_pos], 
-                None,
+                current_tokens, 
+                torch.ones_like(current_tokens, dtype=bool),
                 keys, 
                 values, 
                 hidden_or_intermediate_states[start_pos:end_pos]
@@ -146,7 +144,7 @@ class KV_transfer_agent:
 
         # This is disagg decode instance, during prefill state
         # Need to receive KV from the prefill instance
-        input_tokens_tuple = tuple(model_input.input_tokens.tolist())
+        input_tokens_tensor = model_input.input_tokens
         seq_lens = model_input.attn_metadata.seq_lens
         slot_mapping = model_input.attn_metadata.slot_mapping.flatten()
 
@@ -158,10 +156,12 @@ class KV_transfer_agent:
 
             start_pos = sum(seq_lens[:idx])
             end_pos = start_pos + slen
-            current_input_tokens = input_tokens_tuple[start_pos:end_pos]
+            current_tokens = input_tokens_tensor[start_pos:end_pos]
             num_tokens = slen
 
-            ret = self.buffer.drop_select(current_input_tokens, None)
+            ret = self.buffer.drop_select(
+                current_tokens, 
+                torch.ones_like(current_tokens, dtype=bool))
             if ret[0] is None:
                 # didn't find any match.
                 self.bypass_model_exec = False
@@ -202,4 +202,4 @@ class KV_transfer_agent:
             hidden_or_intermediate_states_for_one_req, dim=0)
 
         logger.debug("[rank%d]: KV recv DONE.", torch.distributed.get_rank())
-        return hidden_or_intermediate_states, bypass_model_exec
+        return hidden_or_intermediate_states, bypass_model_exec, model_input
