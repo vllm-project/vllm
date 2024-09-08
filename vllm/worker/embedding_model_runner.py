@@ -158,6 +158,7 @@ class EmbeddingModelRunner(EncoderDecoderModelRunnerBase[EmbeddingModelInput]):
             attn_metadata,
             encoder_input_tokens_tensor,
             encoder_input_positions_tensor,
+            encoder_seq_lens,
         ) = super()._prepare_encoder_model_input_tensors(
             seq_group_metadata_list, model_input)
 
@@ -169,9 +170,9 @@ class EmbeddingModelRunner(EncoderDecoderModelRunnerBase[EmbeddingModelInput]):
         )
 
         # Prepare PoolingMetadata.
-        assert model_input.seq_lens is not None
-        pooling_metadata = self._prepare_pooling(seq_group_metadata_list,
-                                                 model_input.seq_lens)
+        seq_lens = model_input.seq_lens if not self.model_config.is_encoder_model else encoder_seq_lens
+        assert seq_lens is not None, f"model is_encoder_model: {self.model_config.is_encoder_model}"
+        pooling_metadata = self._prepare_pooling(seq_group_metadata_list,seq_lens)
 
         return dataclasses.replace(model_input,
                                    pooling_metadata=pooling_metadata)

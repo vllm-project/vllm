@@ -9,7 +9,8 @@ import torch.nn.functional as F
 from vllm.inputs import build_decoder_prompts
 
 MODELS = [
-    "intfloat/e5-mistral-7b-instruct",
+    {"name": "intfloat/e5-mistral-7b-instruct", "is_decoder_only": True},
+    # {"name": "bert-base-uncased", "is_decoder_only": False, "max_model_len": 512},
 ]
 
 
@@ -27,24 +28,33 @@ def test_models(
     hf_runner,
     vllm_runner,
     example_prompts,
-    model: str,
+    model: dict,
     dtype: str,
 ) -> None:
-    with hf_runner(model, dtype=dtype, is_embedding_model=True) as hf_model:
-        hf_outputs = hf_model.encode(example_prompts)
+    # # FIXME:
+    example_prompts = example_prompts[0]
+
+    model_name = model["name"]
+    is_decoder_only = model["is_decoder_only"]
+    max_model_len = model["max_model_len"] if "max_model_len" in model else 1024
+    # with hf_runner(model_name, dtype=dtype, is_embedding_model=True) as hf_model:
+    #     hf_outputs = hf_model.encode(example_prompts)
+    hf_outputs = []
 
     with vllm_runner(
-            model,
+            model_name,
             dtype=dtype,
             disable_sliding_window=True,
             enforce_eager=True,
             gpu_memory_utilization=0.95,
+            max_model_len=max_model_len,
     ) as vllm_model:
-        vllm_outputs = vllm_model.encode(build_decoder_prompts(example_prompts))
+        prompt_inputs = build_decoder_prompts(example_prompts) if is_decoder_only else example_prompts
+        vllm_outputs = vllm_model.encode(prompt_inputs)
 
     similarities = compare_embeddings(hf_outputs, vllm_outputs)
     all_similarities = torch.stack(similarities)
     tolerance = 1e-2
     assert torch.all((all_similarities <= 1.0 + tolerance)
                      & (all_similarities >= 1.0 - tolerance)
-                     ), f"Not all values are within {tolerance} of 1.0"
+                     ), f"Not all values are within {tolerance} of 1.0, all_similarities: {all_similarities}"

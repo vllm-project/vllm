@@ -42,6 +42,7 @@ class EncoderDecoderModelInput(ModelInputForGPUWithSamplingMetadata):
     """
     encoder_input_tokens: Optional[torch.Tensor] = None
     encoder_input_positions: Optional[torch.Tensor] = None
+    encoder_seq_lens: Optional[List[int]] = None
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
@@ -225,7 +226,7 @@ class EncoderDecoderModelRunnerBase(GPUModelRunnerBase[TModelInputForGPU]):
         seq_group_metadata_list: List[SequenceGroupMetadata],
         model_input: TEncoderDecoderModelInput,
     ) -> Tuple[AttentionMetadata, Optional[torch.Tensor],
-               Optional[torch.Tensor]]:
+               Optional[torch.Tensor], List[int]]:
         """Helper method to prepare the encoder- and cross-attn-related
         model inputs based on a given sequence group. These additional inputs
         are used to augment an already-computed `TEncoderDecoderModelInput`
@@ -262,7 +263,7 @@ class EncoderDecoderModelRunnerBase(GPUModelRunnerBase[TModelInputForGPU]):
         """
 
         if len(seq_group_metadata_list) == 0:
-            return (model_input.attn_metadata, None, None)
+            return (model_input.attn_metadata, None, None, [])
 
         # Since we are not supporting chunked prefill either the entire
         # batch is prefill or it is decode
@@ -382,7 +383,7 @@ class EncoderDecoderModelRunnerBase(GPUModelRunnerBase[TModelInputForGPU]):
         )
 
         return (attn_metadata, encoder_input_tokens_tensor,
-                encoder_input_positions_tensor)
+                encoder_input_positions_tensor, encoder_seq_lens)
 
 
 class EncoderDecoderModelRunner(
@@ -462,8 +463,9 @@ class EncoderDecoderModelRunner(
             attn_metadata,
             encoder_input_tokens_tensor,
             encoder_input_positions_tensor,
-        ) = (self._prepare_encoder_model_input_tensors(seq_group_metadata_list,
-                                                       model_input))
+            _
+        ) = self._prepare_encoder_model_input_tensors(seq_group_metadata_list,
+                                                      model_input)
 
         # Inject attn_metadata encoder/cross-attention fields &
         # encoder input tokens/positions into model_input.

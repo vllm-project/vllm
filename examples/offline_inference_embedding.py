@@ -14,7 +14,10 @@ model = LLM(
     model="intfloat/e5-mistral-7b-instruct",
     enforce_eager=True,
     # NOTE: sliding_window is not supported by encoder_decoder_model
-    disable_sliding_window=True)
+    disable_sliding_window=True,
+    max_model_len = 2672,
+    gpu_memory_utilization=0.95,
+)
 # Generate embedding. The output is a list of EmbeddingRequestOutputs.
 outputs = model.encode(prompts)
 # Print the outputs.
