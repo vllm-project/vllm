@@ -17,7 +17,7 @@ from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry, MultiModalInputs
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (IntermediateTensors, PoolerOutput,
                            SequenceGroupMetadata)
@@ -184,6 +184,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             "finished_requests_ids": model_input.finished_requests_ids,
             "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
         } if self.has_seqlen_agnostic else {}
+
+        multi_modal_kwargs = model_input.multi_modal_kwargs or {}
         hidden_or_intermediate_states = model_executable(
             input_ids=model_input.input_tokens,
             positions=model_input.input_positions,
@@ -192,6 +194,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             kv_caches=kv_caches,
             attn_metadata=model_input.attn_metadata,
             intermediate_tensors=intermediate_tensors,
+            **MultiModalInputs.as_kwargs(multi_modal_kwargs,
+                                         device=self.device),
             **seqlen_agnostic_kwargs)
 
         logits = self.model.compute_logits(hidden_or_intermediate_states,

@@ -8,6 +8,7 @@ from vllm.inputs.registry import InputContext
 from vllm.logger import init_logger
 from vllm.transformers_utils.image_processor import get_image_processor
 from vllm.utils import is_list_of
+from transformers.image_processing_base import BatchFeature
 
 from .base import MultiModalData, MultiModalInputs, MultiModalPlugin
 
@@ -33,6 +34,10 @@ class ImagePlugin(MultiModalPlugin):
         data: MultiModalData[object],
     ) -> MultiModalInputs:
         model_config = ctx.model_config
+    
+        # Processed by input processor
+        if isinstance(data, BatchFeature):
+            return MultiModalInputs(data.data)
 
         # PIL image
         if isinstance(data, Image.Image) or is_list_of(data, Image.Image):

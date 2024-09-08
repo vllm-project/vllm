@@ -38,6 +38,7 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 
+from vllm.transformers_utils.multimodal_processors.llamavl import LlamaVLImageProcessor
 
 logger = init_logger(__name__)
 MP_SCALE = 8
@@ -54,10 +55,28 @@ class LlamaImagePixelInputs(TypedDict):
 # TODO: support LlamaImageEmbeddingInputs
 
 LlavaImageInputs = LlamaImagePixelInputs
-
+image_processor = None
 
 def input_processor_for_llamavl(ctx: InputContext, llm_inputs: LLMInputs):
-    # TODO: move image preprocessing here
+    multi_modal_data = llm_inputs.get("encoder_multi_modal_data")
+    if multi_modal_data is None or "image" not in multi_modal_data:
+        return llm_inputs
+    global image_processor
+    if image_processor is None:
+        image_processor = LlamaVLImageProcessor(ctx.model_config.model)
+    
+    processed_image = image_processor(multi_modal_data["image"])
+    llm_inputs["encoder_multi_modal_data"]["image"] = processed_image
+
+    num_chunks = int(processed_image["aspect_ratios"].sum())
+    assert ctx.model_config.hf_config.vision_chunk_size % 14 == 0, "chunk size should be multiple of 14"
+    token_per_chunk = (ctx.model_config.hf_config.vision_chunk_size // 14) ** 2 + 1
+    num_tokens = num_chunks * token_per_chunk
+    llm_inputs["encoder_prompt"] = "<|image|>" * num_tokens
+    llm_inputs["encoder_prompt_token_ids"] = [128256] * num_tokens
+
+    assert "decoder_multi_modal_data" not in llm_inputs, "multi-modal data should be put in encoder message of LLaMA Vision"
+
     return llm_inputs
 
 def get_max_llama_image_tokens(ctx: InputContext) -> int:
@@ -1954,6 +1973,7 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: object,
     ) -> torch.Tensor:
+        # import pdb; pdb.set_trace()
         image_inputs = self._parse_and_validate_image_input(**kwargs)
         if image_inputs is None:
             cross_attention_masks = None
@@ -2018,6 +2038,7 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
         )
+        # import pdb; pdb.set_trace()
         return logits
 
 def create_vision_mask(

@@ -885,8 +885,8 @@ class LLMEngine:
         encoder_prompt, encoder_prompt_ids, encoder_mm_data = encoder_comps
         decoder_prompt, decoder_prompt_ids, decoder_mm_data = decoder_comps
 
-        if encoder_mm_data is not None or decoder_mm_data is not None:
-            raise ValueError("Multi-modal encoder-decoder models are "
+        if decoder_mm_data is not None:
+            raise ValueError("Multi-modality decoder inputs of encoder-decoder models are "
                              "not supported yet")
 
         decoder_prompt_ids = (
@@ -895,8 +895,10 @@ class LLMEngine:
         return EncoderDecoderLLMInputs(
             prompt_token_ids=decoder_prompt_ids,
             prompt=decoder_prompt,
+            multi_modal_data=decoder_mm_data,
             encoder_prompt_token_ids=encoder_prompt_ids,
             encoder_prompt=encoder_prompt,
+            encoder_multi_modal_data = encoder_mm_data,
         )
 
     def _process_encoder_decoder_prompt(
@@ -1098,7 +1100,6 @@ class LLMEngine:
                              "not enabled!")
         if arrival_time is None:
             arrival_time = time.time()
-
         processed_inputs = self.process_model_inputs(
             inputs,
             request_id=request_id,
@@ -2011,7 +2012,10 @@ class LLMEngine:
 
     def _validate_model_inputs(self, inputs: Union[LLMInputs,
                                                    EncoderDecoderLLMInputs]):
-        if self.is_encoder_decoder_model():
+        if self.model_config.is_multimodal_model:
+            # For encoder-decoder multimodal models, the max_prompt_len restricts the decoder prompt length
+            prompt_ids = inputs.get("prompt_token_ids")
+        elif self.is_encoder_decoder_model():
             prompt_ids = inputs.get("encoder_prompt_token_ids")
         else:
             prompt_ids = inputs.get("prompt_token_ids")
