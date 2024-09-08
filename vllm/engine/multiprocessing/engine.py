@@ -1,6 +1,6 @@
 import pickle
 from contextlib import contextmanager
-from typing import Iterator, Union
+from typing import List, Iterator, Union
 
 import cloudpickle
 import zmq
@@ -13,10 +13,11 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_OUTPUT_EXT, REQUEST_OUTPUTS_T,
                                          VLLM_RPC_FAILED_STR,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
-                                         RPCGenerateError, RPCGenerateRequest,
+                                         RPCError, RPCGenerateRequest,
                                          RPCStartupRequest, RPCUtilityRequest)
 from vllm.executor.executor_base import get_executor_cls
 from vllm.logger import init_logger
+from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
 
 CONFIG_TYPE = Union[ModelConfig, DecodingConfig, ParallelConfig,
@@ -26,7 +27,6 @@ logger = init_logger(__name__)
 
 POLLING_TIMEOUT_MS = 10000
 HEALTHY_RESPONSE = (pickle.dumps(VLLM_RPC_SUCCESS_STR), )
-UNHEALTHY_RESPONSE = (pickle.dumps(VLLM_RPC_FAILED_STR), )
 
 
 class MQLLMEngine:
@@ -115,6 +115,26 @@ class MQLLMEngine:
             log_stats=not engine_args.disable_log_stats,
             usage_context=usage_context)
 
+    def start(self):
+        try:
+            try:
+                logger.debug("Starting Startup Loop.")
+                self.run_startup_loop()
+                logger.debug("Starting Engine Loop.")
+                self.run_engine_loop()
+            except Exception as e_core:
+                try:
+                    logger.exception(repr(e_core))
+                    if self._errored:
+                        logger.debug("Starting Dead Loop.")
+                        self.run_engine_dead_loop()
+                except Exception as e_dead_loop:
+                    logger.exception(repr(e_dead_loop))
+        except KeyboardInterrupt:
+            logger.debug("Shutting down MQLLMEngine.")
+        finally:
+            self.cleanup()
+
     def cleanup(self):
         """Cleanup zeromq state on shutdown."""
         self.input_socket.close()
@@ -134,7 +154,7 @@ class MQLLMEngine:
             socket.close(linger=0)
 
     def run_startup_loop(self) -> None:
-        """Loop over startup RPCStatupRequest from RPCClient."""
+        """Startup loop for sending data from Engine -> Client."""
 
         with self.make_data_socket() as socket:
 
@@ -173,51 +193,61 @@ class MQLLMEngine:
                                           copy=False)
 
     def run_engine_loop(self):
-        """Entrypoint for core busy loop of the LLMEngine."""
+        """Core busy loop of the LLMEngine."""
 
         while True:
             # Poll until there is work to do.
-            self.poll_for_work()
+            if not self.engine.has_unfinished_requests():
+                while self.input_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
+                    logger.debug("Waiting for new requests in engine loop.")
 
-            # Handle any new data.
+            # Handle any input from the client.
             self.handle_new_input()
 
             # Engine step.
             request_outputs = self.engine_step()
 
-            # Stream results if needed.
-            if (not self.use_async_sockets
-                    or isinstance(request_outputs, RPCGenerateError)):
+            # Send request outputs (if async, done in engine_step callback).
+            if not self.use_async_sockets:
                 self._send_request_outputs(request_outputs)
 
-    def poll_for_work(self):
-        """Poll the socket until there is work to do."""
-        if not self.engine.has_unfinished_requests():
-            while self.input_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
-                logger.debug("Waiting for new requests.")
 
-    def engine_step(self) -> REQUEST_OUTPUTS_T:
+    def run_engine_dead_loop(self):
+        """Loop for replying to all requests that we are dead."""
+        if not self._errored:
+            raise ValueError("In dead loop, but found _errored=False")
+        
+        while True:
+            # Poll until there is a request
+            while self.input_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
+                logger.debug("Waiting for new requests in dead loop.")
+            
+            # Handle any new data, replying with EngineDeadError
+            self.handle_new_input()
+
+
+    def engine_step(self) -> List[RequestOutput]:
         """Engine step wrapper with error handling."""
+
         try:
             return self.engine.step()
         except Exception as e:
             self._errored = True
-            return RPCGenerateError(request_id=None,
-                                    is_engine_errored=self._errored,
-                                    exception=e)
+            err = RPCError(request_id=None,
+                           is_engine_errored=True,
+                           exception=e)
+            logger.exception(repr(e))
+            self._send_request_outputs(err)
+            raise e
 
     def handle_new_input(self):
         """Handle new input from the socket"""
         try:
             while self.input_socket.poll(timeout=0) != 0:
-                # TODO: do we need error handling around the pickling?
                 message = self.input_socket.recv(copy=False)
                 request = cloudpickle.loads(message.buffer)
 
                 if isinstance(request, RPCGenerateRequest):
-                    # Exceptions in RPCGenerateRequest will be caught
-                    # by the handler, meaning any recoverable exceptions
-                    # to only impact that request (and not crash the server)
                     self._handle_generate_request(request)
                 elif isinstance(request, RPCAbortRequest):
                     self._handle_abort_request(request)
@@ -230,13 +260,14 @@ class MQLLMEngine:
             self._errored = True
             logger.exception(repr(e))
             self._send_unhealthy()
+            raise e
 
     def _handle_generate_request(self, request: RPCGenerateRequest):
         """Handle RPCGenerateRequest by adding it to the LLMEngine."""
         request_id = request.request_id
 
         if self._errored:
-            e = RPCGenerateError(request_id, self._errored, ENGINE_DEAD_ERROR)
+            e = RPCError(request_id, self._errored, ENGINE_DEAD_ERROR)
             self._send_request_outputs(e)
 
         try:
@@ -252,13 +283,14 @@ class MQLLMEngine:
                 logger.info("Added request %s.", request.request_id)
 
         except Exception as err:
-            self.engine.abort_request(request_id)
-
-            # We do not set self._errored = True here, since the error is
-            # due to an issue adding this request to the engine, rather
-            # than an issue with the engine itself.
-            e = RPCGenerateError(request_id, self._errored, err)
+            # We do not set self._errored = True here, since the error 
+            # is due to an issue adding this request to the engine, 
+            # rather than an issue with the engine itself.
+            e = RPCError(request_id, self._errored, err)
             self._send_request_outputs(e)
+
+            # Remove request from the engine.
+            self.engine.abort_request(request_id)
 
     def _handle_abort_request(self, request: RPCAbortRequest):
         self.engine.abort_request(request.request_id)
@@ -267,16 +299,19 @@ class MQLLMEngine:
 
     def _handle_utility_request(self, request: RPCUtilityRequest):
         if request == RPCUtilityRequest.DO_LOG_STATS:
-            self.engine.do_log_stats()
+            if not self._errored:
+                self.engine.do_log_stats()
         elif request == RPCUtilityRequest.CHECK_HEALTH:
-            self.engine.check_health()
-            self._send_healthy()
+            if self._errored:
+                self._send_unhealthy(ENGINE_DEAD_ERROR)
+            try:
+                self.engine.check_health()
+                self._send_healthy()
+            except Exception as e:
+                self._send_unhealthy(e)
 
     def _send_request_outputs(self, request_outputs: REQUEST_OUTPUTS_T):
         """Send List of RequestOutput to RPCClient."""
-
-        # TODO: do we need error handling around the pickling?
-
         output_bytes = pickle.dumps(request_outputs)
         self.output_socket.send_multipart((output_bytes, ), copy=False)
 
@@ -284,9 +319,10 @@ class MQLLMEngine:
         """Send HEALTHY message to RPCClient."""
         self.health_socket.send_multipart(HEALTHY_RESPONSE, copy=False)
 
-    def _send_unhealthy(self):
+    def _send_unhealthy(self, error: BaseException):
         """Send UNHEALTHY message to RPCClient."""
-        self.health_socket.send_multipart(UNHEALTHY_RESPONSE, copy=False)
+        error_bytes = pickle.dumps(error)
+        self.health_socket.send_multipart((error_bytes, ), copy=False)
 
     def _async_socket_engine_callback(self,
                                       request_outputs: REQUEST_OUTPUTS_T):
@@ -301,5 +337,4 @@ def run_mp_engine(engine_args: AsyncEngineArgs, usage_context: UsageContext,
                                           usage_context=usage_context,
                                           ipc_path=ipc_path)
 
-    engine.run_startup_loop()
-    engine.run_engine_loop()
+    engine.start()

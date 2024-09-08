@@ -8,6 +8,7 @@ client = OpenAI(
     # defaults to os.environ.get("OPENAI_API_KEY")
     api_key=openai_api_key,
     base_url=openai_api_base,
+    max_retries=0
 )
 
 models = client.models.list()
@@ -19,7 +20,7 @@ completion = client.completions.create(
     model=model,
     prompt="A robot may not injure a human being",
     stream=stream,
-    logprobs=3)
+    max_tokens=1000,)
 
 print("Completion results:")
 if stream:

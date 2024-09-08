@@ -16,7 +16,7 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_HEALTH_EXT, IPC_INPUT_EXT,
                                          IPC_OUTPUT_EXT, REQUEST_OUTPUTS_T,
                                          RPC_REQUEST_T, VLLM_RPC_SUCCESS_STR,
-                                         RPCAbortRequest, RPCGenerateError,
+                                         RPCAbortRequest, RPCError,
                                          RPCGenerateRequest, RPCStartupRequest,
                                          RPCUtilityRequest)
 from vllm.envs import VLLM_RPC_GET_DATA_TIMEOUT_MS
@@ -69,6 +69,7 @@ class MQLLMEngineClient:
     def __init__(self, ipc_path: str):
         self.context = zmq.asyncio.Context()
         self._errored = False
+        self.dead_error = ENGINE_DEAD_ERROR
 
         # Send RPCGenerateRequest to the MQLLMEngine.
         self.input_socket: Socket = self.context.socket(zmq.constants.PUSH)
@@ -128,10 +129,10 @@ class MQLLMEngineClient:
                         error_message="Health check failed.",
                         socket=self.health_socket)
 
-                logger.debug("Health probe complete.")
+                logger.debug("Health probe successful.")
 
         except asyncio.CancelledError:
-            logger.info("Shutting down MQLLMEngineClient check health loop.")
+            logger.debug("Shutting down MQLLMEngineClient check health loop.")
 
         except Exception as e:
             logger.exception(repr(e))
@@ -146,21 +147,24 @@ class MQLLMEngineClient:
                 request_outputs: REQUEST_OUTPUTS_T = pickle.loads(
                     message.buffer)
 
-                if isinstance(request_outputs, BaseException):
-                    if isinstance(request_outputs, RPCGenerateError):
-                        generate_error: RPCGenerateError = request_outputs
-                        request_id = generate_error.request_id
-                        if generate_error.is_engine_errored:
+                is_error = (isinstance(request_outputs, BaseException) or
+                            isinstance(request_outputs, RPCError))
+                            
+                if is_error:
+                    if isinstance(request_outputs, RPCError):
+                        rpc_error: RPCError = request_outputs
+                        request_id = rpc_error.request_id
+                        if rpc_error.is_engine_errored:
                             self._errored = True
-                        exception = generate_error.exception
+                        exception = rpc_error.exception
                     else:
-                        # MPLLMEngine should always return an RPCGenerateError
-                        # if the error handling is graceful. If we are here,
-                        # we are in a bad state and should shut down the server.
+                        # MPLLMEngine should always return an RPCError
+                        # when an issue arises. If we are here, we are in a 
+                        # bad state and should shut down the server.
                         error: BaseException = request_outputs
                         logger.warning(
-                            "Got raw Exception {error} from MPLLMEngine. "
-                            "This should never happen.")
+                            f"Recieved raw Exception {error} rather than "
+                            "RPCError from MPLLMEngine. This should never happen.")
                         self._errored = True
                         request_id = None
                         exception = error
@@ -181,13 +185,12 @@ class MQLLMEngineClient:
                             queue.put_nowait(request_output)
 
         except asyncio.CancelledError:
-            logger.info("Shutting down MQLLMEngineClient output handler.")
+            logger.debug("Shutting down MQLLMEngineClient output handler.")
 
     async def setup(self):
         """Setup the client before it starts sending server requests."""
 
         with self.get_data_socket() as socket:
-
             # Wait until server is ready.
             await self._wait_for_server_rpc(socket)
 
@@ -282,7 +285,7 @@ class MQLLMEngineClient:
         response = pickle.loads(frame.buffer)
 
         if not isinstance(response, str) or response != VLLM_RPC_SUCCESS_STR:
-            if isinstance(response, Exception):
+            if isinstance(response, BaseException):
                 logger.error(error_message)
                 raise response
             raise ValueError(error_message)
@@ -450,8 +453,6 @@ class MQLLMEngineClient:
 
         finally:
             # TODO: check if excepted requests are getting here.
-            # TODO: check if aborted requests are getting here.
-
             self.output_queues.pop(request_id)
 
             # Request was canceled by the client.

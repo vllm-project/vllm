@@ -32,7 +32,7 @@ class RPCGenerateRequest:
 
 
 @dataclass
-class RPCGenerateError(BaseException):
+class RPCError:
     request_id: Optional[str]
     is_engine_errored: bool
     exception: BaseException

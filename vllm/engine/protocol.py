@@ -15,7 +15,7 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 @runtime_checkable
 class AsyncEngineClient(Protocol):
-    """Protocol class for Clients to AsyncLLMEngine"""
+    """Protocol class for Clients to Engine"""
 
     @property
     def is_running(self) -> bool:
@@ -27,6 +27,10 @@ class AsyncEngineClient(Protocol):
 
     @property
     def errored(self) -> bool:
+        ...
+
+    @property
+    def dead_error(self) -> BaseException:
         ...
 
     def generate(

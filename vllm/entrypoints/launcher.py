@@ -8,6 +8,7 @@ from fastapi import FastAPI, Response
 
 from vllm import envs
 from vllm.engine.async_llm_engine import AsyncEngineDeadError
+from vllm.engine.multiprocessing import MQEngineDeadError
 from vllm.engine.protocol import AsyncEngineClient
 from vllm.logger import init_logger
 from vllm.utils import find_process_using_port
@@ -55,7 +56,7 @@ async def serve_http(app: FastAPI, engine: AsyncEngineClient,
             logger.debug(
                 "port %s is used by process %s launched with command:\n%s",
                 port, process, " ".join(process.cmdline()))
-        logger.info("Gracefully stopping http server")
+        logger.info("Shutting down FastAPI HTTP server.")
         return server.shutdown()
 
 
@@ -82,11 +83,22 @@ def _add_shutdown_handlers(app: FastAPI, server: uvicorn.Server,
         return Response(status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
 
     @app.exception_handler(AsyncEngineDeadError)
-    async def engine_dead_handler(_, __):
+    async def async_engine_dead_handler(_, __):
         """Kill the server if the async engine is already dead. It will
         not handle any further requests."""
         if not envs.VLLM_KEEP_ALIVE_ON_ENGINE_DEATH:
             logger.fatal("AsyncLLMEngine is already dead, terminating server "
+                         "process")
+            server.should_exit = True
+
+        return Response(status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
+    
+    @app.exception_handler(MQEngineDeadError)
+    async def mq_engine_dead_handler(_, __):
+        """Kill the server if the mq engine is already dead. It will
+        not handle any further requests."""
+        if not envs.VLLM_KEEP_ALIVE_ON_ENGINE_DEATH:
+            logger.fatal("MQLLMEngine is already dead, terminating server "
                          "process")
             server.should_exit = True
 
