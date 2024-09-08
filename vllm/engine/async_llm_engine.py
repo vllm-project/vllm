@@ -342,17 +342,17 @@ class _AsyncLLMEngine(LLMEngine):
                     virtual_engine]
 
             # Execute the model.
-            output = await self.model_executor.execute_model_async(
+            outputs = await self.model_executor.execute_model_async(
                 execute_model_req)
 
             # we need to do this here so that last step's sampled_token_ids can
             # be passed to the next iteration for PP.
             if self.scheduler_config.is_multi_step:
-                self._update_cached_scheduler_output(virtual_engine, output)
+                self._update_cached_scheduler_output(virtual_engine, outputs)
         else:
             if len(ctx.output_queue) > 0:
                 self._process_model_outputs(ctx=ctx)
-            output = []
+            outputs = []
 
         # Finish the current step for all the sequence groups.
         if self.scheduler_config.is_multi_step:
@@ -365,25 +365,25 @@ class _AsyncLLMEngine(LLMEngine):
                 self.cached_scheduler_outputs[
                     virtual_engine] = SchedulerOutputState()
 
-            is_async = allow_async_output_proc
-            is_last_step = True
-            ctx.output_queue.append(
-                (output, seq_group_metadata_list, scheduler_outputs, is_async,
-                 is_last_step))
+            ctx.append_output(outputs=outputs,
+                              seq_group_metadata_list=seq_group_metadata_list,
+                              scheduler_outputs=scheduler_outputs,
+                              is_async=allow_async_output_proc,
+                              is_last_step=True)
 
-            if output and allow_async_output_proc:
+            if outputs and allow_async_output_proc:
                 assert len(
-                    output
+                    outputs
                 ) == 1, "Async postprocessor expects only a single output set"
                 self._advance_to_next_step(
-                    output[0], seq_group_metadata_list,
+                    outputs[0], seq_group_metadata_list,
                     scheduler_outputs.scheduled_seq_groups)
 
             if not allow_async_output_proc:
                 self._process_model_outputs(ctx=ctx)
 
                 # Log stats.
-                self.do_log_stats(scheduler_outputs, output)
+                self.do_log_stats(scheduler_outputs, outputs)
 
                 # Tracing
                 self.do_tracing(scheduler_outputs)
