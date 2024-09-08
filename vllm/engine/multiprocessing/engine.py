@@ -15,7 +15,6 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCError, RPCGenerateRequest,
                                          RPCStartupRequest, RPCUtilityRequest)
-from vllm.executor.executor_base import get_executor_cls
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
@@ -104,7 +103,7 @@ class MQLLMEngine:
                 "Launch with --disable-frontend-multiprocessing if you "
                 "need to deploy with this flag (not recommended).")
 
-        executor_class = get_executor_cls(engine_config)
+        executor_class = LLMEngine._get_executor_cls(engine_config)
 
         return cls(
             ipc_path=ipc_path,
