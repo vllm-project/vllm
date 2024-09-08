@@ -25,7 +25,7 @@ class MistralToolParser(ToolParser):
     Tool call parser for Mistral 7B Instruct v0.3, intended for use with the
     examples/tool_chat_template_mistral.jinja template.
 
-    Used when --enable-auto-tool-choice --tool-call-parser gmistral are all set
+    Used when --enable-auto-tool-choice --tool-call-parser mistral are all set
     """
 
     def __init__(self, tokenizer: AnyTokenizer):

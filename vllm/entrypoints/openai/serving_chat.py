@@ -272,7 +272,6 @@ class OpenAIServingChat(OpenAIServing):
                     # once per request
                     for i in range(num_choices):
 
-                        # TODO - this breaks, it needs to include ALL fields
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=i,
                             delta=DeltaMessage(
