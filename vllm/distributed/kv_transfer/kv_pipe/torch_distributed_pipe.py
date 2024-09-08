@@ -139,7 +139,7 @@ class TorchDistributedPipe(KVPipeBase):
             device = self.device
         else:
             device = 'cpu'
-        buffer = torch.zeros(shape, dtype=dtype).to(device, non_blocking=True)
+        buffer = torch.zeros(shape, dtype=dtype).to(device)
         
         torch.distributed.recv(
             buffer,
@@ -183,8 +183,6 @@ class TorchDistributedPipe(KVPipeBase):
             tensor_size = 0
         else:
             tensor_size = tensor.element_size() * tensor.numel()
-
-        assert 0 < len(tensor.shape) <  100, "Send tensor does not support tensor with 0 dim or >=100 dim. Got %d" % len(tensor.shape)
 
         self.block_if_full()
 

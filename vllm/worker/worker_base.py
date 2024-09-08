@@ -295,6 +295,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                     model_input,
                     self.kv_cache[worker_input.virtual_engine],
                 )
+            assert bypass_model_exec
         
         if not bypass_model_exec: 
             hidden_or_intermediate_states = self.model_runner.execute_model(
