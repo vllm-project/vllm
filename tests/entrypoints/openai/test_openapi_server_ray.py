@@ -2,7 +2,7 @@ import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
 
-from ..utils import VLLM_PATH, RemoteOpenAIServer
+from ...utils import VLLM_PATH, RemoteOpenAIServer
 
 # any model with a chat template should work here
 MODEL_NAME = "facebook/opt-125m"
