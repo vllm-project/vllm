@@ -31,7 +31,7 @@ from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 logger = init_logger(__name__)
 
 
-class MPClientClosedError(Exception):
+class MQClientClosedError(Exception):
     """Exception class raised when the client is used post-close.
     
     The client can be closed, which closes the ZMQ context. This normally
@@ -375,13 +375,13 @@ class MQLLMEngineClient:
     async def abort(self, request_id: str):
         """Send an ABORT_REQUEST signal to the RPC Server"""
 
-        with suppress(MPClientClosedError):
+        with suppress(MQClientClosedError):
             await self._send_one_way_rpc_request(
                 request=RPCAbortRequest(request_id), socket=self.input_socket)
 
     async def do_log_stats(self):
         """Send a DO_LOG_STATS signal to the RPC Server"""
-        with suppress(MPClientClosedError):
+        with suppress(MQClientClosedError):
             await self._send_one_way_rpc_request(
                 request=RPCUtilityRequest.DO_LOG_STATS,
                 socket=self.input_socket)
