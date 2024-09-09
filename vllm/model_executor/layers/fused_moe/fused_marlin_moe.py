@@ -20,8 +20,9 @@ def single_marlin_moe(
         renormalize: bool,
         override_config: Optional[Dict[str, Any]] = None) -> torch.Tensor:
     """
-    This function computes a Marlin MoE MMM using weights w
-    and top-k gating mechanism. It is meant for testing and debugging.
+    This function computes the multiplication of hidden_states with expert
+    weights used in Marlin MoE, using weights w and top-k gating mechanism.
+    Its purpose is testing and debugging the fused MoE kernel.
 
     Parameters:
     - hidden_states (torch.Tensor): The input tensor to the Marlin Mul.
