@@ -461,12 +461,9 @@ class EncoderDecoderModelRunner(
         model_input = self._prepare_model_input_tensors(
             seq_group_metadata_list, finished_requests_ids)
 
-        (
-            attn_metadata,
-            encoder_input_tokens_tensor,
-            encoder_input_positions_tensor,
-            _
-        ) = self._prepare_encoder_model_input_tensors(
+        (attn_metadata, encoder_input_tokens_tensor,
+         encoder_input_positions_tensor,
+         _) = self._prepare_encoder_model_input_tensors(
              seq_group_metadata_list, model_input)
 
         # Inject attn_metadata encoder/cross-attention fields &
