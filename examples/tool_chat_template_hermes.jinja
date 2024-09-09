@@ -89,22 +89,23 @@
         {{- '<|im_start|>' + message.role + '\n' + message.content + '<|im_end|>' + '\n' }}
     {%- elif message.role == "assistant" and message.tool_calls is defined %}
         {{- '<|im_start|>' + message.role }}
-            {%- for tool_call in message.tool_calls %}
-                {{- '\n<tool_call>\n' }}
-                {%- if tool_call.function is defined %}
-                    {%- set tool_call = tool_call.function %}
-                {%- endif %}
-                {{- '{' }}
-                {{- '"name": "' }}
-                {{- tool_call.name }}
-                {{- '"}' }}
+        {%- for tool_call in message.tool_calls %}
+            {{- '\n<tool_call>\n' }}
+            {%- if tool_call.function is defined %}
+                {%- set tool_call = tool_call.function %}
+            {%- endif %}
+            {{- '{' }}
+            {{- '"name": "' }}
+            {{- tool_call.name }}
+            {{- '"' }}
+            {%- if tool_call.arguments is defined %}
                 {{- ', ' }}
-                {%- if tool_call.arguments is defined %}
-                    {{- '"arguments": ' }}
-                    {{- tool_call.arguments|tojson }}
-                {%- endif %}
-                {{- '\n</tool_call>' }}
-            {%- endfor %}
+                {{- '"arguments": ' }}
+                {{- tool_call.arguments|tojson }}
+            {%- endif %}
+            {{- '}' }}
+            {{- '\n</tool_call>' }}
+        {%- endfor %}
         {{- '<|im_end|>\n' }}
     {%- elif message.role == "tool" %}
         {%- if loop.previtem and loop.previtem.role != "tool" %}

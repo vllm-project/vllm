@@ -20,7 +20,7 @@ from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.cli_args import make_arg_parser
-from vllm.model_executor.model_loader.loader import DefaultModelLoader
+from vllm.model_executor.model_loader.loader import get_model_loader
 from vllm.platforms import current_platform
 from vllm.utils import FlexibleArgumentParser, get_open_port, is_hip
 
@@ -89,11 +89,11 @@ class RemoteOpenAIServer:
         is_local = os.path.isdir(model)
         if not is_local:
             engine_args = AsyncEngineArgs.from_cli_args(args)
-            engine_config = engine_args.create_engine_config()
-            dummy_loader = DefaultModelLoader(engine_config.load_config)
-            dummy_loader._prepare_weights(engine_config.model_config.model,
-                                          engine_config.model_config.revision,
-                                          fall_back_to_pt=True)
+            model_config = engine_args.create_model_config()
+            load_config = engine_args.create_load_config()
+
+            model_loader = get_model_loader(load_config)
+            model_loader.download_model(model_config)
 
         env = os.environ.copy()
         # the current process might initialize cuda,
@@ -178,7 +178,12 @@ def compare_two_settings(model: str,
         env2: The second set of environment variables to pass to the API server.
     """
 
-    tokenizer = AutoTokenizer.from_pretrained(model)
+    trust_remote_code = "--trust-remote-code"
+    if trust_remote_code in arg1 or trust_remote_code in arg2:
+        tokenizer = AutoTokenizer.from_pretrained(model,
+                                                  trust_remote_code=True)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(model)
 
     prompt = "Hello, my name is"
     token_ids = tokenizer(prompt)["input_ids"]

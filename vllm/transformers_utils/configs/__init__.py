@@ -6,6 +6,7 @@ from vllm.transformers_utils.configs.exaone import ExaoneConfig
 # tiiuae/falcon-7b(-instruct) models. Newer Falcon models will use the
 # `FalconConfig` class from the official HuggingFace transformers library.
 from vllm.transformers_utils.configs.falcon import RWConfig
+from vllm.transformers_utils.configs.granite import GraniteConfig
 from vllm.transformers_utils.configs.internvl import InternVLChatConfig
 from vllm.transformers_utils.configs.jais import JAISConfig
 from vllm.transformers_utils.configs.medusa import MedusaConfig
@@ -27,4 +28,7 @@ __all__ = [
     "MLPSpeculatorConfig",
     "NemotronConfig",
     "UltravoxConfig",
+    # Granite can be removed from here once we have upgraded to
+    # transformers 4.45+
+    "GraniteConfig",
 ]

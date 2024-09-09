@@ -29,7 +29,7 @@ If you have already taken care of the issues above, but the vLLM instance still 
 
 With more logging, hopefully you can find the root cause of the issue.
 
-If it crashes, and the error trace shows somewhere around ``self.graph.replay()`` in ``vllm/worker/model_runner.py``, it is a CUDA error inside CUDAGraph. To know the particular CUDA operation that causes the error, you can add ``--enforce-eager`` to the command line, or ``enforce_eager=True`` to the ``LLM`` class, to disable the CUDAGraph optimization. This way, you can locate the exact CUDA operation that causes the error.
+If it crashes, and the error trace shows somewhere around ``self.graph.replay()`` in ``vllm/worker/model_runner.py``, it is a CUDA error inside CUDAGraph. To know the particular CUDA operation that causes the error, you can add ``--enforce-eager`` to the command line, or ``enforce_eager=True`` to the :class:`~vllm.LLM` class, to disable the CUDAGraph optimization. This way, you can locate the exact CUDA operation that causes the error.
 
 Here are some common issues that can cause hangs:
 

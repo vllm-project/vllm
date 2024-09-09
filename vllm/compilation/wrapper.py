@@ -10,7 +10,7 @@ import torch
 import vllm.envs as envs
 
 
-class TorchCompileWrapperWithCustomDispacther:
+class TorchCompileWrapperWithCustomDispatcher:
     """
     A wrapper class for torch.compile, with a custom dispatch logic.
     Subclasses should:
