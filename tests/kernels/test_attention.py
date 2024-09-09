@@ -123,7 +123,6 @@ def ref_single_query_cached_kv_attention(
 @pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-@pytest.mark.skip()
 def test_paged_attention(
     kv_cache_factory,
     version: str,
