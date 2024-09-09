@@ -17,6 +17,7 @@ import torch
 from huggingface_hub import HfApi, hf_hub_download
 from torch import nn
 from transformers import AutoModelForCausalLM, PretrainedConfig
+from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoadFormat,
                          LoRAConfig, ModelConfig, MultiModalConfig,
@@ -185,6 +186,11 @@ class BaseModelLoader(ABC):
         self.load_config = load_config
 
     @abstractmethod
+    def download_model(self, model_config: ModelConfig) -> None:
+        """Download a model so that it can be immediately loaded."""
+        raise NotImplementedError
+
+    @abstractmethod
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
                    lora_config: Optional[LoRAConfig],
@@ -192,7 +198,7 @@ class BaseModelLoader(ABC):
                    scheduler_config: SchedulerConfig,
                    cache_config: CacheConfig) -> nn.Module:
         """Load a model with the given configurations."""
-        ...
+        raise NotImplementedError
 
 
 class DefaultModelLoader(BaseModelLoader):
@@ -241,12 +247,17 @@ class DefaultModelLoader(BaseModelLoader):
         is_local = os.path.isdir(model_name_or_path)
         load_format = self.load_config.load_format
         use_safetensors = False
+        index_file = SAFE_WEIGHTS_INDEX_NAME
         # Some quantized models use .pt files for storing the weights.
         if load_format == LoadFormat.AUTO:
             allow_patterns = ["*.safetensors", "*.bin"]
         elif load_format == LoadFormat.SAFETENSORS:
             use_safetensors = True
             allow_patterns = ["*.safetensors"]
+        elif load_format == LoadFormat.MISTRAL:
+            use_safetensors = True
+            allow_patterns = ["consolidated*.safetensors"]
+            index_file = "consolidated.safetensors.index.json"
         elif load_format == LoadFormat.PT:
             allow_patterns = ["*.pt"]
         elif load_format == LoadFormat.NPCACHE:
@@ -284,10 +295,10 @@ class DefaultModelLoader(BaseModelLoader):
             # any files not found in the index.
             if not is_local:
                 download_safetensors_index_file_from_hf(
-                    model_name_or_path, self.load_config.download_dir,
-                    revision)
+                    model_name_or_path, index_file,
+                    self.load_config.download_dir, revision)
             hf_weights_files = filter_duplicate_safetensors_files(
-                hf_weights_files, hf_folder)
+                hf_weights_files, hf_folder, index_file)
         else:
             hf_weights_files = filter_files_not_needed_for_inference(
                 hf_weights_files)
@@ -328,6 +339,11 @@ class DefaultModelLoader(BaseModelLoader):
 
             weights_iterator = _xla_weights_iterator(weights_iterator)
         return weights_iterator
+
+    def download_model(self, model_config: ModelConfig) -> None:
+        self._prepare_weights(model_config.model,
+                              model_config.revision,
+                              fall_back_to_pt=True)
 
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
@@ -370,6 +386,9 @@ class DummyModelLoader(BaseModelLoader):
         if load_config.model_loader_extra_config:
             raise ValueError(f"Model loader extra config is not supported for "
                              f"load format {load_config.load_format}")
+
+    def download_model(self, model_config: ModelConfig) -> None:
+        pass  # Nothing to download
 
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
@@ -460,6 +479,12 @@ class TensorizerLoader(BaseModelLoader):
 
                 model = load_with_tensorizer(tensorizer_config, **extra_kwargs)
         return model.eval()
+
+    def download_model(self, model_config: ModelConfig) -> None:
+        self.tensorizer_config.verify_with_model_config(model_config)
+
+        with self.tensorizer_config.open_stream():
+            pass
 
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
@@ -561,6 +586,9 @@ class ShardedStateLoader(BaseModelLoader):
                 revision,
                 ignore_patterns=self.load_config.ignore_patterns,
             )
+
+    def download_model(self, model_config: ModelConfig) -> None:
+        self._prepare_weights(model_config.model, model_config.revision)
 
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
@@ -989,6 +1017,9 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     set_weight_attrs(
                         param, {"matmul_state": [None] * len(quant_states)})
 
+    def download_model(self, model_config: ModelConfig) -> None:
+        self._prepare_weights(model_config.model, model_config.revision)
+
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
                    lora_config: Optional[LoRAConfig],
@@ -1063,6 +1094,9 @@ class GGUFModelLoader(BaseModelLoader):
     ) -> Generator[Tuple[str, torch.Tensor], None, None]:
         return gguf_quant_weights_iterator(model_name_or_path,
                                            gguf_to_hf_name_map)
+
+    def download_model(self, model_config: ModelConfig) -> None:
+        self._prepare_weights(model_config.model)
 
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
