@@ -4,7 +4,7 @@
 
 #include <torch/library.h>
 
-void init_cpu_threads_env(const std::string& cpu_ids);
+std::string init_cpu_threads_env(const std::string& cpu_ids);
 
 void int8_scaled_mm(torch::Tensor& c, const torch::Tensor& a,
                     const torch::Tensor& b, const torch::Tensor& a_scales,
@@ -138,7 +138,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _utils), utils) {
   // CPU utils
-  utils.def("init_cpu_threads_env(str cpu_ids) -> ()", &init_cpu_threads_env);
+  utils.def("init_cpu_threads_env(str cpu_ids) -> str", &init_cpu_threads_env);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
