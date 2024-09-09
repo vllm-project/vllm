@@ -232,7 +232,8 @@ class CompressedTensorsConfig(QuantizationConfig):
                 return CompressedTensorsWNA16(
                     num_bits=weight_quant.num_bits,
                     strategy=weight_quant.strategy,
-                    group_size=weight_quant.group_size)
+                    group_size=weight_quant.group_size,
+                    actorder=weight_quant.actorder)
 
         # Detect If Activation Quantization.
         # TODO @dsikka: clean-up conditions
