@@ -313,25 +313,24 @@ define_gpu_extension_target(
   USE_SABI 3
   WITH_SOABI)
 
-#
-# _hip_C extension
-#
 
 if(VLLM_GPU_LANG STREQUAL "HIP")
-  set(VLLM_HIP_EXT_SRC
-    "csrc/hip/torch_bindings.cpp"
-    "csrc/hip/attention.hip")
+  #
+  # _rocm_C extension
+  #
+  set(VLLM_ROCM_EXT_SRC
+    "csrc/rocm/torch_bindings.cpp"
+    "csrc/rocm/attention.cu")
 
   define_gpu_extension_target(
-    _hip_C
+    _rocm_C
     DESTINATION vllm
     LANGUAGE ${VLLM_GPU_LANG}
-    SOURCES ${VLLM_HIP_EXT_SRC}
+    SOURCES ${VLLM_ROCM_EXT_SRC}
     COMPILE_FLAGS ${VLLM_GPU_FLAGS}
     ARCHITECTURES ${VLLM_GPU_ARCHES}
     USE_SABI 3
     WITH_SOABI)
-
 endif()
 
 
@@ -341,5 +340,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 
   message(STATUS "Enabling moe extension.")
   add_dependencies(default _moe_C)
+endif()
 
+if(VLLM_GPU_LANG STREQUAL "HIP")
+  message(STATUS "Enabling rocm extension.")
+  add_dependencies(default _rocm_C)
 endif()

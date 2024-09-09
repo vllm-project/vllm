@@ -1,4 +1,5 @@
-#include "hip/ops.h"
+#include "cuda_utils.h"
+#include "rocm/ops.h"
 #include "core/registration.h"
 
 #include <torch/library.h>
@@ -19,9 +20,16 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
     // Custom attention op
     // Compute the attention between an input query and the cached
     // keys/values using PagedAttention.
-    ops.def(
-        "paged_attention_custom("
-        ""
-    );
-    ops.impl("paged_attention_custom", torch::kCUDA, &paged_attention_custom)
+custom_ops.def(
+      "paged_attention(Tensor! out, Tensor exp_sums,"
+      "                Tensor max_logits, Tensor tmp_out,"
+      "                Tensor query, Tensor key_cache,"
+      "                Tensor value_cache, int num_kv_heads,"
+      "                float scale, Tensor block_tables,"
+      "                Tensor context_lens, int block_size,"
+      "                int max_context_len,"
+      "                Tensor? alibi_slopes,"
+      "                str kv_cache_dtype) -> ()");
+  custom_ops.impl("paged_attention", torch::kCUDA,
+                  &paged_attention);
 }
