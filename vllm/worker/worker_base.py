@@ -133,10 +133,8 @@ class WorkerInput:
     virtual_engine: int = 0
     num_steps: int = 1
     # TODO: We put list here for now. We will check later the correctness
-    blocks_to_swap_in_from_disk: Optional[List[Tuple[int, int, int,
-                                                     int]]] = None
-    blocks_to_swap_out_to_disk: Optional[List[Tuple[int, int, int,
-                                                    int]]] = None
+    blocks_to_swap_in_from_disk: Optional[torch.Tensor] = None
+    blocks_to_swap_out_to_disk: Optional[torch.Tensor] = None
 
     @classmethod
     def from_broadcasted_tensor_dict(
@@ -161,8 +159,7 @@ class WorkerInput:
         )
 
     def as_broadcastable_tensor_dict(
-        self
-    ) -> Dict[str, Union[int, torch.Tensor, List[Tuple[int, int, int, int]]]]:
+            self) -> Dict[str, Union[int, torch.Tensor]]:
         """
         Extract broadcastable fields.
         """

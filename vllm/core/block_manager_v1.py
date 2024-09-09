@@ -131,8 +131,6 @@ class CachedBlockAllocator(BlockAllocatorBase):
             self.cached_blocks[block_hash] = self.allocate_block(
                 block_hash, num_hashed_tokens)
             block = self.cached_blocks[block_hash]
-        else:
-            block = self.cached_blocks[block_hash]
             block.is_evicted = False
         assert block.block_hash == block_hash
         block.ref_count += 1
