@@ -115,7 +115,7 @@ Decoder-only Language Models
     -
   * - :code:`OLMoEForCausalLM`
     - OLMoE
-    - :code:`OLMoE/OLMoE-1B-7B-0924`, :code:`OLMoE/OLMoE-1B-7B-0924`, etc.
+    - :code:`allenai/OLMoE-1B-7B-0924`, :code:`allenai/OLMoE-1B-7B-0924-Instruct`, etc.
     -
   * - :code:`OLMoForCausalLM`
     - OLMo
