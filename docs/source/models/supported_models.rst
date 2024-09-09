@@ -248,7 +248,7 @@ Multimodal Language Models
     - :code:`microsoft/Phi-3-vision-128k-instruct`, :code:`microsoft/Phi-3.5-vision-instruct` etc.
     -
   * - :code:`QWenLMHeadModel`
-    - Qwen
+    - Qwen-VL
     - Image\ :sup:`E+`
     - :code:`Qwen/Qwen-VL`, :code:`Qwen/Qwen-VL-Chat`, etc.
     -
