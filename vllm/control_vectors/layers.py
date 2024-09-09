@@ -27,6 +27,7 @@ class MLPWithControlVector(BaseLayerWithControlVector):
         self.normalize = normalize
 
     def set_layer_id(self, layer_id: int) -> None:
+        """assign the layer id of this MLP layer"""
         self.layer_id = layer_id
 
     def set_control_vector(self, index: int, cv_vector: torch.Tensor):
@@ -43,6 +44,7 @@ class MLPWithControlVector(BaseLayerWithControlVector):
             self.control_vectors[index] = 0
 
     def set_active_tensor(self, index: int):
+        """Sets the active vector"""
         if index is not None and index in self.control_vectors:
             self.active_vector = self.control_vectors[index]
         else:
@@ -57,8 +59,7 @@ class MLPWithControlVector(BaseLayerWithControlVector):
         if cv is not None and cv.numel() > 0:
             hidden_states += cv
             if self.normalize:
-                print("HERE")
-                hidden_states = hidden_states * norm_pre / torch.norm(
-                    hidden_states, dim=-1, keepdim=True)
+                norm_post = torch.norm(hidden_states, dim=-1, keepdim=True)
+                hidden_states = hidden_states * norm_pre / norm_post
 
         return hidden_states
