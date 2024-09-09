@@ -295,8 +295,6 @@ class CohereModel(nn.Module):
 
 
 class CohereForCausalLM(nn.Module, SupportsLoRA):
-    supports_lora = True
-
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
