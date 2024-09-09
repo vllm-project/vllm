@@ -83,17 +83,16 @@ class LlamaMLP(nn.Module):
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
         self.act_fn = SiluAndMul()
-        
-        # self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
-        # self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
-        # self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
+
+        self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+        self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+        self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
 
     def forward(self, x):
-        gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
-        x, _ = self.down_proj(x)
-        return x
-
+        y1 = F.silu(self.gate_proj(x))
+        y2 = self.up_proj(x)
+        y = y1 * y2
+        return self.down_proj(y)
 
 class LlamaAttention(nn.Module):
 

@@ -77,8 +77,8 @@ class ChatTtsLlm(nn.Module):
             (".qkv_proj", ".q_proj", "q"),
             (".qkv_proj", ".k_proj", "k"),
             (".qkv_proj", ".v_proj", "v"),
-            (".gate_up_proj", ".gate_proj", 0),
-            (".gate_up_proj", ".up_proj", 1),
+            # (".gate_up_proj", ".gate_proj", 0),
+            # (".gate_up_proj", ".up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
@@ -115,7 +115,7 @@ class ChatTtsLlm(nn.Module):
         else:
             code_emb = [
                 self.emb_code[0](input_ids[:,0]),
-                self.emb_code[1](input_ids[:,1])
+                self.emb_code[1](input_ids[:,1] - 2)
             ]
             emb = torch.stack(code_emb, 2).sum(2)
         return emb

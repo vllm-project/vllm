@@ -1,7 +1,7 @@
 from vllm import LLM, SamplingParams
 import torch
 torch.random.manual_seed(999)
-# tts = torch.load('/home/zhn/ttslm/GPT_merged_emb_nonorm.pt')
+# tts = torch.load('/home/zhn/ttslm_dev/GPT_merged_emb_nonorm.pt')
 
 # text_emb_count = tts['emb_text.weight'].shape[0]
 # audio_emb_count = tts['emb_code.0.weight'].shape[0]
@@ -45,7 +45,7 @@ torch.random.manual_seed(999)
 # # save the model
 # torch.save(tts, '/home/zhn/ttslm/GPT_merged_emb_nonorm.pt')
 
-llm = LLM(model='/home/zhn/ttslm_dev', gpu_memory_utilization=0.5, dtype=torch.float16, enforce_eager=True)
+llm = LLM(model='/home/zhn/ttslm_dev', gpu_memory_utilization=0.5, dtype=torch.float16)
 prompts = [
     {
         "prompt": "[Stts][empty_spk][speed_5]Your text one[Ptts]",
@@ -61,7 +61,7 @@ for i in range(0):
     prompts.append(prompts[0])
     prompts.append(prompts[1])
 
-sampling_params = SamplingParams(temperature=1, detokenize=False, stop_token_ids=[625], max_tokens=2048, top_k=1)
+sampling_params = SamplingParams(temperature=1, detokenize=False, stop_token_ids=[625], max_tokens=2048, top_k=1, repetition_penalty=1.5, repetition_window=16)
 outputs = llm.generate(prompts, sampling_params)
 for output in outputs:
     print(output.prompt)

@@ -273,7 +273,7 @@ def run_vllm(
         tensor_parallel_size=tensor_parallel_size,
         seed=seed,
         trust_remote_code=trust_remote_code,
-        dtype=dtype,
+        dtype=torch.float32,
         max_model_len=max_model_len,
         gpu_memory_utilization=gpu_memory_utilization,
         enforce_eager=enforce_eager,
@@ -289,22 +289,19 @@ def run_vllm(
     )
 
     # Add the requests to the engine.
-    prompts: List[str] = []
-    sampling_params: List[SamplingParams] = []
-    for prompt, _, output_len in requests:
-        prompts.append(prompt)
-        sampling_params.append(
-            SamplingParams(
-                n=1,
-                temperature=1,
-                detokenize=False,
-                stop_token_ids=[625],
-                max_tokens=2048,
-                top_k=1
-            ))
+    prompts = [
+        {
+            "prompt_token_ids": [7001, 5023,   16,   62, 4550, 4557, 4790, 4963,    7, 4676, 4697,   17,
+            4549, 2719, 4546,    7,  435,   20, 4499,   37, 1164, 4561, 4637,  828,
+            566, 4496,    7,  120,   14, 4695,   32, 4765, 4594, 4648, 4513, 4692,
+            37, 1164, 4555,  100, 4544, 4680,    7,   38, 4706,   36,  566, 4498,
+            4717,   30, 1164, 4596,    7, 4597, 4858,  475,   20, 4496,   37, 1164,
+            4499,    7,  132, 4604,   17, 4610,   17, 4650, 4603,   14, 4596, 4938,
+            4513,    0, 0]
+        }
+    ]
+    sampling_params = SamplingParams(temperature=1, detokenize=False, stop_token_ids=[1025], max_tokens=2048, top_k=1, repetition_penalty=1.5, repetition_window=16)
     print(prompts)
-    outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
-    print("warmup done")
     start = time.perf_counter()
     outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
     end = time.perf_counter()

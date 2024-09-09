@@ -92,3 +92,4 @@ for output in outputs:
     token_ids = output.outputs[0].token_ids
     for token_id in token_ids:
         print([x - 0 for x in token_id])
+    print(len(token_ids))
