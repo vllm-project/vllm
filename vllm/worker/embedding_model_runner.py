@@ -170,9 +170,13 @@ class EmbeddingModelRunner(EncoderDecoderModelRunnerBase[EmbeddingModelInput]):
         )
 
         # Prepare PoolingMetadata.
-        seq_lens = model_input.seq_lens if not self.model_config.is_encoder_model else encoder_seq_lens
-        assert seq_lens is not None, f"model is_encoder_model: {self.model_config.is_encoder_model}"
-        pooling_metadata = self._prepare_pooling(seq_group_metadata_list,seq_lens)
+        seq_lens = model_input.seq_lens\
+            if not self.model_config.is_encoder_model \
+            else encoder_seq_lens
+        assert seq_lens is not None, "model is_encoder_model: "\
+                                     f"{self.model_config.is_encoder_model}"
+        pooling_metadata = self._prepare_pooling(seq_group_metadata_list,
+                                                 seq_lens)
 
         return dataclasses.replace(model_input,
                                    pooling_metadata=pooling_metadata)
