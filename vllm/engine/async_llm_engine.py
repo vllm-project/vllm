@@ -22,6 +22,8 @@ from vllm.inputs import (EncoderDecoderLLMInputs, LLMInputs, PromptInputs,
 from vllm.inputs.parse import is_explicit_encoder_decoder_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.guided_decoding import (
+    get_guided_decoding_logits_processor)
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
@@ -561,6 +563,16 @@ class _AsyncLLMEngine(LLMEngine):
             prompt_adapter_request=prompt_adapter_request,
         )
 
+        if isinstance(params, SamplingParams):
+            # Guided decoding has an async implementation for building logits
+            # processors in a separate threadpool.
+            # We want to invoke that here instead of using the blocking
+            # implementation in the LLMEngine
+            params = await self._build_guided_decoding_logits_processor_async(
+                params,
+                lora_request,
+            )
+
         self._add_processed_request(
             request_id=request_id,
             processed_inputs=processed_inputs,
@@ -575,6 +587,37 @@ class _AsyncLLMEngine(LLMEngine):
         if self.tokenizer:
             self.tokenizer.check_health()
         self.model_executor.check_health()
+
+    async def _build_guided_decoding_logits_processor_async(
+            self, sampling_params: SamplingParams,
+            lora_request: Optional[LoRARequest]) -> SamplingParams:
+        """Constructs logits processors based on the guided_decoding,
+        logits_bias, and allowed_token_ids fields in sampling_params. Deletes
+        those fields and adds the constructed logits processors to the
+        logits_processors field. Returns the modified sampling params."""
+        if (guided_decoding := sampling_params.guided_decoding) is None:
+            return sampling_params
+
+        logger.debug(
+            "Building guided decoding logits processor in "
+            "AsyncLLMEngine. Params: %v", guided_decoding)
+
+        tokenizer = self.get_tokenizer(lora_request=lora_request)
+        guided_decoding.backend = guided_decoding.backend or \
+            self.decoding_config.guided_decoding_backend
+
+        processor = await get_guided_decoding_logits_processor(
+            guided_params=guided_decoding, tokenizer=tokenizer)
+
+        if processor:
+            if sampling_params.logits_processors is None:
+                sampling_params.logits_processors = []
+            sampling_params.logits_processors.append(processor)
+
+        # Unset guided decoding params after constructing the lp from them
+        sampling_params.guided_decoding = None
+
+        return sampling_params
 
 
 class AsyncLLMEngine:

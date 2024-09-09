@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Union
 
 import msgspec
 import torch
+from pydantic import BaseModel
 from typing_extensions import Annotated
 
 from vllm.logger import init_logger
@@ -43,7 +44,6 @@ class GuidedDecodingParams:
     choice: Optional[List[str]] = None
     grammar: Optional[str] = None
     json_object: Optional[bool] = None
-
     """These are other options that can be set"""
     backend: Optional[str] = None
     whitespace_pattern: Optional[str] = None
@@ -51,15 +51,13 @@ class GuidedDecodingParams:
     def __post_init__(self):
         """Validate that some fields are mutually exclusive."""
         guide_count = sum([
-            self.json is not None, self.regex is not None,
-            self.choice is not None, self.grammar is not None,
-            self.json_object is not None
+            self.json is not None, self.regex is not None, self.choice
+            is not None, self.grammar is not None, self.json_object is not None
         ])
         if guide_count > 1:
             raise ValueError(
                 "You can only use one kind of guided decoding but multiple are "
                 f"specified: {self.__dict__}")
-
 
 
 class SamplingParams(
@@ -186,7 +184,6 @@ class SamplingParams(
     guided_decoding: Optional[GuidedDecodingParams] = None
     logit_bias: Optional[Union[Dict[int, float], Dict[str, float]]] = None
     allowed_token_ids: Optional[List[int]] = None
-
 
     @staticmethod
     def from_optional(

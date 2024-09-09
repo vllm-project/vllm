@@ -118,7 +118,7 @@ def _get_guide_and_mode(
         return choices_regex, GuidedDecodingMode.CHOICE
     elif guided_params.grammar:
         return guided_params.grammar, GuidedDecodingMode.GRAMMAR
-    elif guided_params.json_object: 
+    elif guided_params.json_object:
         return JSON_GRAMMAR, GuidedDecodingMode.GRAMMAR
     else:
         return None, None

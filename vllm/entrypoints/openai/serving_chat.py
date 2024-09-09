@@ -7,6 +7,7 @@ from typing import Sequence as GenericSequence
 from typing import Union
 
 from fastapi import Request
+from pydantic import BaseModel
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import AsyncEngineClient
@@ -159,10 +160,11 @@ class OpenAIServingChat(OpenAIServing):
             guided_decoding_params = \
                 self._create_guided_decoding_params(request)
             # Some requests for tools will use guided decoding
+            # TODO: validate against any conflicts here?
             if (guided_json :=
                     self._get_guided_json_from_tool(request)) is not None:
-                guided_decoding_params.guided_json = guided_json
-            
+                guided_decoding_params.json = guided_json
+
             if isinstance(prompt, str):
                 prompt_inputs = self._tokenize_prompt_input(
                     request,
@@ -782,7 +784,7 @@ class OpenAIServingChat(OpenAIServing):
             and delta_message.tool_calls[0].function.arguments is not None
             and output.finish_reason is not None
         )
-    
+
     @staticmethod
     def _get_guided_json_from_tool(
         request: ChatCompletionRequest

@@ -99,8 +99,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 lora_request)
 
             guided_decoding_params = self._create_guided_decoding_params(
-                request
-            )
+                request)
             prompts = list(
                 self._tokenize_prompt_input_or_inputs(
                     request,

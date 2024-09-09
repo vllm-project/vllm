@@ -267,10 +267,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     # doc: end-chat-completion-extra-params
 
-    def to_sampling_params(
-            self,
-            guided_decoding: Optional[GuidedDecodingParams],
-            default_max_tokens: int) -> SamplingParams:
+    def to_sampling_params(self,
+                           guided_decoding: Optional[GuidedDecodingParams],
+                           default_max_tokens: int) -> SamplingParams:
         max_tokens = self.max_tokens
         if max_tokens is None:
             max_tokens = default_max_tokens
@@ -305,8 +304,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             length_penalty=self.length_penalty,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             guided_decoding=guided_decoding,
-            logit_bias=self.logit_bias
-        )
+            logit_bias=self.logit_bias)
 
     @model_validator(mode="before")
     @classmethod
@@ -501,10 +499,9 @@ class CompletionRequest(OpenAIBaseModel):
 
     # doc: end-completion-extra-params
 
-    def to_sampling_params(
-            self,
-            guided_decoding: Optional[GuidedDecodingParams],
-            default_max_tokens: int) -> SamplingParams:
+    def to_sampling_params(self,
+                           guided_decoding: Optional[GuidedDecodingParams],
+                           default_max_tokens: int) -> SamplingParams:
         max_tokens = self.max_tokens
         if max_tokens is None:
             max_tokens = default_max_tokens
@@ -542,8 +539,7 @@ class CompletionRequest(OpenAIBaseModel):
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias,
-            allowed_token_ids=self.allowed_token_ids
-        )
+            allowed_token_ids=self.allowed_token_ids)
 
     @model_validator(mode="before")
     @classmethod

@@ -41,4 +41,3 @@ def get_local_guided_decoding_logits_processor(
     raise ValueError(
         f"Unknown guided decoding backend '{guided_params.backend}'. "
         "Must be one of 'outlines, 'lm-format-enforcer'")
-

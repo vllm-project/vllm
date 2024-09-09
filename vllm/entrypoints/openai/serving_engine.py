@@ -469,7 +469,7 @@ class OpenAIServing:
             if lora_request.lora_name != lora_name
         ]
         return f"Success: LoRA adapter '{lora_name}' removed successfully."
-    
+
     @staticmethod
     def _create_guided_decoding_params(
         api_request: Union[CompletionRequest, ChatCompletionRequest]
@@ -489,4 +489,3 @@ class OpenAIServing:
             regex=api_request.guided_regex,
             whitespace_pattern=api_request.guided_whitespace_pattern,
             json_object=guided_json_object)
-

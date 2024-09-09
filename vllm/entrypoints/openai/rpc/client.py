@@ -23,6 +23,8 @@ from vllm.envs import VLLM_RPC_GET_DATA_TIMEOUT_MS
 from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.guided_decoding import (
+    get_guided_decoding_logits_processor)
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
@@ -382,6 +384,13 @@ class AsyncEngineRPCClient:
     ) -> AsyncGenerator[RequestOutput, None]:
         """Send an RPCGenerateRequest to the RPCServer and stream responses."""
 
+        # Constructing guided decoding logits processors is expensive, so we do
+        # it here to avoid contending with cpu resources and the GIL on the
+        # backend process.
+        sampling_params = await \
+            self._build_guided_decoding_logits_processor_async(
+                sampling_params, lora_request)
+
         finished = False
         try:
             with self.to_proxy_socket() as socket:
@@ -449,3 +458,33 @@ class AsyncEngineRPCClient:
         await self._send_one_way_rpc_request(
             request=RPCUtilityRequest.STOP_PROFILE,
             error_message="RPCRequest STOP_PROFILE failed.")
+
+    async def _build_guided_decoding_logits_processor_async(
+            self, sampling_params: SamplingParams,
+            lora_request: Optional[LoRARequest]) -> SamplingParams:
+        """Constructs a logits processor based on any provided guided
+        decoding parameters. Updates logits_processors, deletes the guided
+        decoding params, and returns the modified sampling params"""
+        if (guided_decoding := sampling_params.guided_decoding) is None:
+            return sampling_params
+
+        logger.debug(
+            "Building guided decoding logits processor in "
+            "AsyncEngineRPCClient. Params: %v", guided_decoding)
+
+        tokenizer = await self.get_tokenizer(lora_request=lora_request)
+        guided_decoding.backend = guided_decoding.backend or \
+            self.decoding_config.guided_decoding_backend
+
+        processor = await get_guided_decoding_logits_processor(
+            guided_params=guided_decoding, tokenizer=tokenizer)
+
+        if processor:
+            if sampling_params.logits_processors is None:
+                sampling_params.logits_processors = []
+            sampling_params.logits_processors.append(processor)
+
+        # Unset guided decoding params after constructing the lp from them
+        sampling_params.guided_decoding = None
+
+        return sampling_params
