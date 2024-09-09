@@ -185,22 +185,26 @@ def run_chat(model: str, question: str, image_urls: List[str]):
     sampling_params = SamplingParams(temperature=0.0,
                                      max_tokens=128,
                                      stop_token_ids=stop_token_ids)
-
-    outputs = llm.chat([{
-        "role":
-        "user",
-        "content": [{
-            "type": "text",
-            "text": question,
-        }, *({
-            "type": "image_url",
-            "image_url": {
-                "url": image_url
-            },
-        } for image_url in image_urls)],
-    }],
-                       sampling_params=sampling_params,
-                       chat_template=chat_template)
+    outputs = llm.chat(
+        [{
+            "role":
+            "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": question,
+                },
+                *({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_url
+                    },
+                } for image_url in image_urls),
+            ],
+        }],
+        sampling_params=sampling_params,
+        chat_template=chat_template,
+    )
 
     for o in outputs:
         generated_text = o.outputs[0].text
