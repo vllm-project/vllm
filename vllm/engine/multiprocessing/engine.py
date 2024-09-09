@@ -80,7 +80,6 @@ class MQLLMEngine:
         self.output_socket = self.ctx.socket(zmq.constants.PUSH)
         # self.output_socket.set_hwm(0)
         self.output_socket.bind(f"{ipc_path}{IPC_OUTPUT_EXT}")
-        
 
         # Send health status back to client.
         self.health_socket = self.ctx.socket(zmq.constants.PUSH)
@@ -197,8 +196,13 @@ class MQLLMEngine:
         """Core busy loop of the LLMEngine."""
 
         while True:
-            # Poll until there is work to do.
-            if not self.engine.has_unfinished_requests():
+            if not self.engine.has_unfinished_requests() and (
+                    self.input_socket.poll(timeout=0) == 0):
+
+                # Stop remote worker loop in distributed case.
+                self.engine.stop_remote_worker_execution_loop()
+
+                # Poll until there is work to do.
                 while self.input_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
                     logger.debug("Waiting for new requests in engine loop.")
 
@@ -315,8 +319,9 @@ class MQLLMEngine:
 
     def _send_outputs(self, outputs: REQUEST_OUTPUTS_T):
         """Send List of RequestOutput to RPCClient."""
-        output_bytes = pickle.dumps(outputs)
-        self.output_socket.send_multipart((output_bytes, ), copy=False)
+        if outputs:
+            output_bytes = pickle.dumps(outputs)
+            self.output_socket.send_multipart((output_bytes, ), copy=False)
 
     def _send_healthy(self):
         """Send HEALTHY message to RPCClient."""
