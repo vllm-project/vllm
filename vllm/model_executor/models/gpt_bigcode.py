@@ -44,6 +44,8 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .interfaces import SupportsLoRA
 
+is_hpu = current_platform.is_hpu()
+
 
 class GPTBigCodeAttention(nn.Module):
 
@@ -225,13 +227,13 @@ class GPTBigCodeModel(nn.Module):
         position_embeds = self.wpe(position_ids)
         hidden_states = inputs_embeds + position_embeds
 
-        if current_platform.is_hpu():
+        if is_hpu:
             import habana_frameworks.torch as htorch
             htorch.core.mark_step()
         for i in range(len(self.h)):
             layer = self.h[i]
             hidden_states = layer(hidden_states, kv_caches[i], attn_metadata)
-            if current_platform.is_hpu():
+            if is_hpu:
                 htorch.core.mark_step()
 
         hidden_states = self.ln_f(hidden_states)
