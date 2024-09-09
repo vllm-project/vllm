@@ -69,16 +69,15 @@ def get_ylabel():
 
 def awq_dequantize_cuda(qweight: torch.Tensor, scales: torch.Tensor,
                         qzeros: torch.Tensor) -> torch.Tensor:
-    K = qweight.shape
+    K = qweight.shape[0]
     M = scales.shape[1]
     G = qweight.shape[0] // scales.shape[0]
     bytes_per_elem = qweight.element_size()
     with proton.scope(
-            f"cuda_awq_dequantize M={M}, N={N}, K={K}", {
-                "bytes":
-                qweight.element_size() * M * K +
-                scales.element_size * K // G * M +
-                qzeros.element_size() * K // G * M,
+            f"cuda_awq_dequantize M={M}, K={K}, G={G}", {
+                "bytes": (qweight.element_size() * M * K +
+                scales.element_size() * K // G * M +
+                qzeros.element_size() * K // G * M),
                 "flops":
                 2 * M * K
             }) if use_proton else dummy_context_mgr():
