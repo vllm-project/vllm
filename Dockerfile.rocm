@@ -43,9 +43,8 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     libsm6 \
     libxext6 \
-    libgl1 
-
- && rm -rf /var/lib/apt/lists/*
+    libgl1 \
+    && rm -rf /var/lib/apt/lists/*
 
 # When launching the container, mount the code directory to /vllm-workspace
 ARG APP_MOUNT=/vllm-workspace
