@@ -72,10 +72,12 @@ class MQLLMEngineClient:
 
         # Send RPCGenerateRequest to the MQLLMEngine.
         self.input_socket: Socket = self.context.socket(zmq.constants.PUSH)
+        # self.input_socket.set_hwm(0)
         self.input_socket.connect(f"{ipc_path}{IPC_INPUT_EXT}")
 
         # Receive streams of RequestOutput from the MQLLMEngine.
         self.output_socket: Socket = self.context.socket(zmq.constants.PULL)
+        # self.output_socket.set_hwm(0)
         self.output_socket.connect(f"{ipc_path}{IPC_OUTPUT_EXT}")
 
         # IPC path for ack of check_health requests.

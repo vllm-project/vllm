@@ -73,11 +73,14 @@ class MQLLMEngine:
 
         # Receive input from the client.
         self.input_socket = self.ctx.socket(zmq.constants.PULL)
+        # self.input_socket.set_hwm(0)
         self.input_socket.bind(f"{ipc_path}{IPC_INPUT_EXT}")
 
         # Send output stream back to client.
         self.output_socket = self.ctx.socket(zmq.constants.PUSH)
+        # self.output_socket.set_hwm(0)
         self.output_socket.bind(f"{ipc_path}{IPC_OUTPUT_EXT}")
+        
 
         # Send health status back to client.
         self.health_socket = self.ctx.socket(zmq.constants.PUSH)
