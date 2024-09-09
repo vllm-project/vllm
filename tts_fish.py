@@ -1,8 +1,10 @@
 from vllm import LLM, SamplingParams
+from tokenizers import Tokenizer
+import pypinyin
 import torch
 torch.random.manual_seed(999)
 # tts1 = torch.load('/home/zhn/ttslm_dev/GPT_merged_emb_nonorm.pt')
-# tts2 = torch.load('/home/zhn/fishtts/checkpoint-1400000.bak')
+# tts2 = torch.load('/data/fishtts/checkpoint-1400000.bak')
 
 # llama = tts2['model']['llama']
 
@@ -70,19 +72,26 @@ torch.random.manual_seed(999)
 # llama['lm_head.1.weight'] = w_output[7002+1026:7002+1026*2]
 # llama.pop(output_name)
 
-# torch.save(llama, '/home/zhn/fishtts/llama.pt')
+# torch.save(llama, '/data/fishtts/llama.pt')
 
-llm = LLM(model='/home/zhn/fishtts', gpu_memory_utilization=0.5, dtype=torch.float32)
+texts = [
+    '城市霓虹,夜幕低垂,梦想之光,闪烁不已。心向未来,勇往直前,在星空下,奋斗的旋律。',
+    '在这个数字的世界里,你是我的唯一,爱情如同网络连接,无论距离多遥远。我们的心相互链接,在虚拟的空间中漫游,每条信息都是爱的表达,每个瞬间都是甜蜜的时刻。爱情不再是纸上文字,而是数码世界的交流,在屏幕上,我们相拥相视,你是我的电子爱情。']
+llm_inputs = []
+tokenizer = Tokenizer.from_file('/data/fishtts/vocab.json')
+for text in texts:
+    pinyin = "".join([p[0] for p in pypinyin.pinyin(text, style=pypinyin.Style.TONE3, heteronym=False, neutral_tone_with_five=True)])
+    txt = f"[zh-cn]{pinyin}"
+    txt = txt.replace(" ", "[SPACE]")
+    token_ids = tokenizer.encode(txt).ids
+    token_ids.insert(0, 7001)
+    token_ids.append(0)
+    token_ids.append(0)
+    llm_inputs.append(token_ids)
+
+llm = LLM(model='/data/fishtts', gpu_memory_utilization=0.5, dtype=torch.float32, skip_tokenizer_init=True)
 prompts = [
-    {
-        "prompt_token_ids": [7001, 5023,   16,   62, 4550, 4557, 4790, 4963,    7, 4676, 4697,   17,
-         4549, 2719, 4546,    7,  435,   20, 4499,   37, 1164, 4561, 4637,  828,
-          566, 4496,    7,  120,   14, 4695,   32, 4765, 4594, 4648, 4513, 4692,
-           37, 1164, 4555,  100, 4544, 4680,    7,   38, 4706,   36,  566, 4498,
-         4717,   30, 1164, 4596,    7, 4597, 4858,  475,   20, 4496,   37, 1164,
-         4499,    7,  132, 4604,   17, 4610,   17, 4650, 4603,   14, 4596, 4938,
-         4513,    0, 0]
-    }
+    {"prompt_token_ids": llm_input} for llm_input in llm_inputs
 ]
 
 sampling_params = SamplingParams(temperature=1, detokenize=False, stop_token_ids=[1025], max_tokens=2048, top_k=1, repetition_penalty=1.5, repetition_window=16)
