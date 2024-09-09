@@ -108,7 +108,7 @@ def fused_marlin_moe(
     - w2 (torch.Tensor): The second set of expert weights.
     - gating_output (torch.Tensor): The output of the gating operation
         (before softmax).
-    - g_idx1 (torch.Tensor): The fist set of act_order indices.
+    - g_idx1 (torch.Tensor): The first set of act_order indices.
     - g_idx2 (torch.Tensor): The second set of act_order indices.
     - perm1 (torch.Tensor): The first act_order input permutation.
     - perm2 (torch.Tensor): The second act_order input permutation.

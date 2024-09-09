@@ -323,7 +323,7 @@ class FusedMoE(torch.nn.Module):
                       loaded_weight: torch.Tensor, weight_name: str,
                       shard_id: str, expert_id: int) -> None:
 
-        # llm-compressor returns weights on disk which are flipped
+        # compressed-tensors represents weights on disk which are flipped
         loaded_weight = loaded_weight.t().contiguous() if (
             self.quant_method.__class__.__name__
             == "CompressedTensorsMoEMethod") else loaded_weight
