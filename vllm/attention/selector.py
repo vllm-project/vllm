@@ -38,6 +38,21 @@ def backend_name_to_enum(backend_name: str) -> _Backend:
     return _Backend[backend_name]
 
 
+def use_rocm_paged_attention(qtype: torch.dtype, head_size: int,
+                             block_size: int, kv_cache_dtype: str,
+                             gqa_ratio: int, max_seq_len: int) -> bool:
+    # To use rocm custom paged attention kernel or not
+    rocm_paged_attention_available = (
+        is_hip() and envs.VLLM_USE_ROCM_CUSTOM_PAGED_ATTN
+        and "gfx1" not in torch.cuda.get_device_properties("cuda").gcnArchName)
+    return (rocm_paged_attention_available
+            and (qtype == torch.half or qtype == torch.bfloat16)
+            and (head_size == 64 or head_size == 128)
+            and (block_size == 16 or block_size == 32)
+            and kv_cache_dtype == "auto"
+            and (gqa_ratio >= 1 and gqa_ratio <= 16) and max_seq_len <= 32768)
+
+
 def get_env_variable_attn_backend() -> Optional[_Backend]:
     '''
     Get the backend override specified by the vLLM attention

@@ -1,9 +1,6 @@
 #pragma once
 
-#include <optional>
-#include <torch/library.h>
-
-#include "core/scalar_type.hpp"
+#include <torch/all.h>
 
 void paged_attention(torch::Tensor& out, torch::Tensor& exp_sums,
                      torch::Tensor& max_logits, torch::Tensor& tmp_out,

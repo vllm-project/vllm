@@ -203,6 +203,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     (os.environ.get("VLLM_DYNAMO_USE_CUSTOM_DISPATCHER", "True").lower() in
      ("true", "1")),
 
+    # Rocm custom paged attention implemented for MI3* GPUs
+    "VLLM_USE_ROCM_CUSTOM_PAGED_ATTN":
+    lambda: (os.getenv("VLLM_USE_ROCM_CUSTOM_PAGED_ATTN", "True").lower() in
+             ("true", "1") != "0"),
+
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
     "LOCAL_RANK":

@@ -1,4 +1,20 @@
-#include <torch/extension.h>
+/*
+ * Copyright (c) 2024, The vLLM team.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <hip/hip_bf16.h>
@@ -1094,14 +1110,10 @@ void paged_attention(
         key_cache,  // [num_blocks, num_heads, head_size/x, block_size, x]
     torch::Tensor&
         value_cache,  // [num_blocks, num_heads, head_size, block_size]
-    int num_kv_heads, float scale,
+    int64_t num_kv_heads, double scale,
     torch::Tensor& block_tables,  // [num_seqs, max_num_blocks_per_seq]
     torch::Tensor& context_lens,  // [num_seqs]
-    int block_size, int max_context_len,
-#if 0
-  torch::Tensor& qk_out,
-  torch::Tensor& softmax_out,
-#endif
+    int64_t block_size, int64_t max_context_len,
     const c10::optional<torch::Tensor>& alibi_slopes,
     const std::string& kv_cache_dtype) {
   assert(kv_cache_dtype == "auto");
