@@ -2,6 +2,7 @@ from http import HTTPStatus
 
 import openai
 import pytest
+import pytest_asyncio
 import requests
 
 from vllm.version import __version__ as VLLM_VERSION
@@ -28,9 +29,10 @@ def server():
         yield remote_server
 
 
-@pytest.fixture(scope="module")
-def client(server):
-    return server.get_async_client()
+@pytest_asyncio.fixture
+async def client(server):
+    async with server.get_async_client() as async_client:
+        yield async_client
 
 
 @pytest.mark.asyncio
@@ -48,14 +50,5 @@ async def test_check_health(client: openai.AsyncOpenAI):
     base_url = str(client.base_url)[:-3].strip("/")
 
     response = requests.get(base_url + "/health")
-
-    assert response.status_code == HTTPStatus.OK
-
-
-@pytest.mark.asyncio
-async def test_log_metrics(client: openai.AsyncOpenAI):
-    base_url = str(client.base_url)[:-3].strip("/")
-
-    response = requests.get(base_url + "/metrics")
 
     assert response.status_code == HTTPStatus.OK

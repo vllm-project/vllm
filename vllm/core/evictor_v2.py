@@ -85,18 +85,21 @@ class LRUEvictor(Evictor):
         if len(self.free_table) == 0:
             raise ValueError("No usable cache memory left")
 
-        evicted_block = next(iter(self.free_table.values()))
-        evicted_block_id = next(iter(self.free_table.keys()))
+        evicted_block, evicted_block_id = None, None
         # The blocks with the lowest timestamps should be placed consecutively
         # at the start of OrderedDict. Loop through all these blocks to
         # find the one with maximum number of hashed tokens.
         for _id, block in self.free_table.items():
-            if evicted_block.last_accessed > block.last_accessed or (
-                    evicted_block.last_accessed == block.last_accessed and
-                    evicted_block.num_hashed_tokens < block.num_hashed_tokens):
-                evicted_block = block
-                evicted_block_id = _id
+            if evicted_block is None:
+                evicted_block, evicted_block_id = block, _id
+                continue
+            if evicted_block.last_accessed < block.last_accessed:
+                break
+            if evicted_block.num_hashed_tokens < block.num_hashed_tokens:
+                evicted_block, evicted_block_id = block, _id
 
+        assert evicted_block is not None
+        assert evicted_block_id is not None
         self.free_table.pop(evicted_block_id)
 
         return evicted_block_id, evicted_block.content_hash

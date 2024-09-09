@@ -3,8 +3,8 @@ from typing import List, Optional, Set, Tuple
 import torch
 
 from vllm.model_executor import SamplingMetadata
-from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
-                           SequenceGroupMetadata)
+from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.sequence import ExecuteModelRequest, SequenceGroupMetadata
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.proposer_worker_base import NonLLMProposerWorkerBase
 
@@ -38,9 +38,11 @@ class MLPSpeculatorWorker(NonLLMProposerWorkerBase, MultiStepWorker):
         (input_tokens, seq_lens,
          query_lens) = self._prepare_input_tensors(seq_group_metadata_list)
 
+        generators = self.model_runner.get_generators(
+            execute_model_req.finished_requests_ids)
         sampling_metadata = SamplingMetadata.prepare(
             seq_group_metadata_list, seq_lens, query_lens, self.device,
-            self.model_runner.pin_memory)
+            self.model_runner.pin_memory, generators)
 
         model_outputs = self.model_runner.model.generate_proposals(
             input_ids=input_tokens,

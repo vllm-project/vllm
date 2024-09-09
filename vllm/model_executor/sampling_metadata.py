@@ -5,14 +5,18 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 
-from vllm.model_executor.layers.ops.sample import get_num_triton_sampler_splits
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.sequence import SequenceData, SequenceGroupMetadata
-from vllm.utils import (async_tensor_h2d, is_pin_memory_available,
-                        make_tensor_with_pad, maybe_expand_dim)
+from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, SequenceData,
+                           SequenceGroupMetadata)
+from vllm.triton_utils.sample import get_num_triton_sampler_splits
+from vllm.utils import (PyObjectCache, async_tensor_h2d,
+                        is_pin_memory_available, make_tensor_with_pad,
+                        maybe_expand_dim)
 
 _SAMPLING_EPS = 1e-5
 _SEED_0_REPLACEMENT = 3403598558
+# Some triton sampler related code is guarded before it is ready.
+_USE_TRITON_SAMPLER = False
 
 
 @dataclass
@@ -58,6 +62,39 @@ class SequenceGroupToSample:
         if self.is_prompt:
             assert self.seq_len is not None
             assert self.query_len is not None
+
+
+def gen_seq_group_to_sample_builder(num_seqs: int):
+    return lambda: SequenceGroupToSample(
+        seq_ids=[0] * num_seqs,
+        sampling_params=None,
+        seq_data=None,  # type: ignore
+        seq_len=0,
+        query_len=0,
+        generator=None,
+        is_prompt=True,
+        prompt_logprob_indices=[],
+        sample_indices=[])
+
+
+class SamplingMetadataCache:
+    """Used to cache SamplingMetadata objects between scheduler iterations
+    """
+
+    def __init__(self):
+        self._seq_group_to_sample_cache: Dict[int, PyObjectCache] = {}
+
+    def get_cached_seq_group_to_sample(self, num_seqs):
+        if num_seqs not in self._seq_group_to_sample_cache:
+            self._seq_group_to_sample_cache[num_seqs] = PyObjectCache(
+                gen_seq_group_to_sample_builder(num_seqs))
+
+        obj = self._seq_group_to_sample_cache[num_seqs].get_object()
+        return obj
+
+    def reset(self):
+        for cache in self._seq_group_to_sample_cache.values():
+            cache.reset()
 
 
 class SamplingMetadata:
@@ -118,6 +155,8 @@ class SamplingMetadata:
         query_lens: Optional[List[int]],
         device: str,
         pin_memory: bool,
+        generators: Optional[Dict[str, torch.Generator]] = None,
+        cache: Optional[SamplingMetadataCache] = None,
     ) -> "SamplingMetadata":
         (
             seq_groups,
@@ -125,7 +164,7 @@ class SamplingMetadata:
             categorized_sample_indices,
             num_prompts,
         ) = _prepare_seq_groups(seq_group_metadata_list, seq_lens, query_lens,
-                                device)
+                                device, generators, cache)
         selected_token_indices = async_tensor_h2d(selected_token_indices,
                                                   dtype=torch.long,
                                                   target_device=device,
@@ -160,6 +199,8 @@ def _prepare_seq_groups(
     seq_lens: List[int],
     query_lens: Optional[List[int]],
     device: str,
+    generators: Optional[Dict[str, torch.Generator]] = None,
+    cache: Optional[SamplingMetadataCache] = None,
 ) -> Tuple[List[SequenceGroupToSample], List[int], Dict[
         SamplingType, List[Tuple[int, int]]], int]:
     """Prepare sequence groups and indices for sampling.
@@ -170,8 +211,10 @@ def _prepare_seq_groups(
             Index of prompt len should match with seq_group_metadata_list.
         query_lens: A list of query lengths. Prompt lens include the length
             of entire prompt tokens, and it could be shorter.
-        device: A device to use for random number generator,
+        device: A device to use for random number generators,
             `SequenceGroupToSample.generator`.
+        generators: A store of per-request random number generators used
+            for seeded requests.
 
     Returns:
         seq_groups: A list of sequence group to sample.
@@ -204,21 +247,35 @@ def _prepare_seq_groups(
     num_prompts = 0
 
     for i, seq_group_metadata in enumerate(seq_group_metadata_list):
-        seq_ids = list(seq_group_metadata.seq_data.keys())
+        seq_ids = seq_group_metadata.seq_data.keys()
+
+        if cache is not None:
+            sample_obj = cache.get_cached_seq_group_to_sample(len(seq_ids))
+
+            for j, seq_id in enumerate(seq_ids):
+                sample_obj.seq_ids[j] = seq_id
+
+            sample_obj.prompt_logprob_indices.clear()
+            sample_obj.sample_indices.clear()
+
         sampling_params = seq_group_metadata.sampling_params
         is_prompt = seq_group_metadata.is_prompt
         generator: Optional[torch.Generator] = None
         # If the current seq group is in decode stage, it is None.
         seq_len: Optional[int] = None
         query_len: Optional[int] = None
-        prompt_logprob_indices: List[int] = []
-        sample_indices: List[int] = []
+        prompt_logprob_indices: List[int] = \
+            sample_obj.prompt_logprob_indices if cache is not None else []
+        sample_indices: List[int] = \
+            sample_obj.sample_indices if cache is not None else []
         do_sample = seq_group_metadata.do_sample
 
         if seq_group_metadata.is_prompt:
             if sampling_params.seed is not None:
-                seq_group_metadata.state.generator = torch.Generator(
-                    device=device).manual_seed(sampling_params.seed)
+                generator = torch.Generator(device=device).manual_seed(
+                    sampling_params.seed)
+                if generators is not None:
+                    generators[seq_group_metadata.request_id] = generator
 
             num_prompts += 1
             num_prefill_sample = len(seq_ids)
@@ -234,6 +291,9 @@ def _prepare_seq_groups(
             # Decode
             prompt_logprob_len = 0
             sample_len = len(seq_ids) if do_sample else 0
+
+            if sampling_params.seed is not None and generators is not None:
+                generator = generators.get(seq_group_metadata.request_id)
 
         # Update indices to select from the model output.
         """
@@ -279,12 +339,16 @@ def _prepare_seq_groups(
             logit_idx += sample_len
             sample_idx += sample_len
 
-        if sampling_params.seed is not None:
-            generator = seq_group_metadata.state.generator
-
-        seq_groups.append(
-            SequenceGroupToSample(
-                seq_ids=seq_ids,
+        if cache is not None:
+            sample_obj.sampling_params = sampling_params
+            sample_obj.seq_data = seq_group_metadata.seq_data
+            sample_obj.seq_len = seq_len
+            sample_obj.query_len = query_len
+            sample_obj.generator = generator
+            sample_obj.is_prompt = is_prompt
+        else:
+            sample_obj = SequenceGroupToSample(
+                seq_ids=list(seq_ids),
                 sampling_params=sampling_params,
                 seq_data=seq_group_metadata.seq_data,
                 seq_len=seq_len,
@@ -292,7 +356,13 @@ def _prepare_seq_groups(
                 generator=generator,
                 is_prompt=is_prompt,
                 prompt_logprob_indices=list(prompt_logprob_indices),
-                sample_indices=list(sample_indices)))
+                sample_indices=list(sample_indices))
+
+        seq_groups.append(sample_obj)
+
+    if cache is not None:
+        cache.reset()
+
     return (seq_groups, selected_token_indices, categorized_sample_indices,
             num_prompts)
 
@@ -341,14 +411,16 @@ class SamplingTensors:
         repetition_penalties: List[float] = []
         sampling_seeds: List[int] = []
         sample_indices: List[int] = []
-        prompt_best_of: List[int] = []
         do_penalties = False
         do_top_p_top_k = False
         do_min_p = False
 
-        # We need one base seed per Triton slice.
-        seeds_to_generate = (extra_seeds_to_generate +
-                             get_num_triton_sampler_splits(vocab_size))
+        if _USE_TRITON_SAMPLER:
+            prompt_best_of: List[int] = []
+
+            # We need one base seed per Triton slice.
+            seeds_to_generate = (extra_seeds_to_generate +
+                                 get_num_triton_sampler_splits(vocab_size))
 
         assert sampling_metadata.seq_groups is not None
         for seq_group in sampling_metadata.seq_groups:
@@ -360,9 +432,6 @@ class SamplingTensors:
             r = sampling_params.repetition_penalty
             top_p = sampling_params.top_p
             min_p = sampling_params.min_p
-            seed = sampling_params.seed
-
-            is_greedy = sampling_params.sampling_type == SamplingType.GREEDY
 
             # k should not be greater than the vocab size.
             top_k = min(sampling_params.top_k, vocab_size)
@@ -383,8 +452,7 @@ class SamplingTensors:
                 do_penalties = True
 
             is_prompt = seq_group.is_prompt
-            if (seq_group.is_prompt
-                    and sampling_params.prompt_logprobs is not None):
+            if (is_prompt and sampling_params.prompt_logprobs is not None):
                 # For tokens in the prompt that we only need to get
                 # their logprobs
                 query_len = seq_group.query_len
@@ -409,23 +477,27 @@ class SamplingTensors:
                 frequency_penalties += [f] * len(seq_ids)
                 repetition_penalties += [r] * len(seq_ids)
 
-            if is_prompt:
-                prompt_best_of.append(sampling_params.best_of)
-                query_len = seq_group.query_len
-                assert query_len is not None
+            if _USE_TRITON_SAMPLER:
+                if is_prompt:
+                    prompt_best_of.append(sampling_params.best_of)
+                    query_len = seq_group.query_len
+                    assert query_len is not None
 
-            for seq_id in seq_ids:
-                seq_data = seq_group.seq_data[seq_id]
-                extra_entropy = extra_entropy or ()
-                seq_seeds = cls._get_sequence_seeds(
-                    seed,
-                    seq_data.get_len(),
-                    *extra_entropy,
-                    seq_id,
-                    seeds_to_generate=seeds_to_generate,
-                    is_greedy=is_greedy)
-                sampling_seeds.append(seq_seeds)
-            sample_indices.extend(seq_group.sample_indices)
+                seed = sampling_params.seed
+                is_greedy = sampling_params.sampling_type == SamplingType.GREEDY
+
+                for seq_id in seq_ids:
+                    seq_data = seq_group.seq_data[seq_id]
+                    extra_entropy = extra_entropy or ()
+                    seq_seeds = cls._get_sequence_seeds(
+                        seed,
+                        seq_data.get_len(),
+                        *extra_entropy,
+                        seq_id,
+                        seeds_to_generate=seeds_to_generate,
+                        is_greedy=is_greedy)
+                    sampling_seeds.append(seq_seeds)
+                sample_indices.extend(seq_group.sample_indices)
 
         if do_penalties:
             for seq_group in sampling_metadata.seq_groups:
@@ -434,9 +506,11 @@ class SamplingTensors:
                         and sampling_params.prompt_logprobs is not None):
                     prefill_len = len(seq_group.prompt_logprob_indices)
                     prompt_tokens.extend(
-                        array('l') for _ in range(prefill_len))
+                        array(VLLM_TOKEN_ID_ARRAY_TYPE)
+                        for _ in range(prefill_len))
                     output_tokens.extend(
-                        array('l') for _ in range(prefill_len))
+                        array(VLLM_TOKEN_ID_ARRAY_TYPE)
+                        for _ in range(prefill_len))
                 if seq_group.do_sample:
                     for seq_id in seq_ids:
                         seq_data = seq_group.seq_data[seq_id]
@@ -543,7 +617,7 @@ class SamplingTensors:
             device="cpu",
             dtype=torch.long,
             pin_memory=pin_memory,
-        ).T.contiguous()
+        ).t().contiguous()
 
         # Because the memory is pinned, we can do non-blocking
         # transfer to device.

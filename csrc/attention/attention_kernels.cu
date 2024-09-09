@@ -706,7 +706,7 @@ void paged_attention_v1_launcher(
   int kv_block_stride = key_cache.stride(0);
   int kv_head_stride = key_cache.stride(1);
 
-  int thread_group_size = MAX(WARP_SIZE / BLOCK_SIZE, 1);
+  [[maybe_unused]] int thread_group_size = MAX(WARP_SIZE / BLOCK_SIZE, 1);
   assert(head_size % thread_group_size == 0);
 
   // NOTE: alibi_slopes is optional.
@@ -750,6 +750,9 @@ void paged_attention_v1_launcher(
       break;
     case 112:
       LAUNCH_PAGED_ATTENTION_V1(112);
+      break;
+    case 120:
+      LAUNCH_PAGED_ATTENTION_V1(120);
       break;
     case 128:
       LAUNCH_PAGED_ATTENTION_V1(128);
@@ -862,7 +865,7 @@ void paged_attention_v2_launcher(
   int kv_block_stride = key_cache.stride(0);
   int kv_head_stride = key_cache.stride(1);
 
-  int thread_group_size = MAX(WARP_SIZE / BLOCK_SIZE, 1);
+  [[maybe_unused]] int thread_group_size = MAX(WARP_SIZE / BLOCK_SIZE, 1);
   assert(head_size % thread_group_size == 0);
 
   // NOTE: alibi_slopes is optional.
@@ -911,6 +914,9 @@ void paged_attention_v2_launcher(
       break;
     case 112:
       LAUNCH_PAGED_ATTENTION_V2(112);
+      break;
+    case 120:
+      LAUNCH_PAGED_ATTENTION_V2(120);
       break;
     case 128:
       LAUNCH_PAGED_ATTENTION_V2(128);

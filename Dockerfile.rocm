@@ -55,8 +55,8 @@ RUN case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \
         *"rocm-6.1"*) \
             python3 -m pip uninstall -y torch torchvision \
             && python3 -m pip install --no-cache-dir --pre \
-                torch==2.5.0.dev20240710 \
-                torchvision==0.20.0.dev20240710 \
+                torch==2.5.0.dev20240726 \
+                torchvision==0.20.0.dev20240726 \
                --index-url https://download.pytorch.org/whl/nightly/rocm6.1;; \
         *) ;; esac
 
@@ -131,8 +131,7 @@ COPY . .
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install --upgrade numba scipy huggingface-hub[cli]
 
-# Make sure punica kernels are built (for LoRA)
-ENV VLLM_INSTALL_PUNICA_KERNELS=1
+
 # Workaround for ray >= 2.10.0
 ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
 # Silences the HF Tokenizers warning

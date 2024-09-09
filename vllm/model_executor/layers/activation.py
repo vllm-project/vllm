@@ -166,9 +166,7 @@ class ReLUSquaredActivation(CustomOp):
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
-        relu_applied = nn.functional.relu(x)
-        squared = torch.square(relu_applied)
-        return squared
+        return torch.square(F.relu(x))
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
         return self.forward_native(x)

@@ -29,7 +29,7 @@ from .conftest import run_equality_correctness_test
     "output_len",
     [
         # Use smaller output len for fast test.
-        10,
+        20,
     ])
 @pytest.mark.parametrize("seed", [None])
 def test_seeded_consistency(baseline_llm_generator, test_llm_generator,
