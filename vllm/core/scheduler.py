@@ -1135,6 +1135,7 @@ class Scheduler:
         # Schedule sequence groups.
         # This function call changes the internal states of the scheduler
         # such as self.running, self.swapped, and self.waiting.
+        logger.debug("Scheduler %s start schedule", self)
         scheduler_outputs = self._schedule()
         now = time.time()
 
@@ -1207,6 +1208,7 @@ class Scheduler:
             self.block_manager.mark_blocks_as_computed(
                 scheduled_seq_group.seq_group)
 
+        logger.debug("Scheduler %s end schedule", self)
         return seq_group_metadata_list, scheduler_outputs
 
     def fork_seq(self, parent_seq: Sequence, child_seq: Sequence) -> None:

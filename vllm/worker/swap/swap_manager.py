@@ -9,16 +9,20 @@ from vllm.config import CacheConfig
 from vllm.core.evictor_v1 import EvictionPolicy
 from vllm.logger import init_logger
 from vllm.utils import Device, size_to_bytes
-from vllm.worker.swap.interface import (DeviceStatus, SwapDevice,
+from vllm.worker.swap.interface import (DeviceStatus, SwapClientManagerBase,
+                                        SwapDeviceClient, SwapDeviceManager,
                                         SwapSpaceManagerBase)
 
 logger = init_logger(__name__)
 
 
 class SwapSpaceManager(SwapSpaceManagerBase):
+    """
+    Stateful in the scheduler
+    """
 
     def __init__(self) -> None:
-        self.device_table: OrderedDict[int, SwapDevice] = OrderedDict()
+        self.device_table: OrderedDict[int, SwapDeviceManager] = OrderedDict()
         # Can have holes when a device is detached
         self.current_device_id: int = 0
 
@@ -35,7 +39,8 @@ class SwapSpaceManager(SwapSpaceManagerBase):
         for k, v in cache_config.disk_swap_config.items():
             # Does not fallthrough
             if isinstance(k, str) and k.lower() == "localdisk":
-                from vllm.worker.swap.local_disk import LocalDisk
+                from vllm.worker.swap.local_disk import (LocalDisk,
+                                                         LocalDiskManager)
                 assert isinstance(v, dict)
                 size_bytes = (size_to_bytes(str(v["size"]))
                               if "size" in v else LocalDisk.DEFAULT_SIZE)
@@ -44,16 +49,17 @@ class SwapSpaceManager(SwapSpaceManagerBase):
                 # TODO: Skip the policy
                 eviction_policy = EvictionPolicy.LRU
                 self.add_swap_device(
-                    LocalDisk(block_size=cache_config.block_size,
-                              num_blocks=int(size_bytes // block_size_bytes),
-                              device_id=self.current_device_id,
-                              path=path,
-                              eviction_policy=eviction_policy))
+                    LocalDiskManager(block_size=cache_config.block_size,
+                                     num_blocks=int(size_bytes //
+                                                    block_size_bytes),
+                                     device_id=self.current_device_id,
+                                     path=path,
+                                     eviction_policy=eviction_policy))
             else:
                 logger.warning("Unsupported swap device %s", str(k))
         return
 
-    def add_swap_device(self, swap_device: SwapDevice) -> DeviceStatus:
+    def add_swap_device(self, swap_device: SwapDeviceManager) -> DeviceStatus:
         status: DeviceStatus = swap_device.attach_device()
         if status == DeviceStatus.OK:
             assert self.current_device_id not in self.device_table
@@ -62,7 +68,8 @@ class SwapSpaceManager(SwapSpaceManagerBase):
             self.current_device_id += 1
         return status
 
-    def remove_swap_device(self, swap_device: SwapDevice) -> DeviceStatus:
+    def remove_swap_device(self,
+                           swap_device: SwapDeviceManager) -> DeviceStatus:
         # NOTE: Blocked implementation
         dev_id = swap_device.dev_id
         if dev_id not in self.device_table:
@@ -128,31 +135,6 @@ class SwapSpaceManager(SwapSpaceManagerBase):
         swap_device = self.device_table[dev_id]
         swap_device.update_hash(block_hash, block)
 
-    def read_blocks(self, caches: List[torch.Tensor],
-                    blocks_to_swap_in_from_dev: Dict[int, List[Tuple[int,
-                                                                     int]]],
-                    layers: List[int]):
-        # NOTE: Right now only support read to GPU
-        # TODO: we will add another internal func for CPU
-        for dev_id, blocks_to_swap_in in blocks_to_swap_in_from_dev.items():
-            # Should be adjusted
-            assert dev_id in self.device_table, "Swap blocks to nonexist device"
-            self.device_table[dev_id].read_block_content(
-                caches, blocks_to_swap_in, layers)
-
-    def write_blocks(self, caches: List[torch.Tensor],
-                     blocks_to_swap_out_to_dev: Dict[int, List[Tuple[int,
-                                                                     int]]],
-                     layers: List[int]):
-        # NOTE: Right now only support write from CPU
-        # TODO: we will add another internal func for GPU
-        for dev_id, blocks_to_swap_out in blocks_to_swap_out_to_dev.items():
-            # Should be adjusted
-            assert dev_id in self.device_table, \
-                "Swap blocks from nonexist device"
-            self.device_table[dev_id].write_block_content(
-                caches, blocks_to_swap_out, layers)
-
     def update_block_tables(self, seq_id: int,
                             disk_block_table: Dict[int, BlockTable]):
         for dev_id, block_table in disk_block_table.items():
@@ -172,3 +154,84 @@ class SwapSpaceManager(SwapSpaceManagerBase):
                     swap_device.free(block)
             block_table.clear()
         self.disk_block_tables.clear()
+
+
+class SwapClientManager(SwapClientManagerBase):
+
+    def __init__(self) -> None:
+        self.device_table: OrderedDict[int, SwapDeviceClient] = OrderedDict()
+        # Can have holes when a device is detached
+        self.current_device_id: int = 0
+
+    def parse_and_add_swap_device(self, cache_config: CacheConfig):
+        if not cache_config.enable_disk_swap:
+            return
+        assert cache_config.num_cpu_blocks is not None, \
+            "Disk swap only works with CPU DRAM"
+        block_size_bytes = int(cache_config.swap_space_bytes //
+                               cache_config.num_cpu_blocks)
+        for k, v in cache_config.disk_swap_config.items():
+            # Does not fallthrough
+            if isinstance(k, str) and k.lower() == "localdisk":
+                from vllm.worker.swap.local_disk import (LocalDisk,
+                                                         LocalDiskClient)
+                assert isinstance(v, dict)
+                size_bytes = (size_to_bytes(str(v["size"]))
+                              if "size" in v else LocalDisk.DEFAULT_SIZE)
+                path = (str(v["path"])
+                        if "path" in v else LocalDisk.DEFAULT_PATH)
+                self.add_swap_device(
+                    LocalDiskClient(block_size=cache_config.block_size,
+                                    num_blocks=int(size_bytes //
+                                                   block_size_bytes),
+                                    device_id=self.current_device_id,
+                                    path=path))
+            else:
+                logger.warning("Unsupported swap device %s", str(k))
+        return
+
+    def add_swap_device(self, swap_device: SwapDeviceClient) -> DeviceStatus:
+        status: DeviceStatus = swap_device.attach_device()
+        if status == DeviceStatus.OK:
+            assert self.current_device_id not in self.device_table
+            self.device_table[self.current_device_id] = \
+                swap_device
+            self.current_device_id += 1
+        return status
+
+    def remove_swap_device(self,
+                           swap_device: SwapDeviceClient) -> DeviceStatus:
+        # NOTE: Blocked implementation
+        dev_id = swap_device.dev_id
+        if dev_id not in self.device_table:
+            logger.warning("Remove unregistered swap device")
+            return DeviceStatus.ERROR
+        status = swap_device.detach_device()
+        if status == DeviceStatus.OK:
+            del self.device_table[dev_id]
+        return status
+
+    def read_blocks(self, caches: List[torch.Tensor],
+                    blocks_to_swap_in_from_dev: Dict[int, List[Tuple[int,
+                                                                     int]]],
+                    layers: List[int], head_range: Tuple[int, int]):
+        # NOTE: Right now only support read to GPU
+        # TODO: we will add another internal func for CPU
+        for dev_id, blocks_to_swap_in in blocks_to_swap_in_from_dev.items():
+            # Should be adjusted
+            assert dev_id in self.device_table, "Swap blocks to nonexist device"
+            self.device_table[dev_id].read_block_content(
+                caches, blocks_to_swap_in, layers, head_range)
+
+    def write_blocks(self, caches: List[torch.Tensor],
+                     blocks_to_swap_out_to_dev: Dict[int, List[Tuple[int,
+                                                                     int]]],
+                     layers: List[int], head_range: Tuple[int, int]):
+        # NOTE: Right now only support write from CPU
+        # TODO: we will add another internal func for GPU
+        for dev_id, blocks_to_swap_out in blocks_to_swap_out_to_dev.items():
+            # Should be adjusted
+            assert dev_id in self.device_table, \
+                "Swap blocks from nonexist device"
+            self.device_table[dev_id].write_block_content(
+                caches, blocks_to_swap_out, layers, head_range)

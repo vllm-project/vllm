@@ -8,12 +8,13 @@ from vllm.block import PhysicalTokenBlock
 from vllm.core.evictor_v1 import EvictionPolicy, Evictor, make_evictor
 from vllm.logger import init_logger
 from vllm.utils import Device
-from vllm.worker.swap.interface import DeviceStatus, SwapDevice
+from vllm.worker.swap.interface import (DeviceStatus, SwapDeviceBase,
+                                        SwapDeviceClient, SwapDeviceManager)
 
 logger = init_logger(__name__)
 
 
-class LocalDisk(SwapDevice):
+class LocalDisk(SwapDeviceBase):
     """
     The dummiest implementation of a local disk 
     """
@@ -26,18 +27,11 @@ class LocalDisk(SwapDevice):
                  block_size: int,
                  num_blocks: int,
                  device_id: int,
-                 path: str = "/tmp/kv_cache",
-                 eviction_policy: EvictionPolicy = EvictionPolicy.LRU):
-        print("Local disk blocks: ", num_blocks)
+                 path: str = "/tmp/kv_cache"):
         self.device_id = device_id
         self.path = path + "/"
         self.block_size = block_size
         self.num_blocks = num_blocks
-
-        self.current_num_blocks = 0
-        self.cached_blocks: Dict[int, PhysicalTokenBlock] = {}
-
-        self.evictor: Evictor = make_evictor(eviction_policy)
 
     def attach_device(self) -> DeviceStatus:
         Path(self.path).mkdir(parents=True, exist_ok=True)
@@ -54,6 +48,105 @@ class LocalDisk(SwapDevice):
     def detach_device(self) -> DeviceStatus:
         # Do nothing for now
         return DeviceStatus.OK
+
+
+class LocalDiskClient(LocalDisk, SwapDeviceClient):
+    """
+    The stateless part in the worker
+    """
+
+    def __init__(self,
+                 block_size: int,
+                 num_blocks: int,
+                 device_id: int,
+                 path: str = "/tmp/kv_cache"):
+        super().__init__(block_size, num_blocks, device_id, path)
+
+    # Stateless part. Each worker should have one
+    def read_block_content(self, caches: List[torch.Tensor],
+                           blocks_to_swap_in: List[Tuple[int, int]],
+                           layers: List[int], head_range: Tuple[int, int]):
+        n_layers = len(caches)
+        for layer in layers:
+            assert layer < n_layers
+            # TODO: Check whether we perform a copy or pass by ref here
+            self.read_block_content_one_layer(caches[layer], blocks_to_swap_in,
+                                              layer, head_range)
+
+    def write_block_content(self, caches: List[torch.Tensor],
+                            blocks_to_swap_in: List[Tuple[int, int]],
+                            layers: List[int], head_range: Tuple[int, int]):
+        n_layers = len(caches)
+        for layer in layers:
+            assert layer < n_layers
+            # TODO: Check whether we perform a copy or pass by ref here
+            self.write_block_content_one_layer(caches[layer],
+                                               blocks_to_swap_in, layer,
+                                               head_range)
+
+    def read_block_content_one_layer(self, cache: torch.Tensor,
+                                     blocks_to_swap_in: List[Tuple[int, int]],
+                                     layer: int,
+                                     head_range: Tuple[int, int]) -> None:
+        # TODO: Support generic target device
+        device = cache.get_device()
+
+        for swap_in in blocks_to_swap_in:
+            disk_block_number = swap_in[0]
+            kv_path_name: str = (
+                self.path +
+                f"{layer}_{disk_block_number}_{head_range[0]}_{head_range[1]}.pt"
+            )
+            device_str = f"cuda:{device}" if device >= 0 else "cpu"
+            #logger.debug("Local disk read from %s", kv_path_name)
+            with safe_open(
+                    kv_path_name,
+                    framework="pt",
+                    device=device_str,
+            ) as f:
+                k: torch.Tensor = f.get_tensor('k')
+                v: torch.Tensor = f.get_tensor('v')
+                cache[0][swap_in[1]] = k
+                cache[1][swap_in[1]] = v
+
+    def write_block_content_one_layer(self, cache: torch.Tensor,
+                                      blocks_to_swap_out: List[Tuple[int,
+                                                                     int]],
+                                      layer: int,
+                                      head_range: Tuple[int, int]) -> None:
+        # TODO: Support generic target device
+
+        for swap_out in blocks_to_swap_out:
+            disk_block_number = swap_out[1]
+            kv_path_name: str = (
+                self.path +
+                f"{layer}_{disk_block_number}_{head_range[0]}_{head_range[1]}.pt"
+            )
+            #logger.debug("Local disk write to %s", kv_path_name)
+            save_file(
+                {
+                    'k': cache[0][swap_out[0]].contiguous(),
+                    'v': cache[1][swap_out[0]].contiguous(),
+                }, kv_path_name)
+
+
+class LocalDiskManager(LocalDisk, SwapDeviceManager):
+    """
+    The stateful part in the scheduler
+    """
+
+    def __init__(self,
+                 block_size: int,
+                 num_blocks: int,
+                 device_id: int,
+                 path: str = "/tmp/kv_cache",
+                 eviction_policy: EvictionPolicy = EvictionPolicy.LRU):
+        super().__init__(block_size, num_blocks, device_id, path)
+
+        self.current_num_blocks = 0
+        self.cached_blocks: Dict[int, PhysicalTokenBlock] = {}
+
+        self.evictor: Evictor = make_evictor(eviction_policy)
 
     def can_allocate_block(self) -> bool:
         return self.get_num_free_blocks() > 0
@@ -127,60 +220,3 @@ class LocalDisk(SwapDevice):
         block.block_hash = block_hash
         del self.cached_blocks[old_hash]
         self.cached_blocks[block_hash] = block
-
-    def read_block_content(self, caches: List[torch.Tensor],
-                           blocks_to_swap_in: List[Tuple[int, int]],
-                           layers: List[int]):
-        n_layers = len(caches)
-        for layer in layers:
-            assert layer < n_layers
-            # TODO: Check whether we perform a copy or pass by ref here
-            self.read_block_content_one_layer(caches[layer], blocks_to_swap_in,
-                                              layer)
-
-    def write_block_content(self, caches: List[torch.Tensor],
-                            blocks_to_swap_in: List[Tuple[int, int]],
-                            layers: List[int]):
-        n_layers = len(caches)
-        for layer in layers:
-            assert layer < n_layers
-            # TODO: Check whether we perform a copy or pass by ref here
-            self.write_block_content_one_layer(caches[layer],
-                                               blocks_to_swap_in, layer)
-
-    def read_block_content_one_layer(self, cache: torch.Tensor,
-                                     blocks_to_swap_in: List[Tuple[int, int]],
-                                     layer: int) -> None:
-        # TODO: Support generic target device
-        device = cache.get_device()
-
-        for swap_in in blocks_to_swap_in:
-            disk_block_number = swap_in[0]
-            kv_path_name: str = (self.path + f"{layer}_{disk_block_number}.pt")
-            device_str = f"cuda:{device}" if device >= 0 else "cpu"
-            #logger.debug("Local disk read from %s", kv_path_name)
-            with safe_open(
-                    kv_path_name,
-                    framework="pt",
-                    device=device_str,
-            ) as f:
-                k: torch.Tensor = f.get_tensor('k')
-                v: torch.Tensor = f.get_tensor('v')
-                cache[0][swap_in[1]] = k
-                cache[1][swap_in[1]] = v
-
-    def write_block_content_one_layer(self, cache: torch.Tensor,
-                                      blocks_to_swap_out: List[Tuple[int,
-                                                                     int]],
-                                      layer: int) -> None:
-        # TODO: Support generic target device
-
-        for swap_out in blocks_to_swap_out:
-            disk_block_number = swap_out[1]
-            kv_path_name: str = (self.path + f"{layer}_{disk_block_number}.pt")
-            #logger.debug("Local disk write to %s", kv_path_name)
-            save_file(
-                {
-                    'k': cache[0][swap_out[0]].contiguous(),
-                    'v': cache[1][swap_out[0]].contiguous(),
-                }, kv_path_name)
