@@ -104,6 +104,12 @@ class PhiFp8MoEMethod(FusedMoEMethodBase):
     def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
                        intermediate_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
+        assert 'weight_loader' in extra_weight_attrs
+        weight_loader = extra_weight_attrs['weight_loader']
+        #wrapped_weight_loader = ExpertsInt8MoEMethod.quantizing_weight_loader(
+        #    layer, weight_loader)
+        #extra_weight_attrs['weight_loader'] = wrapped_weight_loader
+        
         w13_weight = torch.nn.Parameter(torch.empty(num_experts,
                                                     2 * intermediate_size,
                                                     hidden_size,
@@ -128,6 +134,16 @@ class PhiFp8MoEMethod(FusedMoEMethodBase):
                                                         dtype=torch.float32),
                                              requires_grad=False)
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
+    
+    @staticmethod
+    def quantizing_weight_loader(layer, weight_loader):
+        def quantize_and_call_weight_loader(param: torch.nn.Parameter,
+                                            loaded_weight: torch.Tensor,
+                                            weight_name: str, shard_id: int,
+                                            expert_id: int):
+            loaded_weight = loaded_weight.to(device)
+            
+    
 
     def process_weights_after_loading(self, layer: Module) -> None:
         # Currently used by PhiMOE
