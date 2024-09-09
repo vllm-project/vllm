@@ -215,22 +215,24 @@ def dispatch_bgmv_linear(
 ):
     """
     `wa_t_all` and `wb_t_all` contains all LoRA A and LoRA B weight matrices
-    stacked into single tensors, assuming same rank. HPU handles no-LoRA
-    requests using zero valued A and B tensors. These zero valued tensors are
-    appended at the end of `wa_t_all` and `wb_t_all` during initialization.
-    We reshape w_a_t_all to [hidden_dim, num_layers * lora_rank]
-    and w_b_t_all to [num_layers * lora_rank, hidden_dim]. We also
-    have a loraMask of shape [batch_size, num_layers * lora_rank]
+    stacked at dimension 0 into single tensors, assuming same rank. `wa` is the
+    reshaped and transposed version of `wa_t_all` of shape
+    (h_in, max_loras * lora_rank) and `wb` is the transposed and reshaped
+    version of `wb_t_all` of shape (max_loras * lora_rank, h_out).
+
+    Matmul input `x` with `wa`. Multiply `x` with a mask to zero-out inputs of
+    inactive LoRA indices. Matmul masked output with `wb` and scale it to get
+    the final output.
     """
 
     assert layer_idx == 0, f'layer_idx should be 0, but got {layer_idx}'
     mask = LoraMask.getLoraMask()
+
     wa = wa_t_all[:, 0, :, :]
     wb = wb_t_all[:, 0, :, :].transpose(1, 2)
-    wa_shape = wa.shape
-    wb_shape = wb.shape
-    wa = wa.reshape(wa_shape[0] * wa_shape[1], wa_shape[2]).transpose(0, 1)
-    wb = wb.reshape(wb_shape[0] * wb_shape[1], wb_shape[2])
+    wa = wa.reshape(wa.shape[0] * wa.shape[1], wa.shape[2]).transpose(0, 1)
+    wb = wb.reshape(wb.shape[0] * wb.shape[1], wb.shape[2])
+
     out = x @ wa
     assert (out.shape == mask.shape)
     out = out * mask
@@ -241,34 +243,28 @@ def dispatch_bgmv_linear(
 def dispatch_bgmv_embedding(
     y: torch.Tensor,
     x: torch.Tensor,
-    wa_t_all: torch.Tensor,
+    wb_t_all: torch.Tensor,
     indices: torch.LongTensor,
     layer_idx: int,
     scale: float,
 ):
     """
-    `wa_t_all` contains all LoRA A weight matrices stacked into a single tensor
-    assuming same rank. HPU handles no-LoRA requests using zero valued A
-    tensor. This zero valued tensor is appended at the end of `wa_t_all` during
-    initialization. For custom BGMV, the corresponding wa for each batch is
-    created based on the lora_index of the sample.
+    `wb_t_all` contains all LoRA-B weight matrices stacked at dimension 0 into
+    a single tensor, assuming same rank. `wb` is the transposed and reshaped
+    version of `wb_t_all` of shape (num_loras * lora_rank, embedding_dim).
 
-    For example:
-        `wa_t_all` is tensor of shape (num_loras, num_layers, lora_rank,
-        hidden_dim), where `wa_t_all[-1]` is zero valued tensor which handles
-        no-LoRA case. The wa tensor for a batch of size batch_Size will have a
-        shape of (batch_size, num_layers, lora_rank, hidden_dim)
-
-
-    This method avoids for-loop as well as graph breaks.
+    Output of LoRA-A embedding (tensor x) is repeated max_loras times to match
+    the shape of `wb`. Multiply `x` with a mask to zero-out inputs of inactive
+    LoRA indices. Matmul masked output with `wb` and scale it to get the final
+    output.
     """
-    assert layer_idx == 0, f'layer_idx should be 0, but got {layer_idx}'
-    max_loras = wa_t_all.size(0)
-    # Wrap-around for negative indices
-    indices = indices % max_loras
-    wa = torch.index_select(wa_t_all, 0, indices)[:, 0, :, :].transpose(-1, -2)
 
-    x = x.unsqueeze(1)
-    out = x @ wa
-    out = out.squeeze(1)
+    assert layer_idx == 0, f'layer_idx should be 0, but got {layer_idx}'
+    max_loras = wb_t_all.size(0)
+
+    x = x.repeat(1, max_loras)
+    x = x * LoraMask.getLoraMask()
+    wb = wb_t_all[:, 0, :, :].transpose(1, 2)
+    wb = wb.reshape(wb.shape[0] * wb.shape[1], wb.shape[2])
+    out = x @ wb
     y += out * scale
