@@ -214,6 +214,7 @@ class LLMEngine:
             "Initializing an LLM engine (v%s) with config: "
             "model=%r, speculative_config=%r, tokenizer=%r, "
             "skip_tokenizer_init=%s, tokenizer_mode=%s, revision=%s, "
+            "override_neuron_config=%s, "
             "rope_scaling=%r, rope_theta=%r, tokenizer_revision=%s, "
             "trust_remote_code=%s, dtype=%s, max_seq_len=%d, "
             "download_dir=%r, load_format=%s, tensor_parallel_size=%d, "
@@ -232,6 +233,7 @@ class LLMEngine:
             model_config.skip_tokenizer_init,
             model_config.tokenizer_mode,
             model_config.revision,
+            model_config.override_neuron_config,
             model_config.rope_scaling,
             model_config.rope_theta,
             model_config.tokenizer_revision,
@@ -1911,6 +1913,12 @@ class LLMEngine:
         if self.tokenizer:
             self.tokenizer.check_health()
         self.model_executor.check_health()
+
+    def start_profile(self) -> None:
+        self.model_executor.start_profile()
+
+    def stop_profile(self) -> None:
+        self.model_executor.stop_profile()
 
     def is_tracing_enabled(self) -> bool:
         return self.tracer is not None

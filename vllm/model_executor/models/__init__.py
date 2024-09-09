@@ -51,7 +51,6 @@ _GENERATION_MODELS = {
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
     "Phi3ForCausalLM": ("llama", "LlamaForCausalLM"),
     "PhiMoEForCausalLM": ("phimoe", "PhiMoEForCausalLM"),
-    "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2MoeForCausalLM": ("qwen2_moe", "Qwen2MoeForCausalLM"),
     "RWForCausalLM": ("falcon", "FalconForCausalLM"),
@@ -88,6 +87,7 @@ _MULTIMODAL_MODELS = {
                                           "PaliGemmaForConditionalGeneration"),
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
     "UltravoxModel": ("ultravox", "UltravoxModel"),
+    "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
 }
 _CONDITIONAL_GENERATION_MODELS = {
     "BartModel": ("bart", "BartForConditionalGeneration"),
