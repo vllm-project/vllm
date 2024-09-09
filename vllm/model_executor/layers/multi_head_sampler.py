@@ -39,6 +39,7 @@ class MultiheadSampler(nn.Module):
     ) -> Optional[SamplerOutput]:
         batch_size, num_heads, vocab_size = logits.size()
         logits = logits.reshape(batch_size * num_heads, vocab_size)
+        logits[:, 0] = logits[:, 1] = -inf  # Mask out the padding token.
 
         self._init_sampling_tensors(num_heads, vocab_size, logits, sampling_metadata)
         sampling_tensors = self._sampling_tensors

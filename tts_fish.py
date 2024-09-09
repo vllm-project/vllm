@@ -4,22 +4,27 @@ import pypinyin
 import torch
 torch.random.manual_seed(999)
 # tts1 = torch.load('/home/zhn/ttslm_dev/GPT_merged_emb_nonorm.pt')
-# tts2 = torch.load('/data/fishtts/checkpoint-1400000.bak')
+# tts2 = torch.load('/home/zhn/fishtts/checkpoint-1400000.bak')
 
+# layer = 24
+# dim = 1536
+# num_audio_tokens = 1026
+# num_text_tokens = 7002
 # llama = tts2['model']['llama']
 
 # llama.pop('freqs_cis')
 # llama.pop('causal_mask')
 
-# llama['emb_text.weight'] = llama['text_embeddings.weight']
+# text_emb = llama['text_embeddings.weight']
+# for i in range(100):
+#     text_emb = torch.cat([text_emb, torch.zeros((1,dim), device=text_emb.device)], 0)
+# llama['emb_text.weight'] = text_emb
 # llama.pop('text_embeddings.weight')
 
-# llama['emb_code.0.weight'] = llama['code_embeddings.weight'][0:1026]
-# llama['emb_code.1.weight'] = llama['code_embeddings.weight'][1026:]
+# llama['emb_code.0.weight'] = llama['code_embeddings.weight'][0:num_audio_tokens]
+# llama['emb_code.1.weight'] = llama['code_embeddings.weight'][num_audio_tokens-2:num_audio_tokens - 2 + num_audio_tokens]
 # llama.pop('code_embeddings.weight')
 
-# layer = 24
-# dim = 1536
 # for i in range(layer):
 #     qkv_name = f'layers.{i}.attention.wqkv.weight'
 #     q = llama[qkv_name][0:dim]
@@ -68,17 +73,17 @@ torch.random.manual_seed(999)
 
 # output_name = 'output.weight'
 # w_output = llama[output_name]
-# llama['lm_head.0.weight'] = w_output[7002:7002+1026]
-# llama['lm_head.1.weight'] = w_output[7002+1026:7002+1026*2]
+# llama['lm_head.0.weight'] = w_output[num_text_tokens:num_text_tokens+num_audio_tokens]
+# llama['lm_head.1.weight'] = w_output[num_text_tokens+num_audio_tokens:num_text_tokens+num_audio_tokens*2]
 # llama.pop(output_name)
 
-# torch.save(llama, '/data/fishtts/llama.pt')
+# torch.save(llama, '/home/zhn/fishtts/llama.pt')
 
 texts = [
     '城市霓虹,夜幕低垂,梦想之光,闪烁不已。心向未来,勇往直前,在星空下,奋斗的旋律。',
     '在这个数字的世界里,你是我的唯一,爱情如同网络连接,无论距离多遥远。我们的心相互链接,在虚拟的空间中漫游,每条信息都是爱的表达,每个瞬间都是甜蜜的时刻。爱情不再是纸上文字,而是数码世界的交流,在屏幕上,我们相拥相视,你是我的电子爱情。']
 llm_inputs = []
-tokenizer = Tokenizer.from_file('/data/fishtts/vocab.json')
+tokenizer = Tokenizer.from_file('/home/zhn/fishtts/vocab.json')
 for text in texts:
     pinyin = "".join([p[0] for p in pypinyin.pinyin(text, style=pypinyin.Style.TONE3, heteronym=False, neutral_tone_with_five=True)])
     txt = f"[zh-cn]{pinyin}"
@@ -86,10 +91,10 @@ for text in texts:
     token_ids = tokenizer.encode(txt).ids
     token_ids.insert(0, 7001)
     token_ids.append(0)
-    token_ids.append(0)
+    token_ids.append(7003)
     llm_inputs.append(token_ids)
 
-llm = LLM(model='/data/fishtts', gpu_memory_utilization=0.5, dtype=torch.float32, skip_tokenizer_init=True)
+llm = LLM(model='/home/zhn/fishtts', gpu_memory_utilization=0.5, dtype=torch.float32, skip_tokenizer_init=True, enforce_eager=True)
 prompts = [
     {"prompt_token_ids": llm_input} for llm_input in llm_inputs
 ]
