@@ -72,10 +72,9 @@ def test_models(
 
 def test_model_with_failure(vllm_runner) -> None:
     try:
-        exception_secret = "artificial stop"
         with patch("vllm.model_executor.models.opt.OPTForCausalLM.forward",
-                   side_effect=ValueError(exception_secret)):
-            with pytest.raises(Exception, match=exception_secret) as exc_info:
+                   side_effect=ValueError()):
+            with pytest.raises(ValueError) as exc_info:
                 vllm_runner("facebook/opt-125m",
                             dtype="half",
                             enforce_eager=False,

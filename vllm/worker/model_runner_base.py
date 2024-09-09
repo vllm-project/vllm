@@ -112,7 +112,7 @@ def dump_input_when_exception(exclude_args: Optional[List[int]] = None,
                 return func(*args, **kwargs)
             except Exception as err:
                 timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-                filename = f"err_{func.__name__}_input_{timestamp}.pkl"
+                filename = f"/tmp/err_{func.__name__}_input_{timestamp}.pkl"
                 with open(filename, "wb") as filep:
                     dumped_inputs = {
                         k: v
@@ -123,9 +123,9 @@ def dump_input_when_exception(exclude_args: Optional[List[int]] = None,
                         if i not in (exclude_args or []):
                             dumped_inputs[f"arg_{i}"] = arg
                     pickle.dump(dumped_inputs, filep)
-                raise Exception(
+                raise type(err)(
                     f"Error in model execution (input dumped to {filename}): "
-                    f"{str(err)}.\n") from None
+                    f"{str(err)}") from err
 
         return _wrapper
 
