@@ -67,6 +67,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_ENGINE_USE_RAY: bool = False
     VLLM_PLUGINS: Optional[List[str]] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
+    VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SYNC_SERVER_ACCUM_REQUESTS: int = 1
     VLLM_SYNC_SERVER_ENGINE_STEPS_BETWEEN_POLLS: int = 1
     VLLM_MOE_PADDING: bool = True
@@ -448,6 +449,12 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # If set, vLLM will use Triton implementations of AWQ.
     "VLLM_USE_TRITON_AWQ":
     lambda: bool(int(os.getenv("VLLM_USE_TRITON_AWQ", "0"))),
+
+    # If set, allow loading or unloading lora adapters in runtime,
+    "VLLM_ALLOW_RUNTIME_LORA_UPDATING":
+    lambda:
+    (os.environ.get("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "0").strip().lower() in
+     ("1", "true")),
 
     # Try to accumulate this many requests before proceeding
     "VLLM_SYNC_SERVER_ACCUM_REQUESTS":
