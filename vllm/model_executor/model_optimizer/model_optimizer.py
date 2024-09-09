@@ -106,6 +106,8 @@ class backend_class:
 
         logger.debug("Final module:")
         logger.debug(lazy_module_print_readable(gm, False))
+        #print("Final module:")
+        #print(lazy_module_print_readable(gm, False))
 
         # Forward optimized graph onto "final" backend (if any).
         fn = backend_compile(gm, example_inputs, backend=self.backend)

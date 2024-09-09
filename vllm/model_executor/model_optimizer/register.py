@@ -108,6 +108,7 @@ def register_defaults():
     register_fusable(torch.Tensor.numel, is_trivial=True)
     register_fusable('_operator.add')
     register_fusable('_operator.mul')
+    register_fusable('_operator.floordiv')
     register_fusable('_operator.getitem', is_trivial=True)
     register_fusable('torch.empty', is_trivial=True)
     register_fusable('torch.empty_like', is_trivial=True)

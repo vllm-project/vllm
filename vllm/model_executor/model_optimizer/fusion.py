@@ -436,8 +436,10 @@ def pointwise_fusion(cc: CodeCache,
 
     logger.debug("final partitions = %s", dump_partitions(node_map))
 
-    # Make sure all nodes have been assigned a partition.
+    # Make sure all nodes have been assigned a partition and that
+    # each node is assigned to only one partition.
     assert all([n in node_map for n in mod.graph.nodes])
+    assert len({v: k for k, v in node_map.items()}) == partition + 1
 
     logger.debug("pre-fusion split mod:")
     logger.debug(

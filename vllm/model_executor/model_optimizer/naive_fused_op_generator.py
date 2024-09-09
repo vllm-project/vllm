@@ -109,6 +109,7 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         #self.fused_op.append(f'#include <iostream>')
         self.fused_op.append('#define _operator_add(a, b) ((a) + (b))')
         self.fused_op.append('#define _operator_mul(a, b) ((a) * (b))')
+        self.fused_op.append('#define _operator_floordiv(a, b) ((int64_t)floor((a) / (b)))')
         self.fused_op.append(('#define TORCH_LIBRARY_EXPAND(name, mod) '
                               'TORCH_LIBRARY(name, mod)'))
         self.fused_op.append(
@@ -356,9 +357,11 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         #self.fused_op.append(f'  std::cout << "Executing: {op}" << std::endl;')
 
         # Lookup ops for vllm custom kernels.
+        generated = set()
         for n in nodes:
             fn = node_function_target(n)
-            if fn.startswith("torch.ops._C"):
+            if fn.startswith("torch.ops._C") and fn not in generated:
+                generated.add(fn)
                 fn_name = self.rename(fn)
                 cxx_sig = generate_cxx_sig(n)
                 init = (f'  static auto {fn_name} = '
@@ -382,7 +385,7 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
                 call_str = self.translate_getitem(n, inputs)
                 assert kwargs.get(n.name) is None or len(kwargs[n.name]) == 0
             else:
-                if return_type is None:
+                if return_type is None and fn != '_operator_floordiv':
                     call_str = "  "
                 else:
                     call_str = f"  auto {self.sanitize(n.name)} = "
@@ -511,7 +514,7 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
                     mode='w',
                     delete=False,  # TODO: True to delete tmp files
             ) as out:
-                logger.info("generating code to: %s", out.name)
+                logger.info("generating code (%s) to: %s", torch_op_name, out.name)
                 for line in self.fused_op:
                     out.write(line)
                     out.write('\n')
