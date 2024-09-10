@@ -17,15 +17,16 @@ Easy, fast, and cheap LLM serving for everyone
 
 ---
 
-**vLLM & NVIDIA Triton User Meetup (Monday, September 9, 5pm-9pm PT) at Fort Mason, San Francisco**
+**vLLM, AMD, Anyscale Meet & Greet at [Ray Summit 2024](http://raysummit.anyscale.com) (Monday, Sept 30th, 5-7pm PT) at Marriott Marquis San Francisco**
 
-We are excited to announce our sixth vLLM Meetup, in collaboration with NVIDIA Triton Team.
-Join us to hear the vLLM's recent update about performance.
-Register now [here](https://lu.ma/87q3nvnh) and be part of the event!
+We are excited to announce our special vLLM event in collaboration with AMD and Anyscale.
+Join us to learn more about recent advancements of vLLM on MI300X.
+Register [here](https://lu.ma/db5ld9n5) and be a part of the event!
 
 ---
 
 *Latest News* 🔥
+- [2024/09] We hosted [the sixth vLLM meetup](https://lu.ma/87q3nvnh) with NVIDIA! Please find the meetup slides [here](https://docs.google.com/presentation/d/1wrLGwytQfaOTd5wCGSPNhoaW3nq0E-9wqyP7ny93xRs/edit?usp=sharing).
 - [2024/07] We hosted [the fifth vLLM meetup](https://lu.ma/lp0gyjqr) with AWS! Please find the meetup slides [here](https://docs.google.com/presentation/d/1RgUD8aCfcHocghoP3zmXzck9vX3RCI9yfUAB2Bbcl4Y/edit?usp=sharing).
 - [2024/07] In partnership with Meta, vLLM officially supports Llama 3.1 with FP8 quantization and pipeline parallelism! Please check out our blog post [here](https://blog.vllm.ai/2024/07/23/llama31.html).
 - [2024/06] We hosted [the fourth vLLM meetup](https://lu.ma/agivllm) with Cloudflare and BentoML! Please find the meetup slides [here](https://docs.google.com/presentation/d/1iJ8o7V2bQEi0BFEljLTwc5G1S10_Rhv3beed5oB0NJ4/edit?usp=sharing).
@@ -130,3 +131,10 @@ If you use vLLM for your research, please cite our [paper](https://arxiv.org/abs
   year={2023}
 }
 ```
+
+## Contact Us
+
+* For technical questions and feature requests, please use Github issues or discussions.
+* For discussing with fellow users, please use Discord.
+* For security disclosures, please use Github's security advisory feature.
+* For collaborations and partnerships, please contact us at vllm-questions AT lists.berkeley.edu.
