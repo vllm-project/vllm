@@ -153,15 +153,16 @@ class RequestOutput:
             output_text = seq.get_output_text_to_return(text_buffer_length)
             output_logprobs = seq.output_logprobs if include_logprobs else None
 
+            output_token_ids: GenericSequence[int]
             if deltas:
-                output_tokens_ids = seq.data.last_appended_tokens
+                output_token_ids = seq.data.last_appended_tokens
                 seq.data.last_appended_tokens = []
                 last_text_offset = seq.data.last_output_text_offset
                 new_text_len = len(output_text)
                 output_text = output_text[last_text_offset:]
                 seq.data.last_output_text_offset = new_text_len
                 if output_logprobs:
-                    output_logprobs = output_logprobs[-len(output_tokens_ids):]
+                    output_logprobs = output_logprobs[-len(output_token_ids):]
             else:
                 output_token_ids = seq.data._output_token_ids
 
