@@ -1,3 +1,4 @@
+import warnings
 from contextlib import contextmanager
 from typing import ClassVar, List, Optional, Sequence, Union, cast, overload
 
@@ -12,14 +13,12 @@ from vllm.inputs import PromptInputs, TextPrompt, TokensPrompt
 from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.model_executor.guided_decoding import (
-    get_local_guided_decoding_logits_processor)
 from vllm.model_executor.guided_decoding.guided_fields import (
     GuidedDecodingRequest, LLMGuidedOptions)
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 from vllm.transformers_utils.tokenizer import (AnyTokenizer,
                                                get_cached_tokenizer)
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
@@ -614,6 +613,14 @@ class LLM:
         prompt_adapter_request: Optional[PromptAdapterRequest],
         guided_options: Optional[GuidedDecodingRequest] = None,
     ) -> None:
+        if guided_options is not None:
+            warnings.warn(
+                "guided_options is deprecated, use "
+                "SamplingParams.guided_decoding instead",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
         if isinstance(inputs, (str, dict)):
             # Convert a single prompt to a list.
             inputs = [inputs]
@@ -629,12 +636,11 @@ class LLM:
 
         if isinstance(params, list):
             params = [
-                self._add_guided_processor(param, guided_options)
-                if isinstance(param, SamplingParams) else param
-                for param in params
+                self._add_guided_params(param, guided_options) if isinstance(
+                    param, SamplingParams) else param for param in params
             ]
         elif isinstance(params, SamplingParams):
-            params = self._add_guided_processor(params, guided_options)
+            params = self._add_guided_params(params, guided_options)
 
         # Add requests to the engine.
         for i, request_inputs in enumerate(inputs):
@@ -662,22 +668,21 @@ class LLM:
             prompt_adapter_request=prompt_adapter_request,
         )
 
-    def _add_guided_processor(
+    def _add_guided_params(
             self,
             params: SamplingParams,
             guided_options: Optional[GuidedDecodingRequest] = None):
-        if guided_options:
-            if guided_options.guided_decoding_backend is None:
-                decoding_config = self.llm_engine.get_decoding_config()
-                guided_options.guided_decoding_backend = (
-                    decoding_config.guided_decoding_backend)
-            guided_logits_processor = get_local_guided_decoding_logits_processor(  #noqa
-                guided_options.guided_decoding_backend, guided_options,
-                self.get_tokenizer())
-            if guided_logits_processor:
-                if params.logits_processors is None:
-                    params.logits_processors = []
-                params.logits_processors.append(guided_logits_processor)
+        if guided_options is None:
+            return params
+
+        params.guided_decoding = GuidedDecodingParams(
+            json=guided_options.guided_json,
+            regex=guided_options.guided_regex,
+            choice=guided_options.guided_choice,
+            grammar=guided_options.guided_grammar,
+            json_object=guided_options.guided_json_object,
+            backend=guided_options.guided_decoding_backend,
+            whitespace_pattern=guided_options.guided_whitespace_pattern)
         return params
 
     def _run_engine(

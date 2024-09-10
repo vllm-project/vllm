@@ -58,7 +58,7 @@ async def test_guided_logits_processor_black_box(backend: str, sample_regex,
     token_ids = tokenizer.encode(
         f"Give an employee profile that fits this schema: {sample_json_schema}"
     )
-    json_request = GuidedDecodingParams(json=sample_json_schema, 
+    json_request = GuidedDecodingParams(json=sample_json_schema,
                                         backend=backend)
     json_lp = await get_guided_decoding_logits_processor(
         json_request, tokenizer)

@@ -269,7 +269,7 @@ class AsyncEngineRPCClient:
                 raise response
             raise ValueError(error_message)
 
-    async def get_tokenizer(self, lora_request: LoRARequest):
+    async def get_tokenizer(self, lora_request: Optional[LoRARequest]):
         return await self.tokenizer.get_lora_tokenizer_async(lora_request)
 
     async def get_decoding_config(self) -> DecodingConfig:
