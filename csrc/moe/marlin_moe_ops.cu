@@ -1375,7 +1375,8 @@ __global__ void MarlinMoE(
     bool replicate_input,  // do we use the same input for each expert?
     bool apply_weights,    // apply weights to output
     int current_m_block,   // current m block to start kernel computation from
-    int max_par            // maximum parallelism
+    int max_par,           // maximum parallelism
+    int cfg_max_m_blocks   // upper bound on m blocks
 ) {
   int m_block_ctr = current_m_block;
 
@@ -1396,14 +1397,15 @@ __global__ void MarlinMoE(
   prob_m = tot_its - 16 * m_block_ctr;
 
   int par = 1;
-  if (max_block > 4) {
+  if (max_block > cfg_max_m_blocks) {
     // Note that parallel > 1 currently only works for inputs without any
     // padding
-    par = (16 * max_block - pad) / 64;
-    par = min((16 * max_block - pad) / 64, max_par);
-    prob_m = 64 * par;
-    m_block_ctr += 4 * (par - 1);
-    max_block = 4;
+    par = (16 * max_block - pad) / (16 * cfg_max_m_blocks);
+    if (par > max_par) par = max_par;
+    // par = min((16 * max_block - pad) / 64, max_par);
+    prob_m = (16 * cfg_max_m_blocks) * par;
+    m_block_ctr += cfg_max_m_blocks * (par - 1);
+    max_block = cfg_max_m_blocks;
   }
 
   if (max_block == 1) {
@@ -1491,7 +1493,9 @@ __global__ void MarlinMoE(
     bool replicate_input,  // do we use the same input for each expert?
     bool apply_weights,    // apply weights to output
     int current_m_block,   // current m block to start kernel computation from
-    int max_par            // maximum parallelism
+    int max_par,           // maximum parallelism
+    int cfg_max_m_blocks   // upper bound on m blocks
+
 ) {
   // Marlin is not implemented yet for SM < 8.0
   assert(false);
@@ -1530,7 +1534,8 @@ static constexpr int min_thread_k = 64;
             A_ptr, B_ptr, C_ptr, sorted_ids_ptr, topk_weights_ptr, s_ptr,     \
             g_idx_ptr, expert_offsets_ptr, num_groups, expert_idx,            \
             num_experts, topk, prob_m, prob_n, prob_k, tot_m, locks,          \
-            replicate_input, apply_weights, m_block, max_par);                \
+            replicate_input, apply_weights, m_block, max_par,                 \
+            exec_cfg.max_m_blocks);                                           \
   }
 
 typedef struct {
@@ -1538,6 +1543,11 @@ typedef struct {
   int thread_n;
   int num_threads;
 } thread_config_t;
+
+typedef struct {
+  int max_m_blocks;
+  thread_config_t tb_cfg;
+} exec_config_t;
 
 thread_config_t small_batch_thread_configs[] = {
     // Ordered by priority
@@ -1559,8 +1569,78 @@ thread_config_t large_batch_thread_configs[] = {
     {128, 64, 128},   // Reduce N 4X, increase K 2X
 };
 
-bool is_valid_config(thread_config_t const& th_config, int prob_m, int prob_n,
-                     int prob_k) {
+int get_scales_cache_size(thread_config_t const& th_config, int prob_m,
+                          int prob_n, int prob_k, int num_bits, int group_size,
+                          bool has_act_order, bool is_k_full) {
+  bool cache_scales_chunk = has_act_order && !is_k_full;
+
+  int tb_n = th_config.thread_n;
+  int tb_k = th_config.thread_k;
+
+  // Get max scale groups per thread-block
+  int tb_groups;
+  if (group_size == -1) {
+    tb_groups = 1;
+  } else if (group_size == 0) {
+    tb_groups = ceildiv(tb_k, 32);  // Worst case is 32 group size
+  } else {
+    tb_groups = ceildiv(tb_k, group_size);
+  }
+
+  if (cache_scales_chunk) {
+    int load_groups =
+        tb_groups * STAGES * 2;          // Chunk size is 2x pipeline over dim K
+    load_groups = max(load_groups, 32);  // We load at least 32 scale groups
+    return load_groups * tb_n * 2;
+
+  } else {
+    int tb_scales = tb_groups * tb_n * 2;
+
+    return tb_scales * STAGES;
+  }
+}
+
+bool is_valid_cache_size(thread_config_t const& th_config, int max_m_blocks,
+                         int prob_m, int prob_n, int prob_k, int num_bits,
+                         int scales_cache_size, int max_shared_mem) {
+  int pack_factor = 32 / num_bits;
+
+  // Get B size
+  int tb_k = th_config.thread_k;
+  int tb_n = th_config.thread_n;
+
+  int b_size = (tb_k * tb_n / pack_factor) * 4;
+
+  // Get A size
+  int m_blocks = ceildiv(prob_m, 16);
+  int tb_max_m = 16;
+
+  while (true) {
+    if (m_blocks >= max_m_blocks) {
+      tb_max_m *= max_m_blocks;
+      break;
+    }
+
+    // TORCH_CHECK(false, "m blocks failed = ", m_blocks);
+    max_m_blocks--;
+    if (max_m_blocks == 0) {
+      TORCH_CHECK(false, "Unexpected m_blocks = ", m_blocks);
+    }
+  }
+
+  int a_size = (tb_max_m * tb_k) * 2;
+
+  float pipe_size = (a_size + b_size) * STAGES;
+
+  TORCH_CHECK(max_shared_mem / 2 > scales_cache_size);  // Sanity
+
+  return pipe_size < 0.95f * (max_shared_mem - scales_cache_size);
+}
+
+bool is_valid_config(thread_config_t const& th_config, int max_m_blocks,
+                     int prob_m, int prob_n, int prob_k, int num_bits,
+                     int group_size, bool has_act_order, bool is_k_full,
+                     int max_shared_mem) {
   // Sanity
   if (th_config.thread_k == -1 || th_config.thread_n == -1 ||
       th_config.num_threads == -1) {
@@ -1588,26 +1668,49 @@ bool is_valid_config(thread_config_t const& th_config, int prob_m, int prob_n,
     return false;
   }
 
+  //  Determine cache for scales
+  int scales_cache_size =
+      get_scales_cache_size(th_config, prob_m, prob_n, prob_k, num_bits,
+                            group_size, has_act_order, is_k_full);
+
+  // Check that pipeline fits into cache
+  if (!is_valid_cache_size(th_config, max_m_blocks, prob_m, prob_n, prob_k,
+                           num_bits, scales_cache_size, max_shared_mem)) {
+    return false;
+  }
+
   return true;
 }
 
-thread_config_t determine_thread_config(int prob_m, int prob_n, int prob_k) {
-  if (prob_m <= 16) {
-    for (auto th_config : small_batch_thread_configs) {
-      if (is_valid_config(th_config, prob_m, prob_n, prob_k)) {
-        return th_config;
+exec_config_t determine_thread_config(int prob_m, int prob_n, int prob_k,
+                                      int num_bits, int group_size,
+                                      bool has_act_order, bool is_k_full,
+                                      int max_shared_mem) {
+  int max_m_blocks = 4;
+  while (max_m_blocks > 0) {
+    if (prob_m <= 16) {
+      for (auto th_config : small_batch_thread_configs) {
+        if (is_valid_config(th_config, max_m_blocks, prob_m, prob_n, prob_k,
+                            num_bits, group_size, has_act_order, is_k_full,
+                            max_shared_mem)) {
+          return exec_config_t{max_m_blocks, th_config};
+        }
+      }
+    } else {
+      for (auto th_config : large_batch_thread_configs) {
+        if (is_valid_config(th_config, max_m_blocks, prob_m, prob_n, prob_k,
+                            num_bits, group_size, has_act_order, is_k_full,
+                            max_shared_mem)) {
+          return exec_config_t{max_m_blocks, th_config};
+        }
       }
     }
 
-  } else {
-    for (auto th_config : large_batch_thread_configs) {
-      if (is_valid_config(th_config, prob_m, prob_n, prob_k)) {
-        return th_config;
-      }
-    }
+    max_m_blocks--;  // Process less M blocks per invocation to reduce cache
+                     // usage
   }
 
-  return thread_config_t{-1, -1, -1};
+  return exec_config_t{0, {-1, -1, -1}};
 }
 
 #define CALL_IF_MOE(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)           \
@@ -1654,26 +1757,42 @@ void marlin_mm_moe_f16i4(const void* A, const void* B, void* C,
     cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
   }
 
+  int max_shared_mem = 0;
+  cudaDeviceGetAttribute(&max_shared_mem,
+                         cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
+  TORCH_CHECK(max_shared_mem > 0);
+
+  int num_bits = q_type.size_bits();
+
   // Set thread config
-  thread_config_t th_config;
+  exec_config_t exec_cfg;
   if (thread_k != -1 && thread_n != -1) {
     // User-defined config
-    th_config = thread_config_t{thread_k, thread_n, USER_THREADS};
+    exec_cfg =
+        exec_config_t{4, thread_config_t{thread_k, thread_n, USER_THREADS}};
   } else {
     // Auto config
-    th_config = determine_thread_config(prob_m, prob_n, prob_k);
+    exec_cfg =
+        determine_thread_config(prob_m, prob_n, prob_k, num_bits, group_size,
+                                has_act_order, is_k_full, max_shared_mem);
   }
 
-  TORCH_CHECK(is_valid_config(th_config, prob_m, prob_n, prob_k),
-              "Invalid thread config: thread_k = " + str(th_config.thread_k) +
-                  ", thread_n = " + str(th_config.thread_n) +
-                  ", num_threads = " + str(th_config.num_threads) +
-                  " for MKN = [" + str(prob_m) + ", " + str(prob_k) + ", " +
-                  str(prob_n) + "]");
+  TORCH_CHECK(exec_cfg.max_m_blocks > 0 &&
+                  is_valid_config(exec_cfg.tb_cfg, exec_cfg.max_m_blocks,
+                                  prob_m, prob_n, prob_k, num_bits, group_size,
+                                  has_act_order, is_k_full, max_shared_mem),
+              "Invalid thread config: max_m_blocks = ", exec_cfg.max_m_blocks,
+              ", thread_k = ", exec_cfg.tb_cfg.thread_k,
+              ", thread_n = ", exec_cfg.tb_cfg.thread_n,
+              ", num_threads = ", exec_cfg.tb_cfg.num_threads, " for MKN = [",
+              prob_m, ", ", prob_k, ", ", prob_n, "] and num_bits = ", num_bits,
+              ", group_size = ", group_size,
+              ", has_act_order = ", has_act_order, ", is_k_full = ", is_k_full,
+              ", max_shared_mem = ", max_shared_mem);
 
-  int num_threads = th_config.num_threads;
-  thread_k = th_config.thread_k;
-  thread_n = th_config.thread_n;
+  int num_threads = exec_cfg.tb_cfg.num_threads;
+  thread_k = exec_cfg.tb_cfg.thread_k;
+  thread_n = exec_cfg.tb_cfg.thread_n;
 
   int thread_k_blocks = thread_k / 16;
   int thread_n_blocks = thread_n / 16;
@@ -1706,11 +1825,6 @@ void marlin_mm_moe_f16i4(const void* A, const void* B, void* C,
                   " is not divisible by group_blocks = ", group_blocks);
     }
   }
-
-  int max_shared_mem = 0;
-  cudaDeviceGetAttribute(&max_shared_mem,
-                         cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
-  TORCH_CHECK(max_shared_mem > 0);
 
   int tot_m = prob_m;
 
@@ -1756,12 +1870,11 @@ void marlin_mm_moe_f16i4(const void* A, const void* B, void* C,
       A_ptr = a_tmp_ptr;
     }
 
-    int max_m_blocks = ceildiv(tot_m, 16);
-    for (int m_block = 0; m_block < max_m_blocks; m_block += 16) {
-      // Define kernel configurations
-
+    int tot_m_blocks = ceildiv(tot_m, 16);
+    for (int m_block = 0; m_block < tot_m_blocks;
+         m_block += 4 * exec_cfg.max_m_blocks) {
       // make it max possible value
-      int thread_m_blocks = 4;
+      int thread_m_blocks = exec_cfg.max_m_blocks;
 
       if (false) {
       }
