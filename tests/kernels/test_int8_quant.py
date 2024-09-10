@@ -125,3 +125,35 @@ def test_static_scaled_int8_azp_quant(num_tokens: int, hidden_size: int,
 
     # big atol to account for rounding errors
     torch.testing.assert_close(out1, out2, atol=1, rtol=0.0)
+
+
+@pytest.mark.parametrize("is_max", [True, False])
+@torch.inference_mode()
+def test_static_scaled_int8_azp_quant_saturating_cast(is_max: bool) -> None:
+    # Test that the saturating cast works correctly for values near i32 max/min
+
+    from numpy import inf, nextafter
+
+    int32_traits = torch.iinfo(torch.int32)
+    val = float(int32_traits.max if is_max else int32_traits.min)
+
+    x_vals = [[
+        nextafter(val, inf), val + 1, val, val - 1,
+        nextafter(val, -inf)
+    ]]
+    x = torch.tensor(x_vals, dtype=torch.float32, device="cuda")
+
+    # The calculation in the kernel is: cast<int8>(cast<int32>(x / scale) + azp)
+    # where cast<T> is a saturating cast to type T.
+    # Scale is set to 1.0 so that the input values are the ones that are cast.
+    # AZP is set to 0 to make sure the int8 saturating cast is tested as well.
+    scale = torch.scalar_tensor(1.0, dtype=torch.float32, device="cuda")
+    azp = torch.scalar_tensor(0, dtype=torch.int32, device="cuda")
+
+    int8_traits = torch.iinfo(torch.int8)
+    val_i8 = int8_traits.max if is_max else int8_traits.min
+    expected = torch.full((1, 5), val_i8, dtype=torch.int8, device="cuda")
+
+    out = torch.empty_like(expected)
+    torch.ops._C.static_scaled_int8_quant(out, x, scale, azp)
+    torch.testing.assert_close(expected, out, atol=0, rtol=0)
