@@ -11,7 +11,8 @@ from fastapi import Request
 from vllm.config import ModelConfig
 from vllm.engine.protocol import AsyncEngineClient
 from vllm.entrypoints.chat_utils import (ConversationMessage,
-                                         apply_chat_template,
+                                         apply_hf_chat_template,
+                                         apply_mistral_chat_template,
                                          load_chat_template,
                                          parse_chat_messages_futures)
 from vllm.entrypoints.logger import RequestLogger
@@ -35,7 +36,7 @@ from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sequence import Logprob
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.utils import iterate_with_cancellation, random_uuid
 
 logger = init_logger(__name__)
@@ -121,15 +122,27 @@ class OpenAIServingChat(OpenAIServing):
                 tool.model_dump() for tool in request.tools
             ]
 
-            prompt = apply_chat_template(
-                tokenizer,
-                conversation=conversation,
-                chat_template=request.chat_template or self.chat_template,
-                add_generation_prompt=request.add_generation_prompt,
-                tools=tool_dicts,
-                documents=request.documents,
-                **(request.chat_template_kwargs or {}),
-            )
+            prompt: Union[str, List[int]]
+            if isinstance(tokenizer, MistralTokenizer):
+                prompt = apply_mistral_chat_template(
+                    tokenizer,
+                    messages=request.messages,
+                    chat_template=request.chat_template or self.chat_template,
+                    add_generation_prompt=request.add_generation_prompt,
+                    tools=tool_dicts,
+                    documents=request.documents,
+                    **(request.chat_template_kwargs or {}),
+                )
+            else:
+                prompt = apply_hf_chat_template(
+                    tokenizer,
+                    conversation=conversation,
+                    chat_template=request.chat_template or self.chat_template,
+                    add_generation_prompt=request.add_generation_prompt,
+                    tools=tool_dicts,
+                    documents=request.documents,
+                    **(request.chat_template_kwargs or {}),
+                )
         except Exception as e:
             logger.error("Error in applying chat template from request: %s", e)
             return self.create_error_response(str(e))
@@ -307,11 +320,10 @@ class OpenAIServingChat(OpenAIServing):
                     # Send response to echo the input portion of the
                     # last message
                     if request.echo:
-                        last_msg_content: Optional[str] = ""
-                        if conversation and conversation[-1].get(
-                                "content") and conversation[-1].get(
-                                    "role") == role:
-                            last_msg_content = conversation[-1]["content"]
+                        last_msg_content: str = ""
+                        if conversation and "content" in conversation[
+                                -1] and conversation[-1].get("role") == role:
+                            last_msg_content = conversation[-1]["content"] or ""
 
                         if last_msg_content:
                             for i in range(num_choices):
@@ -659,8 +671,8 @@ class OpenAIServingChat(OpenAIServing):
 
         if request.echo:
             last_msg_content = ""
-            if conversation and conversation[-1].get(
-                    "content") and conversation[-1].get("role") == role:
+            if conversation and "content" in conversation[-1] and conversation[
+                    -1].get("role") == role:
                 last_msg_content = conversation[-1]["content"] or ""
 
             for choice in choices:
