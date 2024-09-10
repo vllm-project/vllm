@@ -18,8 +18,13 @@ static inline __device__ int8_t float_to_int8_rn(float x) {
       static_cast<float>(std::numeric_limits<int8_t>::min());
   static constexpr auto i8_max =
       static_cast<float>(std::numeric_limits<int8_t>::max());
-  // rounding mode is always FE_TONEAREST on HIP
+
+  // To match the rounding mode of CUDA, we use nearbyint.
+  // It uses the current rounding mode, which is always FE_TONEAREST on HIP.
+  // If that changes in the future, we may need to set the rounding mode
+  // explicitly, either at runtime or compile time.
   float dst = std::nearbyint(x);
+
   // saturate
   dst = std::clamp(dst, i8_min, i8_max);
   return static_cast<int8_t>(dst);
@@ -42,7 +47,10 @@ static inline __device__ int32_t float_to_int32_rn(float x) {
   static constexpr auto i32_max = std::numeric_limits<int32_t>::max();
   static constexpr auto i32_max_f = static_cast<float>(i32_max);
 
-  // rounding mode is always FE_TONEAREST on HIP
+  // To match the rounding mode of CUDA, we use nearbyint.
+  // It uses the current rounding mode, which is always FE_TONEAREST on HIP.
+  // If that changes in the future, we may need to set the rounding mode
+  // explicitly, either at runtime or compile time.
   float dst = std::nearbyint(x);
 
   // saturate on the higher end.
