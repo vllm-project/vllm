@@ -23,16 +23,18 @@ import torch
 
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, MultiModalConfig, ParallelConfig,
-                         SchedulerConfig)
+                         ModelConfig, MultiModalConfig, ObservabilityConfig,
+                         ParallelConfig, PromptAdapterConfig, SchedulerConfig)
 from vllm.distributed.parallel_state import get_world_group
 from vllm.hpu.ops import LoraMask as LoraMask
+from vllm.inputs.registry import InputRegistry
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
+from vllm.multimodal.registry import MultiModalRegistry
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (IntermediateTensors, SequenceData,
                            SequenceGroupMetadata)
@@ -468,20 +470,26 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
-        load_config: LoadConfig,
         cache_config: CacheConfig,
+        load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
-        multimodal_config: Optional[MultiModalConfig] = None,
+        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
+        return_hidden_states: bool = False,
+        observability_config: Optional[ObservabilityConfig] = None,
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
+        self.device_config = device_config
+        self.cache_config = cache_config
         self.lora_config = lora_config
         self.load_config = load_config
-        self.cache_config = cache_config
         self.is_driver_worker = is_driver_worker
+        self.prompt_adapter_config = prompt_adapter_config
+        self.return_hidden_states = return_hidden_states
+        self.observability_config = observability_config
         self.profiler = Profiler()
 
         self.sliding_window = (model_config.get_sliding_window()
@@ -499,7 +507,6 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         self.pin_memory = is_pin_memory_available()
         self.kv_cache_dtype = kv_cache_dtype
-        self.multimodal_config = multimodal_config
 
         self.attn_backend = get_attn_backend(
             self.model_config.get_num_attention_heads(self.parallel_config),
@@ -757,9 +764,6 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         assert max_query_len > 0
 
         if multi_modal_input_list:
-            assert self.multimodal_config, (
-                "Multi-modal inputs are only supported by "
-                "vision language models.")
             multi_modal_input = torch.cat(multi_modal_input_list,
                                           dim=0).to(self.device)
         else:
@@ -1737,7 +1741,6 @@ class HabanaModelRunner(
         seen = cfg in self.seen_configs
         self.seen_configs.add(cfg)
         if not seen and not warmup_mode:
-            import pdb; pdb.set_trace()
             phase = 'prompt' if is_prompt else 'decode'
             logger.warning("Configuration: (%s, %s, %s) was not warmed-up!",
                            phase, batch_size, seq_len)
@@ -1776,7 +1779,6 @@ class HabanaModelRunner(
         batch_size = input_tokens.size(0)
         seq_len = self._seq_len(attn_metadata)
         use_graphs = self._use_graphs(batch_size, seq_len, is_prompt)
-        import pdb; pdb.set_trace()
         self._check_config(batch_size, seq_len, is_prompt, warmup_mode)
         execute_model_kwargs = {
             "input_ids": input_tokens,

@@ -4,15 +4,15 @@
 
 import gc
 import os
-from typing import List, Optional, Set, Tuple
+from typing import List, Optional, Set, Tuple, Type
 
 import habana_frameworks.torch as htorch  # noqa:F401
 import torch
 import torch.distributed
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, MultiModalConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig,
+                         ModelConfig, MultiModalConfig, ObservabilityConfig,
+                         ParallelConfig, PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
@@ -24,6 +24,7 @@ from vllm.sequence import ExecuteModelRequest
 from vllm.utils import HabanaMemoryProfiler, format_bytes
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.habana_model_runner import HabanaModelRunner
+from vllm.worker.model_runner_base import ModelRunnerBase
 from vllm.worker.worker_base import LocalOrDistributedWorkerBase, WorkerInput
 
 logger = init_logger(__name__)
@@ -49,13 +50,15 @@ class HabanaWorker(LocalOrDistributedWorkerBase):
         rank: int,
         distributed_init_method: str,
         lora_config: Optional[LoRAConfig] = None,
-        multimodal_config: Optional[MultiModalConfig] = None,
         speculative_config: Optional[SpeculativeConfig] = None,
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         is_driver_worker: bool = False,
+        model_runner_cls: Optional[Type[ModelRunnerBase]] = None,
+        observability_config: Optional[ObservabilityConfig] = None,
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
+        self.parallel_config.rank = rank
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.cache_config = cache_config
@@ -64,6 +67,7 @@ class HabanaWorker(LocalOrDistributedWorkerBase):
         self.distributed_init_method = distributed_init_method
         self.lora_config = lora_config
         self.load_config = load_config
+        self.prompt_adapter_config = prompt_adapter_config
         self.is_driver_worker = is_driver_worker
         if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
@@ -72,19 +76,19 @@ class HabanaWorker(LocalOrDistributedWorkerBase):
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
-        self.multimodal_config = multimodal_config
 
         self.model_runner: HabanaModelRunner = HabanaModelRunner(
             model_config,
             parallel_config,
             scheduler_config,
             device_config,
-            cache_config=cache_config,
+            cache_config,
             load_config=load_config,
             lora_config=self.lora_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
-            multimodal_config=self.multimodal_config,
-            is_driver_worker=is_driver_worker)
+            is_driver_worker=is_driver_worker,
+            prompt_adapter_config=prompt_adapter_config,
+            observability_config=observability_config)
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine: List[CacheEngine]
