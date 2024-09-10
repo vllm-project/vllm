@@ -18,7 +18,7 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_OUTPUT_EXT, RPC_REQUEST_T,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCError, RPCGenerateRequest,
-                                         RPCStartupRequest, RPCUtilityRequest)
+                                         RPCHealthRequest, RPCStartupRequest)
 from vllm.envs import VLLM_RPC_GET_DATA_TIMEOUT_MS
 from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
@@ -134,7 +134,7 @@ class MQLLMEngineClient:
                 if await self.health_socket.poll(timeout=timeout) == 0:
                     # Wakeup every N seconds and do a health probe.
                     await self._send_one_way_rpc_request(
-                        RPCUtilityRequest.CHECK_HEALTH, self.input_socket)
+                        RPCHealthRequest(), self.input_socket)
 
                     # Wait for ack from the health socket.
                     await self._await_ack(error_message="Health check failed.",
@@ -394,11 +394,8 @@ class MQLLMEngineClient:
                 request=RPCAbortRequest(request_id), socket=self.input_socket)
 
     async def do_log_stats(self):
-        """Send a DO_LOG_STATS signal to the RPC Server"""
-        with suppress(MQClientClosedError):
-            await self._send_one_way_rpc_request(
-                request=RPCUtilityRequest.DO_LOG_STATS,
-                socket=self.input_socket)
+        """Ignore do_log_stats (handled on MQLLMEngine polling)"""
+        pass
 
     async def check_health(self):
         """

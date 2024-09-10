@@ -42,9 +42,8 @@ class RPCAbortRequest:
     request_id: str
 
 
-class RPCUtilityRequest(Enum):
-    DO_LOG_STATS = 1
-    CHECK_HEALTH = 2
+class RPCHealthRequest:
+    pass
 
 
 class RPCStartupRequest(Enum):
@@ -58,7 +57,7 @@ class RPCStartupRequest(Enum):
     CLIENT_IS_READY = 8
 
 
-RPC_REQUEST_T = Union[RPCGenerateRequest, RPCAbortRequest, RPCUtilityRequest,
+RPC_REQUEST_T = Union[RPCGenerateRequest, RPCAbortRequest, RPCHealthRequest,
                       RPCStartupRequest]
 
 REQUEST_OUTPUTS_T = Union[List[RequestOutput], RPCError]

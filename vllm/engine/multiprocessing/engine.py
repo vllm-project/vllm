@@ -13,7 +13,7 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_OUTPUT_EXT, REQUEST_OUTPUTS_T,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCError, RPCGenerateRequest,
-                                         RPCStartupRequest, RPCUtilityRequest)
+                                         RPCHealthRequest, RPCStartupRequest)
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
@@ -199,6 +199,7 @@ class MQLLMEngine:
             if not self.engine.has_unfinished_requests():
                 # Poll until there is work to do.
                 while self.input_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
+                    self.engine.do_log_stats()
                     logger.debug("Waiting for new requests in engine loop.")
 
             # Handle any input from the client.
@@ -249,8 +250,8 @@ class MQLLMEngine:
                     self._handle_generate_request(request)
                 elif isinstance(request, RPCAbortRequest):
                     self._handle_abort_request(request)
-                elif isinstance(request, RPCUtilityRequest):
-                    self._handle_utility_request(request)
+                elif isinstance(request, RPCHealthRequest):
+                    self._handle_health_request()
                 else:
                     raise ValueError("Unknown RPCRequest Type: {request}")
 
@@ -299,18 +300,14 @@ class MQLLMEngine:
         if self.log_requests:
             logger.info("Aborted request %s.", request.request_id)
 
-    def _handle_utility_request(self, request: RPCUtilityRequest):
-        if request == RPCUtilityRequest.DO_LOG_STATS:
-            if not self._errored:
-                self.engine.do_log_stats()
-        elif request == RPCUtilityRequest.CHECK_HEALTH:
-            if self._errored:
-                self._send_unhealthy(ENGINE_DEAD_ERROR)
-            try:
-                self.engine.check_health()
-                self._send_healthy()
-            except Exception as e:
-                self._send_unhealthy(e)
+    def _handle_health_request(self):
+        if self._errored:
+            self._send_unhealthy(ENGINE_DEAD_ERROR)
+        try:
+            self.engine.check_health()
+            self._send_healthy()
+        except Exception as e:
+            self._send_unhealthy(e)
 
     def _send_outputs(self, outputs: REQUEST_OUTPUTS_T):
         """Send List of RequestOutput to RPCClient."""
