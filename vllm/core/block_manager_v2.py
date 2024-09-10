@@ -120,8 +120,10 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         )
 
         if seq_group.is_encoder_decoder():
+            encoder_seq = seq_group.get_encoder_seq()
+            assert encoder_seq is not None
             num_required_blocks += BlockTable.get_num_required_blocks(
-                seq_group.get_encoder_seq().get_token_ids(),
+                encoder_seq.get_token_ids(),
                 block_size=self.block_size,
             )
 
@@ -189,7 +191,9 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         check_no_caching_or_swa_for_blockmgr_encdec(self, seq_group)
 
         if seq_group.is_encoder_decoder():
-            block_table = self._allocate_sequence(seq_group.get_encoder_seq())
+            encoder_seq = seq_group.get_encoder_seq()
+            assert encoder_seq is not None
+            block_table = self._allocate_sequence(encoder_seq)
             self.cross_block_tables[request_id] = block_table
 
     def can_append_slots(self, seq_group: SequenceGroup,
@@ -286,12 +290,13 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             self._last_access_blocks_tracker.update_last_access(
                 seq.seq_id, now)
 
-    def mark_blocks_as_computed(self, seq_group: SequenceGroup):
-        # The only need for mark block as computed is for prefix caching,
-        # while currently we could determine whether one block is computed
-        # or not by check whether it has content hash.
-        # So this function is useless for block_v2.
-        pass
+    def mark_blocks_as_computed(self, seq_group: SequenceGroup,
+                                token_chunk_size: int):
+        # If prefix caching is enabled, mark immutable blocks as computed
+        # right after they have been scheduled (for prefill). This assumes
+        # the scheduler is synchronous so blocks are actually computed when
+        # scheduling the next batch.
+        self.block_allocator.mark_blocks_as_computed([])
 
     def get_common_computed_block_ids(
             self, seqs: List[Sequence]) -> GenericSequence[int]:
@@ -440,6 +445,9 @@ class BlockSpaceManagerV2(BlockSpaceManager):
 
     def get_num_free_cpu_blocks(self) -> int:
         return self.block_allocator.get_num_free_blocks(Device.CPU)
+
+    def get_prefix_cache_hit_rate(self, device: Device) -> float:
+        return self.block_allocator.get_prefix_cache_hit_rate(device)
 
     def _can_swap(self,
                   seq_group: SequenceGroup,

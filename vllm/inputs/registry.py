@@ -1,8 +1,9 @@
 import functools
+from array import array
 from collections import UserDict
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Callable, Dict, Mapping, Optional, Protocol,
-                    Tuple, Type)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, Mapping, Optional,
+                    Protocol, Tuple, Type)
 
 from torch import nn
 from transformers import PretrainedConfig
@@ -13,13 +14,17 @@ from vllm.logger import init_logger
 from .data import LLMInputs
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig, MultiModalConfig
+    from vllm.config import ModelConfig
     from vllm.multimodal import MultiModalDataDict, MultiModalRegistry
     from vllm.sequence import SequenceData
 
 logger = init_logger(__name__)
 
 C = TypeVar("C", bound=PretrainedConfig, default=PretrainedConfig)
+
+# NOTE: This has to match with sequence.py's VLLM_TOKEN_ID_ARRAY_TYPE.
+# We cannot import it here because of circular dependencies.
+VLLM_TOKEN_ID_ARRAY_TYPE = "l"
 
 
 @dataclass(frozen=True)
@@ -31,20 +36,6 @@ class InputContext:
 
     model_config: "ModelConfig"
     """The configuration of the model."""
-
-    def get_multimodal_config(self) -> "MultiModalConfig":
-        """
-        Get the multimodal configuration of the model.
-
-        Raises:
-            ValueError: If the model is not multimodal.
-        """
-
-        multimodal_config = self.model_config.multimodal_config
-        if multimodal_config is None:
-            raise ValueError("No multimodal config found")
-
-        return multimodal_config
 
     def get_hf_config(self, hf_config_type: Type[C] = PretrainedConfig) -> C:
         """
@@ -63,6 +54,13 @@ class InputContext:
                             f"found type: {type(hf_config)}")
 
         return hf_config
+
+    def get_hf_image_processor_config(self) -> Dict[str, Any]:
+        """
+        Get the HuggingFace image processor configuration of the model.
+        """
+
+        return self.model_config.hf_image_processor_config
 
 
 N = TypeVar("N", bound=Type[nn.Module])
@@ -132,7 +130,8 @@ class InputRegistry:
         # Avoid circular import
         from vllm.sequence import SequenceData
 
-        dummy_seq_data = SequenceData([0] * seq_len)
+        dummy_seq_data = SequenceData(
+            array(VLLM_TOKEN_ID_ARRAY_TYPE, [0]) * seq_len)
         dummy_multi_modal_data = None
 
         return dummy_seq_data, dummy_multi_modal_data

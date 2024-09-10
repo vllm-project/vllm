@@ -8,6 +8,7 @@ import torch
 from vllm._ipex_ops import ipex_ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
+from vllm.attention.backends.utils import CommonAttentionState
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 
@@ -27,6 +28,10 @@ class IpexAttnBackend(AttentionBackend):
     @staticmethod
     def get_metadata_cls() -> Type["IpexAttnMetadata"]:
         return IpexAttnMetadata
+
+    @staticmethod
+    def get_state_cls() -> Type["CommonAttentionState"]:
+        return CommonAttentionState
 
     @staticmethod
     def get_kv_cache_shape(

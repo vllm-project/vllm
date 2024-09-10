@@ -62,7 +62,7 @@ This script evaluates the inference throughput of language models using various 
 
 python3 benchmarks/benchmark_throughput.py --help 
 usage: benchmark_throughput.py [-h] [--backend {vllm,hf,mii}] [--dataset DATASET] [--input-len INPUT_LEN] [--output-len OUTPUT_LEN] [--model MODEL]
-                               [--tokenizer TOKENIZER] [--quantization {awq,gptq,squeezellm,None}] [--tensor-parallel-size TENSOR_PARALLEL_SIZE] [--n N]
+                               [--tokenizer TOKENIZER] [--quantization {awq,gptq,None}] [--tensor-parallel-size TENSOR_PARALLEL_SIZE] [--n N]
                                [--use-beam-search] [--num-prompts NUM_PROMPTS] [--seed SEED] [--hf-max-batch-size HF_MAX_BATCH_SIZE] [--trust-remote-code]
                                [--max-model-len MAX_MODEL_LEN] [--dtype {auto,half,float16,bfloat16,float,float32}] [--enforce-eager] [--kv-cache-dtype {auto,fp8}]
                                [--quantization-param-path KV_CACHE_quantization_param_path]
@@ -76,7 +76,7 @@ optional arguments:
   --output-len OUTPUT_LEN  Output length for each request. Overrides the output length from the dataset.
   --model MODEL
   --tokenizer TOKENIZER
-  --quantization {awq,gptq,squeezellm,None}, -q {awq,gptq,squeezellm,None}
+  --quantization {awq,gptq,None}, -q {awq,gptq,None}
   --tensor-parallel-size TENSOR_PARALLEL_SIZE, -tp TENSOR_PARALLEL_SIZE
   --n N  Number of generated sequences per prompt.
   --use-beam-search

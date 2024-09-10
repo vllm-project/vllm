@@ -6,6 +6,7 @@ import torch_xla.experimental.custom_kernel  # Required to register custom ops.
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
+from vllm.attention.backends.utils import CommonAttentionState
 
 
 class PallasAttentionBackend(AttentionBackend):
@@ -17,6 +18,10 @@ class PallasAttentionBackend(AttentionBackend):
     @staticmethod
     def get_metadata_cls() -> Type["PallasMetadata"]:
         return PallasMetadata
+
+    @staticmethod
+    def get_state_cls() -> Type["CommonAttentionState"]:
+        return CommonAttentionState
 
     @staticmethod
     def get_kv_cache_shape(
@@ -118,7 +123,13 @@ class PallasAttentionBackendImpl(AttentionImpl):
             raise NotImplementedError("TPU version must be 4 or higher.")
 
         self.megacore_mode = None
-        tpu_type = torch_xla.tpu.get_tpu_env()["TYPE"].lower()
+        tpu_env = torch_xla.tpu.get_tpu_env()
+        tpu_type = (tpu_env.get("ACCELERATOR_TYPE", None)
+                    or tpu_env.get("TYPE", None)
+                    or tpu_env.get("TPU_ACCELERATOR_TYPE", None))
+        assert tpu_type is not None
+        tpu_type = tpu_type.lower()
+
         if "lite" not in tpu_type:
             if self.num_kv_heads % 2 == 0:
                 self.megacore_mode = "kv_head"
