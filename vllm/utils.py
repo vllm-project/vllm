@@ -220,21 +220,7 @@ def is_tpu() -> bool:
 @lru_cache(maxsize=None)
 def is_xpu() -> bool:
     from importlib.metadata import version
-    is_xpu_flag = "xpu" in version("vllm")
-    # vllm is not build with xpu
-    if not is_xpu_flag:
-        return False
-    try:
-        import intel_extension_for_pytorch as ipex  # noqa: F401
-        _import_ipex = True
-    except ImportError as e:
-        logger.warning("Import Error for IPEX: %s", e.msg)
-        _import_ipex = False
-    # ipex dependency is not ready
-    if not _import_ipex:
-        logger.warning("not found ipex lib")
-        return False
-    return hasattr(torch, "xpu") and torch.xpu.is_available()
+    return "xpu" in version("vllm")
 
 
 @lru_cache(maxsize=None)
