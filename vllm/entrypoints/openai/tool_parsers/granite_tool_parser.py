@@ -26,26 +26,13 @@ class GraniteToolParser(ToolParser):
     def __init__(self, tokenizer: AnyTokenizer):
         super().__init__(tokenizer)
 
-        # initialize properties used for state when parsing tool calls in
-        # streaming mode
-        # self.prev_tool_call_arr: List[Dict] = []
-        # self.current_tool_id: int = -1
-        # self.current_tool_name_sent: bool = False
-        # self.current_tool_initial_sent: bool = False
-        # self.streamed_args_for_tool: List[str] = [
-        # ]
-
         self.bot_token = "<function_call>"
         self.tool_start_token = self.bot_token
-        # self.bot_token_id = self.model_tokenizer.vocab[self.bot_token]
         self.tool_call_regex = re.compile(r"<function_call>\s*")
 
     def extract_tool_calls(
         self, model_output: str
     ) -> ExtractedToolCallInformation:
-        logger.debug(
-            "Extracting tool calls from model output: %s", model_output
-        )
 
         if self.tool_start_token not in model_output:
             return ExtractedToolCallInformation(
@@ -55,7 +42,8 @@ class GraniteToolParser(ToolParser):
         else:
             try:
                 matches = list(self.tool_call_regex.finditer(model_output))
-
+                logger.debug("Found %d tool call matches", len(matches))
+    
                 raw_function_calls = []
 
                 for i, match in enumerate(matches):
@@ -72,6 +60,7 @@ class GraniteToolParser(ToolParser):
                     )
                     raw_function_calls.append(json.loads(full_json_str))
 
+                logger.debug("Extracted %d tool calls", len(raw_function_calls))
                 tool_calls = [
                     ToolCall(
                         type="function",
