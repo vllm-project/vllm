@@ -41,8 +41,8 @@ class GraniteToolParser(ToolParser):
                     start_of_json = match.end()
                     # end_index == the start of the next function call
                     # (if exists)
-                    next_function_call_start = (matches[i + 1].start() if i +
-                                                1 < len(matches) else None)
+                    next_function_call_start = (matches[i + 1].start() if
+                                                i + 1 < len(matches) else None)
 
                     # extract the full JSON object using bracket matching via
                     # start_of_json and optional end index
