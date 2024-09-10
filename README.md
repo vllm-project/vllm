@@ -16,11 +16,11 @@ Easy, fast, and cheap LLM serving for everyone
 
 
 ---
-**vLLM, AMD & Anyscale Meet & Greet at [Ray Summit 2024](http://raysummit.anyscale.com) (Monday, Sept 30th, 5-7pm PT) at Marriott Marquis San Francisco**
+**vLLM, AMD, Anyscale Meet & Greet at [Ray Summit 2024](http://raysummit.anyscale.com) (Monday, Sept 30th, 5-7pm PT) at Marriott Marquis San Francisco**
 
 We are excited to announce our special vLLM event in collaboration with AMD and Anyscale.
 Join us to learn more about recent advancements of vLLM on MI300X.
-Register [here](https://lu.ma/db5ld9n5) and be part of the event!
+Register [here](https://lu.ma/db5ld9n5) and be a part of the event!
 ---
 
 *Latest News* 🔥
@@ -134,5 +134,5 @@ If you use vLLM for your research, please cite our [paper](https://arxiv.org/abs
 
 * For technical questions and feature requests, please use Github issues or discussions.
 * For discussing with fellow users, please use Discord.
-* For security disclosures, please use Github's seucrity advisory feature.
-* For collaboration and partnership, please contact us at vllm-questions AT lists.berkeley.edu.
+* For security disclosures, please use Github's security advisory feature.
+* For collaborations and partnerships, please contact us at vllm-questions AT lists.berkeley.edu.
