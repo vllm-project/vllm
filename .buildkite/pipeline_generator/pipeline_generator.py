@@ -119,8 +119,12 @@ def process_step(step: Step, run_all: str, list_file_diff: List[str]):
     current_step = BuildkiteStep(label=step.label, key=_get_step_key(step.label), parallelism=step.parallelism, soft_fail=step.soft_fail, plugins=[_get_plugin_config(step)])
     current_step.agents["queue"] = _get_agent_queue(step).value
     if step.num_nodes > 1:
-        multi_node_commands = " && ".join(step.commands)
-        current_step.commands = " ".join(["./.buildkite/run-multi-node-test.sh", str(step.working_dir or DEFAULT_WORKING_DIR), str(step.num_nodes), str(step.num_gpus), _get_image_path(), multi_node_commands])
+        test_commands = []
+        for command in step.commands:
+            test_commands.append(f"'{command}'")
+        all_commands = ["./.buildkite/run-multi-node-test.sh", str(step.working_dir or DEFAULT_WORKING_DIR), str(step.num_nodes), str(step.num_gpus), _get_image_path()]
+        all_commands.extend(test_commands)
+        current_step.commands = " ".join(all_commands)
         current_step.plugins = None
     def step_should_run():
         if not step.source_file_dependencies:
