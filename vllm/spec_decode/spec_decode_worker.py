@@ -632,7 +632,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         non_spec_token_ids = proposal_scores.token_ids[non_spec_indices]
 
         # Get bonus tokens from target model.
-        bonus_token_ids = proposal_scores.token_ids[spec_indices, -1:]
+        target_token_ids = proposal_scores.token_ids[spec_indices]
 
         # Get probabilities according to proposal method.
         proposal_probs = proposals.proposal_probs[spec_indices]
@@ -652,7 +652,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         accepted_token_ids = self.spec_decode_sampler(
             target_with_bonus_probs=proposal_verifier_probs,
-            bonus_token_ids=bonus_token_ids,
+            target_token_ids=target_token_ids,
             draft_probs=proposal_probs,
             draft_token_ids=proposal_token_ids,
             **sampler_extra_kwargs,

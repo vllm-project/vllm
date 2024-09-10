@@ -42,7 +42,7 @@ class TypicalAcceptanceSampler(SpecDecodeDeterministicBaseSampler):
     def forward(
         self,
         target_with_bonus_probs: torch.Tensor,
-        bonus_token_ids: torch.Tensor,
+        target_token_ids: torch.Tensor,
         draft_probs: torch.Tensor,
         draft_token_ids: torch.Tensor,
     ) -> torch.Tensor:
@@ -61,8 +61,8 @@ class TypicalAcceptanceSampler(SpecDecodeDeterministicBaseSampler):
                 context according to the target model.
             shape = [batch_size, num_speculative_tokens, vocab_size]
 
-            bonus_token_ids: The "bonus" token ids that are accepted iff all
-                speculative tokens in a sequence are accepted.
+            target_token_ids: The target model outputs based on the original
+                inputs and the draft token ids.
             shape = [batch_size, num_bonus_tokens]
 
             draft_probs: This parameter is unused by the acceptance sampler.
@@ -81,14 +81,12 @@ class TypicalAcceptanceSampler(SpecDecodeDeterministicBaseSampler):
         # overhead.
         if self._strict_mode:
             self._raise_if_incorrect_input(target_with_bonus_probs,
-                                           draft_token_ids, bonus_token_ids)
+                                           draft_token_ids, target_token_ids)
         target_probs = target_with_bonus_probs[:, :-1]
         accepted = self._evaluate_accepted_tokens(target_probs,
                                                   draft_token_ids)
-        recovered_token_ids = self._replacement_token_ids(target_probs)
-        output_token_ids = self._create_output(accepted, recovered_token_ids,
-                                               draft_token_ids,
-                                               bonus_token_ids)
+        output_token_ids = self._create_output(accepted, draft_token_ids,
+                                               target_token_ids)
         return output_token_ids
 
     def _evaluate_accepted_tokens(self, target_probs, draft_token_ids):
@@ -152,34 +150,3 @@ class TypicalAcceptanceSampler(SpecDecodeDeterministicBaseSampler):
         )
         accepted_mask = candidates_prob > threshold
         return accepted_mask
-
-    def _replacement_token_ids(self, target_probs):
-        """
-        Generate one replacement token ID for each sequence based on target
-        probabilities. The replacement token is used as the fallback option
-        if typical acceptance sampling does not accept any draft tokens for
-        that particular sequence. 
-
-        This method computes the token IDs to be replaced by selecting the
-        token with the highest probability for each sequence in the first 
-        position. The rest of the output is filled with -1. 
-
-        Parameters
-        ----------
-        target_probs : torch.Tensor
-            A tensor of shape (batch_size, k, vocab_size) containing 
-            the target probability distribution
-
-        Returns
-        -------
-        torch.Tensor
-            A tensor of shape (batch_size, k) with the replacement 
-            token IDs. Only the first column is set, and the rest of the
-            columns are filled with -1.
-        """
-        max_indices = torch.argmax(target_probs[:, 0, :], dim=1)
-        output = -torch.ones((target_probs.shape[0], target_probs.shape[1]),
-                             dtype=self.token_id_dtype,
-                             device=target_probs.device)
-        output[:, 0] = max_indices
-        return output

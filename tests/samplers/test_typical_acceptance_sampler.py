@@ -474,37 +474,3 @@ def test_accept_tokens_set_non_default_posteriors(seed: int,
         assert torch.all(output_token_ids[:, -1] == -1)
     else:
         assert torch.all(output_token_ids[:, -1] == bonus_token_ids)
-
-
-@pytest.mark.parametrize("seed", list(range(10)))
-@pytest.mark.parametrize("disable_bonus_tokens", [True, False])
-@pytest.mark.parametrize("device", CUDA_DEVICES)
-@torch.inference_mode()
-def test_replacement_token_ids(seed: int, disable_bonus_tokens: bool,
-                               device: str):
-    """
-    Test the TypicalAcceptanceSampler's method for generating
-    replacement token IDs.
-
-    This test verifies that the `_replacement_token_ids` method of the 
-    TypicalAcceptanceSampler correctly identifies the token IDs to be used
-    as replacements based on the target probability distribution.
-    Specifically, it ensures that the method correctly identifies the
-    tokens with the highest probability for each sequence in the batch.
-    """
-    set_random_seed(seed)
-    k = 10
-    batch_size = 5
-    vocab_size = 30_000
-    torch.set_default_device(device)
-    typical_acceptance_sampler = get_acceptance_sampler(
-        strict_mode=True, disable_bonus_tokens=disable_bonus_tokens)
-    typical_acceptance_sampler.init_gpu_tensors(device=device)
-    target_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
-    expected_replacement_tokens = -torch.ones(
-        (batch_size, k), dtype=torch.long)
-    expected_replacement_tokens[:, 0] = torch.argmax(target_probs[:, 0, :],
-                                                     dim=1)
-    actual_replacement_tokens = (
-        typical_acceptance_sampler._replacement_token_ids(target_probs))
-    assert torch.all(expected_replacement_tokens == actual_replacement_tokens)
