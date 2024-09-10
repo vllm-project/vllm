@@ -35,9 +35,9 @@ steps:
   no_gpu: True
   commands:
   - pip install -r requirements-docs.txt
-  - SPHINXOPTS=\"-W\" make html
+  - SPHINXOPTS="-W" make html
   # Check API reference (if it fails, you may have missing mock imports)
-  - grep \"sig sig-object py\" build/html/dev/sampling_params.html
+  - grep "sig sig-object py" build/html/dev/sampling_params.html
 
 - label: Async Engine, Inputs, Utils, Worker Test # 15min
   fast_check: true
@@ -170,7 +170,7 @@ steps:
   commands:
     - pip install -e ./plugins/vllm_add_dummy_model
     - pytest -v -s models/test_oot_registration.py # it needs a clean process
-    - pytest -v -s models -m \"not vlm\" --ignore=models/test_oot_registration.py
+    - pytest -v -s models -m "not vlm" --ignore=models/test_oot_registration.py
 
 - label: torch compile integration test
   source_file_dependencies:

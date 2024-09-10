@@ -68,6 +68,7 @@ class BuildkiteBlockStep(BaseModel):
 
 def _get_image_path() -> str:
     commit = os.getenv("BUILDKITE_COMMIT")
+    commit = "40184a07427f2a0b06094e98a9ad631e702225cd"
     return f"{ECR_REPO}:{commit}"
 
 def _get_step_key(label: str) -> str:
@@ -117,6 +118,10 @@ def process_step(step: Step, run_all: str, list_file_diff: List[str]):
     steps = []
     current_step = BuildkiteStep(label=step.label, key=_get_step_key(step.label), parallelism=step.parallelism, soft_fail=step.soft_fail, plugins=[_get_plugin_config(step)])
     current_step.agents["queue"] = _get_agent_queue(step).value
+    if step.num_nodes > 1:
+        multi_node_commands = " && ".join(step.commands)
+        current_step.commands = " ".join(["./.buildkite/run-multi-node-test.sh", str(step.working_dir or DEFAULT_WORKING_DIR), str(step.num_nodes), str(step.num_gpus), _get_image_path(), multi_node_commands])
+        current_step.plugins = None
     def step_should_run():
         if not step.source_file_dependencies:
             return True
@@ -142,17 +147,25 @@ def build_step() -> BuildkiteStep:
     step.depends_on = None
     return step
 
+def mock_build_step() -> BuildkiteStep:
+    docker_image = f"{ECR_REPO}:40184a07427f2a0b06094e98a9ad631e702225cd"
+    command = ["echo 'mock build step'"]
+    step = BuildkiteStep(label=":docker: build image", key="build", agents={"queue": AgentQueue.AWS_CPU.value}, env={"DOCKER_BUILDKIT": "1"}, retry={"automatic": [{"exit_status": -1, "limit": 2}, {"exit_status": -10, "limit": 2}]}, commands=command)
+    step.depends_on = None
+    return step
+
 @click.command()
 @click.option("--run_all", type=str)
 @click.option("--list_file_diff", type=str)
 def main(run_all: str = -1, list_file_diff: str = None):
     list_file_diff = list_file_diff.split("|") if list_file_diff else []
+    run_all = -1
     #yaml_obj = ruamel.yaml.YAML()
     path = ".buildkite/test-pipeline.yaml"
     test_steps = read_test_steps(path)
     out_path = ".buildkite/pipeline.yaml"
 
-    final_steps = [build_step()]
+    final_steps = [mock_build_step()]
     for step in test_steps:
         out_steps = process_step(step, run_all, list_file_diff)
         final_steps.extend(out_steps)
