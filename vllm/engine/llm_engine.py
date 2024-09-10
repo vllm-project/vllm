@@ -1283,17 +1283,6 @@ class LLMEngine:
         # only for delta output seq groups
         previous_output_lens: Dict[int, Tuple[int, int]] = {}
 
-        # TODO Need to add this somewhere in the seq group loop
-        # seq_group: SequenceGroup = scheduled_seq_group.seq_group
-        # params = seq_group.sampling_params
-        # if params is not None and (params.output_kind
-        #                            == RequestOutputKind.DELTA):
-        #     text_buffer_length = params.output_text_buffer_length
-        #     for seq in seq_group.seqs:
-        #         previous_output_lens[seq.seq_id] = (
-        #             seq.get_output_len(),
-        #             seq.get_output_text_to_return_len(text_buffer_length))
-
         # Get pending async postprocessor
         if request_id:
             # When we process only one request, no pop is required
@@ -1310,7 +1299,6 @@ class LLMEngine:
 
         # Organize outputs by [step][sequence group] instead of
         # [sequence group][step].
-
         if len(outputs) == 1:
             outputs_by_sequence_group = outputs[0]
         else:
@@ -1354,6 +1342,17 @@ class LLMEngine:
             if not isinstance(output, GenericSequence):
                 output = [output]
 
+            #TODO I don't think this is the correct place to obtain the
+            # previous output lens anymore, given async output processing
+            params = seq_group.sampling_params
+            if params is not None and (params.output_kind
+                                       == RequestOutputKind.DELTA):
+                text_buffer_length = params.output_text_buffer_length
+                for seq in seq_group.seqs:
+                    previous_output_lens[seq.seq_id] = (
+                        seq.get_output_len(),
+                        seq.get_output_text_to_return_len(text_buffer_length))
+
             if not is_async:
                 seq_group.update_num_computed_tokens(
                     scheduled_seq_group.token_chunk_size)
@@ -1391,8 +1390,10 @@ class LLMEngine:
 
             seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
-            request_output = RequestOutputFactory.create(seq_group)
-            ctx.request_outputs.append(request_output)
+            request_output = RequestOutputFactory.create(
+                seq_group, previous_output_lens)
+            if request_output:
+                ctx.request_outputs.append(request_output)
 
         # When we process a single request, we skip it for the next time,
         # and invoke the request output callback (if there was final output)
@@ -1657,8 +1658,7 @@ class LLMEngine:
             if allow_async_output_proc:
                 if outputs:
                     assert len(outputs) == 1, (
-                        "Multi step decoding does not work "
-                        "with async output processing.")
+                        "Async postprocessor expects only a single output set")
 
                 self._advance_to_next_step(
                     outputs[0], seq_group_metadata_list,
