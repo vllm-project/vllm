@@ -317,7 +317,7 @@ def ref_multi_query_kv_attention(
 @pytest.mark.parametrize("version", ["rocm"])
 @pytest.mark.parametrize("num_seqs", NUM_GEN_SEQS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
-@pytest.mark.parametrize("head_size", [64, 128]) # only test 64 128
+@pytest.mark.parametrize("head_size", [64, 128])  # only test 64 128
 @pytest.mark.parametrize("use_alibi", USE_ALIBI)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
@@ -379,8 +379,9 @@ def test_paged_attention_rocm(
                                                 device)
     key_cache, value_cache = key_caches[0], value_caches[0]
 
+    # TODO(charlifu) enable fp8 kv cache
     # Using default kv_scale
-    kv_scale = 1.0
+    # kv_scale = 1.0
 
     # Call the paged attention kernel.
     output = torch.empty_like(query)
@@ -470,7 +471,7 @@ def test_paged_attention_rocm(
     if kv_cache_dtype == "fp8":
         atol, rtol = 1e-2, 1e-5
     assert torch.allclose(output, ref_output, atol=atol, rtol=rtol)
-    
+
 
 # TODO(woosuk): Add tests for USE_ALIBI=True.
 @pytest.mark.parametrize("num_seqs", NUM_PREFILL_SEQS)
