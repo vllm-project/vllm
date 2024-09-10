@@ -32,7 +32,7 @@
 
 
 
-{% set sys_prompt = 'You are a helpful assistant with access to the following function calls. Your task is to produce a sequence of function calls necessary to generate response to the user utterance. Use the following function calls as required.' %}
+{% set sys_prompt = 'You are a helpful assistant with access to the following function calls. Your task is to understand the given conversation with function calls and responses and generate natural language response as the ASSISTANT to continue the conversation. You may use the following function calls to understand how to respond to the user query.' %}
 {{ 'SYSTEM: ' + sys_prompt }}
 <|function_call_library|>
 {%- if tools is iterable and tools | length > 0 %}
