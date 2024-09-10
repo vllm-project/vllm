@@ -4,7 +4,7 @@ USER root
 
 ENV PATH="/usr/local/cargo/bin:$PATH:/opt/conda/bin/"
 
-RUN apt-get update -y && apt-get install -y git wget vim libnuma-dev libsndfile-dev libprotobuf-dev build-essential
+RUN apt-get update -y && apt-get install -y git wget curl vim libnuma-dev libsndfile-dev libprotobuf-dev build-essential
 
 # Some packages in requirements-cpu are installed here
 # IBM provides optimized packages for ppc64le processors in the open-ce project for mamba
@@ -16,7 +16,7 @@ COPY ./ /workspace/vllm
 WORKDIR /workspace/vllm
 
 # These packages will be in rocketce eventually
-RUN pip install -v cmake torch==2.3.1 uvloop==0.20.0 -r requirements-cpu.txt --prefer-binary --extra-index-url https://repo.fury.io/mgiessing
+RUN pip install -v cmake xformers torch==2.3.1 uvloop==0.20.0 -r requirements-cpu.txt --prefer-binary --extra-index-url https://repo.fury.io/mgiessing
 
 RUN VLLM_TARGET_DEVICE=cpu python3 setup.py install
 
@@ -25,4 +25,3 @@ WORKDIR /workspace/
 RUN ln -s /workspace/vllm/tests && ln -s /workspace/vllm/examples && ln -s /workspace/vllm/benchmarks
 
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
-
