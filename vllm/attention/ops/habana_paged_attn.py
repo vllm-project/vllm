@@ -16,16 +16,9 @@ _PARTITION_SIZE = 512
 @dataclass
 class HabanaPagedAttentionMetadata:
     """Metadata for PagedAttention."""
-    # (batch_size,). The length of sequences (entire tokens seen so far) per
-    # sequence.
-    seq_lens_tensor: Optional[torch.Tensor]
-    # (batch_size, max_blocks_per_seq).
-    # Block addresses per sequence. (Seq id -> list of physical block)
-    # E.g., [0, 1, 2] means tokens are stored in 0th, 1st, and 2nd blocks
-    # in the kv cache. Each block can contain up to block_size tokens.
-    # 2nd dimensions are padded up to max_blocks_per_seq if it is cuda-graph
-    # captured.
-    block_tables: Optional[torch.Tensor]
+    block_list: Optional[torch.Tensor]
+    block_mapping: Optional[torch.Tensor]
+    block_usage: Optional[torch.Tensor]
 
 
 class HabanaPagedAttention:
@@ -63,42 +56,8 @@ class HabanaPagedAttention:
                                     slot_mapping, kv_cache_dtype, is_prompt)
 
     @staticmethod
-    def forward_decode(
-        query: torch.Tensor,
-        key_cache: torch.Tensor,
-        value_cache: torch.Tensor,
-        block_tables: torch.Tensor,
-        seq_lens: torch.Tensor,
-        kv_cache_dtype: str,
-        num_kv_heads: int,
-        scale: float,
-        alibi_slopes: Optional[torch.Tensor],
-        k_scale: float,
-        v_scale: float,
-        matmul_qk_op,
-        softmax_op,
-        matmul_av_op,
-        k_cache_cls,
-        v_cache_cls,
-    ) -> torch.Tensor:
-        block_size = value_cache.shape[1]
-        return ops.paged_attention_v1(
-            query,
-            key_cache,
-            value_cache,
-            num_kv_heads,
-            scale,
-            block_tables,
-            seq_lens,
-            block_size,
-            alibi_slopes,
-            kv_cache_dtype,
-            matmul_qk_op,
-            softmax_op,
-            matmul_av_op,
-            k_cache_cls,
-            v_cache_cls,
-        )
+    def forward_decode(**kwargs) -> torch.Tensor:
+        return ops.flat_pa(**kwargs)
 
     @staticmethod
     def forward_prefix(

@@ -58,57 +58,13 @@ class HabanaAttentionBackend(AttentionBackend):
 
 
 @dataclass
-class HabanaAttentionMetadata(AttentionMetadata, HabanaPagedAttentionMetadata):
-    """Metadata for HabanaAttentionbackend.
-
-    NOTE: Any python object stored here is not updated when it is
-    cuda-graph replayed. If you have values that need to be changed
-    dynamically, it should be stored in tensor. The tensor has to be
-    updated from `CUDAGraphRunner.forward` API.
-    """
+class HabanaAttentionMetadata(HabanaPagedAttentionMetadata, AttentionMetadata):
+    """Metadata for HabanaAttentionbackend."""
     # Currently, input sequences can only contain all prompts
     # or all decoding. True if all sequences are prompts.
     is_prompt: bool
-    # (batch_size,). The sequence length per sequence. Sequence length means
-    # the computed tokens + new tokens None if it is a decoding.
-    seq_lens: Optional[List[int]]
-    # seq_lens stored as a tensor.
+    attn_bias: Optional[torch.Tensor]
     seq_lens_tensor: Optional[torch.Tensor]
-
-    # |---------- N-1 iteration --------|
-    # |---------------- N iteration ---------------------|
-    # |- tokenA -|......................|-- newTokens ---|
-    # |---------- context_len ----------|
-    # |-------------------- seq_len ----------------------|
-    #                                   |-- query_len ---|
-
-    # Maximum query length in the batch.
-    max_query_len: Optional[int]
-    # (batch_size + 1,). The cumulative subquery lengths of the sequences in
-    # the batch, used to index into subquery. E.g., if the subquery length
-    # is [4, 6], it is [0, 4, 10].
-    subquery_start_loc: Optional[torch.Tensor]
-    # FIXME: It is for flash attn.
-    # (batch_size + 1,). The cumulative sequence lengths of the sequences in
-    # the batch, used to index into sequence. E.g., if the sequence length is
-    # [4, 6], it is [0, 4, 10].
-    seq_start_loc: Optional[torch.Tensor]
-    # (batch_size,) A tensor of context lengths (tokens that are computed
-    # so far).
-    context_lens_tensor: Optional[torch.Tensor]
-
-    # Whether or not if cuda graph is enabled.
-    # Cuda-graph is currently enabled for decoding only.
-    # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
-    use_cuda_graph: bool
-
-    def __post_init__(self):
-        # Set during the execution of the first attention op.
-        # It is a list because it is needed to set per prompt
-        # when alibi slopes is used. It is because of the limitation
-        # from xformer API.
-        # will not appear in the __repr__ and __init__
-        self.attn_bias: Optional[torch.Tensor] = None
 
 
 class HabanaAttentionImpl(AttentionImpl, torch.nn.Module):
@@ -229,60 +185,48 @@ class HabanaAttentionImpl(AttentionImpl, torch.nn.Module):
 
         if attn_metadata.is_prompt:
             # Prompt run.
-            if kv_cache is None or attn_metadata.block_tables.numel() == 0:
-                if not self.prefill_usefusedsdpa:
-                    # TODO: move this outside of model
-                    assert attn_metadata.attn_bias is not None, \
+            if not self.prefill_usefusedsdpa:
+                # TODO: move this outside of model
+                assert attn_metadata.attn_bias is not None, \
                         'attn_bias must be set before calling model.forward!'
-                    attn_bias = attn_metadata.attn_bias
-                    if self.alibi_slopes is not None and \
-                        self.position_bias is not None:
-                        attn_bias.add_(self.position_bias[:, :,
-                                                          -attn_bias.size(2):,
-                                                          -attn_bias.size(3):])
-                else:
-                    attn_bias = None
-
-                query_shape = (batch_size, seq_len, self.num_heads,
-                               self.head_size)
-                kv_shape = (batch_size, seq_len_kv, self.num_kv_heads,
-                            self.head_size)
-                out = ops.prompt_attention(
-                    query.view(query_shape),
-                    key.view(kv_shape),
-                    value.view(kv_shape),
-                    attn_bias=attn_bias,
-                    p=0.0,
-                    scale=self.scale,
-                    matmul_qk_op=self.matmul_qk,
-                    softmax_op=self.softmax,
-                    matmul_av_op=self.matmul_av,
-                    valid_seq_lengths=attn_metadata.seq_lens_tensor,
-                )
-                output = out.reshape(batch_size, seq_len, hidden_size)
+                attn_bias = attn_metadata.attn_bias
+                if self.alibi_slopes is not None and \
+                    self.position_bias is not None:
+                    attn_bias.add_(self.position_bias[:, :,
+                                                      -attn_bias.size(2):,
+                                                      -attn_bias.size(3):])
             else:
-                # prefix-enabled attention
-                output = HabanaPagedAttention.forward_prefix(
-                    query,
-                    key,
-                    value,
-                    key_cache,
-                    value_cache,
-                    attn_metadata.block_tables,
-                    attn_metadata.subquery_start_loc,
-                    attn_metadata.seq_lens_tensor,
-                    attn_metadata.context_lens_tensor,
-                    attn_metadata.max_query_len,
-                    self.alibi_slopes,
-                )
+                attn_bias = None
+
+            query_shape = (batch_size, seq_len, self.num_heads, self.head_size)
+            kv_shape = (batch_size, seq_len_kv, self.num_kv_heads,
+                        self.head_size)
+            out = ops.prompt_attention(
+                query.view(query_shape),
+                key.view(kv_shape),
+                value.view(kv_shape),
+                attn_bias=attn_bias,
+                p=0.0,
+                scale=self.scale,
+                matmul_qk_op=self.matmul_qk,
+                softmax_op=self.softmax,
+                matmul_av_op=self.matmul_av,
+            )
+            output = out.reshape(batch_size, seq_len, hidden_size)
         else:
             # Decoding run.
             output = HabanaPagedAttention.forward_decode(
-                query, key_cache, value_cache, attn_metadata.block_tables,
-                attn_metadata.seq_lens_tensor, self.kv_cache_dtype,
-                self.num_kv_heads, self.scale, self.position_bias, k_scale,
-                v_scale, self.matmul_qk, self.softmax, self.matmul_av,
-                self.k_cache, self.v_cache)
+                query=query,
+                key_cache=key_cache,
+                value_cache=value_cache,
+                block_list=attn_metadata.block_list,
+                block_mapping=attn_metadata.block_mapping,
+                block_bias=attn_metadata.attn_bias,
+                scale=self.scale,
+                matmul_qk_op=self.matmul_qk,
+                matmul_av_op=self.matmul_av,
+                keys_fetch_func=self.k_cache.fetch_from_cache,
+                values_fetch_func=self.v_cache.fetch_from_cache)
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)
 

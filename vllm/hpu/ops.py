@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD license found in the
 # LICENSE file in the root directory of this source tree.
 ###############################################################################
-import os
 from typing import Optional
 
 import habana_frameworks.torch as htorch
@@ -29,72 +28,57 @@ except ImportError:
     logger.warning("Could not import HPU FusedSDPA kernel. "
                    "vLLM will use native implementation.")
 
-PA_SPLIT_VALUE = (os.environ.get('PA_SPLIT_VALUE', '1') == '1')
+
+def batch2block(tensor, block_mapping):
+    shape = tuple(tensor.shape)
+    return (block_mapping @ tensor.view(shape[0], -1)).view(-1, *shape[1:])
 
 
-def fetch_from_cache(cache, blocks, permutations):
-    return [
-        cache.index_select(0, blocks[:, i]).permute(permutations)
-        for i in range(blocks.size(1))
-    ]
+def block2batch(tensor, block_mapping):
+    shape = tuple(tensor.shape)
+    return (block_mapping.t() @ tensor.view(shape[0], -1)).view(-1, *shape[1:])
 
 
-def paged_attention_v1(query,
-                       key_cache,
-                       value_cache,
-                       head_mapping,
-                       scale,
-                       block_tables,
-                       context_lens,
-                       block_size,
-                       alibi_slopes=None,
-                       kv_cache_dtype=None,
-                       matmul_qk_op=torch.matmul,
-                       softmax_op=torch.softmax,
-                       matmul_av_op=torch.matmul,
-                       k_cache_cls=None,
-                       v_cache_cls=None) -> None:
-    seq_len = block_tables.size(1)
-    batch_size, query_heads, _ = query.shape
-    _, _, kv_heads, _ = key_cache.shape
-    min_inf = torch.finfo(query.dtype).min
-    mask = (torch.arange(0,
-                         seq_len * block_size,
-                         dtype=torch.int32,
-                         device=key_cache.device).view(1, -1).expand(
-                             batch_size, -1).ge(context_lens.view(-1, 1)).view(
-                                 batch_size, 1, 1, -1))
-    query.mul_(scale)
-    query = query.unsqueeze(-2)
-    fetch_keys = fetch_from_cache if k_cache_cls is None else \
-                 k_cache_cls.fetch_from_cache
-    keys = fetch_keys(key_cache, block_tables, (0, 2, 3, 1))
-    if query_heads != kv_heads:
+def block_softmax(batch_size, attn, block_mapping):
+    attn.sub_(10.0)
+    attn = attn.exp_()
+    sums = attn.sum(dim=-1).unsqueeze(-1)
+    sums = block2batch(sums, block_mapping)
+    sums = batch2block(sums, block_mapping)
+    sums.add_(1.0e-12)
+    attn.div_(sums)
+    return attn
+
+
+def flat_pa(query, key_cache, value_cache, block_list, block_mapping,
+            block_bias, scale, matmul_qk_op, matmul_av_op, keys_fetch_func,
+            values_fetch_func):
+    batch_size = query.size(0)
+    q_heads = query.size(1)
+    kv_heads = key_cache.size(2)
+
+    query = batch2block(scale * query, block_mapping).unsqueeze(-2)
+    key = keys_fetch_func(key_cache, block_list).transpose(1, 2)
+    value = values_fetch_func(value_cache, block_list).transpose(1, 2)
+    block_bias = block_bias.view(key.size(0), 1, 1, -1)
+
+    if kv_heads != q_heads:
+        block_bias = block_bias.unsqueeze(1)
         query = query.unflatten(1, (kv_heads, -1))
-        keys = [k.unflatten(1, (kv_heads, 1)) for k in keys]
-        mask = mask.unsqueeze(2)
-
-    attn_weights = torch.cat([matmul_qk_op(query, k) for k in keys], dim=-1)
-    if alibi_slopes is not None:
-        attn_weights.add_(alibi_slopes[:, :, -attn_weights.size(2):,
-                                       -attn_weights.size(3):])
-    attn_weights = softmax_op(attn_weights.masked_fill(mask, min_inf), dim=-1)
-
-    fetch_values = fetch_from_cache if v_cache_cls is None else \
-                   v_cache_cls.fetch_from_cache
-    values = fetch_values(value_cache, block_tables, (0, 2, 1, 3))
-    if PA_SPLIT_VALUE:
-        attn_weights = attn_weights.split(block_size, dim=-1)
+        key = key.unflatten(1, (kv_heads, 1))
+        value = value.unflatten(1, (kv_heads, 1))
+        key = key.transpose(3, 4)
     else:
-        values = [torch.cat(values, dim=-2)]
-        attn_weights = [attn_weights]
-    if query_heads != kv_heads:
-        values = [v.unflatten(1, (kv_heads, 1)) for v in values]
-    attn_weights = [matmul_av_op(a, v) for a, v in zip(attn_weights, values)]
-    if query_heads != kv_heads:
-        attn_weights = [a.flatten(1, 2) for a in attn_weights]
-    attn_weights = sum(attn_weights)
-    return attn_weights.squeeze(-2)
+        key = key.transpose(2, 3)
+
+    attn = matmul_qk_op(query, key) + block_bias
+    attn = block_softmax(batch_size, attn, block_mapping)
+    attn = matmul_av_op(attn, value)
+    attn = block2batch(attn, block_mapping)
+    attn = attn.squeeze(-2)
+    if kv_heads != q_heads:
+        attn = attn.flatten(1, 2)
+    return attn
 
 
 def silu_and_mul(x: torch.Tensor) -> torch.Tensor:
