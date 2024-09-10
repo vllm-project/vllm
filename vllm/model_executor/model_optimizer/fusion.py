@@ -77,6 +77,7 @@ def fuse_graph_nodes(cc: CodeCache, sub: SubGraph):
     try:
         mangled_name = mangle_name(nodes_to_fuse)
         fn_key = simplify_mangled_name(f"{mangled_name}_fused")
+
         # print(mangled_name)
         # fn_key = mangle_name(nodes_to_fuse)
 

@@ -231,6 +231,8 @@ RMS_NORM_QUANT_2_NAMES: List[str] = [
     # "torch_P_empty_like_float16_torch_P_ops_P__C_P_rms_norm_float16_float16_float16_float_1e_05_size_float16_torch_P_empty_SizeK_device_D_cuda_0_K_dtype_float8_e4m3fn_torch_P_ops_P__C_P_static_scaled_fp8_quant_float8_e4m3fn_float16_float32_size_float8_e4m3fn_int_0_torch_P_empty_T_SymInt_int_6144K_dtype_float16_K_device_D_cuda_0_fused",
     # "torch_P_empty_like_float16_torch_P_ops_P__C_P_rms_norm_float16_float16_float16_float_1e_05_size_float16_torch_P_empty_SizeK_device_D_cuda_0_K_dtype_float8_e4m3fn_torch_P_ops_P__C_P_static_scaled_fp8_quant_float8_e4m3fn_float16_float32_size_float8_e4m3fn_int_0_torch_P_empty_T_int_int_6144K_dtype_float16_K_device_D_cuda_0_fused",
 ]
+
+
 # This is not really necessary but helps debugging
 def simplify_mangled_name(name: str) -> str:
     if name in SILU_MUL_QUANT_NAMES:
@@ -484,20 +486,20 @@ def gather_all_input_nodes_old(
                 #print(f"{n} not in inputs of {s}!")
                 all_input_nodes[s].append(n)
 
-
     # Make sure everything is sorted
     for n in nodes:
         all_input_nodes[n] = list(sorted(all_input_nodes[n]))
-        all_node_users[n] = OrderedDict(sorted(all_node_users[n].items(), key=lambda kv: kv[0].name))
+        all_node_users[n] = OrderedDict(
+            sorted(all_node_users[n].items(), key=lambda kv: kv[0].name))
 
     return all_input_nodes, all_node_users
 
 
 def gather_all_input_nodes(
     mod: torch.fx.GraphModule
-) -> Tuple[OrderedDict[torch.fx.Node, List[torch.fx.Node]],
-           OrderedDict[torch.fx.Node, OrderedDict[torch.fx.Node, None]],
-           Dict[torch.fx.Node, Dict[torch.fx.Node, torch.fx.Node]]]:
+) -> Tuple[OrderedDict[torch.fx.Node, List[torch.fx.Node]], OrderedDict[
+        torch.fx.Node, OrderedDict[torch.fx.Node, None]], Dict[
+            torch.fx.Node, Dict[torch.fx.Node, torch.fx.Node]]]:
     """
     Collect all def/use information for each node in 'nodes'.  This is different
     than node.all_input_nodes and node.users since it handles in-place
@@ -516,7 +518,8 @@ def gather_all_input_nodes(
                                 OrderedDict[torch.fx.Node,
                                             None]] = OrderedDict()
     renames: Dict[torch.fx.Node, torch.fx.Node] = dict()
-    all_renames: Dict[torch.fx.Node, Dict[torch.fx.Node, torch.fx.Node]] = dict()
+    all_renames: Dict[torch.fx.Node, Dict[torch.fx.Node,
+                                          torch.fx.Node]] = dict()
 
     def process_arg(arg: torch.fx.node.Argument, fn):
         if isinstance(arg, tuple):
@@ -573,13 +576,15 @@ def gather_all_input_nodes(
         for s in all_node_users[n]:
             all_input_nodes[s].append(n)
 
-    logger.debug(dump_inputs_users(mod.graph.nodes, all_input_nodes, all_node_users))
+    logger.debug(
+        dump_inputs_users(mod.graph.nodes, all_input_nodes, all_node_users))
     #print(dump_inputs_users(mod.graph.nodes, all_input_nodes, all_node_users))
 
     # Make sure everything is sorted
     for n in mod.graph.nodes:
         all_input_nodes[n] = list(sorted(all_input_nodes[n]))
-        all_node_users[n] = OrderedDict(sorted(all_node_users[n].items(), key=lambda kv: kv[0].name))
+        all_node_users[n] = OrderedDict(
+            sorted(all_node_users[n].items(), key=lambda kv: kv[0].name))
 
     return all_input_nodes, all_node_users, all_renames
 
@@ -612,23 +617,24 @@ class FlowGraph:
         self.all_renamed_input_nodes, self.all_renamed_node_users, self.renames = (
             gather_all_input_nodes(self.module.graph.nodes))
 
-#        self.renames = {}
-#        self.all_renamed_input_nodes, self.all_renamed_node_users = (
-#            gather_all_input_nodes_old(self.module.graph.nodes, True))
-#
-#        self.all_input_nodes, self.all_node_users = gather_all_input_nodes_old(
-#            self.module.graph.nodes, False)
+        #        self.renames = {}
+        #        self.all_renamed_input_nodes, self.all_renamed_node_users = (
+        #            gather_all_input_nodes_old(self.module.graph.nodes, True))
+        #
+        #        self.all_input_nodes, self.all_node_users = gather_all_input_nodes_old(
+        #            self.module.graph.nodes, False)
 
         self.preds: Dict[torch.fx.Node, OrderedDict[torch.fx.Node, None]] = {}
         self.succs: Dict[torch.fx.Node, OrderedDict[torch.fx.Node, None]] = {}
         for n in self.module.graph.nodes:
             self.succs[n] = OrderedDict(self.all_renamed_node_users[n])
-            self.preds[n] = OrderedDict.fromkeys(self.all_renamed_input_nodes[n])
+            self.preds[n] = OrderedDict.fromkeys(
+                self.all_renamed_input_nodes[n])
 
-    def successors(self, n: torch.fx.Node): # -> Set[torch.fx.Node]:
+    def successors(self, n: torch.fx.Node):  # -> Set[torch.fx.Node]:
         return self.succs[n].keys()
 
-    def predecessors(self, n: torch.fx.Node): # -> Set[torch.fx.Node]:
+    def predecessors(self, n: torch.fx.Node):  # -> Set[torch.fx.Node]:
         return self.preds[n].keys()
 
     def dfs_visit(self,
@@ -771,7 +777,8 @@ class SubGraph:
 
             if any([
                     #user for user in self.fg.successors(n) if not self.in_subgraph(n)
-                    user for user in all_node_users[n] if not self.in_subgraph(user)
+                    user
+                    for user in all_node_users[n] if not self.in_subgraph(user)
             ]) and n not in outputs:
                 #print(f"ADD OUTPUT {n} {n.users}")
                 if len(n.users) > 0:
@@ -803,10 +810,16 @@ class SubGraph:
             print(f"count={count}")
             print(f"in_degree={in_degree}")
             print(f"worklist={worklist}")
-            nl="  \n"
-            print(f"inputs={nl}{nl.join([str((x,y)) for x,y in all_input_nodes.items() if self.in_subgraph(x)])}")
-            print(f"outputs={nl}{nl.join([str((x,y)) for x,y in all_node_users.items() if self.in_subgraph(x)])}")
-            print(f"in_subgraph={[str((n.name, self.in_subgraph(n))) for n in self.nodes]}")
+            nl = "  \n"
+            print(
+                f"inputs={nl}{nl.join([str((x,y)) for x,y in all_input_nodes.items() if self.in_subgraph(x)])}"
+            )
+            print(
+                f"outputs={nl}{nl.join([str((x,y)) for x,y in all_node_users.items() if self.in_subgraph(x)])}"
+            )
+            print(
+                f"in_subgraph={[str((n.name, self.in_subgraph(n))) for n in self.nodes]}"
+            )
 
         while len(worklist) > 0:
             n = worklist.popleft()

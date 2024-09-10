@@ -109,7 +109,8 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
         #self.fused_op.append(f'#include <iostream>')
         self.fused_op.append('#define _operator_add(a, b) ((a) + (b))')
         self.fused_op.append('#define _operator_mul(a, b) ((a) * (b))')
-        self.fused_op.append('#define _operator_floordiv(a, b) ((int64_t)floor((a) / (b)))')
+        self.fused_op.append(
+            '#define _operator_floordiv(a, b) ((int64_t)floor((a) / (b)))')
         self.fused_op.append(('#define TORCH_LIBRARY_EXPAND(name, mod) '
                               'TORCH_LIBRARY(name, mod)'))
         self.fused_op.append(
@@ -514,7 +515,8 @@ class NaiveFusedOpGenerator(FusedOpGenerator):
                     mode='w',
                     delete=False,  # TODO: True to delete tmp files
             ) as out:
-                logger.info("generating code (%s) to: %s", torch_op_name, out.name)
+                logger.info("generating code (%s) to: %s", torch_op_name,
+                            out.name)
                 for line in self.fused_op:
                     out.write(line)
                     out.write('\n')

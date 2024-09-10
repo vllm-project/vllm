@@ -149,6 +149,7 @@ def _sgmv_shrink(
         scaling,
     )
 
+
 @pytest.mark.parametrize("batches", BATCHES)
 @pytest.mark.parametrize("num_loras", NUM_LORA)
 @pytest.mark.parametrize("rank", MAX_RANKS)
