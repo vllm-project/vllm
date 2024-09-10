@@ -31,15 +31,15 @@ class MQLLMEngine:
     """A multiprocessing wrapper for :class:`LLMEngine`.
 
     This class is used to wrap the :class:`LLMEngine` class to enable use
-    in asynchronous manner. It runs a background loop and uses zeromq to 
-    receive new requests and stream outputs incrementally to another process.
+    in concurrnet manner. It runs a background loop and uses zeromq to 
+    receive new requests and stream outputs incrementally via ipc.
     
-    The :class:`LLMEngine` is kicked off when a new RPCGenerateRequest 
-    is received by the input_socket.
+    The :class:`LLMEngine.generate` is kicked off when a new 
+    RPCGenerateRequest is received by the input_socket.
     
     The self.engine_loop checks the input_socket for new requests,
     adds them to the LLMEngine if there are any, calls the internal
-    :class:`LLMEngine.step()` and sends the RequestOutputs back over
+    :class:`LLMEngine.step()`, and sends the RequestOutputs back over
     the output_socket.
 
     If use_async_sockets is set, the logic associated with reading new
@@ -73,12 +73,10 @@ class MQLLMEngine:
 
         # Receive input from the client.
         self.input_socket = self.ctx.socket(zmq.constants.PULL)
-        # self.input_socket.set_hwm(0)
         self.input_socket.bind(f"{ipc_path}{IPC_INPUT_EXT}")
 
         # Send output stream back to client.
         self.output_socket = self.ctx.socket(zmq.constants.PUSH)
-        # self.output_socket.set_hwm(0)
         self.output_socket.bind(f"{ipc_path}{IPC_OUTPUT_EXT}")
 
         # Send health status back to client.
