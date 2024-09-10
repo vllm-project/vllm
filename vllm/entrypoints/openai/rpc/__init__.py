@@ -46,5 +46,13 @@ class RPCUtilityRequest(Enum):
     STOP_PROFILE = 11
 
 
+@dataclass
+class RPCCachingRequest:
+    inputs: PromptInputs
+    request_id: str
+    ttl: Optional[float] = None
+    expired_at: Optional[float] = None
+
+
 RPC_REQUEST_TYPE = Union[RPCGenerateRequest, RPCAbortRequest,
-                         RPCUtilityRequest]
+                         RPCUtilityRequest, RPCCachingRequest]

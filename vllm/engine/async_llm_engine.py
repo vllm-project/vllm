@@ -5,6 +5,7 @@ from typing import (Any, AsyncGenerator, Callable, Dict, Iterable, List,
                     Mapping, Optional, Set, Tuple, Type, Union)
 
 import vllm.envs as envs
+from vllm.caching_params import CachingParams
 from vllm.config import (DecodingConfig, EngineConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.core.scheduler import SchedulerOutputs
@@ -15,7 +16,7 @@ from vllm.engine.metrics_types import StatLoggerBase
 from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.gpu_executor import GPUExecutorAsync
 from vllm.executor.ray_utils import initialize_ray_cluster
-from vllm.inputs import PromptInputs
+from vllm.inputs import LLMInputs, PromptInputs, TokensPrompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -408,7 +409,7 @@ class _AsyncLLMEngine(LLMEngine):
         self,
         request_id: str,
         inputs: PromptInputs,
-        params: Union[SamplingParams, PoolingParams],
+        params: Union[SamplingParams, PoolingParams, CachingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
@@ -760,7 +761,7 @@ class AsyncLLMEngine:
         self,
         request_id: str,
         inputs: PromptInputs,
-        params: Union[SamplingParams, PoolingParams],
+        params: Union[SamplingParams, PoolingParams, CachingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
@@ -870,6 +871,16 @@ class AsyncLLMEngine:
                 prompt_adapter_request=prompt_adapter_request,
         ):
             yield LLMEngine.validate_output(output, RequestOutput)
+
+    async def caching(self, inputs: PromptInputs, request_id: str,
+                      expired_at: Optional[float],
+                      ttl: Optional[float]) -> RequestOutput:
+        assert isinstance(inputs, TokensPrompt)
+        async for output in self._process_request(
+                request_id, inputs,
+                CachingParams(expired_at=expired_at, ttl=ttl)):
+            # TODO: Only yield once
+            return LLMEngine.validate_output(output, RequestOutput)
 
     async def encode(
         self,
