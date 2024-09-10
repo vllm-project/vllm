@@ -1,9 +1,7 @@
-import time
 import pytest
 import torch
 from transformers import AutoTokenizer
 
-from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
 from vllm.model_executor.guided_decoding.outlines_logits_processors import (
