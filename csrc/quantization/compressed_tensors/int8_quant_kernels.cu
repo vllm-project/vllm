@@ -1,7 +1,6 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/all.h>
 #include <cmath>
-#include <cfenv>
 
 #include "../../dispatch_utils.h"
 
@@ -13,29 +12,13 @@
   #include <hipcub/hipcub.hpp>
 #endif
 
-namespace {
-// RAII class to temporarily set the rounding mode and restore it at the end of
-// the scope.
-class rounding_mode_guard {
-  int old_mode;
-
- public:
-  __device__ rounding_mode_guard(int mode) {
-    old_mode = std::fegetround();
-    std::fesetround(mode);
-  }
-
-  __device__ ~rounding_mode_guard() { std::fesetround(old_mode); }
-};
-}  // namespace
-
 static inline __device__ int8_t float_to_int8_rn(float x) {
 #ifdef USE_ROCM
   static constexpr auto i8_min =
       static_cast<float>(std::numeric_limits<int8_t>::min());
   static constexpr auto i8_max =
       static_cast<float>(std::numeric_limits<int8_t>::max());
-  // round
+  // rounding mode is always FE_TONEAREST on HIP
   float dst = std::nearbyint(x);
   // saturate
   dst = std::clamp(dst, i8_min, i8_max);
@@ -59,7 +42,7 @@ static inline __device__ int32_t float_to_int32_rn(float x) {
   static constexpr auto i32_max = std::numeric_limits<int32_t>::max();
   static constexpr auto i32_max_f = static_cast<float>(i32_max);
 
-  // round
+  // rounding mode is always FE_TONEAREST on HIP
   float dst = std::nearbyint(x);
 
   // saturate on the higher end.
@@ -108,7 +91,6 @@ __global__ void static_scaled_int8_quant_kernel(
   int const token_idx = blockIdx.x;
   scale_type const scale = *scale_ptr;
 
-  rounding_mode_guard guard(FE_TONEAREST);
   for (int i = tid; i < hidden_size; i += blockDim.x) {
     out[token_idx * hidden_size + i] = float_to_int8_rn(
         static_cast<float>(input[token_idx * hidden_size + i]) / scale);
@@ -125,7 +107,6 @@ __global__ void static_scaled_int8_azp_quant_kernel(
   scale_type const scale = *scale_ptr;
   azp_type const azp = *azp_ptr;
 
-  rounding_mode_guard guard(FE_TONEAREST);
   for (int i = tid; i < hidden_size; i += blockDim.x) {
     auto const val = static_cast<float>(input[token_idx * hidden_size + i]);
     auto const quant_val = int32_to_int8(float_to_int32_rn(val / scale) + azp);
@@ -160,9 +141,6 @@ __global__ void dynamic_scaled_int8_quant_kernel(
   __syncthreads();
 
   float const tmp_scale = 127.0f / block_absmax_val;
-
-  // Quantize the values
-  rounding_mode_guard guard(FE_TONEAREST);
   for (int i = tid; i < hidden_size; i += blockDim.x) {
     out[token_idx * hidden_size + i] = float_to_int8_rn(
         static_cast<float>(input[token_idx * hidden_size + i]) * tmp_scale);
@@ -213,7 +191,6 @@ __global__ void dynamic_scaled_int8_azp_quant_kernel(
   azp_type const azp_val = azp_sh;
 
   // Quantize the values
-  rounding_mode_guard guard(FE_TONEAREST);
   for (int i = threadIdx.x; i < hidden_size; i += blockDim.x) {
     auto const val = static_cast<float>(input[token_idx * hidden_size + i]);
     auto const quant_val =
