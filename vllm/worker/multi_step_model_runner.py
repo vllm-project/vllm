@@ -274,12 +274,13 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
                                              self.pinned_sampled_token_ids)
                 if model_output.pythonized:
                     ctx = output_proc_callback.keywords["ctx"]
-                    is_async = False
-                    is_last_step = False
-                    ctx.output_queue.append(
-                        ([model_output.sampler_output
-                          ], ctx.seq_group_metadata_list,
-                         ctx.scheduler_outputs, is_async, is_last_step))
+                    ctx.append_output(
+                        outputs=[model_output.sampler_output],
+                        seq_group_metadata_list=ctx.seq_group_metadata_list,
+                        scheduler_outputs=ctx.scheduler_outputs,
+                        is_async=False,
+                        is_last_step=False)
+
                     output_proc_callback()
                 else:
                     cont = False
@@ -319,12 +320,13 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
                     if not is_last_step:
                         ctx = output_proc_callback.keywords[  # type: ignore
                             "ctx"]  # type: ignore
-                        is_async = False
-                        is_last_step = False
-                        ctx.output_queue.append(
-                            ([output.sampler_output
-                              ], ctx.seq_group_metadata_list,
-                             ctx.scheduler_outputs, is_async, is_last_step))
+                        ctx.append_output(
+                            outputs=[output.sampler_output],
+                            seq_group_metadata_list=ctx.
+                            seq_group_metadata_list,
+                            scheduler_outputs=ctx.scheduler_outputs,
+                            is_async=False,
+                            is_last_step=False)
                     else:
                         outputs.append(output.sampler_output)
             else:
