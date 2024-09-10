@@ -196,12 +196,7 @@ class MQLLMEngine:
         """Core busy loop of the LLMEngine."""
 
         while True:
-            if not self.engine.has_unfinished_requests() and (
-                    self.input_socket.poll(timeout=0) == 0):
-
-                # Stop remote worker loop in distributed case.
-                self.engine.stop_remote_worker_execution_loop()
-
+            if not self.engine.has_unfinished_requests():
                 # Poll until there is work to do.
                 while self.input_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
                     logger.debug("Waiting for new requests in engine loop.")
