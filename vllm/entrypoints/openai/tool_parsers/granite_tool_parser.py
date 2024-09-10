@@ -14,6 +14,7 @@ logger = init_logger(__name__)
 
 
 class GraniteToolParser(ToolParser):
+
     def __init__(self, tokenizer: AnyTokenizer):
         super().__init__(tokenizer)
 
@@ -21,13 +22,12 @@ class GraniteToolParser(ToolParser):
         self.tool_start_token = self.bot_token
         self.tool_call_regex = re.compile(r"<function_call>\s*")
 
-    def extract_tool_calls(
-        self, model_output: str
-    ) -> ExtractedToolCallInformation:
+    def extract_tool_calls(self,
+                           model_output: str) -> ExtractedToolCallInformation:
         if self.tool_start_token not in model_output:
-            return ExtractedToolCallInformation(
-                tools_called=False, tool_calls=[], content=model_output
-            )
+            return ExtractedToolCallInformation(tools_called=False,
+                                                tool_calls=[],
+                                                content=model_output)
 
         else:
             try:
@@ -41,18 +41,17 @@ class GraniteToolParser(ToolParser):
                     start_of_json = match.end()
                     # end_index == the start of the next function call
                     # (if exists)
-                    next_function_call_start = (
-                        matches[i + 1].start() if i + 1 < len(matches) else None
-                    )
+                    next_function_call_start = (matches[i + 1].start() if i +
+                                                1 < len(matches) else None)
 
                     # extract the full JSON object using bracket matching via
                     # start_of_json and optional end index
                     full_json_str = extract_full_json(
-                        model_output, start_of_json, next_function_call_start
-                    )
+                        model_output, start_of_json, next_function_call_start)
                     raw_function_calls.append(json.loads(full_json_str))
 
-                logger.debug("Extracted %d tool calls", len(raw_function_calls))
+                logger.debug("Extracted %d tool calls",
+                             len(raw_function_calls))
                 tool_calls = [
                     ToolCall(
                         type="function",
@@ -61,11 +60,10 @@ class GraniteToolParser(ToolParser):
                             # function call args are JSON but as a string
                             arguments=json.dumps(function_call["arguments"]),
                         ),
-                    )
-                    for function_call in raw_function_calls
+                    ) for function_call in raw_function_calls
                 ]
 
-                content = model_output[: model_output.find(self.bot_token)]
+                content = model_output[:model_output.find(self.bot_token)]
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=tool_calls,
@@ -73,12 +71,11 @@ class GraniteToolParser(ToolParser):
                 )
 
             except Exception as e:
-                logger.error(
-                    "Error in extracting tool call from response %s", e
-                )
-                return ExtractedToolCallInformation(
-                    tools_called=False, tool_calls=[], content=model_output
-                )
+                logger.error("Error in extracting tool call from response %s",
+                             e)
+                return ExtractedToolCallInformation(tools_called=False,
+                                                    tool_calls=[],
+                                                    content=model_output)
 
     def extract_tool_calls_streaming(
         self,
@@ -91,8 +88,7 @@ class GraniteToolParser(ToolParser):
     ) -> Union[DeltaMessage, None]:
         raise NotImplementedError(
             "streaming tool call parsing has not yet been implemented"
-            "for Granite"
-        )
+            "for Granite")
 
 
 def extract_full_json(text, start_index, end_index=None):
@@ -108,5 +104,5 @@ def extract_full_json(text, start_index, end_index=None):
         elif char == "}":
             brace_count -= 1
         if brace_count == 0:
-            return text[json_start : i + 1]
+            return text[json_start:i + 1]
     raise ValueError("Unbalanced braces in the input string")
