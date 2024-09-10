@@ -11,32 +11,35 @@ MAIN_MODEL = "JackFram/llama-68m"
 
 @pytest.mark.parametrize(
     "common_llm_kwargs",
-    [[
+    [{
         # Required for spec decode.
-        "--use-v2-block-manager",
-    ]])
+        "use_v2_block_manager": True,
+
+        # Verify equality when cuda graphs allowed.
+        "enforce_eager": False,
+        "model_name": "JackFram/llama-68m",
+    }])
 @pytest.mark.parametrize(
     "per_test_common_llm_kwargs",
     [
         {
             # Identical models.
-            "--speculative-model",
-            "JackFram/llama-68m",
-            "--num-speculative-tokens",
-            "5",
+            "speculative_model": "JackFram/llama-68m",
+            "num_speculative_tokens": 5,
         },
     ])
-@pytest.mark.parametrize("baseline_llm_kwargs", [[]])
-@pytest.mark.parametrize("test_llm_kwargs", [[]])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize("test_llm_kwargs", [{}])
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("output_len", [32])
 @pytest.mark.parametrize("seed", [1])
-def test_spec_decode_cuda_graph(common_llm_kwargs, per_test_common_llm_kwargs,
+def test_spec_decode_cuda_graph(vllm_runner, common_llm_kwargs,
+                                per_test_common_llm_kwargs,
                                 baseline_llm_kwargs, test_llm_kwargs,
                                 batch_size: int, output_len: int, seed: int):
     """Verify spec decode equality when cuda graphs are enabled.
     """
-    run_equality_correctness_test(MAIN_MODEL,
+    run_equality_correctness_test(vllm_runner,
                                   common_llm_kwargs,
                                   per_test_common_llm_kwargs,
                                   baseline_llm_kwargs,
@@ -50,47 +53,47 @@ def test_spec_decode_cuda_graph(common_llm_kwargs, per_test_common_llm_kwargs,
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
+        "model_name": "JackFram/llama-160m",
+
         # Skip cuda graph recording for fast test.
-        "--enforce-eager",
+        "enforce_eager": True,
 
         # Required for spec decode.
-        "--use-v2-block-manager",
+        "use_v2_block_manager": True,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [
-    [
-        "--speculative-model",
-        "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit",
-        "--num-speculative-tokens",
-        "5",
-    ],
+    {
+        "speculative_model": "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit",
+        "num_speculative_tokens": 5,
+    },
 ])
 @pytest.mark.parametrize(
     "test_llm_kwargs",
     [
         # Explicitly specify draft model quantization
-        [
-            "--speculative-model-quantization",
-            "gptq",
-        ],
+        {
+            "speculative_model_quantization": "gptq",
+        },
         # Explicitly specify GPTQ-based draft model to use marlin quantization
-        [
-            "--speculative-model-quantization",
-            "marlin",
-        ],
+        {
+            "speculative_model_quantization": "marlin",
+        },
         # Not explicitly specify draft model quantization
-        [],
+        {
+            "speculative_model_quantization": None,
+        },
     ])
-@pytest.mark.parametrize("baseline_llm_kwargs", [[]])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("batch_size", [2])
 @pytest.mark.parametrize("seed", [1])
-def test_speculative_model_quantization_config(common_llm_kwargs,
+def test_speculative_model_quantization_config(vllm_runner, common_llm_kwargs,
                                                per_test_common_llm_kwargs,
                                                baseline_llm_kwargs,
                                                test_llm_kwargs,
                                                batch_size: int, seed: int):
     """Verify spec decode works well with draft model quantization configs.
     """
-    run_equality_correctness_test(MAIN_MODEL,
+    run_equality_correctness_test(vllm_runner,
                                   common_llm_kwargs,
                                   per_test_common_llm_kwargs,
                                   baseline_llm_kwargs,

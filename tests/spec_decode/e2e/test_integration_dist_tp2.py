@@ -7,7 +7,7 @@ import torch
 
 from vllm.utils import is_hip
 
-from .conftest import run_equality_correctness_test
+from .conftest import run_equality_correctness_test_tp
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
@@ -56,15 +56,15 @@ def test_target_model_tp_gt_1(common_llm_kwargs, per_test_common_llm_kwargs,
     """
     if is_hip():
         pytest.skip("hip is not well-supported yet")
-    run_equality_correctness_test("JackFram/llama-68m",
-                                  common_llm_kwargs,
-                                  per_test_common_llm_kwargs,
-                                  baseline_llm_kwargs,
-                                  test_llm_kwargs,
-                                  batch_size,
-                                  output_len,
-                                  seed,
-                                  temperature=0.0)
+    run_equality_correctness_test_tp("JackFram/llama-68m",
+                                     common_llm_kwargs,
+                                     per_test_common_llm_kwargs,
+                                     baseline_llm_kwargs,
+                                     test_llm_kwargs,
+                                     batch_size,
+                                     output_len,
+                                     seed,
+                                     temperature=0.0)
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
@@ -112,13 +112,12 @@ def test_draft_model_tp_lt_target_model_tp2(model, common_llm_kwargs,
                                             seed: int):
     """Verify spec decode works well with smaller tp for draft models.
     """
-    test_llm_kwargs += ["--speculative-model", model]
-    run_equality_correctness_test(model,
-                                  common_llm_kwargs,
-                                  per_test_common_llm_kwargs,
-                                  baseline_llm_kwargs,
-                                  test_llm_kwargs,
-                                  batch_size,
-                                  max_output_len=32,
-                                  seed=seed,
-                                  temperature=0.0)
+    run_equality_correctness_test_tp(model,
+                                     common_llm_kwargs,
+                                     per_test_common_llm_kwargs,
+                                     baseline_llm_kwargs,
+                                     test_llm_kwargs,
+                                     batch_size,
+                                     max_output_len=32,
+                                     seed=seed,
+                                     temperature=0.0)

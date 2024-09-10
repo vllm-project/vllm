@@ -1,14 +1,26 @@
 from itertools import cycle
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import pytest
 
-from vllm import LLM
+from vllm import LLM, SamplingParams
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import Logprob
 
 from ...conftest import cleanup
+from ...models.utils import check_outputs_equal
 from ...utils import RemoteOpenAIServer
+
+PROMPTS = [
+    "Hello, my name is",
+    "The president of the United States is",
+    "The capital of France is",
+    "The future of AI is",
+    "San Francisco is know for its",
+    "Facebook was created in 2004 by",
+    "Curious George is a",
+    "Python 3.11 brings improvements to its",
+]
 
 
 @pytest.fixture
@@ -84,18 +96,81 @@ def get_logprobs_from_llm_generator(
     return logprobs
 
 
-def run_equality_correctness_test(model,
-                                  common_llm_kwargs,
-                                  per_test_common_llm_kwargs,
-                                  baseline_llm_kwargs,
-                                  test_llm_kwargs,
-                                  batch_size: int,
-                                  max_output_len: int,
-                                  seed: int = 0,
-                                  temperature: float = 0.0,
-                                  disable_seed: bool = False,
-                                  ensure_all_accepted: bool = False,
-                                  force_output_len: bool = True):
+def run_equality_correctness_test(
+        vllm_runner,
+        common_llm_kwargs,
+        per_test_common_llm_kwargs,
+        baseline_llm_kwargs,
+        test_llm_kwargs,
+        batch_size: int,
+        max_output_len: int,
+        seed: Optional[int] = 0,
+        temperature: float = 0.0,
+        disable_seed: bool = False,
+        ignore_eos: bool = True,
+        ensure_all_accepted: bool = False,
+        expected_acceptance_rate: Optional[float] = None):
+
+    org_args = {
+        **common_llm_kwargs,
+        **per_test_common_llm_kwargs,
+        **baseline_llm_kwargs,
+    }
+
+    sd_args = {
+        **common_llm_kwargs,
+        **per_test_common_llm_kwargs,
+        **test_llm_kwargs,
+    }
+
+    prompts = [prompt for prompt, _ in zip(cycle(PROMPTS), range(batch_size))]
+
+    if disable_seed:
+        seed = None
+
+    sampling_params = SamplingParams(temperature=temperature,
+                                     max_tokens=max_output_len,
+                                     seed=seed,
+                                     ignore_eos=ignore_eos)
+
+    with vllm_runner(**org_args) as vllm_model:
+        org_outputs = vllm_model.generate(prompts, sampling_params)
+
+    with vllm_runner(**sd_args) as vllm_model:
+        if ensure_all_accepted:
+            # Force log interval to be 0 to catch all metrics.
+            stat_logger = vllm_model.model.llm_engine.stat_loggers[
+                'prometheus']
+            stat_logger.local_interval = 0
+
+        sd_outputs = vllm_model.generate(prompts, sampling_params)
+
+        if ensure_all_accepted or expected_acceptance_rate is not None:
+            acceptance_rate = (stat_logger.metrics.
+                               gauge_spec_decode_draft_acceptance_rate.labels(
+                                   **stat_logger.labels)._value.get())
+
+            if ensure_all_accepted:
+                assert acceptance_rate == 1.0
+
+            if expected_acceptance_rate is not None:
+                assert acceptance_rate >= expected_acceptance_rate - 1e-2
+
+    check_outputs_equal(outputs_0_lst=org_outputs,
+                        outputs_1_lst=sd_outputs,
+                        name_0="org",
+                        name_1="sd")
+
+
+def run_equality_correctness_test_tp(model,
+                                     common_llm_kwargs,
+                                     per_test_common_llm_kwargs,
+                                     baseline_llm_kwargs,
+                                     test_llm_kwargs,
+                                     batch_size: int,
+                                     max_output_len: int,
+                                     seed: int = 0,
+                                     temperature: float = 0.0):
     """Helper method that compares the outputs of both the baseline LLM and
     the test LLM. It asserts greedy equality, e.g. that the outputs are exactly
     the same when temperature is zero.
@@ -107,20 +182,7 @@ def run_equality_correctness_test(model,
     max_wait_seconds = 240
     results = []
 
-    prompts = [
-        "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
-        "The future of AI is",
-        "San Francisco is know for its",
-        "Facebook was created in 2004 by",
-        "Curious George is a",
-        "Python 3.11 brings improvements to its",
-    ]
-
-    # TODO: Implement force_output_len.
-
-    prompts = [prompt for prompt, _ in zip(cycle(prompts), range(batch_size))]
+    prompts = [prompt for prompt, _ in zip(cycle(PROMPTS), range(batch_size))]
 
     for args, env in ((arg1, env1), (arg2, env2)):
         with RemoteOpenAIServer(model,
@@ -129,19 +191,11 @@ def run_equality_correctness_test(model,
                                 max_wait_seconds=max_wait_seconds) as server:
             client = server.get_client()
 
-            if disable_seed:
-                completion = client.completions.create(
-                    model=model,
-                    prompt=prompts,
-                    max_tokens=max_output_len,
-                    temperature=temperature)
-            else:
-                completion = client.completions.create(
-                    model=model,
-                    prompt=prompts,
-                    max_tokens=max_output_len,
-                    seed=seed,
-                    temperature=temperature)
+            completion = client.completions.create(model=model,
+                                                   prompt=prompts,
+                                                   max_tokens=max_output_len,
+                                                   seed=seed,
+                                                   temperature=temperature)
 
             results.append({
                 "test":
@@ -153,11 +207,6 @@ def run_equality_correctness_test(model,
                 completion.usage,
             })
 
-            if ensure_all_accepted:
-                # TODO: Implement this.
-                print(server.get_metrics())
-                # assert acceptance_rate == 1.0
-
     n = len(results) // 2
     arg1_results = results[:n]
     arg2_results = results[n:]
@@ -165,83 +214,3 @@ def run_equality_correctness_test(model,
         assert arg1_result == arg2_result, (
             f"Results for {model=} are not the same with {arg1=} and {arg2=}. "
             f"{arg1_result=} != {arg2_result=}")
-
-
-# def run_equality_correctness_test(
-#         baseline_llm_generator,
-#         test_llm_generator,
-#         batch_size,
-#         max_output_len,
-#         force_output_len: bool,
-#         temperature: float,
-#         seeded: bool,
-#         print_tokens: bool = False,
-#         ensure_all_accepted: bool = False,
-#         expected_acceptance_rate: Optional[float] = None):
-#     """Helper method that compares the outputs of both the baseline LLM and
-#     the test LLM. It asserts greedy equality, e.g. that the outputs are exactly
-#     the same when temperature is zero (or when temperature is > 0 and seeded).
-#     """
-
-#     prompts = [
-#         "Hello, my name is",
-#         "The president of the United States is",
-#         "The capital of France is",
-#         "The future of AI is",
-#         "San Francisco is know for its",
-#         "Facebook was created in 2004 by",
-#         "Curious George is a",
-#         "Python 3.11 brings improvements to its",
-#     ]
-
-#     prompts = [prompt for prompt, _ in zip(cycle(prompts), range(batch_size))]
-
-#     # If the test requires that we generated max_output_len tokens, then set the
-#     # sampling params to ignore eos token.
-#     ignore_eos = force_output_len
-
-#     if seeded:
-#         sampling_params = [
-#             SamplingParams(
-#                 max_tokens=max_output_len,
-#                 ignore_eos=ignore_eos,
-#                 temperature=temperature,
-#                 seed=i,
-#             ) for i in range(len(prompts))
-#         ]
-#     else:
-#         sampling_params = SamplingParams(
-#             max_tokens=max_output_len,
-#             ignore_eos=ignore_eos,
-#             temperature=temperature,
-#         )
-
-#     (spec_batch_tokens, spec_batch_token_ids,
-#      acceptance_rate) = get_output_from_llm_generator(test_llm_generator,
-#                                                       prompts, sampling_params)
-
-#     (baseline_batch_tokens, baseline_batch_token_ids,
-#      _) = get_output_from_llm_generator(baseline_llm_generator, prompts,
-#                                         sampling_params)
-
-#     assert len(baseline_batch_token_ids) == len(prompts)
-#     assert len(spec_batch_token_ids) == len(prompts)
-
-#     for i, (baseline_token_ids, baseline_tokens, spec_token_ids,
-#             spec_tokens) in enumerate(
-#                 zip(baseline_batch_token_ids, baseline_batch_tokens,
-#                     spec_batch_token_ids, spec_batch_tokens)):
-#         if print_tokens:
-#             print(f'{i=} {baseline_tokens=}')
-#             print(f'{i=}     {spec_tokens=}')
-#         print(f'{i=} {baseline_token_ids=}')
-#         print(f'{i=}     {spec_token_ids=}')
-#         assert baseline_token_ids == spec_token_ids
-
-#     print(f'{acceptance_rate=}')
-
-#     if ensure_all_accepted:
-#         assert acceptance_rate == 1.0
-
-#     if expected_acceptance_rate is not None:
-#         assert acceptance_rate >= expected_acceptance_rate - 1e-2

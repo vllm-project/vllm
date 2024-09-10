@@ -5,7 +5,7 @@ tensor parallelism.
 import pytest
 import torch
 
-from .conftest import run_equality_correctness_test
+from .conftest import run_equality_correctness_test_tp
 
 MAIN_MODEL = "JackFram/llama-68m"
 SPEC_MODEL = "JackFram/llama-68m"
@@ -51,15 +51,15 @@ def test_draft_model_tp_lt_target_model_tp4(common_llm_kwargs,
                                             seed: int):
     """Verify spec decode works well with smaller tp for draft models.
     """
-    run_equality_correctness_test(MAIN_MODEL,
-                                  common_llm_kwargs,
-                                  per_test_common_llm_kwargs,
-                                  baseline_llm_kwargs,
-                                  test_llm_kwargs,
-                                  batch_size,
-                                  max_output_len=32,
-                                  seed=seed,
-                                  temperature=0.0)
+    run_equality_correctness_test_tp(MAIN_MODEL,
+                                     common_llm_kwargs,
+                                     per_test_common_llm_kwargs,
+                                     baseline_llm_kwargs,
+                                     test_llm_kwargs,
+                                     batch_size,
+                                     max_output_len=32,
+                                     seed=seed,
+                                     temperature=0.0)
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 4,
@@ -114,12 +114,12 @@ def test_skip_speculation(common_llm_kwargs, per_test_common_llm_kwargs,
     TODO: fix it to pass without raising Error. (#5814)
     """
     with pytest.raises(RuntimeError):
-        run_equality_correctness_test(MAIN_MODEL,
-                                      common_llm_kwargs,
-                                      per_test_common_llm_kwargs,
-                                      baseline_llm_kwargs,
-                                      test_llm_kwargs,
-                                      batch_size,
-                                      output_len,
-                                      seed,
-                                      temperature=0.0)
+        run_equality_correctness_test_tp(MAIN_MODEL,
+                                         common_llm_kwargs,
+                                         per_test_common_llm_kwargs,
+                                         baseline_llm_kwargs,
+                                         test_llm_kwargs,
+                                         batch_size,
+                                         output_len,
+                                         seed,
+                                         temperature=0.0)
