@@ -1,6 +1,6 @@
-"""Tests for the AWQ Triton kernel.
+"""Benchmarks for the AWQ Triton kernel.
 
-Run `pytest tests/kernels/test_awq_triton.py`.
+Run `python benchmarks/kernels/benchmark_awq_triton.py`.
 """
 import argparse
 import contextlib
