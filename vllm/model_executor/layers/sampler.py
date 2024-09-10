@@ -44,7 +44,7 @@ class Sampler(nn.Module):
     in logits for each token in the input prompt.
     """
 
-    def __init__(self, idx: int = -1):
+    def __init__(self):
         super().__init__()
 
         # Whether or not the SamplerOutput should have on-device tensors
@@ -52,7 +52,6 @@ class Sampler(nn.Module):
         # speculative decoding.
         self.include_gpu_probs_tensor = False
         self.should_modify_greedy_probs_inplace = False
-        self.head_idx = idx
 
     def _init_sampling_tensors(
         self,
@@ -72,14 +71,13 @@ class Sampler(nn.Module):
 
         # Initialize new sampling tensors
         (sampling_tensors, do_penalties, do_top_p_top_k,
-         do_min_p, is_prompt) = SamplingTensors.from_sampling_metadata(
-             sampling_metadata, vocab_size, logits.device, logits.dtype, head_idx=self.head_idx)
+         do_min_p) = SamplingTensors.from_sampling_metadata(
+             sampling_metadata, vocab_size, logits.device, logits.dtype)
 
         self._sampling_tensors = sampling_tensors
         self._do_penalties = do_penalties
         self._do_top_p_top_k = do_top_p_top_k
         self._do_min_p = do_min_p
-        self._is_prompt = is_prompt
 
     def forward(
         self,
@@ -115,19 +113,11 @@ class Sampler(nn.Module):
 
         # Apply presence and frequency penalties.
         if do_penalties:
-            if self.head_idx >= 0 and is_prompt:
-                # when multihead output and prompt phase, we do not apply penalties
-                # because the prompt tokens are not same as the output tokens
-                pass
-            else:
-                skip_prompt_repetition = self.head_idx >= 0 and not is_prompt
-                logits = _apply_penalties(logits, sampling_tensors.prompt_tokens,
-                                        sampling_tensors.output_tokens,
-                                        sampling_tensors.presence_penalties,
-                                        sampling_tensors.frequency_penalties,
-                                        sampling_tensors.repetition_penalties,
-                                        skip_prompt_repetition=skip_prompt_repetition)
-
+            logits = _apply_penalties(logits, sampling_tensors.prompt_tokens,
+                                      sampling_tensors.output_tokens,
+                                      sampling_tensors.presence_penalties,
+                                      sampling_tensors.frequency_penalties,
+                                      sampling_tensors.repetition_penalties)
         # Use float32 to apply temperature scaling.
         # Use in-place division to avoid creating a new tensor.
         logits = logits.to(torch.float)
@@ -260,19 +250,13 @@ def _apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
                      output_tokens_tensor: torch.Tensor,
                      presence_penalties: torch.Tensor,
                      frequency_penalties: torch.Tensor,
-                     repetition_penalties: torch.Tensor,
-                     skip_prompt_repetition: bool = False) -> torch.Tensor:
+                     repetition_penalties: torch.Tensor) -> torch.Tensor:
     num_seqs, vocab_size = logits.shape
     output_bin_counts, output_mask = _get_bin_counts_and_mask(
         output_tokens_tensor, vocab_size, num_seqs)
 
-    if skip_prompt_repetition:
-        # when multihead output, we do not apply penalties for prompt tokens
-        # because the prompt tokens are not same as the output tokens
-        prompt_mask = torch.zeros((num_seqs, vocab_size), dtype=torch.bool, device=prompt_tokens_tensor.device)
-    else:
-        _, prompt_mask = _get_bin_counts_and_mask(prompt_tokens_tensor, vocab_size,
-                                                  num_seqs)
+    _, prompt_mask = _get_bin_counts_and_mask(prompt_tokens_tensor, vocab_size,
+                                              num_seqs)
 
     repetition_penalties = repetition_penalties[:, None].repeat(1, vocab_size)
     repetition_penalties[~(prompt_mask | output_mask)] = 1.0
