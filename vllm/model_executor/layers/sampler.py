@@ -107,7 +107,6 @@ class Sampler(nn.Module):
         do_penalties = self._do_penalties
         do_top_p_top_k = self._do_top_p_top_k
         do_min_p = self._do_min_p
-        is_prompt = self._is_prompt
 
         logits = _apply_min_tokens_penalty(logits, sampling_metadata)
 
@@ -118,6 +117,7 @@ class Sampler(nn.Module):
                                       sampling_tensors.presence_penalties,
                                       sampling_tensors.frequency_penalties,
                                       sampling_tensors.repetition_penalties)
+
         # Use float32 to apply temperature scaling.
         # Use in-place division to avoid creating a new tensor.
         logits = logits.to(torch.float)
@@ -252,11 +252,10 @@ def _apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
                      frequency_penalties: torch.Tensor,
                      repetition_penalties: torch.Tensor) -> torch.Tensor:
     num_seqs, vocab_size = logits.shape
-    output_bin_counts, output_mask = _get_bin_counts_and_mask(
-        output_tokens_tensor, vocab_size, num_seqs)
-
     _, prompt_mask = _get_bin_counts_and_mask(prompt_tokens_tensor, vocab_size,
                                               num_seqs)
+    output_bin_counts, output_mask = _get_bin_counts_and_mask(
+        output_tokens_tensor, vocab_size, num_seqs)
 
     repetition_penalties = repetition_penalties[:, None].repeat(1, vocab_size)
     repetition_penalties[~(prompt_mask | output_mask)] = 1.0
