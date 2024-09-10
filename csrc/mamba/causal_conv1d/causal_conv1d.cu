@@ -111,13 +111,13 @@ causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
     // CHECK_SHAPE(x, batch_size, dim, seqlen);
     CHECK_SHAPE(weight, dim, width);
 
-    TORCH_CHECK(x.stride(1) == 1 || x.stride(0) == 1);
-    const bool is_channel_last = x.stride(0) == 1 && x.stride(1) > 1;
+    // TORCH_CHECK(x.stride(1) == 1 || x.stride(0) == 1);
+    // const bool is_channel_last = x.stride(0) == 1 && x.stride(1) > 1;
 
-    if (is_channel_last) {
-        TORCH_CHECK(dim % 8 == 0, "causal_conv1d only supports channel dimension divisible by 8 for now");
-        TORCH_CHECK(x.stride(1) % 8 == 0, "causal_conv1d with channel last layout requires strides (x.stride(0) and x.stride(2)) to be multiples of 8");
-    }
+    // if (is_channel_last) {
+        // TORCH_CHECK(dim % 8 == 0, "causal_conv1d only supports channel dimension divisible by 8 for now");
+        // // TORCH_CHECK(x.stride(1) % 8 == 0, "causal_conv1d with channel last layout requires strides (x.stride(0) and x.stride(2)) to be multiples of 8");
+    // }
     TORCH_CHECK(width >= 2 && width <= 4, "causal_conv1d only supports width between 2 and 4");
 
     if (bias_.has_value()) {
@@ -128,14 +128,14 @@ causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
         CHECK_SHAPE(bias, dim);
     }
 
-    if (seq_idx_.has_value()) {
-        TORCH_CHECK(is_channel_last, "seq_idx is only supported for channel last layout");
-        auto seq_idx = seq_idx_.value();
-        TORCH_CHECK(seq_idx.scalar_type() == torch::kInt32);
-        TORCH_CHECK(seq_idx.is_cuda());
-        TORCH_CHECK(seq_idx.is_contiguous());
-        CHECK_SHAPE(seq_idx, batch_size, seqlen);
-    }
+    //if (seq_idx_.has_value()) {
+        // TORCH_CHECK(is_channel_last, "seq_idx is only supported for channel last layout");
+        //auto seq_idx = seq_idx_.value();
+        //TORCH_CHECK(seq_idx.scalar_type() == torch::kInt32);
+        //TORCH_CHECK(seq_idx.is_cuda());
+        //TORCH_CHECK(seq_idx.is_contiguous());
+        //CHECK_SHAPE(seq_idx, batch_size, seqlen);
+    //}
 
     at::Tensor out = torch::empty_like(x);
 
@@ -146,19 +146,19 @@ causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
                         silu_activation);
     params.cu_seq_len_ptr = cu_seq_len_val.data_ptr();
 
-    if (seq_idx_.has_value()) {
-        params.seq_idx_ptr = seq_idx_.value().data_ptr();
-    } else {
-        params.seq_idx_ptr = nullptr;
-    }
+    //if (seq_idx_.has_value()) {
+        //params.seq_idx_ptr = seq_idx_.value().data_ptr();
+    //} else {
+        //params.seq_idx_ptr = nullptr;
+    //}
 
     if (initial_states_.has_value()) {
-        TORCH_CHECK(is_channel_last, "initial_states is only supported for channel last layout");
+        // TORCH_CHECK(is_channel_last, "initial_states is only supported for channel last layout");
         auto initial_states = initial_states_.value();
         TORCH_CHECK(initial_states.scalar_type() == input_type);
         TORCH_CHECK(initial_states.is_cuda());
         CHECK_SHAPE(initial_states, batch_size, dim, width - 1);
-        TORCH_CHECK(initial_states.stride(1) == 1);
+        // TORCH_CHECK(initial_states.stride(1) == 1);
         params.initial_states_ptr = initial_states.data_ptr();
         params.initial_states_batch_stride = initial_states.stride(0);
         params.initial_states_c_stride = initial_states.stride(1);
@@ -168,12 +168,12 @@ causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
     }
 
     if (final_states_out_.has_value()) {
-        TORCH_CHECK(is_channel_last, "final_states is only supported for channel last layout");
+        // TORCH_CHECK(is_channel_last, "final_states is only supported for channel last layout");
         auto final_states = final_states_out_.value();
         TORCH_CHECK(final_states.scalar_type() == input_type);
         TORCH_CHECK(final_states.is_cuda());
         // CHECK_SHAPE(final_states, batch_size, dim, width - 1);
-        TORCH_CHECK(final_states.stride(1) == 1);
+        // TORCH_CHECK(final_states.stride(1) == 1);
         params.final_states_ptr = final_states.data_ptr();
         params.final_states_batch_stride = final_states.stride(0);
         params.final_states_c_stride = final_states.stride(1);
@@ -187,11 +187,11 @@ causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
     at::cuda::CUDAGuard device_guard{(char)x.get_device()};
     auto stream = at::cuda::getCurrentCUDAStream().stream();
     DISPATCH_WTYPE_ITYPE_FLOAT_AND_HALF_AND_BF16(x.scalar_type(), "causal_conv1d_fwd", [&] {
-            if (!is_channel_last) {
-                causal_conv1d_fwd_cuda<input_t, weight_t>(params, stream);
-            } else {
-                causal_conv1d_channellast_fwd_cuda<input_t, weight_t>(params, stream);
-            }
+            //if (!is_channel_last) {
+            causal_conv1d_fwd_cuda<input_t, weight_t>(params, stream);
+            //} else {
+                //causal_conv1d_channellast_fwd_cuda<input_t, weight_t>(params, stream);
+            //}
     });
     return out;
 }
@@ -284,7 +284,7 @@ void causal_conv1d_fwd_kernel(ConvParamsBase params) {
     constexpr int kWidth = Ktraits::kWidth;
     constexpr int kNThreads = Ktraits::kNThreads;
     constexpr int kNElts = Ktraits::kNElts;
-    static constexpr bool kIsVecLoad = Ktraits::kIsVecLoad;
+    constexpr bool kIsVecLoad = Ktraits::kIsVecLoad;
     using input_t = typename Ktraits::input_t;
     using vec_t = typename Ktraits::vec_t;
     using weight_t = typename Ktraits::weight_t;
@@ -300,16 +300,31 @@ void causal_conv1d_fwd_kernel(ConvParamsBase params) {
     const int tidx = threadIdx.x;
     const int batch_id = blockIdx.x;
     const int channel_id = blockIdx.y;
-    input_t *x = reinterpret_cast<input_t *>(params.x_ptr) + batch_id * params.x_batch_stride
+    int *cu_seq_len = reinterpret_cast<int *>(params.cu_seq_len_ptr);
+    const int bos = batch_id == 0 ? 0 : cu_seq_len[batch_id - 1];
+    const int eos = cu_seq_len[batch_id];
+    const int seqlen = eos - bos;
+
+    input_t *x = reinterpret_cast<input_t *>(params.x_ptr) + bos * params.x_batch_stride
         + channel_id * params.x_c_stride;
     weight_t *weight = reinterpret_cast<weight_t *>(params.weight_ptr) + channel_id * params.weight_c_stride;
-    input_t *out = reinterpret_cast<input_t *>(params.out_ptr) + batch_id * params.out_batch_stride
+    input_t *out = reinterpret_cast<input_t *>(params.out_ptr) + bos * params.out_batch_stride
         + channel_id * params.out_c_stride;
     float bias_val = params.bias_ptr == nullptr ? 0.f : float(reinterpret_cast<weight_t *>(params.bias_ptr)[channel_id]);
+
+    input_t *initial_states = params.initial_states_ptr == nullptr ? nullptr
+        : reinterpret_cast<input_t *>(params.initial_states_ptr) + batch_id * params.initial_states_batch_stride + channel_id * params.initial_states_c_stride;
+    input_t *final_states = params.final_states_ptr == nullptr ? nullptr
+        : reinterpret_cast<input_t *>(params.final_states_ptr) + batch_id * params.final_states_batch_stride + channel_id * params.final_states_c_stride;
+
 
     // Thread 0 will load the last elements of the previous chunk, so we initialize those to 0.
     if (tidx == 0) {
         input_t zeros[kNElts] = {0};
+        if (initial_states != nullptr) {
+            #pragma unroll
+            for (int w = 0; w < kWidth - 1; ++w){ zeros[kNElts - 1 - (kWidth - 2) + w ] = initial_states[w]; }
+        }
         smem_exchange[kNThreads - 1] = reinterpret_cast<vec_t *>(zeros)[0];
     }
 
@@ -318,21 +333,26 @@ void causal_conv1d_fwd_kernel(ConvParamsBase params) {
     for (int i = 0; i < kWidth; ++i) { weight_vals[i] = float(weight[i * params.weight_width_stride]); }
 
     constexpr int kChunkSize = kNThreads * kNElts;
-    const int n_chunks = (params.seqlen + kChunkSize - 1) / kChunkSize;
+    const int n_chunks = (seqlen + kChunkSize - 1) / kChunkSize;
     for (int chunk = 0; chunk < n_chunks; ++chunk) {
         input_t x_vals_load[2 * kNElts] = {0};
         if constexpr(kIsVecLoad) {
-            typename Ktraits::BlockLoadVecT(smem_load_vec).Load(reinterpret_cast<vec_t*>(x), *reinterpret_cast<vec_t (*)[1]>(&x_vals_load[kNElts]), (params.seqlen - chunk * kChunkSize) / kNElts);
+            // uploading the data to each thread to the second half of x_vals_load
+            typename Ktraits::BlockLoadVecT(smem_load_vec).Load(reinterpret_cast<vec_t*>(x), *reinterpret_cast<vec_t (*)[1]>(&x_vals_load[kNElts]), (seqlen - chunk * kChunkSize) / kNElts);
         } else {
             __syncthreads();
-            typename Ktraits::BlockLoadT(smem_load).Load(x, *reinterpret_cast<input_t (*)[kNElts]>(&x_vals_load[kNElts]), params.seqlen - chunk * kChunkSize);
+            typename Ktraits::BlockLoadT(smem_load).Load(x, *reinterpret_cast<input_t (*)[kNElts]>(&x_vals_load[kNElts]), seqlen - chunk * kChunkSize);
         }
         x += kChunkSize;
         __syncthreads();
         // Thread kNThreads - 1 don't write yet, so that thread 0 can read
         // the last elements of the previous chunk.
+        // read to smem from second half of x_vals_load
+        // all of threads except the last one
         if (tidx < kNThreads - 1) { smem_exchange[tidx] = reinterpret_cast<vec_t *>(x_vals_load)[1]; }
         __syncthreads();
+        // load to the first half the smem from the previous thread, if tidx == 0, take the data from the last chunk
+        // and put it in x_vals_load
         reinterpret_cast<vec_t *>(x_vals_load)[0] = smem_exchange[tidx > 0 ? tidx - 1 : kNThreads - 1];
         __syncthreads();
         // Now thread kNThreads - 1 can write the last elements of the current chunk.
@@ -363,40 +383,67 @@ void causal_conv1d_fwd_kernel(ConvParamsBase params) {
         #pragma unroll
         for (int i = 0; i < kNElts; ++i) { out_vals_store[i] = out_vals[i]; }
         if constexpr(kIsVecLoad) {
-            typename Ktraits::BlockStoreVecT(smem_store_vec).Store(reinterpret_cast<vec_t*>(out), reinterpret_cast<vec_t (&)[1]>(out_vals_store), (params.seqlen - chunk * kChunkSize) / kNElts);
+            typename Ktraits::BlockStoreVecT(smem_store_vec).Store(reinterpret_cast<vec_t*>(out), reinterpret_cast<vec_t (&)[1]>(out_vals_store), (seqlen - chunk * kChunkSize) / kNElts);
         } else {
-            typename Ktraits::BlockStoreT(smem_store).Store(out, out_vals_store, params.seqlen - chunk * kChunkSize);
+            typename Ktraits::BlockStoreT(smem_store).Store(out, out_vals_store, seqlen - chunk * kChunkSize);
         }
         out += kChunkSize;
+    }
+    int last_thread =  ((seqlen - (kWidth - 1)) - (n_chunks - 1) * kChunkSize) / kNElts;
+    if (final_states != nullptr && tidx == last_thread) { 
+        input_t x_vals_load[kNElts * 2] = {0};
+        // in case we are on the first kWidth tokens
+        if (last_thread == 0 && seqlen < kWidth){
+            // Need to take the initial state
+            reinterpret_cast<vec_t *>(x_vals_load)[0] = smem_exchange[0];
+            const int offset = seqlen - (kWidth - 1);
+            #pragma unroll
+            for (int w = 0; w < kWidth - 1; ++w){
+                if ((w - seqlen) >= 0) { final_states[w - seqlen] = final_states[w]; }
+            }
+            #pragma unroll
+            for (int w = 0; w < kWidth - 1; ++w){
+                if (offset + w >= 0) 
+                    final_states[w] = x_vals_load[offset + w ];
+            }
+        }
+        else {
+            reinterpret_cast<vec_t *>(x_vals_load)[1] = smem_exchange[last_thread + 1];
+            reinterpret_cast<vec_t *>(x_vals_load)[0] = smem_exchange[last_thread];
+            const int offset = ((seqlen - (kWidth - 1)) % (kNElts));
+            #pragma unroll
+            for (int w = 0; w < kWidth - 1; ++w){
+                final_states[w] = x_vals_load[offset + w ];
+            }
+        }
+        
     }
 }
 
 
 template<int kNThreads, int kWidth, typename input_t, typename weight_t>
 void causal_conv1d_fwd_launch(ConvParamsBase &params, cudaStream_t stream) {
-    static constexpr int kNElts = sizeof(input_t) == 4 ? 4 : 8;
-    BOOL_SWITCH(params.seqlen % kNElts == 0, kIsVecLoad, [&] {
-        using Ktraits = Causal_conv1d_fwd_kernel_traits<kNThreads, kWidth, kIsVecLoad, input_t, weight_t>;
-        constexpr int kSmemSize = Ktraits::kSmemSize;
-        dim3 grid(params.batch, params.dim);
+    static constexpr bool kIsVecLoad  = false;
+    using Ktraits = Causal_conv1d_fwd_kernel_traits<kNThreads, kWidth, kIsVecLoad, input_t, weight_t>;
+    constexpr int kSmemSize = Ktraits::kSmemSize;
+    dim3 grid(params.batch, params.dim);
 
-        auto kernel = &causal_conv1d_fwd_kernel<Ktraits>;
+    auto kernel = &causal_conv1d_fwd_kernel<Ktraits>;
 
-        if (kSmemSize >= 48 * 1024) {
-            #ifndef USE_ROCM
-            C10_CUDA_CHECK(cudaFuncSetAttribute(
-                kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
-            #else
-            // There is a slight signature discrepancy in HIP and CUDA "FuncSetAttribute" function.
-            C10_CUDA_CHECK(cudaFuncSetAttribute(
-                (void *) kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
-            std::cerr << "Warning (causal_conv1d fwd launch): attempting to set maxDynamicSharedMemorySize on an AMD GPU which is currently a non-op (in ROCm versions <= 6.1). This might lead to undefined behavior. \n" << std::endl;
-            #endif
-        }
-        kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
+    if (kSmemSize >= 48 * 1024) {
+        #ifndef USE_ROCM
+        C10_CUDA_CHECK(cudaFuncSetAttribute(
+            kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
+        #else
+        // There is a slight signature discrepancy in HIP and CUDA "FuncSetAttribute" function.
+        C10_CUDA_CHECK(cudaFuncSetAttribute(
+            (void *) kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
+        std::cerr << "Warning (causal_conv1d fwd launch): attempting to set maxDynamicSharedMemorySize on an AMD GPU which is currently a non-op (in ROCm versions <= 6.1). This might lead to undefined behavior. \n" << std::endl;
+        #endif
+    }
+    kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
 
-        C10_CUDA_KERNEL_LAUNCH_CHECK();
-    });
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 template<typename input_t, typename weight_t>
