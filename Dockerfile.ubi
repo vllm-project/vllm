@@ -198,6 +198,9 @@ RUN umask 002 \
 
 COPY LICENSE /licenses/vllm.md
 
+# Copy only .jinja files from example directory to template directory
+COPY examples/*.jinja /app/data/template/
+
 USER 2000
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
 
