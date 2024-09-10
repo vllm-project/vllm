@@ -164,17 +164,7 @@ class MQLLMEngine:
                     request: RPCStartupRequest = pickle.loads(message.buffer)
 
                     # Handle the query from the Client.
-                    if request == RPCStartupRequest.GET_MODEL_CONFIG:
-                        response = self.engine.get_model_config()
-                    elif request == RPCStartupRequest.GET_DECODING_CONFIG:
-                        response = self.engine.get_decoding_config()
-                    elif request == RPCStartupRequest.GET_LORA_CONFIG:
-                        response = self.engine.get_lora_config()
-                    elif request == RPCStartupRequest.GET_SCHEDULER_CONFIG:
-                        response = self.engine.get_scheduler_config()
-                    elif request == RPCStartupRequest.GET_PARALLEL_CONFIG:
-                        response = self.engine.get_parallel_config()
-                    elif request == RPCStartupRequest.GET_TRACING_ENABLED:
+                    if request == RPCStartupRequest.GET_TRACING_ENABLED:
                         response = self.engine.is_tracing_enabled()
                     elif request == RPCStartupRequest.IS_SERVER_READY:
                         response = VLLM_RPC_SUCCESS_STR
@@ -183,12 +173,11 @@ class MQLLMEngine:
                         # Breakout of loop once client is ready.
                         client_is_ready = True
 
-                    socket.send_multipart((identity, pickle.dumps(response)),
-                                          copy=False)
-
                 except Exception as e:
-                    socket.send_multipart((identity, pickle.dumps(e)),
-                                          copy=False)
+                    response = e
+
+                socket.send_multipart((identity, pickle.dumps(response)),
+                                      copy=False)
 
     def run_engine_loop(self):
         """Core busy loop of the LLMEngine."""
@@ -305,7 +294,7 @@ class MQLLMEngine:
     def _handle_health_request(self):
         if self._errored:
             self._send_unhealthy(ENGINE_DEAD_ERROR)
-        
+
         # Raises error if unhealthy.
         self.engine.check_health()
         self._send_healthy()
