@@ -568,7 +568,7 @@ def reshape_and_cache(
     k_scale: float,
     v_scale: float,
 ) -> None:
-    ops = torch.ops._C_cpu if key.device.type == "cpu" else torch.ops._C
+    ops = torch.ops._C_cpu_cache_ops if key.device.type == "cpu" else torch.ops._C_cache_ops
     ops.reshape_and_cache(key, value, key_cache, value_cache, slot_mapping,
                           kv_cache_dtype, k_scale, v_scale)
 
@@ -592,8 +592,8 @@ def reshape_and_cache_flash(
 def copy_blocks(key_caches: List[torch.Tensor],
                 value_caches: List[torch.Tensor],
                 block_mapping: torch.Tensor) -> None:
-    ops = torch.ops._C_cpu if key_caches[
-        0].device.type == "cpu" else torch.ops._C
+    ops = torch.ops._C_cpu_cache_ops if key_caches[
+        0].device.type == "cpu" else torch.ops._C_cache_ops
     ops.copy_blocks(key_caches, value_caches, block_mapping)
 
 
