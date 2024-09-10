@@ -268,9 +268,11 @@ Multimodal Language Models
   For :code:`LLaVA-NeXT-Video`, the latest release of :code:`huggingface/transformers` doesn't work yet, so we need to use a developed version (21fac7abba2a37fae86106f87fcf9974fd1e3830) of :code:`huggingface/transformers` for now。 
   This can be installed by running the following command: 
 
-    .. code-block:: bash
-      
-        pip install git+https://github.com/huggingface/transformers.git@21fac7abba2a37fae86106f87fcf9974fd1e3830
+
+  .. code-block:: bash
+    
+    pip install git+https://github.com/huggingface/transformers.git@21fac7abba2a37fae86106f87fcf9974fd1e3830
+
 
 ----
 
