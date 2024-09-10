@@ -301,7 +301,8 @@ def _build_custom_ops() -> bool:
 
 
 def _build_core_ext() -> bool:
-    return not (_is_neuron() or _is_tpu() or _is_openvino() or _is_xpu())
+    return not (_is_neuron() or _is_tpu() or _is_openvino() or _is_xpu()
+                or _is_hpu())
 
 
 def get_hipcc_rocm_version():
