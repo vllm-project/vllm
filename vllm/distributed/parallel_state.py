@@ -931,7 +931,7 @@ def initialize_model_parallel(
     _TP = init_model_parallel_group(group_ranks,
                                     get_world_group().local_rank,
                                     backend,
-                                    use_message_queue_broadcaster=True)
+                                    use_message_queue_broadcaster=False)
 
     # Build the pipeline model-parallel groups.
     num_pipeline_model_parallel_groups: int = (world_size //
