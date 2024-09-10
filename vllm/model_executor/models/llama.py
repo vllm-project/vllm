@@ -157,7 +157,7 @@ class LlamaAttention(nn.Module):
         if quant_config is not None and quant_config.get_name() == "gguf":
             is_neox_style = False
 
-        if config.use_xp_rope:
+        if hasattr(config, "use_xp_rope") and config.use_xp_rope:
             self.rotary_emb = XPRotaryEmbedding(
                 self.head_dim, self.head_dim, max_position_embeddings, rope_theta,
                 is_neox_style)

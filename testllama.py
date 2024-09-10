@@ -4,7 +4,7 @@ from vllm import LLM, SamplingParams
 
 torch.random.manual_seed(999)
 
-llm = LLM(model='/home/zhn/g/Meta-Llama-3-8B-Instruct', gpu_memory_utilization=0.5)
+llm = LLM(model='/home/zhn/g/Meta-Llama-3-8B-Instruct', gpu_memory_utilization=0.5, enforce_eager=True, num_scheduler_steps=8)
 prompts = [
     "Hi my name is",
     "Tell me a joke",

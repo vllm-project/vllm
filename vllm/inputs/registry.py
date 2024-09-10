@@ -130,8 +130,7 @@ class InputRegistry:
         # Avoid circular import
         from vllm.sequence import SequenceData
 
-        dummy_seq_data = SequenceData(
-            array(VLLM_TOKEN_ID_ARRAY_TYPE, [0]) * seq_len)
+        dummy_seq_data = SequenceData([0] * seq_len)
         dummy_multi_modal_data = None
 
         return dummy_seq_data, dummy_multi_modal_data

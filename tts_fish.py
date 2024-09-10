@@ -96,7 +96,7 @@ for text in texts:
     token_ids.append(7003)
     llm_inputs.append(token_ids)
 
-llm = LLM(model='/home/zhn/fishtts', gpu_memory_utilization=0.5, dtype=torch.float32, skip_tokenizer_init=True, enforce_eager=True)
+llm = LLM(model='/home/zhn/fishtts', gpu_memory_utilization=0.5, dtype=torch.float32, skip_tokenizer_init=True, enforce_eager=True, num_scheduler_steps=8)
 prompts = [
     {"prompt_token_ids": llm_input} for llm_input in llm_inputs
 ]
