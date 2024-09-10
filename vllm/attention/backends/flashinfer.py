@@ -403,7 +403,7 @@ class FlashInferMetadata(AttentionMetadata):
             return None
 
         return self
-    
+
     def advance_step(
         self,
         model_input: "ModelInputForGPUWithSamplingMetadata",

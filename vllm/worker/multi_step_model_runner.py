@@ -38,6 +38,7 @@ logger = init_logger(__name__)
 
 MULTI_STEP_ATTENTION_BACKENDS = ["flash-attn", "flashinfer"]
 
+
 def seq_output_builder():
     return SequenceOutput(
         0, 0,
