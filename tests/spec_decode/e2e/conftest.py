@@ -1,14 +1,13 @@
 from itertools import cycle
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import pytest
 
 from vllm import LLM, SamplingParams
 from vllm.model_executor.utils import set_random_seed
-from vllm.sequence import Logprob
 
 from ...conftest import cleanup
-from ...models.utils import check_outputs_equal
+from ...models.utils import check_logprobs_close, check_outputs_equal
 from ...utils import RemoteOpenAIServer
 
 PROMPTS = [
@@ -82,18 +81,45 @@ def get_output_from_llm_generator(
     return tokens, token_ids, acceptance_rate
 
 
-def get_logprobs_from_llm_generator(
-        llm_generator, prompts,
-        sampling_params) -> List[List[Dict[int, Logprob]]]:
-    """Returns a dict of (token_id: Logprob) for each generated position, for
-    each sequence in the batch.
-    """
-    for llm in llm_generator():
-        outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
-        logprobs = [output.outputs[0].logprobs[:] for output in outputs]
-        del llm
+def run_logprob_correctness_test(vllm_runner,
+                                 common_llm_kwargs,
+                                 per_test_common_llm_kwargs,
+                                 baseline_llm_kwargs,
+                                 test_llm_kwargs,
+                                 batch_size: int,
+                                 max_output_len: int,
+                                 seed: Optional[int] = 0,
+                                 temperature: float = 0.0,
+                                 logprobs: int = 1):
+    org_args = {
+        **common_llm_kwargs,
+        **per_test_common_llm_kwargs,
+        **baseline_llm_kwargs,
+    }
 
-    return logprobs
+    sd_args = {
+        **common_llm_kwargs,
+        **per_test_common_llm_kwargs,
+        **test_llm_kwargs,
+    }
+
+    prompts = [prompt for prompt, _ in zip(cycle(PROMPTS), range(batch_size))]
+
+    sampling_params = SamplingParams(temperature=temperature,
+                                     max_tokens=max_output_len,
+                                     seed=seed,
+                                     logprobs=logprobs)
+
+    with vllm_runner(**org_args) as vllm_model:
+        org_outputs = vllm_model.generate_w_logprobs(prompts, sampling_params)
+
+    with vllm_runner(**sd_args) as vllm_model:
+        sd_outputs = vllm_model.generate_w_logprobs(prompts, sampling_params)
+
+    check_logprobs_close(outputs_0_lst=org_outputs,
+                         outputs_1_lst=sd_outputs,
+                         name_0="org",
+                         name_1="sd")
 
 
 def run_equality_correctness_test(
