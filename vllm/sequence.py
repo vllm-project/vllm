@@ -165,6 +165,10 @@ class SequenceData(msgspec.Struct,
     # is called.
     _new_appended_tokens: List[int] = msgspec.field(default_factory=list)
 
+    # TODO: Add doc
+    last_appended_tokens: List[int] = []
+    last_output_text_offset: int = 0
+
     def __post_init__(self) -> None:
         assert self._prompt_token_ids.typecode == "l"
         assert self._output_token_ids.typecode == "l"
@@ -220,6 +224,8 @@ class SequenceData(msgspec.Struct,
         return self._output_token_ids
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
+        self.last_appended_tokens.append(token_id)
+
         self._output_token_ids.append(token_id)
         self._new_appended_tokens.append(token_id)
         self._cached_all_token_ids.append(token_id)

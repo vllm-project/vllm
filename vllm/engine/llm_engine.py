@@ -96,7 +96,7 @@ class OutputData(NamedTuple):
     scheduler_outputs: SchedulerOutputs
     is_async: bool
     is_last_step: bool
-    skip: Set[int]
+    skip: List[int]
 
 
 class SchedulerContext:
@@ -119,7 +119,7 @@ class SchedulerContext:
                        scheduler_outputs=scheduler_outputs,
                        is_async=is_async,
                        is_last_step=is_last_step,
-                       skip=set()))
+                       skip=[]))
 
 
 class LLMEngine:
@@ -1279,9 +1279,6 @@ class LLMEngine:
 
         if len(ctx.output_queue) == 0:
             return None
-        # seq_id to (output token count, text len),
-        # only for delta output seq groups
-        previous_output_lens: Dict[int, Tuple[int, int]] = {}
 
         # Get pending async postprocessor
         if request_id:
@@ -1299,19 +1296,19 @@ class LLMEngine:
 
         # Organize outputs by [step][sequence group] instead of
         # [sequence group][step].
-        if len(outputs) == 1:
-            outputs_by_sequence_group = outputs[0]
-        else:
+        if len(outputs) > 1:
             outputs_by_sequence_group = create_output_by_sequence_group(
                 outputs, num_seq_groups=len(seq_group_metadata_list))
+        else:
+            outputs_by_sequence_group = outputs
 
         # Determine the requests we need to operate on
         if request_id:
-            indices = None
+            indices = []
             for i, seq_group_meta in enumerate(seq_group_metadata_list):
                 if seq_group_meta.request_id == request_id:
                     assert i not in skip  # Cannot be called twice
-                    indices = (i, )
+                    indices.append(i)
                     break
 
             # If the request_id was not found, then it means that
@@ -1321,45 +1318,35 @@ class LLMEngine:
                 return
         else:
             indices = range(len(seq_group_metadata_list))  # type: ignore
-        assert isinstance(indices, Iterable)
 
-        finished_before: Set[int] = set()
-        finished_now: Set[int] = set()
+        finished_before: List[int] = []
+        finished_now: List[int] = []
         for i in indices:
             if i in skip:
                 continue
 
             seq_group_meta = seq_group_metadata_list[i]
             scheduled_seq_group = scheduler_outputs.scheduled_seq_groups[i]
-            output = outputs_by_sequence_group[i]
 
             seq_group = scheduled_seq_group.seq_group
 
             if seq_group.is_finished():
-                finished_before.add(i)
+                finished_before.append(i)
                 continue
 
-            if not isinstance(output, GenericSequence):
-                output = [output]
-
-            #TODO I don't think this is the correct place to obtain the
-            # previous output lens anymore, given async output processing
-            params = seq_group.sampling_params
-            if params is not None and (params.output_kind
-                                       == RequestOutputKind.DELTA):
-                text_buffer_length = params.output_text_buffer_length
-                for seq in seq_group.seqs:
-                    previous_output_lens[seq.seq_id] = (
-                        seq.get_output_len(),
-                        seq.get_output_text_to_return_len(text_buffer_length))
+            if len(outputs) > 1:
+                output = outputs_by_sequence_group[i]
+            else:
+                output = [outputs_by_sequence_group[0][i]]
 
             if not is_async:
                 seq_group.update_num_computed_tokens(
                     scheduled_seq_group.token_chunk_size)
 
-            if seq_group.metrics is not None:
+            if outputs:
                 for o in outputs:
-                    if isinstance(o, SamplerOutput):
+                    if (isinstance(o, SamplerOutput)
+                            and seq_group.metrics is not None):
                         if seq_group.metrics.model_forward_time is not None:
                             seq_group.metrics.model_forward_time += (
                                 o.model_forward_time)
@@ -1382,7 +1369,7 @@ class LLMEngine:
                         seq_group, output, is_async)
 
             if seq_group.is_finished():
-                finished_now.add(i)
+                finished_now.append(i)
 
         # Generate outputs for the requests that finished this iteration
         for i in finished_now:
@@ -1390,8 +1377,7 @@ class LLMEngine:
 
             seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
-            request_output = RequestOutputFactory.create(
-                seq_group, previous_output_lens)
+            request_output = RequestOutputFactory.create(seq_group)
             if request_output:
                 ctx.request_outputs.append(request_output)
 
@@ -1399,7 +1385,7 @@ class LLMEngine:
         # and invoke the request output callback (if there was final output)
         if request_id:
             assert len(indices) == 1
-            skip.add(indices[0])
+            skip.append(indices[0])
 
             if (finished_now
                     and self.process_request_outputs_callback is not None):
@@ -1430,24 +1416,17 @@ class LLMEngine:
 
             seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
-            request_output = RequestOutputFactory.create(
-                seq_group, previous_output_lens)
+            request_output = RequestOutputFactory.create(seq_group)
             if request_output:
                 ctx.request_outputs.append(request_output)
 
         for seq_group in scheduler_outputs.ignored_seq_groups:
             params = seq_group.sampling_params
             if params is not None and params.output_kind == (
-                    RequestOutputKind.DELTA):
-                if not seq_group.is_finished():
-                    continue
-                # Ignored seq groups have no delta, but we must still return
-                # an "empty" RequestOutput when finished
-                for seq in seq_group.seqs:
-                    previous_output_lens[seq.seq_id] = (seq.get_output_len(),
-                                                        seq.output_text)
-            request_output = RequestOutputFactory.create(
-                seq_group, previous_output_lens)
+                    RequestOutputKind.DELTA) and not seq_group.is_finished():
+                continue
+
+            request_output = RequestOutputFactory.create(seq_group)
             if request_output:
                 ctx.request_outputs.append(request_output)
 
@@ -1467,9 +1446,10 @@ class LLMEngine:
             # Tracing
             self.do_tracing(scheduler_outputs)
 
-    @staticmethod
+        return None
+
     def _advance_to_next_step(
-            output: List[SamplerOutput],
+            self, output: List[SamplerOutput],
             seq_group_metadata_list: List[SequenceGroupMetadata],
             scheduled_seq_groups: List[ScheduledSequenceGroup]) -> None:
         """Given model output from a single run, append the tokens to the
@@ -1477,7 +1457,7 @@ class LLMEngine:
         required if the worker is to perform async forward pass to next step.
         """
         for seq_group_metadata, sequence_group_outputs, scheduled_seq_group in \
-                zip(seq_group_metadata_list, output, scheduled_seq_groups):
+            zip(seq_group_metadata_list, output, scheduled_seq_groups):
             seq_group = scheduled_seq_group.seq_group
 
             if seq_group.is_finished():
@@ -1655,17 +1635,16 @@ class LLMEngine:
                               is_async=allow_async_output_proc,
                               is_last_step=True)
 
-            if allow_async_output_proc:
-                if outputs:
-                    assert len(outputs) == 1, (
-                        "Async postprocessor expects only a single output set")
+            if outputs and allow_async_output_proc:
+                assert len(outputs) == 1, (
+                    "Async postprocessor expects only a single output set")
 
                 self._advance_to_next_step(
                     outputs[0], seq_group_metadata_list,
                     scheduler_outputs.scheduled_seq_groups)
 
             # Check if need to run the usual non-async path
-            else:
+            if not allow_async_output_proc:
                 self._process_model_outputs(ctx=ctx)
 
                 # Log stats.
@@ -1769,7 +1748,7 @@ class LLMEngine:
     def do_log_stats(self,
                      scheduler_outputs: Optional[SchedulerOutputs] = None,
                      model_output: Optional[List[SamplerOutput]] = None,
-                     finished_before: Optional[Set[int]] = None) -> None:
+                     finished_before: Optional[List[int]] = None) -> None:
         """Forced log when no requests active."""
         if self.log_stats:
             stats = self._get_stats(scheduler_outputs, model_output,
@@ -1780,7 +1759,7 @@ class LLMEngine:
     def _get_stats(self,
                    scheduler_outputs: Optional[SchedulerOutputs],
                    model_output: Optional[List[SamplerOutput]] = None,
-                   finished_before: Optional[Set[int]] = None) -> Stats:
+                   finished_before: Optional[List[int]] = None) -> Stats:
         """Get Stats to be Logged to Prometheus.
 
         Args:

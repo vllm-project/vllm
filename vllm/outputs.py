@@ -1,8 +1,8 @@
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import List, Optional
 from typing import Sequence as GenericSequence
-from typing import Tuple, Union
+from typing import Union
 
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import RequestOutputKind
@@ -114,11 +114,8 @@ class RequestOutput:
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
 
     @classmethod
-    def from_seq_group(
-        cls,
-        seq_group: SequenceGroup,
-        prior_output_lens: Dict[int, Tuple[int, int]],
-    ) -> Optional["RequestOutput"]:
+    def from_seq_group(cls,
+                       seq_group: SequenceGroup) -> Optional["RequestOutput"]:
         sampling_params = seq_group.sampling_params
         if sampling_params is None:
             raise ValueError(
@@ -148,26 +145,25 @@ class RequestOutput:
         # logprobs are not requested.
         include_logprobs = sampling_params.logprobs is not None
         text_buffer_length = sampling_params.output_text_buffer_length
+        deltas = sampling_params.output_kind == RequestOutputKind.DELTA
 
         outputs = []
         include_prompt = True
         for seq in top_n_seqs:
-            output_token_ids = seq.data._output_token_ids
-            output_logprobs = seq.output_logprobs if include_logprobs else None
             output_text = seq.get_output_text_to_return(text_buffer_length)
+            output_logprobs = seq.output_logprobs if include_logprobs else None
 
-            # Truncate if only deltas are requested
-            prior_out_token_len, prior_text_len = prior_output_lens.get(
-                seq.seq_id, (0, 0))
-            if prior_out_token_len:
-                include_prompt = False
-                output_token_ids = output_token_ids[prior_out_token_len:]
+            if deltas:
+                output_tokens_ids = seq.data.last_appended_tokens
+                seq.data.last_appended_tokens = []
+                last_text_offset = seq.data.last_output_text_offset
+                new_text_len = len(output_text)
+                output_text = output_text[last_text_offset:]
+                seq.data.last_output_text_offset = new_text_len
                 if output_logprobs:
-                    output_logprobs = output_logprobs[prior_out_token_len:]
-            #TODO get deta directly from incremental detokenization to
-            # avoid re-slicing
-            if prior_text_len:
-                output_text = output_text[prior_text_len:]
+                    output_logprobs = output_logprobs[-len(output_tokens_ids):]
+            else:
+                output_token_ids = seq.data._output_token_ids
 
             outputs.append(
                 CompletionOutput(
@@ -265,14 +261,10 @@ class EmbeddingRequestOutput:
 class RequestOutputFactory:
 
     @staticmethod
-    def create(
-            seq_group,
-            previous_output_lens: Dict[int, Tuple[int, int]] = {},  # noqa
-    ):
+    def create(seq_group):
         # Determine the type based on a condition, for example:
         if hasattr(seq_group,
                    'embeddings') and seq_group.embeddings is not None:
             return EmbeddingRequestOutput.from_seq_group(seq_group)
         else:
-            return RequestOutput.from_seq_group(seq_group,
-                                                previous_output_lens)
+            return RequestOutput.from_seq_group(seq_group)
