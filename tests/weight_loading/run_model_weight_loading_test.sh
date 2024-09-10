@@ -1,19 +1,7 @@
 #!/bin/bash
 SUCCESS=0
 
-while getopts "c:" OPT; do
-  case ${OPT} in
-    c ) 
-        CONFIG="$OPTARG"
-        ;;
-    \? )
-        usage
-        exit 1
-        ;;
-  esac
-done
-
-IFS=$'\n' read -d '' -r -a MODEL_CONFIGS < $CONFIG
+IFS=$'\n' read -d '' -r -a MODEL_CONFIGS < "weight_loading/models.txt"
 
 for MODEL_CONFIG in "${MODEL_CONFIGS[@]}"
 do
