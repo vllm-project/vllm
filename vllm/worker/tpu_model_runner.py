@@ -11,7 +11,7 @@ import torch_xla.core.xla_model as xm
 import torch_xla.runtime as xr
 
 from vllm.attention import AttentionMetadata, get_attn_backend
-from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispacther
+from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.logger import init_logger
@@ -601,7 +601,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 batch_idx += 1
             else:
                 for seq_id in seq_ids:
-                    next_token_id = next_token_ids[batch_idx][0]
+                    next_token_id = next_token_ids[batch_idx]
                     seq_outputs.append(
                         SequenceOutput(seq_id, next_token_id,
                                        {next_token_id: zero_logprob}))
@@ -611,7 +611,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         return [SamplerOutput(sampler_outputs)]
 
 
-class ModelWrapper(TorchCompileWrapperWithCustomDispacther):
+class ModelWrapper(TorchCompileWrapperWithCustomDispatcher):
 
     def __init__(self, model: nn.Module):
         self.model = model
@@ -722,6 +722,9 @@ class ModelWrapper(TorchCompileWrapperWithCustomDispacther):
         sampled_token_ids = torch.multinomial(probs,
                                               num_samples,
                                               replacement=True)
+        if num_samples == 1:
+            argmax_token_ids = argmax_token_ids.squeeze(dim=-1)
+            sampled_token_ids = sampled_token_ids.squeeze(dim=-1)
         next_token_ids = torch.where(t != 0, sampled_token_ids,
                                      argmax_token_ids)
         return next_token_ids
