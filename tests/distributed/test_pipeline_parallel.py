@@ -48,6 +48,8 @@ def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL,
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         "float16",
+        "--max-model-len",
+        "8192",
         "--pipeline-parallel-size",
         str(PP_SIZE),
         "--tensor-parallel-size",
@@ -65,6 +67,8 @@ def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL,
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         "bfloat16",
+        "--max-model-len",
+        "8192",
         "--tensor-parallel-size",
         str(max(TP_SIZE, 2)),  # We only use 2 GPUs in the CI.
         "--distributed-executor-backend",
