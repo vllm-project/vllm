@@ -248,7 +248,7 @@ Multimodal Language Models
     - :code:`Qwen/Qwen-VL`, :code:`Qwen/Qwen-VL-Chat`, etc.
     -
   * - :code:`Qwen2VLForConditionalGeneration`
-    - Qwen2-VL
+    - Qwen2-VL (see note)
     - Image\ :sup:`+` / Video\ :sup:`+`
     - :code:`Qwen/Qwen2-VL-2B-Instruct`, :code:`Qwen/Qwen2-VL-7B-Instruct`, :code:`Qwen/Qwen2-VL-72B-Instruct`, etc.
     -
@@ -264,6 +264,10 @@ Multimodal Language Models
 .. note::
   For :code:`openbmb/MiniCPM-V-2`, the official repo doesn't work yet, so we need to use a fork (:code:`HwwwH/MiniCPM-V-2`) for now.
   For more details, please see: https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630
+
+.. note::
+  For Qwen2-VL, the latest version of :code:`transformers` official repo have a bug when loading model config, so we need to use a specific old version :code:`21fac7abba2a37fae86106f87fcf9974fd1e3830` for now.
+  For more details, please see: https://github.com/vllm-project/vllm/pull/7905#issuecomment-2339863055
 
 ----
 
