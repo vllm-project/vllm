@@ -450,10 +450,17 @@ class SiglipVisionTransformer(nn.Module):
             num_hidden_layers_override=num_hidden_layers_override,
         )
 
-        if len(self.encoder.layers) == config.num_hidden_layers:
+        if len(self.encoder.layers) > config.num_hidden_layers:
+            raise ValueError(
+                f"The original encoder only has {config.num_hidden_layers} "
+                f"layers, but you requested {len(self.encoder.layers)} layers."
+            )
+        elif len(self.encoder.layers) == config.num_hidden_layers:
             self.post_layernorm = nn.LayerNorm(embed_dim,
                                                eps=config.layer_norm_eps)
         else:
+            # post_layernorm is unused when we extract intermediate features
+            # In this case, we can skip it to conserve memory
             self.post_layernorm = None
 
         self.use_head = (True if not hasattr(config, "vision_use_head") else
@@ -507,7 +514,7 @@ class SiglipVisionModel(nn.Module):
         )
 
     @property
-    def need_post_layernorm(self) -> bool:
+    def _require_post_layernorm(self) -> bool:
         return self.vision_model.post_layernorm is not None
 
     def get_input_embeddings(self) -> nn.Module:
@@ -536,7 +543,7 @@ class SiglipVisionModel(nn.Module):
         for name, loaded_weight in weights:
             # post_layernorm is optional in SiglipVisionModel
             if ("vision_model.post_layernorm" in name
-                    and not self.need_post_layernorm):
+                    and not self._require_post_layernorm):
                 continue
 
             # omit layers when num_hidden_layers_override is set
