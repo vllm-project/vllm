@@ -92,6 +92,7 @@ class MQLLMEngineClient:
         self.output_loop = asyncio.create_task(self.run_output_handler_loop())
 
         # Loop to check health of the LLMEngine periodically.
+        # Started after the MQLLMEngine is ready.
         self.health_loop: Optional[asyncio.Task] = None
 
     @staticmethod
@@ -171,9 +172,10 @@ class MQLLMEngineClient:
                             self._errored = True
                         exception = rpc_error.exception
                     else:
-                        # MPLLMEngine should always return an RPCError
-                        # when an issue arises. If we are here, we are in a
-                        # bad state and should shut down the server.
+                        # MPLLMEngine should always return an RPCError to
+                        # the output_socket when an issue arises. 
+                        # If we are here, we are in a bad state and 
+                        # should shut down the server.
                         error: BaseException = request_outputs
                         logger.error(
                             "Received Exception %s rather than RPCError from "
