@@ -471,7 +471,7 @@ class FlashAttentionMetadataBuilder(
                     else:
                         # It may be possible to have more blocks allocated due
                         # to lookahead slots of multi-step, however, they are
-                        # not used anyway, so can be safely ignored
+                        # not used anyway, so can be safely ignored.
                         input_block_tables[
                             i, :max_blocks] = block_table[:max_blocks]
 
