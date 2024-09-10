@@ -1,15 +1,14 @@
+import time
 import pytest
 import torch
 from transformers import AutoTokenizer
 
+from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
 from vllm.model_executor.guided_decoding.outlines_logits_processors import (
     JSONLogitsProcessor, RegexLogitsProcessor)
 from vllm.sampling_params import GuidedDecodingParams
-
-# Yoinking fixtures from entrypoints tests, could duplicate them here
-from tests.entrypoints.conftest import sample_regex, sample_json_schema
 
 
 def test_guided_logits_processors(sample_regex, sample_json_schema):
