@@ -1,5 +1,5 @@
 import pathlib
-from typing import Dict, List, Optional, Type, Union
+from typing import Dict, List, Optional, Tuple, Type, Union
 
 import pytest
 import torch
@@ -12,7 +12,8 @@ from vllm.model_executor.models.qwen import (input_mapper_for_qwen,
 from vllm.multimodal.base import MultiModalInputs
 from vllm.multimodal.utils import cached_get_tokenizer, rescale_image_size
 
-from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
+from ..conftest import (IMAGE_ASSETS, HfRunner, ImageAsset, PromptImageInput,
+                        VllmRunner, _ImageAssets)
 from .utils import check_logprobs_close
 
 pytestmark = pytest.mark.vlm
@@ -29,6 +30,8 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "cherry_blossom":
     "Picture 1: <img></img>\nWhat is the season?: ",
 })
+
+HF_MULTIIMAGE_IMAGE_PROMPT = "Picture 1: <img></img>\nPicture 2: <img></img>\nDescribe the two images in detail.\n"  # noqa: E501
 
 ### Multimodal preprocessing tests
 SAMPLE_IMAGE = IMAGE_ASSETS[0].pil_image
@@ -171,14 +174,40 @@ def test_input_mapper_invalid_mm_data(
 
 
 ### End-to-end generation tests
+def get_prompt_with_path(tmp_path: pathlib.PosixPath, prompt: str,
+                         assets: List[ImageAsset]) -> str:
+    """Given a temporary dir path, export one or more image assets into the
+    tempdir & replace its contents with the local path to the string so that
+    the HF version of Qwen-VL can resolve the path and load the image ni its
+    forward() call.
+
+    Args:
+        tmp_path: Tempdir for test under consideration.
+        prompt: Prompt with image placeholders.
+        assets: List of image assets whose len equals the num placeholders.
+    """
+    # Ensure that the number of placeholders matches the number of assets;
+    # If this is not true, the test is probably written incorrectly.
+    assert prompt.count("<img></img>") == len(assets)
+
+    # Replace the placeholders with local paths to the exported assets
+    for asset in assets:
+        image_tmp_path = tmp_path / f"{asset.name}.jpg"
+        asset.pil_image.save(image_tmp_path)
+        prompt = prompt.replace(
+            "<img></img>",
+            f"<img>{image_tmp_path}</img>",
+            1,
+        )
+    return prompt
+
+
 def run_test(
-    tmp_path: pathlib.PosixPath,
     hf_runner: Type[HfRunner],
     vllm_runner: Type[VllmRunner],
-    image_assets: _ImageAssets,
+    inputs: List[Tuple[List[str], PromptImageInput]],
     model: str,
     *,
-    size_factors: List[float],
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
@@ -194,23 +223,6 @@ def run_test(
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """
-    images = [asset.pil_image for asset in image_assets]
-
-    # Export the images to a tempdir and substitute it into the hf prompt;
-    # the contents between <img>/</img> will be ignored by VLLM, but the
-    # transformers implementation for the visual transformer parses this to
-    # reload it in the forward call; the contents are treated as a URL or a
-    # local path.
-    for idx, asset in enumerate(image_assets):
-        image_tmp_path = tmp_path / f"{asset.name}.jpg"
-        asset.pil_image.save(image_tmp_path)
-        HF_IMAGE_PROMPTS[idx] = HF_IMAGE_PROMPTS[idx].replace(
-            "<img></img>", f"<img>{image_tmp_path}</img>")
-
-    inputs_per_image = [(
-        [prompt for _ in size_factors],
-        [rescale_image_size(image, factor) for factor in size_factors],
-    ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
 
     # NOTE: take care of the order. run vLLM first, and then run HF.
     # vLLM needs a fresh new process without cuda initialization.
@@ -231,7 +243,7 @@ def run_test(
                                                 max_tokens,
                                                 num_logprobs=num_logprobs,
                                                 images=images)
-            for prompts, images in inputs_per_image
+            for prompts, images in inputs
         ]
 
     with hf_runner(model, dtype=dtype) as hf_model:
@@ -240,7 +252,7 @@ def run_test(
                                                     max_tokens,
                                                     num_logprobs=num_logprobs,
                                                     images=images)
-            for prompts, images in inputs_per_image
+            for prompts, images in inputs
         ]
 
     for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
@@ -271,16 +283,31 @@ def run_test(
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [8])
 @pytest.mark.parametrize("num_logprobs", [5])
-def test_multimodal_models(tmp_path, hf_runner, vllm_runner, image_assets,
-                           model, size_factors, dtype, max_tokens,
-                           num_logprobs) -> None:
+def test_multimodal_models_single_image(tmp_path: pathlib.PosixPath,
+                                        hf_runner: Type[HfRunner],
+                                        vllm_runner: Type[VllmRunner],
+                                        image_assets: _ImageAssets, model: str,
+                                        size_factors: List[float], dtype: str,
+                                        max_tokens: int,
+                                        num_logprobs: int) -> None:
+    """Tests multimodal models with single image prompts."""
+    images = [asset.pil_image for asset in image_assets]
+
+    prompts = [
+        get_prompt_with_path(tmp_path, prompt, [asset])
+        for prompt, asset in zip(HF_IMAGE_PROMPTS, image_assets)
+    ]
+
+    inputs_per_image = [(
+        [prompt for _ in size_factors],
+        [rescale_image_size(image, factor) for factor in size_factors],
+    ) for image, prompt in zip(images, prompts)]
+
     run_test(
-        tmp_path,
         hf_runner,
         vllm_runner,
-        image_assets,
+        inputs_per_image,
         model,
-        size_factors=size_factors,
         dtype=dtype,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,
@@ -296,7 +323,7 @@ def test_multimodal_models(tmp_path, hf_runner, vllm_runner, image_assets,
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_text_only_qwen_model_can_be_loaded_and_run(
     vllm_runner: Type[VllmRunner],
-    example_prompts,
+    example_prompts: List[str],
     model: str,
     *,
     dtype: str,
