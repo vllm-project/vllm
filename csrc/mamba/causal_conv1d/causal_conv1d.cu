@@ -88,11 +88,10 @@ void set_conv_params_fwd(ConvParamsBase &params,
 at::Tensor
 causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
                   const c10::optional<at::Tensor> &bias_,
-                  const c10::optional<at::Tensor> &seq_idx_,
-                  const c10::optional<at::Tensor> &initial_states_,
-                  const c10::optional<at::Tensor> &final_states_out_,
-                  int64_t max_seq_len,
+                  const c10::optional<at::Tensor> &conv_states,
                   const c10::optional<at::Tensor> &cu_seq_len,
+                  const c10::optional<at::Tensor> &cache_indices,
+                  const c10::optional<at::Tensor> &has_initial_state,
                   bool silu_activation) {
     auto input_type = x.scalar_type();
     auto weight_type = weight.scalar_type();
@@ -141,10 +140,14 @@ causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
 
     ConvParamsBase params;
     auto cu_seq_len_val = cu_seq_len.value();
-    set_conv_params_fwd(params, cu_seq_len_val.sizes()[0], dim, max_seq_len, width, x, weight, out,
+    auto has_initial_state_val = has_initial_state.value();
+    auto cache_indices_val = cache_indices.value();
+    set_conv_params_fwd(params, cu_seq_len_val.sizes()[0], dim, 1, width, x, weight, out,
                         bias_.has_value() ? bias_.value().data_ptr() : nullptr,
                         silu_activation);
     params.cu_seq_len_ptr = cu_seq_len_val.data_ptr();
+    params.has_initial_state_ptr = has_initial_state_val.data_ptr();
+    params.cache_indices_ptr = cache_indices_val.data_ptr();
 
     //if (seq_idx_.has_value()) {
         //params.seq_idx_ptr = seq_idx_.value().data_ptr();
@@ -152,35 +155,34 @@ causal_conv1d_fwd(const at::Tensor &x, const at::Tensor &weight,
         //params.seq_idx_ptr = nullptr;
     //}
 
-    if (initial_states_.has_value()) {
+    if (conv_states.has_value()) {
         // TORCH_CHECK(is_channel_last, "initial_states is only supported for channel last layout");
-        auto initial_states = initial_states_.value();
-        TORCH_CHECK(initial_states.scalar_type() == input_type);
-        TORCH_CHECK(initial_states.is_cuda());
-        CHECK_SHAPE(initial_states, batch_size, dim, width - 1);
+        auto conv_states_ = conv_states.value();
+        TORCH_CHECK(conv_states_.scalar_type() == input_type);
+        TORCH_CHECK(conv_states_.is_cuda());
         // TORCH_CHECK(initial_states.stride(1) == 1);
-        params.initial_states_ptr = initial_states.data_ptr();
-        params.initial_states_batch_stride = initial_states.stride(0);
-        params.initial_states_c_stride = initial_states.stride(1);
-        params.initial_states_l_stride = initial_states.stride(2);
+        params.conv_states_ptr = conv_states_.data_ptr();
+        params.conv_states_batch_stride = conv_states_.stride(0);
+        params.conv_states_c_stride = conv_states_.stride(1);
+        params.conv_states_l_stride = conv_states_.stride(2);
     } else {
-        params.initial_states_ptr = nullptr;
+        params.conv_states_ptr = nullptr;
     }
 
-    if (final_states_out_.has_value()) {
+    // if (final_states_out_.has_value()) {
         // TORCH_CHECK(is_channel_last, "final_states is only supported for channel last layout");
-        auto final_states = final_states_out_.value();
-        TORCH_CHECK(final_states.scalar_type() == input_type);
-        TORCH_CHECK(final_states.is_cuda());
+        // auto final_states = final_states_out_.value();
+        // TORCH_CHECK(final_states.scalar_type() == input_type);
+        // TORCH_CHECK(final_states.is_cuda());
         // CHECK_SHAPE(final_states, batch_size, dim, width - 1);
         // TORCH_CHECK(final_states.stride(1) == 1);
-        params.final_states_ptr = final_states.data_ptr();
-        params.final_states_batch_stride = final_states.stride(0);
-        params.final_states_c_stride = final_states.stride(1);
-        params.final_states_l_stride = final_states.stride(2);
-    } else {
-        params.final_states_ptr = nullptr;
-    }
+        // params.final_states_ptr = final_states.data_ptr();
+        // params.final_states_batch_stride = final_states.stride(0);
+        // params.final_states_c_stride = final_states.stride(1);
+        // params.final_states_l_stride = final_states.stride(2);
+    // } else {
+        // params.final_states_ptr = nullptr;
+    // }
 
     // Otherwise the kernel will be launched from cuda:0 device
     // Cast to char to avoid compiler warning about narrowing
@@ -312,18 +314,23 @@ void causal_conv1d_fwd_kernel(ConvParamsBase params) {
         + channel_id * params.out_c_stride;
     float bias_val = params.bias_ptr == nullptr ? 0.f : float(reinterpret_cast<weight_t *>(params.bias_ptr)[channel_id]);
 
-    input_t *initial_states = params.initial_states_ptr == nullptr ? nullptr
-        : reinterpret_cast<input_t *>(params.initial_states_ptr) + batch_id * params.initial_states_batch_stride + channel_id * params.initial_states_c_stride;
-    input_t *final_states = params.final_states_ptr == nullptr ? nullptr
-        : reinterpret_cast<input_t *>(params.final_states_ptr) + batch_id * params.final_states_batch_stride + channel_id * params.final_states_c_stride;
+    int* has_initial_state = params.has_initial_state_ptr == nullptr ? nullptr
+        : reinterpret_cast<int *>(params.has_initial_state_ptr);
+    bool has_initial_state_bo = has_initial_state != nullptr && (has_initial_state[batch_id] == 1);
 
+    int* cache_indices = params.cache_indices_ptr == nullptr ? nullptr
+        : reinterpret_cast<int *>(params.cache_indices_ptr);
+    int cache_index = cache_indices == nullptr ? batch_id : cache_indices[batch_id];
+
+    input_t *conv_states = params.conv_states_ptr == nullptr ? nullptr
+        : reinterpret_cast<input_t *>(params.conv_states_ptr) + cache_index * params.conv_states_batch_stride + channel_id * params.conv_states_c_stride;
 
     // Thread 0 will load the last elements of the previous chunk, so we initialize those to 0.
     if (tidx == 0) {
         input_t zeros[kNElts] = {0};
-        if (initial_states != nullptr) {
+        if (has_initial_state_bo) {
             #pragma unroll
-            for (int w = 0; w < kWidth - 1; ++w){ zeros[kNElts - 1 - (kWidth - 2) + w ] = initial_states[w]; }
+            for (int w = 0; w < kWidth - 1; ++w){ zeros[kNElts - 1 - (kWidth - 2) + w ] = conv_states[w]; }
         }
         smem_exchange[kNThreads - 1] = reinterpret_cast<vec_t *>(zeros)[0];
     }
@@ -390,7 +397,7 @@ void causal_conv1d_fwd_kernel(ConvParamsBase params) {
         out += kChunkSize;
     }
     int last_thread =  ((seqlen - (kWidth - 1)) - (n_chunks - 1) * kChunkSize) / kNElts;
-    if (final_states != nullptr && tidx == last_thread) { 
+    if (conv_states != nullptr && tidx == last_thread) { 
         input_t x_vals_load[kNElts * 2] = {0};
         // in case we are on the first kWidth tokens
         if (last_thread == 0 && seqlen < kWidth){
@@ -399,21 +406,24 @@ void causal_conv1d_fwd_kernel(ConvParamsBase params) {
             const int offset = seqlen - (kWidth - 1);
             #pragma unroll
             for (int w = 0; w < kWidth - 1; ++w){
-                if ((w - seqlen) >= 0) { final_states[w - seqlen] = final_states[w]; }
+                // pad the existing state
+                if ((w - seqlen) >= 0 && has_initial_state_bo) { conv_states[w - seqlen] = conv_states[w]; }
+                else if (!has_initial_state_bo) { conv_states[w - seqlen] = 0; }
             }
             #pragma unroll
             for (int w = 0; w < kWidth - 1; ++w){
                 if (offset + w >= 0) 
-                    final_states[w] = x_vals_load[offset + w ];
+                    conv_states[w] = x_vals_load[offset + w ];
             }
         }
         else {
+            // in case the final state is in between the threads data
             reinterpret_cast<vec_t *>(x_vals_load)[1] = smem_exchange[last_thread + 1];
             reinterpret_cast<vec_t *>(x_vals_load)[0] = smem_exchange[last_thread];
             const int offset = ((seqlen - (kWidth - 1)) % (kNElts));
             #pragma unroll
             for (int w = 0; w < kWidth - 1; ++w){
-                final_states[w] = x_vals_load[offset + w ];
+                conv_states[w] = x_vals_load[offset + w ];
             }
         }
         

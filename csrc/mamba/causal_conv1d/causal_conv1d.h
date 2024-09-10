@@ -36,6 +36,8 @@ struct ConvParamsBase {
 
     void *__restrict__ conv_state_ptr;
     void *__restrict__ cu_seq_len_ptr;
+    void *__restrict__ has_initial_state_ptr;
+    void *__restrict__ cache_indices_ptr;
 
     void *__restrict__ seq_idx_ptr;
 
@@ -49,6 +51,11 @@ struct ConvParamsBase {
     index_t final_states_batch_stride;
     index_t final_states_l_stride;
     index_t final_states_c_stride;
+
+    void *  conv_states_ptr;
+    index_t conv_states_batch_stride;
+    index_t conv_states_l_stride;
+    index_t conv_states_c_stride;
 };
 
 

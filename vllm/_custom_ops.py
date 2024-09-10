@@ -748,15 +748,14 @@ def ggml_mul_mat_a8(
 # mamba
 def causal_conv1d_fwd(x: torch.Tensor, weight: torch.Tensor,
                       bias_: Optional[torch.Tensor],
-                      seq_idx_: Optional[torch.Tensor],
-                      initial_states_: Optional[torch.Tensor],
-                      final_states_out_: Optional[torch.Tensor],
-                      max_seq_len:int,
+                      conv_states: Optional[torch.Tensor],
                       cu_seq_len: Optional[torch.Tensor],
+                      cache_indices: Optional[torch.Tensor],
+                      has_initial_state: Optional[torch.Tensor],
                       silu_activation: bool) -> torch.Tensor:
-    return torch.ops._C.causal_conv1d_fwd(x, weight, bias_, seq_idx_,
-                                          initial_states_, final_states_out_,
-                                          max_seq_len, cu_seq_len,
+    return torch.ops._C.causal_conv1d_fwd(x, weight, bias_,
+                                          conv_states, cu_seq_len,
+                                          cache_indices, has_initial_state,
                                           silu_activation)
 
 

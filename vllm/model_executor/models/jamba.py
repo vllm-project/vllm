@@ -163,7 +163,6 @@ class JambaMambaMixer(nn.Module):
                     hidden_states,
                     (self.conv_kernel_size - hidden_states.shape[-1], 0))
                 cache_params.conv_state.copy_(conv_states)
-
             hidden_states, _ = causal_conv1d_fn(
                 hidden_states,
                 conv_weights,

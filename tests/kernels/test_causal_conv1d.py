@@ -212,7 +212,7 @@ def test_causal_conv1d_varlen(dim, seqlen, width, has_bias, silu_activation, ity
     torch.random.manual_seed(seqlen + dim + width)
     batch = 1
     seqlens = []
-    nsplits = 1
+    nsplits = 3
     eos_pos = torch.randperm(seqlen - 1)[:nsplits].sort().values
     seqlens.append(torch.diff(torch.cat([torch.tensor([-1]), eos_pos, torch.tensor([seqlen - 1])])).tolist())
     assert sum(seqlens[-1]) == seqlen
@@ -237,10 +237,10 @@ def test_causal_conv1d_varlen(dim, seqlen, width, has_bias, silu_activation, ity
     print(max(seqlens[0]))
     print(cumsum,cumsum.shape)
     print(x.squeeze(0).shape)
-    out = ops.causal_conv1d_fwd(x.squeeze(0), weight, bias, None, final_states,
-                                final_states, 
-                                max(seqlens[0]),
+    out = ops.causal_conv1d_fwd(x.squeeze(0), weight, bias, final_states,
                                 cumsum.cuda(),
+                                torch.arange(cumsum.shape[0],dtype=torch.int32,device=x.device),
+                                torch.ones_like(cumsum,dtype=torch.int32,device=x.device),
                                 activation is not None)
     out_ref = []
     # for b in range(batch):
