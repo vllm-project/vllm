@@ -339,5 +339,4 @@ def run_mp_engine(engine_args: AsyncEngineArgs, usage_context: UsageContext,
     engine = MQLLMEngine.from_engine_args(engine_args=engine_args,
                                           usage_context=usage_context,
                                           ipc_path=ipc_path)
-
     engine.start()
