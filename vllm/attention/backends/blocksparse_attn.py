@@ -367,6 +367,14 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                                       "are not implemented for "
                                       "BlocksparseFlashAttentionImpl")
 
+        # BlocksparseFlashAttention does not support FP8 KV cache.
+        assert k_scale == 1.0 and v_scale == 1.0, (
+            "key/v_scale is not supported in BlocksparseFlashAttention.")
+        
+        #  100% prefill or 100% decode tokens, no mixed case.
+        assert  attn_metadata.num_prefill_tokens == 0 or attn_metadata.num_decode_tokens == 0, (
+            "Chunked prefill are not supported in BlocksparseFlashAttention.")
+
         num_tokens, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
         query = query.view(-1, self.num_heads, self.head_size)
@@ -380,7 +388,6 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
             # Reshape the input keys and values and store them in the cache.
             # If kv_cache is not provided, the new key and value tensors are
             # not cached. This happens during the initial memory profiling run.
-
             PagedAttention.write_to_paged_cache(
                 key,
                 value,
@@ -393,25 +400,37 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
             )
 
         if prefill_meta := attn_metadata.prefill_metadata:
-
             # Prompt run.
-            # normal attention
-            # When block_tables are not filled, it means q and k are the
-            # prompt, and they have the same length.
-
-            assert kv_cache is None \
-                    or prefill_meta.block_tables is None \
-                    or prefill_meta.block_tables.numel() == 0, \
-                "Does not support prefix-enabled attention."
-
-            output = self.bs_attn(
-                q=query,
-                k=key,
-                v=value,
-                cu_seqlens_q=prefill_meta.seq_start_loc,
-                cu_seqlens_k=prefill_meta.seq_start_loc,
-                sm_scale=self.scale,
-            )
+            if kv_cache is None or prefill_meta.block_tables is None \
+                or prefill_meta.block_tables.numel() == 0:
+                # normal attention
+                # When block_tables are not filled, it means q and k are the
+                # prompt, and they have the same length.
+                output = self.bs_attn(
+                    q=query,
+                    k=key,
+                    v=value,
+                    cu_seqlens_q=prefill_meta.seq_start_loc,
+                    cu_seqlens_k=prefill_meta.seq_start_loc,
+                    sm_scale=self.scale,
+                )
+            else:
+                assert prefill_meta.query_start_loc is not None
+                assert prefill_meta.seq_lens_tensor is not None
+                assert prefill_meta.context_lens_tensor is not None
+                # prefix-enabled attention
+                output = self.bs_attn.forward_prefix(
+                    query,
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    prefill_meta.block_tables,
+                    prefill_meta.query_start_loc,
+                    prefill_meta.seq_lens_tensor,
+                    prefill_meta.context_lens_tensor,
+                    sm_scale=self.scale,
+                )
 
         if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.

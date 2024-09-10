@@ -442,3 +442,185 @@ def test_varlen_blocksparse_attention_prefill(
         dtype,
     )
     torch.testing.assert_close(output, ref_output, atol=1e-2, rtol=1e-2)
+
+
+NUM_HEADS = [32]
+NUM_QUERIES_PER_KV = [4]
+HEAD_SIZES = [128]
+DTYPES = [torch.bfloat16]
+
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("num_queries_per_kv", NUM_QUERIES_PER_KV)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("blocksparse_local_blocks", BLOCKSPARSE_LOCAL_BLOCKS)
+@pytest.mark.parametrize("blocksparse_vert_stride", BLOCKSPARSE_VERT_STRIDES)
+@pytest.mark.parametrize("blocksparse_block_size", BLOCKSPARSE_BLOCK_SIZES)
+@pytest.mark.parametrize("blocksparse_homo_heads", BLOCKSPARSE_HOMO_HEADS)
+@torch.inference_mode()
+def test_contexted_kv_attention(
+    num_heads: int,
+    num_queries_per_kv: int,
+    head_size: int,
+    dtype: torch.dtype,
+    device: str,
+    blocksparse_local_blocks: int,
+    blocksparse_vert_stride: int,
+    blocksparse_block_size: int,
+    blocksparse_homo_heads: bool,
+) -> None:
+    random.seed(0)
+    torch.manual_seed(0)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(0)
+    torch.set_default_device(device)
+
+    # Need this, otherwise when we capture the graph the process
+    # for GPU 1 would run on both GPU0 and GPU1 and things would hang
+    #
+    # see also similar issue: https://github.com/Dao-AILab/flash-attention/issues/523
+    torch.cuda.set_device(device)
+
+    cache_dtype = dtype
+    assert num_heads % num_queries_per_kv == 0
+    num_kv_heads = num_heads // num_queries_per_kv
+    scale = float(1.0 / (head_size**0.5))
+    
+    MAX_SEQ_LEN = 8192
+    # First generate some random test cases
+    query_lens = [random.randint(1, MAX_SEQ_LEN) for _ in range(2)]
+    ctx_lens = [max(random.randint(1, MAX_SEQ_LEN)-query_len, 0) for query_len in query_lens]
+    # Then add some edge cases
+    query_lens.extend([
+        # query and context are both very short
+        1,
+        # query is very short, context is long
+        1,
+        # query is long, context is short
+        MAX_SEQ_LEN-1,
+        # context is 0
+        MAX_SEQ_LEN,
+        # query, context length aligns with block size
+        128,
+        # arbitrary query and context length
+        598
+    ])
+    ctx_lens.extend([
+        0,
+        MAX_SEQ_LEN -1,
+        1,
+        0,
+        640,
+        1922
+    ])
+    seq_lens = [a + b for a, b in zip(query_lens, ctx_lens)]
+    
+    BS = len(query_lens)
+    block_size = 16
+    max_block_per_request = MAX_SEQ_LEN // block_size
+    cache_size = max_block_per_request * BS
+
+    # Allocate input tensor for the forward_prefix function
+    num_query_tokens = sum(query_lens)
+    q = torch.empty(num_query_tokens, num_heads, head_size, dtype=dtype)
+    k = torch.zeros(num_query_tokens, num_kv_heads, head_size, dtype=dtype)
+    v = torch.zeros(num_query_tokens, num_kv_heads, head_size, dtype=dtype)
+    
+    # Randomly initialized the query, key, value tensors for the forward function
+    qkv = torch.empty(sum(seq_lens),
+                      num_heads + 2 * num_kv_heads,
+                      head_size,
+                      dtype=dtype)
+    qkv.uniform_(-1e-3, 1e-3)
+    query, key, value = qkv.split(
+        [num_heads, num_kv_heads, num_kv_heads], dim=1)
+    
+    # Allocate kv_cache tensors
+    k_cache = torch.zeros(cache_size,
+                          block_size,
+                          num_kv_heads,
+                          head_size,
+                          dtype=cache_dtype)
+    v_cache = torch.zeros(cache_size,
+                          block_size,
+                          num_kv_heads,
+                          head_size,
+                          dtype=cache_dtype)
+
+    values = torch.arange(0, cache_size, dtype=torch.long)
+    values = values[torch.randperm(cache_size)]
+    block_table = values[:BS * max_block_per_request].view(
+        BS, max_block_per_request)
+    b_seq_len = torch.tensor(seq_lens, dtype=torch.long)
+    b_ctx_len = torch.tensor(ctx_lens, dtype=torch.long)
+    b_start_loc = torch.cumsum(torch.tensor([0] + query_lens,
+                                            dtype=torch.long),
+                               dim=0)
+    # copy kv to cache
+    b_seq_start_loc = torch.cumsum(torch.tensor([0] + seq_lens,
+                                                dtype=torch.long),
+                                   dim=0)
+    for i in range(BS):
+        for j in range(query_lens[i]):
+            q[b_start_loc[i] + j].copy_(query[b_seq_start_loc[i] + b_ctx_len[i] + j])
+            k[b_start_loc[i] + j].copy_(key[b_seq_start_loc[i] + b_ctx_len[i] + j])
+            v[b_start_loc[i] + j].copy_(value[b_seq_start_loc[i] + b_ctx_len[i] + j])
+        cur_ctx = 0
+        block_id = 0
+        while cur_ctx < b_ctx_len[i]:
+            start_loc = b_seq_start_loc[i] + cur_ctx
+            if cur_ctx + block_size > b_ctx_len[i]:
+                end_loc = b_seq_start_loc[i] + b_ctx_len[i]
+            else:
+                end_loc = start_loc + block_size
+            start_slot = block_table[i, block_id] * block_size
+            end_slot = start_slot + end_loc - start_loc
+            k_cache.view(-1, num_kv_heads,
+                         head_size)[start_slot:end_slot].copy_(
+                             key[start_loc:end_loc])
+            v_cache.view(-1, num_kv_heads,
+                         head_size)[start_slot:end_slot].copy_(
+                             value[start_loc:end_loc])
+            cur_ctx += block_size
+            block_id += 1
+    # transpose K_cache[num_blocks, block_size, num_kv_heads, head_size]
+    # to K_cache[num_blocks, num_kv_heads, head_size/8, block_size, 8]
+    k_cache = k_cache.view(-1, block_size, num_kv_heads, head_size // 8,
+                           8).permute(0, 2, 3, 1, 4).contiguous()
+    # transpose V_cache[num_blocks, block_size, num_kv_heads, head_size]
+    # to V_cache[num_blocks, num_kv_heads, head_size, block_size]
+    v_cache = v_cache.view(-1, block_size, num_kv_heads,
+                           head_size).permute(0, 2, 3, 1).contiguous()
+
+    bs_attn_op = LocalStridedBlockSparseAttn(
+        num_heads,
+        MAX_SEQ_LEN,
+        local_blocks=blocksparse_local_blocks,
+        vert_stride=blocksparse_vert_stride,
+        block_size=blocksparse_block_size,
+        device=device,
+        dtype=dtype,
+        homo_head=blocksparse_homo_heads)
+    
+
+    full_ref_output = bs_attn_op(query, key, value, b_seq_start_loc, sm_scale=scale)
+    ref_output = torch.empty(num_query_tokens, num_heads, head_size, dtype=dtype)
+    for i in range(BS):
+        for j in range(query_lens[i]):
+            ref_output[b_start_loc[i] + j].copy_(full_ref_output[b_seq_start_loc[i] + b_ctx_len[i] + j])
+         
+    o = bs_attn_op.forward_prefix(
+                    q,
+                    k,
+                    v,
+                    k_cache,
+                    v_cache,
+                    block_table,
+                    b_start_loc,
+                    b_seq_len,
+                    b_ctx_len,
+                    sm_scale=scale,
+                )
+    atol, rtol = 1e-3, 1e-5
+    torch.testing.assert_close(o, ref_output, atol=atol, rtol=rtol)

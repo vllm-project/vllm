@@ -12,7 +12,8 @@ IS_COMPUTE_8_OR_ABOVE = (torch.cuda.is_available()
                          and current_platform.get_device_capability()[0] >= 8)
 
 if IS_COMPUTE_8_OR_ABOVE:
-    from .blocksparse_attention_kernel import blocksparse_flash_attn_varlen_fwd
+    from .blocksparse_attention_kernel import (blocksparse_flash_attn_varlen_fwd, 
+                                               context_blocksparse_flash_attn_varlen_fwd)
 
 
 class LocalStridedBlockSparseAttn(torch.nn.Module):
@@ -49,6 +50,9 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
         self.use_spda = use_spda
         self.dtype = dtype
         self.device = device
+        # block size used for blocksparse attention, used in `local_blocks`, `vert_stride`.
+        # It is different from kv_cache block size which is he size of of a block in the
+        # kv_cache block table. 
         self.block_size = block_size
         self.q_block_size = q_block_size
         self.homo_head = homo_head
@@ -237,3 +241,63 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
                                 cu_seqlens_k,
                                 cu_seqlens_q=cu_seqlens_q,
                                 sm_scale=sm_scale)
+
+    def forward_prefix(
+            self, 
+            query: torch.Tensor, 
+            key:  torch.Tensor,
+            value:  torch.Tensor,
+            key_cache: torch.Tensor,
+            value_cache: torch.Tensor,
+            block_tables: torch.Tensor,
+            query_start_loc: torch.Tensor,
+            seq_lens_tensor: torch.Tensor,
+            context_lens_tensor: torch.Tensor,
+            sm_scale: float,
+        ):
+        """
+        query, key, value: shape = (num_tokens, num_heads_q/kv, head_size).
+                Support grouped attention, with `q[:, i*r:(i*r + r)]`
+                is correspondent to `k[:, i]`, where `r` is the q/k ratio.
+        key_cache: shape = (num_blocks, num_kv_heads, head_size // x, kv_cache_block_size, x),
+                where x is defined in paged_attn.py.
+        value_cache: shape = (num_blocks, num_kv_heads, head_size, kv_cache_block_size).
+        block_tables: shape = (batch_size, num_blocks).
+        query_start_loc: shape = (batch_size + 1,). 
+                        The cumulative subquery lengths of the sequences in the batch, 
+                        used to index into subquery. E.g., if the subquery length
+                        is [4, 6], it is [0, 4, 10].
+        seq_lens_tensor: shape=(batch_size + 1,).
+                         The sequence length per sequence.
+        context_lens_tensor: shape=(batch_size,).
+                            The context length per sequence (tokens that are computed
+                            so far).
+        sm_scale: softmax scale, default to 1/sqrt(head_size).
+
+        return: tensor of shape as q.
+        """
+        assert(not self.use_spda, "forward_prefix does not support spda")
+        assert (
+            IS_COMPUTE_8_OR_ABOVE
+        ), "Requires compute capability of 8 or above (Ampere or newer) to use \
+            Triton kernel."
+        # TODO: support different block size
+        assert(self.block_size == self.q_block_size or self.q_block_size is None), "Different block size not supported"
+        sm_scale = sm_scale or 1.0 / math.sqrt(q.size(-1))
+        return context_blocksparse_flash_attn_varlen_fwd(
+            query,
+            key,
+            value,
+            key_cache,
+            value_cache,
+            block_tables,
+            # query_start_loc is (batch_size + 1,), does not need the last number.
+            query_start_loc[:-1],
+            seq_lens_tensor,
+            context_lens_tensor,
+            sm_scale,
+            # TODO truncate sparse layout
+            self.sparse_layout,
+            # block size of a sparse block.
+            self.block_size
+        )
