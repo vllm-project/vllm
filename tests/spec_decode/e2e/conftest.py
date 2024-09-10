@@ -163,7 +163,7 @@ def run_equality_correctness_test(
         org_outputs = vllm_model.generate(prompts, sampling_params)
 
     with vllm_runner(**sd_args) as vllm_model:
-        if ensure_all_accepted:
+        if ensure_all_accepted or expected_acceptance_rate is not None:
             # Force log interval to be 0 to catch all metrics.
             stat_logger = vllm_model.model.llm_engine.stat_loggers[
                 'prometheus']
