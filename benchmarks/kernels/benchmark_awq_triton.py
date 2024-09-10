@@ -16,6 +16,8 @@ from vllm.utils import is_hip
 device = "cuda"
 use_proton = False
 benchmark_unit = "gbps"  # can be gpbs or ms
+warmup = 25
+rep = 100
 
 # (qweight_rows, qweight_cols)
 dequantize_benchmark_vals = [
@@ -76,8 +78,8 @@ def awq_dequantize_cuda(qweight: torch.Tensor, scales: torch.Tensor,
     with proton.scope(
             f"cuda_awq_dequantize M={M}, K={K}, G={G}", {
                 "bytes": (qweight.element_size() * M * K +
-                scales.element_size() * K // G * M +
-                qzeros.element_size() * K // G * M),
+                          scales.element_size() * K // G * M +
+                          qzeros.element_size() * K // G * M),
                 "flops":
                 2 * M * K
             }) if use_proton else dummy_context_mgr():
@@ -100,6 +102,7 @@ dequantize_benchmark_obj = triton.testing.Benchmark(
     plot_name="Dequantize performance",
     args={},
 )
+
 
 @triton.testing.perf_report(dequantize_benchmark_obj)
 def bench_dequantize(qweight_rows, qweight_cols, provider):
@@ -133,11 +136,15 @@ def bench_dequantize(qweight_rows, qweight_cols, provider):
     if provider == "cuda":
         ms, min_ms, max_ms = triton.testing.do_bench(
             lambda: awq_dequantize_cuda(qweight, scales, qzeros),
-            quantiles=quantiles)
+            quantiles=quantiles,
+            warmup=warmup,
+            rep=rep)
     if provider == "triton":
         ms, min_ms, max_ms = triton.testing.do_bench(
             lambda: awq_dequantize_triton(qweight, scales, qzeros),
-            quantiles=quantiles)
+            quantiles=quantiles,
+            warmup=warmup,
+            rep=rep)
 
     K = qweight.shape[0]
     M = scales.shape[0]
@@ -192,6 +199,7 @@ gemm_benchmark_obj = triton.testing.Benchmark(
     args={},
 )
 
+
 @triton.testing.perf_report(gemm_benchmark_obj)
 def bench_gemm(N, K, M, splitK, provider):
     group_size = 128
@@ -231,11 +239,15 @@ def bench_gemm(N, K, M, splitK, provider):
     if provider == "cuda":
         ms, min_ms, max_ms = triton.testing.do_bench(
             lambda: awq_gemm_cuda(input, qweight, scales, qzeros, splitK),
-            quantiles=quantiles)
+            quantiles=quantiles,
+            warmup=warmup,
+            rep=rep)
     if provider == "triton":
         ms, min_ms, max_ms = triton.testing.do_bench(
             lambda: awq_gemm_triton(input, qweight, scales, qzeros, splitK),
-            quantiles=quantiles)
+            quantiles=quantiles,
+            warmup=warmup,
+            rep=rep)
     if benchmark_unit == "gbps":
         perf = lambda ms: 2 * M * N * K * 1e-12 / (ms * 1e-3)
         return perf(ms), perf(max_ms), perf(min_ms)
@@ -255,6 +267,8 @@ def main():
     parser.add_argument("--dequantize_rows", type=int)
     parser.add_argument("--dequantize_cols", type=int)
     parser.add_argument("--benchmark_unit", choices=["gbps", "ms"])
+    parser.add_argument("--warmup", type=int)
+    parser.add_argument("--rep", type=int)
     known_args, unknown_args = parser.parse_known_args()
 
     benchmark = known_args.bench
@@ -265,6 +279,13 @@ def main():
     global benchmark_unit
     benchmark_unit = known_args.benchmark_unit
 
+    global warmup
+    if known_args.warmup is not None:
+        warmup = known_args.warmup
+
+    global rep
+    if known_args.warmup is not None:
+        rep = known_args.rep
 
     if known_args.bench is not None:
         benchmark = known_args.bench
@@ -274,25 +295,25 @@ def main():
             proton.start("awq_gemm", hook="triton")
             proton.activate(0)
 
-        if (known_args.gemm_N is not None and
-            known_args.gemm_M is not None and
-            known_args.gemm_K is not None and
-            known_args.gemm_splitK is not None):
+        if (known_args.gemm_N is not None and known_args.gemm_M is not None
+                and known_args.gemm_K is not None
+                and known_args.gemm_splitK is not None):
             global gemm_benchmark_obj
-            gemm_benchmark_obj.x_vals = [(known_args.gemm_N, known_args.gemm_K,
-                known_args.gemm_M, known_args.gemm_splitK)]
+            gemm_benchmark_obj.x_vals = [
+                (known_args.gemm_N, known_args.gemm_K, known_args.gemm_M,
+                 known_args.gemm_splitK)
+            ]
 
         bench_gemm.run(save_path=".", show_plots=True, print_data=True)
         if use_proton:
             proton.deactivate(0)
             proton.finalize()
     elif benchmark == "dequantize":
-
         if (known_args.dequantize_rows is not None
                 and known_args.dequantize_cols is not None):
-            global dequantize_benchmark_obj 
+            global dequantize_benchmark_obj
             dequantize_benchmark_obj.x_vals = [(known_args.dequantize_rows,
-                                               known_args.dequantize_cols)]
+                                                known_args.dequantize_cols)]
         if use_proton:
             proton.start("awq_dequantize", hook="triton")
             proton.activate(0)
