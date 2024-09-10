@@ -74,7 +74,6 @@ def awq_dequantize_cuda(qweight: torch.Tensor, scales: torch.Tensor,
     K = qweight.shape[0]
     M = scales.shape[1]
     G = qweight.shape[0] // scales.shape[0]
-    bytes_per_elem = qweight.element_size()
     with proton.scope(
             f"cuda_awq_dequantize M={M}, K={K}, G={G}", {
                 "bytes": (qweight.element_size() * M * K +
