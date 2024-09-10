@@ -31,8 +31,8 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "Picture 1: <img></img>\nWhat is the season?: ",
 })
 
+HF_MULTIIMAGE_IMAGE_PROMPT = "Picture 1: <img></img>\nPicture 2: <img></img>\nCan you compare these images?\n"  # noqa: E501
 HF_MULTIIMAGE_IMAGE_PROMPT = "Picture 1: <img></img>\nPicture 2: <img></img>\nDescribe the two images in detail.\n"  # noqa: E501
-
 ### Multimodal preprocessing tests
 SAMPLE_IMAGE = IMAGE_ASSETS[0].pil_image
 # These values are specific to Qwen-VL/Chat; we can get these from the model
@@ -175,7 +175,7 @@ def test_input_mapper_invalid_mm_data(
 
 ### End-to-end generation tests
 def get_prompt_with_path(tmp_path: pathlib.PosixPath, prompt: str,
-                         assets: List[ImageAsset]) -> str:
+                         assets: Union[_ImageAssets, List[ImageAsset]]) -> str:
     """Given a temporary dir path, export one or more image assets into the
     tempdir & replace its contents with the local path to the string so that
     the HF version of Qwen-VL can resolve the path and load the image ni its
@@ -211,6 +211,7 @@ def run_test(
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
+    mm_limit: int,
     tensor_parallel_size: int,
     distributed_executor_backend: Optional[str] = None,
 ):
@@ -230,11 +231,12 @@ def run_test(
     # will hurt multiprocessing backend with fork method (the default method).
 
     # max_model_len should be greater than image_feature_size
-    # Qwen encodes images into a fixed content size of 256
+    # Qwen encodes each image into a fixed content size of 256
     with vllm_runner(model,
-                     max_model_len=300,
+                     max_model_len=1024,
                      max_num_seqs=1,
                      dtype=dtype,
+                     limit_mm_per_prompt={"image": mm_limit},
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
                      enforce_eager=True) as vllm_model:
@@ -298,7 +300,7 @@ def test_multimodal_models_single_image(tmp_path: pathlib.PosixPath,
         for prompt, asset in zip(HF_IMAGE_PROMPTS, image_assets)
     ]
 
-    inputs_per_image = [(
+    inputs = [(
         [prompt for _ in size_factors],
         [rescale_image_size(image, factor) for factor in size_factors],
     ) for image, prompt in zip(images, prompts)]
@@ -306,11 +308,58 @@ def test_multimodal_models_single_image(tmp_path: pathlib.PosixPath,
     run_test(
         hf_runner,
         vllm_runner,
-        inputs_per_image,
+        inputs,
         model,
         dtype=dtype,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,
+        mm_limit=1,
+        tensor_parallel_size=1,
+    )
+
+
+@pytest.mark.parametrize("model", multimodal_models)
+@pytest.mark.parametrize(
+    "size_factors",
+    [
+        # No image
+        [],
+        # Single-scale
+        [1.0],
+        # Single-scale, batched
+        [1.0, 1.0, 1.0],
+        # Multi-scale
+        [0.25, 0.5, 1.0],
+    ],
+)
+@pytest.mark.parametrize("dtype", ["bfloat16"])
+@pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("num_logprobs", [5])
+def test_multimodal_models_multi_image(tmp_path: pathlib.PosixPath,
+                                       hf_runner: Type[HfRunner],
+                                       vllm_runner: Type[VllmRunner],
+                                       image_assets: _ImageAssets, model: str,
+                                       size_factors: List[float], dtype: str,
+                                       max_tokens: int,
+                                       num_logprobs: int) -> None:
+    """Tests multimodal models with multi-image prompts."""
+    images = [asset.pil_image for asset in image_assets]
+    # Put all of the images into one prompt.
+    prompt = get_prompt_with_path(tmp_path, HF_MULTIIMAGE_IMAGE_PROMPT,
+                                  image_assets)
+    inputs = [([prompt for _ in size_factors],
+               [[rescale_image_size(image, factor) for image in images]
+                for factor in size_factors])]
+
+    run_test(
+        hf_runner,
+        vllm_runner,
+        inputs,
+        model,
+        dtype=dtype,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        mm_limit=2,
         tensor_parallel_size=1,
     )
 
