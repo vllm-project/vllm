@@ -174,7 +174,7 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
     parser.add_argument(
         "--tool-call-parser",
         type=str,
-        choices=["mistral", "hermes"],
+        choices=["mistral", "hermes", "granite"],
         default=None,
         help=
         "Select the tool call parser depending on the model that you're using."
