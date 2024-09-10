@@ -47,7 +47,7 @@ try:
     from importlib import util
     is_hpu = util.find_spec('habana_frameworks') is not None
 except Exception:
-    pass    
+    pass
 
 if is_tpu:
     # people might install pytorch built with cuda but run on tpu

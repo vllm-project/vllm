@@ -349,9 +349,9 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         else:
             # Embedding layer only need expand op
             self.punica_wrapper.add_expand(full_output,
-                                        full_lora_a_embeddings,
-                                        self.lora_b_stacked,
-                                        add_input=True)
+                                           full_lora_a_embeddings,
+                                           self.lora_b_stacked,
+                                           add_input=True)
         return full_output.view_as(full_output_org)
 
     @classmethod

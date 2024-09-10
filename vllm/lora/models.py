@@ -431,18 +431,19 @@ class LoRAModelManager(AdapterModelManager):
                                             dtype=torch.long,
                                             device=get_device())
             self.sampler_indices = torch.empty(self.max_num_batched_tokens,
-                                            dtype=torch.long,
-                                            device=get_device())
-            self.sampler_indices_padded = torch.empty(self.max_num_batched_tokens,
-                                                    dtype=torch.long,
-                                                    device=get_device())
+                                               dtype=torch.long,
+                                               device=get_device())
+            self.sampler_indices_padded = torch.empty(
+                self.max_num_batched_tokens,
+                dtype=torch.long,
+                device=get_device())
             self.embeddings_indices = torch.empty(2,
-                                                self.max_num_batched_tokens,
-                                                dtype=torch.long,
-                                                device=get_device())
+                                                  self.max_num_batched_tokens,
+                                                  dtype=torch.long,
+                                                  device=get_device())
             self.long_lora_indices = torch.empty(self.max_num_batched_tokens,
-                                                dtype=torch.long,
-                                                device=get_device())
+                                                 dtype=torch.long,
+                                                 device=get_device())
         else:
             self.punica_wrapper = PunicaWrapper(max_num_batched_tokens,
                                                 max_batches=self.max_num_seqs,

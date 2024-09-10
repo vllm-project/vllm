@@ -527,14 +527,13 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             htcore.hpu_set_env()
         with HabanaMemoryProfiler() as m:
             with HabanaMemoryProfiler() as m_getmodel:
-                self.model = get_model(
-                    model_config=self.model_config,
-                    device_config=self.device_config,
-                    load_config=self.load_config,
-                    lora_config=self.lora_config,
-                    parallel_config=self.parallel_config,
-                    scheduler_config=self.scheduler_config,
-                    cache_config=self.cache_config)
+                self.model = get_model(model_config=self.model_config,
+                                       device_config=self.device_config,
+                                       load_config=self.load_config,
+                                       lora_config=self.lora_config,
+                                       parallel_config=self.parallel_config,
+                                       scheduler_config=self.scheduler_config,
+                                       cache_config=self.cache_config)
             msg = ("Pre-loading model weights on "
                    f"{next(self.model.parameters()).device} "
                    f"took {m_getmodel.get_summary_string()}")
@@ -1224,7 +1223,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             block_tables = {group_id: [_PAD_BLOCK_ID] * num_blocks}
         prompt_token_ids = [0] * input_len
         output_token_ids = [1] * output_len
-        prompt_token_ids_array = array('l', [1,3,5,7,9])  # noqa: F821
+        prompt_token_ids_array = array('l', [1, 3, 5, 7, 9])  # noqa: F821
         seq_data = SequenceData(prompt_token_ids_array)
         seq_data.output_token_ids = output_token_ids
         return SequenceGroupMetadata(request_id=str(group_id),
@@ -1738,6 +1737,7 @@ class HabanaModelRunner(
         seen = cfg in self.seen_configs
         self.seen_configs.add(cfg)
         if not seen and not warmup_mode:
+            import pdb; pdb.set_trace()
             phase = 'prompt' if is_prompt else 'decode'
             logger.warning("Configuration: (%s, %s, %s) was not warmed-up!",
                            phase, batch_size, seq_len)
@@ -1776,6 +1776,7 @@ class HabanaModelRunner(
         batch_size = input_tokens.size(0)
         seq_len = self._seq_len(attn_metadata)
         use_graphs = self._use_graphs(batch_size, seq_len, is_prompt)
+        import pdb; pdb.set_trace()
         self._check_config(batch_size, seq_len, is_prompt, warmup_mode)
         execute_model_kwargs = {
             "input_ids": input_tokens,

@@ -355,7 +355,8 @@ class DefaultModelLoader(BaseModelLoader):
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(self.load_config.device):
                 model = _initialize_model(model_config, self.load_config,
-                                          lora_config, cache_config, scheduler_config)
+                                          lora_config, cache_config,
+                                          scheduler_config)
             logger.info("Loading weights on %s ...", self.load_config.device)
             model.load_weights(
                 self._get_weights_iterator(model_config.model,
