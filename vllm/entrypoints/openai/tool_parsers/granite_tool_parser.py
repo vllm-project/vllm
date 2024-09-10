@@ -88,6 +88,20 @@ class GraniteToolParser(ToolParser):
                     tools_called=False, tool_calls=[], content=model_output
                 )
 
+    def extract_tool_calls_streaming(
+        self,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
+    ) -> Union[DeltaMessage, None]:
+        raise NotImplementedError(
+            "streaming tool call parsing has not yet been implemented"
+            "for Granite")
+
+
 
 def extract_full_json(text, start_index, end_index=None):
     """Extracts the full JSON object from text starting at `start_index` and optionally up to `end_index`."""
