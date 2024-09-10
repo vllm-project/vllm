@@ -9,6 +9,7 @@ from typing import (Callable, Deque, Dict, Iterable, List, Optional, Set,
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
+from vllm.core.pinned_caching_manager import PinnedCachingManager
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -335,6 +336,11 @@ class Scheduler:
             num_cpu_blocks=num_cpu_blocks,
             sliding_window=self.cache_config.sliding_window,
             enable_caching=self.cache_config.enable_prefix_caching)
+
+        if self.cache_config.enable_prefix_caching:
+            refresh_time = self.cache_config.pinned_caching_refresh_time
+            max_blocks = self.cache_config.pinned_caching_ratio * num_gpu_blocks
+            self.pinned_caching_manager = PinnedCachingManager(refresh_time=refresh_time, max_blocks=max_blocks)
 
         # Sequence groups in the WAITING state.
         # Contain new prefill or preempted requests.
@@ -866,6 +872,10 @@ class Scheduler:
                 curr_loras.add(lora_int_id)
             waiting_queue.popleft()
             self._allocate_and_set_running(seq_group)
+
+            if self.cache_config.enable_prefix_caching:
+                self._add_pinned_caching_seq(seq_group)
+
             seq_group.init_multi_step(
                 num_scheduler_steps=self._get_num_lookahead_slots(
                     is_prefill=True) + 1)
@@ -1114,6 +1124,9 @@ class Scheduler:
 
         if not self.cache_config.enable_prefix_caching:
             common_computed_block_nums = []
+        else:
+            self._free_expired_pinned_cached_seq(now)
+
 
         allow_async_output_proc: bool = self.use_async_output_proc
 
@@ -1259,6 +1272,11 @@ class Scheduler:
 
     def free_seq(self, seq: Sequence) -> None:
         """Free a sequence from a block table."""
+        if self.cache_config.enable_prefix_caching and seq.pinned_caching:
+            # if seq is prefixed one, delay free operation.
+            # it will be free after expiration.
+            return
+
         self.block_manager.free(seq)
 
     def _free_finished_seqs(self, seq_group: SequenceGroup) -> None:
@@ -1305,6 +1323,39 @@ class Scheduler:
         self.block_manager.allocate(seq_group)
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             seq.status = SequenceStatus.RUNNING
+
+    def _find_last_cached_block_id(self, seq_id: int) -> int:
+        """Finds the last block in the list with a non-None cached content hash."""
+        blocks = self.block_manager.block_tables[seq_id]._blocks
+        for block in reversed(blocks):
+            if block._cached_content_hash is not None:
+                return block.block_id
+        return None
+
+    def _add_pinned_caching_seq(self, seq_group: SequenceGroup) -> None:
+        running_seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
+
+        if not running_seqs:
+            return
+
+        # NOTE: Here we assume that all sequences in the group have the same
+        # prompt.
+        seq = running_seqs[0]
+        if seq.pinned_caching:
+            device = Device.GPU
+            last_cached_block_id = self._find_last_cached_block_id(seq.seq_id)
+            num_blocks = self.block_manager.block_tables[seq.seq_id]
+
+            if last_cached_block_id is not None:
+                block_tracker = self.block_manager.block_allocator._allocators[device]._block_tracker[last_cached_block_id]
+                self.pinned_caching_manager.add_ttl_expiration_seq(seq, num_blocks, block_tracker)
+
+    def _free_expired_pinned_cached_seq(self, current_time: float) -> None:
+        # free expired sequence blocks
+        self.pinned_caching_manager.expire_seqs(current_time)
+        expired_seq = self.pinned_caching_manager.get_and_reset_expired_seq()
+        for exp_seq in expired_seq:
+            self.block_manager.free(exp_seq)
 
     def _append_slots(
         self,

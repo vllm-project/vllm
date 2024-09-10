@@ -462,6 +462,7 @@ class CompletionRequest(OpenAIBaseModel):
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
     allowed_token_ids: Optional[List[int]] = None
     prompt_logprobs: Optional[int] = None
+    pinned_caching: bool = False
     # doc: end-completion-sampling-params
 
     # doc: begin-completion-extra-params
@@ -548,7 +549,7 @@ class CompletionRequest(OpenAIBaseModel):
             stop_token_ids=self.stop_token_ids,
             logprobs=self.logprobs,
             ignore_eos=self.ignore_eos,
-            max_tokens=max_tokens if not echo_without_generation else 1,
+            max_tokens=max_tokens if not echo_without_generation and not self.pinned_caching else 1,
             min_tokens=self.min_tokens,
             use_beam_search=self.use_beam_search,
             early_stopping=self.early_stopping,
@@ -559,6 +560,7 @@ class CompletionRequest(OpenAIBaseModel):
             length_penalty=self.length_penalty,
             logits_processors=logits_processors,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
+            pinned_caching=self.pinned_caching,
         )
 
     @model_validator(mode="before")

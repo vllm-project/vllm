@@ -333,6 +333,7 @@ class Sequence:
         block_size: The block size of the sequence. Should be the same as the
             block size used by the block manager and cache engine.
         eos_token_id: The end-of-sequence (EOS) token id recognized by this LLM.
+        pinned_caching: use prefix pinned caching.
         lora_request: LoRA request.
         prompt_adapter_request: Prompt Adapter request.
         from_decoder_prompt: Construct Sequence from LLMInputs decoder prompt
@@ -347,6 +348,7 @@ class Sequence:
         inputs: "LLMInputs",
         block_size: int,
         eos_token_id: Optional[int] = None,
+        pinned_caching: Optional[bool] = False,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         from_decoder_prompt: bool = True,
@@ -355,6 +357,7 @@ class Sequence:
         self.inputs = inputs
         self.block_size = block_size
         self.eos_token_id = eos_token_id
+        self.pinned_caching = pinned_caching
         self.lora_request = lora_request
         self.prompt_adapter_request = prompt_adapter_request
         self.from_decoder_prompt = from_decoder_prompt

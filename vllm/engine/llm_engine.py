@@ -682,7 +682,7 @@ class LLMEngine:
         eos_token_id = self._get_eos_token_id(lora_request)
 
         seq = Sequence(seq_id, processed_inputs, block_size, eos_token_id,
-                       lora_request, prompt_adapter_request)
+                       params.pinned_caching, lora_request, prompt_adapter_request)
 
         encoder_seq = None
         if 'encoder_prompt_token_ids' in processed_inputs:
