@@ -149,7 +149,7 @@ class EngineArgs:
     otlp_traces_endpoint: Optional[str] = None
     collect_detailed_traces: Optional[str] = None
     disable_async_output_proc: bool = False
-    cpu_draft_worker: Optional[bool] = None
+    cpu_draft_worker: Optional[bool] = False
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -682,7 +682,7 @@ class EngineArgs:
                             action=StoreBoolean,
                             default=EngineArgs.cpu_draft_worker,
                             nargs="?",
-                            const="True",
+                            const="False",
                             help='Use CPU to run draft model.')
 
         parser.add_argument('--model-loader-extra-config',
