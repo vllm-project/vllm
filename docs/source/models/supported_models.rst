@@ -266,7 +266,7 @@ Multimodal Language Models
   For more details, please see: https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630
 
 .. note::
-  For Qwen2-VL, the latest version of :code:`transformers` official repo have a bug when loading model config, so we need to use a specific old version :code:`21fac7abba2a37fae86106f87fcf9974fd1e3830` for now.
+  For :code:`Qwen2-VL`, the latest release of :code:`huggingface/transformers` doesn't work yet, so we need to use a developer version (:code:`21fac7abba2a37fae86106f87fcf9974fd1e3830`) for now.
   For more details, please see: https://github.com/vllm-project/vllm/pull/7905#issuecomment-2339863055
 
 ----
