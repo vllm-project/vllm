@@ -16,11 +16,13 @@ Easy, fast, and cheap LLM serving for everyone
 
 
 ---
+
 **vLLM, AMD, Anyscale Meet & Greet at [Ray Summit 2024](http://raysummit.anyscale.com) (Monday, Sept 30th, 5-7pm PT) at Marriott Marquis San Francisco**
 
 We are excited to announce our special vLLM event in collaboration with AMD and Anyscale.
 Join us to learn more about recent advancements of vLLM on MI300X.
 Register [here](https://lu.ma/db5ld9n5) and be a part of the event!
+
 ---
 
 *Latest News* 🔥
