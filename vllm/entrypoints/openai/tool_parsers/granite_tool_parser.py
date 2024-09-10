@@ -2,14 +2,11 @@ import json
 import re
 from typing import Sequence, Union
 
-
-from vllm.entrypoints.openai.protocol import (
-    DeltaMessage,
-    ExtractedToolCallInformation,
-    FunctionCall,
-    ToolCall,
-)
-from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import ToolParser
+from vllm.entrypoints.openai.protocol import (DeltaMessage,
+                                              ExtractedToolCallInformation,
+                                              FunctionCall, ToolCall)
+from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
+    ToolParser)
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 

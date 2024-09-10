@@ -26,9 +26,9 @@ from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing,
                                                     PromptAdapterPath,
                                                     TextTokensPrompt)
-from vllm.entrypoints.openai.tool_parsers import (Hermes2ProToolParser,
+from vllm.entrypoints.openai.tool_parsers import (GraniteToolParser,
+                                                  Hermes2ProToolParser,
                                                   MistralToolParser,
-                                                  GraniteToolParser,
                                                   ToolParser)
 from vllm.inputs import TokensPrompt
 from vllm.logger import init_logger
