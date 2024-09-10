@@ -267,9 +267,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     # doc: end-chat-completion-extra-params
 
-    def to_sampling_params(self,
-                           guided_decoding: Optional[GuidedDecodingParams],
-                           default_max_tokens: int) -> SamplingParams:
+    def to_sampling_params(self, default_max_tokens: int) -> SamplingParams:
         max_tokens = self.max_tokens
         if max_tokens is None:
             max_tokens = default_max_tokens
@@ -277,6 +275,20 @@ class ChatCompletionRequest(OpenAIBaseModel):
         prompt_logprobs = self.prompt_logprobs
         if prompt_logprobs is None and self.echo:
             prompt_logprobs = self.top_logprobs
+
+        guided_json_object = None
+        if (self.response_format is not None
+                and self.response_format.type == "json_object"):
+            guided_json_object = True
+
+        guided_decoding = GuidedDecodingParams(
+            json=self._get_guided_json_from_tool() or self.guided_json,
+            regex=self.guided_regex,
+            choice=self.guided_choice,
+            grammar=self.guided_grammar,
+            json_object=guided_json_object,
+            backend=self.guided_decoding_backend,
+            whitespace_pattern=self.guided_whitespace_pattern)
 
         return SamplingParams.from_optional(
             n=self.n,
@@ -305,6 +317,24 @@ class ChatCompletionRequest(OpenAIBaseModel):
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias)
+
+    def _get_guided_json_from_tool(
+            self) -> Optional[Union[str, dict, BaseModel]]:
+        # user has chosen to not use any tool
+        if self.tool_choice == "none" or self.tools is None:
+            return None
+
+        # user has chosen to use a named tool
+        if type(self.tool_choice) is ChatCompletionNamedToolChoiceParam:
+            tool_name = self.tool_choice.function.name
+            tools = {tool.function.name: tool.function for tool in self.tools}
+            if tool_name not in tools:
+                raise ValueError(
+                    f"Tool '{tool_name}' has not been passed in `tools`.")
+            tool = tools[tool_name]
+            return tool.parameters
+
+        return None
 
     @model_validator(mode="before")
     @classmethod
@@ -499,9 +529,7 @@ class CompletionRequest(OpenAIBaseModel):
 
     # doc: end-completion-extra-params
 
-    def to_sampling_params(self,
-                           guided_decoding: Optional[GuidedDecodingParams],
-                           default_max_tokens: int) -> SamplingParams:
+    def to_sampling_params(self, default_max_tokens: int) -> SamplingParams:
         max_tokens = self.max_tokens
         if max_tokens is None:
             max_tokens = default_max_tokens
@@ -511,6 +539,20 @@ class CompletionRequest(OpenAIBaseModel):
             prompt_logprobs = self.logprobs
 
         echo_without_generation = self.echo and self.max_tokens == 0
+
+        guided_json_object = None
+        if (self.response_format is not None
+                and self.response_format.type == "json_object"):
+            guided_json_object = True
+
+        guided_decoding = GuidedDecodingParams(
+            json=self.guided_json,
+            regex=self.guided_regex,
+            choice=self.guided_choice,
+            grammar=self.guided_grammar,
+            json_object=guided_json_object,
+            backend=self.guided_decoding_backend,
+            whitespace_pattern=self.guided_whitespace_pattern)
 
         return SamplingParams.from_optional(
             n=self.n,

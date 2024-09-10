@@ -98,8 +98,6 @@ class OpenAIServingCompletion(OpenAIServing):
             tokenizer = await self.async_engine_client.get_tokenizer(
                 lora_request)
 
-            guided_decoding_params = self._create_guided_decoding_params(
-                request)
             prompts = list(
                 self._tokenize_prompt_input_or_inputs(
                     request,
@@ -111,7 +109,6 @@ class OpenAIServingCompletion(OpenAIServing):
 
             for i, prompt_inputs in enumerate(prompts):
                 sampling_params = request.to_sampling_params(
-                    guided_decoding_params,
                     default_max_tokens=self.max_model_len -
                     len(prompt_inputs["prompt_token_ids"]))
 

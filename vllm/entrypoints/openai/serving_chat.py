@@ -7,7 +7,6 @@ from typing import Sequence as GenericSequence
 from typing import Union
 
 from fastapi import Request
-from pydantic import BaseModel
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import AsyncEngineClient
@@ -170,14 +169,6 @@ class OpenAIServingChat(OpenAIServing):
 
         request_id = f"chat-{random_uuid()}"
         try:
-            guided_decoding_params = \
-                self._create_guided_decoding_params(request)
-            # Some requests for tools will use guided decoding
-            # TODO: validate against any conflicts here?
-            if (guided_json :=
-                    self._get_guided_json_from_tool(request)) is not None:
-                guided_decoding_params.json = guided_json
-
             if isinstance(prompt, str):
                 prompt_inputs = self._tokenize_prompt_input(
                     request,
@@ -196,7 +187,6 @@ class OpenAIServingChat(OpenAIServing):
             assert prompt_inputs is not None
 
             sampling_params = request.to_sampling_params(
-                guided_decoding_params,
                 default_max_tokens=self.max_model_len -
                 len(prompt_inputs["prompt_token_ids"]))
 
@@ -800,26 +790,3 @@ class OpenAIServingChat(OpenAIServing):
             and delta_message.tool_calls[0].function.arguments is not None
             and output.finish_reason is not None
         )
-
-    @staticmethod
-    def _get_guided_json_from_tool(
-        request: ChatCompletionRequest
-    ) -> Optional[Union[str, dict, BaseModel]]:
-        # user has chosen to not use any tool
-        if request.tool_choice == "none" or request.tools is None:
-            return None
-
-        # user has chosen to use a named tool
-        if type(request.tool_choice) is ChatCompletionNamedToolChoiceParam:
-            tool_name = request.tool_choice.function.name
-            tools = {
-                tool.function.name: tool.function
-                for tool in request.tools
-            }
-            if tool_name not in tools:
-                raise ValueError(
-                    f"Tool '{tool_name}' has not been passed in `tools`.")
-            tool = tools[tool_name]
-            return tool.parameters
-
-        return None
