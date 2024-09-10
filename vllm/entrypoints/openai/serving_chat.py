@@ -109,7 +109,7 @@ class OpenAIServingChat(OpenAIServing):
         # success status before we actually start generating text :).
         if self.engine_client.errored:
             raise self.engine_client.dead_error
-        
+
         try:
             (
                 lora_request,
