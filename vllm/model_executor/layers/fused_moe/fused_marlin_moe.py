@@ -23,8 +23,9 @@ def single_marlin_moe(
     num_bits: int = 8,
 ) -> torch.Tensor:
     """
-    This function computes a Marlin MoE MMM using weights w
-    and top-k gating mechanism. It is meant for testing and debugging.
+    This function computes the multiplication of hidden_states with expert
+    weights used in Marlin MoE, using weights w and top-k gating mechanism.
+    Its purpose is testing and debugging the fused MoE kernel.
 
     Parameters:
     - hidden_states (torch.Tensor): The input tensor to the Marlin Mul.
@@ -50,9 +51,7 @@ def single_marlin_moe(
     assert gating_output.shape[1] == w.shape[0], "Number of experts mismatch"
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
     assert w.is_contiguous(), "Expert weights must be contiguous"
-    assert hidden_states.dtype in [
-        torch.float32, torch.float16, torch.bfloat16
-    ]
+    assert hidden_states.dtype == torch.float16
     assert num_bits in [4, 8]
 
     M, K = hidden_states.shape
@@ -119,7 +118,7 @@ def fused_marlin_moe(
     - w2 (torch.Tensor): The second set of expert weights.
     - gating_output (torch.Tensor): The output of the gating operation
         (before softmax).
-    - g_idx1 (torch.Tensor): The fist set of act_order indices.
+    - g_idx1 (torch.Tensor): The first set of act_order indices.
     - g_idx2 (torch.Tensor): The second set of act_order indices.
     - perm1 (torch.Tensor): The first act_order input permutation.
     - perm2 (torch.Tensor): The second act_order input permutation.

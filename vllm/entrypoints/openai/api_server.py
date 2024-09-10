@@ -35,11 +35,13 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DetokenizeResponse,
                                               EmbeddingRequest,
                                               EmbeddingResponse, ErrorResponse,
+                                              LoadLoraAdapterRequest,
                                               TokenizeRequest,
-                                              TokenizeResponse)
-# yapf: enable
+                                              TokenizeResponse,
+                                              UnloadLoraAdapterRequest)
 from vllm.entrypoints.openai.rpc.client import AsyncEngineRPCClient
 from vllm.entrypoints.openai.rpc.server import run_rpc_server
+# yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
@@ -233,7 +235,7 @@ def mount_metrics(app: FastAPI):
         metrics_route = Mount("/metrics", make_asgi_app())
 
     # Workaround for 307 Redirect for /metrics
-    metrics_route.path_regex = re.compile('^/metrics(?P<path>.*)$')
+    metrics_route.path_regex = re.compile("^/metrics(?P<path>.*)$")
     app.routes.append(metrics_route)
 
 
@@ -283,11 +285,14 @@ async def show_version():
 @router.post("/v1/chat/completions")
 async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
+
     generator = await openai_serving_chat.create_chat_completion(
         request, raw_request)
+
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
+
     elif isinstance(generator, ChatCompletionResponse):
         return JSONResponse(content=generator.model_dump())
 
@@ -338,6 +343,40 @@ if envs.VLLM_TORCH_PROFILER_DIR:
         await async_engine_client.stop_profile()
         logger.info("Profiler stopped.")
         return Response(status_code=200)
+
+
+if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
+    logger.warning(
+        "Lora dynamic loading & unloading is enabled in the API server. "
+        "This should ONLY be used for local development!")
+
+    @router.post("/v1/load_lora_adapter")
+    async def load_lora_adapter(request: LoadLoraAdapterRequest):
+        response = await openai_serving_chat.load_lora_adapter(request)
+        if isinstance(response, ErrorResponse):
+            return JSONResponse(content=response.model_dump(),
+                                status_code=response.code)
+
+        response = await openai_serving_completion.load_lora_adapter(request)
+        if isinstance(response, ErrorResponse):
+            return JSONResponse(content=response.model_dump(),
+                                status_code=response.code)
+
+        return Response(status_code=200, content=response)
+
+    @router.post("/v1/unload_lora_adapter")
+    async def unload_lora_adapter(request: UnloadLoraAdapterRequest):
+        response = await openai_serving_chat.unload_lora_adapter(request)
+        if isinstance(response, ErrorResponse):
+            return JSONResponse(content=response.model_dump(),
+                                status_code=response.code)
+
+        response = await openai_serving_completion.unload_lora_adapter(request)
+        if isinstance(response, ErrorResponse):
+            return JSONResponse(content=response.model_dump(),
+                                status_code=response.code)
+
+        return Response(status_code=200, content=response)
 
 
 def build_app(args: Namespace) -> FastAPI:
@@ -422,7 +461,8 @@ async def init_app(
         request_logger=request_logger,
         chat_template=args.chat_template,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
-    )
+        enable_auto_tools=args.enable_auto_tool_choice,
+        tool_parser=args.tool_call_parser)
     openai_serving_completion = OpenAIServingCompletion(
         async_engine_client,
         model_config,
