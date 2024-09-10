@@ -8,7 +8,7 @@ from typing import Optional
 import torch
 
 from vllm import LLM, SamplingParams
-from vllm.profiler import nm_profile
+from vllm.profiler import layerwise_profile
 
 BATCH_SIZE_DEFAULT = 1
 PROMPT_LEN_DEFAULT = 256
@@ -78,7 +78,7 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
               f"larger than max_num_batched_tokens ({max_num_batched_tokens}) "
               f"and therefore cannot be run in a single profile step, please "
               f"choose a smaller batch size or prompt length, or increase "
-              f"--max_num_batched_tokens")
+              f"--max-num-batched-tokens")
         sys.exit(-1)
     if batch_size >= max_num_seqs:
         print(
@@ -106,12 +106,12 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
             inputs={'prompt_token_ids': prompt_token_ids},
             params=sampling_params)
 
-    with nm_profile() as prefill_prof:
+    with layerwise_profile() as prefill_prof:
         llm.llm_engine.step()  # First step is prefill
 
     decode_results_list = []
     for x in range(args.output_len - 1):
-        with nm_profile() as decode_prof:
+        with layerwise_profile() as decode_prof:
             llm.llm_engine.step()
         decode_results_list.append(decode_prof.results)
 

@@ -1,3 +1,4 @@
+import os
 import argparse
 import copy
 import json
@@ -426,6 +427,9 @@ if __name__ == "__main__":
 
     output_directory = args.output_directory if args.output_directory else Path(
         args.json_trace).parent
+    
+    if not os.path.exists(output_directory):
+        os.makedirs(output_directory)
 
     main(Path(args.json_trace), output_directory, depth, args.plot_metric,
          make_names_unique, args.top_k, args.fold_json_node)

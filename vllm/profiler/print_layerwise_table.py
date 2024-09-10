@@ -2,7 +2,7 @@ import argparse
 import json
 from typing import Dict
 
-from vllm.profiler.nm_profile import ModelStatsEntry, SummaryStatsEntry
+from vllm.profiler.layerwise_profile import ModelStatsEntry, SummaryStatsEntry
 from vllm.profiler.utils import TablePrinter, indent_string
 
 

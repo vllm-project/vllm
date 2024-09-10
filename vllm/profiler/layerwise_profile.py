@@ -63,7 +63,7 @@ class _StatsTreeNode:
 
 
 @dataclass
-class NMProfileResults(profile):
+class LayerwiseProfileResults(profile):
     _kineto_results: _ProfilerResult
     _kineto_event_correlation_map: Dict[int,
                                         List[_KinetoEvent]] = field(init=False)
@@ -331,7 +331,7 @@ class NMProfileResults(profile):
         return root_dicts
 
 
-class nm_profile(profile):
+class layerwise_profile(profile):
 
     def __init__(self):
         super().__init__(
@@ -346,4 +346,4 @@ class nm_profile(profile):
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         super().__exit__(exc_type, exc_val, exc_tb)
-        self.results = NMProfileResults(self.profiler.kineto_results)
+        self.results = LayerwiseProfileResults(self.profiler.kineto_results)

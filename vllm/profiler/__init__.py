@@ -1,5 +1,5 @@
-from .nm_profile import nm_profile
+from .layerwise_profile import layerwise_profile
 
 __all__ = [
-    "nm_profile",
+    "layerwise_profile",
 ]
