@@ -370,9 +370,10 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         # BlocksparseFlashAttention does not support FP8 KV cache.
         assert k_scale == 1.0 and v_scale == 1.0, (
             "key/v_scale is not supported in BlocksparseFlashAttention.")
-        
+
         #  100% prefill or 100% decode tokens, no mixed case.
-        assert  attn_metadata.num_prefill_tokens == 0 or attn_metadata.num_decode_tokens == 0, (
+        assert attn_metadata.num_prefill_tokens == 0 \
+            or attn_metadata.num_decode_tokens == 0, (
             "Chunked prefill are not supported in BlocksparseFlashAttention.")
 
         num_tokens, hidden_size = query.shape

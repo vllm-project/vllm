@@ -2,6 +2,7 @@ import torch
 import triton
 import triton.language as tl
 
+
 @triton.jit
 def _context_fwd_kernel_inner(
     acc,
@@ -15,18 +16,18 @@ def _context_fwd_kernel_inner(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     LAST_K_BLOCK: tl.constexpr,
-    offs_m, 
+    offs_m,
     context_len,
     start_n,
     offs_n,
 ):
-    qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32) #[M,N]
+    qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)  #[M,N]
     # q shape: BLOCK_M x BLOCK_D
     # k shape: BLOCK_D x BLOCK_N
     qk += tl.dot(q, k)
     qk *= sm_scale
 
-    # the following is needed only when LAST_K_BLOCK 
+    # the following is needed only when LAST_K_BLOCK
     # apply causal mask
     if LAST_K_BLOCK:
         qk += tl.where(
@@ -61,16 +62,16 @@ def _context_fwd_kernel_batch_inference(
     # block ids for the corresponding query block
     query_block_ids,
     num_queries_per_kv,
-    sparse_block_size: tl.constexpr, # 64
+    sparse_block_size: tl.constexpr,  # 64
     kv_cache_block_size,
     x,
     context_lens_tensor,
     query_lens,
     query_start_loc,
     block_tables,
-    # num_blocks, num_kv_heads, head_size // x, block_size, x 
+    # num_blocks, num_kv_heads, head_size // x, block_size, x
     K_cache,
-    # num_blocks, num_kv_heads, head_size, block_size  
+    # num_blocks, num_kv_heads, head_size, block_size
     V_cache,
     stride_b_loc_b,
     stride_b_loc_s,
@@ -110,33 +111,46 @@ def _context_fwd_kernel_batch_inference(
     # offset into the head
     cur_head = tl.program_id(1)
     cur_kv_head = cur_head // num_queries_per_kv
-    
+
     # The batch id of the current block
     # batch size == number of sequences
-    batch_id_for_current_query_block = tl.load(query_batch_ids + cur_query_block).to(tl.int32)
+    batch_id_for_current_query_block = tl.load(query_batch_ids +
+                                               cur_query_block).to(tl.int32)
     # The local block id for current block in the current sequence
-    block_id_for_current_query_block = tl.load(query_block_ids + cur_query_block).to(tl.int32)
+    block_id_for_current_query_block = tl.load(query_block_ids +
+                                               cur_query_block).to(tl.int32)
 
     # context length for current sequence
-    context_len = tl.load(context_lens_tensor + batch_id_for_current_query_block).to(tl.int32)
+    context_len = tl.load(context_lens_tensor +
+                          batch_id_for_current_query_block).to(tl.int32)
     # query length for current sequence
-    query_len = tl.load(query_lens + batch_id_for_current_query_block).to(tl.int32)
+    query_len = tl.load(query_lens + batch_id_for_current_query_block).to(
+        tl.int32)
 
-    query_start_block_id = context_len // sparse_block_size 
+    query_start_block_id = context_len // sparse_block_size
     is_align = context_len % sparse_block_size == 0
-    context_end_block_id = query_start_block_id -1 if is_align else query_start_block_id
+    context_end_block_id = query_start_block_id - 1 \
+        if is_align else query_start_block_id
 
-    cur_q_block_start_location = block_id_for_current_query_block * sparse_block_size
-    next_q_block_start_location = (block_id_for_current_query_block + 1) * sparse_block_size
-    query_offset_within_current_sequence = 0 if cur_q_block_start_location < context_len else cur_q_block_start_location - context_len
+    cur_q_block_start_location = \
+        block_id_for_current_query_block * sparse_block_size
+    next_q_block_start_location = (block_id_for_current_query_block +
+                                   1) * sparse_block_size
+    if cur_q_block_start_location < context_len:
+        query_offset_within_current_sequence = 0
+    else:
+        query_offset_within_current_sequence = \
+            cur_q_block_start_location - context_len
 
     # Along the query token dimension
-    offs_m = query_offset_within_current_sequence + tl.arange(0, sparse_block_size)
+    offs_m = query_offset_within_current_sequence + tl.arange(
+        0, sparse_block_size)
     # Along the head hidden dimension which is 128
     offs_d = tl.arange(0, BLOCK_D)
 
     # global query start location for current sequence
-    q_cu_start = tl.load(query_start_loc + batch_id_for_current_query_block).to(tl.int32)
+    q_cu_start = tl.load(query_start_loc +
+                         batch_id_for_current_query_block).to(tl.int32)
     # Jump to the start location of current sequence
     Q += q_cu_start * stride_qbs + cur_head * stride_qh
     K += q_cu_start * stride_kbs + cur_kv_head * stride_kh
@@ -145,10 +159,10 @@ def _context_fwd_kernel_batch_inference(
 
     q = tl.load(
         Q + offs_m[:, None] * stride_qbs + offs_d[None, :] * stride_qd,
-        # only load current query block, and also could not exceed query length 
-        mask=(offs_m[:, None] < query_len) & (offs_m[:, None] + context_len < next_q_block_start_location),
-        other=0.0
-    )
+        # only load current query block, and also could not exceed query length
+        mask=(offs_m[:, None] < query_len) &
+        (offs_m[:, None] + context_len < next_q_block_start_location),
+        other=0.0)
 
     # layout_crow_ptr shape is [num_heads, num_blocks + 1], where
     # num_blocks = max_seqlen // block_size
@@ -172,24 +186,28 @@ def _context_fwd_kernel_batch_inference(
     # initialize offsets
     # [N]; starts at 0
     offs_n = tl.arange(0, sparse_block_size)
-    
+
     sm_scale *= (
         1.44269504  # 1/log2 as we use base2 for exponential and logarithm
     )
     # flash attention style tiling
     for k_block_col_idx in range(k_block_start, k_block_end):
-        # the block id of the key matrix that the current query block should attend to
+        # The block id of the key matrix that the current query block should
+        # attend to.
         k_block_id = tl.load(layout_col_ptr + cur_head * layout_col_stride_h +
-                         k_block_col_idx * layout_col_stride_m).to(tl.int32)
+                             k_block_col_idx * layout_col_stride_m).to(
+                                 tl.int32)
         # attend to k_cache blocks
         if k_block_id <= context_end_block_id:
             # -- compute qk ----
             start_n = k_block_id * sparse_block_size
             # load the token block ids for the current key matrix
-            bn = tl.load(block_tables + batch_id_for_current_query_block * stride_b_loc_b +
-                         ((start_n + offs_n) // kv_cache_block_size) * stride_b_loc_s,
-                         mask=(start_n + offs_n) < context_len,
-                         other=0)  # [N]
+            bn = tl.load(
+                block_tables +
+                batch_id_for_current_query_block * stride_b_loc_b +
+                ((start_n + offs_n) // kv_cache_block_size) * stride_b_loc_s,
+                mask=(start_n + offs_n) < context_len,
+                other=0)  # [N]
             # [D,N]
             # Index into the key matrix cache
             off_k = (bn[None, :] * stride_k_cache_bs +
@@ -199,72 +217,93 @@ def _context_fwd_kernel_batch_inference(
                      stride_k_cache_bl +
                      (offs_d[:, None] % x) * stride_k_cache_x)
             # [N,D]
-            off_v = (
-                    bn[:, None] * stride_v_cache_bs +
-                    cur_kv_head * stride_v_cache_h +
-                    offs_d[None, :] * stride_v_cache_d +
-                    (start_n + offs_n[:, None]) % kv_cache_block_size * stride_v_cache_bl)
+            off_v = (bn[:, None] * stride_v_cache_bs +
+                     cur_kv_head * stride_v_cache_h +
+                     offs_d[None, :] * stride_v_cache_d +
+                     (start_n + offs_n[:, None]) % kv_cache_block_size *
+                     stride_v_cache_bl)
             k = tl.load(K_cache + off_k,
-                             mask=(start_n + offs_n[None, :]) < context_len,
-                             other=0.0)  # [D,N]
+                        mask=(start_n + offs_n[None, :]) < context_len,
+                        other=0.0)  # [D,N]
             v = tl.load(V_cache + off_v,
-                             mask= (start_n + offs_n[:, None]) < context_len,
-                             other=0.0)  # [N,D]
+                        mask=(start_n + offs_n[:, None]) < context_len,
+                        other=0.0)  # [N,D]
             acc, l_i, m_i = _context_fwd_kernel_inner(
-                acc, l_i, m_i, q, Q, k, v, sm_scale, sparse_block_size, sparse_block_size, 
+                acc,
+                l_i,
+                m_i,
+                q,
+                Q,
+                k,
+                v,
+                sm_scale,
+                sparse_block_size,
+                sparse_block_size,
                 # last key block in the key cache
                 k_block_id == context_end_block_id,
-                offs_m, 
+                offs_m,
                 context_len,
                 start_n,
-                offs_n
-            )
+                offs_n)
 
         # compute query against itself (with causal mask)
         if k_block_id >= query_start_block_id:
             start_n = k_block_id * sparse_block_size
             next_k_block_start_location = (k_block_id + 1) * sparse_block_size
-            key_offset = 0 if k_block_id == query_start_block_id else start_n - context_len
+            key_offset = 0 if k_block_id == query_start_block_id \
+                else start_n - context_len
             offs_n = key_offset + tl.arange(0, sparse_block_size)
             # -- compute qk ----
             k = tl.load(
                 K + offs_n[None, :] * stride_kbs + offs_d[:, None] * stride_kd,
-                # only load current query block, and also could not exceed query length 
-                mask=(offs_n[None, :] < query_len) & (offs_n[None, :] + context_len < next_k_block_start_location),
-                other=0.0
-            )
+                # only load current query block, and also could not exceed query
+                # length
+                mask=(offs_n[None, :] < query_len) &
+                (offs_n[None, :] + context_len < next_k_block_start_location),
+                other=0.0)
             v = tl.load(
                 V + offs_n[:, None] * stride_vbs + offs_d[None, :] * stride_vd,
-                # only load current query block, and also could not exceed query length 
-                mask=(offs_n[:, None] < query_len) & (offs_n[:, None] + context_len < next_k_block_start_location),
-                other=0.0
-            )
+                # only load current query block, and also could not exceed query
+                # length
+                mask=(offs_n[:, None] < query_len) &
+                (offs_n[:, None] + context_len < next_k_block_start_location),
+                other=0.0)
             acc, l_i, m_i = _context_fwd_kernel_inner(
-                acc, l_i, m_i, q, Q, k, v, sm_scale, sparse_block_size, sparse_block_size, 
+                acc,
+                l_i,
+                m_i,
+                q,
+                Q,
+                k,
+                v,
+                sm_scale,
+                sparse_block_size,
+                sparse_block_size,
                 # LAST_K_BLOCK
                 k_block_id == block_id_for_current_query_block,
-                offs_m, 
+                offs_m,
                 context_len,
                 context_len,
-                offs_n
-            )
+                offs_n)
     # flash-attn 2
     # m_i += tl.math.log2(l_i)
     acc = acc / l_i[:, None]
     # write output
     tl.store(Out + offs_m[:, None] * stride_obs + offs_d[None, :] * stride_od,
              acc,
-             mask=(offs_m[:, None] < query_len) & (offs_m[:, None] + context_len < next_q_block_start_location))
+             mask=(offs_m[:, None] < query_len) &
+             (offs_m[:, None] + context_len < next_q_block_start_location))
     return
+
 
 @torch.inference_mode()
 def context_blocksparse_flash_attn_varlen_fwd(
         q,
         k,
-        v, # [num_tokens, num_heads, head_size]
+        v,  # [num_tokens, num_heads, head_size]
         k_cache,
         v_cache,
-        block_tables, 
+        block_tables,
         query_start_loc,
         seq_lens_tensor,
         context_lens_tensor,
@@ -291,16 +330,19 @@ def context_blocksparse_flash_attn_varlen_fwd(
     assert torch.all(query_lens != 0), "query_len should not be 0"
 
     # switch to use cpu to avoid too many kernel launches when iterated over
-    # query start block id and end block id are inclusive 
-    query_start_block_id = (context_lens_tensor // sparse_block_size).cpu() 
+    # query start block id and end block id are inclusive
+    query_start_block_id = (context_lens_tensor // sparse_block_size).cpu()
     query_end_block_id = ((seq_lens_tensor - 1) // sparse_block_size).cpu()
-    query_block_ids = torch.cat(
-        [torch.arange(s, e+1) for s, e in zip(query_start_block_id, query_end_block_id)]
-    ).to(q.device)
-    query_batch_ids = torch.cat(
-        [torch.full((e - s + 1,), i) for i, (s, e) in enumerate(zip(query_start_block_id, query_end_block_id))]
-    ).to(q.device)
-    
+    query_block_ids = torch.cat([
+        torch.arange(s, e + 1)
+        for s, e in zip(query_start_block_id, query_end_block_id)
+    ]).to(q.device)
+    query_batch_ids = torch.cat([
+        torch.full((e - s + 1, ), i)
+        for i, (s,
+                e) in enumerate(zip(query_start_block_id, query_end_block_id))
+    ]).to(q.device)
+
     out = q.new_empty(q.shape)
     layout_crow_indices, layout_col_indices = sparse_layout
     block_d = triton.next_power_of_2(head_size)
@@ -344,7 +386,8 @@ def context_blocksparse_flash_attn_varlen_fwd(
         k_cache.stride(1),
         k_cache.stride(2),
         k_cache.stride(3),
-        k_cache.stride(4),  #[num_blocks, num_kv_heads, head_size/x, block_size, x]
+        k_cache.stride(
+            4),  #[num_blocks, num_kv_heads, head_size/x, block_size, x]
         v_cache.stride(0),
         v_cache.stride(1),
         v_cache.stride(2),
@@ -359,6 +402,7 @@ def context_blocksparse_flash_attn_varlen_fwd(
         num_warps=4,
         num_stages=3)
     return out
+
 
 def blocksparse_flash_attn_varlen_fwd(
         q,
@@ -506,7 +550,8 @@ def _fwd_kernel_inner(
     EVEN_D: tl.constexpr,
     M_LT_N: tl.constexpr,
 ):
-    # the block id of the key matrix that the current query block should attend to
+    # The block id of the key matrix that the current query block
+    # should attend to.
     k_block_id = tl.load(layout_col_ptr + off_h * layout_col_stride_h +
                          k_block_col_idx * layout_col_stride_m).to(tl.int32)
     start_n = k_block_id * BLOCK_N
