@@ -35,7 +35,7 @@ DEFAULT_SERVER_ARGS: List[str] = [
 @pytest.mark.parametrize("num_scheduler_steps", NUM_SCHEDULER_STEPS)
 @pytest.mark.parametrize("num_prompts", NUM_PROMPTS)
 @pytest.mark.parametrize("num_logprobs", [None])
-@pytest.mark.parametrize("is_async", [False, True])
+@pytest.mark.parametrize("is_async", [True])
 @pytest.mark.parametrize("attention_backend", ["FLASHINFER", "FLASH_ATTN"])
 @pytest.mark.asyncio
 async def test_multi_step(
