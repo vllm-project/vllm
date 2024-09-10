@@ -33,9 +33,13 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 from PIL import Image
 from transformers import Qwen2VLConfig
+from transformers.image_utils import (get_image_size,
+                                      infer_channel_dimension_format,
+                                      to_numpy_array)
 from transformers.models.qwen2_vl.configuration_qwen2_vl import (
     Qwen2VLVisionConfig)
-from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
+from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
+    make_batched_images, make_batched_videos, smart_resize)
 
 import vllm.envs as envs
 from vllm.attention import AttentionMetadata
@@ -579,32 +583,61 @@ video_input_mapper_for_qwen2_vl = partial(mm_input_mapper_for_qwen2_vl,
                                           data_type_key="video")
 
 
-def _get_max_image_info(image_processor,
-                        data_type_key: str = "image",
-                        mm_count: int = 1):
-    max_resized_height, max_resized_width = smart_resize(
+def _get_vision_info(
+    image_processor,
+    height: int,
+    width: int,
+    min_pixels: int,
+    max_pixels: int,
+    do_resize: bool = True,
+    data_type_key: str = "image",
+    mm_count: int = 1,
+):
+    """Get information (resized height / width and number of vision tokens)
+    of input image / video frame."""
+
+    if do_resize:
+        resized_height, resized_width = smart_resize(
+            height=height,
+            width=width,
+            factor=image_processor.patch_size * image_processor.merge_size,
+            min_pixels=min_pixels,
+            max_pixels=max_pixels,
+        )
+    else:
+        resized_height, resized_width = height, width
+
+    if data_type_key == "image":
+        grid_t = mm_count
+    else:
+        assert data_type_key == "video"
+        grid_t = max(mm_count // image_processor.temporal_patch_size, 1)
+
+    grid_h = resized_height // image_processor.patch_size
+    grid_w = resized_width // image_processor.patch_size
+    vision_tokens = grid_t * grid_h * grid_w
+    llm_num_vision_tokens = (vision_tokens // image_processor.merge_size //
+                             image_processor.merge_size)
+
+    return resized_height, resized_width, llm_num_vision_tokens
+
+
+def _get_max_image_info(
+    image_processor,
+    data_type_key: str = "image",
+    mm_count: int = 1,
+):
+    return _get_vision_info(
+        image_processor,
         height=9999999,
         width=9999999,
-        factor=image_processor.patch_size * image_processor.merge_size,
 
         # Limit min / max pixels.
         min_pixels=max(image_processor.min_pixels, 28 * 28),
         max_pixels=min(image_processor.max_pixels, 1280 * 28 * 28),
+        data_type_key=data_type_key,
+        mm_count=mm_count,
     )
-
-    if data_type_key == "image":
-        max_grid_t = mm_count
-    else:
-        assert data_type_key == "video"
-        max_grid_t = max(mm_count // image_processor.temporal_patch_size, 1)
-
-    max_grid_h = max_resized_height // image_processor.patch_size
-    max_grid_w = max_resized_width // image_processor.patch_size
-    max_image_tokens = max_grid_t * max_grid_h * max_grid_w
-    max_llm_image_tokens = (max_image_tokens // image_processor.merge_size //
-                            image_processor.merge_size)
-
-    return max_resized_height, max_resized_width, max_llm_image_tokens
 
 
 def get_max_qwen2_vl_mm_tokens(ctx: InputContext, data_type_key: str) -> int:
@@ -665,6 +698,32 @@ def dummy_data_for_qwen2_vl(
     }
 
 
+def _get_llm_num_vision_tokens(
+    mm_inputs: list,
+    data_type_key: str,
+    image_processor,
+):
+    """Get number of vision tokens of multimodal inputs.
+
+    This method is derived from `transformers.models.qwen2_vl.
+    image_processing_qwen2_vl.Qwen2VLImageProcessor._preprocess`.
+    """
+    image = to_numpy_array(mm_inputs[0])
+    input_data_format = infer_channel_dimension_format(image)
+    height, width = get_image_size(image, channel_dim=input_data_format)
+    _, _, llm_num_vision_tokens = _get_vision_info(
+        image_processor,
+        height=height,
+        width=width,
+        min_pixels=image_processor.min_pixels,
+        max_pixels=image_processor.max_pixels,
+        do_resize=image_processor.do_resize,
+        data_type_key=data_type_key,
+        mm_count=len(mm_inputs),
+    )
+    return llm_num_vision_tokens
+
+
 def input_processor_for_qwen2_vl(ctx: InputContext,
                                  llm_inputs: LLMInputs) -> LLMInputs:
     multi_modal_data = llm_inputs.get("multi_modal_data", None)
@@ -675,20 +734,91 @@ def input_processor_for_qwen2_vl(ctx: InputContext,
     video_inputs = multi_modal_data.get("video", None)
 
     processor = cached_get_processor(ctx.model_config.model)
+    image_processor = processor.image_processor
+    hf_config = ctx.get_hf_config(Qwen2VLConfig)
 
-    prompt = llm_inputs["prompt"]
-    if prompt is None:
-        prompt_token_ids = llm_inputs["prompt_token_ids"]
-        prompt = processor.tokenizer.decode(prompt_token_ids)
+    # To avoid redundant processing of vision objects (resize, rescale, etc.),
+    # we extract code of calculating number of vision tokens from
+    # `transformers.models.qwen2_vl.processing_qwen2_vl.Qwen2VLProcessor`.
+    #
+    # The following code is equivalent to:
+    #    prompt = llm_inputs["prompt"]
+    #    inputs = processor(text=[prompt],
+    #                       images=image_inputs,
+    #                       videos=video_inputs,
+    #                       padding=True,
+    #                       return_tensors="pt")
+    #    prompt_token_ids = inputs["input_ids"][0].tolist()
 
-    inputs = processor(text=[prompt],
-                       images=image_inputs,
-                       videos=video_inputs,
-                       padding=True,
-                       return_tensors="pt")
+    prompt_token_ids = llm_inputs.get("prompt_token_ids", None)
+    if prompt_token_ids is None:
+        prompt = llm_inputs["prompt"]
+        prompt_token_ids = processor.tokenizer(
+            prompt,
+            padding=True,
+            return_tensors=None,
+        )["input_ids"]
+
+    # Expand image pad tokens.
+    if image_inputs is not None:
+        image_indices = [
+            idx for idx, token in enumerate(prompt_token_ids)
+            if token == hf_config.image_token_id
+        ]
+        image_inputs = make_batched_images(image_inputs)
+        assert len(image_indices) == len(image_inputs)
+
+        prompt_token_ids_with_image = []
+        for image_cnt, image in enumerate(image_inputs):
+            num_image_tokens = _get_llm_num_vision_tokens(
+                [image],
+                data_type_key="image",
+                image_processor=image_processor,
+            )
+            if image_cnt == 0:
+                non_image_tokens = prompt_token_ids[:image_indices[image_cnt]]
+            else:
+                non_image_tokens = prompt_token_ids[image_indices[image_cnt -
+                                                                  1] +
+                                                    1:image_indices[image_cnt]]
+            prompt_token_ids_with_image.extend(non_image_tokens)
+            prompt_token_ids_with_image.extend(
+                hf_config.image_token_id for _ in range(num_image_tokens))
+        prompt_token_ids_with_image.extend(prompt_token_ids[image_indices[-1] +
+                                                            1:])
+        prompt_token_ids = prompt_token_ids_with_image
+
+    # Expand video pad tokens.
+    if video_inputs is not None:
+        video_indices = [
+            idx for idx, token in enumerate(prompt_token_ids)
+            if token == hf_config.video_token_id
+        ]
+        video_inputs = make_batched_videos(video_inputs)
+        assert len(video_indices) == len(video_inputs)
+
+        prompt_token_ids_with_video = []
+        for video_cnt, video in enumerate(video_inputs):
+            num_video_tokens = _get_llm_num_vision_tokens(
+                video,
+                data_type_key="video",
+                image_processor=image_processor,
+            )
+            if video_cnt == 0:
+                non_video_tokens = prompt_token_ids[:video_indices[video_cnt]]
+            else:
+                non_video_tokens = prompt_token_ids[video_indices[video_cnt -
+                                                                  1] +
+                                                    1:video_indices[video_cnt]]
+            prompt_token_ids_with_video.extend(non_video_tokens)
+            prompt_token_ids_with_video.extend(
+                hf_config.video_token_id for _ in range(num_video_tokens))
+        prompt_token_ids_with_video.extend(prompt_token_ids[video_indices[-1] +
+                                                            1:])
+        prompt_token_ids = prompt_token_ids_with_video
 
     return LLMInputs(
-        prompt_token_ids=inputs["input_ids"][0].tolist(),
+        prompt_token_ids=prompt_token_ids,
         prompt=llm_inputs["prompt"],
         multi_modal_data=multi_modal_data,
     )
@@ -712,6 +842,9 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
                  quant_config: Optional[QuantizationConfig] = None) -> None:
         super().__init__()
 
+        assert not cache_config.enable_prefix_caching, \
+            "Qwen2-VL currently does not support prefix caching"
+
         self.config = config
         self.multimodal_config = multimodal_config
 
@@ -719,7 +852,8 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
             config.vision_config,
             norm_eps=getattr(config, "rms_norm_eps", 1e-6),
 
-            # NOTE: Qwen2-VL does not support any quantization method now.
+            # NOTE: Qwen2-VL vision encoder does not support any
+            # quantization method now.
             quant_config=None,
         )
 
