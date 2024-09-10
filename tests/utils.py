@@ -159,9 +159,6 @@ class RemoteOpenAIServer:
             max_retries=0,
         )
 
-    def get_metrics(self):
-        return requests.get(self.url_for("metrics")).text
-
 
 def compare_two_settings(model: str,
                          arg1: List[str],
