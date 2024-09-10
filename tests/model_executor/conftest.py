@@ -47,4 +47,3 @@ def sample_json_schema():
         },
         "required": ["name", "age", "skills", "work_history"]
     }
-
