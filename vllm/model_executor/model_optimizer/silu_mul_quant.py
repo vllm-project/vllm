@@ -39,7 +39,6 @@ def setup_silu_mul_quant(cc: CodeCache):
     # if not register_silu_mul_quant:
     #     return
     # register_silu_mul_quant = True
-    print("SILU MUL QUANT SUB")
     namespace = "vllm"
     ns_op = f"{namespace}::silu_mul_quant"
     sig = ("(Tensor weight, "

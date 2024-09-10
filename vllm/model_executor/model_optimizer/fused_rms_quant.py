@@ -75,7 +75,6 @@ def setup_fused_rms_norm(cc: CodeCache):
     # if not register_fused_rms_norm:
     #     return
     # register_fused_rms_norm = True
-    print("SUBSTITUTION HAPPENING")
     namespace = "dogfood"
     ns_op = f"{namespace}::rms_norm_quant"
     sig = "(Tensor output, Tensor detach, Tensor x_scale) -> Tensor"
@@ -92,7 +91,6 @@ def setup_fused_rms_norm_2(cc: CodeCache):
     # if not register_fused_rms_norm:
     #     return
     # register_fused_rms_norm = True
-    print("SUBSTITUTION HAPPENING")
     namespace = "dogfood"
     ns_op = f"{namespace}::rms_norm_quant_2"
     sig = "(Tensor output, Tensor detach, Tensor x_scale) -> (Tensor, Tensor)"
