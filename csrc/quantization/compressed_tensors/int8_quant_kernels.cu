@@ -1,6 +1,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/all.h>
 #include <cmath>
+#include <cfenv>
 
 #include "../../dispatch_utils.h"
 
@@ -12,6 +13,18 @@
   #include <hipcub/hipcub.hpp>
 #endif
 
+#define USE_ROCM
+
+// Explicitly set the rounding mode to nearest
+template <typename T>
+auto __device__ to_nearest(T x) {
+  auto const mode = std::fegetround();
+  std::fesetround(FE_TONEAREST);
+  auto const result = std::nearbyint(x);
+  std::fesetround(mode);
+  return result;
+}
+
 static inline __device__ int8_t float_to_int8_rn(float x) {
 #ifdef USE_ROCM
   static constexpr auto i8_min =
@@ -19,7 +32,7 @@ static inline __device__ int8_t float_to_int8_rn(float x) {
   static constexpr auto i8_max =
       static_cast<float>(std::numeric_limits<int8_t>::max());
   // round
-  float dst = std::nearbyint(x);
+  float dst = to_nearest(x);
   // saturate
   dst = std::clamp(dst, i8_min, i8_max);
   return static_cast<int8_t>(dst);
@@ -43,12 +56,16 @@ static inline __device__ int32_t float_to_int32_rn(float x) {
   static constexpr auto i32_max_f = static_cast<float>(i32_max);
 
   // round
-  float dst = std::nearbyint(x);
+  float dst = to_nearest(x);
 
   // saturate on the higher end.
-  if (dst >= i32_max_f) { return i32_max; }
+  if (dst >= i32_max_f) {
+    return i32_max;
+  }
   // saturate on the lower end.
-  if (dst <= i32_min_f) { return i32_min; }
+  if (dst <= i32_min_f) {
+    return i32_min;
+  }
 
   return static_cast<int32_t>(dst);
 #else
