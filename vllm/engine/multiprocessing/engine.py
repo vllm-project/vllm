@@ -243,10 +243,14 @@ class MQLLMEngine:
         """Handle new input from the socket"""
         try:
             while self.input_socket.poll(timeout=0) != 0:
-                message = self.input_socket.recv(copy=False)
-                request = cloudpickle.loads(message.buffer)
+                frames = self.input_socket.recv_multipart(copy=False)
+                request = pickle.loads(frames[0].buffer)
 
                 if isinstance(request, RPCGenerateRequest):
+                    if len(frames) > 1:
+                        # Use cloudpickle for logits processors
+                        lprocs = cloudpickle.loads(frames[1].buffer)
+                        request.sampling_params.logits_processors = lprocs
                     self._handle_generate_request(request)
                 elif isinstance(request, RPCAbortRequest):
                     self._handle_abort_request(request)

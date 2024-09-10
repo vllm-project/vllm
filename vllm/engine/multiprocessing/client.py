@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import pickle
 from contextlib import contextmanager, suppress
 from typing import (Any, AsyncGenerator, Dict, Iterator, Mapping, Optional,
@@ -252,7 +253,7 @@ class MQLLMEngineClient:
         """Send an RPC request that is expecting data back."""
 
         # Ping RPCServer with a request.
-        await socket.send_multipart((cloudpickle.dumps(request), ), copy=False)
+        await socket.send_multipart((pickle.dumps(request), ), copy=False)
 
         # Make sure the server responds in time.
         if await socket.poll(timeout=VLLM_RPC_GET_DATA_TIMEOUT_MS) == 0:
@@ -283,7 +284,7 @@ class MQLLMEngineClient:
                                         socket: Socket):
         """Send one-way RPC request to trigger an action."""
 
-        await socket.send_multipart((cloudpickle.dumps(request), ))
+        await socket.send_multipart((pickle.dumps(request), ))
 
     async def _await_ack(self, error_message: str, socket: Socket):
         "Await acknowledgement that a request succeeded."
@@ -439,36 +440,51 @@ class MQLLMEngineClient:
         self.output_queues[request_id] = queue
 
         try:
-            # 2) Send the RPCGenerateRequest to the MQLLMEngine.
-            await self.input_socket.send_multipart((cloudpickle.dumps(
+            # 2) Detach logits processors so that they can be pickled
+            # separately (may require cloudpickle which is slower)
+            if sampling_params.logits_processors:
+                # Defensive shallow copy
+                sampling_params = copy.copy(sampling_params)
+                logits_processors = sampling_params.logits_processors
+                sampling_params.logits_processors = None
+                lp_bytes = cloudpickle.dumps(logits_processors)
+            else:
+                lp_bytes = None
+
+            request_bytes = pickle.dumps(
                 RPCGenerateRequest(
                     inputs=inputs,
                     sampling_params=sampling_params,
                     request_id=request_id,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
-                    prompt_adapter_request=prompt_adapter_request)), ))
+                    prompt_adapter_request=prompt_adapter_request))
 
-            # 3) Stream the RequestOutputs from the output queue. Note
+            # 3) Send the RPCGenerateRequest to the MQLLMEngine.
+            parts = (request_bytes,
+                     lp_bytes) if lp_bytes else (request_bytes, )
+            await self.input_socket.send_multipart(parts, copy=False)
+
+            # 4) Stream the RequestOutputs from the output queue. Note
             # that the output_loop pushes RequestOutput objects to this
             # queue after pulling them from the zmq socket.
             finished = False
-            while not finished:
-                request_output = await queue.get()
+            try:
+                while not finished:
+                    request_output = await queue.get()
 
-                if isinstance(request_output, BaseException):
-                    raise request_output
+                    if isinstance(request_output, BaseException):
+                        raise request_output
 
-                finished = request_output.finished
-                yield request_output
-
+                    finished = request_output.finished
+                    yield request_output
+            finally:
+                # Request was canceled by the client.
+                if not finished and not self._errored:
+                    await self.abort(request_id)
         finally:
             # TODO: check if excepted requests are getting here.
             self.output_queues.pop(request_id)
-
-            # Request was canceled by the client.
-            if not finished and not self._errored:
-                await self.abort(request_id)
 
     async def encode(self, *args,
                      **kwargs) -> AsyncGenerator[EmbeddingRequestOutput, None]:
