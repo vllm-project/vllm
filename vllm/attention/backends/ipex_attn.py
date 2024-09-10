@@ -8,6 +8,7 @@ import torch
 from vllm._ipex_ops import ipex_ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
+from vllm.attention.backends.utils import CommonAttentionState
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 
@@ -27,6 +28,10 @@ class IpexAttnBackend(AttentionBackend):
     @staticmethod
     def get_metadata_cls() -> Type["IpexAttnMetadata"]:
         return IpexAttnMetadata
+
+    @staticmethod
+    def get_state_cls() -> Type["CommonAttentionState"]:
+        return CommonAttentionState
 
     @staticmethod
     def get_kv_cache_shape(
@@ -105,9 +110,13 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         sliding_window: Optional[int],
         kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
+        logits_soft_cap: Optional[float] = None,
     ) -> None:
-        assert blocksparse_params is None, ValueError(
-            "Torch SPDA does not support block-sparse attention.")
+        if blocksparse_params is not None:
+            raise ValueError(
+                "IPEX backend does not support block-sparse attention.")
+        if logits_soft_cap is not None:
+            raise ValueError("IPEX backend does not support logits_soft_cap.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)

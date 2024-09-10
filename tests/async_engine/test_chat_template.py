@@ -1,22 +1,16 @@
-import os
-import pathlib
-
 import pytest
 
-from vllm.entrypoints.chat_utils import load_chat_template
+from vllm.entrypoints.chat_utils import apply_chat_template, load_chat_template
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
-chatml_jinja_path = pathlib.Path(os.path.dirname(os.path.abspath(
-    __file__))).parent.parent / "examples/template_chatml.jinja"
+from ..utils import VLLM_PATH
+
+chatml_jinja_path = VLLM_PATH / "examples/template_chatml.jinja"
 assert chatml_jinja_path.exists()
 
 # Define models, templates, and their corresponding expected outputs
 MODEL_TEMPLATE_GENERATON_OUTPUT = [
-    ("facebook/opt-125m", None, True,
-     "Hello</s>Hi there!</s>What is the capital of</s>"),
-    ("facebook/opt-125m", None, False,
-     "Hello</s>Hi there!</s>What is the capital of</s>"),
     ("facebook/opt-125m", chatml_jinja_path, True, """<|im_start|>user
 Hello<|im_end|>
 <|im_start|>assistant
@@ -93,11 +87,12 @@ def test_get_gen_prompt(model, template, add_generation_prompt,
         add_generation_prompt=add_generation_prompt)
 
     # Call the function and get the result
-    result = tokenizer.apply_chat_template(
+    result = apply_chat_template(
+        tokenizer,
         conversation=mock_request.messages,
-        tokenize=False,
+        chat_template=mock_request.chat_template or template_content,
         add_generation_prompt=mock_request.add_generation_prompt,
-        chat_template=mock_request.chat_template or template_content)
+    )
 
     # Test assertion
     assert result == expected_output, (

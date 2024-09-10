@@ -6,6 +6,7 @@ import torch_xla.experimental.custom_kernel  # Required to register custom ops.
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
+from vllm.attention.backends.utils import CommonAttentionState
 
 
 class PallasAttentionBackend(AttentionBackend):
@@ -17,6 +18,10 @@ class PallasAttentionBackend(AttentionBackend):
     @staticmethod
     def get_metadata_cls() -> Type["PallasMetadata"]:
         return PallasMetadata
+
+    @staticmethod
+    def get_state_cls() -> Type["CommonAttentionState"]:
+        return CommonAttentionState
 
     @staticmethod
     def get_kv_cache_shape(
@@ -91,6 +96,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         sliding_window: Optional[int],
         kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
+        logits_soft_cap: Optional[float] = None,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -109,12 +115,21 @@ class PallasAttentionBackendImpl(AttentionImpl):
             raise NotImplementedError("FP8 KV cache dtype is not supported.")
         if blocksparse_params is not None:
             raise NotImplementedError("Blocksparse is not supported.")
+        if logits_soft_cap is not None:
+            raise NotImplementedError(
+                "Attention logits soft-capping is not supported.")
 
         if torch_xla.tpu.version() < 4:
             raise NotImplementedError("TPU version must be 4 or higher.")
 
         self.megacore_mode = None
-        tpu_type = torch_xla.tpu.get_tpu_env()["TYPE"].lower()
+        tpu_env = torch_xla.tpu.get_tpu_env()
+        tpu_type = (tpu_env.get("ACCELERATOR_TYPE", None)
+                    or tpu_env.get("TYPE", None)
+                    or tpu_env.get("TPU_ACCELERATOR_TYPE", None))
+        assert tpu_type is not None
+        tpu_type = tpu_type.lower()
+
         if "lite" not in tpu_type:
             if self.num_kv_heads % 2 == 0:
                 self.megacore_mode = "kv_head"

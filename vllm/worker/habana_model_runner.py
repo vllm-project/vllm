@@ -2,6 +2,7 @@
 # Copyright (C) 2024 Habana Labs, Ltd. an Intel Company
 ###############################################################################
 
+from array import array
 import collections
 import contextlib
 import dataclasses
@@ -33,8 +34,9 @@ from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (IntermediateTensors, SamplerOutput, SequenceData,
+from vllm.sequence import (IntermediateTensors, SequenceData,
                            SequenceGroupMetadata)
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.utils import (HabanaMemoryProfiler, format_bytes,
                         is_pin_memory_available, make_tensor_with_pad)
 from vllm.worker.model_runner_base import (
@@ -486,7 +488,6 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     device_config=self.device_config,
                     load_config=self.load_config,
                     lora_config=self.lora_config,
-                    multimodal_config=self.multimodal_config,
                     parallel_config=self.parallel_config,
                     scheduler_config=self.scheduler_config,
                     cache_config=self.cache_config)
@@ -1209,7 +1210,8 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             block_tables = {group_id: [_PAD_BLOCK_ID] * num_blocks}
         prompt_token_ids = [0] * input_len
         output_token_ids = [1] * output_len
-        seq_data = SequenceData(prompt_token_ids)
+        prompt_token_ids_array = array('l', [1,3,5,7,9])  # noqa: F821
+        seq_data = SequenceData(prompt_token_ids_array)
         seq_data.output_token_ids = output_token_ids
         return SequenceGroupMetadata(request_id=str(group_id),
                                      is_prompt=(output_len == 0),
