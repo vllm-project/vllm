@@ -103,19 +103,16 @@ define_gpu_extension_target(
 add_dependencies(default _core_C)
 
 #
-# Forward the non-CUDA device extensions to external CMake scripts.
+# The CUDA device extensions need CPU CMake scripts to support Heterogeneous Speculative Decoding.
 #
-if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda" AND
-    NOT VLLM_TARGET_DEVICE STREQUAL "rocm")
-    if (VLLM_TARGET_DEVICE STREQUAL "cpu")
-        include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
-    else()
-        return()
-    endif()
-    return()
+if (VLLM_TARGET_DEVICE STREQUAL "cuda")
+    include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
 endif()
 
-include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
+if (VLLM_TARGET_DEVICE STREQUAL "cpu")
+    include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
+    return()
+endif()
 
 #
 # Set up GPU language and check the torch version and warn if it isn't
