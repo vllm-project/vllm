@@ -1,5 +1,3 @@
-# This file has been modified by Neural Magic
-
 import dataclasses
 import gc
 import inspect
