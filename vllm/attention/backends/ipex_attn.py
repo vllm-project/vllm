@@ -262,8 +262,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                             attn_metadata.seq_lens, self.sliding_window,
                             query.dtype)  # type: ignore
                     else:
-                        att_masks = _make_sliding_window_bias(
-                            attn_metadata.seq_lens, None, dtype=query.dtype)
+                        att_masks = [None] * len(attn_metadata.seq_lens)
                     attn_metadata.attn_bias = att_masks
 
                 # output = torch.empty(
@@ -298,11 +297,13 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                     end = start + seq_len
                     if use_sdp_causal(self.head_size, query):
                         import xe_addons
+                        if mask is not None:
+                            mask = mask.unsqueeze(0)
                         sub_out = xe_addons.sdp_causal(
                             query[None, :, start:end, :].contiguous(),
                             key[None, :, start:end, :].contiguous(),
                             value[None, :, start:end, :].contiguous(),
-                            mask.unsqueeze(0)).squeeze(0).movedim(
+                            mask).squeeze(0).movedim(
                                 query.dim() - 2, 0)
                     else:
                         sub_out = torch.nn.functional.scaled_dot_product_attention(
