@@ -1,23 +1,17 @@
 import json
 import re
-from typing import Dict, List, Sequence, Union
+from typing import Sequence, Union
 
-import partial_json_parser
-from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.openai.protocol import (
-    DeltaFunctionCall,
     DeltaMessage,
-    DeltaToolCall,
     ExtractedToolCallInformation,
     FunctionCall,
-    InitialDeltaToolCall,
     ToolCall,
 )
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import ToolParser
-from vllm.entrypoints.openai.tool_parsers.utils import extract_intermediate_diff
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 logger = init_logger(__name__)
 
@@ -33,7 +27,6 @@ class GraniteToolParser(ToolParser):
     def extract_tool_calls(
         self, model_output: str
     ) -> ExtractedToolCallInformation:
-
         if self.tool_start_token not in model_output:
             return ExtractedToolCallInformation(
                 tools_called=False, tool_calls=[], content=model_output
@@ -43,18 +36,20 @@ class GraniteToolParser(ToolParser):
             try:
                 matches = list(self.tool_call_regex.finditer(model_output))
                 logger.debug("Found %d tool call matches", len(matches))
-    
+
                 raw_function_calls = []
 
                 for i, match in enumerate(matches):
                     # position after the <function_call> tag
                     start_of_json = match.end()
-                    # end_index == the start of the next function call, if it exists
+                    # end_index == the start of the next function call
+                    # (if exists)
                     next_function_call_start = (
                         matches[i + 1].start() if i + 1 < len(matches) else None
                     )
 
-                    # extract the full JSON object using bracket matching via start_of_json and optional end index
+                    # extract the full JSON object using bracket matching via
+                    # start_of_json and optional end index
                     full_json_str = extract_full_json(
                         model_output, start_of_json, next_function_call_start
                     )
@@ -99,12 +94,15 @@ class GraniteToolParser(ToolParser):
     ) -> Union[DeltaMessage, None]:
         raise NotImplementedError(
             "streaming tool call parsing has not yet been implemented"
-            "for Granite")
-
+            "for Granite"
+        )
 
 
 def extract_full_json(text, start_index, end_index=None):
-    """Extracts the full JSON object from text starting at `start_index` and optionally up to `end_index`."""
+    """
+    Extracts the full JSON object from text starting at `start_index` 
+    and optionally up to `end_index`.
+    """
     brace_count = 0
     json_start = start_index
     for i, char in enumerate(text[start_index:end_index], start=start_index):
