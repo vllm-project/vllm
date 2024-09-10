@@ -303,11 +303,10 @@ class MQLLMEngine:
     def _handle_health_request(self):
         if self._errored:
             self._send_unhealthy(ENGINE_DEAD_ERROR)
-        try:
-            self.engine.check_health()
-            self._send_healthy()
-        except Exception as e:
-            self._send_unhealthy(e)
+        
+        # Raises error if unhealthy.
+        self.engine.check_health()
+        self._send_healthy()
 
     def _send_outputs(self, outputs: REQUEST_OUTPUTS_T):
         """Send List of RequestOutput to RPCClient."""
