@@ -1219,7 +1219,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         input_tokens = torch.zeros(max_batch_size, dtype=torch.long).cuda()
         if hasattr(self.model_config.hf_config, "num_output_head"):
-            input_tokens = torch.zeros(max_batch_size, self.model_config.hf_config.num_output_head, dtype=torch.long).cuda() + 2
+            input_tokens = torch.zeros(max_batch_size, self.model_config.hf_config.num_output_head, dtype=torch.long).cuda()
         input_positions = torch.zeros(max_batch_size, dtype=torch.long).cuda()
         slot_mapping = torch.empty(max_batch_size, dtype=torch.long).cuda()
         slot_mapping.fill_(_PAD_SLOT_ID)

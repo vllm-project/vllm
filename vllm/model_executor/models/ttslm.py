@@ -55,7 +55,7 @@ class ChatTtsLlm(nn.Module):
         self.num_audio_tokens = config.num_audio_tokens
         self.num_text_tokens = config.num_text_tokens
         self.num_output_head = config.num_output_head
-        self.spk_emb_token_id = 7003
+        self.audio_start_token_id = config.audio_start_token_id
 
         self.gpt = LlamaModel(config)
         self.model_dim = self.gpt.config.hidden_size
@@ -105,6 +105,17 @@ class ChatTtsLlm(nn.Module):
     def get_input_embeddings(self, input_ids: torch.Tensor, is_prompt: bool) -> torch.Tensor:
         if is_prompt:
             emb = self.emb_text(input_ids)
+            audio_start = torch.tensor([1024, 1024], device=input_ids.device)
+            code_emb = [
+                self.emb_code[i](audio_start[i])
+                for i in range(self.num_output_head)
+            ]
+            start_token = torch.stack(code_emb, 1).sum(1).to(emb.dtype)
+
+            # find the index of the speaker token
+            indices = (input_ids == self.audio_start_token_id).nonzero(as_tuple=True)
+            if indices[0].size(0) != 0:
+                emb.index_put_(indices, start_token)
         else:
             code_emb = [
                 self.emb_code[i](input_ids[:,i]) for i in range(self.num_output_head)
@@ -150,8 +161,8 @@ class ChatTtsLlm(nn.Module):
             hidden_states = inputs_embeds
         else:
             hidden_states = self.get_input_embeddings(input_ids, is_prompt)
-            spk_emb = kwargs.get("speech", None)
-            self.apply_spk_emb(hidden_states, spk_emb, attn_metadata, input_ids)
+            # spk_emb = kwargs.get("speech", None)
+            # self.apply_spk_emb(hidden_states, spk_emb, attn_metadata, input_ids)
         model_output = self.gpt(
             input_ids=input_ids,
             inputs_embeds=hidden_states,
@@ -174,13 +185,13 @@ class ChatTtsLlm(nn.Module):
             self.emb_code[i](audio_start[i])
             for i in range(self.num_output_head)
         ]
-        spk_emb = torch.stack(code_emb, 1).sum(1).to(emb.dtype)
+        start_token = torch.stack(code_emb, 1).sum(1).to(emb.dtype)
 
         # find the index of the speaker token
-        indices = (input_ids == self.spk_emb_token_id).nonzero(as_tuple=True)
+        indices = (input_ids == self.audio_start_token_id).nonzero(as_tuple=True)
         if indices[0].size(0) == 0:
             return
-        emb.index_put_(indices, spk_emb)
+        emb.index_put_(indices, start_token)
 
     def merge_sample_results(
         self,
