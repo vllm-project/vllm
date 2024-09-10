@@ -12,18 +12,6 @@ SEEDS = [0]
 SCALE = [0.1, 0.5, 0.8, 1.2, 2.1]
 
 
-def allclose_int(input, other, atol: int = 0, rtol: float = 1e-5):
-    INT_DTYPES = [
-        torch.int8, torch.int16, torch.int32, torch.int64, torch.uint8,
-        torch.uint16, torch.uint32, torch.uint64
-    ]
-    assert input.dtype in INT_DTYPES and other.dtype in INT_DTYPES
-    diff = torch.abs(input.to(torch.int64) - other.to(torch.int64))
-    return torch.all(
-        diff <= atol +
-        torch.ceil(rtol * torch.abs(other).to(torch.float32)).to(torch.int64))
-
-
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
@@ -81,8 +69,9 @@ def test_dynamic_scaled_int8_azp_quant(num_tokens: int, hidden_size: int,
     if (not torch.allclose(scales_out, scales)):
         print(torch.argmax(torch.abs(scales_out - scales)))
     torch.testing.assert_close(scales_out, scales)
-    assert allclose_int(azp_out, azps, atol=1)  # azp rounding error
-    assert allclose_int(torch_out, ops_out, atol=1)  # azp rounding error
+    torch.testing.assert_close(azp_out, azps, atol=1)  # azp rounding error
+    torch.testing.assert_close(torch_out, ops_out,
+                               atol=1)  # azp rounding error
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)

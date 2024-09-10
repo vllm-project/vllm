@@ -433,7 +433,7 @@ def scaled_int8_quant(
         symmetric: Whether to use symmetric quantization (scale only, azp ignored).
 
     Returns:
-      Tuple[Torch.Tensor, Torch.Tensor] : Output int8 tensor and scales.
+      Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]] : Output int8 tensor, scales, and optionally azp.
     """
     output = torch.empty_like(input, dtype=torch.int8)
     if scale is not None:
