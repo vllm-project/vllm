@@ -20,7 +20,7 @@ for text in texts:
     token_ids.append(7003)
     llm_inputs.append(token_ids)
 
-engine_args = AsyncEngineArgs(model='/home/zhn/fishtts', gpu_memory_utilization=0.5, dtype=torch.float32, skip_tokenizer_init=True, enforce_eager=True)
+engine_args = AsyncEngineArgs(model='/home/zhn/fishtts', gpu_memory_utilization=0.5, dtype=torch.float32, skip_tokenizer_init=True)
 model = AsyncLLMEngine.from_engine_args(engine_args)
 sampling_params = SamplingParams(temperature=1, detokenize=False, stop_token_ids=[1025], max_tokens=2048, top_k=1, repetition_penalty=1.5, repetition_window=16)
 prompts = [
@@ -38,6 +38,7 @@ async def generate_streaming(prompt, id):
         count+=1
     
     print(id)
+    print(len(tokens))
     for token in tokens:
         print(token)
 

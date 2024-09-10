@@ -148,9 +148,8 @@ class SequenceData(msgspec.Struct,
     """
     # NOTE: we cannot use Union[List, array] because msgspec cannot support
     # union of 2 list types.
-    _prompt_token_ids: array
-    _output_token_ids: array = msgspec.field(
-        default_factory=lambda: array(VLLM_TOKEN_ID_ARRAY_TYPE, []))
+    _prompt_token_ids: list
+    _output_token_ids: list = msgspec.field(default_factory=list)
 
     ### The below fields should not be passed as an argument ###
     _cumulative_logprob: float = 0.0
@@ -166,8 +165,6 @@ class SequenceData(msgspec.Struct,
     _new_appended_tokens: List[int] = msgspec.field(default_factory=list)
 
     def __post_init__(self) -> None:
-        assert self._prompt_token_ids.typecode == "l"
-        assert self._output_token_ids.typecode == "l"
         self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(
             self._prompt_token_ids)
         self._update_cached_all_tokens()
@@ -207,13 +204,13 @@ class SequenceData(msgspec.Struct,
         self._update_cached_all_tokens()
 
     @property
-    def output_token_ids_array(self) -> array:
+    def output_token_ids_array(self) -> list:
         """Return the prompt token ids in array type.
 
         Note that the array is in "I" type, and it is not compatible
         with torch.long (2 bytes vs 4 bytes). So beware of the usage.
         """
-        assert isinstance(self._output_token_ids, array)
+        assert isinstance(self._output_token_ids, list)
         return self._output_token_ids
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
@@ -385,8 +382,7 @@ class Sequence:
                              f"invalid input {inputs}; did you forget the "
                              "encoder input prompt fields?")
 
-        self.data = SequenceData(
-            array(VLLM_TOKEN_ID_ARRAY_TYPE, self.prompt_token_ids))
+        self.data = SequenceData(self.prompt_token_ids)
         self.output_logprobs: SampleLogprobs = []
         self.output_hiddens: List[torch.Tensor] = []
         self.output_text = ""
@@ -474,11 +470,11 @@ class Sequence:
 
     def append_token_id(self, token_id: int, logprobs: Dict[int,
                                                             Logprob]) -> None:
-        assert token_id in logprobs
         self.output_logprobs.append(logprobs)
         if isinstance(token_id, List):
             self.data.append_token_id(token_id, logprobs[token_id[0]].logprob)
         else:
+            assert token_id in logprobs
             self.data.append_token_id(token_id, logprobs[token_id].logprob)
 
     def append_token_ids(
@@ -971,6 +967,7 @@ class SequenceOutput(
     parent_seq_id: int
     output_token: int
     logprobs: Dict[int, Logprob]
+    output_tokens: List[int] = None
 
     def __repr__(self) -> str:
         return (f"SequenceOutput(parent_seq_id={self.parent_seq_id}, "
@@ -1006,6 +1003,7 @@ class CompletionSequenceGroupOutput(
     samples: List[SequenceOutput]
     # Prompt logprob for each prompt query token.
     prompt_logprobs: Optional[PromptLogprobs]
+    hidden_state: Optional[torch.Tensor] = None
 
     def __repr__(self) -> str:
         return (f"CompletionSequenceGroupOutput(samples={self.samples}, "

@@ -21,7 +21,7 @@ import pickle
 class FishSpeechPlugin(MultiModalPlugin):
 
     def get_data_key(self) -> str:
-        return "audio1"
+        return "audio"
 
     def _default_input_mapper(self, ctx: InputContext,
                               data: object) -> MultiModalInputs:

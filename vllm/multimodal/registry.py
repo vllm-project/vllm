@@ -233,7 +233,7 @@ class MultiModalRegistry:
                 key: config_limits_per_plugin.get(key, 1)
                 for key in self._plugins
             }
-
+        limits_per_plugin['audio'] = 1
         self._limits_by_model[model_config] = limits_per_plugin
 
     def get_mm_limits_per_prompt(

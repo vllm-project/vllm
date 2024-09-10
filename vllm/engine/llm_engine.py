@@ -1469,7 +1469,12 @@ class LLMEngine:
 
                 assert len(seq_group.seqs) == 1
                 seq = seq_group.seqs[0]
-                seq.append_token_id(sample.output_token, sample.logprobs)
+                if len(sample.output_tokens) > 1:
+                    seq.append_token_id(sample.output_tokens,
+                                        sample.logprobs)
+                else:
+                    seq.append_token_id(sample.output_token,
+                                        sample.logprobs)
 
     def step(self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.

@@ -1,3 +1,4 @@
+from array import array
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple, Union
 
 import torch
@@ -13,14 +14,14 @@ from vllm.inputs.registry import InputContext
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.multi_head_sampler import MultiheadSampler
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.speech import SpeechPlugin
-from vllm.sequence import IntermediateTensors, SamplerOutput
+from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors
 
 from einops import rearrange
 from transformers.generation import TopKLogitsWarper, TopPLogitsWarper
