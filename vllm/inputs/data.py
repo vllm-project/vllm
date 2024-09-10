@@ -4,6 +4,7 @@ from typing import (TYPE_CHECKING, Generic, Iterable, List, Optional, Tuple,
 from typing_extensions import NotRequired, TypedDict, TypeVar
 
 if TYPE_CHECKING:
+    from vllm.core.block.token_ids import TokenRangeAnnotation
     from vllm.multimodal import MultiModalDataDict
 
 
@@ -120,6 +121,12 @@ class LLMInputs(TypedDict):
     """
     Optional multi-modal data to pass to the model,
     if the model supports it.
+    """
+
+    token_annotations: NotRequired[Optional[List["TokenRangeAnnotation"]]]
+    """
+    Optional token annotations to capture content that will replace portions
+    of the token IDs list.
     """
 
 

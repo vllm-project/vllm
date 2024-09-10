@@ -9,6 +9,7 @@ from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
 from vllm.core.block.interfaces import Block
 from vllm.core.block.prefix_caching_block import (ComputedBlocksTracker,
                                                   LastAccessBlocksTracker)
+from vllm.core.block.token_ids import TokenIds
 from vllm.core.block.utils import check_no_caching_or_swa_for_blockmgr_encdec
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
@@ -115,7 +116,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
 
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
         num_required_blocks = BlockTable.get_num_required_blocks(
-            seq.get_token_ids(),
+            len(seq.get_token_ids()),
             block_size=self.block_size,
         )
 
@@ -123,7 +124,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             encoder_seq = seq_group.get_encoder_seq()
             assert encoder_seq is not None
             num_required_blocks += BlockTable.get_num_required_blocks(
-                encoder_seq.get_token_ids(),
+                len(encoder_seq.get_token_ids()),
                 block_size=self.block_size,
             )
 
@@ -149,7 +150,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             block_allocator=self.block_allocator,
             max_block_sliding_window=self.max_block_sliding_window,
         )
-        block_table.allocate(seq.get_token_ids())
+        block_table.allocate(TokenIds.from_sequence(seq, offset=0))
 
         return block_table
 
@@ -216,8 +217,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
 
             num_touched_blocks += (
                 block_table.get_num_blocks_touched_by_append_slots(
-                    token_ids=block_table.get_unseen_token_ids(
-                        seq.get_token_ids()),
+                    num_token_ids=block_table.get_unseen_token_id_count(seq),
                     num_lookahead_slots=num_lookahead_slots,
                 ))
 
@@ -234,7 +234,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         block_table = self.block_tables[seq.seq_id]
 
         block_table.append_token_ids(
-            token_ids=block_table.get_unseen_token_ids(seq.get_token_ids()),
+            token_ids=block_table.get_unseen_token_ids(seq),
             num_lookahead_slots=num_lookahead_slots,
             num_computed_slots=seq.data.get_num_computed_tokens(),
         )

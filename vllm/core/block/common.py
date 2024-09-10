@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Deque, Dict, Iterable, List, Optional, Protocol, Tuple
 
 from vllm.core.block.interfaces import Block, BlockAllocator
+from vllm.core.block.token_ids import TokenIds
 
 BlockId = int
 RefCount = int
@@ -174,7 +175,7 @@ class BlockPool:
         for i in range(self._pool_size):
             self._pool.append(
                 self._create_block(prev_block=None,
-                                   token_ids=[],
+                                   token_ids=TokenIds(),
                                    block_size=self._block_size,
                                    allocator=self._allocator,
                                    block_id=None))
@@ -191,12 +192,12 @@ class BlockPool:
         for i in range(cur_pool_size, new_pool_size):
             self._pool.append(
                 self._create_block(prev_block=None,
-                                   token_ids=[],
+                                   token_ids=TokenIds(),
                                    block_size=self._block_size,
                                    allocator=self._allocator,
                                    block_id=None))
 
-    def init_block(self, prev_block: Optional[Block], token_ids: List[int],
+    def init_block(self, prev_block: Optional[Block], token_ids: TokenIds,
                    block_size: int, physical_block_id: Optional[int]) -> Block:
         if len(self._free_ids) == 0:
             self.increase_pool()
@@ -248,7 +249,7 @@ class BlockList:
         for block in self._blocks:
             self._add_block_id(block.block_id)
 
-    def append_token_ids(self, block_index: int, token_ids: List[int]) -> None:
+    def append_token_ids(self, block_index: int, token_ids: TokenIds) -> None:
         block = self._blocks[block_index]
         prev_block_id = block.block_id
 

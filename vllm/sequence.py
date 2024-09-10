@@ -19,6 +19,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 if TYPE_CHECKING:
+    from vllm.core.block.token_ids import TokenRangeAnnotation
     from vllm.inputs import LLMInputs
     from vllm.multimodal.base import MultiModalDataDict
 
@@ -441,6 +442,10 @@ class Sequence:
     @property
     def multi_modal_data(self) -> "MultiModalDataDict":
         return self.inputs.get("multi_modal_data") or {}
+    
+    @property
+    def token_annotations(self) -> List["TokenRangeAnnotation"]:
+        return self.inputs.get("token_annotations") or []
 
     @property
     def lora_int_id(self) -> int:
