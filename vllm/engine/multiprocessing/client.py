@@ -11,8 +11,7 @@ import zmq.asyncio
 from zmq import Frame  # type: ignore[attr-defined]
 from zmq.asyncio import Socket
 
-from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig)
+from vllm.config import DecodingConfig, EngineConfig, LoRAConfig, ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_HEALTH_EXT, IPC_INPUT_EXT,
@@ -67,10 +66,22 @@ class MQLLMEngineClient:
             every N seconds, confirming the engine is healthy
     """
 
-    def __init__(self, ipc_path: str):
+    def __init__(self, ipc_path: str, engine_config: EngineConfig):
         self.context = zmq.asyncio.Context()
         self._errored = False
         self.dead_error = ENGINE_DEAD_ERROR
+
+        # Get the configs.
+        self.model_config = engine_config.model_config
+        self.decoding_config = engine_config.decoding_config
+
+        # Create the tokenizer group.
+        self.tokenizer = init_tokenizer_from_configs(
+            model_config=self.model_config,
+            scheduler_config=engine_config.scheduler_config,
+            parallel_config=engine_config.parallel_config,
+            enable_lora=bool(engine_config.lora_config),
+        )
 
         # Send RPCGenerateRequest to the MQLLMEngine.
         self.input_socket: Socket = self.context.socket(zmq.constants.PUSH)
@@ -209,20 +220,7 @@ class MQLLMEngineClient:
             # Wait until server is ready.
             await self._wait_for_server_rpc(socket)
 
-            # Get the configs.
-            self.model_config = await self._get_model_config_rpc(socket)
-            self.decoding_config = await self._get_decoding_config_rpc(socket)
             self.tracing_flag = await self._is_tracing_enabled_rpc(socket)
-
-            # Create the tokenizer group.
-            # TODO: refactor OAI server to avoid needing this info.
-            self.tokenizer = init_tokenizer_from_configs(
-                model_config=self.model_config,
-                scheduler_config=(await
-                                  self._get_scheduler_config_rpc(socket)),
-                parallel_config=(await self._get_parallel_config_rpc(socket)),
-                enable_lora=bool(await self._get_lora_config_rpc(socket)),
-            )
 
             # Start health_loop.
             self.health_loop = asyncio.create_task(
@@ -331,52 +329,6 @@ class MQLLMEngineClient:
 
         await self._send_one_way_rpc_request(
             request=RPCStartupRequest.CLIENT_IS_READY, socket=socket)
-
-    async def _get_model_config_rpc(self, socket: Socket) -> ModelConfig:
-        """Get the ModelConfig object from the RPC Server"""
-
-        return await self._send_get_data_rpc_request(
-            RPCStartupRequest.GET_MODEL_CONFIG,
-            expected_type=ModelConfig,
-            error_message="Could not get ModelConfig from RPC Server",
-            socket=socket)
-
-    async def _get_decoding_config_rpc(self, socket: Socket) -> DecodingConfig:
-        """Get DecodingConfig from the RPCServer"""
-
-        return await self._send_get_data_rpc_request(
-            RPCStartupRequest.GET_DECODING_CONFIG,
-            expected_type=DecodingConfig,
-            error_message="Could not get DecodingConfig from RPC Server",
-            socket=socket)
-
-    async def _get_parallel_config_rpc(self, socket: Socket) -> ParallelConfig:
-        """Get ParallelConfig from the RPCServer"""
-
-        return await self._send_get_data_rpc_request(
-            RPCStartupRequest.GET_PARALLEL_CONFIG,
-            expected_type=ParallelConfig,
-            error_message="Could not get ParallelConfig from RPC Server",
-            socket=socket)
-
-    async def _get_scheduler_config_rpc(self,
-                                        socket: Socket) -> SchedulerConfig:
-        """Get SchedulerConfig from the RPCServer"""
-
-        return await self._send_get_data_rpc_request(
-            RPCStartupRequest.GET_SCHEDULER_CONFIG,
-            expected_type=SchedulerConfig,
-            error_message="Could not get SchedulerConfig from RPC Server",
-            socket=socket)
-
-    async def _get_lora_config_rpc(self, socket: Socket) -> LoRAConfig:
-        """Get LoRAConfig from the RPCServer"""
-
-        return await self._send_get_data_rpc_request(
-            RPCStartupRequest.GET_LORA_CONFIG,
-            expected_type=LoRAConfig,
-            error_message="Could not get LoRAConfig from RPC Server",
-            socket=socket)
 
     async def _is_tracing_enabled_rpc(self, socket: Socket) -> bool:
         """Get is_tracing_enabled flag from the RPCServer"""

@@ -149,11 +149,6 @@ async def build_async_engine_client_from_engine_args(
         logger.info("Multiprocessing frontend to use %s for IPC Path.",
                     ipc_path)
 
-        # Build RPCClient, which conforms to EngineClient Protocol.
-        # NOTE: Actually, this is not true yet. We still need to support
-        # embedding models via RPC (see TODO above)
-        mp_engine_client = MQLLMEngineClient(ipc_path)
-
         # Start RPCServer in separate process (holds the LLMEngine).
         # the current process might have CUDA context,
         # so we need to spawn a new process
@@ -165,6 +160,12 @@ async def build_async_engine_client_from_engine_args(
                                                ipc_path))
         engine_process.start()
         logger.info("Started engine process with PID %d", engine_process.pid)
+
+        # Build RPCClient, which conforms to EngineClient Protocol.
+        # NOTE: Actually, this is not true yet. We still need to support
+        # embedding models via RPC (see TODO above)
+        engine_config = engine_args.create_engine_config()
+        mp_engine_client = MQLLMEngineClient(ipc_path, engine_config)
 
         try:
             while True:
