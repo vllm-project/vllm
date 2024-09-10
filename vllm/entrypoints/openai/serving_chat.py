@@ -28,6 +28,7 @@ from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     PromptAdapterPath,
                                                     TextTokensPrompt)
 from vllm.entrypoints.openai.tool_parsers import (Hermes2ProToolParser,
+                                                  LlamaToolParser,
                                                   MistralToolParser,
                                                   ToolParser)
 from vllm.inputs import TokensPrompt
@@ -83,6 +84,8 @@ class OpenAIServingChat(OpenAIServing):
                 self.tool_parser = MistralToolParser
             elif tool_parser == "hermes":
                 self.tool_parser = Hermes2ProToolParser
+            elif tool_parser == "llama":
+                self.tool_parser = LlamaToolParser
             else:
                 raise TypeError("Error: --enable-auto-tool-choice requires "
                                 "--tool-call-parser")
