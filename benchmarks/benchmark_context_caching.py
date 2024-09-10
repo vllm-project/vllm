@@ -1,0 +1,69 @@
+import time
+
+from vllm import LLM, CachingParams, SamplingParams
+from vllm.utils import FlexibleArgumentParser
+
+PROMPT = "You are a helpful assistant in recognizes the content of tables in markdown format. Here is a table as fellows. You need to answer my question about the table.\n# Table\n|Opening|Opening|Sl. No.|Film|Cast|Director|Music Director|Notes|\n|----|----|----|----|----|----|----|----|\n|J A N|9|1|Agni Pushpam|Jayabharathi, Kamalahasan|Jeassy|M. K. Arjunan||\n|J A N|16|2|Priyamvada|Mohan Sharma, Lakshmi, KPAC Lalitha|K. S. Sethumadhavan|V. Dakshinamoorthy||\n|J A N|23|3|Yakshagaanam|Madhu, Sheela|Sheela|M. S. Viswanathan||\n|J A N|30|4|Paalkkadal|Sheela, Sharada|T. K. Prasad|A. T. Ummer||\n|F E B|5|5|Amma|Madhu, Srividya|M. Krishnan Nair|M. K. Arjunan||\n|F E B|13|6|Appooppan|Thikkurissi Sukumaran Nair, Kamal Haasan|P. Bhaskaran|M. S. Baburaj||\n|F E B|20|7|Srishti|Chowalloor Krishnankutty, Ravi Alummoodu|K. T. Muhammad|M. S. Baburaj||\n|F E B|20|8|Vanadevatha|Prem Nazir, Madhubala|Yusufali Kechery|G. Devarajan||\n|F E B|27|9|Samasya|Madhu, Kamalahaasan|K. Thankappan|Shyam||\n|F E B|27|10|Yudhabhoomi|K. P. Ummer, Vidhubala|Crossbelt Mani|R. K. Shekhar||\n|M A R|5|11|Seemantha Puthran|Prem Nazir, Jayabharathi|A. B. Raj|M. K. Arjunan||\n|M A R|12|12|Swapnadanam|Rani Chandra, Dr. Mohandas|K. G. George|Bhaskar Chandavarkar||\n|M A R|19|13|Thulavarsham|Prem Nazir, sreedevi, Sudheer|N. Sankaran Nair|V. Dakshinamoorthy||\n|M A R|20|14|Aruthu|Kaviyoor Ponnamma, Kamalahasan|Ravi|G. Devarajan||\n|M A R|26|15|Swimming Pool|Kamal Haasan, M. G. Soman|J. Sasikumar|M. K. Arjunan||\n\n# Question\nWhat' s the content in the (1,1) cells\n"  # noqa: E501
+
+LONG_PROMPT = "ialogue: Andrew: Hello Janny, is it still convenient for us to come and check your gas meter at 2.45 today? Janny: Hi Andrew, that's fine. Andrew: Thank you, we will see you then Summary: Andrew will come to Janny to check her gas meter at 2.45 today. Dialogue: Vicky: Can I ask a really big favour? Grant: Sure. Vicky: Can I borrow 50 bucks until the end of the month? Please, please... Grant: Is that on top of the other other couple of 50s you borrowed this month? Grant: Happy to lend it to you as long as you pay it ALL back by the end of the month. Vicky: I will. I promise. Grant: Cross your heart and hope to die? ;-) Vicky: Of course. LOL Vicky: It's just that things have been really unsteady at work and I'm still waiting on all the invoices to be paid. Grant: You need better clients hun! Vicky: If I could ditch all the ones I currently have I would... but money and all that. LOL Grant: What good are clients that don't pay? Vicky: You're right but what can I do. Is what is. Summary: Grant will lend Vicky 50 dollars. She will reyurn it by the end of the month. Dialogue: Rosalie: Hey Mark 🙂 Rosalie: Can you help me? Mark: Hi Rosie 🙂 Mark: Sure whatsup? Rosalie: I am trying to find a new phone Rosalie: I know you're an expert Rosalie: Any models that you would recommend? Mark: Team Apple or Android? Rosalie: Android forever haha Rosalie: And don't worry about the price Mark: In that case I recommend to look at Huawei Mate 20 or Samsung Galaxy Note 9 Rosalie: Thanks. I trust you on that 🙂 Mark: You should 🙂 Rosalie: Gotta go pick one 😄 Mark: No prob 🙂 Summary: Rosalie is going to buy a new Android phone. Dialogue: Jackie: <file_photo> Marisol: omg congrats! Carlita: :O Eunica: I'm so happy for you1 Carlita: <file_gif> Marisol: how did he propose? Eunica: when will u get married? Jackie: when we were walking in a park he dropped on his knee next to this fountain in the Central Park Marisol: *o* Carlita: how sweet Jackie: he told me he wants to share everything what's beautiful with me Marisol: awwww Jackie: he must have carried that ring for a while because I remember him complaining about the weather lately :D Marisol: it's so sweet he had been waiting Jackie: we don't know yet when we'll get married but you are all invited ofc Carlita: PLEASE don't pick June, I'll be in Canada then Eunica: I hate weddings but I'll make an exception Marisol: can't wait! Summary: Jackie got engaged in Central Park. Marisol, Carlita, Eunica are excited. Jackie doesn't know the date yet but they are all invited. Dialogue: Kyle: Ever seen that before? Sarah: No! Kyle: Hope I don't again either! Sarah: Me neither! Summary: Neither Kyle nor Sarah have seen that before. They don't wish to see it again. Dialogue: Rachel: Hi Dad, what time is Pete and Sylve coming over? Dad: They said about 11, why? Rachel: well they were going to come and have a cuppa with me but I am thinking I may as well drive over to yours and save them a journey Dad: you could do darling Rachel: I dont have too much to do this afternoon and I do need to go shopping so I will come over to yours and see them and then go shopping on the way home Dad: sounds like a plan! Rachel: yes I will see you after 12 then xxx Dad: ok xxx Summary: Pete and Sylve are coming to Dad's place at 11. Rachel decides to change her plans for meeting them and drive over to Dad to see them there after 12. Rachel will go shopping on the way home. Dialogue: Andres: Hey Mila: Hey let's chat in a bit kinda busy now Andres: Ok Summary: Andres wants to chat, but Mila is busy now. Dialogue: Alek: bro, I like going to the gym with you. It's like highlight of the day <3 Krzysztof: bro Krzysztof: this is the nicest thing any gym bro told me. Let's do some chest and biceps together tomorrow evening, are you fine? Alek: chest and biceps are my favorite (＾ｕ＾) Krzysztof: dude, you're nice but kinda creepy though Alek: come on, just wanted to be nice Krzysztof: all right, so we're cool Alek: so maybe we could do glutes too? Summary: Krzysztof and Alek are going to go to the gym together tomorrow evening. Dialogue: Tom: Who wants to come with me to Boston in December? Tom: A friend of mine left for a month and said I can stay at his place with whoever I want. Carmen: Amazing! When exactly? Dorothy: I love Boston! I'm in! Peter: If it's the end of December I can join as well Tom: 15 of Dec till 15 of Jan. Peter: So maybe New Year's Eve in Boston? Carmen: How many people could you take? Tom: it's a huge house, I think up to 5-6 would be still fine. Peter: So let's organise it, because we're so amazingly flexible, some people can come earlier, some later Tom: yup! I will reside there the whole month probably, taking care of the place and working from home Tom: So, guys, just let me know exact dates when you can come and I will make a schedule Carmen: Wow! I'm so excited! Tom: Is anybody else interested? Laura: I think I am! Grace: Count me in! Toby: I would love to, but we're going to Barbados with Lore Carmen: Fuck you Toby! you never work! travelling all the time. I'm so envious Toby: But it's my work as you know. Toby: Traveling is my lifestyle 😜 Tom: We should just ban you, Toby, you're a troll with your amazing lifestyle Toby: Sorry guys! 🤴 Enjoy your snowy Massachusetts 😜 Dorothy: Hahahah, I love you subtle trolling Toby. Carmen was already ecstatic and then you entered with Barbados 😂 Carmen: I'm still excited! Summary: Tom will take care of his friends' place in Boston in December. Dorothy, Peter, Carmen, Laura and Grace will join him and they will spend New Year's Eve there. Toby can't come because he is going to Barbados with Lore, which makes others a bit envious. Dialogue: Lemar: Khabib is such a smasher dude! Memphis: yeah man, everyone was shocked Lemar: yeah, even my dad Memphis: Haha, me too Lemar: McGregor was totally beaten Memphis: terrorized, shaken and knocked into submission Lemar: that was history Memphis: Putin must be really happy with Khabib..haha Lemar: Man, bt poor McGregor Memphis: haha, his stamina was off Lemar: yeah Memphis: that he needs to improve Lemar: i totally agree Memphis: but outside brawl that occurred was so dope Lemar: khabib poked Mc's trainer Memphis: haha, yeah Lemar: then he dashed out flying Memphis: haha, so dope and crazy Lemar: haha Memphis: later dude Summary: Khabib has beaten McGregor. Khabib's trainer poked McGregor's trainer, which resulted in a brawl. Dialogue: Carla: Joanna here are my details that you requested Carla: It's Anglo street, no 54, Hammersmith, W614, London Joanna: Ok Carla Joanna: I have been searching our database this morning for the item Joanna: However nothing has arrived yet Joanna: Can you give me a couple of more days and I'll speak to my manager? Carla: Ok, I'll wait Carla: It's a very important package, so I hope you will be able to find it.. Joanna: Yes I have added it to our priority list Joanna: Don't worry, I'll do my best Carla: Thank you Carla: I was given another code, do you want this? Joanna: Yes please Carla: IYREBH777 Joanna: Great Joanna: I'll get back to you asap! Carla: Thanks again Joanna Summary: Carla is waiting for an important package. Joanna helps Carla locate it. Carla provided Joanna her address information and a code. Dialogue: Connor: What are you doing tomorrow? Rachel: I was going to stay at home. Connor: Do you want to go swimming with us? Rachel: Where? Connor: The big lake near the mountains. Rachel: Isn't that dar away? Connor: About an hour's drive. We're thinking of staying the weekend, tough. Rachel: Who's going? Connor: Everyone is in. Rachel: OK, cool. Count me in as well. Connor: Awesome! Do you have a tent? Rachel: Yes, a big one. It fits six people, easy. I also have a portable barbecue I can bring. Connor: Great, I'll go check on everyone else and then I'll text you. Rachel: OK. Connor: I think I'm going to create a group chat. It's easier that way. Summary: Rachel, Connor and others are going for a weekend away by the lake in the mountains. Rachel is bringing a six people tent and portable barbecue. Dialogue: Alice: Hey, what do u think of this offer? <file_other> Mark: Y? Alice: My mobile plan is coming to an end and need to find a new one. Mark: Well, this doesn't sound too bad. What about this one? <file_other> Alice: That's also nice, but I don't want to change my network. Mark: But u can benefit a lot! Summary: Alice's mobile plan is coming to an end and she's looking for a new one. She doesn't want to change her network. Dialogue: Evan: Jonny Jonny: Ye? Evan: Watching Netflix? Jonny: Nope, why? Evan: Time to change it Jonny: Mhm. Carry on Evan: I'm testing Netflix Ultra, it costs 70PLN a month. Evan: But I'm sharing costs with friends. So far we created three profiles, do you want to have your account? Jonny: Let me ask my girl Jonny: Brb Evan: Sure Jonny: She's excited, let's do it! Evan: Great, you'll have all the details on email. Jonny: Thanks dude. Hope it's worth it. Evan: Trust me, it is! Summary: Evan is trying out Netflix Ultra at 70 PLN a month. Jonny and his girlfriend will chip in. Dialogue: Caroline: Jake still hasn't proposed to me Caroline: But I keep seeing sponsored ads of engagement rings and jewellery stores on my social media feeds Judy: Well. Maybe it wasn't the case yet. Judy: I have to remind you that you've just crashed his car and he needs to spend money on it Caroline: :( Caroline: Please. I already feel bad about it. Caroline: No reminder needed. Judy: Oh come on. Judy: I didn't mean it that way. Judy: I'm just saying he doesn't have a proper job yet and he doesn't have that kind of money to spend yet. Judy: Everything comes in a proper moment Caroline: I know I know Caroline: It's just these ads are bothering me Caroline: And everybody are getting engaged recently Judy: Calm down. You have nothing to worry about. He will propose to you eventually. He loves you so much he could kill the entire world to be with you. Caroline: Thanks. Summary: Jake didn't propose to Caroline yet, which makes her unhappy. He doesn't have a proper job and Caroline crashed his car, so he needs to spend money on that. He will propose eventually because he loves her."  # noqa: E501
+
+
+def test_prefix(llm=None, sampling_params=None, prompts=None):
+    start_time = time.time()
+
+    llm.generate(prompts, sampling_params=sampling_params)
+
+    end_time = time.time()
+    print(f"cost time {end_time - start_time}")
+
+
+def main(args):
+    llm = LLM(model=args.model,
+              tokenizer_mode='auto',
+              trust_remote_code=True,
+              enforce_eager=True,
+              use_v2_block_manager=False,
+              tensor_parallel_size=1,
+              enable_prefix_caching=True)
+
+    print("------ build context caching ------")
+
+    start_time = time.time()
+    caching_params = CachingParams(ttl=args.ttl)
+    cache_output = llm.caching(LONG_PROMPT, caching_params=caching_params)
+    end_time = time.time()
+
+    print(
+        f"Caching output: {cache_output} \ncost time {end_time - start_time}\n"
+    )
+
+    print("------ start generating ------")
+    start_time = time.time()
+    llm.generate(LONG_PROMPT,
+                 SamplingParams(temperature=0, max_tokens=args.output_len))
+    end_time = time.time()
+    print(f"Cost time {end_time - start_time}\n")
+
+    time.sleep(args.ttl)
+
+    print("------ start generating after ttl ------")
+    print("WARNING: this test case can not reflect "
+          "whether the context is correctly evicted,\n"
+          "because an LRU prefix caching is automatically"
+          "enabled by BlockManagerV1")
+    start_time = time.time()
+    llm.generate(LONG_PROMPT,
+                 SamplingParams(temperature=0, max_tokens=args.output_len))
+    end_time = time.time()
+    print(f"Cost time {end_time - start_time}\n")
+
+
+if __name__ == "__main__":
+    parser = FlexibleArgumentParser(
+        description='Benchmark the performance with context caching.')
+    parser.add_argument('--model', type=str, default='01-ai/Yi-6B')
+    parser.add_argument('--output-len', type=int, default=1)
+    parser.add_argument('--ttl', type=int, default=3)
+
+    args = parser.parse_args()
+    main(args)

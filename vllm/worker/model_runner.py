@@ -1382,9 +1382,11 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             "finished_requests_ids": model_input.finished_requests_ids,
             "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
         } if self.has_seqlen_agnostic else {}
-        #model_forward_start = torch.cuda.Event(enable_timing=True)
-        #model_forward_end = torch.cuda.Event(enable_timing=True)
-        #model_forward_start.record()
+
+        model_forward_start = torch.cuda.Event(enable_timing=True)
+        model_forward_end = torch.cuda.Event(enable_timing=True)
+        model_forward_start.record()
+
         hidden_or_intermediate_states = model_executable(
             input_ids=model_input.input_tokens,
             positions=model_input.input_positions,
@@ -1396,6 +1398,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             **seqlen_agnostic_kwargs)
         #model_forward_end.record()
 
+        model_forward_end.record()
         # Compute the logits in the last pipeline stage.
         if not get_pp_group().is_last_rank:
             return hidden_or_intermediate_states

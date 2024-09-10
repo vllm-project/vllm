@@ -346,11 +346,13 @@ class Scheduler:
         # Contain new prefill or preempted requests.
         self.waiting: Deque[SequenceGroup] = deque()
         # Sequence groups in the RUNNING state.
-        # Contain decode requests.
+        # Contain decode requests and caching request.
         self.running: Deque[SequenceGroup] = deque()
         # Sequence groups in the SWAPPED state.
         # Contain decode requests that are swapped out.
         self.swapped: Deque[SequenceGroup] = deque()
+        # Contain caching request
+        self.fixed: Deque[SequenceGroup] = deque()
         # Sequence groups finished requests ids since last step iteration.
         # It lets the model know that any state associated with these requests
         # can and must be released after the current step.
@@ -888,6 +890,10 @@ class Scheduler:
             token_budget=self.scheduler_config.max_num_batched_tokens,
             max_num_seqs=self.scheduler_config.max_num_seqs,
         )
+
+        # Check context caching and free
+        self.free_expired_context_caching()
+
         # Make sure we include num running seqs before scheduling prefill,
         # so that we don't schedule beyond max_num_seqs for prefill.
         for seq_group in self.running:
@@ -921,8 +927,8 @@ class Scheduler:
                     running_scheduled.swapped_out) == 0:
                 swapped_in = self._schedule_swapped(budget, curr_loras)
 
-        assert (budget.num_batched_tokens
-                <= self.scheduler_config.max_num_batched_tokens)
+        assert (budget.num_batched_tokens <=
+                self.scheduler_config.max_num_batched_tokens)
         assert budget.num_curr_seqs <= self.scheduler_config.max_num_seqs
 
         # Update waiting requests.
@@ -1054,8 +1060,8 @@ class Scheduler:
             blocks_to_swap_out_to_disk.extend(
                 prefills.blocks_to_swap_out_to_disk)
 
-        assert (budget.num_batched_tokens
-                <= self.scheduler_config.max_num_batched_tokens)
+        assert (budget.num_batched_tokens <=
+                self.scheduler_config.max_num_batched_tokens)
         assert budget.num_curr_seqs <= self.scheduler_config.max_num_seqs
 
         # Update waiting requests.
@@ -1172,10 +1178,12 @@ class Scheduler:
                 # NOTE: We use get_len instead of get_prompt_len because when
                 # a sequence is preempted, prefill includes previous generated
                 # output tokens.
-                if (token_chunk_size + seqs[0].data.get_num_computed_tokens()
-                        < seqs[0].data.get_len()):
+                if (token_chunk_size + seqs[0].data.get_num_computed_tokens() <
+                        seqs[0].data.get_len()):
                     do_sample = False
-
+                # # Do not sample with context caching request
+                if seq_group.caching_params:
+                    do_sample = False
             # It assumes the scheduled_seq_groups is ordered by
             # prefill < decoding.
             is_prompt = seq_group.is_prefill()
@@ -1187,6 +1195,7 @@ class Scheduler:
                 block_tables=block_tables,
                 do_sample=do_sample,
                 pooling_params=seq_group.pooling_params,
+                caching_params=seq_group.caching_params,
                 token_chunk_size=token_chunk_size,
                 lora_request=seq_group.lora_request,
                 computed_block_nums=common_computed_block_nums,
@@ -1229,6 +1238,32 @@ class Scheduler:
             else:
                 remaining.append(seq_group)
         self.running = remaining
+
+    def move_caching_from_running_to_fixed(self) -> None:
+        """
+        move the finished context caching requests
+        from running to fixed queue
+        """
+        remaining: Deque[SequenceGroup] = deque()
+        for seq_group in self.running:
+            if seq_group.is_fixed():
+                self.fixed.append(seq_group)
+            else:
+                remaining.append(seq_group)
+        self.running = remaining
+
+    def free_expired_context_caching(self) -> None:
+        """
+        !! note that this method also physically free the blocks
+        """
+        remaining: Deque[SequenceGroup] = deque()
+        for seq_group in self.fixed:
+            if seq_group.is_expired():
+                assert len(seq_group.seqs) == 1
+                self.free_seq(seq_group[0])
+            else:
+                remaining.append(seq_group)
+        self.fixed = remaining
 
     def _allocate_and_set_running(
         self, seq_group: SequenceGroup
@@ -1377,9 +1412,10 @@ class Scheduler:
         if self.scheduler_config.delay_factor > 0 and self.waiting:
             earliest_arrival_time = min(
                 [e.metrics.arrival_time for e in self.waiting])
-            passed_delay = ((now - earliest_arrival_time)
-                            > (self.scheduler_config.delay_factor *
-                               self.last_prompt_latency) or not self.running)
+            passed_delay = (
+                (now - earliest_arrival_time) >
+                (self.scheduler_config.delay_factor * self.last_prompt_latency)
+                or not self.running)
         else:
             passed_delay = True
         return passed_delay

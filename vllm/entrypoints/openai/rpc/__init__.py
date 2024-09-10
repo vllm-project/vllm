@@ -38,5 +38,13 @@ class RPCUtilityRequest(Enum):
     IS_TRACING_ENABLED = 9
 
 
+@dataclass
+class RPCCachingRequest:
+    inputs: PromptInputs
+    request_id: str
+    ttl: Optional[float] = None
+    expired_at: Optional[float] = None
+
+
 RPC_REQUEST_TYPE = Union[RPCGenerateRequest, RPCAbortRequest,
-                         RPCUtilityRequest]
+                         RPCUtilityRequest, RPCCachingRequest]

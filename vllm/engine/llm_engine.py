@@ -6,6 +6,7 @@ from typing import Sequence as GenericSequence
 from typing import Set, Type, TypeVar, Union
 
 import vllm.envs as envs
+from vllm.caching_params import CachingParams
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
                          MultiModalConfig, ObservabilityConfig, ParallelConfig,
@@ -25,8 +26,8 @@ from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.inputs import INPUT_REGISTRY, LLMInputs, PromptInputs
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
-                          RequestOutputFactory)
+from vllm.outputs import (CachingRequestOutput, EmbeddingRequestOutput,
+                          RequestOutput, RequestOutputFactory)
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
@@ -528,7 +529,7 @@ class LLMEngine:
         self,
         request_id: str,
         processed_inputs: LLMInputs,
-        params: Union[SamplingParams, PoolingParams],
+        params: Union[SamplingParams, PoolingParams, CachingParams],
         arrival_time: float,
         lora_request: Optional[LoRARequest],
         prompt_adapter_request: Optional[PromptAdapterRequest],
@@ -560,9 +561,12 @@ class LLMEngine:
                 arrival_time=arrival_time,
                 lora_request=lora_request,
                 prompt_adapter_request=prompt_adapter_request)
+        elif isinstance(params, CachingParams):
+            seq_group = self._create_sequence_group_with_caching(
+                request_id, seq, params, arrival_time=arrival_time)
         else:
-            raise ValueError(
-                "Either SamplingParams or PoolingParams must be provided.")
+            raise ValueError("Either SamplingParams, PoolingParams "
+                             "or CachingParams must be provided.")
 
         # Add the sequence group to the scheduler with least unfinished seqs.
         costs = [
@@ -610,7 +614,7 @@ class LLMEngine:
         self,
         request_id: str,
         inputs: PromptInputs,
-        params: Union[SamplingParams, PoolingParams],
+        params: Union[SamplingParams, PoolingParams, CachingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
@@ -740,6 +744,22 @@ class LLMEngine:
             prompt_adapter_request=prompt_adapter_request)
         return seq_group
 
+    def _create_sequence_group_with_caching(
+        self,
+        request_id: str,
+        seq: Sequence,
+        caching_params: CachingParams,
+        arrival_time: float,
+    ) -> SequenceGroup:
+        caching_params = caching_params.clone()
+        seq_group = SequenceGroup(
+            request_id=request_id,
+            seqs=[seq],
+            arrival_time=arrival_time,
+            caching_params=caching_params,
+            sampling_params=SamplingParams())  # use default sampling_params
+        return seq_group
+
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
         """Aborts a request(s) with the given ID.
 
@@ -833,8 +853,17 @@ class LLMEngine:
                 scheduled_seq_groups, output_by_sequence_group,
                 seq_group_metadata_list):
             seq_group = scheduled_seq_group.seq_group
+
+            # If it is a context cache request, set it as fixed
+
             seq_group.update_num_computed_tokens(
                 scheduled_seq_group.token_chunk_size)
+
+            if seq_group.caching_params:
+                for seq in seq_group.get_seqs():
+                    seq.status = SequenceStatus.FIXED
+                continue
+
             if self.model_config.embedding_mode:
                 self._process_sequence_group_outputs(seq_group, outputs)
                 continue
@@ -846,12 +875,18 @@ class LLMEngine:
         # Free the finished sequence groups.
         for scheduler in self.scheduler:
             scheduler.free_finished_seq_groups()
+            scheduler.move_caching_from_running_to_fixed()
 
         # Create the outputs.
-        request_outputs: List[Union[RequestOutput,
-                                    EmbeddingRequestOutput]] = []
+        request_outputs: List[Union[RequestOutput, EmbeddingRequestOutput,
+                                    CachingRequestOutput]] = []
         for scheduled_seq_group in scheduled_seq_groups:
             seq_group = scheduled_seq_group.seq_group
+            # process Caching requests output
+            if seq_group.caching_params:
+                request_output = RequestOutputFactory.create(seq_group)
+                request_outputs.append(request_output)
+                continue
             seq_group.maybe_set_first_token_time(now)
             request_output = RequestOutputFactory.create(seq_group)
             request_outputs.append(request_output)
@@ -860,7 +895,10 @@ class LLMEngine:
             request_outputs.append(request_output)
         return request_outputs
 
-    def step(self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
+    def step(
+        self
+    ) -> List[Union[RequestOutput, EmbeddingRequestOutput,
+                    CachingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
 
         .. figure:: https://i.imgur.com/sv2HssD.png

@@ -10,7 +10,8 @@ from typing_extensions import Never
 from vllm import AsyncEngineArgs, AsyncLLMEngine
 from vllm.entrypoints.openai.rpc import (VLLM_RPC_HEALTHY_STR,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
-                                         RPCGenerateRequest, RPCUtilityRequest)
+                                         RPCCachingRequest, RPCGenerateRequest,
+                                         RPCUtilityRequest)
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 
@@ -125,6 +126,23 @@ class AsyncEngineRPCServer:
             ### Notify client of all failures
             await self.socket.send_multipart([identity, cloudpickle.dumps(e)])
 
+    async def caching(self, identity, caching_request: RPCCachingRequest):
+        # try:
+        # TODO: result_generator = self.engine.caching
+        try:
+            request_output = await self.engine.caching(
+                inputs=caching_request.inputs,
+                request_id=caching_request.request_id,
+                expired_at=caching_request.expired_at,
+                ttl=caching_request.ttl)
+
+            await self.socket.send_multipart(
+                [identity, cloudpickle.dumps(request_output)])
+
+        except Exception as e:
+            await self.socket.send_multipart([identity, cloudpickle.dump(e)])
+        return
+
     async def check_health(self, identity):
         try:
             await self.engine.check_health()
@@ -141,6 +159,9 @@ class AsyncEngineRPCServer:
 
         if isinstance(request, RPCGenerateRequest):
             return self.generate(identity, request)
+
+        elif isinstance(request, RPCCachingRequest):
+            return self.caching(identity, request)
 
         elif isinstance(request, RPCAbortRequest):
             return self.abort(identity, request)

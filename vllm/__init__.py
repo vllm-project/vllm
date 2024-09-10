@@ -1,5 +1,6 @@
 """vLLM: a high-throughput and memory-efficient inference engine for LLMs"""
 
+from vllm.caching_params import CachingParams
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.llm_engine import LLMEngine
@@ -27,6 +28,8 @@ __all__ = [
     "CompletionOutput",
     "EmbeddingOutput",
     "EmbeddingRequestOutput",
+    "CachingParams",
+    "CachingRequestOutput",
     "LLMEngine",
     "EngineArgs",
     "AsyncLLMEngine",

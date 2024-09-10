@@ -4,6 +4,7 @@ from typing import ClassVar, List, Optional, Sequence, Union, cast, overload
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
+from vllm.caching_params import CachingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.inputs import (PromptInputs, TextPrompt, TokensPrompt,
@@ -13,7 +14,8 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor.guided_decoding import (
     GuidedDecodingRequest, get_local_guided_decoding_logits_processor)
 from vllm.model_executor.guided_decoding.guided_fields import LLMGuidedOptions
-from vllm.outputs import EmbeddingRequestOutput, RequestOutput
+from vllm.outputs import (CachingRequestOutput, EmbeddingRequestOutput,
+                          RequestOutput)
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
@@ -330,6 +332,37 @@ class LLM:
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return LLMEngine.validate_outputs(outputs, RequestOutput)
 
+    def caching(
+        self,
+        prompts: Union[Union[PromptInputs, Sequence[PromptInputs]],
+                       Optional[Union[str, List[str]]]],
+        caching_params: Union[CachingParams, Sequence[CachingParams]],
+        prompt_token_ids: Optional[Union[List[int], List[List[int]]]] = None,
+        use_tqdm: bool = True,
+    ) -> CachingRequestOutput:
+        """Build context caching for the input prompts."""
+        if self.llm_engine.model_config.embedding_mode:
+            raise ValueError(
+                "LLM.caching() is only supported for generation models "
+                "(XForCausalLM).")
+
+        if prompt_token_ids is not None:
+            inputs = self._convert_v1_inputs(
+                prompts=cast(Optional[Union[str, List[str]]], prompts),
+                prompt_token_ids=prompt_token_ids,
+            )
+        else:
+            inputs = cast(Union[PromptInputs, Sequence[PromptInputs]], prompts)
+
+        self._validate_and_add_requests(inputs=inputs,
+                                        params=caching_params,
+                                        lora_request=None,
+                                        prompt_adapter_request=None,
+                                        guided_options=None)
+
+        outputs = self._run_engine(use_tqdm=use_tqdm)
+        return LLMEngine.validate_outputs(outputs, CachingRequestOutput)
+
     @overload  # LEGACY: single (prompt + optional token ids)
     def encode(
         self,
@@ -519,7 +552,8 @@ class LLM:
         self,
         inputs: Union[PromptInputs, Sequence[PromptInputs]],
         params: Union[SamplingParams, Sequence[SamplingParams], PoolingParams,
-                      Sequence[PoolingParams]],
+                      Sequence[PoolingParams], CachingParams,
+                      Sequence[CachingParams]],
         lora_request: Optional[Union[Sequence[LoRARequest], LoRARequest]],
         prompt_adapter_request: Optional[PromptAdapterRequest],
         guided_options: Optional[GuidedDecodingRequest] = None,
@@ -559,7 +593,7 @@ class LLM:
     def _add_request(
             self,
             inputs: PromptInputs,
-            params: Union[SamplingParams, PoolingParams],
+            params: Union[SamplingParams, PoolingParams, CachingParams],
             lora_request: Optional[Union[List[LoRARequest],
                                          LoRARequest]] = None,
             prompt_adapter_request: Optional[PromptAdapterRequest] = None
@@ -610,7 +644,7 @@ class LLM:
         while self.llm_engine.has_unfinished_requests():
             step_outputs = self.llm_engine.step()
             for output in step_outputs:
-                if output.finished:
+                if isinstance(output, CachingRequestOutput) or output.finished:
                     outputs.append(output)
                     if use_tqdm:
                         if isinstance(output, RequestOutput):
@@ -624,6 +658,14 @@ class LLM:
                             pbar.postfix = (
                                 f"est. speed input: {in_spd:.2f} toks/s, "
                                 f"output: {out_spd:.2f} toks/s")
+
+                        if isinstance(output, CachingRequestOutput):
+                            # Calculate tokens only for CachingRequestOutput
+                            total_in_toks = output.tokens
+                            in_spd = total_in_toks / pbar.format_dict["elapsed"]
+                            pbar.postfix = (
+                                f"est. speed input: {in_spd:.2f} toks/s")
+
                         pbar.update(1)
         if use_tqdm:
             pbar.close()

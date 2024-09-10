@@ -10,10 +10,12 @@ from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
 from vllm.entrypoints.openai.rpc import (RPC_REQUEST_TYPE,
                                          VLLM_RPC_HEALTHY_STR,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
-                                         RPCGenerateRequest, RPCUtilityRequest)
+                                         RPCCachingRequest, RPCGenerateRequest,
+                                         RPCUtilityRequest)
 from vllm.inputs import PromptInputs
 from vllm.lora.request import LoRARequest
-from vllm.outputs import EmbeddingRequestOutput, RequestOutput
+from vllm.outputs import (CachingRequestOutput, EmbeddingRequestOutput,
+                          RequestOutput)
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
@@ -220,6 +222,28 @@ class AsyncEngineRPCClient:
                 yield request_output
 
             yield request_output
+
+    async def caching(self, inputs: PromptInputs, request_id: str,
+                      expired_at: Optional[float],
+                      ttl: Optional[float]) -> CachingRequestOutput:
+        """
+        Send an RPCCacheRequest to the RPCServer and return response
+        """
+        with self.socket() as socket:
+            await socket.send_multipart([
+                cloudpickle.dumps(
+                    RPCCachingRequest(inputs=inputs,
+                                      request_id=request_id,
+                                      expired_at=expired_at,
+                                      ttl=ttl))
+            ])
+            message = await socket.recv()
+            caching_request_output = cloudpickle.loads(message)
+
+            if isinstance(caching_request_output, Exception):
+                raise caching_request_output
+
+            return caching_request_output
 
     async def check_health(self) -> None:
         """Raise if unhealthy"""
