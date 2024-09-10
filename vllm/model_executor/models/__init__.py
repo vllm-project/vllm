@@ -50,7 +50,7 @@ _GENERATION_MODELS = {
     "PersimmonForCausalLM": ("persimmon", "PersimmonForCausalLM"),
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
     "Phi3ForCausalLM": ("llama", "LlamaForCausalLM"),
-    "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
+    "PhiMoEForCausalLM": ("phimoe", "PhiMoEForCausalLM"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2MoeForCausalLM": ("qwen2_moe", "Qwen2MoeForCausalLM"),
     "RWForCausalLM": ("falcon", "FalconForCausalLM"),
@@ -64,6 +64,7 @@ _GENERATION_MODELS = {
     "EAGLEModel": ("eagle", "EAGLE"),
     "MLPSpeculatorPreTrainedModel": ("mlp_speculator", "MLPSpeculator"),
     "JambaForCausalLM": ("jamba", "JambaForCausalLM"),
+    "GraniteForCausalLM": ("granite", "GraniteForCausalLM")
 }
 
 _EMBEDDING_MODELS = {
@@ -86,6 +87,7 @@ _MULTIMODAL_MODELS = {
                                           "PaliGemmaForConditionalGeneration"),
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
     "UltravoxModel": ("ultravox", "UltravoxModel"),
+    "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
 }
 _CONDITIONAL_GENERATION_MODELS = {
     "BartModel": ("bart", "BartForConditionalGeneration"),

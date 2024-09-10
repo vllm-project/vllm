@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from PIL import Image
 from transformers import CLIPVisionConfig
-from xformers import ops as xops
+from transformers.models.clip.modeling_clip import CLIPSdpaAttention
 
 from vllm.config import ModelConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
@@ -21,6 +21,12 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    repeat_and_pad_placeholder_tokens)
 from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE, SequenceData
+
+try:
+    from xformers import ops as xops
+    USE_XFORMERS_OPS = True
+except ImportError:
+    USE_XFORMERS_OPS = False
 
 
 def get_clip_patch_grid_length(*, image_size: int, patch_size: int) -> int:
@@ -99,7 +105,7 @@ def input_processor_for_clip(
         if isinstance(image_data, Image.Image):
             image_feature_size = get_clip_image_feature_size(hf_config)
         elif isinstance(image_data, torch.Tensor):
-            image_feature_size = image_data.shape[0]
+            num_images, image_feature_size, hidden_size = image_data.shape
         else:
             raise TypeError(f"Invalid image type: {type(image_data)}")
     else:
@@ -162,7 +168,7 @@ class CLIPVisionEmbeddings(nn.Module):
         return embeddings
 
 
-class CLIPAttention(nn.Module):
+class CLIPParallelAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(
@@ -231,7 +237,7 @@ class CLIPAttention(nn.Module):
         out = out.view(bsz, tgt_len, -1)
         attn_output, _ = self.out_proj(out)
 
-        return attn_output
+        return attn_output, None
 
 
 class CLIPMLP(nn.Module):
@@ -266,7 +272,13 @@ class CLIPEncoderLayer(nn.Module):
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
 
-        self.self_attn = CLIPAttention(config, quant_config=quant_config)
+        num_heads = config.num_attention_heads
+        tp_size = get_tensor_model_parallel_world_size()
+        if USE_XFORMERS_OPS and num_heads % tp_size == 0:
+            self.self_attn = CLIPParallelAttention(config,
+                                                   quant_config=quant_config)
+        else:
+            self.self_attn = CLIPSdpaAttention(config)
         self.layer_norm1 = nn.LayerNorm(config.hidden_size,
                                         eps=config.layer_norm_eps)
         self.mlp = CLIPMLP(config, quant_config=quant_config)
@@ -278,7 +290,7 @@ class CLIPEncoderLayer(nn.Module):
         residual = hidden_states
 
         hidden_states = self.layer_norm1(hidden_states)
-        hidden_states = self.self_attn(hidden_states=hidden_states)
+        hidden_states, _ = self.self_attn(hidden_states=hidden_states)
         hidden_states = residual + hidden_states
 
         residual = hidden_states
@@ -343,6 +355,19 @@ class CLIPVisionTransformer(nn.Module):
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override)
 
+        if len(self.encoder.layers) > config.num_hidden_layers:
+            raise ValueError(
+                f"The original encoder only has {config.num_hidden_layers} "
+                f"layers, but you requested {len(self.encoder.layers)} layers."
+            )
+        elif len(self.encoder.layers) == config.num_hidden_layers:
+            self.post_layernorm = nn.LayerNorm(embed_dim,
+                                               eps=config.layer_norm_eps)
+        else:
+            # post_layernorm is unused when we extract intermediate features
+            # In this case, we can skip it to conserve memory
+            self.post_layernorm = None
+
     def forward(
         self,
         pixel_values: torch.Tensor,
@@ -352,7 +377,10 @@ class CLIPVisionTransformer(nn.Module):
         hidden_states = self.pre_layrnorm(hidden_states)
         hidden_states = self.encoder(inputs_embeds=hidden_states)
 
-        return hidden_states
+        if self.post_layernorm is None:
+            return hidden_states
+
+        return self.post_layernorm(hidden_states)
 
 
 class CLIPVisionModel(nn.Module):
@@ -365,14 +393,21 @@ class CLIPVisionModel(nn.Module):
                  quant_config: Optional[QuantizationConfig] = None,
                  num_hidden_layers_override: Optional[int] = None):
         super().__init__()
+        tp_size = get_tensor_model_parallel_world_size()
+        num_heads = config.num_attention_heads
+        self.shard_weight = USE_XFORMERS_OPS and num_heads % tp_size == 0
+
         self.vision_model = CLIPVisionTransformer(
             config=config,
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override)
 
-    def forward(self, pixel_values: Optional[torch.Tensor] = None):
+    @property
+    def _require_post_layernorm(self) -> bool:
+        return self.vision_model.post_layernorm is not None
 
-        return self.vision_model(pixel_values=pixel_values)
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        return self.vision_model(pixel_values)
 
     @property
     def device(self):
@@ -386,14 +421,16 @@ class CLIPVisionModel(nn.Module):
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
-        ]
+        ] if self.shard_weight else []
         params_dict = dict(self.named_parameters())
         layer_count = len(self.vision_model.encoder.layers)
 
         for name, loaded_weight in weights:
             # post_layernorm is not needed in CLIPVisionModel
-            if "vision_model.post_layernorm" in name:
+            if ("vision_model.post_layernorm" in name
+                    and not self._require_post_layernorm):
                 continue
+
             # omit layers when num_hidden_layers_override is set
             if "vision_model.encoder.layers." in name:
                 layer_idx = int(name.split(".")[3])
