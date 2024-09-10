@@ -276,13 +276,14 @@ class OpenAIServingChat(OpenAIServing):
         else:
             tool_choice_function_name = None
 
+        # Determine whether tools are in use with "auto" tool choice
         tool_choice_auto = (
             not tool_choice_function_name
             and self._should_stream_with_auto_tool_parsing(request))
 
         all_previous_token_ids: Optional[List[List[int]]]
-        # These are only used in "auto" tool choice case
         if tool_choice_auto:
+            # These are only required in "auto" tool choice case
             previous_texts = [""] * num_choices
             all_previous_token_ids = [[]] * num_choices
         else:

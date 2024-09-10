@@ -1472,10 +1472,13 @@ class LLMEngine:
                     " (i.e sampling_params.n == 1 and no "
                     "sampling_params.best_of > 1)")
                 sample = sequence_group_outputs.samples[0]
+                track_delta = seq_group.sampling_params.output_kind == (
+                    RequestOutputKind.DELTA)
 
                 assert len(seq_group.seqs) == 1
                 seq = seq_group.seqs[0]
-                seq.append_token_id(sample.output_token, sample.logprobs)
+                seq.append_token_id(sample.output_token, sample.logprobs,
+                                    track_delta)
 
     def step(self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.

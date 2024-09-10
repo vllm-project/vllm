@@ -8,7 +8,7 @@ from vllm.engine.output_processor.single_step import (
     single_step_process_prompt_logprob)
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.sequence import (Sequence, SequenceGroup, SequenceGroupOutput,
                            SequenceOutput, SequenceStatus)
 from vllm.transformers_utils.detokenizer import Detokenizer
@@ -161,6 +161,8 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
                     valid_samples = valid_samples[:i + 1]
                     break
 
+        track_delta = sampling_params.output_kind == RequestOutputKind.DELTA
+
         # Incrementally append tokens to the sequence, as if we had only one new
         # token.
         for output_token_id, output_logprob in zip(output_token_ids,
@@ -168,6 +170,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             seq.append_token_id(
                 token_id=output_token_id,
                 logprobs=output_logprob,
+                track_delta=track_delta,
             )
 
             self._process_decode_and_stop(seq, sampling_params)

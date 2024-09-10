@@ -165,7 +165,7 @@ class SequenceData(msgspec.Struct,
     # is called.
     _new_appended_tokens: List[int] = msgspec.field(default_factory=list)
 
-    # TODO: Add doc
+    # These are used to keep track of delta outputs
     last_appended_tokens: List[int] = []
     last_output_text_offset: int = 0
 
@@ -223,8 +223,12 @@ class SequenceData(msgspec.Struct,
         assert isinstance(self._output_token_ids, array)
         return self._output_token_ids
 
-    def append_token_id(self, token_id: int, logprob: float) -> None:
-        self.last_appended_tokens.append(token_id)
+    def append_token_id(self,
+                        token_id: int,
+                        logprob: float,
+                        track_delta: bool = False) -> None:
+        if track_delta:
+            self.last_appended_tokens.append(token_id)
 
         self._output_token_ids.append(token_id)
         self._new_appended_tokens.append(token_id)
@@ -463,11 +467,6 @@ class Sequence:
         return self.output_text[:-buffer_length] if truncate else (
             self.output_text)
 
-    def get_output_text_to_return_len(self, buffer_length: int) -> int:
-        if not buffer_length or self.is_finished():
-            return len(self.output_text)
-        return max(0, len(self.output_text) - buffer_length)
-
     def hash_of_block(self, logical_idx: int) -> int:
         # TODO This can produce incorrect hash when block size > prompt size
 
@@ -485,11 +484,14 @@ class Sequence:
         """Reset the sequence states for recomputation."""
         self.data.reset_state_for_recompute()
 
-    def append_token_id(self, token_id: int, logprobs: Dict[int,
-                                                            Logprob]) -> None:
+    def append_token_id(self,
+                        token_id: int,
+                        logprobs: Dict[int, Logprob],
+                        track_delta: bool = False) -> None:
         assert token_id in logprobs
         self.output_logprobs.append(logprobs)
-        self.data.append_token_id(token_id, logprobs[token_id].logprob)
+        self.data.append_token_id(token_id, logprobs[token_id].logprob,
+                                  track_delta)
 
     def get_len(self) -> int:
         return self.data.get_len()
