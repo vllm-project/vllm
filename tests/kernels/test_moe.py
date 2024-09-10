@@ -257,7 +257,7 @@ def test_fused_marlin_moe(
 @pytest.mark.parametrize("group_size", [-1, 32, 64, 128])
 @pytest.mark.parametrize("act_order", [True, False])
 @pytest.mark.parametrize("num_bits", [4, 8])
-def test_marlin_moe_mmm(
+def test_single_marlin_moe_multiply(
     m: int,
     n: int,
     k: int,
