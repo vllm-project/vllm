@@ -210,4 +210,4 @@ Flags: `--tool-call-parser granite`
 Known issues:
 1. Tool call parsing is not yet supported in streaming mode.
 
-* `examples/tool_chat_template_granite_response.jinja` - this is a modified chat template from the original on Huggingface, which is not vLLM compatible. It blends function description elements from the Hermes template and follows the same system prompt as "Nested Function Calling/Function Chaining/Parallel Functions" mode from the paper. Parallel function calls are supported.
+* `examples/tool_chat_template_granite_response.jinja` - this is a modified chat template from the original on Huggingface, which is not vLLM compatible. It blends function description elements from the Hermes template and follows the same system prompt as "Response Generation" mode from [the paper](https://arxiv.org/abs/2407.00121). Parallel function calls are supported.
