@@ -93,7 +93,7 @@ def _apply_lora(
     x = x.view(-1, x.shape[-1])
     output = output.view(-1, output.shape[-1])
     indices = indices.view(-1)
-    if is_hpu():
+    if current_platform.is_hpu():
         dispatch_bgmv_linear(output, x, lora_a_stacked, lora_b_stacked,
                              indices, 0, 1.0)
     else:
@@ -314,7 +314,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             # NOTE(vgoel): These asserts can be skipped when upstreaming.
             # Can be removed from vllm-fork also once lora functionality
             # on Gaudi stabilizes.
-            if is_hpu():
+            if current_platform.is_hpu():
                 emb_len = embedding_len
                 x_shape = x.shape
                 ind_shape = self.embeddings_indices[1].shape

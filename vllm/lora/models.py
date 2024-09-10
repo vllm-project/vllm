@@ -4,7 +4,7 @@ import math
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
 import safetensors.torch
 import torch
@@ -94,9 +94,10 @@ def convert_mapping(
     embedding_indices = index_mapping_indices.copy()
     lora_indices = index_mapping_indices.copy()
     long_lora_offsets: Optional[torch.Tensor] = None
+    device = "hpu" if current_platform.is_hpu() else "cuda"
     if long_lora_context:
         long_lora_offsets = torch.zeros(len(index_mapping_indices),
-                                        device=get_device(),
+                                        device=device,
                                         dtype=torch.long)
     prompt_mapping: List[int] = [
         lora_index_to_id.index(x) if x > 0 else -1
@@ -121,9 +122,9 @@ def convert_mapping(
     if long_lora_context:
         assert long_lora_offsets is not None
         indices_list.append(long_lora_offsets)
-    indices = torch.tensor(indices_list, dtype=torch.long, device=get_device())
+    indices = torch.tensor(indices_list, dtype=torch.long, device=device)
     prompt_mapping_tensor = torch.tensor(prompt_mapping,
-                                         device=get_device(),
+                                         device=device,
                                          dtype=torch.long)
     embeddings_indices = torch.stack([
         indices[2] * extra_vocab_size,
@@ -134,10 +135,10 @@ def convert_mapping(
     sampler_indices = prompt_mapping_tensor
     sampler_indices_padded = sampler_indices.clone()
     sampler_indices_padded[sampler_indices_padded == -1] = max_loras - 1
-    sampler_indices_padded = (torch.arange(
-        0, len(sampler_indices_padded), device=get_device(), dtype=torch.long)
-                              + (sampler_indices_padded *
-                                 len(sampler_indices_padded)))
+    sampler_indices_padded = (
+        torch.arange(
+            0, len(sampler_indices_padded), device=device, dtype=torch.long) +
+        (sampler_indices_padded * len(sampler_indices_padded)))
     long_lora_indices = None
     long_lora_indices_len: Optional[int] = None
     if long_lora_context:
