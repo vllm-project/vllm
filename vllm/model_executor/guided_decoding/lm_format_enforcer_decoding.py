@@ -35,13 +35,10 @@ def get_local_lm_format_enforcer_guided_decoding_logits_processor(
     elif guided_params.regex:
         character_level_parser = RegexParser(guided_params.regex)
     elif guided_params.grammar:
-        # CFG grammar not supported by LMFE, revert to outlines
-
-        # NOTE: lazy import outlines to avoid https://github.com/vllm-project/vllm/issues/4193
-        from vllm.model_executor.guided_decoding.outlines_decoding import (
-            get_local_outlines_guided_decoding_logits_processor)
-        return get_local_outlines_guided_decoding_logits_processor(
-            guided_params, tokenizer)
+        # CFG grammar not supported by LMFE
+        raise ValueError("Cannot construct a guided decoding logits processor"
+                         " using the grammar option with the"
+                         " lm_format_enforcer backend.")
     elif guided_params.json_object:
         # None means any json object
         character_level_parser = JsonSchemaParser(None)
