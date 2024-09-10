@@ -4,8 +4,6 @@ import enum
 from typing import List, Dict, Any, Optional
 import os
 from pydantic import BaseModel, Field
-import ruamel.yaml
-from ruamel.yaml.scalarstring import DoubleQuotedScalarString as DoubleQuoted
 
 HF_HOME = "/root/.cache/huggingface"
 DEFAULT_WORKING_DIR = "/vllm-workspace/tests"
@@ -141,6 +139,7 @@ def build_step() -> BuildkiteStep:
     docker_image = _get_image_path()
     command = ["aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7", f"docker build --build-arg max_jobs=16 --build-arg buildkite_commit={buildkite_commit} --build-arg USE_SCCACHE=1 --tag {docker_image} --target test --progress plain .", f"docker push {docker_image}"]
     step = BuildkiteStep(label=":docker: build image", key="build", agents={"queue": AgentQueue.AWS_CPU.value}, env={"DOCKER_BUILDKIT": "1"}, retry={"automatic": [{"exit_status": -1, "limit": 2}, {"exit_status": -10, "limit": 2}]}, commands=command)
+    step.depends_on = None
     return step
 
 @click.command()
