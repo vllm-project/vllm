@@ -62,8 +62,6 @@ typedef struct _B16x8 {
 
 ////// Non temporal load stores ///////
 
-  #if 1
-
 template <typename T>
 __device__ __forceinline__ T load(T* addr) {
   return addr[0];
@@ -73,83 +71,6 @@ template <typename T>
 __device__ __forceinline__ void store(T value, T* addr) {
   addr[0] = value;
 }
-
-  #else
-
-template <typename T>
-__device__ __forceinline__ T load(const T* addr) {
-  return __builtin_nontemporal_load(addr);
-}
-
-template <>
-__device__ __forceinline__ float2 load(const float2* addr) {
-  auto addr_alias{reinterpret_cast<const uint64_t*>(addr)};
-  auto result = __builtin_nontemporal_load(addr_alias);
-  auto ret = reinterpret_cast<float2*>(&result);
-  return ret[0];
-}
-
-template <>
-__device__ __forceinline__ float4 load(const float4* addr) {
-  auto addr_alias{reinterpret_cast<const uint64_t*>(addr)};
-  auto result1 = __builtin_nontemporal_load(addr_alias);
-  auto result2 = __builtin_nontemporal_load(addr_alias + 1);
-  float4 ret{};
-  auto ret_alias = reinterpret_cast<float2*>(&result1);
-  ret.x = ret_alias->x;
-  ret.y = ret_alias->y;
-  ret_alias = reinterpret_cast<float2*>(&result2);
-  ret.z = ret_alias->x;
-  ret.w = ret_alias->y;
-  return ret;
-}
-
-template <>
-__device__ __forceinline__ __half load(const __half* addr) {
-  auto addr_alias{reinterpret_cast<const uint16_t*>(addr)};
-  auto result = __builtin_nontemporal_load(addr_alias);
-  auto ret = reinterpret_cast<__half*>(&result);
-  return ret[0];
-}
-
-template <>
-__device__ __forceinline__ __half2 load(const __half2* addr) {
-  auto addr_alias{reinterpret_cast<const uint32_t*>(addr)};
-  auto result = __builtin_nontemporal_load(addr_alias);
-  auto ret = reinterpret_cast<__half2*>(&result);
-  return ret[0];
-}
-
-template <>
-__device__ __forceinline__ vllm::Half4_ load(const vllm::Half4_* addr) {
-  auto addr_alias{reinterpret_cast<const uint64_t*>(addr)};
-  auto result = __builtin_nontemporal_load(addr_alias);
-  auto ret = reinterpret_cast<vllm::Half4_*>(&result);
-  return ret[0];
-}
-
-template <>
-__device__ __forceinline__ vllm::Half8_ load(const vllm::Half8_* addr) {
-  auto addr_alias{reinterpret_cast<const uint64_t*>(addr)};
-  auto result1 = __builtin_nontemporal_load(addr_alias);
-  auto result2 = __builtin_nontemporal_load(addr_alias + 1);
-  vllm::Half8_ ret{};
-  auto ret_alias = reinterpret_cast<vllm::Half4_*>(&result1);
-  ret.x = ret_alias->x;
-  ret.y = ret_alias->y;
-  ret_alias = reinterpret_cast<vllm::Half4_*>(&result2);
-  ret.z = ret_alias->x;
-  ret.w = ret_alias->y;
-  return ret;
-}
-
-//// Not using nontemporal stores for now
-template <typename T>
-__device__ __forceinline__ void store(T value, T* addr) {
-  return __builtin_nontemporal_store(value, addr);
-}
-
-  #endif
 
 template <typename T, int absz, int cbid, int blgp>
 __device__ __forceinline__ floatx4 gcn_mfma_instr(const _B16x4& inpA,
@@ -699,22 +620,6 @@ __global__ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_kernel(
       }
     }
   }
-
-  #if 0
-    const int num_seqs = gridDim.x;
-    const int global_token4id = global_token_idx/4;
-    #pragma unroll
-    for (int t=0;t<4;t++) {
-    #pragma unroll
-        for (int h=0;h<QHLOOP;h++) {
-          //const int head_idx = h*4 + t;
-          const int head_idx = h*4 + lane4id;
-	      //qk_out[head_idx*num_seqs*max_ctx_blocks*BLOCK_SIZE + seq_idx*max_ctx_blocks*BLOCK_SIZE + global_token_idx] = (scalar_t)dout[h][t];
-	       qk_out[head_idx*num_seqs*max_ctx_blocks*BLOCK_SIZE + seq_idx*max_ctx_blocks*BLOCK_SIZE + 4*global_token4id + t] = logits[h][t];
-	      //qk_out[head_idx*num_seqs*max_ctx_blocks*BLOCK_SIZE + seq_idx*max_ctx_blocks*BLOCK_SIZE + 4*global_token4id + t] = vout[h][t%2][t];
-        }
-    }
-  #endif
 }
 
 // Grid: (num_heads, num_seqs).
