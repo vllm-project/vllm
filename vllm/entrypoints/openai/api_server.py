@@ -67,18 +67,6 @@ logger = init_logger('vllm.entrypoints.openai.api_server')
 
 _running_tasks: Set[asyncio.Task] = set()
 
-
-def model_is_embedding(model_name: str, trust_remote_code: bool,
-                       quantization: Optional[str]) -> bool:
-    return ModelConfig(model=model_name,
-                       tokenizer=model_name,
-                       tokenizer_mode="auto",
-                       trust_remote_code=trust_remote_code,
-                       quantization=quantization,
-                       seed=0,
-                       dtype="auto").embedding_mode
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
 
@@ -127,11 +115,10 @@ async def build_async_engine_client_from_engine_args(
     Returns the Client or None if the creation failed.
     """
 
-    # If manually triggered or embedding model, use AsyncLLMEngine in process.
-    # TODO: support embedding model via RPC.
-    if (model_is_embedding(engine_args.model, engine_args.trust_remote_code,
-                           engine_args.quantization)
-            or engine_args.engine_use_ray or disable_frontend_multiprocessing):
+    # Fall back
+    # TODO: fill out feature matrix.
+    if (MQLLMEngineClient.is_unsupported_config(engine_args)
+        or disable_frontend_multiprocessing):
         engine_client = AsyncLLMEngine.from_engine_args(
             engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
         try:
