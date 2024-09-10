@@ -43,7 +43,7 @@ PRECISION = "float32"
 
 @pytest.mark.parametrize(
     "common_llm_kwargs",
-    [{
+    [[
         # Skip cuda graph recording for fast test.
         "--enforce-eager",
 
@@ -52,7 +52,7 @@ PRECISION = "float32"
         # Precision
         "--dtype",
         f"{PRECISION}",
-    }])
+    ]])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [[]])
 @pytest.mark.parametrize("baseline_llm_kwargs", [[]])
 @pytest.mark.parametrize("test_llm_kwargs", [
@@ -85,7 +85,7 @@ def test_mlp_e2e_greedy_correctness(common_llm_kwargs,
 
 @pytest.mark.parametrize(
     "common_llm_kwargs",
-    [{
+    [[
         # Skip cuda graph recording for fast test.
         "--enforce-eager",
 
@@ -94,7 +94,7 @@ def test_mlp_e2e_greedy_correctness(common_llm_kwargs,
         # Precision
         "--dtype",
         f"{PRECISION}",
-    }])
+    ]])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [[]])
 @pytest.mark.parametrize("baseline_llm_kwargs", [[]])
 @pytest.mark.parametrize("test_llm_kwargs", [
@@ -234,7 +234,7 @@ def test_mlp_e2e_greedy_correctness_with_preemption(
 
 @pytest.mark.parametrize(
     "common_llm_kwargs",
-    [{
+    [[
         "--block-size",
         "8",
         # 2 for small prompt, 256//8 for generated.
@@ -252,7 +252,7 @@ def test_mlp_e2e_greedy_correctness_with_preemption(
         # Precision
         "--dtype",
         f"{PRECISION}",
-    }])
+    ]])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [[]])
 @pytest.mark.parametrize("baseline_llm_kwargs", [[]])
 @pytest.mark.parametrize("test_llm_kwargs", [
