@@ -631,7 +631,7 @@ class LLM:
     ) -> None:
         if guided_options is not None:
             warnings.warn(
-                "guided_options is deprecated, use "
+                "guided_options_request is deprecated, use "
                 "SamplingParams.guided_decoding instead",
                 DeprecationWarning,
                 stacklevel=2,
@@ -690,6 +690,10 @@ class LLM:
             guided_options: Optional[GuidedDecodingRequest] = None):
         if guided_options is None:
             return params
+
+        if params.guided_decoding is not None:
+            raise ValueError("Cannot set both guided_options_request and"
+                             "params.guided_decoding.")
 
         params.guided_decoding = GuidedDecodingParams(
             json=guided_options.guided_json,
