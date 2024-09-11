@@ -1387,8 +1387,7 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
 
     def apply(self, lm_head: 'ModulesToSaveWrapper', hidden_states: torch.Tensor, bias: Optional[torch.Tensor])->torch.Tensor:
         
-        
-        logits=self.punica_wrapper.bgmv_sample(hidden_states, self.lm_head_tensors)
+        logits=self.punica_wrapper.bgmv_sample(hidden_states, self.lm_head_tensors, self.base_layer.weight)
         
         if bias is not None:
             logits+=bias
@@ -1404,7 +1403,6 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
     ) -> None:
         
         self.dtype=lora_config.lora_dtype
-        # TODO implement adding tokens in lora
         
         self.lm_head_tensors = torch.zeros(
             (

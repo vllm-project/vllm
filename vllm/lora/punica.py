@@ -605,11 +605,13 @@ class PunicaWrapper:
         y = y.view_as(y_org)
 
     def bgmv_sample(self, hidden_states: torch.Tensor,
-             lm_heads_all: torch.Tensor): 
-        # hidden_states - [num_tokens, hidden_dim]
-        # lm_heads_all - [num_loras, vocab_size, hidden_dim]
-
+             lm_heads_all: torch.Tensor, lm_head_base: torch.Tensor): 
+         
         '''
+
+        hidden_states - [num_tokens, hidden_dim]
+        lm_heads_all - [num_loras, vocab_size, hidden_dim]
+
         the same as:
 
         vocab_size=self.lm_head_tensors.shape[-2]
@@ -620,12 +622,15 @@ class PunicaWrapper:
                                  device=hidden_states.device)
         
         for i in range(len(hidden_states)):
-            logits[i]=self.lm_head_tensors[indices[i]] @ hidden_states[i]
+            if indices[i]==-1:
+                logits[i]=lm_head_base @ hidden_states[i]
+            else:
+                logits[i]=self.lm_head_tensors[indices[i]] @ hidden_states[i]
         '''
 
         indices=self.sampler_indices
         
-        logits=bgmv_sample(hidden_states, lm_heads_all, indices)
+        logits=bgmv_sample(hidden_states, lm_heads_all, lm_head_base, indices)
         return logits
         
 

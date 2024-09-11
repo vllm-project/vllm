@@ -11,38 +11,44 @@ from .utils import get_lora_op_configs
 def _bgmv_sample_kernel(
     hidden_state_ptr,
     lm_heads_all_ptr,
+    lm_head_base_ptr,
     logits_ptr,
     sampling_indices_tensor_ptr,
     HIDDEN_DIM: tl.constexpr,
-    VOCAB_SIZE: tl.constexpr
+    VOCAB_SIZE: tl.constexpr,
+    BLOCK_N: tl.constexpr
 ):
 
-    curr_logit_idx=tl.program_id(axis=0)
+    cur_token = tl.program_id(axis=0)
 
-    cur_token = tl.program_id(axis=1)
+    logits_start_idx=tl.program_id(axis=1)*BLOCK_N
     
-
     lora_index = tl.load(sampling_indices_tensor_ptr + cur_token)
-    if lora_index == -1: #TODO multiply to base_layer.weights
-        return
-
+    
     hidden_state=tl.load(hidden_state_ptr+HIDDEN_DIM*cur_token+tl.arange(0,HIDDEN_DIM))
     hidden_state=hidden_state.expand_dims(0)
 
-    offsets=tl.arange(0, HIDDEN_DIM)[None,:]
+    offsets_embed=tl.arange(0, HIDDEN_DIM)
+    offsets_logits=logits_start_idx+tl.arange(0, BLOCK_N)
 
-    weights=tl.load(lm_heads_all_ptr+lora_index*(VOCAB_SIZE*HIDDEN_DIM)+curr_logit_idx*HIDDEN_DIM+offsets)
+    offset_base_layer=offsets_embed[None,:]+offsets_logits[:,None]*HIDDEN_DIM
+    offset_lora=lora_index*(VOCAB_SIZE*HIDDEN_DIM)+offset_base_layer
 
+    if lora_index == -1:
+        weights=tl.load(lm_head_base_ptr+offset_base_layer)
+    else:
+        weights=tl.load(lm_heads_all_ptr+offset_lora)
 
-    logit=tl.sum(weights*hidden_state)
-
-    tl.store(logits_ptr+cur_token*VOCAB_SIZE+curr_logit_idx, logit)
+    logits=tl.sum(weights*hidden_state, axis=1)
+    
+    tl.store(logits_ptr+cur_token*VOCAB_SIZE+offsets_logits, logits)
     
 
 @torch.inference_mode()
 def _bgmv_sample(
     hidden_state: torch.Tensor,
     lm_heads_all: torch.Tensor,
+    lm_head_base: torch.Tensor,
     sampling_indices_tensor: torch.Tensor,
 ) -> torch.Tensor:
     """
@@ -62,22 +68,23 @@ def _bgmv_sample(
                                  dtype=hidden_state.dtype,
                                  device=hidden_state.device)
 
-    print(hidden_state.shape, lm_heads_all.shape, logits.shape, sampling_indices_tensor.shape)
-
     num_tokens = sampling_indices_tensor.shape[0]
     hidden_dim=hidden_state.shape[-1]
 
 
-    grid = lambda meta: (vocab_size,num_tokens,)
+    grid = lambda meta: (num_tokens,triton.cdiv(vocab_size, meta['BLOCK_N']))
+
+    config=get_lora_op_configs("sample", num_tokens, hidden_dim)
 
     _bgmv_sample_kernel[grid](
         hidden_state,
         lm_heads_all,
+        lm_head_base,
         logits,
         sampling_indices_tensor,
         HIDDEN_DIM=hidden_dim,
         VOCAB_SIZE=vocab_size,
-        #**config,
+        **config,
     )
     return logits
 
