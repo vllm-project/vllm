@@ -204,6 +204,12 @@ class MQLLMEngine:
         """Loop for replying to all requests that we are dead."""
         if not self._errored:
             raise ValueError("In dead loop, but found _errored=False")
+        
+        # Send a single message that we are dead.
+        rpc_err = RPCError(request_id=None,
+                           is_engine_errored=True,
+                           exception=ENGINE_DEAD_ERROR)
+        self._send_outputs(rpc_err)
 
         while True:
             # Poll until there is a request

@@ -147,3 +147,51 @@ def run_with_evil_abort(engine_args: AsyncEngineArgs, ipc_path: str):
     engine.engine.abort_request = Mock(side_effect=RAISED_ERROR)
     # Run engine.
     engine.start()
+
+@pytest.mark.asyncio
+async def test_failed_abort(tmp_socket):
+    with RemoteMQLLMEngine(
+            engine_args=ENGINE_ARGS,
+            ipc_path=tmp_socket,
+            run_fn=run_with_evil_abort) as engine:
+
+        client = await engine.make_client()
+        assert client.is_running
+
+        # Firsh check health should work.
+        await asyncio.sleep(10)
+        await client.check_health()
+        
+        # Trigger an abort on the client side.
+        async def bad_abort_after_2s():
+            await asyncio.sleep(2.0)    
+            await client.abort(request_id="foo")
+
+            # Immediately should tigger error.
+            try:
+                await client.check_health()
+            except Exception as e:
+                # First exception should be a RAISED_ERROR
+                assert repr(e) == repr(RAISED_ERROR), (
+                    "Health check raise the original error.")
+                assert client.errored
+
+        # Trigger an abort in 2s from now.
+        abort_task = asyncio.create_task(bad_abort_after_2s())
+
+        # Exception in abort() will happen during this generation.
+        try:
+            async for _ in client.generate(inputs="Hello my name is",
+                                           sampling_params=SamplingParams(
+                                               max_tokens=2000),
+                                           request_id=uuid.uuid4()):
+                pass
+        except Exception as e:
+            # Next exception should be an ENGINE_DEAD_ERROR
+            assert e == ENGINE_DEAD_ERROR, (
+                "Engine should be dead and raise ENGINE_DEAD_ERROR")
+            assert client.errored
+
+        await abort_task
+        
+        client.close()
