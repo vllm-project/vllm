@@ -82,7 +82,7 @@ def test_target_model_tp_gt_1(common_llm_kwargs, per_test_common_llm_kwargs,
 
         # precision
         "--dtype",
-        "float32",
+        "bfloat16",
     ]])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [[]])
 @pytest.mark.parametrize("baseline_llm_kwargs", [[]])
