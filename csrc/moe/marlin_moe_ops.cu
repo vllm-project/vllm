@@ -1402,7 +1402,6 @@ __global__ void MarlinMoE(
     // padding
     par = (16 * max_block - pad) / (16 * cfg_max_m_blocks);
     if (par > max_par) par = max_par;
-    // par = min((16 * max_block - pad) / 64, max_par);
     prob_m = (16 * cfg_max_m_blocks) * par;
     m_block_ctr += cfg_max_m_blocks * (par - 1);
     max_block = cfg_max_m_blocks;
@@ -1621,7 +1620,6 @@ bool is_valid_cache_size(thread_config_t const& th_config, int max_m_blocks,
       break;
     }
 
-    // TORCH_CHECK(false, "m blocks failed = ", m_blocks);
     max_m_blocks--;
     if (max_m_blocks == 0) {
       TORCH_CHECK(false, "Unexpected m_blocks = ", m_blocks);
