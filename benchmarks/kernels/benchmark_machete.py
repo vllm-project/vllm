@@ -172,9 +172,9 @@ def bench(atype: torch.dtype,
         schedules = ops.machete_supported_schedules(wtype)
         for schedule in reversed(schedules):
             schedule_M = int(schedule.split("_")[0].split("x")[1])
-            
+
             # Prune known bad schedules
-            if schedule_M >= 2*max(m, 16) or schedule_M < m // 4:
+            if schedule_M >= 2 * max(m, 16) or schedule_M < m // 4:
                 continue
 
             def run(a, _, w_q, w_s, schedule=schedule):
