@@ -78,7 +78,7 @@ def load_qwen2_vl(question, image_urls: List[str]):
     llm = LLM(
         model=model_name,
         max_num_seqs=5,
-        max_model_len=4096,
+        max_model_len=32768 if process_vision_info is None else 4096,
         limit_mm_per_prompt={"image": len(image_urls)},
     )
 
