@@ -52,7 +52,6 @@ def _bgmv_sample(
         sampling_indices_tensor - [num_tokens] - indexes from 0 to num_loras-1
     """
     assert hidden_state.dtype == lm_heads_all.dtype
-
     assert hidden_state.size(-1) == lm_heads_all.size(-1)
     assert hidden_state.is_contiguous()
     assert lm_heads_all.is_contiguous()

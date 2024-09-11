@@ -2,6 +2,7 @@
 Compare the outputs of HF and vLLM for Llama3 with/without 
 LoRA with modules_to_save.
 """
+import os
 import pytest
 
 from tests.models.utils import check_logprobs_close
@@ -14,6 +15,7 @@ MODELS = [
 
 LORAS = ["SergeyKochetkovT/llama3-lora-with-modules-to-save"]
 
+os.environ['CUDA_VISIBLE_DEVICES']="1"
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])

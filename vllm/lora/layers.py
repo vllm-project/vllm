@@ -1484,7 +1484,6 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
         assert embeddings_tensor is None
 
         self.reset_lora(index)
-        # TODO why we need to copy?
         self.lm_head_tensors[index,
                             :lora_b.shape[0], :lora_b.shape[1]].copy_(
                                 lora_b, non_blocking=True)
