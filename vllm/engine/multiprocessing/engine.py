@@ -1,6 +1,6 @@
 import pickle
 from contextlib import contextmanager
-from typing import Any, Optional, Iterator, List, Union
+from typing import Any, Iterator, List, Optional, Union
 
 import cloudpickle
 import zmq
@@ -241,7 +241,7 @@ class MQLLMEngine:
         """Handle RPCGenerateRequest by adding it to the LLMEngine."""
         request_id = request.request_id
 
-        if self._is_errored():
+        if self._errored_with is not None:
             rpc_err = RPCError(request_id=request_id,
                                is_engine_errored=True,
                                exception=ENGINE_DEAD_ERROR(self._errored_with))
@@ -263,8 +263,9 @@ class MQLLMEngine:
             # We do not set self._errored = True here, since the error
             # is due to an issue adding this request to the engine,
             # rather than an issue with the engine itself.
+            is_errored = self._errored_with is not None
             rpc_err = RPCError(request_id=request_id,
-                               is_engine_errored=self._errored,
+                               is_engine_errored=is_errored,
                                exception=e)
             self._send_outputs(rpc_err)
 
@@ -277,7 +278,7 @@ class MQLLMEngine:
             logger.info("Aborted request %s.", request.request_id)
 
     def _handle_health_request(self):
-        if self._is_errored():
+        if self._errored_with is not None:
             self._send_unhealthy(self._errored_with)
 
         # Raises error if unhealthy.
@@ -310,10 +311,6 @@ class MQLLMEngine:
         logger.exception(repr(e))
         if self._errored_with is None:
             self._errored_with = e
-
-    def _is_errored(self) -> bool:
-        """Check _errored status."""
-        return self._errored_with is not None
 
 
 def run_mp_engine(engine_args: AsyncEngineArgs, usage_context: UsageContext,

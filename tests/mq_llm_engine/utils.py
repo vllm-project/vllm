@@ -2,8 +2,8 @@ import multiprocessing
 from typing import Callable
 
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.multiprocessing.engine import MQLLMEngine
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
+from vllm.engine.multiprocessing.engine import MQLLMEngine
 from vllm.usage.usage_lib import UsageContext
 
 
@@ -17,10 +17,13 @@ def run_normal(engine_args: AsyncEngineArgs, ipc_path: str):
     # Run engine.
     engine.start()
 
+
 class RemoteMQLLMEngine:
 
-    def __init__(self, engine_args: AsyncEngineArgs,
-                 ipc_path: str, run_fn: Callable = run_normal) -> None:
+    def __init__(self,
+                 engine_args: AsyncEngineArgs,
+                 ipc_path: str,
+                 run_fn: Callable = run_normal) -> None:
 
         self.engine_args = engine_args
         self.ipc_path = ipc_path

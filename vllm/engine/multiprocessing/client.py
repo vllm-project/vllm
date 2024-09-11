@@ -73,7 +73,6 @@ class MQLLMEngineClient:
     def __init__(self, ipc_path: str, engine_config: EngineConfig):
         self.context = zmq.asyncio.Context()
         self._errored_with: Optional[BaseException] = None
-        self.dead_error = ENGINE_DEAD_ERROR
 
         # Get the configs.
         self.model_config = engine_config.model_config
@@ -179,8 +178,8 @@ class MQLLMEngineClient:
 
                     # If errored, alert all running requests.
                     if self.errored:
-                        for queue in tuple(self.output_queues.values()):
-                            queue.put_nowait(ENGINE_DEAD_ERROR)
+                        for queue_j in tuple(self.output_queues.values()):
+                            queue_j.put_nowait(ENGINE_DEAD_ERROR)
                         return
 
                 message: Frame = await self.output_socket.recv(copy=False)
@@ -241,8 +240,7 @@ class MQLLMEngineClient:
 
             # Start health_loop.
             self.health_loop = asyncio.create_task(
-                self.run_check_health_loop(
-                    timeout=VLLM_RPC_TIMEOUT))
+                self.run_check_health_loop(timeout=VLLM_RPC_TIMEOUT))
 
             # Notify MQLLMEngine client is ready to start sending requests.
             await self._notify_ready(socket)
@@ -399,8 +397,8 @@ class MQLLMEngineClient:
         """Send an RPCGenerateRequest to the RPCServer and stream responses."""
 
         # If already dead, error out.
-        if self.errored:
-            raise ENGINE_DEAD_ERROR
+        if self._errored_with is not None:
+            raise ENGINE_DEAD_ERROR(self._errored_with)
 
         # 1) Create output queue for this requests.
         queue: asyncio.Queue[Union[RequestOutput,

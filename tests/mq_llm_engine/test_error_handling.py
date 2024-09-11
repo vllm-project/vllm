@@ -11,9 +11,9 @@ from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.multiprocessing import MQEngineDeadError
 from vllm.engine.multiprocessing.engine import MQLLMEngine
-from vllm.lora.request import LoRARequest
 from vllm.entrypoints.openai.api_server import build_async_engine_client
 from vllm.entrypoints.openai.cli_args import make_arg_parser
+from vllm.lora.request import LoRARequest
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser
 
@@ -79,7 +79,6 @@ async def test_evil_forward(tmp_socket):
             assert client.errored, "Client should be dead."
             assert isinstance(e, MQEngineDeadError), (
                 "Engine should be dead and raise ENGINE_DEAD_ERROR")
-            
 
         await asyncio.sleep(2.0)
         try:
@@ -203,20 +202,20 @@ async def test_failed_abort(tmp_socket):
 
 @pytest.mark.asyncio
 async def test_bad_request(tmp_socket):
-    with RemoteMQLLMEngine(
-            engine_args=ENGINE_ARGS,
-            ipc_path=tmp_socket) as engine:
+    with RemoteMQLLMEngine(engine_args=ENGINE_ARGS,
+                           ipc_path=tmp_socket) as engine:
 
         client = await engine.make_client()
 
         # This should fail, but not crash the server.
         try:
             print("calling first generate")
-            async for _ in client.generate(
-                inputs="Hello my name is",
-                sampling_params=SamplingParams(),
-                request_id="abcd-1",
-                lora_request=LoRARequest("invalid-lora", 1, "invalid-path")):
+            async for _ in client.generate(inputs="Hello my name is",
+                                           sampling_params=SamplingParams(),
+                                           request_id="abcd-1",
+                                           lora_request=LoRARequest(
+                                               "invalid-lora", 1,
+                                               "invalid-path")):
                 pass
         except Exception as e:
             print("got exception")
@@ -224,18 +223,18 @@ async def test_bad_request(tmp_socket):
                 "Expected ValueError when a LoRARequest in llm_engine")
 
         # This request should be okay.
-        async for _ in client.generate(
-            inputs="Hello my name is",
-            sampling_params=SamplingParams(),
-            request_id="abcd-2"):
+        async for _ in client.generate(inputs="Hello my name is",
+                                       sampling_params=SamplingParams(),
+                                       request_id="abcd-2"):
             pass
-        
+
         # Confirm server is still running.
         await asyncio.sleep(10.)
         await client.check_health()
-        
+
         # Shutdown.
         client.close()
+
 
 @pytest.mark.asyncio
 async def test_mp_crash_detection():
