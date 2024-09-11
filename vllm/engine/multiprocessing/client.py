@@ -13,6 +13,8 @@ from zmq.asyncio import Socket
 
 from vllm.config import DecodingConfig, EngineConfig, LoRAConfig, ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_HEALTH_EXT, IPC_INPUT_EXT,
                                          IPC_OUTPUT_EXT, RPC_REQUEST_T,
@@ -20,6 +22,7 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCError, RPCGenerateRequest,
                                          RPCHealthRequest, RPCStartupRequest,
                                          RPCStartupResponse)
+# yapf: enable
 from vllm.envs import VLLM_RPC_GET_DATA_TIMEOUT_MS
 from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
