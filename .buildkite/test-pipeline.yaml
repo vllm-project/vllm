@@ -228,6 +228,7 @@ steps:
   parallelism: 4
 
 - label: Kernels Test %N # 30min each
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - csrc/
   - vllm/attention
