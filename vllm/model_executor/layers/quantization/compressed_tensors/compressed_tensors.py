@@ -128,7 +128,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                     f"Current capability: {capability}.")
             return supported
         else:
-            return True
+            return current_platform.is_cpu()
 
     def _is_static_tensor_w8a8(self, weight_quant: BaseModel,
                                input_quant: BaseModel) -> bool:

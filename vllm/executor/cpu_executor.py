@@ -363,7 +363,12 @@ def _verify_and_get_cache_config(config: CacheConfig) -> CacheConfig:
 
 
 def _verify_and_get_parallel_config(config: ParallelConfig) -> ParallelConfig:
-    config.distributed_executor_backend = "mp"
+    if (config.distributed_executor_backend is not None
+            and config.distributed_executor_backend != "mp"):
+        logger.warning(
+            "%s is not supported on CPU, fallback to mp distributed executor "
+            "backend.", config.distributed_executor_backend)
+        config.distributed_executor_backend = "mp"
     return config
 
 
