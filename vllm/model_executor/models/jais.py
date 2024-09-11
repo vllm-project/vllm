@@ -35,12 +35,12 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
+    ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors, SamplerOutput
+from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import JAISConfig
 
 from .utils import is_pp_missing_parameter, make_layers
@@ -291,7 +291,11 @@ class JAISLMHeadModel(nn.Module):
         self.config = config
         self.quant_config = quant_config
         self.transformer = JAISModel(config, cache_config, quant_config)
-        self.lm_head = self.transformer.wte
+        if self.config.tie_word_embeddings:
+            self.lm_head = self.transformer.wte
+        else:
+            self.lm_head = ParallelLMHead(self.config.vocab_size,
+                                          self.config.hidden_size)
         if hasattr(config, "width_scale"):
             self.output_logits_scale = config.width_scale
         else:

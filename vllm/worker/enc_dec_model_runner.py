@@ -6,6 +6,7 @@ import torch.distributed
 
 from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata)
+from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.attention.selector import (_Backend, get_env_variable_attn_backend,
                                      get_global_forced_attn_backend,
                                      global_force_attn_backend)
@@ -15,12 +16,13 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (IntermediateTensors, PoolerOutput, SamplerOutput,
+from vllm.sequence import (IntermediateTensors, PoolerOutput,
                            SequenceGroupMetadata)
 from vllm.utils import STR_NOT_IMPL_ENC_DEC_BACKEND, make_tensor_with_pad
-from vllm.worker.model_runner import (_PAD_SLOT_ID, GPUModelRunnerBase,
+from vllm.worker.model_runner import (GPUModelRunnerBase,
                                       ModelInputForGPUBuilder,
                                       ModelInputForGPUWithSamplingMetadata)
 from vllm.worker.model_runner_base import (
@@ -395,7 +397,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                     # initialized yet. In this case, we just use a dummy
                     # slot mapping.
                     # In embeddings, the block tables are {seq_id: None}.
-                    cross_slot_mapping.extend([_PAD_SLOT_ID] * seq_len)
+                    cross_slot_mapping.extend([PAD_SLOT_ID] * seq_len)
                 else:
                     for i in range(0, seq_len):
                         block_number = seq_group_metadata.cross_block_table[

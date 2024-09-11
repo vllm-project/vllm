@@ -83,6 +83,25 @@ torch::Tensor marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                           torch::Tensor& b_scales, torch::Tensor& workspace,
                           int64_t size_m, int64_t size_n, int64_t size_k);
 
+namespace machete {
+
+std::vector<std::string> supported_schedules(
+    vllm::ScalarTypeTorchPtr const& btype);
+
+torch::Tensor gemm(torch::Tensor const& A, torch::Tensor const& B,
+                   vllm::ScalarTypeTorchPtr const& btype,
+                   c10::optional<torch::Tensor> const& scales,
+                   c10::optional<torch::Tensor> const& zeros,
+                   c10::optional<int64_t> group_size,
+                   c10::optional<torch::Tensor> const& C,
+                   c10::optional<double> alpha, c10::optional<double> beta,
+                   c10::optional<std::string> schedule);
+
+torch::Tensor prepack_B(torch::Tensor const& B,
+                        vllm::ScalarTypeTorchPtr const& btype);
+
+};  // namespace machete
+
 torch::Tensor gptq_marlin_24_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                                   torch::Tensor& b_meta,
                                   torch::Tensor& b_scales,
@@ -104,8 +123,16 @@ torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
                                  int64_t size_k, int64_t size_n,
                                  int64_t num_bits);
 
+torch::Tensor gptq_marlin_repack_meta(torch::Tensor& b_q_weight,
+                                      torch::Tensor& perm, c10::SymInt size_k,
+                                      c10::SymInt size_n, int64_t num_bits);
+
 torch::Tensor awq_marlin_repack(torch::Tensor& b_q_weight, int64_t size_k,
                                 int64_t size_n, int64_t num_bits);
+
+torch::Tensor awq_marlin_repack_meta(torch::Tensor& b_q_weight,
+                                     c10::SymInt size_k, c10::SymInt size_n,
+                                     int64_t num_bits);
 
 torch::Tensor ggml_dequantize(torch::Tensor W, int64_t type, int64_t m,
                               int64_t n);
@@ -151,9 +178,6 @@ void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
 void dynamic_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
                                torch::Tensor& scales);
 
-void squeezellm_gemm(torch::Tensor vec, torch::Tensor mat, torch::Tensor mul,
-                     torch::Tensor lookup_table);
-
 torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
                         torch::Tensor b_gptq_qzeros,
                         torch::Tensor b_gptq_scales, torch::Tensor b_g_idx,
@@ -175,6 +199,28 @@ void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
                           int64_t block_size, torch::Tensor sorted_token_ids,
                           torch::Tensor experts_ids,
                           torch::Tensor num_tokens_post_pad);
+
+std::vector<torch::Tensor> selective_scan_fwd(
+    const torch::Tensor& u, const torch::Tensor& delta, const torch::Tensor& A,
+    const torch::Tensor& B, const torch::Tensor& C,
+    const c10::optional<torch::Tensor>& D_,
+    const c10::optional<torch::Tensor>& z_,
+    const c10::optional<torch::Tensor>& delta_bias_, bool delta_softplus,
+    const c10::optional<torch::Tensor>& index_,
+    const c10::optional<torch::Tensor>& x);
+
+at::Tensor causal_conv1d_update(const at::Tensor& x,
+                                const at::Tensor& conv_state,
+                                const at::Tensor& weight,
+                                const c10::optional<at::Tensor>& bias_,
+                                bool silu_activation);
+
+at::Tensor causal_conv1d_fwd(const at::Tensor& x, const at::Tensor& weight,
+                             const c10::optional<at::Tensor>& bias_,
+                             const c10::optional<at::Tensor>& seq_idx_,
+                             const c10::optional<at::Tensor>& initial_states_,
+                             const c10::optional<at::Tensor>& final_states_out_,
+                             bool silu_activation);
 
 #ifndef USE_ROCM
 using fptr_t = int64_t;

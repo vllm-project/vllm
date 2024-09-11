@@ -9,11 +9,8 @@ from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
+from vllm.assets.video import VideoAsset
 from vllm.utils import FlexibleArgumentParser
-
-# Input image and question
-image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
-question = "What is the content of this image?"
 
 
 # LLaVA-1.5
@@ -30,7 +27,16 @@ def run_llava(question):
 def run_llava_next(question):
 
     prompt = f"[INST] <image>\n{question} [/INST]"
-    llm = LLM(model="llava-hf/llava-v1.6-mistral-7b-hf")
+    llm = LLM(model="llava-hf/llava-v1.6-mistral-7b-hf", max_model_len=8192)
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
+
+
+# LlaVA-NeXT-Video
+# Currently only support for video input
+def run_llava_next_video(question):
+    prompt = f"USER: <video>\n{question} ASSISTANT:"
+    llm = LLM(model="llava-hf/LLaVA-NeXT-Video-7B-hf", max_model_len=8192)
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
@@ -159,9 +165,41 @@ def run_blip2(question):
     return llm, prompt, stop_token_ids
 
 
+# Qwen
+def run_qwen_vl(question):
+
+    llm = LLM(
+        model="Qwen/Qwen-VL",
+        trust_remote_code=True,
+        max_num_seqs=5,
+    )
+
+    prompt = f"{question}Picture 1: <img></img>\n"
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
+
+
+# Qwen2-VL
+def run_qwen2_vl(question):
+    model_name = "Qwen/Qwen2-VL-7B-Instruct"
+
+    llm = LLM(
+        model=model_name,
+        max_num_seqs=5,
+    )
+
+    prompt = ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+              "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"
+              f"{question}<|im_end|>\n"
+              "<|im_start|>assistant\n")
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
+
+
 model_example_map = {
     "llava": run_llava,
     "llava-next": run_llava_next,
+    "llava-next-video": run_llava_next_video,
     "fuyu": run_fuyu,
     "phi3_v": run_phi3v,
     "paligemma": run_paligemma,
@@ -169,13 +207,53 @@ model_example_map = {
     "minicpmv": run_minicpmv,
     "blip-2": run_blip2,
     "internvl_chat": run_internvl,
+    "qwen_vl": run_qwen_vl,
+    "qwen2_vl": run_qwen2_vl,
 }
+
+
+def get_multi_modal_input(args):
+    """
+    return {
+        "data": image or video,
+        "question": question,
+    }
+    """
+    if args.modality == "image":
+        # Input image and question
+        image = ImageAsset("cherry_blossom") \
+            .pil_image.convert("RGB")
+        img_question = "What is the content of this image?"
+
+        return {
+            "data": image,
+            "question": img_question,
+        }
+
+    if args.modality == "video":
+        # Input video and question
+        video = VideoAsset(name="sample_demo_1.mp4",
+                           num_frames=args.num_frames).np_ndarrays
+        vid_question = "Why is this video funny?"
+
+        return {
+            "data": video,
+            "question": vid_question,
+        }
+
+    msg = f"Modality {args.modality} is not supported."
+    raise ValueError(msg)
 
 
 def main(args):
     model = args.model_type
     if model not in model_example_map:
         raise ValueError(f"Model type {model} is not supported.")
+
+    modality = args.modality
+    mm_input = get_multi_modal_input(args)
+    data = mm_input["data"]
+    question = mm_input["question"]
 
     llm, prompt, stop_token_ids = model_example_map[model](question)
 
@@ -191,7 +269,7 @@ def main(args):
         inputs = {
             "prompt": prompt,
             "multi_modal_data": {
-                "image": image
+                modality: data
             },
         }
 
@@ -200,7 +278,7 @@ def main(args):
         inputs = [{
             "prompt": prompt,
             "multi_modal_data": {
-                "image": image
+                modality: data
             },
         } for _ in range(args.num_prompts)]
 
@@ -223,8 +301,15 @@ if __name__ == "__main__":
                         help='Huggingface "model_type".')
     parser.add_argument('--num-prompts',
                         type=int,
-                        default=1,
+                        default=4,
                         help='Number of prompts to run.')
-
+    parser.add_argument('--modality',
+                        type=str,
+                        default="image",
+                        help='Modality of the input.')
+    parser.add_argument('--num-frames',
+                        type=int,
+                        default=16,
+                        help='Number of frames to extract from the video.')
     args = parser.parse_args()
     main(args)
