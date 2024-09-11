@@ -46,6 +46,7 @@ logger = init_logger(__name__)
 
 
 class Gemma2MLP(nn.Module):
+
     def __init__(
         self,
         hidden_size: int,
@@ -78,6 +79,7 @@ class Gemma2MLP(nn.Module):
 
 
 class Gemma2Attention(nn.Module):
+
     def __init__(self,
                  layer_idx: int,
                  config: Gemma2Config,
@@ -166,6 +168,7 @@ class Gemma2Attention(nn.Module):
 
 
 class Gemma2DecoderLayer(nn.Module):
+
     def __init__(
         self,
         layer_idx: int,
@@ -235,6 +238,7 @@ class Gemma2DecoderLayer(nn.Module):
 
 
 class Gemma2Model(nn.Module):
+
     def __init__(
         self,
         config: Gemma2Config,
