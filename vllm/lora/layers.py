@@ -1456,7 +1456,6 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
     ) -> None:
         
         self.dtype=lora_config.lora_dtype
-        # TODO implement adding tokens in lora
         
         self.lm_head_tensors = torch.zeros(
             (
