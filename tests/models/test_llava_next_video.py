@@ -164,7 +164,7 @@ def run_test(
 
 
 @pytest.mark.skipif(transformers.__version__ < "4.45",
-                    "LLaVA-NeXT-Video does not work in transformers yet")
+                    reason="LLaVA-NeXT-Video does not work in transformers yet")
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
     "size_factors",
@@ -209,7 +209,7 @@ def test_models(hf_runner, vllm_runner, video_assets, model, size_factors,
 
 
 @pytest.mark.skipif(transformers.__version__ < "4.45",
-                    "LLaVA-NeXT-Video does not work in transformers yet")
+                    reason="LLaVA-NeXT-Video does not work in transformers yet")
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
     "sizes",
