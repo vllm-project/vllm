@@ -201,15 +201,12 @@ def test_chat_multi_image(image_urls: List[str]):
 def test_offline_mode(llm: LLM, monkeypatch):
     # we use the llm fixture to ensure the model files are in-cache
     del llm
-    hf_hub_modules = [
-        v for k, v in sys.modules.items() if k.startswith("huggingface_hub")
-    ]
 
     # Set HF to offline mode and ensure we can still construct an LLM
     try:
         monkeypatch.setenv("HF_HUB_OFFLINE", "1")
-        # Need to re-import huggingface_hub library to setup offline mode
-        _re_import_modules(hf_hub_modules)
+        # Need to re-import huggingface_hub and friends to setup offline mode
+        _re_import_modules()
         # Cached model files should be used in offline mode
         LLM(model=MODEL_NAME,
             max_num_batched_tokens=4096,
@@ -220,9 +217,17 @@ def test_offline_mode(llm: LLM, monkeypatch):
         # Reset the environment after the test
         # NB: Assuming tests are run in online mode
         monkeypatch.delenv("HF_HUB_OFFLINE")
-        _re_import_modules(hf_hub_modules)
+        _re_import_modules()
+        pass
 
 
-def _re_import_modules(modules: List):
-    for module in modules:
+def _re_import_modules():
+    hf_hub_modules = [
+        v for k, v in sys.modules.items() if k.startswith("huggingface_hub")
+    ]
+    transformers_modules = [
+        v for k, v in sys.modules.items() if k.startswith("transformers")
+    ]
+
+    for module in hf_hub_modules + transformers_modules:
         importlib.reload(module)
