@@ -148,7 +148,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return f"<|image_{current_count}|>"
             if model_type == "minicpmv":
                 return "(<image>./</image>)"
-            if model_type in ("blip-2", "chatglm", "fuyu", "paligemma"):
+            if model_type in ("blip-2", "chatglm", "fuyu", "paligemma",
+                              "pixtral"):
                 # These models do not use image tokens in the prompt
                 return None
             if model_type == "qwen":
