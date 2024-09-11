@@ -1,6 +1,8 @@
+import inspect
 from typing import (ClassVar, Dict, List, Literal, Optional, Protocol, Type,
                     Union, overload, runtime_checkable)
 
+import torch.nn as nn
 from typing_extensions import TypeIs
 
 from vllm.config import LoRAConfig, MultiModalConfig, SchedulerConfig
@@ -189,3 +191,10 @@ def has_inner_state(
         return isinstance(model, _HasInnerStateType)
 
     return isinstance(model, HasInnerState)
+
+
+def supports_input_embeds(model: nn.Module) -> bool:
+    """Check if the model supports input_embeds and input_embeds_masks."""
+    model_forward_params = inspect.signature(model.forward).parameters
+    return ("inputs_embeds" in model_forward_params
+            and "inputs_embeds_masks" in model_forward_params)

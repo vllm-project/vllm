@@ -290,7 +290,7 @@ def get_inputs_embeds(
 ) -> torch.Tensor:
     """Get the input embeddings from either `input_ids` and `inputs_embeds`."""
     if inputs_embeds is not None:
-        if all(inputs_embeds_masks):
+        if inputs_embeds_masks.all().item():
             hidden_states = inputs_embeds
         else:
             hidden_states = embeddings_module(input_ids)

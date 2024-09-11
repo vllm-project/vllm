@@ -34,7 +34,8 @@ from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-from vllm.model_executor.models.interfaces import (supports_lora,
+from vllm.model_executor.models.interfaces import (supports_input_embeds,
+                                                   supports_lora,
                                                    supports_multimodal)
 from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
@@ -1039,10 +1040,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                                    parallel_config=self.parallel_config,
                                    scheduler_config=self.scheduler_config,
                                    cache_config=self.cache_config)
-        model_forward_params = inspect.signature(self.model.forward).parameters
-        if ("inputs_embeds" in model_forward_params
-                and "inputs_embeds_masks" in model_forward_params):
-            self.model_supports_input_embeds = True
+            self.model_supports_input_embeds = supports_input_embeds(
+                self.model)
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB",
                     self.model_memory_usage / float(2**30))
