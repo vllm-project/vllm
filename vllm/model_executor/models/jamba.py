@@ -38,6 +38,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.worker.model_runner import (_BATCH_SIZES_TO_CAPTURE,
                                       _get_graph_batch_size)
 
+from .interfaces import SupportsLoRA
 from .utils import get_inputs_embeds
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
@@ -544,7 +545,7 @@ class JambaModel(nn.Module):
         return hidden_states
 
 
-class JambaForCausalLM(nn.Module, HasInnerState):
+class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",

@@ -16,7 +16,7 @@ from mistral_common.tokens.tokenizers.tekken import (SpecialTokenPolicy,
                                                      Tekkenizer)
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.chat_utils import ConversationMessage
+    from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 
 
 @dataclass
@@ -122,19 +122,19 @@ class MistralTokenizer:
         return []
 
     def encode(self, prompt: str) -> List[int]:
-        # `encode ` should only be used for prompt completion
+        # `encode` should only be used for prompt completion
         # it should never be used for chat_completion.
         # For chat completion use `apply_chat_template`
         return self.tokenizer.encode(prompt, bos=True, eos=False)
 
     def apply_chat_template(self,
-                            conversation: List["ConversationMessage"],
+                            messages: List["ChatCompletionMessageParam"],
                             tools: Optional[Dict[str, Any]] = None,
                             **kwargs) -> List[int]:
         assert tools is None, "`tools` are not yet supported."
 
         request = ChatCompletionRequest(
-            messages=conversation)  # type: ignore[type-var]
+            messages=messages)  # type: ignore[type-var]
         encoded = self.mistral.encode_chat_completion(request)
 
         # encode-decode to get clean prompt

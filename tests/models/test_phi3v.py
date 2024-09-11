@@ -1,16 +1,15 @@
 import os
 import re
-from typing import List, Optional, Tuple, Type, Union
+from typing import List, Optional, Tuple, Type
 
 import pytest
-from PIL import Image
 from transformers import AutoTokenizer
 
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
 from vllm.utils import is_cpu, is_hip
 
-from ..conftest import IMAGE_ASSETS, HfRunner, VllmRunner
+from ..conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
 from .utils import check_logprobs_close
 
 pytestmark = pytest.mark.vlm
@@ -60,8 +59,7 @@ if is_hip():
 def run_test(
     hf_runner: Type[HfRunner],
     vllm_runner: Type[VllmRunner],
-    inputs: List[Tuple[List[str], Union[List[Image.Image],
-                                        List[List[Image.Image]]]]],
+    inputs: List[Tuple[List[str], PromptImageInput]],
     model: str,
     *,
     dtype: str,
