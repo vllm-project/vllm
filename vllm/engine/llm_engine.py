@@ -2,12 +2,9 @@ import functools
 import time
 from collections import deque
 from contextlib import contextmanager
-from dataclasses import dataclass, field
-from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Deque, Dict,
-                    Iterable, List, Mapping, Optional)
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, ClassVar, Deque, Dict, Iterable, List,
-                    Mapping, NamedTuple, Optional)
+from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Deque, Dict,
+                    Iterable, List, Mapping, NamedTuple, Optional)
 from typing import Sequence as GenericSequence
 from typing import Set, Tuple, Type, Union
 
