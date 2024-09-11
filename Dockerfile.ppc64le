@@ -4,7 +4,7 @@ USER root
 
 ENV PATH="/usr/local/cargo/bin:$PATH:/opt/conda/bin/"
 
-RUN apt-get update -y && apt-get install -y git wget curl vim libnuma-dev libsndfile-dev libprotobuf-dev build-essential
+RUN apt-get update -y && apt-get install -y git wget curl vim libnuma-dev libsndfile-dev libprotobuf-dev build-essential ffmpeg libsm6 libxext6 libgl1 
 
 # Some packages in requirements-cpu are installed here
 # IBM provides optimized packages for ppc64le processors in the open-ce project for mamba
