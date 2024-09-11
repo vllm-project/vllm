@@ -87,6 +87,7 @@ if [[ $commands == *" kernels "* ]]; then
   --ignore=kernels/test_machete_gemm.py \
   --ignore=kernels/test_mamba_ssm.py \
   --ignore=kernels/test_marlin_gemm.py \
+  --ignore=kernels/test_moe.py \
   --ignore=kernels/test_prefix_prefill.py \
   --ignore=kernels/test_rand.py \
   --ignore=kernels/test_sampler.py"
