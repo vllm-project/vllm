@@ -76,9 +76,6 @@ def test_serving_chat_should_set_correct_max_tokens():
     with suppress(Exception):
         asyncio.run(serving_chat.create_chat_completion(req))
 
-    print(mock_engine)
-    print(mock_engine.generate)
-    print(mock_engine.generate.call_args)
     assert mock_engine.generate.call_args.args[1].max_tokens == 93
 
     req.max_tokens = 10
