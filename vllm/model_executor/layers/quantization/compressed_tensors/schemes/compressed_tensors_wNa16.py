@@ -74,7 +74,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             act_type=params_dtype,
             group_size=self.group_size,
             zero_points=False,
-            act_reordering=False
+            has_g_idx=self.has_g_idx
         )
 
         kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)

@@ -47,7 +47,7 @@ class MarlinLinearKernel(MPLinearKernel):
         c = self.config
 
         row_parallel = (c.partition_weight_shape[0] != c.full_weight_shape[0])
-        self.is_k_full = marlin_is_k_full(c.act_reordering, row_parallel)
+        self.is_k_full = marlin_is_k_full(c.has_g_idx, row_parallel)
 
         # Allocate marlin workspace.
         self.workspace = marlin_make_workspace(c.partition_weight_shape[1],
@@ -60,7 +60,7 @@ class MarlinLinearKernel(MPLinearKernel):
         if self.w_zp_name is None:
             self.w_zp_name = "w_zp"
 
-        if c.act_reordering:
+        if c.has_g_idx:
             g_idx, g_idx_sort_indices = marlin_sort_g_idx(
                 getattr(layer, self.w_gidx_name))
             self._transform_param(layer, self.w_gidx_name, lambda _: g_idx)

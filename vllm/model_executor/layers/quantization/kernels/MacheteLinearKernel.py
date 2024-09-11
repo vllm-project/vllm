@@ -21,7 +21,7 @@ class MacheteLinearKernel(MPLinearKernel):
     @classmethod
     def can_implement(cls,
                       c: MPLinearLayerConfig) -> Tuple[bool, Optional[str]]:
-        if c.act_reordering and\
+        if c.has_g_idx and\
             c.partition_weight_shape[0] != c.full_weight_shape[0]:
             return False, "Act reordering currently not supported by Machete, "\
                           "when the input features are partitioned across "\
@@ -53,7 +53,7 @@ class MacheteLinearKernel(MPLinearKernel):
     def process_weights_after_loading(self, layer: torch.nn.Module):
         c = self.config
 
-        if c.act_reordering:
+        if c.has_g_idx:
             assert self.w_gidx_name is not None
             perm = torch.argsort(getattr(layer, self.w_gidx_name))\
                 .to(torch.int)
@@ -67,7 +67,7 @@ class MacheteLinearKernel(MPLinearKernel):
         def transform_w_q(x):
             assert isinstance(x, BasevLLMParameter)
             permute_param_layout_(x, input_dim=0, output_dim=1, packed_dim=0)
-            if c.act_reordering:
+            if c.has_g_idx:
                 x_unpacked = unpack_weights_into_int32(x.data,
                                                        c.weight_type,
                                                        packed_dim=0)
@@ -99,7 +99,7 @@ class MacheteLinearKernel(MPLinearKernel):
         x_2d = x.reshape(-1, x.shape[-1])
         out_shape = x.shape[:-1] + (c.partition_weight_shape[1], )
 
-        if c.act_reordering:
+        if c.has_g_idx:
             x_2d = self.act_perm(x_2d)
 
         output = ops.machete_gemm(a=x_2d,

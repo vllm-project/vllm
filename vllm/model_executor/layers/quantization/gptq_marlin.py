@@ -189,7 +189,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             act_type=params_dtype,
             group_size=self.quant_config.group_size,
             zero_points=False,
-            act_reordering=self.quant_config.desc_act
+            has_g_idx=self.quant_config.desc_act
         )
 
         kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)

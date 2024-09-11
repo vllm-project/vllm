@@ -336,7 +336,7 @@ def generate():
 
     # For now we use the same heuristic for all types
     default_heuristic = [
-        #### 257+
+        #### M = 257+
         (
             "M > 256 && K <= 16384 && N <= 4096",
             ScheduleConfig(
@@ -351,7 +351,7 @@ def generate():
                 cluster_shape_mnk=(2, 1, 1),
                 **schedule_common_params  # type: ignore
             )),
-        #### 129-256
+        #### M = 129-256
         (
             "M > 128 && K <= 4096 && N <= 4096",
             ScheduleConfig(
@@ -373,7 +373,7 @@ def generate():
                 cluster_shape_mnk=(2, 1, 1),
                 **schedule_common_params  # type: ignore
             )),
-        #### 65-128
+        #### M = 65-128
         (
             "M > 64 && K <= 4069 && N <= 4069",
             ScheduleConfig(
@@ -402,7 +402,7 @@ def generate():
                 cluster_shape_mnk=(2, 1, 1),
                 **schedule_common_params  # type: ignore
             )),
-        #### 33-64
+        #### M = 33-64
         (
             "M > 32 && K <= 6144 && N <= 6144",
             ScheduleConfig(
@@ -424,7 +424,7 @@ def generate():
                 cluster_shape_mnk=(2, 1, 1),
                 **schedule_common_params  # type: ignore
             )),
-        #### 17-32
+        #### M = 17-32
         (
             "M > 16 && K <= 12288 && N <= 8192",
             ScheduleConfig(
@@ -439,7 +439,7 @@ def generate():
                 cluster_shape_mnk=(2, 1, 1),
                 **schedule_common_params  # type: ignore
             )),
-        #### 1-16
+        #### M = 1-16
         (
             "N >= 26624",
             ScheduleConfig(

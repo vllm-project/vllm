@@ -16,7 +16,7 @@ class MPLinearLayerConfig:
     act_type: torch.dtype
     group_size: int
     zero_points: bool
-    act_reordering: bool
+    has_g_idx: bool
 
 
 class MPLinearKernel(ABC):
@@ -45,11 +45,6 @@ class MPLinearKernel(ABC):
         self.w_zp_name = w_zp_param_name
         self.w_gidx_name = w_gidx_param_name
 
-    # note assumes that (if the they are not ModelWeightParameters)
-    #  `getattr(layer, w_q_name)` is:
-    #     {input_dim = 0, output_dim = 1, packed_dim = 0}
-    #  `getattr(layer, w_s_name)` is:
-    #     {input_dim = 0, output_dim = 1}
     @abstractmethod
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         raise NotImplementedError
@@ -68,9 +63,11 @@ class MPLinearKernel(ABC):
 
     def _get_weight_params(
             self, layer: torch.nn.Module
-    ) -> Tuple[torch.Tensor,  # w_q
-               torch.Tensor,  # w_s
-               Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> Tuple[torch.Tensor,          # w_q
+               torch.Tensor,          # w_s
+               Optional[torch.Tensor],# w_zp, 
+               Optional[torch.Tensor] # w_gidx
+        ]:
         return (
             getattr(layer, self.w_q_name),
             getattr(layer, self.w_s_name),

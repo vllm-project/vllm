@@ -346,7 +346,7 @@ def permute_param_layout_(param: BasevLLMParameter, input_dim: int,
 
     if curr_input_dim is None or curr_output_dim is None:
         assert param.data.dim() == 2,\
-            "permute_param_layout_ only supports 2D parameters where either "\
+            "permute_param_layout_ only supports 2D parameters when either "\
             "input_dim or output_dim is not set"
 
     # if one of the dimensions is not set, set it to the opposite of the other
