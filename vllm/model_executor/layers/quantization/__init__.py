@@ -22,6 +22,7 @@ from vllm.model_executor.layers.quantization.gptq_marlin import (
 from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
     GPTQMarlin24Config)
 from vllm.model_executor.layers.quantization.marlin import MarlinConfig
+from vllm.model_executor.layers.quantization.modelopt import ModelOptFp8Config
 from vllm.model_executor.layers.quantization.neuron_quant import (
     NeuronQuantConfig)
 from vllm.model_executor.layers.quantization.qqq import QQQConfig
@@ -34,6 +35,7 @@ QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "tpu_int8": Int8TpuConfig,
     "fp8": Fp8Config,
     "fbgemm_fp8": FBGEMMFp8Config,
+    "modelopt": ModelOptFp8Config,
     # The order of gptq methods is important for config.py iteration over
     # override_quantization_method(..)
     "marlin": MarlinConfig,
