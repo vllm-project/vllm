@@ -449,11 +449,12 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
             if not isinstance(pixel_values, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
-
+            # We need to flatten (B, N, P) to (B*N*P),
+            # so we call flatten_bn twice.
             return InternVLImagePixelInputs(
                 type="pixel_values",
                 data=self._validate_pixel_values(
-                    flatten_bn(pixel_values, concat=True).flatten(0, 1)),
+                    flatten_bn(flatten_bn(pixel_values), concat=True)),
             )
 
         raise AssertionError("This line should be unreachable.")
