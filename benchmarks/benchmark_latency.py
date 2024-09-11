@@ -13,9 +13,9 @@ from tqdm import tqdm
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import PromptType
-from vllm.utils import FlexibleArgumentParser
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.utils import FlexibleArgumentParser
 
 
 def main(args: argparse.Namespace):
@@ -26,14 +26,15 @@ def main(args: argparse.Namespace):
     # the engine will automatically process the request in multiple batches.
     llm = LLM(**dataclasses.asdict(engine_args))
     lora_kwargs={}
+    lora_kwargs = {}
     if args.lora_path is not None:
-        lora_kwargs['enable_lora']=True
-        lora_kwargs['max_loras']=args.max_loras
-        lora_kwargs['max_lora_rank']=args.max_lora_rank
+        lora_kwargs['enable_lora'] = True
+        lora_kwargs['max_loras'] = args.max_loras
+        lora_kwargs['max_lora_rank'] = args.max_lora_rank
 
     # NOTE(woosuk): If the request cannot be processed in a single batch,
     # the engine will automatically process the request in multiple batches.
-    
+
     llm = LLM(
         model=args.model,
         speculative_model=args.speculative_model,
@@ -71,7 +72,10 @@ def main(args: argparse.Namespace):
         max_tokens=args.output_len,
     )
     
-    lora_request=LoRARequest(lora_name='lora', lora_int_id=0, lora_path=args.lora_path) if args.lora_path else None
+
+    lora_request = LoRARequest(
+        lora_name='lora', lora_int_id=0,
+        lora_path=args.lora_path) if args.lora_path else None
 
     dummy_prompt_token_ids = np.random.randint(10000,
                                                size=(args.batch_size,
