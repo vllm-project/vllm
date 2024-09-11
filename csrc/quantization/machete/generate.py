@@ -457,7 +457,6 @@ def generate():
     ]
 
     schedules = list(set([x[1] for x in default_heuristic]))
-    print(schedules)
 
     impl_configs = []
 
