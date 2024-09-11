@@ -3,6 +3,7 @@ import argparse
 
 from vllm import LLM
 from vllm.sampling_params import SamplingParams
+
 """
 This script is an offline demo for running Pixtral.
 
@@ -125,8 +126,7 @@ def run_advanced_demo():
             "content": "More details please and answer only in French!.",
         },
         {
-            "role":
-            "user",
+            "role": "user",
             "content": [
                 {
                     "type": "image_url",

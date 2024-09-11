@@ -51,8 +51,7 @@ def dummy_data_for_pixtral(ctx: InputContext, seq_len: int,
     mm_encoder = tokenizer.instruct.mm_encoder
 
     mm_config = ctx.model_config.multimodal_config
-    max_num_images_per_request = mm_config.limit_per_prompt.get(
-        "image", 1)
+    max_num_images_per_request = mm_config.limit_per_prompt.get("image", 1)
 
     # approximate image size
     size = int(math.sqrt(seq_len) * mm_encoder.mm_config.image_patch_size)
@@ -113,18 +112,11 @@ def merge_multimodal_embeddings(input_ids: torch.Tensor,
     _, D_txt = inputs_embeds.shape
     N_img, D_img = image_features.shape
 
-    assert (
-        D_txt == D_img
-    ), (
-        f"Text features dim {D_txt} should be equal "
-        "to image features dim {D_img}"
-    )
-    assert (
-        seq_len == N_txt + N_img
-    ), (
-        f"seq_len {seq_len} should be equal to N_txt + N_img "
-        f"{(N_txt, N_img, image_locations.sum().item())}"
-    )
+    assert (D_txt == D_img), (f"Text features dim {D_txt} should be equal "
+                              "to image features dim {D_img}")
+    assert (seq_len == N_txt +
+            N_img), (f"seq_len {seq_len} should be equal to N_txt + N_img "
+                     f"{(N_txt, N_img, image_locations.sum().item())}")
 
     inputs_embeds[image_locations, :] = image_features
     return inputs_embeds
