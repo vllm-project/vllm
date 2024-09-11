@@ -718,6 +718,7 @@ class LLMEngine:
     def _prepare_decoder_input_ids_for_generation(
         self,
         decoder_input_ids: Optional[List[int]],
+        force_bos: bool = False,
     ) -> List[int]:
         """
         Prepares `decoder_input_ids` for generation with encoder-decoder models.
@@ -747,7 +748,7 @@ class LLMEngine:
             # use decoder_start_token_id as decoder_input_ids
             decoder_input_ids = self._get_default_enc_dec_decoder_prompt()
 
-        if (len(decoder_input_ids) == 0
+        if force_bos and (len(decoder_input_ids) == 0
                 or decoder_input_ids[0] != decoder_start_token_id):
             decoder_input_ids = [decoder_start_token_id] + decoder_input_ids
 
@@ -889,8 +890,9 @@ class LLMEngine:
             raise ValueError("Multi-modality decoder inputs of encoder-decoder models are "
                              "not supported yet")
 
+        # For Multi-Modal models, the start token can be the image token
         decoder_prompt_ids = (
-            self._prepare_decoder_input_ids_for_generation(decoder_prompt_ids))
+            self._prepare_decoder_input_ids_for_generation(decoder_prompt_ids, force_bos=(encoder_mm_data is None and decoder_mm_data is None)))
 
         return EncoderDecoderLLMInputs(
             prompt_token_ids=decoder_prompt_ids,
