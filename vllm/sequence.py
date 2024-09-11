@@ -165,6 +165,9 @@ class SequenceData(msgspec.Struct,
     # is called.
     _new_appended_tokens: List[int] = msgspec.field(default_factory=list)
 
+    # It is used to compute mrope_position_ids.
+    _mrope_position_delta: Optional[int] = None
+
     # These are used to keep track of delta outputs
     last_appended_tokens: List[int] = []
     last_output_text_offset: int = 0
@@ -222,6 +225,14 @@ class SequenceData(msgspec.Struct,
         """
         assert isinstance(self._output_token_ids, array)
         return self._output_token_ids
+
+    @property
+    def mrope_position_delta(self) -> Optional[int]:
+        return self._mrope_position_delta
+
+    @mrope_position_delta.setter
+    def mrope_position_delta(self, new_mrope_position_delta):
+        self._mrope_position_delta = new_mrope_position_delta
 
     def append_token_id(self,
                         token_id: int,

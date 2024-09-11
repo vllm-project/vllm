@@ -26,6 +26,16 @@ logger = init_logger(__name__)
 
 ALLOWED_DETAILED_TRACE_MODULES = ["model", "worker", "all"]
 
+DEVICE_OPTIONS = [
+    "auto",
+    "cuda",
+    "neuron",
+    "cpu",
+    "openvino",
+    "tpu",
+    "xpu",
+]
+
 
 def nullable_str(val: str):
     if not val or val == "None":
@@ -553,10 +563,7 @@ class EngineArgs:
         parser.add_argument("--device",
                             type=str,
                             default=EngineArgs.device,
-                            choices=[
-                                "auto", "cuda", "neuron", "cpu", "openvino",
-                                "tpu", "xpu"
-                            ],
+                            choices=DEVICE_OPTIONS,
                             help='Device type for vLLM execution.')
         parser.add_argument('--num-scheduler-steps',
                             type=int,
@@ -878,7 +885,6 @@ class EngineArgs:
                 if (is_gpu and not use_sliding_window and not use_spec_decode
                         and not self.enable_lora
                         and not self.enable_prompt_adapter
-                        and not self.enable_prefix_caching
                         and not has_seqlen_agnostic_layers):
                     self.enable_chunked_prefill = True
                     logger.warning(

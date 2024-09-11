@@ -70,7 +70,7 @@ def file_or_path_exists(model: Union[str, Path], config_name, revision,
     if Path(model).exists():
         return (Path(model) / config_name).is_file()
 
-    return file_exists(model, HF_CONFIG_NAME, revision=revision, token=token)
+    return file_exists(model, config_name, revision=revision, token=token)
 
 
 def get_config(
@@ -205,14 +205,25 @@ def load_params_config(model, revision) -> PretrainedConfig:
     config_dict["hidden_act"] = config_dict.get("activation", "silu")
     config_dict["tie_word_embeddings"] = config_dict.get(
         "tie_embeddings", False)
+    config_dict["max_seq_len"] = config_dict.get("max_seq_len", 128_000)
 
-    if config_dict["model_type"] == "transformer":
-        if "moe" in config_dict:
-            config_dict["architectures"] = ["MixtralForCausalLM"]
-        else:
-            config_dict["architectures"] = ["MistralForCausalLM"]
+    if config_dict.get("moe") is not None:
+        config_dict["architectures"] = ["MixtralForCausalLM"]
+    else:
+        config_dict["architectures"] = ["MistralForCausalLM"]
 
-    return recurse_elems(config_dict)
+    if config_dict.get("vision_encoder") is not None:
+        multimodal_config = config_dict.pop("vision_encoder")
+
+        config_dict = {
+            "text_config": config_dict,
+            "vision_config": multimodal_config
+        }
+        config_dict["architectures"] = ["PixtralForConditionalGeneration"]
+        config_dict["model_type"] = "pixtral"
+
+    config = recurse_elems(config_dict)
+    return config
 
 
 def get_hf_image_processor_config(
