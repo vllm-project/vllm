@@ -17,6 +17,7 @@ from vllm.engine.llm_engine import (DecoderPromptComponents, LLMEngine,
 from vllm.engine.metrics_types import StatLoggerBase
 from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.ray_utils import initialize_ray_cluster
+from vllm.executor.gpu_executor import GPUExecutorAsync
 from vllm.inputs import (EncoderDecoderLLMInputs, LLMInputs, PromptInputs,
                          SingletonPromptInputs)
 from vllm.inputs.parse import is_explicit_encoder_decoder_prompt
@@ -1156,7 +1157,13 @@ class AsyncLLMEngine:
         self.engine.remove_logger(logger_name=logger_name)
 
     async def start_profile(self) -> None:
-        self.engine.model_executor._run_workers("start_profile")
+        if isinstance(self.engine.model_executor, GPUExecutorAsync):
+            self.engine.model_executor.start_profile()
+        else:
+            self.engine.model_executor._run_workers("start_profile")
 
     async def stop_profile(self) -> None:
-        self.engine.model_executor._run_workers("stop_profile")
+        if isinstance(self.engine.model_executor, GPUExecutorAsync):
+            self.engine.model_executor.stop_profile()
+        else:
+            self.engine.model_executor._run_workers("stop_profile")
