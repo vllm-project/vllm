@@ -165,10 +165,10 @@ class MQLLMEngineClient:
             logger.debug("Shutting down MQLLMEngineClient check health loop.")
 
         except Exception as e:
-            self.raise_exception(e)
+            self._set_errored(e)
 
     async def run_output_handler_loop(self):
-        """Get RequestOutputs from Engine and stream to request Queues"""
+        """Get RequestOutputs from Engine and stream to Request Queues"""
 
         try:
             while True:
@@ -249,11 +249,7 @@ class MQLLMEngineClient:
 
     def close(self):
         """Destroy the ZeroMQ Context."""
-        # Close all sockets associated with this context and
-        # then terminate the context.
-        self.output_socket.close()
-        self.input_socket.close()
-        self.health_socket.close()
+        # Close all sockets and terminate the context.
         self.context.destroy(linger=0)
 
         # Cancel background tasks.
@@ -261,7 +257,7 @@ class MQLLMEngineClient:
             self.health_loop.cancel()
         self.output_loop.cancel()
 
-    def raise_exception(self, e: BaseException):
+    def _set_errored(self, e: BaseException):
         logger.exception(repr(e))
         if self._errored_with is None:
             self._errored_with = e
@@ -285,19 +281,10 @@ class MQLLMEngineClient:
         frame = await socket.recv(copy=False)
         data = pickle.loads(frame.buffer)
 
-        if isinstance(data, Exception):
-            # Re-raise exceptions returned by the server
+        if isinstance(data, BaseException):
             raise data
-
-        if not isinstance(data, expected_type):
-            # LoRAConfig can be None.
-            if expected_type == LoRAConfig and data is None:
-                pass
-            elif isinstance(data, Exception):
-                logger.error(error_message)
-                raise data
-            else:
-                raise ValueError(error_message)
+        elif not isinstance(data, expected_type):
+            raise ValueError(error_message)
 
         return data
 
@@ -305,7 +292,7 @@ class MQLLMEngineClient:
     async def _send_one_way_rpc_request(request: RPC_REQUEST_T,
                                         socket: Socket):
         """Send one-way RPC request to trigger an action."""
-        # Raise handlable error for graceful shutdown.
+
         if socket.closed:
             raise MQClientClosedError()
 
@@ -313,7 +300,7 @@ class MQLLMEngineClient:
 
     async def _await_ack(self, error_message: str, socket: Socket):
         """Await acknowledgement that a request succeeded."""
-        # Raise handlable error for graceful shutdown.
+
         if socket.closed:
             raise MQClientClosedError()
 
@@ -325,17 +312,19 @@ class MQLLMEngineClient:
 
     @staticmethod
     async def _check_success(error_message: str, socket: Socket):
-        # Raise handlable error for graceful shutdown.
+        """Confirm that socket has a VLLM_RPC_SUCCESS_STR message"""
+
         if socket.closed:
             raise MQClientClosedError()
 
         frame = await socket.recv(copy=False)
         response = pickle.loads(frame.buffer)
 
-        if not isinstance(response, str) or response != VLLM_RPC_SUCCESS_STR:
-            if isinstance(response, BaseException):
-                logger.error(error_message)
-                raise response
+        # Raise error if unsuccessful
+        if isinstance(response, BaseException):
+            raise response
+        elif (not isinstance(response, str) or 
+            response != VLLM_RPC_SUCCESS_STR):
             raise ValueError(error_message)
 
     async def get_tokenizer(self, lora_request: LoRARequest):

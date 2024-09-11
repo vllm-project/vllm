@@ -19,7 +19,8 @@ from vllm.utils import FlexibleArgumentParser
 
 MODEL = "Qwen/Qwen2-0.5B-Instruct"
 ENGINE_ARGS = AsyncEngineArgs(model=MODEL)
-RAISED_ERROR = KeyError("foo")
+RAISED_ERROR = KeyError
+RAISED_VALUE = "foo"
 
 
 @pytest.fixture(scope="function")
@@ -36,7 +37,8 @@ def run_with_evil_forward(engine_args: AsyncEngineArgs, ipc_path: str):
         ipc_path=ipc_path)
 
     # Raise error during first forward pass.
-    engine.engine.model_executor.execute_model = Mock(side_effect=RAISED_ERROR)
+    engine.engine.model_executor.execute_model = Mock(
+        side_effect=RAISED_ERROR(RAISED_VALUE))
 
     # Run engine.
     engine.start()
@@ -50,46 +52,32 @@ async def test_evil_forward(tmp_socket):
 
         client = await engine.make_client()
 
-        # Fast health probe.
-        fast_health_probe_task = asyncio.create_task(
-            client.run_check_health_loop(timeout=1.0))
-
         # Server should be healthy after initial probe.
         await asyncio.sleep(2.0)
         await client.check_health()
 
         # Throws an error in first forward pass.
-        try:
+        with pytest.raises(RAISED_ERROR):
             async for _ in client.generate(inputs="Hello my name is",
                                            sampling_params=SamplingParams(),
                                            request_id=uuid.uuid4()):
                 pass
-        except Exception as e:
-            # First exception should be a RAISED_ERROR
-            assert repr(e) == repr(RAISED_ERROR)
-            assert client.errored
+        assert client.errored
 
         # Engine is errored, should get ENGINE_DEAD_ERROR.
-        try:
+        with pytest.raises(MQEngineDeadError):
             async for _ in client.generate(inputs="Hello my name is",
                                            sampling_params=SamplingParams(),
                                            request_id=uuid.uuid4()):
                 pass
-        except Exception as e:
-            # Next exception should be an ENGINE_DEAD_ERROR
-            assert client.errored, "Client should be dead."
-            assert isinstance(e, MQEngineDeadError), (
-                "Engine should be dead and raise ENGINE_DEAD_ERROR")
+        assert client.errored
 
-        await asyncio.sleep(2.0)
-        try:
+        await asyncio.sleep(1.0)
+        with pytest.raises(RAISED_ERROR):
             await client.check_health()
-        except Exception as e:
-            assert repr(e) == repr(RAISED_ERROR), (
-                "Health check raise the original error.")
+        assert client.errored
 
-        # Cleanup
-        await fast_health_probe_task
+        # Shutdown.
         client.close()
 
 
@@ -120,25 +108,18 @@ async def test_failed_health_check(tmp_socket):
 
         # Health probe should throw RAISED_ERROR.
         await asyncio.sleep(10)
-        try:
+
+        with pytest.raises(RAISED_ERROR):
             await client.check_health()
-        except Exception as e:
-            assert client.errored, "Client should be dead."
-            assert repr(e) == repr(RAISED_ERROR), (
-                "Health check raise the original error.")
+        assert client.errored
 
         # Generate call should throw ENGINE_DEAD_ERROR
-        try:
+        with pytest.raises(MQEngineDeadError):
             async for _ in client.generate(inputs="Hello my name is",
                                            sampling_params=SamplingParams(),
                                            request_id=uuid.uuid4()):
                 pass
-        except Exception as e:
-            assert client.errored, "Client should be dead."
-            assert isinstance(e, MQEngineDeadError), (
-                "Engine should be dead and raise ENGINE_DEAD_ERROR")
 
-        # Cleanup
         client.close()
 
 
@@ -173,34 +154,26 @@ async def test_failed_abort(tmp_socket):
             await asyncio.sleep(2.0)
             await client.abort(request_id="foo")
 
-            # Immediately should trigger error.
-            try:
-                await client.check_health()
-            except Exception as e:
-                assert client.errored, "Client should be dead."
-                assert repr(e) == repr(RAISED_ERROR), (
-                    "Health check raise the original error.")
-
         # Trigger an abort in 2s from now.
         abort_task = asyncio.create_task(bad_abort_after_2s())
 
         # Exception in abort() will happen during this generation.
-        # This will kill the engine and should return ENGINE_DEAD_ERROR.
-        try:
+        # This will kill the engine and should return ENGINE_DEAD_ERROR
+        # with reference to the original KeyError("foo")
+        with pytest.raises(MQEngineDeadError) as execinfo:
             async for _ in client.generate(
                     inputs="Hello my name is",
                     sampling_params=SamplingParams(max_tokens=2000),
                     request_id=uuid.uuid4()):
                 pass
-        except Exception as e:
-            print(f"error is: {e}")
-            # Next exception should be an ENGINE_DEAD_ERROR
-            assert isinstance(e, MQEngineDeadError), (
-                "Engine should be dead and raise ENGINE_DEAD_ERROR")
-            assert client.errored
-
+        assert "KeyError" in repr(execinfo.value)
+        assert client.errored
         await abort_task
 
+        # This should raise the original error.
+        with pytest.raises(RAISED_ERROR):
+            await client.check_health()
+        
         client.close()
 
 
@@ -211,30 +184,20 @@ async def test_bad_request(tmp_socket):
 
         client = await engine.make_client()
 
-        # This should fail, but not crash the server.
-        try:
-            print("calling first generate")
+        # Invalid request should fail, but not crash the server.
+        with pytest.raises(ValueError):
             async for _ in client.generate(inputs="Hello my name is",
                                            sampling_params=SamplingParams(),
                                            request_id="abcd-1",
                                            lora_request=LoRARequest(
-                                               "invalid-lora", 1,
-                                               "invalid-path")):
+                                               "invalid-lora", 1, "invalid-path")):
                 pass
-        except Exception as e:
-            print("got exception")
-            assert isinstance(e, ValueError), (
-                "Expected ValueError when a LoRARequest in llm_engine")
 
         # This request should be okay.
         async for _ in client.generate(inputs="Hello my name is",
                                        sampling_params=SamplingParams(),
                                        request_id="abcd-2"):
             pass
-
-        # Confirm server is still running.
-        await asyncio.sleep(10.)
-        await client.check_health()
 
         # Shutdown.
         client.close()

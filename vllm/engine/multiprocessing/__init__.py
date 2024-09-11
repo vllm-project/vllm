@@ -71,4 +71,4 @@ def ENGINE_DEAD_ERROR(
 
     return MQEngineDeadError(
         "Engine loop is not running. Inspect the stacktrace to "
-        f"find the original error {repr(error)}.")
+        f"find the original error: {repr(error)}.")

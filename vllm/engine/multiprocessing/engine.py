@@ -141,9 +141,7 @@ class MQLLMEngine:
 
     def cleanup(self):
         """Cleanup zeromq state on shutdown."""
-        self.input_socket.close()
-        self.output_socket.close()
-        self.health_socket.close()
+        # Closes all sockets and destroys context.
         self.ctx.destroy(linger=0)
         del self.engine
 
