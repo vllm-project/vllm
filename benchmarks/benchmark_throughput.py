@@ -11,7 +11,7 @@ from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           PreTrainedTokenizerBase)
 
-from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
+from vllm.engine.arg_utils import DEVICE_OPTIONS, AsyncEngineArgs, EngineArgs
 from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args)
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -451,13 +451,11 @@ if __name__ == "__main__":
         'accuracy issues. FP8_E5M2 (without scaling) is only supported on '
         'cuda version greater than 11.8. On ROCm (AMD GPU), FP8_E4M3 is '
         'instead supported for common inference criteria.')
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="auto",
-        choices=["auto", "cuda", "cpu", "openvino", "tpu", "xpu"],
-        help='device type for vLLM execution, supporting CUDA, OpenVINO and '
-        'CPU.')
+    parser.add_argument("--device",
+                        type=str,
+                        default="auto",
+                        choices=DEVICE_OPTIONS,
+                        help='device type for vLLM execution')
     parser.add_argument(
         "--num-scheduler-steps",
         type=int,
