@@ -222,12 +222,23 @@ def test_offline_mode(llm: LLM, monkeypatch):
 
 
 def _re_import_modules():
-    hf_hub_modules = [
-        v for k, v in sys.modules.items() if k.startswith("huggingface_hub")
+    hf_hub_module_names = [
+        k for k in sys.modules if k.startswith("huggingface_hub")
     ]
-    transformers_modules = [
-        v for k, v in sys.modules.items() if k.startswith("transformers")
+    transformers_module_names = [
+        k for k in sys.modules if k.startswith("transformers")
+        and not k.startswith("transformers_modules")
     ]
 
-    for module in hf_hub_modules + transformers_modules:
-        importlib.reload(module)
+    reload_exception = None
+    for module_name in hf_hub_module_names + transformers_module_names:
+        try:
+            importlib.reload(sys.modules[module_name])
+        except Exception as e:
+            reload_exception = e
+            # Try to continue clean up so that other tests are less likely to
+            # be affected
+
+    # Error this test if reloading a module failed
+    if reload_exception is not None:
+        raise reload_exception
