@@ -257,6 +257,11 @@ Multimodal Language Models
     - Audio\ :sup:`E+`
     - :code:`fixie-ai/ultravox-v0_3`
     -
+  * - :code:`PixtralForConditionalGeneration`
+    - Pixtral
+    - Image\ :sup:`E+`
+    - :code:`mistralai/Pixtral-12B-2409`
+    -
 
 | :sup:`E` Pre-computed embeddings can be inputted for this modality.
 | :sup:`+` Multiple items can be inputted per text prompt for this modality.

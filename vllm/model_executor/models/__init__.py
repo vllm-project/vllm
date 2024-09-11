@@ -90,6 +90,8 @@ _MULTIMODAL_MODELS = {
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
     "UltravoxModel": ("ultravox", "UltravoxModel"),
     "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
+    "PixtralForConditionalGeneration": ("pixtral",
+                                        "PixtralForConditionalGeneration"),
 }
 _CONDITIONAL_GENERATION_MODELS = {
     "BartModel": ("bart", "BartForConditionalGeneration"),
