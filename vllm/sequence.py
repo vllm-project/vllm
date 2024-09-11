@@ -442,7 +442,7 @@ class Sequence:
     @property
     def multi_modal_data(self) -> "MultiModalDataDict":
         return self.inputs.get("multi_modal_data") or {}
-    
+
     @property
     def token_annotations(self) -> List["TokenRangeAnnotation"]:
         return self.inputs.get("token_annotations") or []
