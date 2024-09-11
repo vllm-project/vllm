@@ -224,11 +224,6 @@ TORCH_LIBRARY_EXPAND(_C, ops) {
   // Post processing for GPTQ.
   ops.def("gptq_shuffle(Tensor! q_weight, Tensor q_perm, int bit) -> ()");
 
-  // Quantized GEMM for SqueezeLLM.
-  ops.def(
-      "squeezellm_gemm(Tensor vec, Tensor mat, Tensor! mul, "
-      "Tensor lookup_table) -> ()");
-
   // Compute FP8 quantized tensor for given scaling factor.
   ops.def(
       "static_scaled_fp8_quant(Tensor! out, Tensor input, Tensor scale) -> ()");
