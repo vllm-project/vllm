@@ -92,9 +92,9 @@ Notes:
     mkdir -p ~/.cache/huggingface/hub/
     hf_cache_dir=~/.cache/huggingface/
     SVR_0_CORES=0-47
-    SVR_1_CORES=48-96
-    docker run -itd --ipc host --network vllm_nginx --cap-add=SYS_ADMIN --shm-size=10.24gb -e VLLM_CPU_KVCACHE_SPACE=40 -e VLLM_CPU_OMP_THREADS_BIND=$SVR_0_CORES -e http_proxy=$http_proxy -e https_proxy=$https_proxy -v $hf_cache_dir:/root/.cache/huggingface/ -p 8081:8000 --name vllm0 vllm
-    docker run -itd --ipc host --network vllm_nginx --cap-add=SYS_ADMIN --shm-size=10.24gb -e VLLM_CPU_KVCACHE_SPACE=40 -e VLLM_CPU_OMP_THREADS_BIND=$SVR_1_CORES -e http_proxy=$http_proxy -e https_proxy=$https_proxy -v $hf_cache_dir:/root/.cache/huggingface/ -p 8082:8000 --name vllm1 vllm 
+    SVR_1_CORES=48-95
+    docker run -itd --ipc host --privileged --network vllm_nginx --cap-add=SYS_ADMIN --shm-size=10.24gb -e VLLM_CPU_KVCACHE_SPACE=40 -e VLLM_CPU_OMP_THREADS_BIND=$SVR_0_CORES -e http_proxy=$http_proxy -e https_proxy=$https_proxy -v $hf_cache_dir:/root/.cache/huggingface/ -p 8081:8000 --name vllm0 vllm
+    docker run -itd --ipc host --privileged --network vllm_nginx --cap-add=SYS_ADMIN --shm-size=10.24gb -e VLLM_CPU_KVCACHE_SPACE=40 -e VLLM_CPU_OMP_THREADS_BIND=$SVR_1_CORES -e http_proxy=$http_proxy -e https_proxy=$https_proxy -v $hf_cache_dir:/root/.cache/huggingface/ -p 8082:8000 --name vllm1 vllm 
 
 Launch Nginx
 ------------
