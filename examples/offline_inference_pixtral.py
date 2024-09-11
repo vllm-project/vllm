@@ -1,6 +1,8 @@
+# ruff: noqa
+import argparse
+
 from vllm import LLM
 from vllm.sampling_params import SamplingParams
-import argparse
 
 """
 This script is an offline demo for running Pixtral.
@@ -52,10 +54,19 @@ def run_simple_demo():
 
     messages = [
         {
-            "role": "user",
+            "role":
+            "user",
             "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": image_url}},
+                {
+                    "type": "text",
+                    "text": prompt
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_url
+                    }
+                },
             ],
         },
     ]
@@ -85,10 +96,19 @@ def run_advanced_demo():
 
     messages = [
         {
-            "role": "user",
+            "role":
+            "user",
             "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": url_1}},
+                {
+                    "type": "text",
+                    "text": prompt
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": url_1
+                    }
+                },
             ],
         },
         {
@@ -100,10 +120,21 @@ def run_advanced_demo():
             "content": "In more detail for all the following images.",
         },
         {
-            "role": "user",
+            "role":
+            "user",
             "content": [
-                {"type": "image_url", "image_url": {"url": url_2}},
-                {"type": "image_url", "image_url": {"url": url_3}},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": url_2
+                    }
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": url_3
+                    }
+                },
             ],
         },
     ]
@@ -114,8 +145,7 @@ def run_advanced_demo():
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run a demo in simple or advanced mode."
-    )
+        description="Run a demo in simple or advanced mode.")
 
     parser.add_argument(
         "mode",

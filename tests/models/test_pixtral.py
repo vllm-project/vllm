@@ -3,6 +3,7 @@
 Run `pytest tests/models/test_mistral.py`.
 """
 import pytest
+
 from vllm.sampling_params import SamplingParams
 
 MODELS = [
@@ -23,8 +24,14 @@ def test_models(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-    image_urls = ["https://picsum.photos/id/237/200/300", "https://picsum.photos/seed/picsum/200/300"]
-    expected = ["The image depicts a black dog lying on a wooden surface, looking directly at the camera with a calm expression.", "The image depicts a serene landscape with a snow-covered mountain under a pastel-colored sky during sunset."]
+    image_urls = [
+        "https://picsum.photos/id/237/200/300",
+        "https://picsum.photos/seed/picsum/200/300"
+    ]
+    expected = [
+        "The image depicts a black dog lying on a wooden surface, looking directly at the camera with a calm expression.",  # noqa
+        "The image depicts a serene landscape with a snow-covered mountain under a pastel-colored sky during sunset."  # noqa
+    ]
     prompt = "Describe the image in one short sentence."
 
     sampling_params = SamplingParams(max_tokens=512, temperature=0.0)
@@ -32,15 +39,24 @@ def test_models(
     with vllm_runner(model, dtype=dtype,
                      tokenizer_mode="mistral") as vllm_model:
 
-        tokenizer = vllm_model.model.llm_engine.tokenizer.tokenizer
 
         for i, image_url in enumerate(image_urls):
             messages = [
                 {
-                    "role": "user",
-                    "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": image_url}}]
+                    "role":
+                    "user",
+                    "content": [{
+                        "type": "text",
+                        "text": prompt
+                    }, {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": image_url
+                        }
+                    }]
                 },
             ]
 
-            outputs = vllm_model.model.chat(messages, sampling_params=sampling_params)
+            outputs = vllm_model.model.chat(messages,
+                                            sampling_params=sampling_params)
             assert outputs[0].outputs[0].text == expected[i]
