@@ -98,7 +98,7 @@ class SpecDecodeBaseSampler(nn.Module):
         # with causal acceptance.
         matched_len = accepted_mask.sum(dim=-1)
         for i in range(matched_len.shape[0]):
-            bonus_token_ids = target_token_ids[i][matched_len]
+            bonus_token_ids = target_token_ids[i][matched_len[i]]
             output_with_bonus_tokens[i, matched_len[i]] = bonus_token_ids
 
         # We disable bonus tokens because it causes corrupt KV cache for
