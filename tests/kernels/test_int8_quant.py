@@ -2,6 +2,7 @@ import pytest
 import torch
 
 from tests.kernels.quant_utils import ref_dynamic_per_token_quant
+from tests.kernels.utils import opcheck
 from vllm._custom_ops import scaled_int8_quant
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
@@ -10,6 +11,16 @@ HIDDEN_SIZES = [16, 67, 768, 2048, 5120, 5137, 8192,
 NUM_TOKENS = [1, 7, 83, 4096]  # Arbitrary values for testing
 SEEDS = [0]
 SCALE = [0.1, 0.5, 0.8, 1.2, 2.1]
+
+
+def opcheck_int8_quant(output, input, scale=None):
+    if scale is not None:
+        opcheck(torch.ops._C.static_scaled_int8_quant, (output, input, scale))
+    else:
+        scale = torch.empty((input.numel() // input.shape[-1], 1),
+                            device=input.device,
+                            dtype=torch.float32)
+        opcheck(torch.ops._C.dynamic_scaled_int8_quant, (output, input, scale))
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -33,6 +44,8 @@ def test_dynamic_scaled_int8_quant(num_tokens: int, hidden_size: int,
     torch.testing.assert_close(
         ops_out, ref_out, atol=1,
         rtol=0.0)  # big atol to account for rounding errors
+
+    opcheck_int8_quant(ops_out, x)
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -58,3 +71,5 @@ def test_static_scaled_int8_quant(num_tokens: int, hidden_size: int,
     torch.testing.assert_close(
         out1, out2, atol=1,
         rtol=0.0)  # big atol to account for rounding errors
+
+    opcheck_int8_quant(out2, x, scale)

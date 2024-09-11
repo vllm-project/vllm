@@ -350,6 +350,7 @@ function (define_gpu_extension_target GPU_MOD_NAME)
   target_include_directories(${GPU_MOD_NAME} PRIVATE csrc
     ${GPU_INCLUDE_DIRECTORIES})
 
+  # TODO: is torch_python_LIBRARY needed?
   target_link_libraries(${GPU_MOD_NAME} PRIVATE torch ${torch_python_LIBRARY}
     ${GPU_LIBRARIES})
 
