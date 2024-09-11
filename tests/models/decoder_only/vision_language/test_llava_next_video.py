@@ -8,10 +8,8 @@ from vllm.multimodal.utils import (rescale_video_size, resize_video,
                                    sample_frames_from_video)
 from vllm.sequence import SampleLogprobs
 
-from ..conftest import VIDEO_ASSETS, HfRunner, VllmRunner, _VideoAssets
-from .utils import check_logprobs_close
-
-pytestmark = pytest.mark.vlm
+from ....conftest import VIDEO_ASSETS, HfRunner, VllmRunner, _VideoAssets
+from ...utils import check_logprobs_close
 
 _PREFACE = (
     "A chat between a curious human and an artificial intelligence assistant. "
