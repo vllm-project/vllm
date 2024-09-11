@@ -17,7 +17,7 @@ vllm serve mistralai/Pixtral-12B-2409 --tokenizer_mode mistral --limit_mm_per_pr
 - Client:
 
 ```bash
-curl --location '<your-node-url>:8000/v1/chat/completions' \
+curl --location 'http://<your-node-url>:8000/v1/chat/completions' \
 --header 'Content-Type: application/json' \
 --header 'Authorization: Bearer token' \
 --data '{
