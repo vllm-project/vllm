@@ -14,6 +14,7 @@ from vllm.config import PromptAdapterConfig
 from vllm.prompt_adapter.layers import (
     VocabParallelEmbeddingWithPromptAdapter)  # yapf: disable
 from vllm.prompt_adapter.layers import PromptAdapterMapping
+from vllm.prompt_adapter.utils import load_peft_weights
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +91,6 @@ class PromptAdapterModel(AdapterModel):
         config: PromptAdapterConfig,
         device: str = "cuda",
     ) -> "PromptAdapterModel":
-        from peft.utils import load_peft_weights
 
         if num_virtual_tokens > config.max_prompt_adapter_token:
             raise ValueError(
