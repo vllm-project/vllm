@@ -249,7 +249,7 @@ Multimodal Language Models
     -
   * - :code:`PixtralForConditionalGeneration`
     - Pixtral
-    - Image\ :sup:`E+`
+    - Image\ :sup:`+`
     - :code:`mistralai/Pixtral-12B-2409`
     -
   * - :code:`QWenLMHeadModel`
