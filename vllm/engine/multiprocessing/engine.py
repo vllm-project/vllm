@@ -308,7 +308,6 @@ class MQLLMEngine:
 
     def _set_errored(self, e: BaseException):
         """Log and set errored status if this is the first issue."""
-        logger.exception(repr(e))
         if self._errored_with is None:
             self._errored_with = e
 

@@ -34,6 +34,7 @@ def run_with_evil_forward(engine_args: AsyncEngineArgs, ipc_path: str):
         engine_args=engine_args,
         usage_context=UsageContext.UNKNOWN_CONTEXT,
         ipc_path=ipc_path)
+
     # Raise error during first forward pass.
     engine.engine.model_executor.execute_model = Mock(side_effect=RAISED_ERROR)
 
@@ -99,6 +100,7 @@ def run_with_evil_model_executor_health(engine_args: AsyncEngineArgs,
         engine_args=engine_args,
         usage_context=UsageContext.UNKNOWN_CONTEXT,
         ipc_path=ipc_path)
+
     # Raise error during first forward pass.
     engine.engine.model_executor.check_health = Mock(side_effect=RAISED_ERROR)
 
@@ -146,8 +148,10 @@ def run_with_evil_abort(engine_args: AsyncEngineArgs, ipc_path: str):
         engine_args=engine_args,
         usage_context=UsageContext.UNKNOWN_CONTEXT,
         ipc_path=ipc_path)
+
     # Raise error during abort call.
     engine.engine.abort_request = Mock(side_effect=RAISED_ERROR)
+
     # Run engine.
     engine.start()
 
