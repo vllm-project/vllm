@@ -1,5 +1,6 @@
 import asyncio
 import tempfile
+import time
 import uuid
 from unittest.mock import Mock
 
@@ -10,7 +11,10 @@ from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.multiprocessing import ENGINE_DEAD_ERROR
 from vllm.engine.multiprocessing.engine import MQLLMEngine
+from vllm.entrypoints.openai.api_server import build_async_engine_client
+from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils import FlexibleArgumentParser
 
 MODEL = "Qwen/Qwen2-0.5B-Instruct"
 ENGINE_ARGS = AsyncEngineArgs(model=MODEL)
@@ -148,12 +152,12 @@ def run_with_evil_abort(engine_args: AsyncEngineArgs, ipc_path: str):
     # Run engine.
     engine.start()
 
+
 @pytest.mark.asyncio
 async def test_failed_abort(tmp_socket):
-    with RemoteMQLLMEngine(
-            engine_args=ENGINE_ARGS,
-            ipc_path=tmp_socket,
-            run_fn=run_with_evil_abort) as engine:
+    with RemoteMQLLMEngine(engine_args=ENGINE_ARGS,
+                           ipc_path=tmp_socket,
+                           run_fn=run_with_evil_abort) as engine:
 
         client = await engine.make_client()
         assert client.is_running
@@ -161,13 +165,13 @@ async def test_failed_abort(tmp_socket):
         # Firsh check health should work.
         await asyncio.sleep(10)
         await client.check_health()
-        
+
         # Trigger an abort on the client side.
         async def bad_abort_after_2s():
-            await asyncio.sleep(2.0)    
+            await asyncio.sleep(2.0)
             await client.abort(request_id="foo")
 
-            # Immediately should tigger error.
+            # Immediately should trigger error.
             try:
                 await client.check_health()
             except Exception as e:
@@ -181,10 +185,10 @@ async def test_failed_abort(tmp_socket):
 
         # Exception in abort() will happen during this generation.
         try:
-            async for _ in client.generate(inputs="Hello my name is",
-                                           sampling_params=SamplingParams(
-                                               max_tokens=2000),
-                                           request_id=uuid.uuid4()):
+            async for _ in client.generate(
+                    inputs="Hello my name is",
+                    sampling_params=SamplingParams(max_tokens=2000),
+                    request_id=uuid.uuid4()):
                 pass
         except Exception as e:
             # Next exception should be an ENGINE_DEAD_ERROR
@@ -193,5 +197,38 @@ async def test_failed_abort(tmp_socket):
             assert client.errored
 
         await abort_task
-        
+
         client.close()
+
+
+@pytest.mark.asyncio
+async def test_mp_crash_detection():
+
+    parser = FlexibleArgumentParser(description="vLLM's remote OpenAI server.")
+    parser = make_arg_parser(parser)
+    args = parser.parse_args([])
+    # use an invalid tensor_parallel_size to trigger the
+    # error in the server
+    args.tensor_parallel_size = 65536
+
+    start = time.perf_counter()
+    async with build_async_engine_client(args):
+        pass
+    end = time.perf_counter()
+
+    assert end - start < 60, ("Expected vLLM to gracefully shutdown in <60s "
+                              "if there is an error in the startup.")
+
+
+@pytest.mark.asyncio
+async def test_mp_cuda_init():
+    # it should not crash, when cuda is initialized
+    # in the API server process
+    import torch
+    torch.cuda.init()
+    parser = FlexibleArgumentParser(description="vLLM's remote OpenAI server.")
+    parser = make_arg_parser(parser)
+    args = parser.parse_args([])
+
+    async with build_async_engine_client(args):
+        pass
