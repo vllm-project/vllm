@@ -149,12 +149,13 @@ typedef struct {
     uint8_t scales[IQ3S_N_SCALE];
 } block_iq3_s;
 
+// 1.5625 bpw
 #define QR1_S 8
 #define QI1_S (QK_K / (4*QR1_S))
 typedef struct {
     half d;
-    uint8_t qs[QK_K/8];
-    uint8_t scales[QK_K/16];
+    uint8_t  qs[QK_K/8];
+    uint16_t qh[QK_K/32];
 } block_iq1_s;
 
 // 1.75 bpw
