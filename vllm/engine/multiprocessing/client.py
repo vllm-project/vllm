@@ -68,7 +68,7 @@ class MQLLMEngineClient:
 
     def __init__(self, ipc_path: str, engine_config: EngineConfig):
         self.context = zmq.asyncio.Context()
-        self._errored = False
+        self._errored_with: Optional[BaseException] = None
         self.dead_error = ENGINE_DEAD_ERROR
 
         # Get the configs.
@@ -162,8 +162,7 @@ class MQLLMEngineClient:
             logger.debug("Shutting down MQLLMEngineClient check health loop.")
 
         except Exception as e:
-            logger.exception(repr(e))
-            self._errored = True
+            self.raise_exception(e)
 
     async def run_output_handler_loop(self):
         """Get RequestOutputs from Engine and stream to request Queues"""
@@ -179,8 +178,6 @@ class MQLLMEngineClient:
                     if isinstance(request_outputs, RPCError):
                         rpc_error: RPCError = request_outputs
                         request_id = rpc_error.request_id
-                        if rpc_error.is_engine_errored:
-                            self._errored = True
                         exception = rpc_error.exception
                     else:
                         # MPLLMEngine should always return an RPCError to
@@ -191,9 +188,12 @@ class MQLLMEngineClient:
                         logger.error(
                             "Received Exception %s rather than RPCError from "
                             "MPLLMEngine. This should never happen.", error)
-                        self._errored = True
                         request_id = None
                         exception = error
+
+                    # If this is the first error, set _errored_with
+                    if not self._errored_with:
+                        self._errored_with = exception
 
                     if request_id is None:
                         for queue_i in tuple(self.output_queues.values()):
@@ -243,6 +243,12 @@ class MQLLMEngineClient:
         if self.health_loop is not None:
             self.health_loop.cancel()
         self.output_loop.cancel()
+
+    def raise_exception(self, e: BaseException):
+        logger.exception(repr(e))
+        if self._errored_with is None:
+            self._errored_with = e
+
 
     async def _send_get_data_rpc_request(self, request: RPCStartupRequest,
                                          expected_type: Any,
@@ -353,24 +359,23 @@ class MQLLMEngineClient:
     async def check_health(self):
         """
         The check health loop probes the health status of the
-        Engine's health every N seconds and sets _errored if
-        the engine is unhealth. So check_health just raises
-        an ENGINE_DEAD_ERROR if we find self._errored
+        Engine's health every N seconds and sets _errored_with 
+        if the engine is unhealthy.
         """
-        if self._errored:
-            raise ENGINE_DEAD_ERROR
+        if self._errored_with is not None:
+            raise self._errored_with
 
     @property
     def is_running(self) -> bool:
-        return not self._errored
+        return not self.errored
 
     @property
     def is_stopped(self) -> bool:
-        return self._errored
+        return self.errored
 
     @property
     def errored(self) -> bool:
-        return self._errored
+        return self._errored_with is not None
 
     async def generate(
         self,
@@ -383,7 +388,8 @@ class MQLLMEngineClient:
     ) -> AsyncGenerator[RequestOutput, None]:
         """Send an RPCGenerateRequest to the RPCServer and stream responses."""
 
-        if self._errored:
+        # If already dead, error out.
+        if self.errored:
             raise ENGINE_DEAD_ERROR
 
         # 1) Create output queue for this requests.
@@ -432,7 +438,7 @@ class MQLLMEngineClient:
                     yield request_output
             finally:
                 # Request was canceled by the client.
-                if not finished and not self._errored:
+                if not finished and not self.errored:
                     await self.abort(request_id)
         finally:
             self.output_queues.pop(request_id)

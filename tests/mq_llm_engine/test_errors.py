@@ -26,35 +26,35 @@ def tmp_socket():
         yield f"ipc://{td}/{uuid.uuid4()}"
 
 def run_with_evil_forward(engine_args: AsyncEngineArgs, 
-                              ipc_path: str):
-    engine = MQLLMEngine.from_engine_args(
-        engine_args=engine_args,
-        usage_context= UsageContext.UNKNOWN_CONTEXT,
-        ipc_path=ipc_path)
+                          ipc_path: str):
+    # Make engine.
+    engine = MQLLMEngine.from_engine_args(engine_args=engine_args,
+                                          usage_context= UsageContext.UNKNOWN_CONTEXT,
+                                          ipc_path=ipc_path)    
     # Raise error during first forward pass.
     engine.engine.model_executor.execute_model = Mock(
         side_effect=RAISED_ERROR)
+
+    # Run engine.
     engine.start()
 
-
 @pytest.mark.asyncio
-async def test_health_loop(tmp_socket):
+async def test_evil_forward(tmp_socket):
     with RemoteMQLLMEngine(engine_args=ENGINE_ARGS,
                            ipc_path=tmp_socket,
                            run_fn=run_with_evil_forward) as engine:
 
-        # Make client.
         client = await engine.make_client()
 
-        POLL_TIME = 1.0
-        health_task = asyncio.create_task(
-            client.run_check_health_loop(timeout=POLL_TIME))
+        # Fast health probe.
+        fast_health_probe_task = asyncio.create_task(
+            client.run_check_health_loop(timeout=1.0))
 
-        # Server should be healthy.
-        await asyncio.sleep(POLL_TIME * 3)
+        # Server should be healthy after initial probe.
+        await asyncio.sleep(2.0)
         await client.check_health()
 
-        # Throws an error in engine.step().
+        # Throws an error in first forward pass.
         try:
             async for _ in client.generate(inputs="Hello my name is",
                                            sampling_params=SamplingParams(),
@@ -63,6 +63,7 @@ async def test_health_loop(tmp_socket):
         except Exception as e:
             # First exception should be a RAISED_ERROR
             assert repr(e) == repr(RAISED_ERROR)
+            assert client.errored
 
         # Engine is errored, should get ENGINE_DEAD_ERROR.
         try:
@@ -71,19 +72,67 @@ async def test_health_loop(tmp_socket):
                                            request_id=uuid.uuid4()):
                 pass
         except Exception as e:
-            # First exception should be a RAISED_ERROR
+            # Next excpetion should be an ENGINE_DEAD_ERROR
             assert e == ENGINE_DEAD_ERROR, (
                 "Engine should be dead and raise ENGINE_DEAD_ERROR")
-        
+            assert client.errored
 
-        asyncio.sleep(POLL_TIME * 3)
+        await asyncio.sleep(2.0)
         try:
             await client.check_health()
         except Exception as e:
-            assert e == ENGINE_DEAD_ERROR, (
-                "Engine should be dead and raise ENGINE_DEAD_ERROR")
+            assert repr(e) == repr(RAISED_ERROR), (
+                "Health check raise the original error.")
 
-        await health_task
+        # Cleanup
+        await fast_health_probe_task
         client.close()
 
 
+def run_with_evil_model_executor_health(
+        engine_args: AsyncEngineArgs, ipc_path: str):
+    # Make engine.
+    engine = MQLLMEngine.from_engine_args(engine_args=engine_args,
+                                          usage_context= UsageContext.UNKNOWN_CONTEXT,
+                                          ipc_path=ipc_path)    
+    # Raise error during first forward pass.
+    engine.engine.model_executor.check_health = Mock(
+        side_effect=RAISED_ERROR)
+
+    # Run engine.
+    engine.start()
+
+@pytest.mark.asyncio
+async def test_failed_health_check(tmp_socket):
+    with RemoteMQLLMEngine(engine_args=ENGINE_ARGS,
+                           ipc_path=tmp_socket,
+                           run_fn=run_with_evil_model_executor_health) as engine:
+
+        client = await engine.make_client()
+        assert client.is_running
+
+        # Health probe should throw RAISED_ERROR.
+        await asyncio.sleep(10)
+        try:
+            await client.check_health()
+        except Exception as e:
+            # First exception should be a RAISED_ERROR
+            assert repr(e) == repr(RAISED_ERROR), (
+                "Health check raise the original error.")
+            assert client.errored
+
+        # Generate call should throw ENGINE_DEAD_ERROR
+        try:
+            async for _ in client.generate(inputs="Hello my name is",
+                                           sampling_params=SamplingParams(),
+                                           request_id=uuid.uuid4()):
+                pass
+        except Exception as e:
+            # Next excpetion should be an ENGINE_DEAD_ERROR
+            assert e == ENGINE_DEAD_ERROR, (
+                "Engine should be dead and raise ENGINE_DEAD_ERROR")
+            assert client.errored
+
+        # Cleanup
+        client.close()
+    

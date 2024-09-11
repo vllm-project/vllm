@@ -131,6 +131,7 @@ class MQLLMEngine:
         except KeyboardInterrupt:
             logger.debug("Shutting down MQLLMEngine.")
         finally:
+            logger.debug("MQLLMEngine is shut down.")
             self.cleanup()
 
     def cleanup(self):
