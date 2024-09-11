@@ -252,7 +252,7 @@ def test_metric_spec_decode_interval(
         engine.add_request(
             "request-id-0",
             example_prompts[0],
-            SamplingParams(max_tokens=max_tokens),
+            SamplingParams(max_tokens=max_tokens, temperature=0),
         )
 
         # set log internal
