@@ -11,6 +11,10 @@ pytestmark = pytest.mark.vlm
 MODELS = ["mistralai/Pixtral-12B-2409"]
 
 
+@pytest.mark.skip(
+    reason=
+    "Model is too big, test passed on A100 locally but will OOM on CI machine."
+)
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [64])
