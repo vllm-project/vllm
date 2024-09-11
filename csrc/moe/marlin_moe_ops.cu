@@ -25,7 +25,13 @@
 
 #include <iostream>
 
+#include "quantization/gptq_marlin/marlin_dtypes.cuh"
 #include "core/scalar_type.hpp"
+
+#define STATIC_ASSERT_SCALAR_TYPE_VALID(scalar_t)               \
+  static_assert(std::is_same<scalar_t, half>::value ||          \
+                    std::is_same<scalar_t, nv_bfloat16>::value, \
+                "only float16 and bfloat16 is supported");
 
 template <typename T>
 inline std::string str(T x) {
@@ -54,10 +60,10 @@ using I4 = Vec<int, 4>;
 // Matrix fragments for tensor core instructions; their precise layout is
 // documented here:
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#matrix-fragments-for-mma-m16n8k16-with-floating-point-type
-using FragA = Vec<half2, 4>;
-using FragB = Vec<half2, 2>;
-using FragC = Vec<float, 4>;
-using FragS = Vec<half2, 1>;  // quantization scales
+// using FragA = Vec<half2, 4>;
+// using FragB = Vec<half2, 2>;
+// using FragC = Vec<float, 4>;
+// using FragS = Vec<half2, 1>;  // quantization scales
 
 // Predicated asynchronous global->shared copy; used for inputs A where we apply
 // predication to handle batchsizes that are not multiples of 16.
@@ -98,22 +104,39 @@ __device__ inline void cp_async_wait() {
 
 // m16n8k16 tensor core mma instruction with fp16 inputs and fp32
 // output/accumulation.
-__device__ inline void mma(const FragA& a_frag, const FragB& frag_b,
-                           FragC& frag_c) {
+template <typename scalar_t>
+__device__ inline void mma(
+    const typename marlin::ScalarType<scalar_t>::FragA& a_frag,
+    const typename marlin::ScalarType<scalar_t>::FragB& frag_b,
+    typename marlin::ScalarType<scalar_t>::FragC& frag_c) {
   const uint32_t* a = reinterpret_cast<const uint32_t*>(&a_frag);
   const uint32_t* b = reinterpret_cast<const uint32_t*>(&frag_b);
   float* c = reinterpret_cast<float*>(&frag_c);
-  asm volatile(
-      "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
-      "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
-      : "=f"(c[0]), "=f"(c[1]), "=f"(c[2]), "=f"(c[3])
-      : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]),
-        "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]));
+  if constexpr (std::is_same<scalar_t, half>::value) {
+    asm volatile(
+        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
+        : "=f"(c[0]), "=f"(c[1]), "=f"(c[2]), "=f"(c[3])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]),
+          "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]));
+  } else if constexpr (std::is_same<scalar_t, nv_bfloat16>::value) {
+    asm volatile(
+        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
+        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
+        : "=f"(c[0]), "=f"(c[1]), "=f"(c[2]), "=f"(c[3])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]),
+          "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]));
+  } else {
+    STATIC_ASSERT_SCALAR_TYPE_VALID(scalar_t);
+  }
 }
 
 // Instruction for loading a full 16x16 matrix fragment of operand A from shared
 // memory, directly in tensor core layout.
-__device__ inline void ldsm4(FragA& frag_a, const void* smem_ptr) {
+template <typename scalar_t>
+__device__ inline void ldsm4(
+    typename marlin::ScalarType<scalar_t>::FragA& frag_a,
+    const void* smem_ptr) {
   uint32_t* a = reinterpret_cast<uint32_t*>(&frag_a);
   uint32_t smem = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
   asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
@@ -144,15 +167,21 @@ __device__ inline uint32_t prmt(uint32_t a) {
   return res;
 }
 
-template <vllm::ScalarTypeId w_type_id>
-__device__ inline FragB dequant(int q);
+template <typename scalar_t, vllm::ScalarTypeId w_type_id>
+__device__ inline typename marlin::ScalarType<scalar_t>::FragB dequant(int q);
 
+//
 // Efficiently dequantize 4bit values packed in an int32 value into a full
 // B-fragment of 4 fp16 values. We mostly follow the strategy in the link below,
 // with some small changes:
+// - FP16:
 // https://github.com/NVIDIA/FasterTransformer/blob/release/v5.3_tag/src/fastertransformer/cutlass_extensions/include/cutlass_extensions/interleaved_numeric_conversion.h#L215-L287
+// - BF16:
+// https://github.com/NVIDIA/FasterTransformer/blob/release/v5.3_tag/src/fastertransformer/cutlass_extensions/include/cutlass_extensions/interleaved_numeric_conversion.h#L327-L385
+//
 template <>
-__device__ inline FragB dequant<vllm::kU4B8.id()>(int q) {
+__device__ inline typename marlin::ScalarType<half>::FragB
+dequant<half, vllm::kU4B8.id()>(int q) {
   const int LO = 0x000f000f;
   const int HI = 0x00f000f0;
   const int EX = 0x64006400;
@@ -164,7 +193,7 @@ __device__ inline FragB dequant<vllm::kU4B8.id()>(int q) {
   const int SUB = 0x64086408;
   const int MUL = 0x2c002c00;
   const int ADD = 0xd480d480;
-  FragB frag_b;
+  typename marlin::ScalarType<half>::FragB frag_b;
   frag_b[0] = __hsub2(*reinterpret_cast<half2*>(&lo),
                       *reinterpret_cast<const half2*>(&SUB));
   frag_b[1] = __hfma2(*reinterpret_cast<half2*>(&hi),
@@ -173,11 +202,42 @@ __device__ inline FragB dequant<vllm::kU4B8.id()>(int q) {
   return frag_b;
 }
 
-// Fast Int8ToFp16: Efficiently dequantize 8bit int values to fp16
-// Reference:
-// https://github.com/NVIDIA/FasterTransformer/blob/release/v5.3_tag/src/fastertransformer/cutlass_extensions/include/cutlass_extensions/interleaved_numeric_conversion.h#L53-L85
 template <>
-__device__ inline FragB dequant<vllm::kU8B128.id()>(int q) {
+__device__ inline typename marlin::ScalarType<nv_bfloat16>::FragB
+dequant<nv_bfloat16, vllm::kU4B8.id()>(int q) {
+  static constexpr uint32_t MASK = 0x000f000f;
+  static constexpr uint32_t EX = 0x43004300;
+
+  // Guarantee that the `(a & b) | c` operations are LOP3s.
+
+  int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
+  q >>= 4;
+  int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
+
+  typename marlin::ScalarType<nv_bfloat16>::FragB frag_b;
+  static constexpr uint32_t MUL = 0x3F803F80;
+  static constexpr uint32_t ADD = 0xC308C308;
+
+  frag_b[0] = __hfma2(*reinterpret_cast<nv_bfloat162*>(&lo),
+                      *reinterpret_cast<const nv_bfloat162*>(&MUL),
+                      *reinterpret_cast<const nv_bfloat162*>(&ADD));
+  frag_b[1] = __hfma2(*reinterpret_cast<nv_bfloat162*>(&hi),
+                      *reinterpret_cast<const nv_bfloat162*>(&MUL),
+                      *reinterpret_cast<const nv_bfloat162*>(&ADD));
+  return frag_b;
+}
+
+//
+// Fast Int8ToFp16/Int8ToBf16: Efficiently dequantize 8bit int values to fp16 or
+// bf16 Reference:
+// - FP16:
+// https://github.com/NVIDIA/FasterTransformer/blob/release/v5.3_tag/src/fastertransformer/cutlass_extensions/include/cutlass_extensions/interleaved_numeric_conversion.h#L53-L85
+// - BF16:
+// https://github.com/NVIDIA/FasterTransformer/blob/release/v5.3_tag/src/fastertransformer/cutlass_extensions/include/cutlass_extensions/interleaved_numeric_conversion.h#L125-L175
+//
+template <>
+__device__ inline typename marlin::ScalarType<half>::FragB
+dequant<half, vllm::kU8B128.id()>(int q) {
   static constexpr uint32_t mask_for_elt_01 = 0x5250;
   static constexpr uint32_t mask_for_elt_23 = 0x5351;
   static constexpr uint32_t start_byte_for_fp16 = 0x64646464;
@@ -187,7 +247,7 @@ __device__ inline FragB dequant<vllm::kU8B128.id()>(int q) {
 
   static constexpr uint32_t I8s_TO_F16s_MAGIC_NUM = 0x64806480;
 
-  FragB frag_b;
+  typename marlin::ScalarType<half>::FragB frag_b;
   frag_b[0] = __hsub2(*reinterpret_cast<half2*>(&lo),
                       *reinterpret_cast<const half2*>(&I8s_TO_F16s_MAGIC_NUM));
   frag_b[1] = __hsub2(*reinterpret_cast<half2*>(&hi),
@@ -195,31 +255,73 @@ __device__ inline FragB dequant<vllm::kU8B128.id()>(int q) {
   return frag_b;
 }
 
+template <>
+__device__ inline typename marlin::ScalarType<nv_bfloat16>::FragB
+dequant<nv_bfloat16, vllm::kU8B128.id()>(int q) {
+  typename marlin::ScalarType<nv_bfloat16>::FragB frag_b;
+
+  float fp32_intermediates[4];
+  uint32_t* fp32_intermediates_casted =
+      reinterpret_cast<uint32_t*>(fp32_intermediates);
+
+  static constexpr uint32_t fp32_base = 0x4B000000;
+  fp32_intermediates_casted[0] = __byte_perm(q, fp32_base, 0x7650);
+  fp32_intermediates_casted[1] = __byte_perm(q, fp32_base, 0x7652);
+  fp32_intermediates_casted[2] = __byte_perm(q, fp32_base, 0x7651);
+  fp32_intermediates_casted[3] = __byte_perm(q, fp32_base, 0x7653);
+
+  fp32_intermediates[0] -= 8388736.f;
+  fp32_intermediates[1] -= 8388736.f;
+  fp32_intermediates[2] -= 8388736.f;
+  fp32_intermediates[3] -= 8388736.f;
+
+  uint32_t* bf16_result_ptr = reinterpret_cast<uint32_t*>(&frag_b);
+  bf16_result_ptr[0] = __byte_perm(fp32_intermediates_casted[0],
+                                   fp32_intermediates_casted[1], 0x7632);
+  bf16_result_ptr[1] = __byte_perm(fp32_intermediates_casted[2],
+                                   fp32_intermediates_casted[3], 0x7632);
+
+  return frag_b;
+}
+
 // Multiply dequantized values by the corresponding quantization scale; used
 // only for grouped quantization.
-__device__ inline void scale(FragB& frag_b, FragS& frag_s, int i) {
-  half2 s = __half2half2(reinterpret_cast<__half*>(&frag_s)[i]);
+template <typename scalar_t>
+__device__ inline void scale(
+    typename marlin::ScalarType<scalar_t>::FragB& frag_b,
+    typename marlin::ScalarType<scalar_t>::FragS& frag_s, int i) {
+  using scalar_t2 = typename marlin::ScalarType<scalar_t>::scalar_t2;
+  scalar_t2 s = marlin::ScalarType<scalar_t>::num2num2(
+      reinterpret_cast<scalar_t*>(&frag_s)[i]);
   frag_b[0] = __hmul2(frag_b[0], s);
   frag_b[1] = __hmul2(frag_b[1], s);
 }
 
 // Given 2 floats multiply by 2 scales (halves)
-__device__ inline void scale_float(float* c, FragS& s) {
-  __half* s_ptr = reinterpret_cast<__half*>(&s);
-  c[0] = __fmul_rn(c[0], __half2float(s_ptr[0]));
-  c[1] = __fmul_rn(c[1], __half2float(s_ptr[1]));
+template <typename scalar_t>
+__device__ inline void scale_float(
+    float* c, typename marlin::ScalarType<scalar_t>::FragS& s) {
+  scalar_t* s_ptr = reinterpret_cast<scalar_t*>(&s);
+  c[0] = __fmul_rn(c[0], marlin::ScalarType<scalar_t>::num2float(s_ptr[0]));
+  c[1] = __fmul_rn(c[1], marlin::ScalarType<scalar_t>::num2float(s_ptr[1]));
 }
 
 // Same as above, but for act_order (each K is multiplied individually)
-__device__ inline void scale4(FragB& frag_b, FragS& frag_s_1, FragS& frag_s_2,
-                              FragS& frag_s_3, FragS& frag_s_4, int i) {
-  __half2 s_val_1_2;
-  s_val_1_2.x = reinterpret_cast<__half*>(&frag_s_1)[i];
-  s_val_1_2.y = reinterpret_cast<__half*>(&frag_s_2)[i];
+template <typename scalar_t>
+__device__ inline void scale4(
+    typename marlin::ScalarType<scalar_t>::FragB& frag_b,
+    typename marlin::ScalarType<scalar_t>::FragS& frag_s_1,
+    typename marlin::ScalarType<scalar_t>::FragS& frag_s_2,
+    typename marlin::ScalarType<scalar_t>::FragS& frag_s_3,
+    typename marlin::ScalarType<scalar_t>::FragS& frag_s_4, int i) {
+  using scalar_t2 = typename marlin::ScalarType<scalar_t>::scalar_t2;
+  scalar_t2 s_val_1_2;
+  s_val_1_2.x = reinterpret_cast<scalar_t*>(&frag_s_1)[i];
+  s_val_1_2.y = reinterpret_cast<scalar_t*>(&frag_s_2)[i];
 
-  __half2 s_val_3_4;
-  s_val_3_4.x = reinterpret_cast<__half*>(&frag_s_3)[i];
-  s_val_3_4.y = reinterpret_cast<__half*>(&frag_s_4)[i];
+  scalar_t2 s_val_3_4;
+  s_val_3_4.x = reinterpret_cast<scalar_t*>(&frag_s_3)[i];
+  s_val_3_4.y = reinterpret_cast<scalar_t*>(&frag_s_4)[i];
 
   frag_b[0] = __hmul2(frag_b[0], s_val_1_2);
   frag_b[1] = __hmul2(frag_b[1], s_val_3_4);
@@ -335,7 +437,8 @@ __global__ void compute_expert_offsets(int const* __restrict__ topk_ids,
   __syncthreads();
 }
 
-template <const vllm::ScalarTypeId w_type_id,  // weight ScalarType id
+template <typename scalar_t,  // compute dtype, half or nv_float16
+          const vllm::ScalarTypeId w_type_id,  // weight ScalarType id
           const int threads,          // number of threads in a threadblock
           const int thread_m_blocks,  // number of 16x16 blocks in the m
                                       // dimension (batchsize) of the
@@ -371,6 +474,14 @@ __device__ inline void MarlinMoESingle(
     bool apply_weights,    // apply weights to output
     int current_m_block    // current m block to start kernel computation from
 ) {
+  using Dtype = marlin::ScalarType<scalar_t>;
+  using scalar_t2 = typename marlin::ScalarType<scalar_t>::scalar_t2;
+  using FragA = typename marlin::ScalarType<scalar_t>::FragA;
+  using FragB = typename marlin::ScalarType<scalar_t>::FragB;
+  using FragC = typename marlin::ScalarType<scalar_t>::FragC;
+  using FragS = typename marlin::ScalarType<scalar_t>::FragS;
+  using FragZP = typename marlin::ScalarType<scalar_t>::FragZP;
+
   static constexpr auto w_type = vllm::ScalarType::from_id(w_type_id);
   constexpr int pack_factor = 32 / w_type.size_bits();
 
@@ -490,8 +601,6 @@ __device__ inline void MarlinMoESingle(
   // Scale size/strides with act_order
   constexpr int tb_k = 16 * thread_k_blocks;
   constexpr int g_idx_stage = has_act_order ? (tb_k * sizeof(int)) / 16 : 0;
-  // constexpr int act_s_row_stride      = 1;
-  // int           act_s_col_stride      = act_s_row_stride * num_groups;
   int act_s_col_stride = 1;
   int act_s_col_warp_stride = act_s_col_stride * 8;
   int tb_n_warps = thread_n_blocks / 4;
@@ -765,7 +874,8 @@ __device__ inline void MarlinMoESingle(
     int4* sh_a_stage = sh_a + a_sh_stage * pipe;
   #pragma unroll
     for (int i = 0; i < thread_m_blocks; i++)
-      ldsm4(frag_a[k % 2][i], &sh_a_stage[a_sh_rd_trans[k % b_sh_wr_iters][i]]);
+      ldsm4<scalar_t>(frag_a[k % 2][i],
+                      &sh_a_stage[a_sh_rd_trans[k % b_sh_wr_iters][i]]);
     int4* sh_b_stage = sh_b + b_sh_stage * pipe;
 
   #pragma unroll
@@ -913,34 +1023,36 @@ __device__ inline void MarlinMoESingle(
         b_quant_1 = frag_b_quant_ptr[j * 2 + 1];
       }
 
-      FragB frag_b0 = dequant<w_type_id>(b_quant_0);
-      FragB frag_b1 = dequant<w_type_id>(b_quant_1);
+      FragB frag_b0 = dequant<scalar_t, w_type_id>(b_quant_0);
+      FragB frag_b1 = dequant<scalar_t, w_type_id>(b_quant_1);
 
       // Apply scale to frag_b0
       if constexpr (has_act_order) {
-        scale4(frag_b0, act_frag_s[k % 2][0][j], act_frag_s[k % 2][1][j],
-               act_frag_s[k % 2][2][j], act_frag_s[k % 2][3][j], 0);
+        scale4<scalar_t>(frag_b0, act_frag_s[k % 2][0][j],
+                         act_frag_s[k % 2][1][j], act_frag_s[k % 2][2][j],
+                         act_frag_s[k % 2][3][j], 0);
       } else {
         if constexpr (group_blocks != -1) {
-          scale(frag_b0, frag_s[k % 2][j], 0);
+          scale<scalar_t>(frag_b0, frag_s[k % 2][j], 0);
         }
       }
 
       // Apply scale to frag_b1
       if constexpr (has_act_order) {
-        scale4(frag_b1, act_frag_s[k % 2][0][j], act_frag_s[k % 2][1][j],
-               act_frag_s[k % 2][2][j], act_frag_s[k % 2][3][j], 1);
+        scale4<scalar_t>(frag_b1, act_frag_s[k % 2][0][j],
+                         act_frag_s[k % 2][1][j], act_frag_s[k % 2][2][j],
+                         act_frag_s[k % 2][3][j], 1);
 
       } else {
         if constexpr (group_blocks != -1) {
-          scale(frag_b1, frag_s[k % 2][j], 1);
+          scale<scalar_t>(frag_b1, frag_s[k % 2][j], 1);
         }
       }
 
   #pragma unroll
       for (int i = 0; i < thread_m_blocks; i++) {
-        mma(frag_a[k % 2][i], frag_b0, frag_c[i][j][0]);
-        mma(frag_a[k % 2][i], frag_b1, frag_c[i][j][1]);
+        mma<scalar_t>(frag_a[k % 2][i], frag_b0, frag_c[i][j][0]);
+        mma<scalar_t>(frag_a[k % 2][i], frag_b1, frag_c[i][j][1]);
       }
     }
   };
@@ -1054,15 +1166,15 @@ __device__ inline void MarlinMoESingle(
             for (int j = 0; j < 2 * 4; j++) {
               reinterpret_cast<float*>(
                   &frag_c)[4 * 2 * 4 * (i / 4) + 4 * j + (i % 4)] +=
-                  __half2float(reinterpret_cast<__half*>(&c_red)[j]);
+                  Dtype::num2float(reinterpret_cast<scalar_t*>(&c_red)[j]);
             }
           }
           if (!last) {
             int4 c;
   #pragma unroll
             for (int j = 0; j < 2 * 4; j++) {
-              reinterpret_cast<__half*>(&c)[j] =
-                  __float2half(reinterpret_cast<float*>(
+              reinterpret_cast<scalar_t*>(&c)[j] =
+                  Dtype::float2num(reinterpret_cast<float*>(
                       &frag_c)[4 * 2 * 4 * (i / 4) + 4 * j + (i % 4)]);
             }
             int c_idx =
@@ -1102,7 +1214,8 @@ __device__ inline void MarlinMoESingle(
     // We first reorder in shared memory to guarantee the most efficient final
     // global write patterns
     auto write = [&](int idx, float c0, float c1, FragS& s) {
-      half2 res = __halves2half2(__float2half(c0), __float2half(c1));
+      scalar_t2 res =
+          Dtype::nums2num2(Dtype::float2num(c0), Dtype::float2num(c1));
 
       // For per-column quantization we finally apply the scale here (only for
       // 4-bit)
@@ -1111,7 +1224,7 @@ __device__ inline void MarlinMoESingle(
         res = __hmul2(res, s[0]);
       }
 
-      ((half2*)sh)[idx] = res;
+      ((scalar_t2*)sh)[idx] = res;
     };
     if (threadIdx.x / 32 < thread_n_blocks / 4) {
   #pragma unroll
@@ -1144,10 +1257,11 @@ __device__ inline void MarlinMoESingle(
           if (!apply_weights) {
             C[off] = sh[c_sh_rd];
           } else {
-            __half* ctrg = reinterpret_cast<__half*>(&C[off]);
-            __half* csrc = reinterpret_cast<__half*>(&sh[c_sh_rd]);
+            scalar_t* ctrg = reinterpret_cast<scalar_t*>(&C[off]);
+            scalar_t* csrc = reinterpret_cast<scalar_t*>(&sh[c_sh_rd]);
             for (int j = 0; j < 8; ++j) {
-              ctrg[j] = __float2half(topk_weights[row] * __half2float(csrc[j]));
+              ctrg[j] = Dtype::float2num(topk_weights[row] *
+                                         Dtype::num2float(csrc[j]));
             }
           }
           c_gl_wr += c_gl_wr_delta;
@@ -1287,15 +1401,19 @@ __device__ inline void MarlinMoESingle(
           for (int i = 0; i < thread_m_blocks; i++) {
   #pragma unroll
             for (int j = 0; j < 4; j++) {
-              scale_float(reinterpret_cast<float*>(&frag_c[i][j][0][0]),
-                          frag_s[j / 2][2 * (j % 2) + 0]);
-              scale_float(reinterpret_cast<float*>(&frag_c[i][j][0][2]),
-                          frag_s[j / 2][2 * (j % 2) + 0]);
+              scale_float<scalar_t>(
+                  reinterpret_cast<float*>(&frag_c[i][j][0][0]),
+                  frag_s[j / 2][2 * (j % 2) + 0]);
+              scale_float<scalar_t>(
+                  reinterpret_cast<float*>(&frag_c[i][j][0][2]),
+                  frag_s[j / 2][2 * (j % 2) + 0]);
 
-              scale_float(reinterpret_cast<float*>(&frag_c[i][j][1][0]),
-                          frag_s[j / 2][2 * (j % 2) + 1]);
-              scale_float(reinterpret_cast<float*>(&frag_c[i][j][1][2]),
-                          frag_s[j / 2][2 * (j % 2) + 1]);
+              scale_float<scalar_t>(
+                  reinterpret_cast<float*>(&frag_c[i][j][1][0]),
+                  frag_s[j / 2][2 * (j % 2) + 1]);
+              scale_float<scalar_t>(
+                  reinterpret_cast<float*>(&frag_c[i][j][1][2]),
+                  frag_s[j / 2][2 * (j % 2) + 1]);
             }
           }
         }
@@ -1340,7 +1458,8 @@ __device__ inline void MarlinMoESingle(
   }
 }
 
-template <const vllm::ScalarTypeId w_type_id,  // weight ScalarType id
+template <typename scalar_t,  // compute dtype, half or nv_float16
+          const vllm::ScalarTypeId w_type_id,  // weight ScalarType id
           const int threads,          // number of threads in a threadblock
           const int thread_m_blocks,  // number of 16x16 blocks in the m
                                       // dimension (batchsize) of the
@@ -1408,29 +1527,29 @@ __global__ void MarlinMoE(
   }
 
   if (max_block == 1) {
-    MarlinMoESingle<w_type_id, threads, 1, thread_n_blocks, thread_k_blocks,
-                    stages, has_act_order, group_blocks>(
+    MarlinMoESingle<scalar_t, w_type_id, threads, 1, thread_n_blocks,
+                    thread_k_blocks, stages, has_act_order, group_blocks>(
         A, B, C, sorted_ids_expert, topk_weights, scales_ptr, g_idx,
         expert_offsets, num_groups, expert_idx, num_experts, topk, prob_m,
         prob_n, prob_k, tot_m, locks, replicate_input, apply_weights,
         current_m_block);
   } else if (max_block == 2) {
-    MarlinMoESingle<w_type_id, threads, 2, thread_n_blocks, thread_k_blocks,
-                    stages, has_act_order, group_blocks>(
+    MarlinMoESingle<scalar_t, w_type_id, threads, 2, thread_n_blocks,
+                    thread_k_blocks, stages, has_act_order, group_blocks>(
         A, B, C, sorted_ids_expert, topk_weights, scales_ptr, g_idx,
         expert_offsets, num_groups, expert_idx, num_experts, topk, prob_m,
         prob_n, prob_k, tot_m, locks, replicate_input, apply_weights,
         current_m_block);
   } else if (max_block == 3) {
-    MarlinMoESingle<w_type_id, threads, 3, thread_n_blocks, thread_k_blocks,
-                    stages, has_act_order, group_blocks>(
+    MarlinMoESingle<scalar_t, w_type_id, threads, 3, thread_n_blocks,
+                    thread_k_blocks, stages, has_act_order, group_blocks>(
         A, B, C, sorted_ids_expert, topk_weights, scales_ptr, g_idx,
         expert_offsets, num_groups, expert_idx, num_experts, topk, prob_m,
         prob_n, prob_k, tot_m, locks, replicate_input, apply_weights,
         current_m_block);
   } else {
-    MarlinMoESingle<w_type_id, threads, 4, thread_n_blocks, thread_k_blocks,
-                    stages, has_act_order, group_blocks>(
+    MarlinMoESingle<scalar_t, w_type_id, threads, 4, thread_n_blocks,
+                    thread_k_blocks, stages, has_act_order, group_blocks>(
         A, B, C, sorted_ids_expert, topk_weights, scales_ptr, g_idx,
         expert_offsets, num_groups, expert_idx, num_experts, topk, prob_m,
         prob_n, prob_k, tot_m, locks, replicate_input, apply_weights,
@@ -1457,7 +1576,8 @@ __global__ void compute_expert_offsets(int const* __restrict__ topk_ids,
   return;
 }
 
-template <const vllm::ScalarTypeId w_type_id,  // weight ScalarType id
+template <typename scalar_t,  // compute dtype, half or nv_float16
+          const vllm::ScalarTypeId w_type_id,  // weight ScalarType id
           const int threads,          // number of threads in a threadblock
           const int thread_m_blocks,  // number of 16x16 blocks in the m
                                       // dimension (batchsize) of the
@@ -1524,17 +1644,17 @@ static constexpr int min_thread_k = 64;
            has_act_order == HAS_ACT_ORDER && group_blocks == GROUP_BLOCKS &&  \
            num_threads == NUM_THREADS) {                                      \
     cudaFuncSetAttribute(                                                     \
-        MarlinMoE<W_TYPE.id(), NUM_THREADS, THREAD_M_BLOCKS, THREAD_N_BLOCKS, \
-                  THREAD_K_BLOCKS, STAGES, HAS_ACT_ORDER, GROUP_BLOCKS>,      \
+        MarlinMoE<scalar_t, W_TYPE.id(), NUM_THREADS, THREAD_M_BLOCKS,        \
+                  THREAD_N_BLOCKS, THREAD_K_BLOCKS, STAGES, HAS_ACT_ORDER,    \
+                  GROUP_BLOCKS>,                                              \
         cudaFuncAttributeMaxDynamicSharedMemorySize, max_shared_mem);         \
-    MarlinMoE<W_TYPE.id(), NUM_THREADS, THREAD_M_BLOCKS, THREAD_N_BLOCKS,     \
-              THREAD_K_BLOCKS, STAGES, HAS_ACT_ORDER, GROUP_BLOCKS>           \
-        <<<blocks, NUM_THREADS, max_shared_mem, stream>>>(                    \
-            A_ptr, B_ptr, C_ptr, sorted_ids_ptr, topk_weights_ptr, s_ptr,     \
-            g_idx_ptr, expert_offsets_ptr, num_groups, expert_idx,            \
-            num_experts, topk, prob_m, prob_n, prob_k, tot_m, locks,          \
-            replicate_input, apply_weights, m_block, max_par,                 \
-            exec_cfg.max_m_blocks);                                           \
+    MarlinMoE<scalar_t, W_TYPE.id(), NUM_THREADS, THREAD_M_BLOCKS,            \
+              THREAD_N_BLOCKS, THREAD_K_BLOCKS, STAGES, HAS_ACT_ORDER,        \
+              GROUP_BLOCKS><<<blocks, NUM_THREADS, max_shared_mem, stream>>>( \
+        A_ptr, B_ptr, C_ptr, sorted_ids_ptr, topk_weights_ptr, s_ptr,         \
+        g_idx_ptr, expert_offsets_ptr, num_groups, expert_idx, num_experts,   \
+        topk, prob_m, prob_n, prob_k, tot_m, locks, replicate_input,          \
+        apply_weights, m_block, max_par, exec_cfg.max_m_blocks);              \
   }
 
 typedef struct {
@@ -1737,17 +1857,17 @@ exec_config_t determine_thread_config(int prob_m, int prob_n, int prob_k,
   __CALL_IF_MOE(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, 4, NUM_THREADS)  \
   __CALL_IF_MOE(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, 8, NUM_THREADS)
 
-void marlin_mm_moe_f16i4(const void* A, const void* B, void* C,
-                         const void* sorted_ids, const void* topk_weights,
-                         const void* topk_ids, const void* s, const void* g_idx,
-                         const void* perm, void* a_tmp, void* expert_offsets,
-                         int prob_m, int prob_n, int prob_k, void* workspace,
-                         vllm::ScalarType const& q_type, bool has_act_order,
-                         bool is_k_full, int num_groups, int group_size,
-                         int num_experts, int topk, int moe_block_size, int dev,
-                         cudaStream_t stream, int thread_k, int thread_n,
-                         int sms, int max_par, bool replicate_input,
-                         bool apply_weights) {
+template <typename scalar_t>
+void marlin_mm_moe(const void* A, const void* B, void* C,
+                   const void* sorted_ids, const void* topk_weights,
+                   const void* topk_ids, const void* s, const void* g_idx,
+                   const void* perm, void* a_tmp, void* expert_offsets,
+                   int prob_m, int prob_n, int prob_k, void* workspace,
+                   vllm::ScalarType const& q_type, bool has_act_order,
+                   bool is_k_full, int num_groups, int group_size,
+                   int num_experts, int topk, int moe_block_size, int dev,
+                   cudaStream_t stream, int thread_k, int thread_n, int sms,
+                   int max_par, bool replicate_input, bool apply_weights) {
   TORCH_CHECK(prob_m > 0 && prob_n > 0 && prob_k > 0, "Invalid MNK = [", prob_m,
               ", ", prob_n, ", ", prob_k, "]");
 
@@ -1969,13 +2089,30 @@ torch::Tensor marlin_gemm_moe(
     }
   }
 
-  marlin_moe::marlin_mm_moe_f16i4(
-      a.data_ptr(), b_q_weights.data_ptr(), c.data_ptr(), sorted_ids.data_ptr(),
-      topk_weights.data_ptr(), topk_ids.data_ptr(), b_scales.data_ptr(),
-      g_idx.data_ptr(), perm.data_ptr(), a_tmp.data_ptr(),
-      expert_offsets.data_ptr(), size_m, size_n, size_k, workspace.data_ptr(),
-      *b_q_type, has_act_order, is_k_full, num_groups, group_size, num_experts,
-      topk, moe_block_size, dev, at::cuda::getCurrentCUDAStream(dev), thread_k,
-      thread_n, sms, max_par, replicate_input, apply_weights);
+  if (a.scalar_type() == at::ScalarType::Half) {
+    marlin_moe::marlin_mm_moe<half>(
+        a.data_ptr<at::Half>(), b_q_weights.data_ptr(), c.data_ptr<at::Half>(),
+        sorted_ids.data_ptr(), topk_weights.data_ptr(), topk_ids.data_ptr(),
+        b_scales.data_ptr<at::Half>(), g_idx.data_ptr(), perm.data_ptr(),
+        a_tmp.data_ptr<at::Half>(), expert_offsets.data_ptr(), size_m, size_n,
+        size_k, workspace.data_ptr(), *b_q_type, has_act_order, is_k_full,
+        num_groups, group_size, num_experts, topk, moe_block_size, dev,
+        at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms, max_par,
+        replicate_input, apply_weights);
+  } else if (a.scalar_type() == at::ScalarType::BFloat16) {
+    marlin_moe::marlin_mm_moe<nv_bfloat16>(
+        a.data_ptr<at::BFloat16>(), b_q_weights.data_ptr(),
+        c.data_ptr<at::BFloat16>(), sorted_ids.data_ptr(),
+        topk_weights.data_ptr(), topk_ids.data_ptr(),
+        b_scales.data_ptr<at::BFloat16>(), g_idx.data_ptr(), perm.data_ptr(),
+        a_tmp.data_ptr<at::BFloat16>(), expert_offsets.data_ptr(), size_m,
+        size_n, size_k, workspace.data_ptr(), *b_q_type, has_act_order,
+        is_k_full, num_groups, group_size, num_experts, topk, moe_block_size,
+        dev, at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms,
+        max_par, replicate_input, apply_weights);
+  } else {
+    TORCH_CHECK(false, "marlin_gemm_moe only supports bfloat16 and float16");
+  }
+
   return c;
 }

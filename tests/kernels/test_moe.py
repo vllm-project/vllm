@@ -141,6 +141,7 @@ def compute_max_diff(output, output_ref):
 @pytest.mark.parametrize("group_size", [-1, 32, 64, 128])
 @pytest.mark.parametrize("act_order", [True, False])
 @pytest.mark.parametrize("num_bits", [4, 8])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_fused_marlin_moe(
     m: int,
     n: int,
@@ -150,6 +151,7 @@ def test_fused_marlin_moe(
     group_size: int,
     act_order: bool,
     num_bits: int,
+    dtype: torch.dtype,
 ):
     torch.manual_seed(7)
 
@@ -165,7 +167,7 @@ def test_fused_marlin_moe(
 
     quant_type = (scalar_types.uint4b8
                   if num_bits == 4 else scalar_types.uint8b128)
-    dtype = torch.float16
+
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
     w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
@@ -257,6 +259,7 @@ def test_fused_marlin_moe(
 @pytest.mark.parametrize("group_size", [-1, 32, 64, 128])
 @pytest.mark.parametrize("act_order", [True, False])
 @pytest.mark.parametrize("num_bits", [4, 8])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_single_marlin_moe_multiply(
     m: int,
     n: int,
@@ -266,6 +269,7 @@ def test_single_marlin_moe_multiply(
     group_size: int,
     act_order: bool,
     num_bits: int,
+    dtype: torch.dtype,
 ):
     if topk > e:
         return
@@ -279,7 +283,7 @@ def test_single_marlin_moe_multiply(
 
     quant_type = (scalar_types.uint4b8
                   if num_bits == 4 else scalar_types.uint8b128)
-    dtype = torch.float16
+
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w = torch.randn((e, n, k), device="cuda", dtype=dtype) / 10
 

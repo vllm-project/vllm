@@ -51,7 +51,7 @@ def single_marlin_moe(
     assert gating_output.shape[1] == w.shape[0], "Number of experts mismatch"
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
     assert w.is_contiguous(), "Expert weights must be contiguous"
-    assert hidden_states.dtype == torch.float16
+    assert hidden_states.dtype in [torch.float16, torch.bfloat16]
     assert num_bits in [4, 8]
 
     M, K = hidden_states.shape
@@ -147,7 +147,7 @@ def fused_marlin_moe(
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
     assert w1.is_contiguous(), "Expert weights1 must be contiguous"
     assert w2.is_contiguous(), "Expert weights2 must be contiguous"
-    assert hidden_states.dtype == torch.float16
+    assert hidden_states.dtype in [torch.float16, torch.bfloat16]
     assert num_bits in [4, 8]
 
     M, K = hidden_states.shape
