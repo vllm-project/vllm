@@ -322,3 +322,88 @@ def test_selective_state_update(dim, dstate, has_z, itype):
 
     assert torch.allclose(state, state_ref, rtol=rtol, atol=atol)
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
+
+
+
+
+@pytest.mark.parametrize('wtype', [torch.float32])
+@pytest.mark.parametrize('itype', [torch.float32])
+@pytest.mark.parametrize('seqlen', [128, 256, 512, 1024, 2048, 4096])
+@pytest.mark.parametrize("return_last_state", [True])
+@pytest.mark.parametrize('has_delta_bias', [True])
+@pytest.mark.parametrize('delta_softplus', [True])
+@pytest.mark.parametrize('has_z', [True])
+@pytest.mark.parametrize('has_D', [True])
+@pytest.mark.parametrize("varBC_groups", [1, 2])
+@pytest.mark.parametrize("is_variable_C", [True])
+@pytest.mark.parametrize("is_variable_B", [True])
+@pytest.mark.parametrize("scan_chunks", [1, 2, 3])
+def test_selective_scan_varlen(is_variable_B, is_variable_C, varBC_groups, has_D,
+                        has_z, has_delta_bias, delta_softplus,
+                        return_last_state, seqlen, itype, wtype, scan_chunks):
+    if varBC_groups > 1 and (not is_variable_B or not is_variable_C):
+        pytest.skip()  # This config is not applicable
+    device = 'cuda'
+    rtol, atol = (6e-4, 2e-3) if itype == torch.float32 else (3e-3, 5e-3)
+    if itype == torch.bfloat16:
+        rtol, atol = 3e-2, 5e-2
+    rtolw, atolw = (1e-3, 1e-3)
+    if has_z:  # If we have z, the errors on the weights seem higher
+        rtolw = max(rtolw, rtol)
+        atolw = max(atolw, atol)
+    # set seed
+    torch.random.manual_seed(0)
+    batch_size = 2
+    dim = 4
+    dstate = 8
+    A = (-0.5 * torch.rand(dim, dstate, device=device, dtype=wtype))
+    B_shape = [varBC_groups, dstate, seqlen]
+    B = torch.randn(B_shape,
+                    device=device,
+                    dtype=wtype if not is_variable_B else itype)
+    C_shape = [varBC_groups, dstate, seqlen]
+    C = torch.randn(C_shape,
+                    device=device,
+                    dtype=wtype if not is_variable_C else itype)
+    D = torch.randn(dim, device=device, dtype=torch.float32) if has_D else None
+
+    z = torch.randn(dim, seqlen, device=device,
+                    dtype=itype) if has_z else None
+    delta_bias = (0.5 * torch.rand(dim, device=device, dtype=torch.float32)
+                  ) if has_delta_bias else None
+    u = torch.randn(dim, seqlen, device=device, dtype=itype)
+    delta = (0.5 * torch.rand(dim, seqlen, device=device, dtype=itype))
+    state = None
+    state_ref = None
+    out = None
+    out_ref = None
+    outs = []
+    out, *rest = selective_scan_fn(u,
+                                    delta,
+                                       A,
+                                       B,
+                                       C,
+                                       D,
+                                       z=z,
+                                       delta_bias=delta_bias,
+                                       delta_softplus=delta_softplus,
+                                       return_last_state=return_last_state)
+    out_ref, *rest = selective_scan_ref(u,
+                                        delta,
+                                        A,
+                                        B,
+                                        C,
+                                        D,
+                                        z=z,
+                                        delta_bias=delta_bias,
+                                        delta_softplus=delta_softplus,
+                                        return_last_state=return_last_state)
+    if return_last_state:
+        state_ref = rest[0]
+
+    assert out is not None and out_ref is not None
+    assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
+    if return_last_state:
+        assert state is not None and state_ref is not None
+        assert torch.allclose(state, state_ref, rtol=rtol, atol=atol)
+

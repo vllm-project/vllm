@@ -21,9 +21,9 @@
 #include "selective_scan.h"
 #include "static_switch.h"
 
-template<int kNThreads_, int kNItems_, int kNRows_, bool kIsEvenLen_,
+template<int kNThreads_, int kNItems_, int kNRows_, 
          bool kIsVariableB_, bool kIsVariableC_,
-         bool kHasZ_, bool kUseIndex_, typename input_t_, typename weight_t_>
+         bool kHasZ_, typename input_t_, typename weight_t_>
 struct Selective_Scan_fwd_kernel_traits {
     static_assert(kNItems_ % 4 == 0);
     using input_t = input_t_;
@@ -38,13 +38,13 @@ struct Selective_Scan_fwd_kernel_traits {
     static constexpr int kNElts = kNBytes == 4 ? 4 : constexpr_min(8, kNItems);
     static_assert(kNItems % kNElts == 0);
     static constexpr int kNLoads = kNItems / kNElts;
-    static constexpr bool kIsEvenLen = kIsEvenLen_;
+    static constexpr bool kIsEvenLen = false;
     static constexpr bool kIsVariableB = kIsVariableB_;
     static constexpr bool kIsVariableC = kIsVariableC_;
     static constexpr bool kHasZ = kHasZ_;
-    static constexpr bool kUseIndex = kUseIndex_;
 
-    static constexpr bool kDirectIO = kIsEvenLen && kNLoads == 1;
+    // static constexpr bool kDirectIO = kIsEvenLen && kNLoads == 1;
+    static constexpr bool kDirectIO = false;
     static constexpr int kNLoadsIndex = kNItems / 4;
     using vec_t = typename BytesToType<kNBytes * kNElts>::Type;
     using scan_t = float2;
@@ -80,7 +80,6 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     constexpr bool kIsVariableB = Ktraits::kIsVariableB;
     constexpr bool kIsVariableC = Ktraits::kIsVariableC;
     constexpr bool kHasZ = Ktraits::kHasZ;
-    constexpr bool kUseIndex = Ktraits::kUseIndex;
     constexpr int kNThreads = Ktraits::kNThreads;
     constexpr int kNItems = Ktraits::kNItems;
     constexpr int kNRows = Ktraits::kNRows;
@@ -107,18 +106,29 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     const int batch_id = blockIdx.x;
     const int dim_id = blockIdx.y;
     const int group_id = dim_id / (params.dim_ngroups_ratio);
-    input_t *u = reinterpret_cast<input_t *>(params.u_ptr) + batch_id * params.u_batch_stride
+    int *cu_seq_len = reinterpret_cast<int *>(params.cu_seq_len_ptr);
+    const int bos = batch_id == 0 ? 0 : cu_seq_len[batch_id - 1];
+    const int eos = cu_seq_len[batch_id];
+    const int seqlen = eos - bos;
+
+    int* has_initial_state = params.has_initial_state_ptr == nullptr ? nullptr
+        : reinterpret_cast<int *>(params.has_initial_state_ptr);
+    bool has_initial_state_bo = has_initial_state != nullptr && (has_initial_state[batch_id] == 1);
+
+    int* cache_indices = params.cache_indices_ptr == nullptr ? nullptr
+        : reinterpret_cast<int *>(params.cache_indices_ptr);
+    int cache_index = cache_indices == nullptr ? batch_id : cache_indices[batch_id];
+
+    input_t *u = reinterpret_cast<input_t *>(params.u_ptr) + bos * params.u_batch_stride
         + dim_id * kNRows * params.u_d_stride;
-    input_t *delta = reinterpret_cast<input_t *>(params.delta_ptr) + batch_id * params.delta_batch_stride
+    input_t *delta = reinterpret_cast<input_t *>(params.delta_ptr) + bos * params.delta_batch_stride
         + dim_id * kNRows * params.delta_d_stride;
     weight_t *A = reinterpret_cast<weight_t *>(params.A_ptr) + dim_id * kNRows * params.A_d_stride;
     weight_t *B = reinterpret_cast<weight_t *>(params.B_ptr) + dim_id * kNRows * params.B_d_stride;
-    input_t *Bvar = reinterpret_cast<input_t *>(params.B_ptr) + batch_id * params.B_batch_stride + group_id * params.B_group_stride;
+    input_t *Bvar = reinterpret_cast<input_t *>(params.B_ptr) + bos * params.B_batch_stride + group_id * params.B_group_stride;
     weight_t *C = reinterpret_cast<weight_t *>(params.C_ptr) + dim_id * kNRows * params.C_d_stride;
-    input_t *Cvar = reinterpret_cast<input_t *>(params.C_ptr) + batch_id * params.C_batch_stride + group_id * params.C_group_stride;
-
-    float *x = reinterpret_cast<float *>(params.x_ptr) + (batch_id * params.dim + dim_id * kNRows) * params.dstate;
-    int *index = !kUseIndex ? nullptr :reinterpret_cast<int *>(params.index_ptr) + batch_id * params.seqlen;
+    input_t *Cvar = reinterpret_cast<input_t *>(params.C_ptr) + bos * params.C_batch_stride + group_id * params.C_group_stride;
+    float *x = reinterpret_cast<float *>(params.x_ptr) + (cache_index * params.dim + dim_id * kNRows) * params.dstate;
 
     float D_val[kNRows] = {0};
     if (params.D_ptr != nullptr) {
@@ -144,7 +154,6 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     constexpr int kChunkSize = kNThreads * kNItems;
     for (int chunk = 0; chunk < params.n_chunks; ++chunk) {
         input_t u_vals[kNRows][kNItems], delta_vals_load[kNRows][kNItems];
-        int index_vals_load[kNRows][kNItems];
 
         __syncthreads();
         #pragma unroll
@@ -152,15 +161,9 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
             if constexpr (!kDirectIO) {
                 if (r > 0) { __syncthreads(); }
             }
-            load_input<Ktraits>(u + r * params.u_d_stride, u_vals[r], smem_load, params.seqlen - chunk * kChunkSize);
+            load_input<Ktraits>(u + r * params.u_d_stride, u_vals[r], smem_load, seqlen - chunk * kChunkSize);
             if constexpr (!kDirectIO) { __syncthreads(); }
-            load_input<Ktraits>(delta + r * params.delta_d_stride, delta_vals_load[r], smem_load, params.seqlen - chunk * kChunkSize);
-            if constexpr (kUseIndex) {
-                load_index<Ktraits>(index + r * params.delta_d_stride, index_vals_load[r], smem_load_index, params.seqlen - chunk * kChunkSize);
-            }
-        }
-        if constexpr (kUseIndex) {
-            index += kChunkSize;
+            load_input<Ktraits>(delta + r * params.delta_d_stride, delta_vals_load[r], smem_load, seqlen - chunk * kChunkSize);
         }
         u += kChunkSize;
         delta += kChunkSize;
@@ -197,7 +200,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
             weight_t B_vals[kNItems], C_vals[kNItems];
                         if constexpr (kIsVariableB) {
                 load_weight<Ktraits>(Bvar + state_idx * params.B_dstate_stride, B_vals,
-                    smem_load_weight, (params.seqlen - chunk * kChunkSize) * (1));
+                    smem_load_weight, (seqlen - chunk * kChunkSize) * (1));
                 if constexpr (!kIsVariableC) {
                     #pragma unroll
                     for (int r = 0; r < kNRows; ++r) {
@@ -208,7 +211,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
             if constexpr (kIsVariableC) {
                 auto &smem_load_weight_C = !kIsVariableB ? smem_load_weight : smem_load_weight1;
                 load_weight<Ktraits>(Cvar + state_idx * params.C_dstate_stride, C_vals,
-                    smem_load_weight_C, (params.seqlen - chunk * kChunkSize) * (1 ));
+                    smem_load_weight_C, (seqlen - chunk * kChunkSize) * (1 ));
                 if constexpr (!kIsVariableB) {
                     #pragma unroll
                     for (int r = 0; r < kNRows; ++r) {
@@ -232,21 +235,14 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                     thread_data[i] = make_float2(exp2f(delta_vals[r][i] * A_val[r]),
                                                  !kIsVariableB ? delta_u_vals[r][i] : B_vals[i] * delta_u_vals[r][i]);
                     
-                    // Reset A bar for cumulative sequences (Real)
-                    if constexpr (kUseIndex) {
-                        if (index_vals_load[r][i] == 0) {
-                            thread_data[i].x = 0.f;
-                        }
-                    }
-
                     if constexpr (!Ktraits::kIsEvenLen) {  // So that the last state is correct
-                        if (threadIdx.x * kNItems + i >= params.seqlen - chunk * kChunkSize) {
+                        if (threadIdx.x * kNItems + i >= seqlen - chunk * kChunkSize) {
                             thread_data[i] = make_float2(1.f, 0.f);
                         }
                     }
                 }
                 // Initialize running total
-                scan_t running_prefix = make_float2(1.0,x[state_idx]);
+                scan_t running_prefix = make_float2(1.0,has_initial_state_bo ? x[state_idx] : 0.0);
 
                 SSMScanPrefixCallbackOp<weight_t> prefix_op(running_prefix);
                 typename Ktraits::BlockScanT(smem_scan).InclusiveScan(
@@ -267,7 +263,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
             }
         }
         
-        input_t *out = reinterpret_cast<input_t *>(params.out_ptr) + batch_id * params.out_batch_stride
+        input_t *out = reinterpret_cast<input_t *>(params.out_ptr) + bos * params.out_batch_stride
             + dim_id * kNRows * params.out_d_stride + chunk * kChunkSize;
         __syncthreads();
         #pragma unroll
@@ -275,26 +271,26 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
             if constexpr (!kDirectIO) {
                 if (r > 0) { __syncthreads(); }
             }
-            store_output<Ktraits>(out + r * params.out_d_stride, out_vals[r], smem_store, params.seqlen - chunk * kChunkSize);
+            store_output<Ktraits>(out + r * params.out_d_stride, out_vals[r], smem_store, seqlen - chunk * kChunkSize);
         }
 
         if constexpr (kHasZ) {
-            input_t *z = reinterpret_cast<input_t *>(params.z_ptr) + batch_id * params.z_batch_stride
+            input_t *z = reinterpret_cast<input_t *>(params.z_ptr) + bos * params.z_batch_stride
                 + dim_id * kNRows * params.z_d_stride + chunk * kChunkSize;
-            input_t *out_z = reinterpret_cast<input_t *>(params.out_z_ptr) + batch_id * params.out_z_batch_stride
+            input_t *out_z = reinterpret_cast<input_t *>(params.out_z_ptr) + bos * params.out_z_batch_stride
                 + dim_id * kNRows * params.out_z_d_stride + chunk * kChunkSize;
             #pragma unroll
             for (int r = 0; r < kNRows; ++r) {
                 input_t z_vals[kNItems];
                 __syncthreads();
-                load_input<Ktraits>(z + r * params.z_d_stride, z_vals, smem_load, params.seqlen - chunk * kChunkSize);
+                load_input<Ktraits>(z + r * params.z_d_stride, z_vals, smem_load, seqlen - chunk * kChunkSize);
                 #pragma unroll
                 for (int i = 0; i < kNItems; ++i) {
                     float z_val = z_vals[i];
                     out_vals[r][i] *= z_val / (1 + expf(-z_val));
                 }
                 __syncthreads();
-                store_output<Ktraits>(out_z + r * params.out_z_d_stride, out_vals[r], smem_store, params.seqlen - chunk * kChunkSize);
+                store_output<Ktraits>(out_z + r * params.out_z_d_stride, out_vals[r], smem_store, seqlen - chunk * kChunkSize);
             }
         }
 
@@ -312,20 +308,18 @@ void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
     constexpr bool kIsVariableB = true;
     constexpr bool kIsVariableC = true;
     constexpr bool kHasZ = true;
-    BOOL_SWITCH(params.seqlen % (kNThreads * kNItems) == 0, kIsEvenLen, [&] {
-        BOOL_SWITCH(params.index_ptr != nullptr , kUseIndex, [&] {
-            using Ktraits = Selective_Scan_fwd_kernel_traits<kNThreads, kNItems, kNRows, kIsEvenLen, kIsVariableB, kIsVariableC, kHasZ,  kUseIndex, input_t, weight_t>;
-            constexpr int kSmemSize = Ktraits::kSmemSize + kNRows * MAX_DSTATE * sizeof(typename Ktraits::scan_t);
-            dim3 grid(params.batch, params.dim / kNRows);
-            auto kernel = &selective_scan_fwd_kernel<Ktraits>;
-            if (kSmemSize >= 48 * 1024) {
-                C10_CUDA_CHECK(cudaFuncSetAttribute(
-                    kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
-            }
-            kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
-            C10_CUDA_KERNEL_LAUNCH_CHECK();
-        });
-    });
+    //BOOL_SWITCH(params.seqlen % (kNThreads * kNItems) == 0, kIsEvenLen, [&] {
+    using Ktraits = Selective_Scan_fwd_kernel_traits<kNThreads, kNItems, kNRows, kIsVariableB, kIsVariableC, kHasZ,  input_t, weight_t>;
+    constexpr int kSmemSize = Ktraits::kSmemSize + kNRows * MAX_DSTATE * sizeof(typename Ktraits::scan_t);
+    dim3 grid(params.batch, params.dim / kNRows);
+    auto kernel = &selective_scan_fwd_kernel<Ktraits>;
+    if (kSmemSize >= 48 * 1024) {
+        C10_CUDA_CHECK(cudaFuncSetAttribute(
+            kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
+    }
+    kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    //});
 }
 
 template<typename input_t, typename weight_t>
@@ -406,8 +400,7 @@ void set_ssm_params_fwd(SSMParamsBase &params,
                         void* delta_bias_ptr,
                         void* x_ptr,
                         bool has_z, 
-                        bool delta_softplus,
-                        void* index_ptr) {
+                        bool delta_softplus) {
 
     // Reset the parameters
     memset(&params, 0, sizeof(params));
@@ -437,8 +430,6 @@ void set_ssm_params_fwd(SSMParamsBase &params,
     params.x_ptr = x_ptr;
     params.z_ptr = has_z ? z.data_ptr() : nullptr;
     params.out_z_ptr = has_z ? out_z.data_ptr() : nullptr;
-
-    params.index_ptr = index_ptr;
 
     // All stride are in elements, not bytes.
     params.A_d_stride = A.stride(0);
@@ -478,7 +469,9 @@ selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
                   const c10::optional<torch::Tensor> &z_,
                   const c10::optional<torch::Tensor> &delta_bias_,
                   bool delta_softplus,
-                  const c10::optional<torch::Tensor> &index_,
+                  const c10::optional<at::Tensor> &cu_seq_len,
+                  const c10::optional<at::Tensor> &cache_indices,
+                  const c10::optional<at::Tensor> &has_initial_state,
                   const c10::optional<torch::Tensor> &x) {
     auto input_type = u.scalar_type();
     auto weight_type = A.scalar_type();
@@ -502,30 +495,39 @@ selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
     TORCH_CHECK(delta.stride(-1) == 1 || delta.size(-1) == 1);
 
     const auto sizes = u.sizes();
-    const int batch_size = sizes[0];
-    const int dim = sizes[1];
-    const int seqlen = sizes[2];
+    int batch_size,dim,seqlen;
+    if (cu_seq_len.has_value()){
+        batch_size = cu_seq_len.value().sizes()[0];
+        dim = sizes[0];
+        seqlen = sizes[1];
+    }
+    else{
+        batch_size = sizes[0];
+        dim = sizes[1];
+        seqlen = sizes[2];
+    }
+
     const int dstate = A.size(1);
     const int n_groups = is_variable_B ? B.size(1) : 1;
 
     TORCH_CHECK(dstate <= 256, "selective_scan only supports state dimension <= 256");
 
-    CHECK_SHAPE(u, batch_size, dim, seqlen);
-    CHECK_SHAPE(delta, batch_size, dim, seqlen);
+    CHECK_SHAPE(u, dim, seqlen);
+    CHECK_SHAPE(delta, dim, seqlen);
     CHECK_SHAPE(A, dim, dstate);
     TORCH_CHECK(is_variable_B, "is_variable_B = False is disabled in favor of reduced binary size")
-    CHECK_SHAPE(B, batch_size, n_groups, dstate, seqlen );
+    CHECK_SHAPE(B, n_groups, dstate, seqlen );
     TORCH_CHECK(B.stride(-1) == 1 || B.size(-1) == 1);
 
     TORCH_CHECK(is_variable_C, "is_variable_C = False is disabled in favor of reduced binary size")
-    CHECK_SHAPE(C, batch_size, n_groups, dstate, seqlen);
+    CHECK_SHAPE(C, n_groups, dstate, seqlen);
     TORCH_CHECK(C.stride(-1) == 1 || C.size(-1) == 1);
 
     if (D_.has_value()) {
         auto D = D_.value();
         TORCH_CHECK(D.scalar_type() == at::ScalarType::Float);
         TORCH_CHECK(D.is_cuda());
-        TORCH_CHECK(D.stride(-1) == 1 || D.size(-1) == 1);
+        TORCH_CHECK(D.stride(-1) == 1);
         CHECK_SHAPE(D, dim);
     }
 
@@ -533,15 +535,11 @@ selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
         auto delta_bias = delta_bias_.value();
         TORCH_CHECK(delta_bias.scalar_type() == at::ScalarType::Float);
         TORCH_CHECK(delta_bias.is_cuda());
-        TORCH_CHECK(delta_bias.stride(-1) == 1 || delta_bias.size(-1) == 1);
+        TORCH_CHECK(delta_bias.stride(-1) == 1);
         CHECK_SHAPE(delta_bias, dim);
     }
-    if (index_.has_value()) {
-        auto index = index_.value();
-        TORCH_CHECK(index.scalar_type() == at::ScalarType::Int);
-        TORCH_CHECK(index.is_cuda());
-        CHECK_SHAPE(index, batch_size, seqlen);
-    }
+
+    
 
     at::Tensor z, out_z;
     const bool has_z = z_.has_value();
@@ -550,7 +548,7 @@ selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
     TORCH_CHECK(z.scalar_type() == input_type);
     TORCH_CHECK(z.is_cuda());
     TORCH_CHECK(z.stride(-1) == 1 || z.size(-1) == 1);
-    CHECK_SHAPE(z, batch_size, dim, seqlen);
+    CHECK_SHAPE(z, dim, seqlen);
     out_z = torch::empty_like(z);
 
     const int n_chunks = (seqlen + 2048 - 1) / 2048;
@@ -573,9 +571,31 @@ selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
                        delta_bias_.has_value() ? delta_bias_.value().data_ptr() : nullptr,
                        x.value().data_ptr(),
                        has_z,
-                       delta_softplus,
-                       index_.has_value() ? index_.value().data_ptr() : nullptr);
+                       delta_softplus);
 
+    if (cu_seq_len.has_value()) {
+        auto cu_seq_len_ = cu_seq_len.value();
+        //TORCH_CHECK(cu_seq_len.scalar_type() == at::ScalarType::Int32);
+        TORCH_CHECK(cu_seq_len_.is_cuda());
+        TORCH_CHECK(cu_seq_len_.stride(-1) == 1);
+        CHECK_SHAPE(cu_seq_len_, batch_size);
+        params.cu_seq_len_ptr = cu_seq_len_.data_ptr();
+    }
+
+    if (cache_indices.has_value()) {
+        auto cache_indices_ = cache_indices.value();
+        //TORCH_CHECK(cache_indices_.scalar_type() == at::ScalarType::Int32);
+        TORCH_CHECK(cache_indices_.is_cuda());
+        CHECK_SHAPE(cache_indices_, batch_size);
+        params.cache_indices_ptr = cache_indices_.data_ptr();
+    }
+    if (has_initial_state.has_value()) {
+        auto has_initial_state_ = has_initial_state.value();
+        //TORCH_CHECK(cache_indices_.scalar_type() == at::ScalarType::Int32);
+        TORCH_CHECK(has_initial_state_.is_cuda());
+        CHECK_SHAPE(has_initial_state_, batch_size);
+        params.has_initial_state_ptr = has_initial_state_.data_ptr();
+    }
     // Otherwise the kernel will be launched from cuda:0 device
     // Cast to char to avoid compiler warning about narrowing
     at::cuda::CUDAGuard device_guard{(char)u.get_device()};
