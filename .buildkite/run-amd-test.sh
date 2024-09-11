@@ -5,7 +5,7 @@ set -o pipefail
 echo "--- Confirming Clean Initial State"
 while true; do
         sleep 3
-        if grep -q clean /opt/amdgpu/etc/gpu_state; then
+        if grep -q clean ${BUILDKITE_META_DATA_RESET_TARGET}; then
                 echo "GPUs state is \"clean\""
                 break
         fi
@@ -44,11 +44,11 @@ cleanup_docker
 
 echo "--- Resetting GPUs"
 
-echo "reset" > /opt/amdgpu/etc/gpu_state
+echo "reset" > ${BUILDKITE_META_DATA_RESET_TARGET}
 
 while true; do
         sleep 3
-        if grep -q clean /opt/amdgpu/etc/gpu_state; then
+	if grep -q clean ${BUILDKITE_META_DATA_RESET_TARGET}; then
                 echo "GPUs state is \"clean\""
                 break
         fi
@@ -105,8 +105,9 @@ if [[ $commands == *"--shard-id="* ]]; then
     fi
   done
 else
+  echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
   docker run \
-          --device /dev/kfd --device /dev/dri \
+          --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
           --network host \
           --shm-size=16gb \
           --rm \
