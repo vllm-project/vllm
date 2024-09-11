@@ -32,12 +32,12 @@ from vllm.distributed import (cleanup_dist_env_and_memory,
 from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
                          to_enc_dec_tuple_list, zip_enc_dec_prompts)
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, cuda_device_count_stateless,
                         identity, is_cpu)
-from vllm.lora.request import LoRARequest
 
 logger = init_logger(__name__)
 
@@ -234,7 +234,7 @@ def video_assets() -> _VideoAssets:
     return VIDEO_ASSETS
 
 
-_T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature, dict)
+_T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature)
 
 
 class HfRunner:
@@ -626,7 +626,9 @@ class HfRunner:
         del self.model
         cleanup_dist_env_and_memory()
 
+
 class PeftRunner(HfRunner):
+
     def __init__(
         self,
         model_name: str,
@@ -638,23 +640,26 @@ class PeftRunner(HfRunner):
         postprocess_inputs: Callable[[BatchEncoding],
                                      BatchEncoding] = identity,
     ) -> None:
-        super().__init__(model_name, 
-                         dtype, 
-                         model_kwargs=model_kwargs, 
-                         is_embedding_model = False, 
-                         auto_cls=auto_cls, 
+        super().__init__(model_name,
+                         dtype,
+                         model_kwargs=model_kwargs,
+                         is_embedding_model=False,
+                         auto_cls=auto_cls,
                          postprocess_inputs=postprocess_inputs)
-        
-        self.model=PeftModel.from_pretrained(self.model, model_id=adapter_name)
-        
+
+        self.model = PeftModel.from_pretrained(self.model,
+                                               model_id=adapter_name)
+
 
 @pytest.fixture(scope="session")
 def hf_runner():
     return HfRunner
 
+
 @pytest.fixture(scope="session")
 def peft_runner():
     return PeftRunner
+
 
 class VllmRunner:
 
@@ -673,9 +678,8 @@ class VllmRunner:
         enable_chunked_prefill: bool = False,
         swap_space: int = 4,
         enforce_eager: Optional[bool] = False,
-        enable_lora:bool=False,
-        max_loras: int=4,
-
+        enable_lora: bool = False,
+        max_loras: int = 4,
         **kwargs,
     ) -> None:
         self.model = LLM(
@@ -860,12 +864,7 @@ class VllmRunner:
         outputs = self.generate(prompts,
                                 greedy_params,
                                 images=images,
-                                videos=videos,
-                                audios=audios)
-        
-        
-        greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
-        outputs = self.generate(prompts, greedy_params, images=images, lora_requests=lora_requests)
+                                lora_requests=lora_requests)
         return [(output_ids[0], output_str[0])
                 for output_ids, output_str in outputs]
 
@@ -891,11 +890,15 @@ class VllmRunner:
         
         
 
-        return self.generate_w_logprobs(prompts,
+        outputs = self.generate_w_logprobs(prompts,
                                            greedy_logprobs_params,
                                            images=images,
                                            audios=audios,
+                                           videos=videos,
                                            lora_requests=lora_requests)
+
+        return [(output_ids, output_str, output_logprobs)
+                for output_ids, output_str, output_logprobs in outputs]
 
     def generate_encoder_decoder_greedy_logprobs(
         self,
@@ -917,8 +920,10 @@ class VllmRunner:
         Greedy logprobs generation for vLLM encoder/decoder models
         '''
 
-        return self.generate_encoder_decoder_w_logprobs(
-            encoder_decoder_prompts, greedy_logprobs_params, lora_requests=lora_requests)
+        outputs = self.generate_encoder_decoder_w_logprobs(
+            encoder_decoder_prompts,
+            greedy_logprobs_params,
+            lora_requests=lora_requests)
 
     def generate_beam_search(
         self,
@@ -927,15 +932,14 @@ class VllmRunner:
         max_tokens: int,
         lora_requests: Optional[List[LoRARequest]] = None,
     ) -> List[Tuple[List[List[int]], List[str]]]:
-        outputs = self.model.beam_search(
-            prompts,
-            BeamSearchParams(beam_width=beam_width, max_tokens=max_tokens))
-        returned_outputs = []
-        for output in outputs:
-            token_ids = [x.tokens for x in output.sequences]
-            texts = [x.text for x in output.sequences]
-            returned_outputs.append((token_ids, texts))
-        return returned_outputs
+        beam_search_params = SamplingParams(n=beam_width,
+                                            use_beam_search=True,
+                                            temperature=0.0,
+                                            max_tokens=max_tokens)
+        outputs = self.generate(prompts,
+                                beam_search_params,
+                                lora_requests=lora_requests)
+        return outputs
 
     def encode(
         self,
