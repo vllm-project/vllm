@@ -516,12 +516,6 @@ class _AsyncLLMEngine(LLMEngine):
     ) -> Union[LLMInputs, EncoderDecoderLLMInputs]:
         """Async version of :meth:`process_model_inputs`."""
         if self.is_encoder_decoder_model():
-            if self.device_config.device_type == "cpu":
-                print_warning_once(
-                    "The current device type \"cpu\" is not supported "
-                    "for encoder/decoder models and may result in errors "
-                    "or unexpected behavior during model execution.")
-
             # Encoder-decoder model requires special mapping of
             # input prompts to encoder & decoder
             model_inputs = await self._process_encoder_decoder_prompt_async(
