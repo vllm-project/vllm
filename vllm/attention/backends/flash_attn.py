@@ -26,8 +26,8 @@ from vllm_flash_attn import flash_attn_with_kvcache as _flash_attn_with_kvcache
 @torch.library.custom_op("vllm::flash_attn_varlen_func", mutates_args=[])
 def flash_attn_varlen_func(
     q: torch.Tensor,
-    k: Optional[torch.Tensor],
-    v: Optional[torch.Tensor],
+    k: torch.Tensor,
+    v: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
     max_seqlen_q: int,
@@ -38,7 +38,6 @@ def flash_attn_varlen_func(
     softcap: float = 0.0,
     alibi_slopes: Optional[torch.Tensor] = None,
     block_table: Optional[torch.Tensor] = None,
-    kv: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     # custom op does not support tuple input
     real_window_size: Tuple[int, int]
@@ -47,10 +46,6 @@ def flash_attn_varlen_func(
     else:
         assert len(window_size) == 2
         real_window_size = (window_size[0], window_size[1])
-    assert kv is None or (k is None and v is None)
-    if kv is not None:
-        k = kv[0]
-        v = kv[1]
     return _flash_attn_varlen_func(
         q=q,
         k=k,
@@ -71,8 +66,8 @@ def flash_attn_varlen_func(
 @flash_attn_varlen_func.register_fake  # type: ignore
 def _(
     q: torch.Tensor,
-    k: Optional[torch.Tensor],
-    v: Optional[torch.Tensor],
+    k: torch.Tensor,
+    v: torch.Tensor,
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
     max_seqlen_q: int,
@@ -83,7 +78,6 @@ def _(
     softcap: float = 0.0,
     alibi_slopes: Optional[torch.Tensor] = None,
     block_table: Optional[torch.Tensor] = None,
-    kv: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     return torch.empty_like(q)
 
@@ -91,7 +85,8 @@ def _(
 @torch.library.custom_op("vllm::flash_attn_with_kvcache", mutates_args=[])
 def flash_attn_with_kvcache(
     decode_query: torch.Tensor,
-    kv_cache: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
     cache_seqlens: Optional[torch.Tensor] = None,
     block_table: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
@@ -101,8 +96,8 @@ def flash_attn_with_kvcache(
 ) -> torch.Tensor:
     return _flash_attn_with_kvcache(
         decode_query,
-        kv_cache[0],
-        kv_cache[1],
+        key_cache,
+        value_cache,
         cache_seqlens=cache_seqlens,
         block_table=block_table,
         softmax_scale=softmax_scale,
@@ -115,7 +110,8 @@ def flash_attn_with_kvcache(
 @flash_attn_with_kvcache.register_fake  # type: ignore
 def _(
     decode_query: torch.Tensor,
-    kv_cache: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
     cache_seqlens: Optional[torch.Tensor] = None,
     block_table: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
@@ -680,6 +676,9 @@ class FlashAttentionImpl(AttentionImpl):
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
         if kv_cache is not None:
+            key_cache = kv_cache[0]
+            value_cache = kv_cache[1]
+
             # Reshape the input keys and values and store them in the cache.
             # If kv_cache is not provided, the new key and value tensors are
             # not cached. This happens during the initial memory profiling run.
@@ -739,8 +738,8 @@ class FlashAttentionImpl(AttentionImpl):
                 output[:
                        num_prefill_tokens] = torch.ops.vllm.flash_attn_varlen_func(  # noqa
                            q=query,
-                           k=None,
-                           v=None,
+                           k=key_cache,
+                           v=value_cache,
                            cu_seqlens_q=prefill_meta.query_start_loc,
                            max_seqlen_q=prefill_meta.max_query_len,
                            cu_seqlens_k=prefill_meta.seq_start_loc,
@@ -750,7 +749,6 @@ class FlashAttentionImpl(AttentionImpl):
                            alibi_slopes=self.alibi_slopes,
                            block_table=prefill_meta.block_tables,
                            softcap=self.logits_soft_cap,
-                           kv=kv_cache,
                        )
 
         if decode_meta := attn_metadata.decode_metadata:
@@ -758,7 +756,8 @@ class FlashAttentionImpl(AttentionImpl):
             output[
                 num_prefill_tokens:] = torch.ops.vllm.flash_attn_with_kvcache(
                     decode_query.unsqueeze(1),
-                    kv_cache=kv_cache,
+                    key_cache,
+                    value_cache,
                     block_table=decode_meta.block_tables,
                     cache_seqlens=decode_meta.seq_lens_tensor,
                     softmax_scale=self.scale,
