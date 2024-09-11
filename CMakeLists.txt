@@ -325,10 +325,12 @@ define_gpu_extension_target(
   WITH_SOABI)
 
 
+
 if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   message(STATUS "Enabling C extension.")
   add_dependencies(default _C)
 
   message(STATUS "Enabling moe extension.")
   add_dependencies(default _moe_C)
+
 endif()
