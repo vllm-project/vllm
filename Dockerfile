@@ -10,7 +10,7 @@ ARG CUDA_VERSION=12.4.1
 # prepare basic build environment
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04 AS base
 ARG CUDA_VERSION=12.4.1
-ARG PYTHON_VERSION=3.10
+ARG PYTHON_VERSION=3.12
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install Python and other dependencies
@@ -37,14 +37,10 @@ WORKDIR /workspace
 
 # install build and runtime dependencies
 COPY requirements-common.txt requirements-common.txt
-COPY requirements-adag.txt requirements-adag.txt
 COPY requirements-cuda.txt requirements-cuda.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install -r requirements-cuda.txt
 
-COPY requirements-mamba.txt requirements-mamba.txt
-RUN python3 -m pip install packaging
-RUN python3 -m pip install -r requirements-mamba.txt
 
 # cuda arch list used by torch
 # can be useful for both `dev` and `test`
@@ -69,7 +65,6 @@ COPY setup.py setup.py
 COPY cmake cmake
 COPY CMakeLists.txt CMakeLists.txt
 COPY requirements-common.txt requirements-common.txt
-COPY requirements-adag.txt requirements-adag.txt
 COPY requirements-cuda.txt requirements-cuda.txt
 COPY pyproject.toml pyproject.toml
 COPY vllm vllm
@@ -111,10 +106,17 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
         python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
     fi
 
-# check the size of the wheel, we cannot upload wheels larger than 100MB
+# Check the size of the wheel if RUN_WHEEL_CHECK is true
 COPY .buildkite/check-wheel-size.py check-wheel-size.py
-RUN python3 check-wheel-size.py dist
-
+# Default max size of the wheel is 250MB
+ARG VLLM_MAX_SIZE_MB=250
+ENV VLLM_MAX_SIZE_MB=$VLLM_MAX_SIZE_MB
+ARG RUN_WHEEL_CHECK=true
+RUN if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
+        python3 check-wheel-size.py dist; \
+    else \
+        echo "Skipping wheel size check."; \
+    fi
 #################### EXTENSION Build IMAGE ####################
 
 #################### DEV IMAGE ####################
@@ -127,27 +129,11 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install -r requirements-dev.txt
 
 #################### DEV IMAGE ####################
-#################### MAMBA Build IMAGE ####################
-FROM dev as mamba-builder
-# max jobs used for build
-ARG max_jobs=2
-ENV MAX_JOBS=${max_jobs}
-
-WORKDIR /usr/src/mamba
-
-COPY requirements-mamba.txt requirements-mamba.txt
-
-# Download the wheel or build it if a pre-compiled release doesn't exist
-RUN pip --verbose wheel -r requirements-mamba.txt \
-    --no-build-isolation --no-deps --no-cache-dir
-
-#################### MAMBA Build IMAGE ####################
-
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
 FROM nvidia/cuda:${CUDA_VERSION}-base-ubuntu20.04 AS vllm-base
 ARG CUDA_VERSION=12.4.1
-ARG PYTHON_VERSION=3.10
+ARG PYTHON_VERSION=3.12
 WORKDIR /vllm-workspace
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -159,6 +145,7 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
     && apt-get update -y \
     && apt-get install -y ccache software-properties-common git curl sudo vim python3-pip \
+    && apt-get install -y ffmpeg libsm6 libxext6 libgl1 \
     && add-apt-repository ppa:deadsnakes/ppa \
     && apt-get update -y \
     && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv libibverbs-dev \
@@ -179,13 +166,9 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
     --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install dist/*.whl --verbose
 
-RUN --mount=type=bind,from=mamba-builder,src=/usr/src/mamba,target=/usr/src/mamba \
-    --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install /usr/src/mamba/*.whl --no-cache-dir
-
 RUN --mount=type=cache,target=/root/.cache/pip \
     . /etc/environment && \
-    python3 -m pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.1.4/flashinfer-0.1.4+cu121torch2.4-cp${PYTHON_VERSION_STR}-cp${PYTHON_VERSION_STR}-linux_x86_64.whl
+    python3 -m pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.1.6/flashinfer-0.1.6+cu121torch2.4-cp${PYTHON_VERSION_STR}-cp${PYTHON_VERSION_STR}-linux_x86_64.whl
 #################### vLLM installation IMAGE ####################
 
 
@@ -197,6 +180,10 @@ FROM vllm-base AS test
 ADD . /vllm-workspace/
 
 # install development dependencies (for testing)
+# A newer setuptools is required for installing some test dependencies from source that do not publish python 3.12 wheels
+# This installation must complete before the test dependencies are collected and installed.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install "setuptools>=74.1.1"
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install -r requirements-dev.txt
 

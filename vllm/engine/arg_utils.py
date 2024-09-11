@@ -2,20 +2,21 @@ import argparse
 import dataclasses
 import json
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Dict, List, Mapping, Optional, Tuple, Type,
-                    Union)
+from typing import (TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Tuple,
+                    Type, Union)
 
 import torch
 
 import vllm.envs as envs
-from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
-                         EngineConfig, LoadConfig, LoadFormat, LoRAConfig,
-                         ModelConfig, ObservabilityConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig,
+from vllm.config import (CacheConfig, ConfigFormat, DecodingConfig,
+                         DeviceConfig, EngineConfig, LoadConfig, LoadFormat,
+                         LoRAConfig, ModelConfig, ObservabilityConfig,
+                         ParallelConfig, PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig, TokenizerPoolConfig)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import FlexibleArgumentParser
 
 if TYPE_CHECKING:
@@ -64,6 +65,7 @@ class EngineArgs:
     trust_remote_code: bool = False
     download_dir: Optional[str] = None
     load_format: str = 'auto'
+    config_format: str = 'auto'
     dtype: str = 'auto'
     kv_cache_dtype: str = 'auto'
     quantization_param_path: Optional[str] = None
@@ -148,6 +150,7 @@ class EngineArgs:
     otlp_traces_endpoint: Optional[str] = None
     collect_detailed_traces: Optional[str] = None
     disable_async_output_proc: bool = False
+    override_neuron_config: Optional[Dict[str, Any]] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -232,6 +235,13 @@ class EngineArgs:
             'section for more information.\n'
             '* "bitsandbytes" will load the weights using bitsandbytes '
             'quantization.\n')
+        parser.add_argument(
+            '--config-format',
+            default=EngineArgs.config_format,
+            choices=[f.value for f in ConfigFormat],
+            help='The format of the model config to load.\n\n'
+            '* "auto" will try to load the config in hf format '
+            'if available else it will try to load in mistral format ')
         parser.add_argument(
             '--dtype',
             type=str,
@@ -741,6 +751,16 @@ class EngineArgs:
             default=EngineArgs.disable_async_output_proc,
             help="Disable async output processing. This may result in "
             "lower performance.")
+        parser.add_argument(
+            '--override-neuron-config',
+            type=lambda configs: {
+                str(key): value
+                for key, value in
+                (config.split(':') for config in configs.split(','))
+            },
+            default=None,
+            help="override or set neuron device configuration.")
+
         return parser
 
     @classmethod
@@ -751,33 +771,8 @@ class EngineArgs:
         engine_args = cls(**{attr: getattr(args, attr) for attr in attrs})
         return engine_args
 
-    def create_engine_config(self) -> EngineConfig:
-        # gguf file needs a specific model loader and doesn't use hf_repo
-        if self.model.endswith(".gguf"):
-            self.quantization = self.load_format = "gguf"
-
-        # bitsandbytes quantization needs a specific model loader
-        # so we make sure the quant method and the load format are consistent
-        if (self.quantization == "bitsandbytes" or
-           self.qlora_adapter_name_or_path is not None) and \
-           self.load_format != "bitsandbytes":
-            raise ValueError(
-                "BitsAndBytes quantization and QLoRA adapter only support "
-                f"'bitsandbytes' load format, but got {self.load_format}")
-
-        if (self.load_format == "bitsandbytes" or
-            self.qlora_adapter_name_or_path is not None) and \
-            self.quantization != "bitsandbytes":
-            raise ValueError(
-                "BitsAndBytes load format and QLoRA adapter only support "
-                f"'bitsandbytes' quantization, but got {self.quantization}")
-
-        assert self.cpu_offload_gb >= 0, (
-            "CPU offload space must be non-negative"
-            f", but got {self.cpu_offload_gb}")
-
-        device_config = DeviceConfig(device=self.device)
-        model_config = ModelConfig(
+    def create_model_config(self) -> ModelConfig:
+        return ModelConfig(
             model=self.model,
             tokenizer=self.tokenizer,
             tokenizer_mode=self.tokenizer_mode,
@@ -801,7 +796,46 @@ class EngineArgs:
             served_model_name=self.served_model_name,
             limit_mm_per_prompt=self.limit_mm_per_prompt,
             use_async_output_proc=not self.disable_async_output_proc,
+            override_neuron_config=self.override_neuron_config,
+            config_format=self.config_format,
         )
+
+    def create_load_config(self) -> LoadConfig:
+        return LoadConfig(
+            load_format=self.load_format,
+            download_dir=self.download_dir,
+            model_loader_extra_config=self.model_loader_extra_config,
+            ignore_patterns=self.ignore_patterns,
+        )
+
+    def create_engine_config(self) -> EngineConfig:
+        # gguf file needs a specific model loader and doesn't use hf_repo
+        if check_gguf_file(self.model):
+            self.quantization = self.load_format = "gguf"
+
+        # bitsandbytes quantization needs a specific model loader
+        # so we make sure the quant method and the load format are consistent
+        if (self.quantization == "bitsandbytes" or
+           self.qlora_adapter_name_or_path is not None) and \
+           self.load_format != "bitsandbytes":
+            raise ValueError(
+                "BitsAndBytes quantization and QLoRA adapter only support "
+                f"'bitsandbytes' load format, but got {self.load_format}")
+
+        if (self.load_format == "bitsandbytes" or
+            self.qlora_adapter_name_or_path is not None) and \
+            self.quantization != "bitsandbytes":
+            raise ValueError(
+                "BitsAndBytes load format and QLoRA adapter only support "
+                f"'bitsandbytes' quantization, but got {self.quantization}")
+
+        assert self.cpu_offload_gb >= 0, (
+            "CPU offload space must be non-negative"
+            f", but got {self.cpu_offload_gb}")
+
+        device_config = DeviceConfig(device=self.device)
+        model_config = self.create_model_config()
+
         cache_config = CacheConfig(
             block_size=self.block_size if self.device != "neuron" else
             self.max_model_len,  # neuron needs block_size = max_model_len
@@ -844,7 +878,6 @@ class EngineArgs:
                 if (is_gpu and not use_sliding_window and not use_spec_decode
                         and not self.enable_lora
                         and not self.enable_prompt_adapter
-                        and not self.enable_prefix_caching
                         and not has_seqlen_agnostic_layers):
                     self.enable_chunked_prefill = True
                     logger.warning(
@@ -921,6 +954,7 @@ class EngineArgs:
             delay_factor=self.scheduler_delay_factor,
             enable_chunked_prefill=self.enable_chunked_prefill,
             embedding_mode=model_config.embedding_mode,
+            is_multimodal_model=model_config.is_multimodal_model,
             preemption_mode=self.preemption_mode,
             num_scheduler_steps=self.num_scheduler_steps,
             send_delta_data=(envs.VLLM_USE_RAY_SPMD_WORKER
@@ -943,12 +977,7 @@ class EngineArgs:
             self.model_loader_extra_config[
                 "qlora_adapter_name_or_path"] = self.qlora_adapter_name_or_path
 
-        load_config = LoadConfig(
-            load_format=self.load_format,
-            download_dir=self.download_dir,
-            model_loader_extra_config=self.model_loader_extra_config,
-            ignore_patterns=self.ignore_patterns,
-        )
+        load_config = self.create_load_config()
 
         prompt_adapter_config = PromptAdapterConfig(
             max_prompt_adapters=self.max_prompt_adapters,

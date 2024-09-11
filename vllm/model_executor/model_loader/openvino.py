@@ -15,9 +15,8 @@ from vllm.config import DeviceConfig, ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import (LogitsProcessor,
                                                          _prune_hidden_states)
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import SamplerOutput
 
 logger = init_logger(__name__)
 

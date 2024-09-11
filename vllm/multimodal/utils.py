@@ -1,11 +1,10 @@
 import base64
 from functools import lru_cache
 from io import BytesIO
-from typing import List, Optional, Tuple, TypeVar, Union
+from typing import Any, List, Optional, Tuple, TypeVar, Union
 
-import librosa
 import numpy as np
-import soundfile
+import numpy.typing as npt
 from PIL import Image
 
 from vllm.connections import global_http_connection
@@ -73,10 +72,22 @@ async def async_fetch_image(image_url: str,
     return image.convert(image_mode)
 
 
+def try_import_audio_packages() -> Tuple[Any, Any]:
+    try:
+        import librosa
+        import soundfile
+    except ImportError:
+        raise ImportError(
+            "Please install vllm[audio] for audio support.") from None
+    return librosa, soundfile
+
+
 def fetch_audio(audio_url: str) -> Tuple[np.ndarray, Union[int, float]]:
     """
     Load audio from a URL.
     """
+    librosa, _ = try_import_audio_packages()
+
     if audio_url.startswith("http"):
         audio_bytes = global_http_connection.get_bytes(
             audio_url, timeout=VLLM_AUDIO_FETCH_TIMEOUT)
@@ -95,6 +106,8 @@ async def async_fetch_audio(
     """
     Asynchronously fetch audio from a URL.
     """
+    librosa, _ = try_import_audio_packages()
+
     if audio_url.startswith("http"):
         audio_bytes = await global_http_connection.async_get_bytes(
             audio_url, timeout=VLLM_AUDIO_FETCH_TIMEOUT)
@@ -106,6 +119,16 @@ async def async_fetch_audio(
                          "with either 'data:audio' or 'http'.")
 
     return librosa.load(BytesIO(audio_bytes), sr=None)
+
+
+def get_and_parse_audio(audio_url: str) -> MultiModalDataDict:
+    audio, sr = fetch_audio(audio_url)
+    return {"audio": (audio, sr)}
+
+
+def get_and_parse_image(image_url: str) -> MultiModalDataDict:
+    image = fetch_image(image_url)
+    return {"image": image}
 
 
 async def async_get_and_parse_audio(audio_url: str) -> MultiModalDataDict:
@@ -123,6 +146,8 @@ def encode_audio_base64(
     sampling_rate: int,
 ) -> str:
     """Encode audio as base64."""
+    _, soundfile = try_import_audio_packages()
+
     buffered = BytesIO()
     soundfile.write(buffered, audio, sampling_rate, format="WAV")
 
@@ -163,6 +188,47 @@ def rescale_image_size(image: Image.Image,
     return image
 
 
+def try_import_video_packages() -> Any:
+    try:
+        import cv2
+    except ImportError:
+        raise ImportError(
+            "Please install vllm[video] for video support.") from None
+    return cv2
+
+
+def resize_video(frames: npt.NDArray, size: Tuple[int, int]) -> npt.NDArray:
+    cv2 = try_import_video_packages()
+
+    num_frames, _, _, channels = frames.shape
+    new_height, new_width = size
+    resized_frames = np.empty((num_frames, new_height, new_width, channels),
+                              dtype=frames.dtype)
+    for i, frame in enumerate(frames):
+        resized_frame = cv2.resize(frame, (new_width, new_height))
+        resized_frames[i] = resized_frame
+    return resized_frames
+
+
+def rescale_video_size(frames: npt.NDArray, size_factor: float) -> npt.NDArray:
+    _, height, width, _ = frames.shape
+    new_height = int(height * size_factor)
+    new_width = int(width * size_factor)
+
+    return resize_video(frames, (new_height, new_width))
+
+
+def sample_frames_from_video(frames: npt.NDArray,
+                             num_frames: int) -> npt.NDArray:
+    total_frames = frames.shape[0]
+    if num_frames == -1:
+        return frames
+    else:
+        frame_indices = np.linspace(0, total_frames - 1, num_frames, dtype=int)
+        sampled_frames = frames[frame_indices, ...]
+        return sampled_frames
+
+
 # Utilities for input processors
 _T = TypeVar("_T", str, int)
 
@@ -189,10 +255,13 @@ def repeat_and_pad_placeholder_tokens(
     prompt_token_ids: List[int],
     *,
     placeholder_token_id: int,
-    repeat_count: int = 1,
+    repeat_count: Union[int, List[int]],
     pad_token_left: Optional[int] = None,
     pad_token_right: Optional[int] = None,
 ) -> Tuple[Optional[str], List[int]]:
+    if isinstance(repeat_count, int):
+        repeat_count = [repeat_count]
+
     if prompt is None:
         new_prompt = None
     else:
@@ -201,13 +270,6 @@ def repeat_and_pad_placeholder_tokens(
                               tokenizer.decode(pad_token_left))
         pad_token_str_right = (None if pad_token_right is None else
                                tokenizer.decode(pad_token_right))
-        replacement_str = "".join(
-            repeat_and_pad_token(
-                placeholder_token_str,
-                repeat_count=repeat_count,
-                pad_token_left=pad_token_str_left,
-                pad_token_right=pad_token_str_right,
-            ))
 
         placeholder_token_count = prompt.count(placeholder_token_str)
         # This is an arbitrary number to distinguish between the two cases
@@ -216,28 +278,45 @@ def repeat_and_pad_placeholder_tokens(
                 "Please follow the prompt format that is "
                 "documented on HuggingFace which does not involve "
                 "repeating %s tokens.", placeholder_token_str)
-        elif placeholder_token_count > 1:
-            logger.warning("Multiple multi-modal input is not supported yet, "
-                           "so any extra placeholder tokens will be treated "
-                           "as plain text.")
+        if placeholder_token_count < len(repeat_count):
+            logger.warning(
+                "The number of multi-modal placeholder tokens in the prompt "
+                "is less than the number of multi-modal inputs. Extra "
+                "placeholder tokens will be treated as plain text")
+            repeat_count = repeat_count[:placeholder_token_count]
 
-        # The image tokens are removed to be consistent with HuggingFace
-        new_prompt = prompt.replace(placeholder_token_str, replacement_str, 1)
+        prompt_parts = prompt.split(placeholder_token_str,
+                                    maxsplit=len(repeat_count))
+        new_prompt = ""
+        for i, repeat_count_item in enumerate(repeat_count):
+            replacement_str = "".join(
+                repeat_and_pad_token(
+                    placeholder_token_str,
+                    repeat_count=repeat_count_item,
+                    pad_token_left=pad_token_str_left,
+                    pad_token_right=pad_token_str_right,
+                ))
+            # The image tokens are removed to be consistent with HuggingFace
+            new_prompt += prompt_parts[i] + replacement_str
+        new_prompt += prompt_parts[-1]
 
     new_token_ids: List[int] = []
+    placeholder_token_idx = 0
     for i, token in enumerate(prompt_token_ids):
         if token == placeholder_token_id:
             replacement_ids = repeat_and_pad_token(
                 placeholder_token_id,
-                repeat_count=repeat_count,
+                repeat_count=repeat_count[placeholder_token_idx],
                 pad_token_left=pad_token_left,
                 pad_token_right=pad_token_right,
             )
             new_token_ids.extend(replacement_ids)
+            placeholder_token_idx += 1
 
-            # No need to further scan the list since we only replace once
-            new_token_ids.extend(prompt_token_ids[i + 1:])
-            break
+            # No need to further scan the list since we replaced all tokens
+            if placeholder_token_idx >= len(repeat_count):
+                new_token_ids.extend(prompt_token_ids[i + 1:])
+                break
         else:
             new_token_ids.append(token)
 

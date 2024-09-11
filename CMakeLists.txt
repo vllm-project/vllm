@@ -181,7 +181,6 @@ set(VLLM_EXT_SRC
   "csrc/pos_encoding_kernels.cu"
   "csrc/activation_kernels.cu"
   "csrc/layernorm_kernels.cu"
-  "csrc/quantization/squeezellm/quant_cuda_kernel.cu"
   "csrc/quantization/gptq/q_gemm.cu"
   "csrc/quantization/compressed_tensors/int8_quant_kernels.cu"
   "csrc/quantization/fp8/common.cu"
@@ -196,13 +195,19 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   FetchContent_Declare(
         cutlass
         GIT_REPOSITORY https://github.com/nvidia/cutlass.git
-        # CUTLASS 3.5.1
-        GIT_TAG 06b21349bcf6ddf6a1686a47a137ad1446579db9 
+        GIT_TAG v3.5.1
         GIT_PROGRESS TRUE
+
+        # Speed up CUTLASS download by retrieving only the specified GIT_TAG instead of the history.
+        # Important: If GIT_SHALLOW is enabled then GIT_TAG works only with branch names and tags.
+        # So if the GIT_TAG above is updated to a commit hash, GIT_SHALLOW must be set to FALSE
+        GIT_SHALLOW TRUE
   )
   FetchContent_MakeAvailable(cutlass)
 
   list(APPEND VLLM_EXT_SRC
+    "csrc/mamba/mamba_ssm/selective_scan_fwd.cu"
+    "csrc/mamba/causal_conv1d/causal_conv1d.cu"
     "csrc/quantization/aqlm/gemm_kernels.cu"
     "csrc/quantization/awq/gemm_kernels.cu"
     "csrc/quantization/marlin/dense/marlin_cuda_kernel.cu"
@@ -229,6 +234,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
           COMPILE_FLAGS
           "-gencode arch=compute_90a,code=sm_90a")
   endif()
+
 
   #
   # Machete kernels
@@ -288,6 +294,12 @@ define_gpu_extension_target(
   USE_SABI 3
   WITH_SOABI)
 
+# If CUTLASS is compiled on NVCC >= 12.5, it by default uses 
+# cudaGetDriverEntryPointByVersion as a wrapper to avoid directly calling the 
+# driver API. This causes problems when linking with earlier versions of CUDA.
+# Setting this variable sidesteps the issue by calling the driver directly.
+target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
+
 #
 # _moe_C extension
 #
@@ -295,6 +307,11 @@ define_gpu_extension_target(
 set(VLLM_MOE_EXT_SRC
   "csrc/moe/torch_bindings.cpp"
   "csrc/moe/topk_softmax_kernels.cu")
+
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  list(APPEND VLLM_MOE_EXT_SRC
+      "csrc/moe/marlin_moe_ops.cu")
+endif()
 
 define_gpu_extension_target(
   _moe_C
