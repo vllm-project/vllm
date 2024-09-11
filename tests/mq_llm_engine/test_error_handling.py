@@ -1,42 +1,40 @@
 import asyncio
-import pytest
 import tempfile
 import uuid
-
 from unittest.mock import Mock
 
+import pytest
+
+from tests.mq_llm_engine.utils import RemoteMQLLMEngine
 from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.multiprocessing import ENGINE_DEAD_ERROR
-
 from vllm.engine.multiprocessing.engine import MQLLMEngine
-
 from vllm.usage.usage_lib import UsageContext
-
-from tests.mq_llm_engine.utils import RemoteMQLLMEngine
-
 
 MODEL = "Qwen/Qwen2-0.5B-Instruct"
 ENGINE_ARGS = AsyncEngineArgs(model=MODEL)
 RAISED_ERROR = KeyError("foo")
+
 
 @pytest.fixture(scope="function")
 def tmp_socket():
     with tempfile.TemporaryDirectory() as td:
         yield f"ipc://{td}/{uuid.uuid4()}"
 
-def run_with_evil_forward(engine_args: AsyncEngineArgs, 
-                          ipc_path: str):
+
+def run_with_evil_forward(engine_args: AsyncEngineArgs, ipc_path: str):
     # Make engine.
-    engine = MQLLMEngine.from_engine_args(engine_args=engine_args,
-                                          usage_context= UsageContext.UNKNOWN_CONTEXT,
-                                          ipc_path=ipc_path)    
+    engine = MQLLMEngine.from_engine_args(
+        engine_args=engine_args,
+        usage_context=UsageContext.UNKNOWN_CONTEXT,
+        ipc_path=ipc_path)
     # Raise error during first forward pass.
-    engine.engine.model_executor.execute_model = Mock(
-        side_effect=RAISED_ERROR)
+    engine.engine.model_executor.execute_model = Mock(side_effect=RAISED_ERROR)
 
     # Run engine.
     engine.start()
+
 
 @pytest.mark.asyncio
 async def test_evil_forward(tmp_socket):
@@ -72,7 +70,7 @@ async def test_evil_forward(tmp_socket):
                                            request_id=uuid.uuid4()):
                 pass
         except Exception as e:
-            # Next excpetion should be an ENGINE_DEAD_ERROR
+            # Next exception should be an ENGINE_DEAD_ERROR
             assert e == ENGINE_DEAD_ERROR, (
                 "Engine should be dead and raise ENGINE_DEAD_ERROR")
             assert client.errored
@@ -89,24 +87,26 @@ async def test_evil_forward(tmp_socket):
         client.close()
 
 
-def run_with_evil_model_executor_health(
-        engine_args: AsyncEngineArgs, ipc_path: str):
+def run_with_evil_model_executor_health(engine_args: AsyncEngineArgs,
+                                        ipc_path: str):
     # Make engine.
-    engine = MQLLMEngine.from_engine_args(engine_args=engine_args,
-                                          usage_context= UsageContext.UNKNOWN_CONTEXT,
-                                          ipc_path=ipc_path)    
+    engine = MQLLMEngine.from_engine_args(
+        engine_args=engine_args,
+        usage_context=UsageContext.UNKNOWN_CONTEXT,
+        ipc_path=ipc_path)
     # Raise error during first forward pass.
-    engine.engine.model_executor.check_health = Mock(
-        side_effect=RAISED_ERROR)
+    engine.engine.model_executor.check_health = Mock(side_effect=RAISED_ERROR)
 
     # Run engine.
     engine.start()
 
+
 @pytest.mark.asyncio
 async def test_failed_health_check(tmp_socket):
-    with RemoteMQLLMEngine(engine_args=ENGINE_ARGS,
-                           ipc_path=tmp_socket,
-                           run_fn=run_with_evil_model_executor_health) as engine:
+    with RemoteMQLLMEngine(
+            engine_args=ENGINE_ARGS,
+            ipc_path=tmp_socket,
+            run_fn=run_with_evil_model_executor_health) as engine:
 
         client = await engine.make_client()
         assert client.is_running
@@ -128,11 +128,22 @@ async def test_failed_health_check(tmp_socket):
                                            request_id=uuid.uuid4()):
                 pass
         except Exception as e:
-            # Next excpetion should be an ENGINE_DEAD_ERROR
+            # Next exception should be an ENGINE_DEAD_ERROR
             assert e == ENGINE_DEAD_ERROR, (
                 "Engine should be dead and raise ENGINE_DEAD_ERROR")
             assert client.errored
 
         # Cleanup
         client.close()
-    
+
+
+def run_with_evil_abort(engine_args: AsyncEngineArgs, ipc_path: str):
+    # Make engine.
+    engine = MQLLMEngine.from_engine_args(
+        engine_args=engine_args,
+        usage_context=UsageContext.UNKNOWN_CONTEXT,
+        ipc_path=ipc_path)
+    # Raise error during abort call.
+    engine.engine.abort_request = Mock(side_effect=RAISED_ERROR)
+    # Run engine.
+    engine.start()

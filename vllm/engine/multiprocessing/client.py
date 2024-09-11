@@ -181,8 +181,8 @@ class MQLLMEngineClient:
                         exception = rpc_error.exception
                     else:
                         # MPLLMEngine should always return an RPCError to
-                        # the output_socket when an issue arises. 
-                        # If we are here, we are in a bad state and 
+                        # the output_socket when an issue arises.
+                        # If we are here, we are in a bad state and
                         # should shut down the server.
                         error: BaseException = request_outputs
                         logger.error(
@@ -248,7 +248,6 @@ class MQLLMEngineClient:
         logger.exception(repr(e))
         if self._errored_with is None:
             self._errored_with = e
-
 
     async def _send_get_data_rpc_request(self, request: RPCStartupRequest,
                                          expected_type: Any,

@@ -1,18 +1,19 @@
 import multiprocessing
 from typing import Callable
+
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
 
+
 class RemoteMQLLMEngine:
-    def __init__(self,
-                 run_fn: Callable,
-                 engine_args: AsyncEngineArgs,
+
+    def __init__(self, run_fn: Callable, engine_args: AsyncEngineArgs,
                  ipc_path: str) -> None:
 
         self.engine_args = engine_args
         self.ipc_path = ipc_path
         context = multiprocessing.get_context("spawn")
-        self.proc = context.Process(target=run_fn, 
+        self.proc = context.Process(target=run_fn,
                                     args=(engine_args, ipc_path))
         self.proc.start()
 
