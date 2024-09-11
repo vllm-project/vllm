@@ -303,11 +303,17 @@ class MQLLMEngineClient:
     async def _send_one_way_rpc_request(request: RPC_REQUEST_T,
                                         socket: Socket):
         """Send one-way RPC request to trigger an action."""
-
+        # Raise handlable error for graceful shutdown.
+        if socket.closed:
+            raise MQClientClosedError()
+        
         await socket.send_multipart((pickle.dumps(request), ))
 
     async def _await_ack(self, error_message: str, socket: Socket):
         """Await acknowledgement that a request succeeded."""
+        # Raise handlable error for graceful shutdown.
+        if socket.closed:
+            raise MQClientClosedError()
 
         if await socket.poll(timeout=VLLM_RPC_TIMEOUT) == 0:
             raise TimeoutError("MQLLMEngine didn't reply within "
@@ -317,6 +323,10 @@ class MQLLMEngineClient:
 
     @staticmethod
     async def _check_success(error_message: str, socket: Socket):
+        # Raise handlable error for graceful shutdown.
+        if socket.closed:
+            raise MQClientClosedError()
+
         frame = await socket.recv(copy=False)
         response = pickle.loads(frame.buffer)
 
