@@ -3,6 +3,7 @@ import argparse
 
 from vllm import LLM
 from vllm.sampling_params import SamplingParams
+
 """
 This script is an offline demo for running Pixtral.
 
