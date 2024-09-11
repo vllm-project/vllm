@@ -61,6 +61,8 @@ def _bgmv_sample(
                          dtype=hidden_state.dtype,
                          device=hidden_state.device)
 
+    print(hidden_state.shape, lm_heads_all.shape, logits.shape, sampling_indices_tensor.shape)
+
     num_tokens = sampling_indices_tensor.shape[0]
     hidden_dim = hidden_state.shape[-1]
 
