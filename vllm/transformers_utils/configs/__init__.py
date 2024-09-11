@@ -27,6 +27,7 @@ __all__ = [
     "ExaoneConfig",
     "MLPSpeculatorConfig",
     "NemotronConfig",
+    "SolarConfig",
     "UltravoxConfig",
     # Granite can be removed from here once we have upgraded to
     # transformers 4.45+
