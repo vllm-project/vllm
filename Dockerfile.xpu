@@ -11,8 +11,12 @@ RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRO
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends --fix-missing \
     curl \
+    ffmpeg \
     git \
     libsndfile1 \
+    libsm6 \
+    libxext6 \
+    libgl1 \
     lsb-release \
     numactl \
     python3 \
@@ -33,13 +37,13 @@ ENV VLLM_TARGET_DEVICE=xpu
 
 RUN python3 setup.py install
 
-# FROM vllm-base AS vllm-openai
+FROM vllm-base AS vllm-openai
 
 # install additional dependencies for openai api server
-# RUN --mount=type=cache,target=/root/.cache/pip \
-#     pip install accelerate hf_transfer 'modelscope!=1.15.0'
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install accelerate hf_transfer 'modelscope!=1.15.0'
 
-# ENV VLLM_USAGE_SOURCE production-docker-image \
-#     TRITON_XPU_PROFILE 1
+ENV VLLM_USAGE_SOURCE production-docker-image \
+    TRITON_XPU_PROFILE 1
 
-# ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]

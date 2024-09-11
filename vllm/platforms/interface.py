@@ -1,5 +1,5 @@
 import enum
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 
@@ -9,6 +9,7 @@ class PlatformEnum(enum.Enum):
     ROCM = enum.auto()
     TPU = enum.auto()
     XPU = enum.auto()
+    CPU = enum.auto()
     UNSPECIFIED = enum.auto()
 
 
@@ -26,10 +27,12 @@ class Platform:
 
     def is_xpu(self) -> bool:
         return self._enum == PlatformEnum.XPU
+    def is_cpu(self) -> bool:
+        return self._enum == PlatformEnum.CPU
 
     @staticmethod
-    def get_device_capability(device_id: int = 0) -> Tuple[int, int]:
-        raise NotImplementedError
+    def get_device_capability(device_id: int = 0) -> Optional[Tuple[int, int]]:
+        return None
 
     @staticmethod
     def get_device_name(device_id: int = 0) -> str:
