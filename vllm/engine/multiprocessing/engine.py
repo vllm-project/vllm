@@ -1,6 +1,6 @@
 import pickle
 from contextlib import contextmanager
-from typing import Iterator, List, Union
+from typing import Any, Iterator, List, Union
 
 import cloudpickle
 import zmq
@@ -13,7 +13,8 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_OUTPUT_EXT, REQUEST_OUTPUTS_T,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCError, RPCGenerateRequest,
-                                         RPCHealthRequest, RPCStartupRequest)
+                                         RPCHealthRequest, RPCStartupRequest,
+                                         RPCStartupResponse)
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
@@ -160,15 +161,16 @@ class MQLLMEngine:
             # Loop until the RPCClient has all the data it needs.
             client_is_ready = False
             while not client_is_ready:
+                response: Any
                 try:
                     identity, message = socket.recv_multipart(copy=False)
                     request: RPCStartupRequest = pickle.loads(message.buffer)
 
                     # Handle the query from the Client.
-                    if request == RPCStartupRequest.GET_TRACING_ENABLED:
-                        response = self.engine.is_tracing_enabled()
-                    elif request == RPCStartupRequest.IS_SERVER_READY:
-                        response = VLLM_RPC_SUCCESS_STR
+                    if request == RPCStartupRequest.IS_SERVER_READY:
+                        tracing_enabled = self.engine.is_tracing_enabled()
+                        response = RPCStartupResponse(
+                            tracing_enabled=tracing_enabled)
                     elif request == RPCStartupRequest.CLIENT_IS_READY:
                         response = VLLM_RPC_SUCCESS_STR
                         # Breakout of loop once client is ready.

@@ -18,7 +18,8 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_OUTPUT_EXT, RPC_REQUEST_T,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCError, RPCGenerateRequest,
-                                         RPCHealthRequest, RPCStartupRequest)
+                                         RPCHealthRequest, RPCStartupRequest,
+                                         RPCStartupResponse)
 from vllm.envs import VLLM_RPC_GET_DATA_TIMEOUT_MS
 from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
@@ -218,9 +219,9 @@ class MQLLMEngineClient:
 
         with self.get_data_socket() as socket:
             # Wait until server is ready.
-            await self._wait_for_server_rpc(socket)
+            response = await self._wait_for_server_rpc(socket)
 
-            self.tracing_flag = await self._is_tracing_enabled_rpc(socket)
+            self.tracing_flag = response.tracing_enabled
 
             # Start health_loop.
             self.health_loop = asyncio.create_task(
@@ -249,7 +250,8 @@ class MQLLMEngineClient:
         if self._errored_with is None:
             self._errored_with = e
 
-    async def _send_get_data_rpc_request(self, request: RPCStartupRequest,
+    @staticmethod
+    async def _send_get_data_rpc_request(request: RPCStartupRequest,
                                          expected_type: Any,
                                          error_message: str,
                                          socket: Socket) -> Any:
@@ -283,14 +285,15 @@ class MQLLMEngineClient:
 
         return data
 
-    async def _send_one_way_rpc_request(self, request: RPC_REQUEST_T,
+    @staticmethod
+    async def _send_one_way_rpc_request(request: RPC_REQUEST_T,
                                         socket: Socket):
         """Send one-way RPC request to trigger an action."""
 
         await socket.send_multipart((pickle.dumps(request), ))
 
     async def _await_ack(self, error_message: str, socket: Socket):
-        "Await acknowledgement that a request succeeded."
+        """Await acknowledgement that a request succeeded."""
 
         if await socket.poll(timeout=VLLM_RPC_GET_DATA_TIMEOUT_MS) == 0:
             raise TimeoutError("MQLLMEngine didn't reply within "
@@ -298,7 +301,8 @@ class MQLLMEngineClient:
 
         await self._check_success(error_message, socket)
 
-    async def _check_success(self, error_message: str, socket: Socket):
+    @staticmethod
+    async def _check_success(error_message: str, socket: Socket):
         frame = await socket.recv(copy=False)
         response = pickle.loads(frame.buffer)
 
@@ -320,29 +324,20 @@ class MQLLMEngineClient:
     async def is_tracing_enabled(self) -> bool:
         return self.tracing_flag
 
-    async def _wait_for_server_rpc(self, socket: Socket):
+    async def _wait_for_server_rpc(self, socket: Socket) -> RPCStartupResponse:
         """Wait for the RPCServer to start up."""
 
-        await self._send_one_way_rpc_request(
-            request=RPCStartupRequest.IS_SERVER_READY, socket=socket)
-
-        await self._await_ack(error_message="Unable to start RPC Server",
-                              socket=socket)
+        return await self._send_get_data_rpc_request(
+            request=RPCStartupRequest.IS_SERVER_READY,
+            expected_type=RPCStartupResponse,
+            error_message="Unable to start RPC Server",
+            socket=socket)
 
     async def _notify_ready(self, socket: Socket):
         """Get the RPCServer that the RPCClient is ready"""
 
         await self._send_one_way_rpc_request(
             request=RPCStartupRequest.CLIENT_IS_READY, socket=socket)
-
-    async def _is_tracing_enabled_rpc(self, socket: Socket) -> bool:
-        """Get is_tracing_enabled flag from the RPCServer"""
-
-        return await self._send_get_data_rpc_request(
-            RPCStartupRequest.GET_TRACING_ENABLED,
-            expected_type=bool,
-            error_message="Could not get is_tracing_enabled from RPC Server",
-            socket=socket)
 
     async def abort(self, request_id: str):
         """Send an ABORT_REQUEST signal to the RPC Server"""

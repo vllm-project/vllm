@@ -48,13 +48,12 @@ class RPCHealthRequest:
 
 class RPCStartupRequest(Enum):
     IS_SERVER_READY = 1
-    GET_MODEL_CONFIG = 2
-    GET_DECODING_CONFIG = 3
-    GET_PARALLEL_CONFIG = 4
-    GET_SCHEDULER_CONFIG = 5
-    GET_LORA_CONFIG = 6
-    GET_TRACING_ENABLED = 7
-    CLIENT_IS_READY = 8
+    CLIENT_IS_READY = 2
+
+
+@dataclass
+class RPCStartupResponse:
+    tracing_enabled: bool
 
 
 RPC_REQUEST_T = Union[RPCGenerateRequest, RPCAbortRequest, RPCHealthRequest,
