@@ -63,11 +63,11 @@ class MPLinearKernel(ABC):
 
     def _get_weight_params(
             self, layer: torch.nn.Module
-    ) -> Tuple[torch.Tensor,          # w_q
-               torch.Tensor,          # w_s
-               Optional[torch.Tensor],# w_zp, 
-               Optional[torch.Tensor] # w_gidx
-        ]:
+    ) -> Tuple[torch.Tensor,  # w_q
+               torch.Tensor,  # w_s
+               Optional[torch.Tensor],  # w_zp, 
+               Optional[torch.Tensor]  # w_gidx
+               ]:
         return (
             getattr(layer, self.w_q_name),
             getattr(layer, self.w_s_name),
