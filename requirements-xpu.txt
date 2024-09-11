@@ -3,8 +3,10 @@
 
 setuptools < 70.0.0 # IPEX's torch have some dependency. to be removed.
 
-torch @ https://ubit-artifactory-sh.intel.com/artifactory/aipc_releases-sh-local/gpu-new/validation/IPEX/weekly/PVC/2024/ww34/py310/torch-2.3.0a0+giteb3ebdc-cp310-cp310-linux_x86_64.whl
-intel_extension_for_pytorch @ https://ubit-artifactory-sh.intel.com/artifactory/aipc_releases-sh-local/gpu-new/validation/IPEX/weekly/PVC/2024/ww34/py310/intel_extension_for_pytorch-2.3.110+gited12d5e-cp310-cp310-linux_x86_64.whl
-oneccl_bind_pt @ https://ubit-artifactory-sh.intel.com/artifactory/aipc_releases-sh-local/gpu-new/validation/IPEX/weekly/PVC/2024/ww34/py310/oneccl_bind_pt-2.3.0+gpu-cp310-cp310-linux_x86_64.whl
+torch == 2.3.1+cxx11.abi
+intel-extension-for-pytorch == 2.3.110+xpu
+oneccl_bind_pt == 2.3.100+xpu
 
-triton-xpu @ https://github.com/intel/intel-xpu-backend-for-triton/releases/download/v3.0.0b2/triton_xpu-3.0.0b2-cp310-cp310-linux_x86_64.whl  
+triton-xpu == 3.0.0b2
+
+--extra-index-url https://pytorch-extension.intel.com/release-whl/stable/xpu/us/
