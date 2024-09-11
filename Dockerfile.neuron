@@ -6,7 +6,9 @@ FROM $BASE_IMAGE
 RUN echo "Base image is $BASE_IMAGE"
 
 # Install some basic utilities
-RUN apt-get update && apt-get install python3 python3-pip -y
+RUN apt-get update \
+    && apt-get install python3 python3-pip -y \
+    && apt-get install -y ffmpeg libsm6 libxext6 libgl1 
 
 ### Mount Point ###
 # When launching the container, mount the code directory to /app

@@ -9,6 +9,7 @@ from .audio import AudioPlugin
 from .base import (MultiModalDataDict, MultiModalInputMapper, MultiModalInputs,
                    MultiModalPlugin, MultiModalTokensCalc, NestedTensors)
 from .image import ImagePlugin
+from .video import VideoPlugin
 
 logger = init_logger(__name__)
 
@@ -34,7 +35,7 @@ class MultiModalRegistry:
     :class:`~vllm.multimodal.MultiModalPlugin` for each modality.
     """
 
-    DEFAULT_PLUGINS = (ImagePlugin(), AudioPlugin())
+    DEFAULT_PLUGINS = (ImagePlugin(), AudioPlugin(), VideoPlugin())
 
     def __init__(
             self,

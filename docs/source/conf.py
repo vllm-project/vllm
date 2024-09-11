@@ -99,6 +99,7 @@ autodoc_mock_imports = [
     "aiohttp",
     "compressed_tensors",
     "cpuinfo",
+    "cv2",
     "torch",
     "transformers",
     "psutil",
