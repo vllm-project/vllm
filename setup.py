@@ -170,14 +170,17 @@ class cmake_build_ext(build_ext):
 
         if is_sccache_available():
             cmake_args += [
+                '-DCMAKE_C_COMPILER_LAUNCHER=sccache',
                 '-DCMAKE_CXX_COMPILER_LAUNCHER=sccache',
                 '-DCMAKE_CUDA_COMPILER_LAUNCHER=sccache',
-                '-DCMAKE_C_COMPILER_LAUNCHER=sccache',
+                '-DCMAKE_HIP_COMPILER_LAUNCHER=sccache',
             ]
         elif is_ccache_available():
             cmake_args += [
+                '-DCMAKE_C_COMPILER_LAUNCHER=ccache',
                 '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache',
                 '-DCMAKE_CUDA_COMPILER_LAUNCHER=ccache',
+                '-DCMAKE_HIP_COMPILER_LAUNCHER=ccache',
             ]
 
         # Pass the python executable to cmake so it can find an exact
@@ -502,6 +505,7 @@ setup(
     ext_modules=ext_modules,
     extras_require={
         "tensorizer": ["tensorizer>=2.9.0"],
+        "video": ["opencv-python"],  # Required for video processing
         "audio": ["librosa", "soundfile"]  # Required for audio processing
     },
     cmdclass={"build_ext": cmake_build_ext} if len(ext_modules) > 0 else {},

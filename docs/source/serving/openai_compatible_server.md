@@ -110,6 +110,14 @@ directory [here](https://github.com/vllm-project/vllm/tree/main/examples/)
 :func: create_parser_for_docs
 :prog: vllm serve
 ```
+## Tool Calling in the Chat Completion API
+### Named Function Calling
+vLLM supports only named function calling in the chat completion API by default. It does so using Outlines, so this is 
+enabled by default, and will work with any supported model. You are guaranteed a validly-parsable function call - not a 
+high-quality one. 
+
+To use a named function, you need to define the functions in the `tools` parameter of the chat completion request, and 
+specify the `name` of one of the tools in the `tool_choice` parameter of the chat completion request. 
 
 ### Config file
 
@@ -140,10 +148,52 @@ The order of priorities is `command line > config file values > defaults`.
 ## Tool calling in the chat completion API
 vLLM supports only named function calling in the chat completion API. The `tool_choice` options `auto` and `required` are **not yet supported** but on the roadmap.
 
-To use a named function you need to define the function in the `tools` parameter and call it in the `tool_choice` parameter. 
-
-It is the callers responsibility to prompt the model with the tool information, vLLM will not automatically manipulate the prompt. **This may change in the future.**
+It is the callers responsibility to prompt the model with the tool information, vLLM will not automatically manipulate the prompt.
 
 vLLM will use guided decoding to ensure the response matches the tool parameter object defined by the JSON schema in the `tools` parameter.
 
-Please refer to the OpenAI API reference documentation for more information.
+
+### Automatic Function Calling
+To enable this feature, you should set the following flags:
+* `--enable-auto-tool-choice` -- **mandatory** Auto tool choice. tells vLLM that you want to enable the model to generate its own tool calls when it 
+deems appropriate.
+* `--tool-call-parser` -- select the tool parser to use - currently either `hermes` or `mistral`. Additional tool parsers 
+will continue to be added in the future.
+* `--chat-template` -- **optional** for auto tool choice. the path to the chat template which handles `tool`-role messages and `assistant`-role messages 
+that contain previously generated tool calls. Hermes and Mistral models have tool-compatible chat templates in their 
+`tokenizer_config.json` files, but you can specify a custom template. This argument can be set to `tool_use` if your model has a tool use-specific chat 
+template configured in the `tokenizer_config.json`. In this case, it will be used per the `transformers` specification. More on this [here](https://huggingface.co/docs/transformers/en/chat_templating#why-do-some-models-have-multiple-templates)
+from HuggingFace; and you can find an example of this in a `tokenizer_config.json` [here](https://huggingface.co/NousResearch/Hermes-2-Pro-Llama-3-8B/blob/main/tokenizer_config.json)
+
+If your favorite tool-calling model is not supported, please feel free to contribute a parser & tool use chat template! 
+
+#### Hermes Models
+All Nous Research Hermes-series models newer than Hermes 2 Pro should be supported.
+* `NousResearch/Hermes-2-Pro-*`
+* `NousResearch/Hermes-2-Theta-*`
+* `NousResearch/Hermes-3-*`
+
+
+_Note that the Hermes 2 **Theta** models are known to have degraded tool call quality & capabilities due to the merge 
+step in their creation_. 
+
+Flags: `--tool-call-parser hermes`
+
+#### Mistral Models
+Supported models:
+* `mistralai/Mistral-7B-Instruct-v0.3` (confirmed)
+* Additional mistral function-calling models are compatible as well.
+
+Known issues:
+1. Mistral 7B struggles to generate parallel tool calls correctly. 
+2. Mistral's `tokenizer_config.json` chat template requires tool call IDs that are exactly 9 digits, which is 
+much shorter than what vLLM generates. Since an exception is thrown when this condition 
+is not met, the following additional chat templates are provided:
+
+* `examples/tool_chat_template_mistral.jinja` - this is the "official" Mistral chat template, but tweaked so that
+it works with vLLM's tool call IDs (provided `tool_call_id` fields are truncated to the last 9 digits)
+* `examples/tool_chat_template_mistral_parallel.jinja` - this is a "better" version that adds a tool-use system prompt
+when tools are provided, that results in much better reliability when working with parallel tool calling.
+
+
+Recommended flags: `--tool-call-parser mistral --chat-template examples/tool_chat_template_mistral_parallel.jinja`
