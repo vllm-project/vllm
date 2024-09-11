@@ -50,7 +50,8 @@ def dummy_data_for_pixtral(ctx: InputContext, seq_len: int,
         tokenizer_mode=ctx.model_config.tokenizer_mode)
     mm_encoder = tokenizer.instruct.mm_encoder
 
-    max_num_images_per_request = ctx.model_config.multimodal_config.limit_per_prompt.get(
+    mm_config = ctx.model_config.multimodal_config
+    max_num_images_per_request = mm_config.limit_per_prompt.get(
         "image", 1)
 
     # approximate image size
@@ -114,10 +115,16 @@ def merge_multimodal_embeddings(input_ids: torch.Tensor,
 
     assert (
         D_txt == D_img
-    ), f"Text features dim {D_txt} should be equal to image features dim {D_img}"
+    ), (
+        f"Text features dim {D_txt} should be equal "
+        "to image features dim {D_img}"
+    )
     assert (
         seq_len == N_txt + N_img
-    ), f"seq_len {seq_len} should be equal to N_txt + N_img {(N_txt, N_img, image_locations.sum().item())}"
+    ), (
+        f"seq_len {seq_len} should be equal to N_txt + N_img "
+        f"{(N_txt, N_img, image_locations.sum().item())}"
+    )
 
     inputs_embeds[image_locations, :] = image_features
     return inputs_embeds
@@ -310,8 +317,8 @@ def precompute_freqs_cis_2d(
     theta: float,
 ) -> torch.Tensor:
     """
-    freqs_cis: 2D complex tensor of shape (height, width, dim // 2) to be indexed by
-        (height, width) position tuples
+    freqs_cis: 2D complex tensor of shape (height, width, dim // 2)
+        to be indexed by (height, width) position tuples
     """
     # (dim / 2) frequency bases
     freqs = 1.0 / (theta**(torch.arange(0, dim, 2).float() / dim))
@@ -506,10 +513,11 @@ class VisionTransformer(nn.Module):
     ) -> torch.Tensor:
         """
         Args:
-            images: list of N_img images of variable sizes, each of shape (C, H, W)
+            images: list of N_img images of variable sizes, 
+                each of shape (C, H, W)
         Returns:
-            image_features: tensor of token features for all tokens of all images of
-                shape (N_toks, D)
+            image_features: tensor of token features for 
+                all tokens of all images of shape (N_toks, D)
         """
         # pass images through initial convolution independently
         patch_embeds_list = [
