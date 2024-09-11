@@ -519,11 +519,14 @@ def apply_hf_chat_template(
 def apply_mistral_chat_template(
     tokenizer: MistralTokenizer,
     messages: List[ChatCompletionMessageParam],
-    chat_template: Optional[str],
+    chat_template: Optional[str] = None,
     **kwargs: Any,
 ) -> List[int]:
+    if chat_template is not None:
+        logger.warning(
+            "'chat_template' cannot be overridden for mistral tokenizer.")
+
     return tokenizer.apply_chat_template(
         messages=messages,
-        chat_template=chat_template,
         **kwargs,
     )
