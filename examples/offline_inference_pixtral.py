@@ -43,7 +43,7 @@ Usage:
 
 
 def run_simple_demo():
-    model_name = "mistralai/Pixtral-12B-0910"
+    model_name = "mistralai/Pixtral-12B-2409"
     sampling_params = SamplingParams(max_tokens=8192)
 
     llm = LLM(model=model_name, tokenizer_mode="mistral")
@@ -75,7 +75,7 @@ def run_simple_demo():
 
 
 def run_advanced_demo():
-    model_name = "mistralai/Pixtral-12B-0910"
+    model_name = "mistralai/Pixtral-12B-2409"
     max_img_per_msg = 5
     max_tokens_per_img = 4096
 
@@ -90,8 +90,8 @@ def run_advanced_demo():
     prompt = "Describe the following image."
 
     url_1 = "https://huggingface.co/datasets/patrickvonplaten/random_img/resolve/main/yosemite.png"
-    url_2 = "https://huggingface.co/datasets/patrickvonplaten/random_img/resolve/main/slack.png"
-    url_3 = "https://picsum.photos/200/300"
+    url_2 = "https://picsum.photos/seed/picsum/200/300"
+    url_3 = "https://picsum.photos/id/32/512/512"
 
     messages = [
         {
@@ -108,26 +108,26 @@ def run_advanced_demo():
                         "url": url_1
                     }
                 },
-            ],
-        },
-        {
-            "role": "assistant",
-            "content": "The image shows nature.",
-        },
-        {
-            "role": "user",
-            "content": "In more detail for all the following images.",
-        },
-        {
-            "role":
-            "user",
-            "content": [
                 {
                     "type": "image_url",
                     "image_url": {
                         "url": url_2
                     }
                 },
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": "The images show nature.",
+        },
+        {
+            "role": "user",
+            "content": "More details please and answer only in French!.",
+        },
+        {
+            "role":
+            "user",
+            "content": [
                 {
                     "type": "image_url",
                     "image_url": {

@@ -6,10 +6,7 @@ import pytest
 
 from vllm.sampling_params import SamplingParams
 
-MODELS = [
-    # "mistralai/Pixtral-12B-2409"
-    "bullerwins/pixtral-12b-240910"
-]
+MODELS = ["mistralai/Pixtral-12B-2409"]
 
 
 @pytest.mark.parametrize("model", MODELS)
