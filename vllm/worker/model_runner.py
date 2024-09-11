@@ -30,6 +30,7 @@ from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata, SamplingMetadataCache
+from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -181,6 +182,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         def simple_reinit(self):
             self.input_tokens[0].clear()  # type: ignore
             self.input_positions[0].clear()  # type: ignore
+            self.mrope_input_positions = None  # type: ignore
             self.seq_lens[0] = 0  # type: ignore
             self.orig_seq_lens[0] = 0  # type: ignore
             self.query_lens[0] = 0  # type: ignore
@@ -206,6 +208,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             # Input tokens and positions.
             input_tokens: Optional[List[List[int]]] = None,
             input_positions: Optional[List[List[int]]] = None,
+            mrope_input_positions: Optional[List[List[List[int]]]] = None,
 
             # The sequence length (may be capped to the sliding window).
             seq_lens: Optional[List[int]] = None,
@@ -265,6 +268,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                     else:
                         for seq_id in range(len(self.seq_ids)):
                             self.input_positions[seq_id].clear()
+
+                    self.mrope_input_positions = None
 
                     if seq_lens:
                         self.seq_lens = seq_lens
@@ -327,6 +332,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             else:
                 self.input_tokens = input_tokens or []
                 self.input_positions = input_positions or []
+                self.mrope_input_positions = mrope_input_positions or None
                 self.seq_lens = seq_lens or []
                 self.orig_seq_lens = orig_seq_lens or []
                 self.query_lens = query_lens or []
@@ -357,6 +363,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
             self.input_tokens = [[] for _ in range(self.n_seqs)]
             self.input_positions = [[] for _ in range(self.n_seqs)]
+            self.mrope_input_positions = None
             self.seq_lens = [0] * self.n_seqs
             self.orig_seq_lens = [0] * self.n_seqs
             self.query_lens = [0] * self.n_seqs
@@ -492,6 +499,17 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         inter_data.query_lens[
             seq_idx] = seq_len - context_len if inter_data.is_prompt else 1
+
+        if seq_data.mrope_position_delta is not None:
+            if inter_data.mrope_input_positions is None:
+                inter_data.mrope_input_positions = [None] * inter_data.n_seqs
+
+            inter_data.mrope_input_positions[
+                seq_idx] = MRotaryEmbedding.get_next_input_positions(
+                    seq_data.mrope_position_delta,
+                    context_len,
+                    seq_len,
+                )
 
     def _compute_for_prefix_cache_hit(
             self, inter_data: InterDataForSeqGroup, seq_idx: int,
@@ -636,6 +654,40 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         mm_kwargs = self.multi_modal_input_mapper(mm_data)
         inter_data.multi_modal_inputs = mm_kwargs
 
+        # special processing for mrope position deltas.
+        if self.runner.model_is_mrope:
+            image_grid_thw = mm_kwargs.get("image_grid_thw", None)
+            video_grid_thw = mm_kwargs.get("video_grid_thw", None)
+            assert image_grid_thw is not None or video_grid_thw is not None, (
+                "mrope embedding type requires multi-modal input mapper "
+                "returns 'image_grid_thw' or 'video_grid_thw'.")
+
+            hf_config = self.runner.model_config.hf_config
+
+            inter_data.mrope_input_positions = [None] * inter_data.n_seqs
+            for seq_idx in range(inter_data.n_seqs):
+                seq_data = seq_group_metadata.seq_data[
+                    inter_data.seq_ids[seq_idx]]
+                token_ids = seq_data.get_token_ids()
+
+                mrope_input_positions, mrope_position_delta = \
+                    MRotaryEmbedding.get_input_positions(
+                        token_ids,
+                        image_grid_thw=image_grid_thw,
+                        video_grid_thw=video_grid_thw,
+                        image_token_id=hf_config.image_token_id,
+                        video_token_id=hf_config.video_token_id,
+                        vision_start_token_id=hf_config.vision_start_token_id,
+                        vision_end_token_id=hf_config.vision_end_token_id,
+                        spatial_merge_size=hf_config.vision_config.
+                        spatial_merge_size,
+                        context_len=inter_data.context_lens[seq_idx],
+                    )
+
+                seq_data.mrope_position_delta = mrope_position_delta
+                inter_data.mrope_input_positions[
+                    seq_idx] = mrope_input_positions
+
     def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata):
         """Add a sequence group to the builder."""
         seq_ids = seq_group_metadata.seq_data.keys()
@@ -684,10 +736,27 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             # prefix caching and there is no decode request.
             return self.model_input_cls()
 
-        input_positions = []
-        for inter_data in self.inter_data_list:
-            for cur_input_positions in inter_data.input_positions:
-                input_positions.extend(cur_input_positions)
+        mrope_input_positions: Optional[List[List[int]]] = None
+        if any(inter_data.mrope_input_positions is not None
+               for inter_data in self.inter_data_list):
+            mrope_input_positions = [[] for _ in range(3)]
+            for idx in range(3):
+                for inter_data in self.inter_data_list:
+                    msections = inter_data.mrope_input_positions
+                    if msections is None:
+                        for _seq_input_positions in inter_data.input_positions:
+                            mrope_input_positions[idx].extend(
+                                _seq_input_positions)
+                    else:
+                        for _seq_mrope_input_positions in msections:
+                            mrope_input_positions[idx].extend(
+                                _seq_mrope_input_positions[idx])
+            input_positions = None
+        else:
+            input_positions = []
+            for inter_data in self.inter_data_list:
+                for cur_input_positions in inter_data.input_positions:
+                    input_positions.extend(cur_input_positions)
 
         seq_lens = []
         max_decode_seq_len = 0
@@ -724,15 +793,24 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # Tokens and positions.
         if cuda_graph_pad_size:
             input_tokens.extend(itertools.repeat(0, cuda_graph_pad_size))
-            input_positions.extend(itertools.repeat(0, cuda_graph_pad_size))
         assert self.runner.device is not None
         input_tokens_tensor = async_tensor_h2d(input_tokens, torch.long,
                                                self.runner.device,
                                                self.runner.pin_memory)
-        input_positions_tensor = async_tensor_h2d(input_positions, torch.long,
-                                                  self.runner.device,
-                                                  self.runner.pin_memory)
-
+        if mrope_input_positions is not None:
+            for idx in range(3):
+                mrope_input_positions[idx].extend(
+                    itertools.repeat(0, cuda_graph_pad_size))
+            input_positions_tensor = async_tensor_h2d(mrope_input_positions,
+                                                      torch.long,
+                                                      self.runner.device,
+                                                      self.runner.pin_memory)
+        else:
+            input_positions.extend(itertools.repeat(0, cuda_graph_pad_size))
+            input_positions_tensor = async_tensor_h2d(input_positions,
+                                                      torch.long,
+                                                      self.runner.device,
+                                                      self.runner.pin_memory)
         # Sequence and query lengths.
         if cuda_graph_pad_size:
             seq_lens.extend(itertools.repeat(1, cuda_graph_pad_size))
@@ -1199,6 +1277,15 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             raise RuntimeError("PromptAdapter is not enabled.")
         return self.prompt_adapter_manager.list_adapters()
 
+    @property
+    def model_is_mrope(self) -> bool:
+        """Detect if the model has "mrope" rope_scaling type.
+        mrope requires keep "rope_deltas" between prompt and decoding phases."""
+        rope_scaling = getattr(self.model_config.hf_config, "rope_scaling", {})
+        if rope_scaling is None:
+            return False
+        return rope_scaling.get("type", None) == "mrope"
+
     @torch.inference_mode()
     def capture_model(self, kv_caches: List[List[torch.Tensor]]) -> None:
         """Cuda graph capture a model.
@@ -1229,7 +1316,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         max_batch_size = self.max_batchsize_to_capture
         input_tokens = torch.zeros(max_batch_size, dtype=torch.long).cuda()
         input_positions = torch.zeros(max_batch_size, dtype=torch.long).cuda()
-
+        if self.model_is_mrope:
+            input_positions = torch.tile(input_positions, (3, 1))
         # Prepare dummy previous_hidden_states only if needed by the model.
         # This is used by draft models such as EAGLE.
         previous_hidden_states = None
@@ -1293,7 +1381,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         "input_ids":
                         input_tokens[:batch_size],
                         "positions":
-                        input_positions[:batch_size],
+                        input_positions[..., :batch_size],
                         "hidden_or_intermediate_states":
                         hidden_or_intermediate_states[
                             virtual_engine]  # type: ignore

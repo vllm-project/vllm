@@ -165,6 +165,9 @@ class SequenceData(msgspec.Struct,
     # is called.
     _new_appended_tokens: List[int] = msgspec.field(default_factory=list)
 
+    # It is used to compute mrope_position_ids.
+    _mrope_position_delta: Optional[int] = None
+
     def __post_init__(self) -> None:
         assert self._prompt_token_ids.typecode == "l"
         assert self._output_token_ids.typecode == "l"
@@ -218,6 +221,14 @@ class SequenceData(msgspec.Struct,
         """
         assert isinstance(self._output_token_ids, array)
         return self._output_token_ids
+
+    @property
+    def mrope_position_delta(self) -> Optional[int]:
+        return self._mrope_position_delta
+
+    @mrope_position_delta.setter
+    def mrope_position_delta(self, new_mrope_position_delta):
+        self._mrope_position_delta = new_mrope_position_delta
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self._output_token_ids.append(token_id)
