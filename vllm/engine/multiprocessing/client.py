@@ -11,7 +11,7 @@ import zmq.asyncio
 from zmq import Frame  # type: ignore[attr-defined]
 from zmq.asyncio import Socket
 
-from vllm.config import DecodingConfig, EngineConfig, LoRAConfig, ModelConfig
+from vllm.config import DecodingConfig, EngineConfig, ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -323,8 +323,8 @@ class MQLLMEngineClient:
         # Raise error if unsuccessful
         if isinstance(response, BaseException):
             raise response
-        elif (not isinstance(response, str) or 
-            response != VLLM_RPC_SUCCESS_STR):
+        elif (not isinstance(response, str)
+              or response != VLLM_RPC_SUCCESS_STR):
             raise ValueError(error_message)
 
     async def get_tokenizer(self, lora_request: LoRARequest):

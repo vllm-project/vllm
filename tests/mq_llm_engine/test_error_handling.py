@@ -9,6 +9,7 @@ import pytest
 from tests.mq_llm_engine.utils import RemoteMQLLMEngine
 from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.engine.llm_engine import LLMEngine
 from vllm.engine.multiprocessing import MQEngineDeadError
 from vllm.engine.multiprocessing.engine import MQLLMEngine
 from vllm.entrypoints.openai.api_server import build_async_engine_client
@@ -168,12 +169,13 @@ async def test_failed_abort(tmp_socket):
                 pass
         assert "KeyError" in repr(execinfo.value)
         assert client.errored
+
         await abort_task
 
         # This should raise the original error.
         with pytest.raises(RAISED_ERROR):
             await client.check_health()
-        
+
         client.close()
 
 
@@ -190,7 +192,8 @@ async def test_bad_request(tmp_socket):
                                            sampling_params=SamplingParams(),
                                            request_id="abcd-1",
                                            lora_request=LoRARequest(
-                                               "invalid-lora", 1, "invalid-path")):
+                                               "invalid-lora", 1,
+                                               "invalid-path")):
                 pass
 
         # This request should be okay.
@@ -204,14 +207,17 @@ async def test_bad_request(tmp_socket):
 
 
 @pytest.mark.asyncio
-async def test_mp_crash_detection():
+async def test_mp_crash_detection(monkeypatch):
 
     parser = FlexibleArgumentParser(description="vLLM's remote OpenAI server.")
     parser = make_arg_parser(parser)
     args = parser.parse_args([])
-    # use an invalid tensor_parallel_size to trigger the
-    # error in the server
-    args.tensor_parallel_size = 65536
+
+    # When LLMEngine is loaded, it will crash.
+    def mock_init():
+        raise ValueError
+
+    monkeypatch.setattr(LLMEngine, "__init__", mock_init)
 
     start = time.perf_counter()
     async with build_async_engine_client(args):
