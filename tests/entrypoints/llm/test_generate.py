@@ -1,3 +1,5 @@
+import importlib
+import sys
 import weakref
 from typing import List
 
@@ -193,3 +195,34 @@ def test_chat_multi_image(image_urls: List[str]):
     }]
     outputs = llm.chat(messages)
     assert len(outputs) >= 0
+
+
+@pytest.mark.skip_global_cleanup
+def test_offline_mode(llm: LLM, monkeypatch):
+    # we use the llm fixture to ensure the model files are in-cache
+    del llm
+    hf_hub_modules = [
+        v for k, v in sys.modules.items() if k.startswith("huggingface_hub")
+    ]
+
+    # Set HF to offline mode and ensure we can still construct an LLM
+    try:
+        monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+        # Need to re-import huggingface_hub library to setup offline mode
+        _re_import_modules(hf_hub_modules)
+        # Cached model files should be used in offline mode
+        LLM(model=MODEL_NAME,
+            max_num_batched_tokens=4096,
+            tensor_parallel_size=1,
+            gpu_memory_utilization=0.10,
+            enforce_eager=True)
+    finally:
+        # Reset the environment after the test
+        # NB: Assuming tests are run in online mode
+        monkeypatch.delenv("HF_HUB_OFFLINE")
+        _re_import_modules(hf_hub_modules)
+
+
+def _re_import_modules(modules: List):
+    for module in modules:
+        importlib.reload(module)
