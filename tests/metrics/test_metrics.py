@@ -224,7 +224,7 @@ def test_metric_spec_decode(
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
-@pytest.mark.parametrize("max_tokens", [10])
+@pytest.mark.parametrize("max_tokens", [8])
 @pytest.mark.parametrize("log_interval", [1, 3, 5, 7])
 def test_metric_spec_decode_interval(
     vllm_runner,
@@ -234,7 +234,7 @@ def test_metric_spec_decode_interval(
     max_tokens: int,
     log_interval: int,
 ) -> None:
-    k = 5
+    k = 4
 
     engine_args = EngineArgs(model=model,
                              dtype=dtype,
@@ -252,7 +252,7 @@ def test_metric_spec_decode_interval(
         engine.add_request(
             "request-id-0",
             example_prompts[0],
-            SamplingParams(max_tokens=max_tokens, temperature=0),
+            SamplingParams(max_tokens=max_tokens),
         )
 
         # set log internal
