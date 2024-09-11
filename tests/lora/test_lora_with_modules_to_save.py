@@ -2,7 +2,6 @@
 Compare the outputs of HF and vLLM for Llama3 with/without 
 LoRA with modules_to_save.
 """
-import os
 import pytest
 
 from tests.models.utils import check_logprobs_close

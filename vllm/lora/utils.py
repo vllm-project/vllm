@@ -26,8 +26,7 @@ from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
                               ModulesToSaveWrapper, QKVParallelLinearWithLora,
                               ReplicatedLinearWithLoRA,
                               RowParallelLinearWithLoRA,
-                              VocabParallelEmbeddingWithLoRA, 
-                              ModulesToSaveWrapper)
+                              VocabParallelEmbeddingWithLoRA)
 # yapf: enable
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
@@ -119,7 +118,6 @@ def parse_fine_tuned_lora_name(
                 return '.'.join(parts[2:-1]), None
         elif parts[-1] == "lora_embedding_A" or parts[-1] == "lora_embedding_B":
             return ".".join(parts[2:-1]), parts[-1] == "lora_embedding_A"
-        
 
     raise ValueError(f"{name} is unsupported LoRA weight")
 

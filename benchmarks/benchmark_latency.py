@@ -16,61 +16,16 @@ from vllm.inputs import PromptType
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.utils import FlexibleArgumentParser
-from vllm.lora.request import LoRARequest
 
 
 def main(args: argparse.Namespace):
     
     engine_args = EngineArgs.from_cli_args(args)
 
-    lora_kwargs={}
-    if args.lora_path is not None:
-        lora_kwargs['enable_lora']=True
-        lora_kwargs['max_loras']=args.max_loras
-        lora_kwargs['max_lora_rank']=args.max_lora_rank
-
     # NOTE(woosuk): If the request cannot be processed in a single batch,
     # the engine will automatically process the request in multiple batches.
     llm = LLM(**dataclasses.asdict(engine_args))
-    lora_kwargs={}
-    lora_kwargs = {}
-    if args.lora_path is not None:
-        lora_kwargs['enable_lora'] = True
-        lora_kwargs['max_loras'] = args.max_loras
-        lora_kwargs['max_lora_rank'] = args.max_lora_rank
-
-    # NOTE(woosuk): If the request cannot be processed in a single batch,
-    # the engine will automatically process the request in multiple batches.
-
-    llm = LLM(
-        model=args.model,
-        speculative_model=args.speculative_model,
-        num_speculative_tokens=args.num_speculative_tokens,
-        speculative_draft_tensor_parallel_size=\
-            args.speculative_draft_tensor_parallel_size,
-        tokenizer=args.tokenizer,
-        quantization=args.quantization,
-        tensor_parallel_size=args.tensor_parallel_size,
-        trust_remote_code=args.trust_remote_code,
-        dtype=args.dtype,
-        max_model_len=args.max_model_len,
-        enforce_eager=args.enforce_eager,
-        kv_cache_dtype=args.kv_cache_dtype,
-        quantization_param_path=args.quantization_param_path,
-        device=args.device,
-        ray_workers_use_nsight=args.ray_workers_use_nsight,
-        use_v2_block_manager=args.use_v2_block_manager,
-        enable_chunked_prefill=args.enable_chunked_prefill,
-        download_dir=args.download_dir,
-        block_size=args.block_size,
-        gpu_memory_utilization=args.gpu_memory_utilization,
-        load_format=args.load_format,
-        distributed_executor_backend=args.distributed_executor_backend,
-        otlp_traces_endpoint=args.otlp_traces_endpoint,
-        enable_prefix_caching=args.enable_prefix_caching,
-        **lora_kwargs
-    )
-
+    
     sampling_params = SamplingParams(
         n=args.n,
         temperature=1.0,

@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from huggingface_hub import snapshot_download
+from peft import PeftModel
 from PIL import Image
 from transformers import (AutoModelForCausalLM, AutoTokenizer, BatchEncoding,
                           BatchFeature)
@@ -38,7 +39,6 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, cuda_device_count_stateless,
                         identity, is_cpu)
-from vllm.lora.request import LoRARequest
 
 logger = init_logger(__name__)
 
@@ -236,7 +236,8 @@ def video_assets() -> _VideoAssets:
 
 
 _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature)
-        
+
+
 class HfRunner:
 
     def wrap_device(self, x: _T, device: Optional[str] = None) -> _T:
@@ -650,7 +651,9 @@ class PeftRunner(HfRunner):
         self.model = PeftModel.from_pretrained(self.model,
                                                model_id=adapter_name)
 
+
 class PeftRunner(HfRunner):
+
     def __init__(
         self,
         model_name: str,
@@ -662,19 +665,21 @@ class PeftRunner(HfRunner):
         postprocess_inputs: Callable[[BatchEncoding],
                                      BatchEncoding] = identity,
     ) -> None:
-        super().__init__(model_name, 
-                         dtype, 
-                         model_kwargs=model_kwargs, 
-                         is_embedding_model = False, 
-                         auto_cls=auto_cls, 
+        super().__init__(model_name,
+                         dtype,
+                         model_kwargs=model_kwargs,
+                         is_embedding_model=False,
+                         auto_cls=auto_cls,
                          postprocess_inputs=postprocess_inputs)
-        
-        self.model=PeftModel.from_pretrained(self.model, model_id=adapter_name)
-        
+
+        self.model = PeftModel.from_pretrained(self.model,
+                                               model_id=adapter_name)
+
 
 @pytest.fixture(scope="session")
 def hf_runner():
     return HfRunner
+
 
 @pytest.fixture(scope="session")
 def peft_runner():

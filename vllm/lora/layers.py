@@ -23,9 +23,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
-
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import (
     LinearScalingRotaryEmbedding, RotaryEmbedding)
@@ -69,23 +66,24 @@ def _not_fully_sharded_can_replace(can_replace):
 
     return dec
 
+
 class TensorPropertiesMixin:
-    
+
     @property
     def dtype(self):
         return self._dtype
-    
+
     @dtype.setter
     def dtype(self, value):
-        self._dtype=value
+        self._dtype = value
 
     @property
     def device(self):
         return self._device
-    
+
     @device.setter
     def device(self, value):
-        self._device=value
+        self._device = value
 
 
 class TensorPropertiesMixin:
@@ -200,25 +198,20 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA, TensorPropertiesMixin):
             self.embeddings_slice = None
             self.embeddings_weights = None
 
-        self.embeddings_tensors = torch.zeros(
-            (
-                max_loras,
-                lora_config.lora_extra_vocab_size,
-                self.base_layer.embedding_dim,
-            ),
-            dtype=self.dtype,
-            device=self.device
-        )
-        self.lora_a_stacked = torch.zeros(
-            (
-                max_loras,
-                self.base_layer.org_vocab_size +
-                lora_config.lora_extra_vocab_size,
-                lora_config.max_lora_rank,
-            ),
-            dtype=self.dtype,
-            device=self.device
-        )
+        self.embeddings_tensors = torch.zeros((
+            max_loras,
+            lora_config.lora_extra_vocab_size,
+            self.base_layer.embedding_dim,
+        ),
+                                              dtype=self.dtype,
+                                              device=self.device)
+        self.lora_a_stacked = torch.zeros((
+            max_loras,
+            self.base_layer.org_vocab_size + lora_config.lora_extra_vocab_size,
+            lora_config.max_lora_rank,
+        ),
+                                          dtype=self.dtype,
+                                          device=self.device)
         self.lora_b_stacked = torch.zeros(
             (
                 max_loras,
@@ -1060,7 +1053,6 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
         return type(source_layer) is RowParallelLinear
 
 
-
 class LogitsProcessorWithLoRA(BaseLayerWithLoRA, TensorPropertiesMixin):
     """
     LoRA wrapper for LogitsProcessor, with extra logic to handle the
@@ -1399,11 +1391,11 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
     @property
     def org_vocab_size(self):
         return self.base_layer.org_vocab_size
-    
+
     @property
     def embedding_dim(self):
         return self.base_layer.embedding_dim
-    
+
     @property
     def bias(self):
         return self.base_layer.bias
@@ -1454,19 +1446,15 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
         lora_config: LoRAConfig,
         model_config: Optional[PretrainedConfig] = None,
     ) -> None:
-        
-        self.dtype=lora_config.lora_dtype
-        
+
+        self.dtype = lora_config.lora_dtype
+
         self.lm_head_tensors = torch.zeros(
-            (
-                max_loras,
-                self.padded_vocab_size,
-                self.base_layer.embedding_dim
-            ),
+            (max_loras, self.padded_vocab_size, self.base_layer.embedding_dim),
             dtype=lora_config.lora_dtype,
             device=self.device,
         )
-        
+
     def reset_lora(self, index: int):
         weights = self.base_layer.weight
         self._lora_tensors[index, :weights.shape[0], :weights.shape[1]].copy_(
@@ -1483,10 +1471,9 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
         assert embeddings_tensor is None
 
         self.reset_lora(index)
-        self.lm_head_tensors[index,
-                            :lora_b.shape[0], :lora_b.shape[1]].copy_(
-                                lora_b, non_blocking=True)
-        
+        self.lm_head_tensors[index, :lora_b.shape[0], :lora_b.shape[1]].copy_(
+            lora_b, non_blocking=True)
+
     def forward(self, *args, **kwargs):
         return type(self.base_layer).forward(self, *args, **kwargs)
 
