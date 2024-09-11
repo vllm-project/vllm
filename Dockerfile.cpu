@@ -2,6 +2,10 @@
 
 FROM ubuntu:22.04 AS cpu-test-1
 
+ENV CCACHE_DIR=/root/.cache/ccache
+
+ENV CMAKE_CXX_COMPILER_LAUNCHER=ccache
+
 RUN --mount=type=cache,target=/var/cache/apt \
     apt-get update -y \
     && apt-get install -y curl ccache git wget vim numactl gcc-12 g++-12 python3 python3-pip libtcmalloc-minimal4 libnuma-dev \
@@ -26,6 +30,19 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --upgrade pip && \
     pip install -r requirements-build.txt
 
+# install oneDNN
+RUN git clone -b rls-v3.5 https://github.com/oneapi-src/oneDNN.git
+
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    cmake -B ./oneDNN/build -S ./oneDNN -G Ninja -DONEDNN_LIBRARY_TYPE=STATIC \ 
+    -DONEDNN_BUILD_DOC=OFF \ 
+    -DONEDNN_BUILD_EXAMPLES=OFF \ 
+    -DONEDNN_BUILD_TESTS=OFF \ 
+    -DONEDNN_BUILD_GRAPH=OFF \ 
+    -DONEDNN_ENABLE_WORKLOAD=INFERENCE \ 
+    -DONEDNN_ENABLE_PRIMITIVE=MATMUL && \
+    cmake --build ./oneDNN/build --target install --config Release
+
 FROM cpu-test-1 AS build
 
 WORKDIR /workspace/vllm
@@ -41,7 +58,6 @@ COPY ./ ./
 ARG VLLM_CPU_DISABLE_AVX512
 ENV VLLM_CPU_DISABLE_AVX512=${VLLM_CPU_DISABLE_AVX512}
 
-ENV CCACHE_DIR=/root/.cache/ccache
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/ccache \
     VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel && \
