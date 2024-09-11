@@ -1,21 +1,22 @@
 """Compare the outputs of HF and vLLM for Llama3 with/without LoRA with modules_to_save.
 
 """
+import os
 import pytest
 from tests.models.utils import check_logprobs_close
 from vllm.lora.request import LoRARequest
 
 MODELS = [
     #"/workspace/meta-llama3-8b-instruct"
-    "/workspace/t-lite/backbone"
-
+    "/workspace/t-lite-instruct/1/t-lite-instruct/"
 ]
 
 LORAS=[
     #'/workspace/llama3_lora'
-    "/workspace/t-lite/lora_shopping"
+    "/workspace/t-lite-instruct/1/shopping"
     ]
 
+os.environ['CUDA_VISIBLE_DEVICES']="1"
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
@@ -64,7 +65,7 @@ def test_llama3_loras_switches(
     num_logprobs: int,
 ) -> None:
     
-    with vllm_runner(model, dtype=dtype, enable_lora=True, gpu_memory_utilization=0.5) as vllm_lora_model:
+    with vllm_runner(model, dtype=dtype, enable_lora=True, gpu_memory_utilization=0.3) as vllm_lora_model:
         vllm_outputs = []
         for i in range(len(example_prompts)):
             lora_request=None if i%2==0 else LoRARequest('lora',1,lora_local_path=adapter_name)

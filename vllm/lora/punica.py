@@ -15,6 +15,7 @@ if HAS_TRITON:
     from vllm.lora.ops.bgmv_expand import bgmv_expand
     from vllm.lora.ops.bgmv_expand_slice import bgmv_expand_slice
     from vllm.lora.ops.bgmv_shrink import bgmv_shrink
+    from vllm.lora.ops.bgmv_sample import bgmv_sample
     from vllm.lora.ops.sgmv_expand import sgmv_expand
     from vllm.lora.ops.sgmv_expand_slice import sgmv_expand_slice
     from vllm.lora.ops.sgmv_shrink import sgmv_shrink
@@ -603,17 +604,29 @@ class PunicaWrapper:
         bgmv_expand(buffer, wb_t_all, y, self.sampler_indices, add_inputs=True)
         y = y.view_as(y_org)
 
-    def bgmv_sampling(self, y: torch.Tensor,
-             wb_t_all: torch.Tensor): #TODO does not work for large vocab need to be reimplemented in triton
-        # wb_t_all - [num_loras, vocab_size, hidden_dim]
-        indices=self.sampler_indices
-        vocab_size=wb_t_all.shape[-2]
-        buffer = torch.zeros((y.size(0), vocab_size),
-                                 dtype=torch.float32,
-                                 device=y.device)
+    def bgmv_sample(self, hidden_states: torch.Tensor,
+             lm_heads_all: torch.Tensor): 
+        # hidden_states - [num_tokens, hidden_dim]
+        # lm_heads_all - [num_loras, vocab_size, hidden_dim]
 
-        bgmv_shrink(y, wb_t_all, buffer, indices)
-        return buffer
+        '''
+        the same as:
+
+        vocab_size=self.lm_head_tensors.shape[-2]
+        hidden_dim=hidden_states.size(0)
+        
+        logits = torch.zeros((hidden_dim, vocab_size),
+                                 dtype=torch.float32,
+                                 device=hidden_states.device)
+        
+        for i in range(len(hidden_states)):
+            logits[i]=self.lm_head_tensors[indices[i]] @ hidden_states[i]
+        '''
+
+        indices=self.sampler_indices
+        
+        logits=bgmv_sample(hidden_states, lm_heads_all, indices)
+        return logits
         
 
         
