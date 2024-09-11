@@ -9,8 +9,7 @@ RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRO
     chmod 644 /usr/share/keyrings/intel-graphics.gpg
 
 RUN apt-get update  -y \
-&& apt-get install -y curl libicu70 lsb-release git wget vim numactl python3 python3-pip
-
+&& apt-get install -y curl libicu70 lsb-release git wget vim numactl python3 python3-pip ffmpeg libsm6 libxext6 libgl1 
 COPY ./ /workspace/vllm
 
 WORKDIR /workspace/vllm

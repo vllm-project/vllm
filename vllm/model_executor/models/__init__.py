@@ -80,8 +80,10 @@ _MULTIMODAL_MODELS = {
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
     "LlavaForConditionalGeneration":
     ("llava", "LlavaForConditionalGeneration"),
-    "LlavaNextForConditionalGeneration":
-    ("llava_next", "LlavaNextForConditionalGeneration"),
+    "LlavaNextForConditionalGeneration": ("llava_next",
+                                          "LlavaNextForConditionalGeneration"),
+    "LlavaNextVideoForConditionalGeneration":
+    ("llava_next_video", "LlavaNextVideoForConditionalGeneration"),
     "MiniCPMV": ("minicpmv", "MiniCPMV"),
     "PaliGemmaForConditionalGeneration": ("paligemma",
                                           "PaliGemmaForConditionalGeneration"),

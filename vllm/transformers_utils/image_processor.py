@@ -1,6 +1,33 @@
 from typing import cast
 
 
+def get_video_processor(
+    processor_name: str,
+    trust_remote_code: bool = False,
+):
+    """
+    Gets a processor for the given model name via HuggingFace.
+    """
+    from transformers import AutoProcessor
+
+    try:
+        processor = AutoProcessor.from_pretrained(processor_name)
+        video_processor = processor.video_processor
+
+    except ValueError as e:
+        if not trust_remote_code:
+            err_msg = (
+                "Failed to load the processor. If the processor is "
+                "a custom processor not yet available in the HuggingFace "
+                "transformers library, consider setting "
+                "`trust_remote_code=True` in LLM or using the "
+                "`--trust-remote-code` flag in the CLI.")
+            raise RuntimeError(err_msg) from e
+        else:
+            raise e
+    return video_processor
+
+
 def get_image_processor(
     processor_name: str,
     *args,
