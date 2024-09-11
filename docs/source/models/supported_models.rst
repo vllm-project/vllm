@@ -247,6 +247,11 @@ Multimodal Language Models
     - Image\ :sup:`E+`
     - :code:`microsoft/Phi-3-vision-128k-instruct`, :code:`microsoft/Phi-3.5-vision-instruct` etc.
     -
+  * - :code:`PixtralForConditionalGeneration`
+    - Pixtral
+    - Image\ :sup:`E+`
+    - :code:`mistralai/Pixtral-12B-2409`
+    -
   * - :code:`QWenLMHeadModel`
     - Qwen-VL
     - Image\ :sup:`E`
@@ -261,11 +266,6 @@ Multimodal Language Models
     - Ultravox
     - Audio\ :sup:`E+`
     - :code:`fixie-ai/ultravox-v0_3`
-    -
-  * - :code:`PixtralForConditionalGeneration`
-    - Pixtral
-    - Image\ :sup:`E+`
-    - :code:`mistralai/Pixtral-12B-2409`
     -
 
 | :sup:`E` Pre-computed embeddings can be inputted for this modality.
