@@ -52,7 +52,7 @@ from vllm.transformers_utils.tokenizer_group import (
     BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
-from vllm.utils import Counter, Device
+from vllm.utils import Counter, Device, print_warning_once
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -1034,8 +1034,13 @@ class LLMEngine:
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> Union[LLMInputs, EncoderDecoderLLMInputs]:
-
         if self.is_encoder_decoder_model():
+            if self.device_config.device_type == "cpu":
+                print_warning_once(
+                    "The current device type \"cpu\" is not supported "
+                    "for encoder/decoder models and may result in errors "
+                    "or unexpected behavior during model execution.")
+
             # Encoder-decoder model requires special mapping of
             # input prompts to encoder & decoder
             model_inputs = self._process_encoder_decoder_prompt(
