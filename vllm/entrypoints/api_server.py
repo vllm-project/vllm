@@ -86,7 +86,7 @@ async def generate(request: Request) -> Response:
     prompt = final_output.prompt
     assert prompt is not None
     text_outputs = [
-        (prompt + output.text) if is_return_prompt else output.text  # Conditional prompt inclusion
+        (prompt + output.text) if is_return_prompt else output.text
         for output in final_output.outputs
     ]
     ret = {"text": text_outputs}
