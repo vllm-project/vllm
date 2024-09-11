@@ -6,6 +6,8 @@ import pytest
 
 from vllm.sampling_params import SamplingParams
 
+pytestmark = pytest.mark.vlm
+
 MODELS = ["mistralai/Pixtral-12B-2409"]
 
 
