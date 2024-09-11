@@ -49,7 +49,7 @@ try:
     if hasattr(torch, 'xpu') and torch.xpu.is_available():
         is_xpu = True
 except Exception:
-  pass
+    pass
 
 is_cpu = False
 try:
