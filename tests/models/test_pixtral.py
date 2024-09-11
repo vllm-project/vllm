@@ -39,7 +39,6 @@ def test_models(
     with vllm_runner(model, dtype=dtype,
                      tokenizer_mode="mistral") as vllm_model:
 
-
         for i, image_url in enumerate(image_urls):
             messages = [
                 {
