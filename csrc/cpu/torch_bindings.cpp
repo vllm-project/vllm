@@ -4,7 +4,12 @@
 
 #include <torch/library.h>
 
-void init_cpu_threads_env(const std::string& cpu_ids);
+std::string init_cpu_threads_env(const std::string& cpu_ids);
+
+void int8_scaled_mm(torch::Tensor& c, const torch::Tensor& a,
+                    const torch::Tensor& b, const torch::Tensor& a_scales,
+                    const torch::Tensor& b_scales,
+                    const c10::optional<torch::Tensor>& bias);
 
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops
@@ -84,6 +89,28 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                 Tensor! key, int head_size,"
       "                 Tensor cos_sin_cache, bool is_neox) -> ()");
   ops.impl("rotary_embedding", torch::kCPU, &rotary_embedding);
+
+  // Quantization
+#ifdef __AVX512F__
+  // Compute int8 quantized tensor for given scaling factor.
+  ops.def(
+      "static_scaled_int8_quant(Tensor! out, Tensor input, Tensor scale) -> "
+      "()");
+  ops.impl("static_scaled_int8_quant", torch::kCPU, &static_scaled_int8_quant);
+  // Compute int8 quantized tensor and scaling factor
+  ops.def(
+      "dynamic_scaled_int8_quant(Tensor! out, Tensor input, Tensor! scale) -> "
+      "()");
+  ops.impl("dynamic_scaled_int8_quant", torch::kCPU,
+           &dynamic_scaled_int8_quant);
+  // W8A8 GEMM, supporting symmetric per-tensor or per-row/column
+  // quantization.
+  ops.def(
+      "cutlass_scaled_mm(Tensor! out, Tensor a,"
+      "                  Tensor b, Tensor a_scales,"
+      "                  Tensor b_scales, Tensor? bias) -> ()");
+  ops.impl("cutlass_scaled_mm", torch::kCPU, &int8_scaled_mm);
+#endif
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
@@ -111,7 +138,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _utils), utils) {
   // CPU utils
-  utils.def("init_cpu_threads_env(str cpu_ids) -> ()", &init_cpu_threads_env);
+  utils.def("init_cpu_threads_env(str cpu_ids) -> str", &init_cpu_threads_env);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
