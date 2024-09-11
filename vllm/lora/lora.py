@@ -33,8 +33,9 @@ class LoRALayerWeights:
         self.lora_a = lora_a
         self.lora_b = lora_b
         self.embeddings_tensor = embeddings_tensor
+        self.scaling: Optional[float]
 
-        if scaling is None:
+        if (scaling is None) and (self.rank is not None):
             self.scaling = self.lora_alpha / self.rank
         else:
             self.scaling = scaling
@@ -49,7 +50,10 @@ class LoRALayerWeights:
 
     @property
     def input_dim(self) -> int:
-        return self.lora_a.shape[0]
+        if self.lora_a is not None:
+            return self.lora_a.shape[0]
+
+        return self.lora_b.shape[0]
 
     @property
     def output_dim(self) -> int:
@@ -74,27 +78,27 @@ class LoRALayerWeights:
             dtype: torch.dtype,
             device: torch.types.Device,
             embeddings_tensor_dim: Optional[int] = None) -> "LoRALayerWeights":
-        
-        
+
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
         if rank is None:
-            lora_a=None
-            lora_b=torch.zeros([input_dim, output_dim],dtype=dtype,
-                                device=device,
-                                pin_memory=pin_memory)
+            lora_a = None
+            lora_b = torch.zeros([input_dim, output_dim],
+                                 dtype=dtype,
+                                 device=device,
+                                 pin_memory=pin_memory)
             embeddings_tensor = None
-            scaling=1
+            scaling = 1
         else:
             lora_a = torch.zeros([input_dim, rank],
-                                dtype=dtype,
-                                device=device,
-                                pin_memory=pin_memory)
+                                 dtype=dtype,
+                                 device=device,
+                                 pin_memory=pin_memory)
             lora_b = torch.zeros([rank, output_dim],
-                                dtype=dtype,
-                                device=device,
-                                pin_memory=pin_memory)
-            scaling=None
-        
+                                 dtype=dtype,
+                                 device=device,
+                                 pin_memory=pin_memory)
+            scaling = None
+
             embeddings_tensor = torch.rand(
                 10,
                 embeddings_tensor_dim,
@@ -111,6 +115,13 @@ class LoRALayerWeights:
             embeddings_tensor=embeddings_tensor,
         )
 
+    def lora_a_pin_memory(self):
+        if self.lora_a is not None:
+            self.lora_a = self.lora_a.pin_memory()
+
+    def lora_b_pin_memory(self):
+        self.lora_b = self.lora_b.pin_memory()
+
 
 class PackedLoRALayerWeights(LoRALayerWeights):
     """LoRA used for packed layers (eg. qkv_proj)."""
@@ -118,7 +129,7 @@ class PackedLoRALayerWeights(LoRALayerWeights):
     def __init__(
         self,
         module_name: str,
-        rank: int,
+        rank: Optional[int],
         lora_alphas: List[Optional[int]],
         lora_a: List[Optional[torch.Tensor]],
         lora_b: List[Optional[torch.Tensor]],
@@ -134,7 +145,7 @@ class PackedLoRALayerWeights(LoRALayerWeights):
             embeddings_tensor=None,
         )
         self.lora_alphas = lora_alphas
-        if scaling is None:
+        if (scaling is None) and (self.rank is not None):
             self.scaling = [  # type: ignore
                 lora_alpha / self.rank  # type: ignore # noqa
                 for lora_alpha in self.lora_alphas

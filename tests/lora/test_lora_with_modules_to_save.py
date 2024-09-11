@@ -1,18 +1,16 @@
-"""Compare the outputs of HF and vLLM for Llama3 with/without LoRA with modules_to_save.
-
 """
-import os
+Compare the outputs of HF and vLLM for Llama3 with/without 
+LoRA with modules_to_save.
+"""
 import pytest
+
 from tests.models.utils import check_logprobs_close
 from vllm.lora.request import LoRARequest
 
-MODELS = [
-    "/workspace/t-lite-instruct/1/t-lite-instruct/"
-]
+MODELS = ["/workspace/t-lite-instruct/1/t-lite-instruct/"]
 
-LORAS=[
-    "/workspace/t-lite-instruct/1/shopping"
-    ]
+LORAS = ["/workspace/t-lite-instruct/1/shopping"]
+
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
@@ -27,7 +25,7 @@ def test_llama3_models(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-    
+
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs)
@@ -43,7 +41,7 @@ def test_llama3_models(
         name_1="vllm",
     )
 
-                
+
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("adapter_name", LORAS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
@@ -60,26 +58,35 @@ def test_llama3_loras_switches(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-    
-    with vllm_runner(model, dtype=dtype, enable_lora=True, gpu_memory_utilization=0.3) as vllm_lora_model:
+
+    with vllm_runner(model,
+                     dtype=dtype,
+                     enable_lora=True,
+                     gpu_memory_utilization=0.3) as vllm_lora_model:
         vllm_outputs = []
         for i in range(len(example_prompts)):
-            lora_request=None if i%2==0 else LoRARequest('lora',1,lora_local_path=adapter_name)
-            output=vllm_lora_model.generate_greedy_logprobs(
-                [example_prompts[i]], max_tokens, num_logprobs, lora_requests=lora_request)
-            
+            lora_request = None if i % 2 == 0 else LoRARequest(
+                'lora', 1, lora_local_path=adapter_name)
+            output = vllm_lora_model.generate_greedy_logprobs(
+                [example_prompts[i]],
+                max_tokens,
+                num_logprobs,
+                lora_requests=lora_request)
+
             vllm_outputs.extend(output)
 
     with peft_runner(model, adapter_name, dtype=dtype) as peft_model:
         peft_outputs = peft_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs)
-        
+
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs)
 
-    
-    peft_hf_outputs=[hf_outputs[i] if i%2==0 else peft_outputs[i] for i in range(len(example_prompts))]
+    peft_hf_outputs = [
+        hf_outputs[i] if i % 2 == 0 else peft_outputs[i]
+        for i in range(len(example_prompts))
+    ]
     check_logprobs_close(
         outputs_0_lst=peft_hf_outputs,
         outputs_1_lst=vllm_outputs,

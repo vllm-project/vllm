@@ -22,11 +22,10 @@ from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
                               LogitsProcessorWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
                               MergedQKVParallelLinearWithLora,
-                              QKVParallelLinearWithLora,
+                              ModulesToSaveWrapper, QKVParallelLinearWithLora,
                               ReplicatedLinearWithLoRA,
                               RowParallelLinearWithLoRA,
-                              VocabParallelEmbeddingWithLoRA, 
-                              ModulesToSaveWrapper)
+                              VocabParallelEmbeddingWithLoRA)
 # yapf: enable
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
@@ -34,21 +33,14 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 logger = init_logger(__name__)
 
 _all_lora_classes: Set[Type[BaseLayerWithLoRA]] = {
-    VocabParallelEmbeddingWithLoRA,
-    ColumnParallelLinearWithLoRA,
-    MergedColumnParallelLinearWithLoRA,
-    QKVParallelLinearWithLora,
-    MergedQKVParallelLinearWithLora,
-    RowParallelLinearWithLoRA,
-    ReplicatedLinearWithLoRA,
-    LogitsProcessorWithLoRA,
-    ColumnParallelLinearWithShardedLoRA,
-    QKVParallelLinearWithShardedLora,
+    VocabParallelEmbeddingWithLoRA, ColumnParallelLinearWithLoRA,
+    MergedColumnParallelLinearWithLoRA, QKVParallelLinearWithLora,
+    MergedQKVParallelLinearWithLora, RowParallelLinearWithLoRA,
+    ReplicatedLinearWithLoRA, LogitsProcessorWithLoRA,
+    ColumnParallelLinearWithShardedLoRA, QKVParallelLinearWithShardedLora,
     MergedColumnParallelLinearWithShardedLoRA,
-    MergedQKVParallelLinearWithShardedLora,
-    RowParallelLinearWithShardedLoRA,
-    LinearScalingRotaryEmbeddingWithLora,
-    ModulesToSaveWrapper
+    MergedQKVParallelLinearWithShardedLora, RowParallelLinearWithShardedLoRA,
+    LinearScalingRotaryEmbeddingWithLora, ModulesToSaveWrapper
 }
 
 
@@ -101,7 +93,8 @@ def parse_fine_tuned_lora_name(name: str) -> Tuple[str, Optional[bool]]:
     return:
         Tuple(module_name, is_lora_a):
             module_name: the name of the module, e.g. model.dense1,
-            is_lora_a whether the tensor is lora_a or lora_b. None - if tensor is for ModulesToSaveWrapper
+            is_lora_a whether the tensor is lora_a or lora_b. 
+            None - if tensor is for ModulesToSaveWrapper
     """
     parts = name.split(".")
 
@@ -113,7 +106,6 @@ def parse_fine_tuned_lora_name(name: str) -> Tuple[str, Optional[bool]]:
                 return parts[-2], None
         elif parts[-1] == "lora_embedding_A" or parts[-1] == "lora_embedding_B":
             return ".".join(parts[2:-1]), parts[-1] == "lora_embedding_A"
-        
 
     raise ValueError(f"{name} is unsupported LoRA weight")
 
