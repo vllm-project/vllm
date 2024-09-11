@@ -17,6 +17,7 @@ from transformers import PretrainedConfig
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
+from vllm.distributed import get_pp_group
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -480,7 +481,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal):
         **kwargs: object,
     ) -> SamplerOutput:
         image_input = self._parse_and_validate_image_input(**kwargs)
-        if image_input is not None:
+        if image_input is not None and get_pp_group().is_first_rank:
             inputs_embeds = self.language_model.model.get_input_embeddings(
                 input_ids)
             vision_embeddings = self._process_image_input(image_input)
