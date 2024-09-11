@@ -14,13 +14,14 @@ def _bgmv_sample_kernel(
     logits_ptr,
     sampling_indices_tensor_ptr,
     HIDDEN_DIM: tl.constexpr,
-    VOCAB_SIZE: tl.constexpr,
-    BLOCK_SIZE_LOGITS: tl.constexpr
+    VOCAB_SIZE: tl.constexpr
 ):
 
-    cur_token = tl.program_id(axis=0)
-    logits_start_idx=tl.program_id(axis=1)*BLOCK_SIZE_LOGITS
+    curr_logit_idx=tl.program_id(axis=0)
+
+    cur_token = tl.program_id(axis=1)
     
+
     lora_index = tl.load(sampling_indices_tensor_ptr + cur_token)
     if lora_index == -1: #TODO multiply to base_layer.weights
         return
@@ -28,14 +29,14 @@ def _bgmv_sample_kernel(
     hidden_state=tl.load(hidden_state_ptr+HIDDEN_DIM*cur_token+tl.arange(0,HIDDEN_DIM))
     hidden_state=hidden_state.expand_dims(0)
 
-    offsets_embed=tl.arange(0, HIDDEN_DIM)
-    offsets_logits=logits_start_idx+tl.arange(0, BLOCK_SIZE_LOGITS)
+    offsets=tl.arange(0, HIDDEN_DIM)[None,:]
 
-    weights=tl.load(lm_heads_all_ptr+lora_index*(VOCAB_SIZE*HIDDEN_DIM)+offsets_embed[None,:]+offsets_logits[:,None]*HIDDEN_DIM)
+    weights=tl.load(lm_heads_all_ptr+lora_index*(VOCAB_SIZE*HIDDEN_DIM)+curr_logit_idx*HIDDEN_DIM+offsets)
 
-    logits=tl.sum(weights*hidden_state, axis=1)
-    
-    tl.store(logits_ptr+cur_token*VOCAB_SIZE+offsets_logits, logits)
+
+    logit=tl.sum(weights*hidden_state)
+
+    tl.store(logits_ptr+cur_token*VOCAB_SIZE+curr_logit_idx, logit)
     
 
 @torch.inference_mode()
@@ -61,11 +62,13 @@ def _bgmv_sample(
                                  dtype=hidden_state.dtype,
                                  device=hidden_state.device)
 
+    print(hidden_state.shape, lm_heads_all.shape, logits.shape, sampling_indices_tensor.shape)
+
     num_tokens = sampling_indices_tensor.shape[0]
     hidden_dim=hidden_state.shape[-1]
 
 
-    grid = lambda meta: (num_tokens,triton.cdiv(vocab_size, meta['BLOCK_SIZE_LOGITS']))
+    grid = lambda meta: (vocab_size,num_tokens,)
 
     _bgmv_sample_kernel[grid](
         hidden_state,
@@ -74,7 +77,6 @@ def _bgmv_sample(
         sampling_indices_tensor,
         HIDDEN_DIM=hidden_dim,
         VOCAB_SIZE=vocab_size,
-        BLOCK_SIZE_LOGITS=2
         #**config,
     )
     return logits
