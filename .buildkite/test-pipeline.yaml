@@ -215,7 +215,8 @@ steps:
   commands:
     # See https://github.com/vllm-project/vllm/issues/5152
     - export VLLM_ATTENTION_BACKEND=XFORMERS
-    - pytest -v -s spec_decode
+    - pytest -v -s spec_decode/e2e/test_multistep_correctness.py
+    - pytest -v -s spec_decode --ignore=spec_decode/e2e/test_multistep_correctness.py
 
 - label: LoRA Test %N # 30min each
   source_file_dependencies:
