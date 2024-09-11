@@ -92,7 +92,6 @@ class MQLLMEngine:
 
         # Error state.
         self._errored_with: Optional[BaseException] = None
- 
 
     @property
     def dead_error(self) -> BaseException:
@@ -100,7 +99,6 @@ class MQLLMEngine:
             return ENGINE_DEAD_ERROR(self._errored_with)
         else:
             return ENGINE_DEAD_ERROR()
-
 
     @classmethod
     def from_engine_args(cls, engine_args: AsyncEngineArgs,

@@ -63,11 +63,11 @@ REQUEST_OUTPUTS_T = Union[List[RequestOutput], RPCError]
 
 
 def ENGINE_DEAD_ERROR(
-        error: Optional[BaseException]) -> MQEngineDeadError:
+        error: Optional[BaseException] = None) -> MQEngineDeadError:
     if error is None:
         return MQEngineDeadError(
             "Engine loop is not running. Inspect the stacktrace to "
-            f"find the original error")
+            "find the original error")
 
     return MQEngineDeadError(
         "Engine loop is not running. Inspect the stacktrace to "

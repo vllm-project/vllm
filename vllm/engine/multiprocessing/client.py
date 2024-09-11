@@ -173,13 +173,15 @@ class MQLLMEngineClient:
         try:
             while True:
                 # Poll, checking for ENGINE_DEAD
-                while await self.output_socket.poll(timeout=VLLM_RPC_TIMEOUT) == 0:
+                while await self.output_socket.poll(timeout=VLLM_RPC_TIMEOUT
+                                                    ) == 0:
                     logger.debug("Waiting for output from MQLLMEngine.")
 
                     # If errored, alert all running requests.
                     if self.errored:
                         for queue_j in tuple(self.output_queues.values()):
-                            queue_j.put_nowait(ENGINE_DEAD_ERROR(self._errored_with))
+                            queue_j.put_nowait(
+                                ENGINE_DEAD_ERROR(self._errored_with))
                         return
 
                 message: Frame = await self.output_socket.recv(copy=False)
@@ -306,7 +308,7 @@ class MQLLMEngineClient:
         # Raise handlable error for graceful shutdown.
         if socket.closed:
             raise MQClientClosedError()
-        
+
         await socket.send_multipart((pickle.dumps(request), ))
 
     async def _await_ack(self, error_message: str, socket: Socket):
