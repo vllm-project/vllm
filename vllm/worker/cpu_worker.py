@@ -364,7 +364,15 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         )
 
         # A small all_reduce for warmup.
-        torch.distributed.all_reduce(torch.zeros(1).cpu())
+        try:
+            torch.distributed.all_reduce(torch.zeros(1).cpu())
+        except Exception as e:
+            logger.warning(
+                "torch.distributed.all_reduce failed because of %s. \
+                Custom allreduce do not support CPU backend. You may run \
+                heterogeneous speculative decoding, please notice it does \
+                not support TP or PP for now if the target model and the \
+                draft model are on different devices", e)
 
         ensure_model_parallel_initialized(
             parallel_config.tensor_parallel_size,

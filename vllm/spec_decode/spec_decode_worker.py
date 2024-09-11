@@ -281,8 +281,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         """
         # The scorer worker model is initialized first in case the proposer
         # model has a smaller TP degree than the target worker.
-        self.proposer_worker.init_device()
         self.scorer_worker.init_device()
+        self.proposer_worker.init_device()
 
         # NOTE(cade): load_model is not part of the WorkerBase interface.
         self.scorer_worker.load_model()
