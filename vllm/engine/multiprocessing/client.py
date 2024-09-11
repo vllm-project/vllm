@@ -193,11 +193,7 @@ class MQLLMEngineClient:
                         rpc_error: RPCError = request_outputs
                         request_id = rpc_error.request_id
                         exception = rpc_error.exception
-<<<<<<< HEAD
-                        engine_errored = rpc_error.is_engine_errored
-=======
                         is_engine_errored = rpc_error.is_engine_errored
->>>>>>> ead62dda25792cfd2318215257d23c464f708a65
                     else:
                         # MPLLMEngine should always return an RPCError to
                         # the output_socket when an issue arises.
@@ -209,18 +205,11 @@ class MQLLMEngineClient:
                             "MPLLMEngine. This should never happen.", error)
                         request_id = None
                         exception = error
-<<<<<<< HEAD
-                        engine_errored = True
-
-                    # If the engine is DEAD and this issue caused it.
-                    if not self._errored_with and engine_errored:
-=======
                         is_engine_errored = True
 
                     # Set to error state only on engine critical error
                     # (and record only the first one)
                     if is_engine_errored and not self._errored_with:
->>>>>>> ead62dda25792cfd2318215257d23c464f708a65
                         self._errored_with = exception
 
                     if request_id is None:
