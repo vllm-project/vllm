@@ -236,3 +236,22 @@ USER 2000
 
 # Set the entrypoint
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+
+
+FROM vllm-openai as vllm-grpc-adapter
+
+USER root
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install vllm-tgis-adapter==0.4.0
+
+ENV GRPC_PORT=8033 \
+    PORT=8000 \
+    # As an optimization, vLLM disables logprobs when using spec decoding by
+    # default, but this would be unexpected to users of a hosted model that
+    # happens to have spec decoding
+    # see: https://github.com/vllm-project/vllm/pull/6485
+    DISABLE_LOGPROBS_DURING_SPEC_DECODING=false
+
+USER 2000
+ENTRYPOINT ["python3", "-m", "vllm_tgis_adapter", "--uvicorn-log-level=warning"]
