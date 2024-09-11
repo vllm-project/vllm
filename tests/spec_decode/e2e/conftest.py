@@ -167,7 +167,7 @@ def run_equality_correctness_test(
             # Force log interval to be 0 to catch all metrics.
             stat_logger = vllm_model.model.llm_engine.stat_loggers[
                 'prometheus']
-            stat_logger.local_interval = 0
+            stat_logger.local_interval = -100
 
         sd_outputs = vllm_model.generate(prompts, sampling_params)
 
