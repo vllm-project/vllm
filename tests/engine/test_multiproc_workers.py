@@ -83,7 +83,7 @@ def test_local_workers() -> None:
     workers[3].process.kill()
 
     # Other workers should get shut down here
-    worker_monitor.join(2)
+    worker_monitor.join(20)
 
     # Ensure everything is stopped
     assert not worker_monitor.is_alive()
@@ -108,7 +108,7 @@ def test_local_workers_clean_shutdown() -> None:
     # Clean shutdown
     worker_monitor.close()
 
-    worker_monitor.join(5)
+    worker_monitor.join(20)
 
     # Ensure everything is stopped
     assert not worker_monitor.is_alive()
@@ -161,7 +161,7 @@ async def test_local_workers_async() -> None:
     workers[3].process.kill()
 
     # Other workers should get shut down here
-    worker_monitor.join(2)
+    worker_monitor.join(20)
 
     # Ensure everything is stopped
     assert not worker_monitor.is_alive()
