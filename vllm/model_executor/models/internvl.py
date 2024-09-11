@@ -270,6 +270,7 @@ def input_mapper_for_internvl(ctx: InputContext, data: object):
         # Add an N dimension for number of images per prompt (currently 1).
         data = data.unsqueeze(0)
     elif is_list_of(data, Image.Image):
+        # we can't stack here because the images may have different num_patches
         data = [
             image_to_pixel_values(img,
                                   image_size,
@@ -277,7 +278,6 @@ def input_mapper_for_internvl(ctx: InputContext, data: object):
                                   max_num,
                                   use_thumbnail=use_thumbnail) for img in data
         ]
-        data = torch.stack(data)
     model_config = ctx.model_config
     tokenizer = cached_get_tokenizer(model_config.tokenizer,
                                      trust_remote_code=True)
