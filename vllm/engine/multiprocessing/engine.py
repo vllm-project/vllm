@@ -1,6 +1,6 @@
 import pickle
 from contextlib import contextmanager
-from typing import Any, Iterator, List, Union
+from typing import Any, Optional, Iterator, List, Union
 
 import cloudpickle
 import zmq
@@ -91,7 +91,7 @@ class MQLLMEngine:
         self.data_ipc_path = f"{ipc_path}{IPC_DATA_EXT}"
 
         # Error state.
-        self._errored = False
+        self._errored_with: Optional[BaseException] = None
 
     @classmethod
     def from_engine_args(cls, engine_args: AsyncEngineArgs,
@@ -124,14 +124,8 @@ class MQLLMEngine:
                 self.run_startup_loop()
                 logger.debug("Starting Engine Loop.")
                 self.run_engine_loop()
-            except Exception as e_core:
-                try:
-                    logger.exception(repr(e_core))
-                    if self._errored:
-                        logger.debug("Starting Dead Loop.")
-                        self.run_engine_dead_loop()
-                except Exception as e_dead_loop:
-                    logger.exception(repr(e_dead_loop))
+            except Exception as e:
+                logger.exception(repr(e))
         except KeyboardInterrupt:
             logger.debug("Shutting down MQLLMEngine.")
         finally:
@@ -205,36 +199,16 @@ class MQLLMEngine:
             if not self.use_async_sockets:
                 self._send_outputs(request_outputs)
 
-    def run_engine_dead_loop(self):
-        """Loop for replying to all requests that we are dead."""
-        if not self._errored:
-            raise ValueError("In dead loop, but found _errored=False")
-
-        # Send a single message that we are dead.
-        rpc_err = RPCError(request_id=None,
-                           is_engine_errored=True,
-                           exception=ENGINE_DEAD_ERROR)
-        self._send_outputs(rpc_err)
-
-        while True:
-            # Poll until there is a request
-            while self.input_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
-                logger.debug("Waiting for new requests in dead loop.")
-
-            # Handle any new data, replying with EngineDeadError
-            self.handle_new_input()
-
     def engine_step(self) -> List[RequestOutput]:
         """Engine step wrapper with error handling."""
 
         try:
             return self.engine.step()
         except Exception as e:
-            self._errored = True
+            self._set_errored(e)
             rpc_err = RPCError(request_id=None,
                                is_engine_errored=True,
                                exception=e)
-            logger.exception(repr(e))
             self._send_outputs(rpc_err)
             raise e
 
@@ -259,8 +233,7 @@ class MQLLMEngine:
                     raise ValueError("Unknown RPCRequest Type: {request}")
 
         except Exception as e:
-            self._errored = True
-            logger.exception(repr(e))
+            self._set_errored(e)
             self._send_unhealthy(e)
             raise e
 
@@ -268,10 +241,10 @@ class MQLLMEngine:
         """Handle RPCGenerateRequest by adding it to the LLMEngine."""
         request_id = request.request_id
 
-        if self._errored:
+        if self._is_errored():
             rpc_err = RPCError(request_id=request_id,
                                is_engine_errored=True,
-                               exception=ENGINE_DEAD_ERROR)
+                               exception=ENGINE_DEAD_ERROR(self._errored_with))
             self._send_outputs(rpc_err)
 
         try:
@@ -304,8 +277,8 @@ class MQLLMEngine:
             logger.info("Aborted request %s.", request.request_id)
 
     def _handle_health_request(self):
-        if self._errored:
-            self._send_unhealthy(ENGINE_DEAD_ERROR)
+        if self._is_errored():
+            self._send_unhealthy(self._errored_with)
 
         # Raises error if unhealthy.
         self.engine.check_health()
@@ -331,6 +304,16 @@ class MQLLMEngine:
         """Callback used by engine to make socket handling async with GPU."""
         self._send_outputs(request_outputs)
         self.handle_new_input()
+
+    def _set_errored(self, e: BaseException):
+        """Log and set errored status if this is the first issue."""
+        logger.exception(repr(e))
+        if self._errored_with is None:
+            self._errored_with = e
+
+    def _is_errored(self) -> bool:
+        """Check _errored status."""
+        return self._errored_with is not None
 
 
 def run_mp_engine(engine_args: AsyncEngineArgs, usage_context: UsageContext,

@@ -9,8 +9,9 @@ import pytest
 from tests.mq_llm_engine.utils import RemoteMQLLMEngine
 from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.multiprocessing import ENGINE_DEAD_ERROR
+from vllm.engine.multiprocessing import MQEngineDeadError
 from vllm.engine.multiprocessing.engine import MQLLMEngine
+from vllm.lora.request import LoRARequest
 from vllm.entrypoints.openai.api_server import build_async_engine_client
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.usage.usage_lib import UsageContext
@@ -75,9 +76,10 @@ async def test_evil_forward(tmp_socket):
                 pass
         except Exception as e:
             # Next exception should be an ENGINE_DEAD_ERROR
-            assert e == ENGINE_DEAD_ERROR, (
+            assert client.errored, "Client should be dead."
+            assert isinstance(e, MQEngineDeadError), (
                 "Engine should be dead and raise ENGINE_DEAD_ERROR")
-            assert client.errored
+            
 
         await asyncio.sleep(2.0)
         try:
@@ -120,10 +122,9 @@ async def test_failed_health_check(tmp_socket):
         try:
             await client.check_health()
         except Exception as e:
-            # First exception should be a RAISED_ERROR
+            assert client.errored, "Client should be dead."
             assert repr(e) == repr(RAISED_ERROR), (
                 "Health check raise the original error.")
-            assert client.errored
 
         # Generate call should throw ENGINE_DEAD_ERROR
         try:
@@ -132,10 +133,9 @@ async def test_failed_health_check(tmp_socket):
                                            request_id=uuid.uuid4()):
                 pass
         except Exception as e:
-            # Next exception should be an ENGINE_DEAD_ERROR
-            assert e == ENGINE_DEAD_ERROR, (
+            assert client.errored, "Client should be dead."
+            assert isinstance(e, MQEngineDeadError), (
                 "Engine should be dead and raise ENGINE_DEAD_ERROR")
-            assert client.errored
 
         # Cleanup
         client.close()
@@ -163,7 +163,6 @@ async def test_failed_abort(tmp_socket):
         assert client.is_running
 
         # Firsh check health should work.
-        await asyncio.sleep(10)
         await client.check_health()
 
         # Trigger an abort on the client side.
@@ -175,15 +174,15 @@ async def test_failed_abort(tmp_socket):
             try:
                 await client.check_health()
             except Exception as e:
-                # First exception should be a RAISED_ERROR
+                assert client.errored, "Client should be dead."
                 assert repr(e) == repr(RAISED_ERROR), (
                     "Health check raise the original error.")
-                assert client.errored
 
         # Trigger an abort in 2s from now.
         abort_task = asyncio.create_task(bad_abort_after_2s())
 
         # Exception in abort() will happen during this generation.
+        # This will kill the engine and should return ENGINE_DEAD_ERROR.
         try:
             async for _ in client.generate(
                     inputs="Hello my name is",
@@ -191,8 +190,9 @@ async def test_failed_abort(tmp_socket):
                     request_id=uuid.uuid4()):
                 pass
         except Exception as e:
+            print(f"error is: {e}")
             # Next exception should be an ENGINE_DEAD_ERROR
-            assert e == ENGINE_DEAD_ERROR, (
+            assert isinstance(e, MQEngineDeadError), (
                 "Engine should be dead and raise ENGINE_DEAD_ERROR")
             assert client.errored
 
@@ -200,6 +200,42 @@ async def test_failed_abort(tmp_socket):
 
         client.close()
 
+
+@pytest.mark.asyncio
+async def test_bad_request(tmp_socket):
+    with RemoteMQLLMEngine(
+            engine_args=ENGINE_ARGS,
+            ipc_path=tmp_socket) as engine:
+
+        client = await engine.make_client()
+
+        # This should fail, but not crash the server.
+        try:
+            print("calling first generate")
+            async for _ in client.generate(
+                inputs="Hello my name is",
+                sampling_params=SamplingParams(),
+                request_id="abcd-1",
+                lora_request=LoRARequest("invalid-lora", 1, "invalid-path")):
+                pass
+        except Exception as e:
+            print("got exception")
+            assert isinstance(e, ValueError), (
+                "Expected ValueError when a LoRARequest in llm_engine")
+
+        # This request should be okay.
+        async for _ in client.generate(
+            inputs="Hello my name is",
+            sampling_params=SamplingParams(),
+            request_id="abcd-2"):
+            pass
+        
+        # Confirm server is still running.
+        await asyncio.sleep(10.)
+        await client.check_health()
+        
+        # Shutdown.
+        client.close()
 
 @pytest.mark.asyncio
 async def test_mp_crash_detection():

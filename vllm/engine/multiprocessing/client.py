@@ -23,7 +23,7 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCHealthRequest, RPCStartupRequest,
                                          RPCStartupResponse)
 # yapf: enable
-from vllm.envs import VLLM_RPC_GET_DATA_TIMEOUT_MS
+from vllm.envs import VLLM_RPC_TIMEOUT
 from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -173,6 +173,16 @@ class MQLLMEngineClient:
 
         try:
             while True:
+                # Poll, checking for ENGINE_DEAD
+                while self.output_socket.poll(timeout=VLLM_RPC_TIMEOUT) == 0:
+                    logger.debug("Waiting for output from MQLLMEngine.")
+
+                    # If errored, alert all running requests.
+                    if self.errored:
+                        for queue in tuple(self.output_queues.values()):
+                            queue.put_nowait(ENGINE_DEAD_ERROR)
+                        return
+
                 message: Frame = await self.output_socket.recv(copy=False)
                 request_outputs = pickle.loads(message.buffer)
 
@@ -183,6 +193,7 @@ class MQLLMEngineClient:
                         rpc_error: RPCError = request_outputs
                         request_id = rpc_error.request_id
                         exception = rpc_error.exception
+                        engine_errored = rpc_error.is_engine_errored
                     else:
                         # MPLLMEngine should always return an RPCError to
                         # the output_socket when an issue arises.
@@ -194,9 +205,10 @@ class MQLLMEngineClient:
                             "MPLLMEngine. This should never happen.", error)
                         request_id = None
                         exception = error
+                        engine_errored = True
 
-                    # If this is the first error, set _errored_with
-                    if not self._errored_with:
+                    # If the engine is DEAD and this issue caused it.
+                    if not self._errored_with and engine_errored:
                         self._errored_with = exception
 
                     if request_id is None:
@@ -229,7 +241,7 @@ class MQLLMEngineClient:
             # Start health_loop.
             self.health_loop = asyncio.create_task(
                 self.run_check_health_loop(
-                    timeout=VLLM_RPC_GET_DATA_TIMEOUT_MS))
+                    timeout=VLLM_RPC_TIMEOUT))
 
             # Notify MQLLMEngine client is ready to start sending requests.
             await self._notify_ready(socket)
@@ -264,9 +276,9 @@ class MQLLMEngineClient:
         await socket.send_multipart((pickle.dumps(request), ), copy=False)
 
         # Make sure the server responds in time.
-        if await socket.poll(timeout=VLLM_RPC_GET_DATA_TIMEOUT_MS) == 0:
+        if await socket.poll(timeout=VLLM_RPC_TIMEOUT) == 0:
             raise TimeoutError("RPCServer didn't reply within "
-                               f"{VLLM_RPC_GET_DATA_TIMEOUT_MS} ms")
+                               f"{VLLM_RPC_TIMEOUT} ms")
 
         # Await the data from the Server.
         frame = await socket.recv(copy=False)
@@ -298,9 +310,9 @@ class MQLLMEngineClient:
     async def _await_ack(self, error_message: str, socket: Socket):
         """Await acknowledgement that a request succeeded."""
 
-        if await socket.poll(timeout=VLLM_RPC_GET_DATA_TIMEOUT_MS) == 0:
+        if await socket.poll(timeout=VLLM_RPC_TIMEOUT) == 0:
             raise TimeoutError("MQLLMEngine didn't reply within "
-                               f"{VLLM_RPC_GET_DATA_TIMEOUT_MS}ms")
+                               f"{VLLM_RPC_TIMEOUT}ms")
 
         await self._check_success(error_message, socket)
 

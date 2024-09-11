@@ -61,7 +61,7 @@ RPC_REQUEST_T = Union[RPCGenerateRequest, RPCAbortRequest, RPCHealthRequest,
 
 REQUEST_OUTPUTS_T = Union[List[RequestOutput], RPCError]
 
-ENGINE_DEAD_ERROR = MQEngineDeadError(
-    "Engine loop is not running. Inspect the output to find "
-    "the stacktrace of the error that caused the engine loop "
-    "to stop (MQEngineDeadError).")
+def ENGINE_DEAD_ERROR(original_error: str) -> MQEngineDeadError:
+    return MQEngineDeadError(
+        "Engine loop is not running. Inspect the stacktrace to "
+        f"find the original error: {original_error}.")
