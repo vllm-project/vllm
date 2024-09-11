@@ -245,6 +245,50 @@ __global__ void reshape_and_cache_flash_kernel(
     }
   }
 }
+
+template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
+__global__ void reshape_and_cache_xqa_kernel(
+    const scalar_t* __restrict__ key,    // [num_tokens, num_heads, head_size]
+    const scalar_t* __restrict__ value,  // [num_tokens, num_heads, head_size]
+    cache_t* __restrict__ kv_cache,  // [num_blocks, 2, num_heads, block_size,
+                                     // head_size], k_cache, v_cache
+    const int64_t* __restrict__ slot_mapping,  // [num_tokens]
+    const int block_stride, const int key_stride, const int value_stride,
+    const int num_heads, const int head_size, const int block_size,
+    const float k_scale, const float v_scale) {
+  const int64_t token_idx = blockIdx.x;
+  const int64_t slot_idx = slot_mapping[token_idx];
+  // NOTE: slot_idx can be -1 if the token is padded
+  if (slot_idx < 0) {
+    return;
+  }
+  const int64_t block_idx = slot_idx / block_size * 2;
+  const int64_t block_offset = slot_idx % block_size;
+  const int n = num_heads * head_size;
+  for (int i = threadIdx.x; i < n; i += blockDim.x) {
+    const int64_t src_key_idx = token_idx * key_stride + i;
+    const int64_t src_value_idx = token_idx * value_stride + i;
+    const int head_idx = i / head_size;
+    const int head_offset = i % head_size;
+    const int64_t tgt_key_idx = block_idx * block_stride +
+                                head_idx * block_size * head_size +
+                                block_offset * head_size + head_offset;
+    const int64_t tgt_value_idx = (block_idx + 1) * block_stride +
+                                  head_idx * block_size * head_size +
+                                  block_offset * head_size + head_offset;
+    scalar_t tgt_key = key[src_key_idx];
+    scalar_t tgt_value = value[src_value_idx];
+    if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
+      kv_cache[tgt_key_idx] = tgt_key;
+      kv_cache[tgt_value_idx] = tgt_value;
+    } else {
+      kv_cache[tgt_key_idx] =
+          fp8::scaled_convert<cache_t, scalar_t, kv_dt>(tgt_key, k_scale);
+      kv_cache[tgt_value_idx] =
+          fp8::scaled_convert<cache_t, scalar_t, kv_dt>(tgt_value, v_scale);
+    }
+  }
+}
 }  // namespace vllm
 
 // KV_T is the stored data type of kv-cache.
