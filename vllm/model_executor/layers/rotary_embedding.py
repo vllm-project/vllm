@@ -712,6 +712,179 @@ class Llama3RotaryEmbedding(RotaryEmbedding):
         return new_freqs
 
 
+class MRotaryEmbedding(RotaryEmbedding):
+    """Rotary Embedding with Multimodal Sections."""
+
+    def __init__(
+        self,
+        head_size: int,
+        rotary_dim: int,
+        max_position_embeddings: int,
+        base: int,
+        is_neox_style: bool,
+        dtype: torch.dtype,
+        mrope_section: Optional[List[int]] = None,
+    ) -> None:
+        super().__init__(head_size, rotary_dim, max_position_embeddings, base,
+                         is_neox_style, dtype)
+
+        self.mrope_section = mrope_section
+        if self.mrope_section:
+            assert sum(self.mrope_section) == rotary_dim // 2
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """PyTorch-native implementation equivalent to forward().
+
+        Args:
+            positions:
+                [num_tokens,] (text only) or
+                [3, num_tokens] (T/H/W positions with multimodal inputs)
+            query: [num_tokens, num_heads * head_size]
+            key: [num_tokens, num_kv_heads * head_size]
+        """
+        assert positions.ndim == 1 or positions.ndim == 2
+
+        num_tokens = positions.shape[-1]
+        cos_sin = self.cos_sin_cache[positions]
+        cos, sin = cos_sin.chunk(2, dim=-1)
+        if positions.ndim == 2:
+            assert self.mrope_section
+
+            cos = torch.cat([
+                m[i]
+                for i, m in enumerate(cos.split(self.mrope_section, dim=-1))
+            ],
+                            dim=-1)
+            sin = torch.cat([
+                m[i]
+                for i, m in enumerate(sin.split(self.mrope_section, dim=-1))
+            ],
+                            dim=-1)
+
+        query_shape = query.shape
+        query = query.view(num_tokens, -1, self.head_size)
+        query_rot = query[..., :self.rotary_dim]
+        query_pass = query[..., self.rotary_dim:]
+        query_rot = _apply_rotary_emb(query_rot, cos, sin, self.is_neox_style)
+        query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
+
+        key_shape = key.shape
+        key = key.view(num_tokens, -1, self.head_size)
+        key_rot = key[..., :self.rotary_dim]
+        key_pass = key[..., self.rotary_dim:]
+        key_rot = _apply_rotary_emb(key_rot, cos, sin, self.is_neox_style)
+        key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
+        return query, key
+
+    @staticmethod
+    def get_input_positions(
+        input_tokens: List[int],
+        image_grid_thw: Union[List[List[int]], torch.Tensor],
+        video_grid_thw: Union[List[List[int]], torch.Tensor],
+        image_token_id: int,
+        video_token_id: int,
+        vision_start_token_id: int,
+        vision_end_token_id: int,
+        spatial_merge_size: int,
+        context_len: int = 0,
+    ) -> Tuple[List[List[int]], int]:
+        """Get mrope input positions and delta value."""
+
+        if isinstance(image_grid_thw, torch.Tensor):
+            image_grid_thw = image_grid_thw.tolist()
+        if isinstance(video_grid_thw, torch.Tensor):
+            video_grid_thw = video_grid_thw.tolist()
+
+        input_tokens_tensor = torch.tensor(input_tokens)
+        vision_start_indices = torch.argwhere(
+            input_tokens_tensor == vision_start_token_id).squeeze(1)
+        vision_tokens = input_tokens_tensor[vision_start_indices + 1]
+        image_nums = (vision_tokens == image_token_id).sum()
+        video_nums = (vision_tokens == video_token_id).sum()
+        llm_pos_ids_list: list = []
+
+        st = 0
+        remain_images, remain_videos = image_nums, video_nums
+
+        image_index, video_index = 0, 0
+        for _ in range(image_nums + video_nums):
+            if image_token_id in input_tokens and remain_images > 0:
+                ed_image = input_tokens.index(image_token_id, st)
+            else:
+                ed_image = len(input_tokens) + 1
+            if video_token_id in input_tokens and remain_videos > 0:
+                ed_video = input_tokens.index(video_token_id, st)
+            else:
+                ed_video = len(input_tokens) + 1
+            if ed_image < ed_video:
+                t, h, w = (
+                    image_grid_thw[image_index][0],
+                    image_grid_thw[image_index][1],
+                    image_grid_thw[image_index][2],
+                )
+                image_index += 1
+                remain_images -= 1
+                ed = ed_image
+            else:
+                t, h, w = (
+                    video_grid_thw[video_index][0],
+                    video_grid_thw[video_index][1],
+                    video_grid_thw[video_index][2],
+                )
+                video_index += 1
+                remain_videos -= 1
+                ed = ed_video
+            llm_grid_t, llm_grid_h, llm_grid_w = \
+                t, h // spatial_merge_size, w // spatial_merge_size
+            text_len = ed - st
+
+            st_idx = llm_pos_ids_list[-1].max() + 1 if len(
+                llm_pos_ids_list) > 0 else 0
+            llm_pos_ids_list.append(
+                torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
+
+            t_index = torch.arange(llm_grid_t).view(-1, 1).expand(
+                -1, llm_grid_h * llm_grid_w).flatten()
+            h_index = torch.arange(llm_grid_h).view(1, -1, 1).expand(
+                llm_grid_t, -1, llm_grid_w).flatten()
+            w_index = torch.arange(llm_grid_w).view(1, 1, -1).expand(
+                llm_grid_t, llm_grid_h, -1).flatten()
+            llm_pos_ids_list.append(
+                torch.stack([t_index, h_index, w_index]) + text_len + st_idx)
+            st = ed + llm_grid_t * llm_grid_h * llm_grid_w
+
+        if st < len(input_tokens):
+            st_idx = llm_pos_ids_list[-1].max() + 1 if len(
+                llm_pos_ids_list) > 0 else 0
+            text_len = len(input_tokens) - st
+            llm_pos_ids_list.append(
+                torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
+
+        llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
+        llm_positions = llm_positions[:, context_len:]
+        mrope_position_delta = (llm_positions.max() + 1 -
+                                len(input_tokens)).item()
+
+        return llm_positions.tolist(), mrope_position_delta
+
+    @staticmethod
+    def get_next_input_positions(
+        mrope_position_delta: int,
+        context_len: int,
+        seq_len: int,
+    ) -> List[List[int]]:
+        return [
+            list(
+                range(context_len + mrope_position_delta,
+                      seq_len + mrope_position_delta)) for _ in range(3)
+        ]
+
+
 _ROPE_DICT: Dict[Tuple, RotaryEmbedding] = {}
 
 
@@ -752,7 +925,7 @@ def get_rope(
         # The correct one should be "longrope" but keep "su" here
         # for backward compatible
         if scaling_type not in {"su", "longrope"}:
-            scaling_factor = rope_scaling["factor"]
+            scaling_factor = rope_scaling.get("factor", 1.0)
         if scaling_type == "llama3":
             low_freq_factor = rope_scaling["low_freq_factor"]
             high_freq_factor = rope_scaling["high_freq_factor"]
@@ -816,6 +989,16 @@ def get_rope(
                 head_size, rotary_dim, max_position, original_max_position,
                 base, is_neox_style, dtype, short_factor, long_factor,
                 **extra_kwargs)
+        elif scaling_type == "mrope":
+            return MRotaryEmbedding(
+                head_size,
+                rotary_dim,
+                max_position,
+                base,
+                is_neox_style,
+                dtype,
+                mrope_section=rope_scaling["mrope_section"],
+            )
         else:
             raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
     _ROPE_DICT[key] = rotary_emb

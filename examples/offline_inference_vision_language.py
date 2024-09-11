@@ -179,6 +179,23 @@ def run_qwen_vl(question):
     return llm, prompt, stop_token_ids
 
 
+# Qwen2-VL
+def run_qwen2_vl(question):
+    model_name = "Qwen/Qwen2-VL-7B-Instruct"
+
+    llm = LLM(
+        model=model_name,
+        max_num_seqs=5,
+    )
+
+    prompt = ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+              "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"
+              f"{question}<|im_end|>\n"
+              "<|im_start|>assistant\n")
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
+
+
 model_example_map = {
     "llava": run_llava,
     "llava-next": run_llava_next,
@@ -191,6 +208,7 @@ model_example_map = {
     "blip-2": run_blip2,
     "internvl_chat": run_internvl,
     "qwen_vl": run_qwen_vl,
+    "qwen2_vl": run_qwen2_vl,
 }
 
 
