@@ -347,7 +347,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         draft_num_gpu_blocks = None
         draft_num_cpu_blocks = None
 
-        if self.proposer_worker.device_config.device.type == "cpu":
+        if hasattr(
+                self.proposer_worker, "device_config"
+        ) and self.proposer_worker.device_config.device.type == "cpu":
             draft_num_gpu_blocks, draft_num_cpu_blocks = (
                 self.proposer_worker.determine_num_available_blocks())
         else:
