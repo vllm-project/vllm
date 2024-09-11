@@ -1,9 +1,9 @@
 # Test the AsyncLLMEngine with multi-step-decoding
-
-import os
 from typing import List, Optional
 
 import pytest
+
+from tests.kernels.utils import override_backend_env_variable
 
 from ..models.utils import check_logprobs_close
 from ..utils import (completions_with_server_args, get_client_text_generations,
@@ -49,6 +49,7 @@ async def test_multi_step(
     is_async: bool,
     num_logprobs: Optional[int],
     attention_backend: str,
+    monkeypatch,
 ) -> None:
     """Test vLLM engine with multi-step scheduling in an OpenAI-protocol
     client/server environment.
@@ -74,7 +75,7 @@ async def test_multi_step(
                     completions endpoint; `None` -> no logprobs
     """
 
-    os.environ["VLLM_ATTENTION_BACKEND"] = attention_backend
+    override_backend_env_variable(monkeypatch, attention_backend)
 
     prompts = example_prompts
     if len(prompts) < num_prompts:

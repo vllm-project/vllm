@@ -12,13 +12,11 @@ namespace prepare_inputs {
 
 //
 template <int const num_threads>
-__global__ void advance_step_kernel(int num_seqs, int num_queries,
-                                    int block_size, long* input_tokens_ptr,
-                                    long const* sampled_token_ids_ptr,
-                                    long* input_positions_ptr,
-                                    int* seq_lens_ptr, long* slot_mapping_ptr,
-                                    int const* block_tables_ptr,
-                                    int64_t const block_tables_stride) {
+__global__ void advance_step_flashattn_kernel(
+    int num_seqs, int num_queries, int block_size, long* input_tokens_ptr,
+    long const* sampled_token_ids_ptr, long* input_positions_ptr,
+    int* seq_lens_ptr, long* slot_mapping_ptr, int const* block_tables_ptr,
+    int64_t const block_tables_stride) {
   int num_query_blocks = div_ceil(num_queries, num_threads);
 
   if (blockIdx.x >= num_query_blocks) {
@@ -154,16 +152,16 @@ __global__ void advance_step_flashinfer_indices_kernel(
   }
 }
 
-void advance_step(int num_seqs, int num_queries, int block_size,
-                  torch::Tensor& input_tokens,       // type: long
-                  torch::Tensor& sampled_token_ids,  // type: long
-                  torch::Tensor& input_positions,    // type: long
-                  torch::Tensor& seq_lens,           // type: int
-                  torch::Tensor& slot_mapping,       // type: long
-                  torch::Tensor& block_tables) {     // type: int
+void advance_step_flashattn(int num_seqs, int num_queries, int block_size,
+                            torch::Tensor& input_tokens,       // type: long
+                            torch::Tensor& sampled_token_ids,  // type: long
+                            torch::Tensor& input_positions,    // type: long
+                            torch::Tensor& seq_lens,           // type: int
+                            torch::Tensor& slot_mapping,       // type: long
+                            torch::Tensor& block_tables) {     // type: int
 
   if (logging) {
-    printf("advance_step:\n");
+    printf("advance_step_flashattn:\n");
     printf("  num_seqs = %d\n", num_seqs);
     printf("  num_queries = %d\n", num_queries);
     printf("  block_size = %d\n", block_size);
@@ -183,15 +181,16 @@ void advance_step(int num_seqs, int num_queries, int block_size,
   int blocks;
   cudaDeviceGetAttribute(&blocks, cudaDevAttrMultiProcessorCount, dev);
 
-  advance_step_kernel<max_threads><<<blocks, max_threads, 0, stream>>>(
-      num_seqs, num_queries, block_size,
-      reinterpret_cast<long*>(input_tokens.data_ptr()),
-      reinterpret_cast<long const*>(sampled_token_ids.data_ptr()),
-      reinterpret_cast<long*>(input_positions.data_ptr()),
-      reinterpret_cast<int*>(seq_lens.data_ptr()),
-      reinterpret_cast<long*>(slot_mapping.data_ptr()),
-      reinterpret_cast<int const*>(block_tables.data_ptr()),
-      block_tables.stride(0));
+  advance_step_flashattn_kernel<max_threads>
+      <<<blocks, max_threads, 0, stream>>>(
+          num_seqs, num_queries, block_size,
+          reinterpret_cast<long*>(input_tokens.data_ptr()),
+          reinterpret_cast<long const*>(sampled_token_ids.data_ptr()),
+          reinterpret_cast<long*>(input_positions.data_ptr()),
+          reinterpret_cast<int*>(seq_lens.data_ptr()),
+          reinterpret_cast<long*>(slot_mapping.data_ptr()),
+          reinterpret_cast<int const*>(block_tables.data_ptr()),
+          block_tables.stride(0));
 }
 
 void advance_step_flashinfer(
@@ -208,7 +207,7 @@ void advance_step_flashinfer(
     torch::Tensor& block_table_bound) {     // type: int
 
   if (logging) {
-    printf("advance_step:\n");
+    printf("advance_step_flashinfer:\n");
     printf("  num_seqs = %d\n", num_seqs);
     printf("  num_queries = %d\n", num_queries);
     printf("  block_size = %d\n", block_size);
@@ -281,13 +280,16 @@ void advance_step_flashinfer(
 
 }  // namespace prepare_inputs
 
-void advance_step(int64_t num_seqs, int64_t num_queries, int64_t block_size,
-                  torch::Tensor& input_tokens, torch::Tensor& sampled_token_ids,
-                  torch::Tensor& input_positions, torch::Tensor& seq_lens,
-                  torch::Tensor& slot_mapping, torch::Tensor& block_tables) {
-  prepare_inputs::advance_step(num_seqs, num_queries, block_size, input_tokens,
-                               sampled_token_ids, input_positions, seq_lens,
-                               slot_mapping, block_tables);
+void advance_step_flashattn(int64_t num_seqs, int64_t num_queries,
+                            int64_t block_size, torch::Tensor& input_tokens,
+                            torch::Tensor& sampled_token_ids,
+                            torch::Tensor& input_positions,
+                            torch::Tensor& seq_lens,
+                            torch::Tensor& slot_mapping,
+                            torch::Tensor& block_tables) {
+  prepare_inputs::advance_step_flashattn(
+      num_seqs, num_queries, block_size, input_tokens, sampled_token_ids,
+      input_positions, seq_lens, slot_mapping, block_tables);
 }
 
 void advance_step_flashinfer(

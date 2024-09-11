@@ -485,7 +485,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
             raise ValueError(
                 f"Multi-step not supported for attention backend: "
                 f"{self.attn_backend.get_name()}. Set VLLM_ATTENTION_BACKEND "
-                "to 'flash-attn' or 'flashinfer'.")
+                f"to a value from {MULTI_STEP_ATTENTION_BACKENDS}.")
 
         sampled_token_ids = model_input.cached_outputs[-1].sampled_token_ids
         num_seqs = model_input.num_seqs
