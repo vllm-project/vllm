@@ -50,7 +50,7 @@ async def generate(request: Request) -> Response:
     request_dict = await request.json()
     prompt = request_dict.pop("prompt")
     stream = request_dict.pop("stream", False)
-    is_return_prompt = request_dict.pop("is_return_prompt", False)  # Add this parameter
+    is_return_prompt = request_dict.pop("is_return_prompt", False)
     sampling_params = SamplingParams(**request_dict)
     request_id = random_uuid()
 
@@ -65,7 +65,7 @@ async def generate(request: Request) -> Response:
             prompt = request_output.prompt
             assert prompt is not None
             text_outputs = [
-                (prompt + output.text) if is_return_prompt else output.text  # Conditional prompt inclusion
+                (prompt + output.text) if is_return_prompt else output.text
                 for output in request_output.outputs
             ]
             ret = {"text": text_outputs}
