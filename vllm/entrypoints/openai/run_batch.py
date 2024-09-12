@@ -195,7 +195,6 @@ async def main(args):
     engine = AsyncLLMEngine.from_engine_args(
         engine_args, usage_context=UsageContext.OPENAI_BATCH_RUNNER)
 
-    # When using single vLLM without engine_use_ray
     model_config = await engine.get_model_config()
 
     if args.disable_log_requests:
