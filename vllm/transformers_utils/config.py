@@ -206,6 +206,8 @@ def load_params_config(model, revision) -> PretrainedConfig:
     config_dict["tie_word_embeddings"] = config_dict.get(
         "tie_embeddings", False)
     config_dict["max_seq_len"] = config_dict.get("max_seq_len", 128_000)
+    config_dict["max_position_embeddings"] = config_dict.get(
+        "max_position_embeddings", 128_000)
 
     if config_dict.get("moe") is not None:
         config_dict["architectures"] = ["MixtralForCausalLM"]
