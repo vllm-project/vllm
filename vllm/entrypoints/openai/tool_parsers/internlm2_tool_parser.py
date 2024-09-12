@@ -26,6 +26,8 @@ class Internlm2ToolParser(ToolParser):
     def adjust_request(
             self, request: ChatCompletionRequest) -> ChatCompletionRequest:
         if request.tools and request.tool_choice != 'none':
+            # do not skip special tokens because internlm use the special
+            # tokens to indicated the start and end of the tool calls infomation.
             request.skip_special_tokens = False
         return request
 
@@ -42,7 +44,8 @@ class Internlm2ToolParser(ToolParser):
         if '<|action_start|>' not in current_text:
             self.position = len(current_text)
             return DeltaMessage(content=delta_text)
-
+        # if the tool call is sended, return a emptry delta message 
+        # to make sure the finish_reason will be send correctly.
         if self.current_tool_id > 0:
             return DeltaMessage(content='')
 
