@@ -158,16 +158,17 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 # install oneDNN
 RUN git clone -b rls-v3.5 https://github.com/oneapi-src/oneDNN.git
 
+RUN which cmake
+
 RUN --mount=type=cache,target=/root/.cache/ccache \
-    echo `which cmake` && \
-    cmake -B ./oneDNN/build -S ./oneDNN -G Ninja -DONEDNN_LIBRARY_TYPE=STATIC \
+    \cmake -B ./oneDNN/build -S ./oneDNN -G Ninja -DONEDNN_LIBRARY_TYPE=STATIC \
     -DONEDNN_BUILD_DOC=OFF \
     -DONEDNN_BUILD_EXAMPLES=OFF \
     -DONEDNN_BUILD_TESTS=OFF \
     -DONEDNN_BUILD_GRAPH=OFF \
     -DONEDNN_ENABLE_WORKLOAD=INFERENCE \
     -DONEDNN_ENABLE_PRIMITIVE=MATMUL && \
-    cmake --build ./oneDNN/build --target install --config Release
+    \cmake --build ./oneDNN/build --target install --config Release
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
