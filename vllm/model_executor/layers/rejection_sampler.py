@@ -142,20 +142,42 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
             self.num_emitted_tokens += emitted_token_num.sum() + batch_size
             self.num_draft_tokens += batch_size * k
         else:
+            target_probs = target_with_bonus_probs[:, :-1]
             accepted = (self._batch_modified_rejection_sampling(
-                target_with_bonus_probs[:, :-1],
+                target_probs,
                 draft_probs,
                 draft_token_ids,
                 seeded_seqs,
             ))
 
+            recovered_token_ids = self._get_recovered_token_ids(
+                accepted, target_probs, draft_probs, target_token_ids)
+
             output_token_ids = self._create_output(
                 accepted,
                 draft_token_ids,
                 target_token_ids,
+                recovered_token_ids,
             )
 
         return output_token_ids
+
+    def _get_recovered_token_ids(self, accepted, target_probs, draft_probs,
+                                 target_token_ids):
+        unmatch_indices = (accepted == 0).max(1).indices
+        recovered_token_ids = torch.zeros_like(unmatch_indices)
+        recovered_probs = torch.clamp((target_probs - draft_probs), min=0)
+        for i in range(unmatch_indices.shape[0]):
+            if unmatch_indices[i] == target_probs[i].shape[0]:
+                # Return bonus token if all matched
+                recovered_token_ids[i] = target_token_ids[i][
+                    unmatch_indices[i]]
+            else:
+                # Return re-sampled token from the new distribution
+                recovered_token_ids[i] = torch.multinomial(
+                    recovered_probs[i][unmatch_indices[i]], num_samples=1)
+
+        return recovered_token_ids
 
     def _batch_modified_rejection_sampling(
         self,

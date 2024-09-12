@@ -85,9 +85,20 @@ class TypicalAcceptanceSampler(SpecDecodeDeterministicBaseSampler):
         target_probs = target_with_bonus_probs[:, :-1]
         accepted = self._evaluate_accepted_tokens(target_probs,
                                                   draft_token_ids)
+        recovered_token_ids = self._get_recovered_token_ids(
+            accepted, target_probs)
         output_token_ids = self._create_output(accepted, draft_token_ids,
-                                               target_token_ids)
+                                               target_token_ids,
+                                               recovered_token_ids)
         return output_token_ids
+
+    def _get_recovered_token_ids(self, accepted, target_probs):
+        unmatch_indices = (accepted == 0).max(1).indices
+        recovered_token_ids = torch.zeros_like(unmatch_indices)
+        for i in range(unmatch_indices.shape[0]):
+            recovered_token_ids[i] = target_probs[
+                i, unmatch_indices[i], :].argmax()
+        return recovered_token_ids
 
     def _evaluate_accepted_tokens(self, target_probs, draft_token_ids):
         r"""
