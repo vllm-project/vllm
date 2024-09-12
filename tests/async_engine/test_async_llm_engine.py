@@ -1,5 +1,4 @@
 import asyncio
-import os
 from asyncio import CancelledError
 from dataclasses import dataclass
 from typing import Optional
@@ -72,14 +71,12 @@ class MockEngine:
 
 
 class MockAsyncLLMEngine(AsyncLLMEngine):
-
-    def _init_engine(self, *args, **kwargs):
-        return MockEngine()
+    _engine_class = MockEngine
 
 
 @pytest.mark.asyncio
 async def test_new_requests_event():
-    engine = MockAsyncLLMEngine(worker_use_ray=False, engine_use_ray=False)
+    engine = MockAsyncLLMEngine(worker_use_ray=False)
     engine.start_background_loop()
     await asyncio.sleep(0.01)
     assert engine.engine.step_calls == 0
@@ -112,15 +109,10 @@ async def test_new_requests_event():
     assert engine.engine.add_request_calls == 3
     assert engine.engine.step_calls == old_step_calls + 1
 
-    # Allow deprecated engine_use_ray to not raise exception
-    os.environ["VLLM_ALLOW_ENGINE_USE_RAY"] = "1"
-
-    engine = MockAsyncLLMEngine(worker_use_ray=True, engine_use_ray=True)
+    engine = MockAsyncLLMEngine(worker_use_ray=True)
     assert engine.get_model_config() is not None
     assert engine.get_tokenizer() is not None
     assert engine.get_decoding_config() is not None
-
-    os.environ.pop("VLLM_ALLOW_ENGINE_USE_RAY")
 
 
 def start_engine():

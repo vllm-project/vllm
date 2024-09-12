@@ -1035,7 +1035,6 @@ class EngineArgs:
 @dataclass
 class AsyncEngineArgs(EngineArgs):
     """Arguments for asynchronous vLLM engine."""
-    engine_use_ray: bool = False
     disable_log_requests: bool = False
 
     @staticmethod
@@ -1043,16 +1042,6 @@ class AsyncEngineArgs(EngineArgs):
                      async_args_only: bool = False) -> FlexibleArgumentParser:
         if not async_args_only:
             parser = EngineArgs.add_cli_args(parser)
-        parser.add_argument('--engine-use-ray',
-                            action='store_true',
-                            help='Use Ray to start the LLM engine in a '
-                            'separate process as the server process.'
-                            '(DEPRECATED. This argument is deprecated '
-                            'and will be removed in a future update. '
-                            'Set `VLLM_ALLOW_ENGINE_USE_RAY=1` to force '
-                            'use it. See '
-                            'https://github.com/vllm-project/vllm/issues/7045.'
-                            ')')
         parser.add_argument('--disable-log-requests',
                             action='store_true',
                             help='Disable logging requests.')

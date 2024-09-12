@@ -3,8 +3,8 @@ import time
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, ClassVar, Deque, Dict, Iterable, List,
-                    Mapping, NamedTuple, Optional)
+from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Deque, Dict,
+                    Iterable, List, Mapping, NamedTuple, Optional)
 from typing import Sequence as GenericSequence
 from typing import Set, Tuple, Type, Union
 
@@ -397,7 +397,7 @@ class LLMEngine:
 
         # Currently used by AsyncLLMEngine to ensure quick append
         # of request outputs to asyncio queues
-        self.process_request_outputs_callback = None
+        self.process_request_outputs_callback: Optional[Callable] = None
 
         # Create the scheduler.
         # NOTE: the cache_config here have been updated with the numbers of
