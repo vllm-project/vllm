@@ -170,6 +170,6 @@ def test_model_engine(model: str, dtype: str) -> None:
     if is_h100_gpu():
         assert (
             results[1] ==
-            "1. A black dog with floppy ears sits attentively on a wooden surface.\n2. A vast mountain range stretches across the horizon under a cloudy sky."
-        )  # noqa
+            "1. A black dog with floppy ears sits attentively on a wooden surface.\n2. A vast mountain range stretches across the horizon under a cloudy sky."  # noqa
+        )
         assert results[2] == EXPECTED[2]
