@@ -13,7 +13,6 @@ from mistral_common.tokens.tokenizers.multimodal import image_from_chunk
 
 from vllm import EngineArgs, LLMEngine, SamplingParams, TokensPrompt
 from vllm.multimodal import MultiModalDataBuiltins
-from vllm.sampling_params import SamplingParams
 
 pytestmark = pytest.mark.vlm
 
@@ -76,9 +75,9 @@ ENGINE_INPUTS = [
 ]
 
 EXPECTED = [
-    "The image shows a black dog sitting on a wooden surface.",
-    "1. A black dog with floppy ears sits attentively on a wooden surface.\n2. A vast mountain range with rugged peaks stretches under a cloudy sky.",
-    "1. A black dog sits attentively on a wooden floor.\n2. A vast mountain range stretches across the horizon under a cloudy sky.\n3. Surfers wait for waves in the ocean at sunset.\n4. A winding gravel path leads through a lush green park."
+    "The image shows a black dog sitting on a wooden surface.",  # noqa
+    "1. A black dog with floppy ears sits attentively on a wooden surface.\n2. A vast mountain range with rugged peaks stretches under a cloudy sky.",  # noqa 
+    "1. A black dog sits attentively on a wooden floor.\n2. A vast mountain range stretches across the horizon under a cloudy sky.\n3. Surfers wait for waves in the ocean at sunset.\n4. A winding gravel path leads through a lush green park."   # noqa 
 ]
 
 SAMPLING_PARAMS = SamplingParams(max_tokens=512, temperature=0.0)
@@ -150,8 +149,9 @@ def test_model_engine(model: str, dtype: str) -> None:
             break
 
     assert results[0] == EXPECTED[0]
-    # the result is a tiny bit different but this is not unexpected given that different kernels are executed
-    # and given that flash attention is not deterministic
+    # the result is a tiny bit different but this is not unexpected given that 
+    # different kernels are executed and given that flash attention is not 
+    # deterministic
     assert results[
-        1] == "1. A black dog with floppy ears sits attentively on a wooden surface.\n2. A vast mountain range stretches across the horizon under a cloudy sky."
+        1] == "1. A black dog with floppy ears sits attentively on a wooden surface.\n2. A vast mountain range stretches across the horizon under a cloudy sky."  # noqa
     assert results[2] == EXPECTED[2]
