@@ -8,7 +8,7 @@ import math
 import os
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from typing import Any, Dict, Generator, List, Optional, Tuple, Type
+from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Type
 
 import gguf
 import huggingface_hub
@@ -43,6 +43,74 @@ from vllm.model_executor.models.interfaces import (has_inner_state,
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
+
+# _NN_MODULE_TO_COMPILE[torch.nn.Linear] = torch.compile means
+# that after torch.nn.Linear is loaded, it will be compiled using torch.compile
+# Search for _NN_MODULE_TO_COMPILE in the codebase to see how it is used.
+_NN_MODULE_TO_COMPILE: Dict[torch.nn.Module, Callable[[torch.nn.Module],
+                                                      Callable], ] = {}
+
+
+def register_module_to_compile(
+    module: torch.nn.Module,
+    compiler: Callable[[torch.nn.Module], Callable],
+) -> None:
+    """
+    Registers a neural network module with a specified compiler function.
+
+    This function ensures that the given module is not already registered
+    with a compiler.  If the module is not registered, it associates the
+    module with the provided compiler function. All torch.nn.Module instances
+    registered with this function will be compiled using the provided compiler
+    function when being loaded.
+
+    Args:
+        module (torch.nn.Module): The neural network module to be registered.
+            Example: 
+                class MyModule(torch.nn.Module):
+                    def forward(self, x):
+                        return x * 2
+                my_module = MyModule()
+        
+        compiler (Callable[[torch.nn.Module], Callable]): A function that
+            takes a neural network module
+            and returns a compiled version of that module.
+            Example:
+                import functools
+                customized_compiler = functools.partial(
+                    torch.compile, dynamic=True
+                )
+
+    """
+    _NN_MODULE_TO_COMPILE[module] = compiler
+
+
+def unregister_module_to_compile(module: torch.nn.Module) -> None:
+    _NN_MODULE_TO_COMPILE.pop(module, None)
+
+
+def compile_child_modules(module):
+    """
+    Recursively compiles child modules of a given module.
+    This function traverses through all child modules of the provided 
+    `module` and compiles them if their type is listed in the 
+    `_NN_MODULE_TO_COMPILE` dictionary. The compiled module in-place
+    replaces the original child module in the parent module.
+
+    Args:
+        module (torch.nn.Module): The parent module whose child modules 
+            are to be compiled.
+        compiled_modules (dict): A dictionary that maps module types to 
+            their corresponding compiler functions.
+    Returns:
+        None
+    """
+
+    for child_name, child in module.named_children():
+        if type(child) in _NN_MODULE_TO_COMPILE:
+            module_compiler = _NN_MODULE_TO_COMPILE[type(child)]
+            setattr(module, child_name, module_compiler(child))
+        compile_child_modules(child)
 
 
 @contextmanager
@@ -376,6 +444,9 @@ class DefaultModelLoader(BaseModelLoader):
                     # parameters onto device for processing and back off after.
                     with device_loading_context(module, target_device):
                         quant_method.process_weights_after_loading(module)
+
+        compile_child_modules(model)
+
         return model.eval()
 
 

@@ -1,4 +1,6 @@
+import functools
 import math
+import os
 from typing import Iterable, List, Optional, Tuple
 
 import torch
@@ -15,10 +17,12 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.rotary_embedding import (
+    Phi3LongRoPEScaledRotaryEmbedding, get_rope)
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
+from vllm.model_executor.model_loader.loader import register_module_to_compile
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
@@ -50,12 +54,16 @@ class HeadMajorColumnParallelLinear(MergedColumnParallelLinear):
         return load_column_parallel_weight(param, loaded_weight)
 
 
-@torch.jit.script
+# When COMPILE_PHI3_SMALL=1, this will be compiled by
+# torch.compile because it's wrapped inside nn.Module
+# to be compiled.
 def quick_gelu(x):
     return x * torch.sigmoid(1.702 * x)
 
 
-@torch.jit.script
+# When COMPILE_PHI3_SMALL=1, this will be compiled by
+# torch.compile because it's wrapped inside nn.Module
+# to be compiled.
 def gegelu(input, limit: Optional[float] = None):
     a_gelu, a_linear = input[..., ::2], input[..., 1::2]
     if limit is not None:
@@ -451,3 +459,13 @@ class Phi3SmallForCausalLM(nn.Module):
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
+
+
+# Register compiler if environment variables is detected.
+# The model will be compiled after being loaded and quantized.
+if os.environ.get("COMPILE_PHI3_SMALL", "0") == "1":
+    dynamic_shape_compiler = functools.partial(torch.compile, dynamic=True)
+    register_module_to_compile(torch.nn.LayerNorm, dynamic_shape_compiler)
+    register_module_to_compile(Phi3SmallMLP, dynamic_shape_compiler)
+    register_module_to_compile(Phi3LongRoPEScaledRotaryEmbedding,
+                               dynamic_shape_compiler)
