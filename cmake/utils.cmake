@@ -268,7 +268,7 @@ macro(override_gpu_arches GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
       # Check if the current version is in the supported arch list.
       string_to_ver(_CODE_VER ${_CODE_ARCH})
       if (NOT _CODE_VER IN_LIST _GPU_SUPPORTED_ARCHES_LIST)
-        message(STATUS "discarding unsupported CUDA arch ${_VER}.")
+        message(STATUS "discarding unsupported CUDA arch ${_CODE_VER}.")
         continue()
       endif()
 
