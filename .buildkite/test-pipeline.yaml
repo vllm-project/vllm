@@ -91,6 +91,7 @@ steps:
   - pytest -v -s entrypoints/llm/test_lazy_outlines.py # it needs a clean process
   - pytest -v -s entrypoints/openai
   - pytest -v -s entrypoints/test_chat_utils.py
+  - pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
 
 
 - label: Distributed Tests (4 GPUs) # 10min
@@ -217,7 +218,8 @@ steps:
   commands:
     # See https://github.com/vllm-project/vllm/issues/5152
     - export VLLM_ATTENTION_BACKEND=XFORMERS
-    - pytest -v -s spec_decode
+    - pytest -v -s spec_decode/e2e/test_multistep_correctness.py
+    - pytest -v -s spec_decode --ignore=spec_decode/e2e/test_multistep_correctness.py
 
 - label: LoRA Test %N # 30min each
   mirror_hardwares: [amd]
