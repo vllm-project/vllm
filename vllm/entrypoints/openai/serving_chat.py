@@ -607,7 +607,7 @@ class OpenAIServingChat(OpenAIServing):
 
             # if auto tools are not enabled, and a named tool choice using
             #   outlines is not being used
-            if not (self.enable_auto_tools
+            if (not self.enable_auto_tools
                     or not self.tool_parser) and not isinstance(
                         request.tool_choice,
                         ChatCompletionNamedToolChoiceParam):
