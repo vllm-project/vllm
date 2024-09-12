@@ -134,6 +134,8 @@ def reshape_and_cache_flash(
     v_scale: float,
 ) -> None:
     """Inductor cannot deal with inplace operations on views.
+    See https://github.com/pytorch/pytorch/issues/131192
+    and https://github.com/pytorch/pytorch/issues/130174
     This is a workaround to hide the view operation from the inductor.
     """
     return torch.ops._C_cache_ops.reshape_and_cache_flash(
