@@ -1,6 +1,6 @@
 import json
-from json import JSONDecoder, JSONDecodeError
 import re
+from json import JSONDecodeError, JSONDecoder
 from typing import Dict, List, Sequence, Union
 
 import partial_json_parser
@@ -12,8 +12,7 @@ from vllm.entrypoints.openai.protocol import (DeltaFunctionCall, DeltaMessage,
                                               FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser)
-from vllm.entrypoints.openai.tool_parsers.utils import (
-    extract_intermediate_diff)
+from vllm.entrypoints.openai.tool_parsers.utils import find_common_prefix
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
@@ -23,16 +22,23 @@ logger = init_logger(__name__)
 
 # partial_json_parser doesn't support extra data and
 # JSONDecorder.raw_decode doesn't support partial JSON
-def partial_json_loads(input_str):
+def partial_json_loads(input_str, flags):
     try:
-        return (partial_json_parser.loads(input_str, Allow.ALL & ~Allow.STR),
-                len(input_str))
+        return (partial_json_parser.loads(input_str, flags), len(input_str))
     except JSONDecodeError as e:
         if "Extra data" in e.msg:
             dec = JSONDecoder()
             return dec.raw_decode(input_str)
         else:
             raise
+
+
+def is_complete_json(input_str):
+    try:
+        json.loads(input_str)
+        return True
+    except JSONDecodeError:
+        return False
 
 
 class LlamaToolParser(ToolParser):
@@ -135,6 +141,7 @@ class LlamaToolParser(ToolParser):
             else Allow.ALL & ~Allow.STR
         try:
             tool_call_arr = []
+            is_complete = []
             try:
                 # depending on the prompt format the Llama model may or may not
                 # prefix the output with the <|python_tag|> token
@@ -142,12 +149,17 @@ class LlamaToolParser(ToolParser):
                     self.bot_token) else 0
                 while start_idx < len(current_text):
                     (obj,
-                     end_idx) = partial_json_loads(current_text[start_idx:])
+                     end_idx) = partial_json_loads(current_text[start_idx:],
+                                                   flags)
+                    is_complete.append(
+                        is_complete_json(current_text[start_idx:start_idx +
+                                                      end_idx]))
                     start_idx += end_idx + len('; ')
                     # depending on the prompt Llama can use
                     # either arguments or parameters
                     if "parameters" in obj:
-                        assert "arguments" not in obj, "model generated both parameters and arguments"
+                        assert "arguments" not in obj, \
+                            "model generated both parameters and arguments"
                         obj["arguments"] = obj["parameters"]
                     tool_call_arr.append(obj)
             except partial_json_parser.core.exceptions.MalformedJSON:
@@ -176,9 +188,9 @@ class LlamaToolParser(ToolParser):
                     cur_arguments = current_tool_call.get("arguments")
                     if cur_arguments:
                         cur_args_json = json.dumps(cur_arguments)
-                        argument_diff = cur_args_json[
-                            len(self.streamed_args_for_tool[self.
-                                                            current_tool_id]):]
+                        sent = len(
+                            self.streamed_args_for_tool[self.current_tool_id])
+                        argument_diff = cur_args_json[sent:]
 
                         logger.debug("got arguments diff: %s", argument_diff)
                         delta = DeltaMessage(tool_calls=[
@@ -202,7 +214,7 @@ class LlamaToolParser(ToolParser):
 
             # if the current tool name hasn't been sent, send if available
             # - otherwise send nothing
-            if not self.current_tool_name_sent:
+            elif not self.current_tool_name_sent:
                 function_name = current_tool_call.get("name")
                 if function_name:
 
@@ -221,25 +233,36 @@ class LlamaToolParser(ToolParser):
             # now we know we're on the same tool call and we're streaming
             # arguments
             else:
-
                 cur_arguments = current_tool_call.get("arguments")
+                delta = None
 
-                if not cur_arguments:
-                    delta = None
-                else:
-                    cur_args_json = json.dumps(cur_arguments)
+                if cur_arguments:
                     sent = len(
                         self.streamed_args_for_tool[self.current_tool_id])
-                    argument_diff = cur_args_json[sent:-1]  # remove final "}"
-                    logger.debug("got arguments diff: %s", argument_diff)
-                    delta = DeltaMessage(tool_calls=[
-                        DeltaToolCall(index=self.current_tool_id,
-                                      function=DeltaFunctionCall(
-                                          arguments=argument_diff).model_dump(
-                                              exclude_none=True))
-                    ])
-                    self.streamed_args_for_tool[
-                        self.current_tool_id] += argument_diff
+                    cur_args_json = json.dumps(cur_arguments)
+                    prev_arguments = self.prev_tool_call_arr[
+                        self.current_tool_id].get("arguments")
+
+                    argument_diff = None
+                    if is_complete[self.current_tool_id]:
+                        argument_diff = cur_args_json[sent:]
+                    elif prev_arguments:
+                        prev_args_json = json.dumps(prev_arguments)
+                        if cur_args_json != prev_args_json:
+
+                            prefix = find_common_prefix(
+                                prev_args_json, cur_args_json)
+                            argument_diff = prefix[sent:]
+
+                    if argument_diff is not None:
+                        delta = DeltaMessage(tool_calls=[
+                            DeltaToolCall(index=self.current_tool_id,
+                                          function=DeltaFunctionCall(
+                                              arguments=argument_diff).
+                                          model_dump(exclude_none=True))
+                        ])
+                        self.streamed_args_for_tool[
+                            self.current_tool_id] += argument_diff
 
             self.prev_tool_call_arr = tool_call_arr
             return delta

@@ -1,3 +1,5 @@
+import json
+from copy import deepcopy
 from typing import Any, Callable, Dict, List, Optional
 
 from openai.types.chat import (ChatCompletionMessageParam,
@@ -5,8 +7,6 @@ from openai.types.chat import (ChatCompletionMessageParam,
 from typing_extensions import TypedDict
 
 from tests.utils import VLLM_PATH
-import json
-from copy import deepcopy
 
 
 class ServerConfig(TypedDict, total=False):
