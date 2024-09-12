@@ -7,8 +7,6 @@ from PIL.Image import Image
 
 from vllm.config import ModelConfig
 from vllm.inputs import InputContext, LLMInputs
-from vllm.model_executor.models.qwen import (input_mapper_for_qwen,
-                                             input_processor_for_qwen)
 from vllm.multimodal.base import MultiModalInputs
 from vllm.multimodal.utils import cached_get_tokenizer, rescale_image_size
 
@@ -73,6 +71,20 @@ def build_model_context(model_name: str,
 
 
 @pytest.fixture()
+def input_mapper_for_qwen():
+    # Lazy import to avoid initializing CUDA during test collection
+    from vllm.model_executor.models.qwen import input_mapper_for_qwen
+    return input_mapper_for_qwen
+
+
+@pytest.fixture()
+def input_processor_for_qwen():
+    # Lazy import to avoid initializing CUDA during test collection
+    from vllm.model_executor.models.qwen import input_processor_for_qwen
+    return input_processor_for_qwen
+
+
+@pytest.fixture()
 def qwen_vl_context() -> InputContext:
     """Get an InputContext for Qwen-VL."""
     return build_model_context(model_name="Qwen/Qwen-VL",
@@ -82,7 +94,8 @@ def qwen_vl_context() -> InputContext:
 # Happy path tests for single/multi-image scenarios for the multimodal
 # input processor and mapper, respectively
 @pytest.mark.parametrize("num_images", [1, 2])
-def test_input_processor_valid_mm_data(qwen_vl_context: InputContext,
+def test_input_processor_valid_mm_data(input_processor_for_qwen,
+                                       qwen_vl_context: InputContext,
                                        num_images: int):
     """Happy cases for image inputs to Qwen's multimodal input processor."""
     prompt = "".join(
@@ -119,7 +132,8 @@ def test_input_processor_valid_mm_data(qwen_vl_context: InputContext,
         (torch.rand(
             (2, TOKS_PER_IMG, VIS_ENC_DIM)), (2, TOKS_PER_IMG, VIS_ENC_DIM)),
     ])
-def test_input_mapper_valid_mm_data(qwen_vl_context: InputContext,
+def test_input_mapper_valid_mm_data(input_mapper_for_qwen,
+                                    qwen_vl_context: InputContext,
                                     img_data: Union[torch.Tensor, List[Image],
                                                     Image],
                                     expected_shape: List[int]):
@@ -141,7 +155,8 @@ def test_input_mapper_valid_mm_data(qwen_vl_context: InputContext,
         "image": torch.rand((5, 5, 5, 5, 5))
     },
 ])
-def test_input_processor_invalid_mm_data(qwen_vl_context: InputContext,
+def test_input_processor_invalid_mm_data(input_processor_for_qwen,
+                                         qwen_vl_context: InputContext,
                                          mm_data: Dict[str, torch.Tensor]):
     """Test sad cases validated in Qwen's multimodal input processor."""
     tokenizer = cached_get_tokenizer(qwen_vl_context.model_config.tokenizer,
@@ -165,6 +180,7 @@ def test_input_processor_invalid_mm_data(qwen_vl_context: InputContext,
         torch.rand((1, TOKS_PER_IMG, VIS_ENC_DIM + 10)),
     ])
 def test_input_mapper_invalid_mm_data(
+    input_mapper_for_qwen,
     qwen_vl_context: InputContext,
     img_data: Union[torch.Tensor, List[Image], Image],
 ):
