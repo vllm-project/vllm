@@ -1,5 +1,5 @@
 import json
-from json import JSONDecoder
+from json import JSONDecoder, JSONDecodeError
 import re
 from typing import Dict, List, Sequence, Union
 
@@ -19,6 +19,20 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 logger = init_logger(__name__)
+
+
+# partial_json_parser doesn't support extra data and
+# JSONDecorder.raw_decode doesn't support partial JSON
+def partial_json_loads(input_str):
+    try:
+        return (partial_json_parser.loads(input_str, Allow.ALL & ~Allow.STR),
+                len(input_str))
+    except JSONDecodeError as e:
+        if "Extra data" in e.msg:
+            dec = JSONDecoder()
+            return dec.raw_decode(input_str)
+        else:
+            raise
 
 
 class LlamaToolParser(ToolParser):
@@ -51,6 +65,12 @@ class LlamaToolParser(ToolParser):
         find-and-replacing single quotes with double quotes for JSON parsing,
         make sure your tool call arguments don't ever include quotes!
         """
+        # case -- if a tool call token is not present, return a text response
+        if not (model_output.startswith(self.bot_token)
+                or model_output.startswith('{')):
+            return ExtractedToolCallInformation(tools_called=False,
+                                                tool_calls=[],
+                                                content=model_output)
 
         try:
             # load the JSON, and then use it to build the Function and
@@ -60,7 +80,8 @@ class LlamaToolParser(ToolParser):
 
             # depending on the prompt format the Llama model may or may not
             # prefix the output with the <|python_tag|> token
-            start_idx = len(self.bot_token) if model_output.startswith(self.bot_token) else 0
+            start_idx = len(self.bot_token) if model_output.startswith(
+                self.bot_token) else 0
             while start_idx < len(model_output):
                 (obj, end_idx) = dec.raw_decode(model_output[start_idx:])
                 start_idx += end_idx + len('; ')
@@ -79,10 +100,9 @@ class LlamaToolParser(ToolParser):
             ]
 
             # get any content before  the tool call
-            ret = ExtractedToolCallInformation(
-                tools_called=True,
-                tool_calls=tool_calls,
-                content=None)
+            ret = ExtractedToolCallInformation(tools_called=True,
+                                               tool_calls=tool_calls,
+                                               content=None)
             return ret
 
         except Exception as e:
@@ -102,4 +122,142 @@ class LlamaToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
     ) -> Union[DeltaMessage, None]:
-        raise NotImplementedError("streaming tool calls not supported for Llama 3.1 yet")
+
+        if not (current_text.startswith(self.bot_token)
+                or current_text.startswith('{')):
+            return DeltaMessage(content=delta_text)
+
+        # bit mask flags for partial JSON parsing. If the name hasn't been
+        # sent yet, don't allow sending
+        # an incomplete string since OpenAI only ever (as far as I have
+        # seen) allows sending the entire tool/ function name at once.
+        flags = Allow.ALL if self.current_tool_name_sent \
+            else Allow.ALL & ~Allow.STR
+        try:
+            tool_call_arr = []
+            try:
+                # depending on the prompt format the Llama model may or may not
+                # prefix the output with the <|python_tag|> token
+                start_idx = len(self.bot_token) if current_text.startswith(
+                    self.bot_token) else 0
+                while start_idx < len(current_text):
+                    (obj,
+                     end_idx) = partial_json_loads(current_text[start_idx:])
+                    start_idx += end_idx + len('; ')
+                    # depending on the promt Llama can use
+                    # either arguments or parameters
+                    if "parameters" in obj:
+                        assert "arguments" not in obj, "model generated both parameters and arguments"
+                        obj["arguments"] = obj["parameters"]
+                    tool_call_arr.append(obj)
+            except partial_json_parser.core.exceptions.MalformedJSON:
+                logger.debug('not enough tokens to parse into JSON yet')
+                return None
+
+            # select as the current tool call the one we're on the state at
+            current_tool_call: Dict = tool_call_arr[self.current_tool_id] \
+                if len(tool_call_arr) > 0 else {}
+
+            # case -- if no tokens have been streamed for the tool, e.g.
+            #   only the array brackets, stream nothing
+            if len(tool_call_arr) == 0:
+                return None
+
+            # case: we are starting a new tool in the array
+            #   -> array has > 0 length AND length has moved past cursor
+            elif (len(tool_call_arr) > 0
+                  and len(tool_call_arr) > self.current_tool_id + 1):
+
+                # if we're moving on to a new call, first make sure we
+                # haven't missed anything in the previous one that was
+                # auto-generated due to JSON completions, but wasn't
+                # streamed to the client yet.
+                if self.current_tool_id >= 0:
+                    cur_arguments = current_tool_call.get("arguments")
+                    if cur_arguments:
+                        cur_args_json = json.dumps(cur_arguments)
+                        argument_diff = cur_args_json[
+                            len(self.streamed_args_for_tool[self.
+                                                            current_tool_id]):]
+
+                        logger.debug("got arguments diff: %s", argument_diff)
+                        delta = DeltaMessage(tool_calls=[
+                            DeltaToolCall(index=self.current_tool_id,
+                                          function=DeltaFunctionCall(
+                                              arguments=argument_diff).
+                                          model_dump(exclude_none=True))
+                        ])
+                        self.streamed_args_for_tool[
+                            self.current_tool_id] += argument_diff
+                    else:
+                        delta = None
+                else:
+                    delta = None
+                # re-set stuff pertaining to progress in the current tool
+                self.current_tool_id = len(tool_call_arr) - 1
+                self.current_tool_name_sent = False
+                self.current_tool_initial_sent = False
+                self.streamed_args_for_tool.append("")
+                logger.debug("starting on new tool %d", self.current_tool_id)
+                return delta
+
+            # case: update an existing tool - this is handled below
+
+            # if the current tool initial data incl. the id, type=function
+            # and idx not sent, send that
+            if not self.current_tool_initial_sent:
+                self.current_tool_initial_sent = True
+                delta = DeltaMessage(tool_calls=[
+                    InitialDeltaToolCall(
+                        index=self.current_tool_id).model_dump(
+                            exclude_none=True)
+                ])
+
+            # if the current tool name hasn't been sent, send if available
+            # - otherwise send nothing
+            elif not self.current_tool_name_sent:
+                function_name = current_tool_call.get("name")
+                if function_name:
+
+                    delta = DeltaMessage(tool_calls=[
+                        DeltaToolCall(index=self.current_tool_id,
+                                      function=DeltaFunctionCall(
+                                          name=function_name).model_dump(
+                                              exclude_none=True))
+                    ])
+                    self.current_tool_name_sent = True
+                else:
+                    delta = None
+
+            # now we know we're on the same tool call and we're streaming
+            # arguments
+            else:
+
+                cur_arguments = current_tool_call.get("arguments")
+
+                if not cur_arguments:
+                    delta = None
+                else:
+                    cur_args_json = json.dumps(cur_arguments)
+                    sent = len(
+                        self.streamed_args_for_tool[self.current_tool_id])
+                    argument_diff = cur_args_json[sent:-1]  # remove final "}"
+                    logger.debug("got arguments diff: %s", argument_diff)
+                    delta = DeltaMessage(tool_calls=[
+                        DeltaToolCall(index=self.current_tool_id,
+                                      function=DeltaFunctionCall(
+                                          arguments=argument_diff).model_dump(
+                                              exclude_none=True))
+                    ])
+                    self.streamed_args_for_tool[
+                        self.current_tool_id] += argument_diff
+
+            self.prev_tool_call_arr = tool_call_arr
+            return delta
+
+        except Exception as e:
+            logger.error("Error trying to handle streaming tool call: %s", e)
+            logger.debug(
+                "Skipping chunk as a result of tool streaming extraction "
+                "error")
+            return None
