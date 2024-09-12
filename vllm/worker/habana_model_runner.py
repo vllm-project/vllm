@@ -549,7 +549,8 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         default_gc_thrs = list(gc.get_threshold())
         requested_gc_thrs = [0] * len(default_gc_thrs)
         for i in range(len(default_gc_thrs)):
-            requested_gc_thrs[i] = int(os.environ.get(f'VLLM_GC_THR_GEN{i}', default_gc_thrs[i]))
+            requested_gc_thrs[i] = int(os.environ.get(f'VLLM_GC_THR_GEN{i}',
+                                                       default_gc_thrs[i]))
         if requested_gc_thrs == default_gc_thrs:
             gc_thr_multiplier = int(os.environ.get('VLLM_GC_THR_MULTIPLIER', 2))
             requested_gc_thrs = [t * gc_thr_multiplier for t in default_gc_thrs]
