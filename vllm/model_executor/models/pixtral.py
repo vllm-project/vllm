@@ -1,4 +1,3 @@
-import math
 from array import array
 from dataclasses import dataclass, fields
 from itertools import tee
@@ -50,7 +49,6 @@ def dummy_data_for_pixtral(ctx: InputContext, seq_len: int,
         ctx.model_config.tokenizer,
         tokenizer_mode=ctx.model_config.tokenizer_mode)
 
-    max_model_len = ctx.model_config.max_model_len
     mm_encoder = tokenizer.mistral.instruct_tokenizer.mm_encoder
     patch_size = mm_encoder.mm_config.image_patch_size
     image_token_id = mm_encoder.special_ids.img
@@ -62,7 +60,7 @@ def dummy_data_for_pixtral(ctx: InputContext, seq_len: int,
     size = 256
     image = Image.new("RGB", (size, size), color=0)
 
-    image_feature_size = (size ** 2) // (patch_size ** 2)
+    image_feature_size = (size**2) // (patch_size**2)
 
     num_image_tokens = image_feature_size * num_images
 
@@ -118,13 +116,12 @@ def input_processor_for_pixtral(ctx: InputContext, llm_inputs: LLMInputs):
         image_token_id = mm_encoder.special_ids.img
 
         if image_token_id not in llm_inputs['prompt_token_ids']:
-            raise ValueError((
-                f"You've passed {llm_inputs=} without {image_token_id=}"
-                " Make sure to process your input via mistral_common's"
-                " tokenizer or pass a chat completion request. For more"
-                " For more info, see: "
-                "https://github.com/vllm-project/vllm/issues/8411."
-            ))
+            raise ValueError(
+                (f"You've passed {llm_inputs=} without {image_token_id=}"
+                 " Make sure to process your input via mistral_common's"
+                 " tokenizer or pass a chat completion request. For more"
+                 " For more info, see: "
+                 "https://github.com/vllm-project/vllm/issues/8411."))
 
     return llm_inputs
 
@@ -217,7 +214,9 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal):
             # if passed as list flatten lists of tensors
             flatten_images = []
             for imgs_per_req in images:
-                imgs_per_req = [imgs_per_req[i] for i in range(imgs_per_req.size(0))] if isinstance(imgs_per_req, torch.Tensor) else imgs_per_req
+                imgs_per_req = [
+                    imgs_per_req[i] for i in range(imgs_per_req.size(0))
+                ] if isinstance(imgs_per_req, torch.Tensor) else imgs_per_req
 
                 flatten_images.extend(imgs_per_req)
 

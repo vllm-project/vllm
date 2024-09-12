@@ -2,26 +2,18 @@
 
 Run `pytest tests/models/test_mistral.py`.
 """
-import pytest
-from typing import List, Dict, Any
-
-from vllm.sampling_params import SamplingParams
-import PIL.Image
 import uuid
-from vllm import EngineArgs, LLMEngine
-from vllm import SamplingParams, TokensPrompt
-from vllm.multimodal import MultiModalDataBuiltins
+from typing import Any, Dict, List
 
-from mistral_common.protocol.instruct.messages import (
-    UserMessage,
-    TextChunk,
-    ImageURLChunk,
-    ImageChunk,
-)
-from PIL import Image
+import pytest
+import torch
+from mistral_common.protocol.instruct.messages import ImageURLChunk
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 from mistral_common.tokens.tokenizers.multimodal import image_from_chunk
+
+from vllm import EngineArgs, LLMEngine, SamplingParams, TokensPrompt
+from vllm.multimodal import MultiModalDataBuiltins
 
 pytestmark = pytest.mark.vlm
 
@@ -34,22 +26,21 @@ IMG_URLS = [
 ]
 PROMPT = "Describe each image in one short sentence."
 
+
 def _create_msg_format(urls: List[str]) -> List[Dict[str, Any]]:
-    return [
-        {
-            "role":
-            "user",
-            "content": [{
-                "type": "text",
-                "text": PROMPT,
-            }] + [{
-                    "type": "image_url",
-                    "image_url": {
-                        "url": url
-                    }
-                } for url in urls]
-        }
-    ]
+    return [{
+        "role":
+        "user",
+        "content": [{
+            "type": "text",
+            "text": PROMPT,
+        }] + [{
+            "type": "image_url",
+            "image_url": {
+                "url": url
+            }
+        } for url in urls],
+    }]
 
 
 def _create_engine_inputs(urls: List[str]) -> TokensPrompt:
@@ -73,25 +64,47 @@ def _create_engine_inputs(urls: List[str]) -> TokensPrompt:
     return engine_inputs
 
 
-MSGS = [_create_msg_format(IMG_URLS[:1]), _create_msg_format(IMG_URLS[:2]), _create_msg_format(IMG_URLS)]
-ENGINE_INPUTS = [_create_engine_inputs(IMG_URLS[:1]), _create_engine_inputs(IMG_URLS[:2]), _create_engine_inputs(IMG_URLS)]
-
-EXPECTED = [
-    "The image shows a black dog sitting on a wooden surface.",
-    "1. A black dog with floppy ears sits attentively on a wooden surface.\n2. A vast mountain range with rugged peaks stretches under a cloudy sky.",
-    "1. A black dog sits attentively on a wooden floor.\n2. A vast mountain range stretches across the horizon under a cloudy sky.\n3. Surfers wait for waves in the ocean at sunset.\n4. A winding gravel path leads through a lush green park."
+MSGS = [
+    _create_msg_format(IMG_URLS[:1]),
+    _create_msg_format(IMG_URLS[:2]),
+    _create_msg_format(IMG_URLS),
+]
+ENGINE_INPUTS = [
+    _create_engine_inputs(IMG_URLS[:1]),
+    _create_engine_inputs(IMG_URLS[:2]),
+    _create_engine_inputs(IMG_URLS),
 ]
 
+EXPECTED = [
+    "The image shows a black dog sitting on a wooden surface.",  # noqa
+    "1. A black dog with floppy ears sits attentively on a wooden surface.\n2. A vast mountain range with rugged peaks stretches under a cloudy sky.",  # noqa
+    "1. A black dog sits attentively on a wooden floor.\n2. A vast mountain range stretches across the horizon under a cloudy sky.\n3. Surfers wait for waves in the ocean at sunset.\n4. A winding gravel path leads through a lush green park.",  # noqa
+]
 
 SAMPLING_PARAMS = SamplingParams(max_tokens=512, temperature=0.0)
 LIMIT_MM_PER_PROMPT = dict(image=4)
+
+
+def is_h100_gpu() -> bool:
+    # Tests will long inputs give device-dependent output
+    # Let some test only run on H100
+    if torch.cuda.is_available():
+        device_name = torch.cuda.get_device_name(0)
+        print(f"Device name: {device_name}")
+        if "H100" in device_name:
+            return True
+    return False
+
+
+MAX_MODEL_LEN = [8192, 65536] if is_h100_gpu() else [8192]
+
 
 @pytest.mark.skip(
     reason=
     "Model is too big, test passed on A100 locally but will OOM on CI machine."
 )
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("max_model_len", [8192, 65536])
+@pytest.mark.parametrize("max_model_len", MAX_MODEL_LEN)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 def test_chat(
     vllm_runner,
@@ -99,17 +112,23 @@ def test_chat(
     model: str,
     dtype: str,
 ) -> None:
-
-    with vllm_runner(model, dtype=dtype,
-                     tokenizer_mode="mistral", enable_chunked_prefill=False, max_model_len=max_model_len, limit_mm_per_prompt=LIMIT_MM_PER_PROMPT) as vllm_model:
+    with vllm_runner(
+            model,
+            dtype=dtype,
+            tokenizer_mode="mistral",
+            enable_chunked_prefill=False,
+            max_model_len=max_model_len,
+            limit_mm_per_prompt=LIMIT_MM_PER_PROMPT,
+    ) as vllm_model:
         results = []
-        for msg in MSGS:
+        num_test_samples = len(MSGS) if is_h100_gpu() else 1
+        for msg in MSGS[:num_test_samples]:
             outputs = vllm_model.model.chat(msg,
                                             sampling_params=SAMPLING_PARAMS)
 
             results.append(outputs[0].outputs[0].text)
 
-        assert results == EXPECTED
+        assert results == EXPECTED[:num_test_samples]
 
 
 @pytest.mark.skip(
@@ -129,7 +148,8 @@ def test_model_engine(model: str, dtype: str) -> None:
     engine = LLMEngine.from_engine_args(args)
 
     engine.add_request(uuid.uuid4().hex, ENGINE_INPUTS[0], SAMPLING_PARAMS)
-    engine.add_request(uuid.uuid4().hex, ENGINE_INPUTS[1], SAMPLING_PARAMS)
+    if is_h100_gpu():
+        engine.add_request(uuid.uuid4().hex, ENGINE_INPUTS[1], SAMPLING_PARAMS)
 
     results = []
     count = 0
@@ -140,13 +160,19 @@ def test_model_engine(model: str, dtype: str) -> None:
             if request_output.finished:
                 results.append(request_output.outputs[0].text)
 
-        if count == 2:
-            engine.add_request(uuid.uuid4().hex, ENGINE_INPUTS[2], SAMPLING_PARAMS)
+        if count == 2 and is_h100_gpu():
+            engine.add_request(uuid.uuid4().hex, ENGINE_INPUTS[2],
+                               SAMPLING_PARAMS)
         if not engine.has_unfinished_requests():
             break
 
     assert results[0] == EXPECTED[0]
-    # the result is a tiny bit different but this is not unexpected given that different kernels are executed
-    # and given that flash attention is not deterministic
-    assert results[1] == "1. A black dog with floppy ears sits attentively on a wooden surface.\n2. A vast mountain range stretches across the horizon under a cloudy sky."
-    assert results[2] == EXPECTED[2]
+    # the result is a tiny bit different but this is not unexpected given that
+    # different kernels are executed and given that flash attention is not
+    # deterministic
+    if is_h100_gpu():
+        assert (
+            results[1] ==
+            "1. A black dog with floppy ears sits attentively on a wooden surface.\n2. A vast mountain range stretches across the horizon under a cloudy sky."  # noqa
+        )
+        assert results[2] == EXPECTED[2]
