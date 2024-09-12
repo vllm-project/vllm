@@ -155,6 +155,19 @@ TORCH_LIBRARY_EXPAND(_C, ops) {
       "__torch__.torch.classes._core_C.ScalarType b_q_type, "
       "int size_m, int size_n, int size_k) -> Tensor");
 
+  // Machete (Dense) Optimized Mixed Precision GEMM for Hopper.
+  ops.def(
+      "machete_gemm(Tensor A, Tensor B,"
+      "             __torch__.torch.classes._core_C.ScalarType btype,"
+      "             Tensor? scales, Tensor? zeros, int? group_size,"
+      "             Tensor? C, float? alpha, float? beta, str? schedule)"
+      "-> Tensor");
+
+  ops.def(
+      "machete_prepack_B(Tensor B,"
+      "                  __torch__.torch.classes._core_C.ScalarType btype)"
+      "-> Tensor");
+
   // gptq_marlin Optimized Quantized GEMM for GPTQ.
   ops.def(
       "gptq_marlin_gemm(Tensor a, Tensor b_q_weight, Tensor b_scales, "
@@ -211,6 +224,29 @@ TORCH_LIBRARY_EXPAND(_C, ops) {
       "                  Tensor b, Tensor a_scales,"
       "                  Tensor b_scales, Tensor azp_adj,"
       "                  Tensor? azp, Tensor? bias) -> ()");
+
+  // Mamba selective scan kernel
+  ops.def(
+      "selective_scan_fwd(Tensor! u, Tensor! delta,"
+      "Tensor! A, Tensor! B, Tensor! C,"
+      "Tensor? D_, Tensor? z_, Tensor? delta_bias_,"
+      "bool delta_softplus,"
+      "Tensor? index_, Tensor(a! -> *)? x) -> Tensor(a)[]");
+
+  ops.def(
+      "causal_conv1d_update(Tensor! x,"
+      "Tensor! conv_state,"
+      "Tensor! weight,"
+      "Tensor? bias_,"
+      "bool silu_activation) -> Tensor");
+
+  ops.def(
+      "causal_conv1d_fwd(Tensor! x, Tensor! weight,"
+      "Tensor? bias_,"
+      "Tensor? seq_idx_,"
+      "Tensor? initial_states_,"
+      "Tensor? final_states_out_,"
+      "bool silu_activation) -> Tensor");
 #endif
 
   // Quantized GEMM for GPTQ.

@@ -52,10 +52,22 @@ TORCH_LIBRARY_IMPL_EXPAND(_C, CPU, ops) {
   // Rotary embedding
   // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.
   ops.impl("rotary_embedding", &rotary_embedding);
+
+  // Quantization
+#ifdef __AVX512F__
+  // Compute int8 quantized tensor for given scaling factor.
+  ops.impl("static_scaled_int8_quant", &static_scaled_int8_quant);
+
+  // Compute int8 quantized tensor and scaling factor
+  ops.impl("dynamic_scaled_int8_quant", &dynamic_scaled_int8_quant);
+
+  // W8A8 GEMM, supporting symmetric per-tensor or per-row/column
+  // quantization.
+  ops.impl("cutlass_scaled_mm", &int8_scaled_mm);
+#endif
 }
 
-TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _cache_ops), CPU,
-                          cache_ops) {
+TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _cache_ops), CPU, cache_ops) {
   // Cache ops
   // Swap in (out) the cache blocks from src to dst.
   cache_ops.impl("swap_blocks", &swap_blocks);
