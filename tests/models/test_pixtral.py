@@ -2,26 +2,18 @@
 
 Run `pytest tests/models/test_mistral.py`.
 """
-import pytest
-from typing import List, Dict, Any
-
-from vllm.sampling_params import SamplingParams
-import PIL.Image
 import uuid
-from vllm import EngineArgs, LLMEngine
-from vllm import SamplingParams, TokensPrompt
-from vllm.multimodal import MultiModalDataBuiltins
+from typing import Any, Dict, List
 
-from mistral_common.protocol.instruct.messages import (
-    UserMessage,
-    TextChunk,
-    ImageURLChunk,
-    ImageChunk,
-)
-from PIL import Image
+import pytest
+from mistral_common.protocol.instruct.messages import ImageURLChunk
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 from mistral_common.tokens.tokenizers.multimodal import image_from_chunk
+
+from vllm import EngineArgs, LLMEngine, SamplingParams, TokensPrompt
+from vllm.multimodal import MultiModalDataBuiltins
+from vllm.sampling_params import SamplingParams
 
 pytestmark = pytest.mark.vlm
 
@@ -34,22 +26,21 @@ IMG_URLS = [
 ]
 PROMPT = "Describe each image in one short sentence."
 
+
 def _create_msg_format(urls: List[str]) -> List[Dict[str, Any]]:
-    return [
-        {
-            "role":
-            "user",
-            "content": [{
-                "type": "text",
-                "text": PROMPT,
-            }] + [{
-                    "type": "image_url",
-                    "image_url": {
-                        "url": url
-                    }
-                } for url in urls]
-        }
-    ]
+    return [{
+        "role":
+        "user",
+        "content": [{
+            "type": "text",
+            "text": PROMPT,
+        }] + [{
+            "type": "image_url",
+            "image_url": {
+                "url": url
+            }
+        } for url in urls]
+    }]
 
 
 def _create_engine_inputs(urls: List[str]) -> TokensPrompt:
@@ -73,8 +64,16 @@ def _create_engine_inputs(urls: List[str]) -> TokensPrompt:
     return engine_inputs
 
 
-MSGS = [_create_msg_format(IMG_URLS[:1]), _create_msg_format(IMG_URLS[:2]), _create_msg_format(IMG_URLS)]
-ENGINE_INPUTS = [_create_engine_inputs(IMG_URLS[:1]), _create_engine_inputs(IMG_URLS[:2]), _create_engine_inputs(IMG_URLS)]
+MSGS = [
+    _create_msg_format(IMG_URLS[:1]),
+    _create_msg_format(IMG_URLS[:2]),
+    _create_msg_format(IMG_URLS)
+]
+ENGINE_INPUTS = [
+    _create_engine_inputs(IMG_URLS[:1]),
+    _create_engine_inputs(IMG_URLS[:2]),
+    _create_engine_inputs(IMG_URLS)
+]
 
 EXPECTED = [
     "The image shows a black dog sitting on a wooden surface.",
@@ -82,9 +81,9 @@ EXPECTED = [
     "1. A black dog sits attentively on a wooden floor.\n2. A vast mountain range stretches across the horizon under a cloudy sky.\n3. Surfers wait for waves in the ocean at sunset.\n4. A winding gravel path leads through a lush green park."
 ]
 
-
 SAMPLING_PARAMS = SamplingParams(max_tokens=512, temperature=0.0)
 LIMIT_MM_PER_PROMPT = dict(image=4)
+
 
 @pytest.mark.skip(
     reason=
@@ -100,8 +99,12 @@ def test_chat(
     dtype: str,
 ) -> None:
 
-    with vllm_runner(model, dtype=dtype,
-                     tokenizer_mode="mistral", enable_chunked_prefill=False, max_model_len=max_model_len, limit_mm_per_prompt=LIMIT_MM_PER_PROMPT) as vllm_model:
+    with vllm_runner(model,
+                     dtype=dtype,
+                     tokenizer_mode="mistral",
+                     enable_chunked_prefill=False,
+                     max_model_len=max_model_len,
+                     limit_mm_per_prompt=LIMIT_MM_PER_PROMPT) as vllm_model:
         results = []
         for msg in MSGS:
             outputs = vllm_model.model.chat(msg,
@@ -141,12 +144,14 @@ def test_model_engine(model: str, dtype: str) -> None:
                 results.append(request_output.outputs[0].text)
 
         if count == 2:
-            engine.add_request(uuid.uuid4().hex, ENGINE_INPUTS[2], SAMPLING_PARAMS)
+            engine.add_request(uuid.uuid4().hex, ENGINE_INPUTS[2],
+                               SAMPLING_PARAMS)
         if not engine.has_unfinished_requests():
             break
 
     assert results[0] == EXPECTED[0]
     # the result is a tiny bit different but this is not unexpected given that different kernels are executed
     # and given that flash attention is not deterministic
-    assert results[1] == "1. A black dog with floppy ears sits attentively on a wooden surface.\n2. A vast mountain range stretches across the horizon under a cloudy sky."
+    assert results[
+        1] == "1. A black dog with floppy ears sits attentively on a wooden surface.\n2. A vast mountain range stretches across the horizon under a cloudy sky."
     assert results[2] == EXPECTED[2]
