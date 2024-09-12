@@ -494,7 +494,7 @@ class InputPreprocessor:
 
         if is_explicit_encoder_decoder_prompt(inputs):
             raise ValueError("Cannot pass encoder-decoder prompt "
-                                "to decoder-only models")
+                             "to decoder-only models")
 
         # Decoder-only operation
         return self._process_decoder_only_prompt(
@@ -522,7 +522,7 @@ class InputPreprocessor:
 
         if is_explicit_encoder_decoder_prompt(inputs):
             raise ValueError("Cannot pass encoder-decoder prompt "
-                                "to decoder-only models")
+                             "to decoder-only models")
 
         # Decoder-only operation
         return await self._process_decoder_only_prompt_async(
