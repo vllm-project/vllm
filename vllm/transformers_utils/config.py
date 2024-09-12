@@ -4,7 +4,9 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Optional, Type, Union
 
-from huggingface_hub import file_exists, hf_hub_download
+import huggingface_hub
+from huggingface_hub import (file_exists, hf_hub_download,
+                             try_to_load_from_cache)
 from transformers import GenerationConfig, PretrainedConfig
 from transformers.models.auto.image_processing_auto import (
     get_image_processor_config)
@@ -70,7 +72,22 @@ def file_or_path_exists(model: Union[str, Path], config_name, revision,
     if Path(model).exists():
         return (Path(model) / config_name).is_file()
 
-    return file_exists(model, config_name, revision=revision, token=token)
+    # Offline mode support: Check if config file is cached already
+    cached_filepath = try_to_load_from_cache(repo_id=model,
+                                             filename=config_name,
+                                             revision=revision)
+    if isinstance(cached_filepath, str):
+        # The config file exists in cache- we can continue trying to load
+        return True
+
+    # NB: file_exists will only check for the existence of the config file on
+    # hf_hub. This will fail in offline mode.
+    try:
+        return file_exists(model, config_name, revision=revision, token=token)
+    except huggingface_hub.errors.OfflineModeIsEnabled:
+        # Don't raise in offline mode, all we know is that we don't have this
+        # file cached.
+        return False
 
 
 def get_config(
@@ -102,6 +119,15 @@ def get_config(
                                  token=kwargs.get("token")):
             config_format = ConfigFormat.MISTRAL
         else:
+            # If we're in offline mode and found no valid config format, then
+            # raise an offline mode error to indicate to the user that they
+            # don't have files cached and may need to go online.
+            # This is conveniently triggered by calling file_exists().
+            file_exists(model,
+                        HF_CONFIG_NAME,
+                        revision=revision,
+                        token=kwargs.get("token"))
+
             raise ValueError(f"No supported config format found in {model}")
 
     if config_format == ConfigFormat.HF:
