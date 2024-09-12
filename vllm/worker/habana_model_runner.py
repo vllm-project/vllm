@@ -39,6 +39,8 @@ from vllm.worker.model_runner_base import (
     _add_sampling_metadata_broadcastable_dict,
     _init_attn_metadata_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
+from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensors,
+                             MultiModalInputs)
 
 from .profiler import Profiler
 
@@ -250,7 +252,7 @@ class PreparePromptMetadata(NamedTuple):
     lora_index_mapping: List[List[int]]
     lora_prompt_mapping: List[List[int]]
     lora_requests: Set[LoRARequest]
-    multi_modal_input: Optional[torch.Tensor]
+    multi_modal_kwargs: Dict[str, BatchedTensors]
     slot_mapping: List[List[int]]
 
     @classmethod
@@ -264,7 +266,7 @@ class PreparePromptMetadata(NamedTuple):
             lora_index_mapping=[],
             lora_prompt_mapping=[],
             lora_requests=set(),
-            multi_modal_input=None,
+            multi_modal_kwargs=None,
             slot_mapping=[],
         )
 
@@ -452,6 +454,10 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self._mem_margin: Optional[int] = None
         self._setup_buckets()
 
+        # Multi-modal data support
+        self.multi_modal_input_mapper = MULTIMODAL_REGISTRY \
+            .create_input_mapper(self.model_config)
+
     def load_model(self) -> None:
         import habana_frameworks.torch.core as htcore
         if self.model_config.quantization == 'inc':
@@ -623,7 +629,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         context_lens: List[int] = []
         query_lens: List[int] = []
         prefix_block_tables: List[List[int]] = []
-        multi_modal_input_list: List[torch.Tensor] = []
+        multi_modal_inputs_list: List[MultiModalInputs] = []
 
         if len(seq_group_metadata_list) == 0:
             return PreparePromptMetadata.empty()
@@ -681,9 +687,10 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             # is always the first token in the sequence.
             input_positions.append(list(range(context_len, seq_len)))
 
-            if seq_group_metadata.multi_modal_data:
-                multi_modal_input_list.append(
-                    seq_group_metadata.multi_modal_data.data)
+            mm_data = seq_group_metadata.multi_modal_data
+            if mm_data:
+                mm_kwargs = self.multi_modal_input_mapper(mm_data)
+                multi_modal_inputs_list.append(mm_kwargs)
 
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized
@@ -724,15 +731,6 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         context_lens_tensor = torch.tensor(context_lens,
                                            dtype=torch.int,
                                            device=self.device)
-
-        if multi_modal_input_list:
-            assert self.multimodal_config, (
-                "Multi-modal inputs are only supported by "
-                "vision language models.")
-            multi_modal_input = torch.cat(multi_modal_input_list,
-                                          dim=0).to(self.device)
-        else:
-            multi_modal_input = None
 
         max_prompt_block_table_len = max(len(t) for t in prefix_block_tables)
         max_prompt_len = max(
@@ -806,6 +804,9 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             num_decode_tokens=0,
             slot_mapping=slot_mapping,
         )
+        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list,
+                                                    device=self.device)
+
         return PreparePromptMetadata(
             input_tokens=input_tokens,
             input_positions=input_positions,
@@ -815,7 +816,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             lora_index_mapping=lora_index_mapping,
             lora_prompt_mapping=lora_prompt_mapping,
             lora_requests=lora_requests,
-            multi_modal_input=multi_modal_input,
+            multi_modal_kwargs=multi_modal_kwargs,
             slot_mapping=slot_mapping,
         )
 
@@ -930,7 +931,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         input_positions = None
         lora_mapping = None
         lora_requests = None
-        multi_modal_input = None
+        multi_modal_kwargs = None
         batch_type = None
         seq_lens = None
         query_lens = None
@@ -969,7 +970,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             lora_index_mapping,
             lora_prompt_mapping,
             lora_requests,
-            multi_modal_input,
+            multi_modal_kwargs,
             slot_mapping,
         ) = self._prepare_prompt(prefill_reqs)
         (
@@ -1047,7 +1048,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             "selected_token_indices": sampling_metadata.selected_token_indices,
             "lora_requests": lora_requests,
             "lora_mapping": lora_mapping,
-            "multi_modal_input": multi_modal_input,
+            "multi_modal_kwargs": multi_modal_kwargs,
             "num_prefill_tokens": num_prefill_tokens,
             "num_decode_tokens": num_decode_tokens,
             "slot_mapping": slot_mapping,
@@ -1073,7 +1074,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             attn_metadata=attn_metadata,
             lora_requests=lora_requests,
             lora_mapping=lora_mapping,
-            multi_modal_kwargs=multi_modal_input,
+            multi_modal_kwargs=multi_modal_kwargs,
             real_batch_size=real_batch_size,
             batch_size_padded=batch_size_padded), sampling_metadata
 
@@ -1592,7 +1593,6 @@ class HabanaModelRunner(
         input_positions = model_input.input_positions
         attn_metadata = model_input.attn_metadata
         sampling_metadata = model_input.sampling_metadata
-        multi_modal_input = model_input.multi_modal_kwargs
         real_batch_size = model_input.real_batch_size
         batch_size_padded = model_input.batch_size_padded
         assert input_tokens is not None
@@ -1610,10 +1610,9 @@ class HabanaModelRunner(
             "positions": input_positions,
             "kv_caches": kv_caches,
             "attn_metadata": self.trim_attn_metadata(attn_metadata),
-            "intermediate_tensors": intermediate_tensors
+            "intermediate_tensors": intermediate_tensors,
+            **(model_input.multi_modal_kwargs or {}),
         }
-        if multi_modal_input is not None:
-            execute_model_kwargs.update(multi_modal_input)
         if htorch.utils.internal.is_lazy():
             execute_model_kwargs.update({
                 "bypass_hpu_graphs": not use_graphs,
