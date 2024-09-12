@@ -538,8 +538,9 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.seen_configs: set = set()
         self._mem_margin: Optional[int] = None
         self._setup_buckets()
-
+        self._set_gc_threshold()
         
+    def _set_gc_threshold(self) -> None:
         # Read https://docs.python.org/3/library/gc.html#gc.set_threshold
         # for comprehensive description of gc generations.
         # We can either use VLLM_GC_THR_GEN[0-2] (this has higher priority)
