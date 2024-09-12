@@ -6,8 +6,15 @@ from vllm.utils import cuda_device_count_stateless
 
 from ..utils import fork_new_process_for_each_test
 
+TEST_MODELS=[
+    ("facebook/opt-125m", {})
+    ("nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change", {"dtype":torch.float16, "quantization":"compressed-tensors"})
+    ("neuralmagic/Meta-Llama-3-8B-Instruct-FP8", {"dtype":torch.float16, "quantization":"fp8"})
+    ("nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Dyn-Per-Token-2048-Samples", {"quantization":"compressed-tensors"})
+    ("meta-llama/Meta-Llama-3-8B", {})
+]
 
-@pytest.mark.parametrize("model", ["meta-llama/Meta-Llama-3-8B"])
+@pytest.mark.parametrize("model", TEST_MODELS)
 @pytest.mark.parametrize("tp_size", [1, 2])
 @fork_new_process_for_each_test
 def test_full_graph(model, tp_size):
@@ -30,8 +37,8 @@ def test_full_graph(model, tp_size):
     sampling_params = SamplingParams(temperature=0)
     llm = LLM(model=model,
               enforce_eager=True,
-              tensor_parallel_size=tp_size,
-              disable_custom_all_reduce=True)
+              load_format="dummy",
+              *model_kwargs)
 
     outputs = llm.generate(prompts, sampling_params)
 
