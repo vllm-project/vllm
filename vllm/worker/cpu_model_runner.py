@@ -15,7 +15,7 @@ from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalInputs)
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
-from vllm.utils import make_tensor_with_pad
+from vllm.utils import STR_NOT_IMPL_ENC_DEC_ERR_STRS, make_tensor_with_pad
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase,
     _add_attn_metadata_broadcastable_dict,
@@ -120,6 +120,10 @@ class CPUModelRunner(ModelRunnerBase[CPUModelInput]):
 
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
+
+        if self.model_config.is_encoder_decoder_model:
+            raise NotImplementedError(
+                STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_CPU'])
 
     def load_model(self) -> None:
         self.model = get_model(model_config=self.model_config,
