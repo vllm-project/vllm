@@ -1,6 +1,6 @@
 """Sampling parameters for text generation."""
 import copy
-from enum import IntEnum
+from enum import Enum, IntEnum
 from functools import cached_property
 from typing import Any, Dict, List, Optional, Set, Union
 
@@ -23,6 +23,15 @@ class SamplingType(IntEnum):
     RANDOM = 1
     RANDOM_SEED = 2
     BEAM = 3
+
+
+class RequestOutputKind(Enum):
+    # Return entire output so far in every RequestOutput
+    CUMULATIVE = 0
+    # Return only deltas in each RequestOutput
+    DELTA = 1
+    # Do not return intermediate RequestOuputs
+    FINAL_ONLY = 2
 
 
 class SamplingParams(
@@ -144,6 +153,7 @@ class SamplingParams(
     logits_processors: Optional[Any] = None
     include_stop_str_in_output: bool = False
     truncate_prompt_tokens: Optional[Annotated[int, msgspec.Meta(ge=1)]] = None
+    output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE
 
     # The below fields are not supposed to be used as an input.
     # They are set in post_init.
@@ -179,6 +189,7 @@ class SamplingParams(
         logits_processors: Optional[List[LogitsProcessor]] = None,
         truncate_prompt_tokens: Optional[Annotated[int,
                                                    msgspec.Meta(ge=1)]] = None,
+        output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
     ) -> "SamplingParams":
         return SamplingParams(
             n=1 if n is None else n,
@@ -210,6 +221,7 @@ class SamplingParams(
             spaces_between_special_tokens=spaces_between_special_tokens,
             logits_processors=logits_processors,
             truncate_prompt_tokens=truncate_prompt_tokens,
+            output_kind=output_kind,
         )
 
     def __post_init__(self) -> None:
@@ -314,6 +326,9 @@ class SamplingParams(
             raise ValueError(
                 "stop strings are only supported when detokenize is True. "
                 "Set detokenize=True to use stop.")
+        if self.best_of != self.n and self.output_kind == (
+                RequestOutputKind.DELTA):
+            raise ValueError("best_of must equal n to use output_kind=DELTA")
 
     def _verify_beam_search(self) -> None:
         if self.best_of == 1:
