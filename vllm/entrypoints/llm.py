@@ -19,7 +19,8 @@ from vllm.model_executor.guided_decoding.guided_fields import (
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import (GuidedDecodingParams, RequestOutputKind, SamplingParams)
+from vllm.sampling_params import (GuidedDecodingParams, RequestOutputKind,
+                                  SamplingParams)
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
@@ -650,8 +651,7 @@ class LLM:
             raise ValueError("The lengths of prompts and lora_request "
                              "must be the same.")
 
-
-        for sp in params if isinstance(params, list) else (self._add_guided_params(params, guided_options), ):
+        for sp in params if isinstance(params, list) else (params, ):
             if isinstance(sp, SamplingParams):
                 self._add_guided_params(sp, guided_options)
 
