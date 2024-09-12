@@ -318,7 +318,6 @@ class LlamaVLImageProcessor(BaseImageProcessor):
         )
     def preprocess(self, images, **kwargs) -> BatchFeature:
         with TorchBF16Context():
-            print("[warning] mask unsupported due to lack of example, replace with official release in the future")
             # assert len(images) == len(
             #     batch_masks
             # ), "Images and masks must have the same length"
@@ -328,9 +327,8 @@ class LlamaVLImageProcessor(BaseImageProcessor):
 
             max_num_images = max(len(x) for x in images)
             bsz = len(images)
-
             if max_num_images == 0:
-                data = {'pixel_values': None}
+                data = None
             else:
                 images_and_aspect_ratios = [
                     [self.image_transform(im) for im in row] for row in images

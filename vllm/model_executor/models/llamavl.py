@@ -40,6 +40,17 @@ from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
 
 from vllm.transformers_utils.multimodal_processors.llamavl import LlamaVLImageProcessor
 
+step_name = "prefill"
+pt_dir = ""
+
+def check(tensor, file_name): pass
+    # with open(f"{pt_dir}{file_name}", "rb") as f:
+    #     data = torch.load(f)
+
+    # tensor_flat = tensor.cpu().reshape(-1)
+    # data_flat = data.cpu().reshape(-1)
+    # print("check:", file_name, torch.allclose(tensor_flat, data_flat), torch.max(torch.abs(tensor_flat-data_flat)), tensor_flat.shape, data_flat.shape)
+
 logger = init_logger(__name__)
 MP_SCALE = 8
 IMAGE_RES = 224
@@ -79,10 +90,11 @@ def input_processor_for_llamavl(ctx: InputContext, llm_inputs: LLMInputs):
 
     return llm_inputs
 
-def get_max_llama_image_tokens(ctx: InputContext) -> int:
-    logger.warning("need further check on max llama image tokens")
-    return 1025 * 2
 
+def get_max_llama_image_tokens(ctx: InputContext) -> int:
+    hf_config = ctx.model_config.hf_config
+    token_per_chunk = (hf_config.vision_chunk_size // 14) ** 2 + 1
+    return hf_config.max_num_image * hf_config.vision_max_num_chunks *  token_per_chunk 
 
 def to_2tuple(x):
     if isinstance(x, collections.abc.Iterable):
@@ -103,7 +115,7 @@ def resize_local_position_embedding(orig_pos_embed, grid_size):
         orig_pos_embed[:1],
         orig_pos_embed[1:],
     )
-    logger.info(
+    logger.debug(
         f"resizing position embedding grid-size from {orig_grid_size} to {new_grid_size}"
     )
 
@@ -690,7 +702,7 @@ class VisionEncoder(nn.Module):
                     self.max_num_tiles,
                     self.max_num_tiles,
                 )
-                logger.info(
+                logger.debug(
                     f"Resized global positional embedding from {state_dict[prefix + 'gated_positional_embedding'].size()} to {global_pos_embed.size()}"
                 )
                 state_dict[prefix + "gated_positional_embedding"] = global_pos_embed
@@ -1164,10 +1176,10 @@ class CrossAttention(torch.nn.Module):
         xk = self.wk(xattn_tokens)
         xv = self.wv(xattn_tokens)
 
-        _, seqlen_y, _ = xk.shape
+        # _, seqlen_y, _ = xk.shape
 
-        xk = xk.view(bsz, seqlen_y, self.n_local_kv_heads, self.head_dim)
-        xv = xv.view(bsz, seqlen_y, self.n_local_kv_heads, self.head_dim)
+        xk = xk.view(-1, self.n_local_kv_heads, self.head_dim)
+        xv = xv.view(-1, self.n_local_kv_heads, self.head_dim)
 
         xk = self.k_norm(xk)
 
@@ -1532,6 +1544,7 @@ class CrossAttentionTransformerText(torch.nn.Module):
                 kv_cache=kv_caches[idx],
                 attn_metadata=attn_metadata,
             )
+            # check(h, f"layer_{idx}_xh_{step_name}.pt")
             h = layer(
                 x=h,
                 # mask=mask,
@@ -1540,8 +1553,10 @@ class CrossAttentionTransformerText(torch.nn.Module):
                 kv_cache=kv_caches[idx],
                 attn_metadata=attn_metadata,
             )
+            # check(h, f"layer_{idx}_h_{step_name}.pt")
 
         h = self.norm(h)
+        # check(h, f"finalh_{step_name}.pt")
         return h
 
     def _get_xattn_mask(
@@ -1810,6 +1825,7 @@ class VariableSizeImageTransform(object):
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_llama_image_tokens)
+@INPUT_REGISTRY.register_dummy_data(dummy_data_for_llamavl)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_llamavl)
 class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
     def __init__(self, config,
@@ -1948,6 +1964,7 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: object,
     ) -> torch.Tensor:
+        # import pdb; pdb.set_trace()
         image_inputs = self._parse_and_validate_image_input(**kwargs)
         if image_inputs is None:
             cross_attention_masks = None
@@ -1958,6 +1975,17 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
             cuda_images = image_inputs['data'].cuda()
             cuda_aspect_ratios = image_inputs['aspect_ratios'].cuda()
             vision_tokens = self.vision_model(cuda_images, cuda_aspect_ratios)
+            # import pdb; pdb.set_trace()
+            bsz, _, _, _, image_token_dim = tuple(vision_tokens.shape)
+            vision_tokens = vision_tokens.view(bsz, -1, image_token_dim)
+
+            vision_tokens_flat = torch.zeros(sum(attn_metadata.encoder_seq_lens), image_token_dim, device=vision_tokens.device, dtype=vision_tokens.dtype)
+            start_pos = 0
+            for seq_len, vision_token_in_batch in zip(attn_metadata.encoder_seq_lens, vision_tokens):
+                end_pos = start_pos + seq_len
+                vision_tokens_flat[start_pos:end_pos] = vision_token_in_batch[:seq_len]
+                start_pos = end_pos
+
             batch_masks = []
             # TODO: get the sequence of each query without hack? 1) better attn metadata 2) better input processor to create vision mask during preprocess
             # assert isinstance(attn_metadata, PagedAttentionMetadata)
@@ -1967,12 +1995,9 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
                 batch_masks.append(create_vision_mask(input_ids[start_pos:end_pos]))
                 start_pos = end_pos
 
-            bsz, nimg, nchunk, ntok, image_token_dim = tuple(vision_tokens.shape)
             xattn_caches = torch.stack(
                 [
-                    layer.compute_xattn_kv_cache(
-                        vision_tokens.view(bsz, -1, image_token_dim)
-                    )
+                    layer.compute_xattn_kv_cache(vision_tokens_flat)
                     for layer in self.text_model.cross_attention_layers
                 ]
             )
@@ -2002,7 +2027,12 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
             #     full_text_row_masked_out_mask_plain[start_pos:end_pos, 0] = full_text_row_masked_out_mask[i, 0, :seq_len, 0]
             #     start_pos = end_pos
             # full_text_row_masked_out_mask = full_text_row_masked_out_mask_plain.cuda()
+        # print("input_ids", input_ids)
+        if positions.numel() == 1:
+            global step_name
+            step_name = f"decode_{positions.item()}"
         h = self.text_model.get_partially_trainable_embedding(input_ids)
+        # check(h, f"h_{step_name}.pt")
         h = self.text_model.forward(
             positions=positions,
             h=h,
@@ -2012,15 +2042,14 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
         )
+        # if positions.numel() == 1 and positions.item() == 20:
+        #     exit(0)
         return h
 
 def create_vision_mask(
     tokens: List[int],
     vision_token: int=128256,
 ) -> List[List[int]]:
-    # import pdb; pdb.set_trace()
-#     (Pdb) p tokens
-# [128011, 128011, 128000, 644, 264, 11914, 11, 1521, 1403, 5448, 6308]
     vision_token_locations = [
         i for i, token in enumerate(tokens) if token == vision_token
     ]
