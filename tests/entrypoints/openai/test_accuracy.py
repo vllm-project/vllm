@@ -21,11 +21,12 @@ EXPECTED_VALUE = 0.58
 
 
 @pytest.fixture(scope="module")
-def server():
-    args = [
-        "--max-model-len", "4096", "--enable-chunked-prefill",
-        "--disable-log-requests", "--enforce-eager"
-    ]
+@pytest.mark.parametrize(
+    "more_args",
+    [["--enable-chunked-prefill"], ["--num-scheduler-steps", "8"]])
+def server(more_args):
+    args = ["--max-model-len", "4096", "--disable-log-requests"]
+    args.extend(more_args)
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
