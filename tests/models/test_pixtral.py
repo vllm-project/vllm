@@ -96,6 +96,9 @@ def is_h100_gpu() -> bool:
     return False
 
 
+MAX_MODEL_LEN = [8192, 65536] if is_h100_gpu() else [8192]
+
+
 @pytest.mark.skip(
     reason=
     "Model is too big, test passed on A100 locally but will OOM on CI machine."
