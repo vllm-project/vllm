@@ -658,8 +658,8 @@ class VllmRunner:
             outputs.append((req_sample_output_ids, req_sample_output_strs))
         return outputs
 
+    @staticmethod
     def _final_steps_generate_w_logprobs(
-        self,
         req_outputs: List[RequestOutput],
     ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
         outputs: List[Tuple[List[int], str, Optional[SampleLogprobs]]] = []
