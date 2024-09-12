@@ -16,5 +16,7 @@ def test_full_graph(model):
         "The future of AI is",
     ]
     sampling_params = SamplingParams(temperature=0)
-    llm = LLM(model="meta-llama/Meta-Llama-3-8B")
+    llm = LLM(model="meta-llama/Meta-Llama-3-8B",
+              enforce_eager=True,
+              load_format="dummy")
     llm.generate(prompts, sampling_params)
