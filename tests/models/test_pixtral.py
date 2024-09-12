@@ -104,7 +104,7 @@ MAX_MODEL_LEN = [8192, 65536] if is_h100_gpu() else [8192]
     "Model is too big, test passed on A100 locally but will OOM on CI machine."
 )
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("max_model_len", [8192, 65536])
+@pytest.mark.parametrize("max_model_len", MAX_MODEL_LEN)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 def test_chat(
     vllm_runner,
