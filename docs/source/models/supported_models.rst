@@ -247,6 +247,11 @@ Multimodal Language Models
     - Image\ :sup:`E+`
     - :code:`microsoft/Phi-3-vision-128k-instruct`, :code:`microsoft/Phi-3.5-vision-instruct` etc.
     -
+  * - :code:`PixtralForConditionalGeneration`
+    - Pixtral
+    - Image\ :sup:`+`
+    - :code:`mistralai/Pixtral-12B-2409`
+    -
   * - :code:`QWenLMHeadModel`
     - Qwen-VL
     - Image\ :sup:`E`
