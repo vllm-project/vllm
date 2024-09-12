@@ -990,7 +990,7 @@ def get_rope(
                 base, is_neox_style, dtype, short_factor, long_factor,
                 **extra_kwargs)
         elif scaling_type == "mrope":
-            return MRotaryEmbedding(
+            rotary_emb = MRotaryEmbedding(
                 head_size,
                 rotary_dim,
                 max_position,
