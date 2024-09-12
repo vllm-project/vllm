@@ -48,23 +48,30 @@ def dummy_data_for_pixtral(ctx: InputContext, seq_len: int,
     tokenizer = cached_get_tokenizer(
         ctx.model_config.tokenizer,
         tokenizer_mode=ctx.model_config.tokenizer_mode)
-    mm_encoder = tokenizer.instruct.mm_encoder
+
+    max_model_len = ctx.model_config.max_model_len
+    mm_encoder = tokenizer.mistral.instruct_tokenizer.mm_encoder
+    patch_size = mm_encoder.mm_config.image_patch_size
+    image_token_id = mm_encoder.special_ids.img
 
     mm_config = ctx.model_config.multimodal_config
-    max_num_images_per_request = mm_config.limit_per_prompt.get("image", 1)
+    num_images = mm_config.limit_per_prompt.get("image", 1)
 
-    # approximate image size
-    size = int(math.sqrt(seq_len) * mm_encoder.mm_config.image_patch_size)
-
+    # dummy size
+    size = 256
     image = Image.new("RGB", (size, size), color=0)
-    img_chunk = ImageChunk(image=image)
 
-    tokens = mm_encoder(img_chunk).tokens
-    token_ids = max_num_images_per_request * array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                                                   tokens)
+    image_feature_size = (size ** 2) // (patch_size ** 2)
+
+    num_image_tokens = image_feature_size * num_images
+
+    token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
+                      [image_token_id]) * num_image_tokens
+    token_ids += array(VLLM_TOKEN_ID_ARRAY_TYPE,
+                       [0]) * (seq_len - num_image_tokens)
 
     seq_data = SequenceData(token_ids)
-    mm_data = {"image": max_num_images_per_request * [image]}
+    mm_data = {"image": num_images * [image]}
     return seq_data, mm_data
 
 
@@ -115,8 +122,9 @@ def merge_multimodal_embeddings(input_ids: torch.Tensor,
     assert (D_txt == D_img), (f"Text features dim {D_txt} should be equal "
                               "to image features dim {D_img}")
     assert (seq_len == N_txt +
-            N_img), (f"seq_len {seq_len} should be equal to N_txt + N_img "
-                     f"{(N_txt, N_img, image_locations.sum().item())}")
+            N_img), (f"seq_len should be equal to N_txt + N_img, "
+                     f" but got {seq_len=} != {N_txt=} + {N_img=}, "
+                     f" for {image_locations.sum().item()} img locs")
 
     inputs_embeds[image_locations, :] = image_features
     return inputs_embeds
@@ -201,10 +209,12 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal):
             return None
 
         if isinstance(images, torch.Tensor):
-            # always take last images
-            images = [images[-1][i] for i in range(images.size(1))]
+            # if passed as batch take all images
+            N, B, C, W, H = images.shape
+            images = images.reshape(N * B, C, W, H)
+            images = [images[i] for i in range(images.size(0))]
         elif isinstance(images, list):
-            # always take last images
+            # if passed as list always take last images
             images = [images[-1][i] for i in range(len(images[0]))]
 
         return images
