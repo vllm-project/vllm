@@ -12,7 +12,7 @@ import torch.nn.functional as F
 import torchvision.transforms as tv
 from PIL import Image
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.attention.ops.paged_attn import PagedAttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
@@ -393,13 +393,11 @@ class ImageFeedForward(torch.nn.Module):
         self.dropout = dropout
 
     def forward(self, x):
-        hidden = self.c_fc(x)
-        # hidden = F.linear(x, self.c_fc.weight, self.c_fc.bias)
+        hidden = F.linear(x, self.c_fc.weight, self.c_fc.bias)
         hidden = self.non_linearity(hidden)
-        hidden = self.c_proj(hidden)
-        # hidden = F.linear(hidden, self.c_proj.weight)
+        hidden = F.linear(hidden, self.c_proj.weight)
         # hidden = reduce_from_tensor_model_parallel_region(hidden)
-        # hidden += self.c_proj.bias
+        hidden += self.c_proj.bias
         return hidden
 
 
@@ -854,6 +852,15 @@ class FeedForward(nn.Module):
 class LlamaVLAttention(LlamaAttention):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        rope_scaling = kwargs.get("rope_scaling", None)
+        self.rotary_emb = get_rope(
+            self.head_dim,
+            rotary_dim=self.head_dim,
+            max_position=self.max_position_embeddings,
+            base=self.rope_theta,
+            rope_scaling=rope_scaling,
+            is_neox_style=False, # force to use neox=False
+        )
         self._register_load_state_dict_pre_hook(self.load_hook)
 
 
@@ -867,8 +874,6 @@ class LlamaVLAttention(LlamaAttention):
         unexpected_keys: List[str],
         error_msgs: List[str],
     ) -> None:
-        if prefix + "wqkv.weight" in state_dict:
-            state_dict[prefix + "qkv_proj.weight"] = state_dict.pop(prefix + "wqkv.weight")
         if prefix + "wo.weight" in state_dict:
             state_dict[prefix + "o_proj.weight"] = state_dict.pop(prefix + "wo.weight")
 
@@ -1112,6 +1117,13 @@ class CrossAttention(torch.nn.Module):
             self.head_dim,
             eps=norm_eps,
         )
+        self.scaling = self.head_dim**-0.5
+        self.attn = Attention(
+            self.n_heads,
+            self.head_dim,
+            self.scaling,
+            self.n_kv_heads,
+        )
 
         # cross-attention heads are model parallel similar to
         # self-attention, and we also use the identical KV head
@@ -1157,12 +1169,6 @@ class CrossAttention(torch.nn.Module):
         xk = xk.view(bsz, seqlen_y, self.n_local_kv_heads, self.head_dim)
         xv = xv.view(bsz, seqlen_y, self.n_local_kv_heads, self.head_dim)
 
-        xk, xv = [tensor.transpose(1, 2) for tensor in (xk, xv)]
-
-        # repeat k/v heads if n_kv_heads < n_heads
-        xk = xk.repeat_interleave(self.n_rep, dim=1)
-        xv = xv.repeat_interleave(self.n_rep, dim=1)
-
         xk = self.k_norm(xk)
 
         return torch.stack([xk, xv])
@@ -1170,59 +1176,25 @@ class CrossAttention(torch.nn.Module):
     def compute_xattn_kv_cache(self, xattn_tokens: torch.Tensor) -> torch.Tensor:
         return self._compute_xattn_kv_cache(xattn_tokens)
 
-    def unpack_value(self, x: torch.Tensor, positions: torch.LongTensor, attn_metadata: AttentionMetadata, xattn_mask: torch.Tensor, full_text_row_masked_out_mask: torch.Tensor):
-        x_unpacked = torch.zeros(attn_metadata.num_prefills, attn_metadata.max_query_len, x.shape[-1], device=x.device, dtype=x.dtype)
-        positions_unpacked = torch.zeros(attn_metadata.num_prefills, attn_metadata.max_query_len, device=positions.device, dtype=positions.dtype)
-        xattn_mask = xattn_mask[:, :, :attn_metadata.max_query_len]
-        # position
-        start_pos = 0
-        for i, seq_len in enumerate(attn_metadata.seq_lens_tensor):
-            end_pos = start_pos + seq_len
-            x_unpacked[i, :seq_len] = x[start_pos:end_pos]
-            positions_unpacked[i, :seq_len] = positions[start_pos:end_pos]
-            xattn_mask[i, 0, seq_len:] = torch.finfo(xattn_mask.dtype).min
-            start_pos = end_pos
-        # xattn_mask = xattn_mask[:, :, :attn_metadata.max_query_len]
-        # full_text_row_masked_out_mask = full_text_row_masked_out_mask[:, :, :attn_metadata.max_query_len]
-        return x_unpacked, positions_unpacked, xattn_mask, full_text_row_masked_out_mask
-
-    def pack_value(self, x:torch.Tensor, attn_metadata: AttentionMetadata):
-        x_packed = torch.zeros(attn_metadata.num_prefill_tokens, x.shape[-1], device=x.device, dtype=x.dtype)
-        start_pos = 0
-        for i, seq_len in enumerate(attn_metadata.seq_lens_tensor):
-            end_pos = start_pos + seq_len
-            x_packed[start_pos:end_pos] = x[i, :seq_len]
-            start_pos = end_pos
-        return x_packed
-
     def forward(
         self,
         x: torch.Tensor,
-        xattn_mask: torch.Tensor,
-        full_text_row_masked_out_mask: torch.Tensor,
+        # xattn_mask: torch.Tensor,
+        # full_text_row_masked_out_mask: torch.Tensor,
         xattn_cache: torch.Tensor,
-        positions: torch.LongTensor,
+        kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         xq = F.linear(x, self.wq.weight)
-        n_token = xq.shape[0]
-        xq, positions, xattn_mask, full_text_row_masked_out_mask = self.unpack_value(xq, positions, attn_metadata, xattn_mask, full_text_row_masked_out_mask)
-        bsz, seqlen, _ = xq.shape
 
-        xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
+        xq = xq.view(-1, self.n_local_heads, self.head_dim)
         xq = self.q_norm(xq)
-        xq = xq.transpose(1, 2) # [bs, n_head, seq_len, head_dim]
 
-        xk, xv = xattn_cache
-
-        output = F.scaled_dot_product_attention(
-            xq, xk, xv, attn_mask=xattn_mask, dropout_p=0.0
-        )
-        
-        output = output.transpose(1, 2).reshape(bsz, seqlen, -1).contiguous()
-        output = self.pack_value(output, attn_metadata)
-
-        output = output * full_text_row_masked_out_mask
+        if xattn_cache is not None:
+            xk, xv = xattn_cache
+        else:
+            xk, xv = None, None
+        output = self.attn(xq, xk, xv, kv_cache, attn_metadata, attn_type=AttentionType.ENCODER_DECODER)
         out = F.linear(output, self.wo.weight)
         return out
 
@@ -1311,23 +1283,23 @@ class CrossAttentionTransformerBlock(torch.nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        xattn_mask: torch.Tensor,
-        full_text_row_masked_out_mask: torch.Tensor,
+        # xattn_mask: torch.Tensor,
+        # full_text_row_masked_out_mask: torch.Tensor,
         xattn_cache: torch.Tensor,
-        positions: torch.LongTensor,
+        kv_cache: torch.LongTensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         _attn_out = self.attention(
             x=self.attention_norm(x),
-            xattn_mask=xattn_mask,
-            full_text_row_masked_out_mask=full_text_row_masked_out_mask,
+            # xattn_mask=xattn_mask,
+            # full_text_row_masked_out_mask=full_text_row_masked_out_mask,
             xattn_cache=xattn_cache,
-            positions=positions,
+            kv_cache=kv_cache,
             attn_metadata=attn_metadata
         )
         h = x + self.gate_attn.tanh() * _attn_out
         _ffn = self.feed_forward(self.ffn_norm(h))
-        _ffn = full_text_row_masked_out_mask * _ffn  # type: ignore
+        # _ffn = full_text_row_masked_out_mask * _ffn  # type: ignore
         h = h + self.gate_ffwd.tanh() * _ffn * float(not self.no_ffn)
         return h
 
@@ -1399,7 +1371,6 @@ class CrossAttentionTransformerVision(torch.nn.Module):
         vision_tokens = self.vision_encoder(
             images.to(dtype=torch.bfloat16), aspect_ratios
         )
-
         vision_tokens = F.linear(vision_tokens, self.vision_projection.weight)
         # vision_tokens = gather_from_tensor_model_parallel_region(vision_tokens)
         return vision_tokens
@@ -1538,8 +1509,8 @@ class CrossAttentionTransformerText(torch.nn.Module):
         self,
         positions: torch.LongTensor,
         h: torch.Tensor,
-        xattn_mask: torch.Tensor,
-        full_text_row_masked_out_mask: torch.Tensor,
+        # xattn_mask: torch.Tensor,
+        # full_text_row_masked_out_mask: torch.Tensor,
         xattn_caches: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
@@ -1553,16 +1524,14 @@ class CrossAttentionTransformerText(torch.nn.Module):
             xattn_layer,
             xattn_layer_idx,
         ) in enumerate(self.text_and_xattn_layers):
-            # TODO: a hack now. skip decode cross attention
-            if xattn_mask is not None:
-                h = xattn_layer(
-                    x=h,
-                    xattn_mask=xattn_mask,
-                    full_text_row_masked_out_mask=full_text_row_masked_out_mask,
-                    xattn_cache=xattn_caches[xattn_layer_idx],
-                    positions=positions,
-                    attn_metadata=attn_metadata,
-                )
+            h = xattn_layer(
+                x=h,
+                # xattn_mask=xattn_mask,
+                # full_text_row_masked_out_mask=full_text_row_masked_out_mask,
+                xattn_cache=xattn_caches[xattn_layer_idx] if xattn_caches is not None else None,
+                kv_cache=kv_caches[idx],
+                attn_metadata=attn_metadata,
+            )
             h = layer(
                 x=h,
                 # mask=mask,
@@ -1574,9 +1543,6 @@ class CrossAttentionTransformerText(torch.nn.Module):
 
         h = self.norm(h)
         return h
-        # output = F.linear(h, self.output.weight)
-        # output = gather_from_tensor_model_parallel_region(output)
-        # return output.float()
 
     def _get_xattn_mask(
         self,
@@ -1885,7 +1851,16 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
         state_dict = {name: weight for name, weight in weights}
         state_dict.pop('text_model.rope.freqs')
         state_dict['lm_head.weight'] = state_dict.pop('text_model.output.weight')
-        self.load_state_dict(state_dict, strict=True)
+        param_dict = {k: v for k, v in self.named_parameters()}
+        for i in range(self.text_model.n_layers):
+            module = self.text_model.layers[i].attention.qkv_proj
+            param_name = f"text_model.layers.{i}.attention.qkv_proj.weight"
+            weight_name = f"text_model.layers.{i}.attention.wqkv.weight"
+            param = param_dict[param_name]
+            weight = state_dict.pop(weight_name)
+            module.weight_loader(param, weight)
+        self.load_state_dict(state_dict, strict=False)
+        
 
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[LlavaImageInputs]:
@@ -1973,7 +1948,6 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: object,
     ) -> torch.Tensor:
-        # import pdb; pdb.set_trace()
         image_inputs = self._parse_and_validate_image_input(**kwargs)
         if image_inputs is None:
             cross_attention_masks = None
@@ -2003,43 +1977,42 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
                 ]
             )
             # TODO: remove this hardcode
-            total_len = 512
-            padded_masks = _pad_masks(
-                batch_masks,
-                image_inputs['num_chunks'],
-                total_len,
-                self.max_num_chunks,
-            )
+            # total_len = 512
+            # padded_masks = _pad_masks(
+            #     batch_masks,
+            #     image_inputs['num_chunks'],
+            #     total_len,
+            #     self.max_num_chunks,
+            # )
 
-            cross_attention_masks, full_text_row_masked_out_mask = (
-                self.text_model._get_xattn_mask(
-                    num_tokens=total_len,
-                    text_device="cuda",
-                    text_dtype=next(self.text_model.parameters()).dtype,
-                    vision_tokens=vision_tokens,
-                    cross_attention_masks=padded_masks,
-                )
-            )
+            # cross_attention_masks, full_text_row_masked_out_mask = (
+            #     self.text_model._get_xattn_mask(
+            #         num_tokens=total_len,
+            #         text_device="cuda",
+            #         text_dtype=next(self.text_model.parameters()).dtype,
+            #         vision_tokens=vision_tokens,
+            #         cross_attention_masks=padded_masks,
+            #     )
+            # )
 
-            full_text_row_masked_out_mask_plain = torch.zeros(attn_metadata.num_prefill_tokens, 1, dtype=full_text_row_masked_out_mask.dtype)
-            start_pos = 0
-            for i, seq_len in enumerate(attn_metadata.seq_lens_tensor):
-                end_pos = start_pos + seq_len
-                full_text_row_masked_out_mask_plain[start_pos:end_pos, 0] = full_text_row_masked_out_mask[i, 0, :seq_len, 0]
-                start_pos = end_pos
-            full_text_row_masked_out_mask = full_text_row_masked_out_mask_plain.cuda()
+            # full_text_row_masked_out_mask_plain = torch.zeros(attn_metadata.num_prefill_tokens, 1, dtype=full_text_row_masked_out_mask.dtype)
+            # start_pos = 0
+            # for i, seq_len in enumerate(attn_metadata.seq_lens_tensor):
+            #     end_pos = start_pos + seq_len
+            #     full_text_row_masked_out_mask_plain[start_pos:end_pos, 0] = full_text_row_masked_out_mask[i, 0, :seq_len, 0]
+            #     start_pos = end_pos
+            # full_text_row_masked_out_mask = full_text_row_masked_out_mask_plain.cuda()
         h = self.text_model.get_partially_trainable_embedding(input_ids)
-        logits = self.text_model.forward(
+        h = self.text_model.forward(
             positions=positions,
             h=h,
-            xattn_mask=cross_attention_masks,
-            full_text_row_masked_out_mask=full_text_row_masked_out_mask,
+            # xattn_mask=cross_attention_masks,
+            # full_text_row_masked_out_mask=full_text_row_masked_out_mask,
             xattn_caches=xattn_caches,
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
         )
-        # import pdb; pdb.set_trace()
-        return logits
+        return h
 
 def create_vision_mask(
     tokens: List[int],
