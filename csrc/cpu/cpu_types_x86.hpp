@@ -465,7 +465,7 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
 };
 #endif
 
-#ifdef __AVX512F__
+#if defined(__AVX512BW__) && defined(__AVX512VL__)
 struct INT8Vec16: public Vec<INT8Vec16> {
   constexpr static int VEC_ELEM_NUM = 16;
   union AliasReg {
@@ -474,7 +474,7 @@ struct INT8Vec16: public Vec<INT8Vec16> {
   };
 
   __m128i reg;
-  
+
   explicit INT8Vec16(const FP32Vec16& vec) : reg(
     _mm512_cvtepi32_epi8(_mm512_cvt_roundps_epi32(vec.reg, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC))
   ) {}
