@@ -16,7 +16,7 @@ custom_attn_available = is_hip() and VLLM_USE_ROCM_CUSTOM_PAGED_ATTN and \
 
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
 _PARTITION_SIZE_V1V2 = 512
-_PARTITION_SIZE_CUSTOM = 256
+_PARTITION_SIZE_CUSTOM = 512
 
 
 @dataclass
@@ -122,11 +122,8 @@ class PagedAttention:
         num_seqs, num_heads, head_size = query.shape
         gqa_ratio = num_heads // num_kv_heads
         use_custom = (custom_attn_available
-                      and (query.dtype == torch.half
-                           or query.dtype == torch.bfloat16)
-                      and (head_size == 128 or head_size == 64)
-                      and (block_size == 16 or block_size == 32)
-                      and kv_cache_dtype == "auto"
+                      and query.dtype in (torch.half, torch.bfloat16)
+                      and head_size in (64, 128) and block_size in (16, 32)
                       and (gqa_ratio >= 1 and gqa_ratio <= 16)
                       and max_seq_len <= 32768)
         if not use_custom:
@@ -208,23 +205,12 @@ class PagedAttention:
                     blocksparse_head_sliding_step,
                 )
             else:
-                ops.paged_attention_custom(
-                    output,
-                    exp_sums,
-                    max_logits,
-                    tmp_output,
-                    query,
-                    key_cache,
-                    value_cache,
-                    num_kv_heads,
-                    scale,
-                    block_tables,
-                    seq_lens,
-                    block_size,
-                    max_seq_len,
-                    alibi_slopes,
-                    kv_cache_dtype,
-                )
+                ops.paged_attention_custom(output, exp_sums, max_logits,
+                                           tmp_output, query, key_cache,
+                                           value_cache, num_kv_heads, scale,
+                                           block_tables, seq_lens, block_size,
+                                           max_seq_len, alibi_slopes,
+                                           kv_cache_dtype, k_scale, v_scale)
         return output
 
     @staticmethod

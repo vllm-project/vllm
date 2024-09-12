@@ -19,7 +19,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, custom_ops) {
       "                       Tensor context_lens, int block_size,"
       "                       int max_context_len,"
       "                       Tensor? alibi_slopes,"
-      "                       str kv_cache_dtype) -> ()");
+      "                       str kv_cache_dtype,"
+      "                       float k_scale, float v_scale) -> ()");
   custom_ops.impl("paged_attention_custom", torch::kCUDA,
                   &paged_attention_custom);
   custom_ops.def(

@@ -378,8 +378,6 @@ scaled_vec_conversion<__nv_bfloat16, uint8_t>(const uint8_t& a, float scale) {
   return __float2bfloat16(f * scale);
 }
 
-using __nv_bfloat162 = __hip_bfloat162;
-
 // fp8x2 -> __nv_bfloat162
 template <>
 __inline__ __device__ __nv_bfloat162
