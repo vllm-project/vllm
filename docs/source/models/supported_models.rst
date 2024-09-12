@@ -254,7 +254,7 @@ Multimodal Language Models
     -
   * - :code:`QWenLMHeadModel`
     - Qwen-VL
-    - Image\ :sup:`E`
+    - Image\ :sup:`E+`
     - :code:`Qwen/Qwen-VL`, :code:`Qwen/Qwen-VL-Chat`, etc.
     -
   * - :code:`Qwen2VLForConditionalGeneration`
