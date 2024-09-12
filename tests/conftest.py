@@ -9,22 +9,25 @@ from enum import Enum
 from typing import (Any, Callable, Dict, List, Optional, Tuple, TypedDict,
                     TypeVar, Union)
 
+import numpy as np
 import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from huggingface_hub import snapshot_download
 from PIL import Image
-from transformers import (AutoModelForCausalLM, AutoModelForSeq2SeqLM,
-                          AutoModelForVision2Seq, AutoTokenizer, BatchEncoding,
+from transformers import (AutoModelForCausalLM, AutoTokenizer, BatchEncoding,
                           BatchFeature)
 
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
+from vllm.assets.video import VideoAsset
 from vllm.config import TokenizerPoolConfig
 from vllm.connections import global_http_connection
 from vllm.distributed import (destroy_distributed_environment,
-                              destroy_model_parallel)
+                              destroy_model_parallel,
+                              init_distributed_environment,
+                              initialize_model_parallel)
 from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
                          to_enc_dec_tuple_list, zip_enc_dec_prompts)
 from vllm.logger import init_logger
@@ -38,6 +41,11 @@ logger = init_logger(__name__)
 _TEST_DIR = os.path.dirname(__file__)
 _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
 _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
+
+PromptImageInput = Union[List[Image.Image], List[List[Image.Image]]]
+PromptAudioInput = Union[List[Tuple[np.ndarray, int]],
+                         List[List[Tuple[np.ndarray, int]]]]
+PromptVideoInput = Union[List[np.ndarray], List[List[np.ndarray]]]
 
 
 def _read_prompts(filename: str) -> List[str]:
@@ -79,8 +87,35 @@ class _ImageAssets(_ImageAssetsBase):
         return [prompts["stop_sign"], prompts["cherry_blossom"]]
 
 
+class _VideoAssetPrompts(TypedDict):
+    sample_demo_1: str
+
+
+if sys.version_info < (3, 9):
+    # UserList cannot be subscripted
+    class _VideoAssetsBase(UserList):
+        pass
+else:
+
+    class _VideoAssetsBase(UserList[VideoAsset]):
+        pass
+
+
+class _VideoAssets(_VideoAssetsBase):
+
+    def __init__(self) -> None:
+        super().__init__([
+            VideoAsset("sample_demo_1.mp4"),
+        ])
+
+    def prompts(self, prompts: _VideoAssetPrompts) -> List[str]:
+        return [prompts["sample_demo_1"]]
+
+
 IMAGE_ASSETS = _ImageAssets()
 """Singleton instance of :class:`_ImageAssets`."""
+VIDEO_ASSETS = _VideoAssets()
+"""Singleton instance of :class:`_VideoAssets`."""
 
 
 @pytest.fixture(autouse=True)
@@ -88,6 +123,21 @@ def init_test_http_connection():
     # pytest_asyncio may use a different event loop per test
     # so we need to make sure the async client is created anew
     global_http_connection.reuse_client = False
+
+
+@pytest.fixture
+def dist_init():
+    temp_file = tempfile.mkstemp()[1]
+    init_distributed_environment(
+        world_size=1,
+        rank=0,
+        distributed_init_method=f"file://{temp_file}",
+        local_rank=0,
+        backend="nccl",
+    )
+    initialize_model_parallel(1, 1)
+    yield
+    cleanup()
 
 
 def cleanup():
@@ -144,7 +194,7 @@ def example_encoder_decoder_prompts(
     decoder prompt) tuple.
 
     Returns:
-    
+
     * Encoder prompt list
     * Decoder prompt list (reverse of encoder prompt list)
     '''
@@ -181,6 +231,11 @@ def image_assets() -> _ImageAssets:
     return IMAGE_ASSETS
 
 
+@pytest.fixture(scope="session")
+def video_assets() -> _VideoAssets:
+    return VIDEO_ASSETS
+
+
 _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature)
 
 
@@ -188,8 +243,14 @@ class HfRunner:
 
     def wrap_device(self, input: _T) -> _T:
         if not is_cpu():
+            # Check if the input is already on the GPU
+            if hasattr(input, 'device') and input.device.type == "cuda":
+                return input  # Already on GPU, no need to move
             return input.to("cuda")
         else:
+            # Check if the input is already on the CPU
+            if hasattr(input, 'device') and input.device.type == "cpu":
+                return input  # Already on CPU, no need to move
             return input.to("cpu")
 
     def __init__(
@@ -199,8 +260,7 @@ class HfRunner:
         *,
         model_kwargs: Optional[Dict[str, Any]] = None,
         is_embedding_model: bool = False,
-        is_vision_model: bool = False,
-        is_encoder_decoder_model: bool = False,
+        auto_cls=AutoModelForCausalLM,
         postprocess_inputs: Callable[[BatchEncoding],
                                      BatchEncoding] = identity,
     ) -> None:
@@ -217,13 +277,6 @@ class HfRunner:
                     device="cpu",
                 ).to(dtype=torch_dtype))
         else:
-            if is_vision_model:
-                auto_cls = AutoModelForVision2Seq
-            elif is_encoder_decoder_model:
-                auto_cls = AutoModelForSeq2SeqLM
-            else:
-                auto_cls = AutoModelForCausalLM
-
             model_kwargs = model_kwargs if model_kwargs is not None else {}
             self.model = self.wrap_device(
                 auto_cls.from_pretrained(
@@ -259,7 +312,8 @@ class HfRunner:
     def generate(
         self,
         prompts: List[str],
-        images: Optional[List[Image.Image]] = None,
+        images: Optional[PromptImageInput] = None,
+        videos: Optional[List[np.ndarray]] = None,
         **kwargs: Any,
     ) -> List[Tuple[List[List[int]], List[str]]]:
         if images:
@@ -273,6 +327,8 @@ class HfRunner:
             }
             if images is not None and images[i] is not None:
                 processor_kwargs["images"] = images[i]
+            if videos is not None and videos[i] is not None:
+                processor_kwargs["videos"] = videos[i]
 
             inputs = self.processor(**processor_kwargs)
             inputs = self.postprocess_inputs(inputs)
@@ -295,7 +351,7 @@ class HfRunner:
         self,
         prompts: List[str],
         max_tokens: int,
-        images: Optional[List[Image.Image]] = None,
+        images: Optional[PromptImageInput] = None,
         **kwargs: Any,
     ) -> List[Tuple[List[int], str]]:
         outputs = self.generate(prompts,
@@ -332,7 +388,8 @@ class HfRunner:
         self,
         prompts: List[str],
         max_tokens: int,
-        images: Optional[List[Image.Image]] = None,
+        images: Optional[PromptImageInput] = None,
+        videos: Optional[List[np.ndarray]] = None,
         **kwargs: Any,
     ) -> List[List[torch.Tensor]]:
         all_logprobs: List[List[torch.Tensor]] = []
@@ -343,6 +400,8 @@ class HfRunner:
             }
             if images is not None and images[i] is not None:
                 processor_kwargs["images"] = images[i]
+            if videos is not None and videos[i] is not None:
+                processor_kwargs["videos"] = videos[i]
 
             inputs = self.processor(**processor_kwargs)
             inputs = self.postprocess_inputs(inputs)
@@ -414,7 +473,9 @@ class HfRunner:
         prompts: List[str],
         max_tokens: int,
         num_logprobs: int,
-        images: Optional[List[Image.Image]] = None,
+        images: Optional[PromptImageInput] = None,
+        audios: Optional[PromptAudioInput] = None,
+        videos: Optional[List[np.ndarray]] = None,
         **kwargs: Any,
     ) -> List[Tuple[List[int], str, List[Dict[int, float]]]]:
         all_logprobs: List[List[Dict[int, float]]] = []
@@ -429,6 +490,13 @@ class HfRunner:
             if images is not None and images[i] is not None:
                 processor_kwargs["images"] = images[i]
 
+            if audios is not None:
+                audio, sr = audios[i]
+                processor_kwargs["audio"] = audio
+                processor_kwargs["sampling_rate"] = sr
+
+            if videos is not None:
+                processor_kwargs["videos"] = videos[i]
             inputs = self.processor(**processor_kwargs)
             inputs = self.postprocess_inputs(inputs)
 
@@ -563,8 +631,7 @@ class VllmRunner:
         self,
         prompts: List[str],
         sampling_params: SamplingParams,
-        images: Optional[Union[List[Image.Image],
-                               List[List[Image.Image]]]] = None,
+        images: Optional[PromptImageInput] = None,
     ) -> List[Tuple[List[List[int]], List[str]]]:
         if images is not None:
             assert len(prompts) == len(images)
@@ -608,18 +675,31 @@ class VllmRunner:
         self,
         prompts: List[str],
         sampling_params: SamplingParams,
-        images: Optional[Union[List[Image.Image],
-                               List[List[Image.Image]]]] = None,
+        images: Optional[PromptImageInput] = None,
+        audios: Optional[PromptAudioInput] = None,
+        videos: Optional[PromptVideoInput] = None,
     ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
         assert sampling_params.logprobs is not None
 
         if images is not None:
             assert len(prompts) == len(images)
 
+        if videos is not None:
+            assert len(prompts) == len(videos)
+
         inputs = [TextPrompt(prompt=prompt) for prompt in prompts]
         if images is not None:
             for i, image in enumerate(images):
                 inputs[i]["multi_modal_data"] = {"image": image}
+
+        if audios is not None:
+            for i, audio in enumerate(audios):
+                inputs[i]["multi_modal_data"] = {"audio": audio}
+
+        if videos is not None:
+            for i, video in enumerate(videos):
+                inputs[i]["multi_modal_data"] = {"video": video}
+        print(f"[INPUTS!!!!]: {inputs}, {sampling_params}")
 
         req_outputs = self.model.generate(inputs,
                                           sampling_params=sampling_params)
@@ -643,7 +723,7 @@ class VllmRunner:
         self,
         prompts: List[str],
         max_tokens: int,
-        images: Optional[List[Image.Image]] = None,
+        images: Optional[PromptImageInput] = None,
     ) -> List[Tuple[List[int], str]]:
         greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
         outputs = self.generate(prompts, greedy_params, images=images)
@@ -655,8 +735,9 @@ class VllmRunner:
         prompts: List[str],
         max_tokens: int,
         num_logprobs: int,
-        images: Optional[Union[List[Image.Image],
-                               List[List[Image.Image]]]] = None,
+        images: Optional[PromptImageInput] = None,
+        audios: Optional[PromptAudioInput] = None,
+        videos: Optional[PromptVideoInput] = None,
         stop_token_ids: Optional[List[int]] = None,
     ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
         greedy_logprobs_params = SamplingParams(temperature=0.0,
@@ -665,7 +746,9 @@ class VllmRunner:
                                                 stop_token_ids=stop_token_ids)
         outputs = self.generate_w_logprobs(prompts,
                                            greedy_logprobs_params,
-                                           images=images)
+                                           images=images,
+                                           audios=audios,
+                                           videos=videos)
 
         return [(output_ids, output_str, output_logprobs)
                 for output_ids, output_str, output_logprobs in outputs]

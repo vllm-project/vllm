@@ -5,11 +5,10 @@ from abc import ABC, abstractmethod
 from array import array
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Set,
-                    Tuple, Union, cast)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Mapping,
+                    Optional, Set, Tuple, Union, cast)
 
 import msgspec
-import numpy
 import torch
 
 from vllm.inputs.parse import is_valid_encoder_decoder_llm_inputs
@@ -166,6 +165,9 @@ class SequenceData(msgspec.Struct,
     # is called.
     _new_appended_tokens: List[int] = msgspec.field(default_factory=list)
 
+    # It is used to compute mrope_position_ids.
+    _mrope_position_delta: Optional[int] = None
+
     def __post_init__(self) -> None:
         assert self._prompt_token_ids.typecode == VLLM_TOKEN_ID_ARRAY_TYPE
         assert self._output_token_ids.typecode == VLLM_TOKEN_ID_ARRAY_TYPE
@@ -219,6 +221,14 @@ class SequenceData(msgspec.Struct,
         """
         assert isinstance(self._output_token_ids, array)
         return self._output_token_ids
+
+    @property
+    def mrope_position_delta(self) -> Optional[int]:
+        return self._mrope_position_delta
+
+    @mrope_position_delta.setter
+    def mrope_position_delta(self, new_mrope_position_delta):
+        self._mrope_position_delta = new_mrope_position_delta
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self._output_token_ids.append(token_id)
@@ -475,11 +485,8 @@ class Sequence:
         """Reset the sequence states for recomputation."""
         self.data.reset_state_for_recompute()
 
-    def append_token_id(
-        self,
-        token_id: int,
-        logprobs: Dict[int, Logprob],
-    ) -> None:
+    def append_token_id(self, token_id: int, logprobs: Dict[int,
+                                                            Logprob]) -> None:
         assert token_id in logprobs
         self.output_logprobs.append(logprobs)
         self.data.append_token_id(token_id, logprobs[token_id].logprob)
@@ -815,6 +822,9 @@ class SequenceGroup:
         self.is_single_seq = len(self.seqs) == 1
 
     def is_finished(self) -> bool:
+        if self.is_single_seq:
+            return self.seqs[0].is_finished()
+
         return all(seq.is_finished() for seq in self.seqs)
 
     def is_prefill(self) -> bool:
@@ -887,7 +897,7 @@ class SequenceGroupMetadata(
     request_id: str
     is_prompt: bool
     seq_data: Dict[int, SequenceData]
-    sampling_params: SamplingParams
+    sampling_params: Optional[SamplingParams]
     block_tables: Dict[int, List[int]]
     do_sample: bool = True
     pooling_params: Optional[PoolingParams] = None
@@ -1061,69 +1071,6 @@ class IntermediateTensors(
         return f"IntermediateTensors(tensors={self.tensors})"
 
 
-class SamplerOutput(
-        msgspec.Struct,
-        omit_defaults=True,  # type: ignore[call-arg]
-        array_like=True):  # type: ignore[call-arg]
-    """For each sequence group, we generate a list of SequenceOutput object,
-    each of which contains one possible candidate for the next token.
-
-    This data structure implements methods, so it can be used like a list, but
-    also has optional fields for device tensors.
-    """
-
-    outputs: List[CompletionSequenceGroupOutput]
-
-    # On-device tensor containing probabilities of each token.
-    sampled_token_probs: Optional[torch.Tensor] = None
-
-    # On-device tensor containing the logprobs of each token.
-    logprobs: Optional["torch.Tensor"] = None
-
-    # On-device tensor containing the sampled token ids.
-    sampled_token_ids: Optional[torch.Tensor] = None
-    sampled_token_ids_numpy: Optional[numpy.ndarray] = None
-
-    # Spec decode metrics populated by workers.
-    spec_decode_worker_metrics: Optional[SpecDecodeWorkerMetrics] = None
-
-    # Optional last hidden states from the model.
-    hidden_states: Optional[torch.Tensor] = None
-
-    # Time taken in the forward pass for this across all workers
-    model_forward_time: Optional[float] = None
-
-    # Time taken in the model execute function. This will include model forward,
-    # block/sync across workers, cpu-gpu sync time and sampling time.
-    model_execute_time: Optional[float] = None
-
-    def __getitem__(self, idx: int):
-        return self.outputs[idx]
-
-    def __setitem__(self, idx: int, value):
-        self.outputs[idx] = value
-
-    def __len__(self):
-        return len(self.outputs)
-
-    def __eq__(self, other: object):
-        return isinstance(other,
-                          self.__class__) and self.outputs == other.outputs
-
-    def __repr__(self) -> str:
-        """Show the shape of a tensor instead of its values to reduce noise.
-        """
-        sampled_token_probs_repr = ("None" if self.sampled_token_probs is None
-                                    else self.sampled_token_probs.shape)
-        sampled_token_ids_repr = ("None" if self.sampled_token_ids is None else
-                                  self.sampled_token_ids.shape)
-        return (
-            f"SamplerOutput(outputs={self.outputs}, "
-            f"sampled_token_probs={sampled_token_probs_repr}, "
-            f"sampled_token_ids={sampled_token_ids_repr}, "
-            f"spec_decode_worker_metrics={self.spec_decode_worker_metrics})")
-
-
 class PoolerOutput(
         msgspec.Struct,
         omit_defaults=True,  # type: ignore[call-arg]
@@ -1174,39 +1121,86 @@ class HiddenStates(msgspec.Struct, array_like=True,
                    omit_defaults=True):  # type: ignore[call-arg]
     """Hidden states corresponding to in-progress sequences.
     Used in speculative decoding to pass hidden states from
-    the target model to the proposer model in the subsequent step.
+    the target model to the proposer model.
 
     seq_ids are the sequence ids of each entry of the batch
     dimension of the hidden_states tensor"""
-
-    seq_group_metadata_list: List[SequenceGroupMetadata]
+    # Scorer hidden states. For prefill step, it is used for hidden states of
+    # all tokens, whereas for decode step, it use used for last accepted tokens.
     hidden_states: torch.Tensor
+    # The sequence group metadata list. Only needed for decode step.
+    seq_group_metadata_list: Optional[List[SequenceGroupMetadata]] = None
+    # Scorer hidden states of the 2nd last token proposed by the proposer (
+    # irrespective of whether it was accepted or not). Only used for cases when
+    # last proposed token is accepted (i.e., in case of bonus tokens). For the
+    # case of no bonus tokens, these are ignored.
+    second_last_token_hidden_states: Optional[torch.Tensor] = None
+
     _seq_ids: List[int] = msgspec.field(default_factory=list)
 
     def __post_init__(self):
-        self._seq_ids = get_all_seq_ids(self.seq_group_metadata_list)
-        assert len(self.seq_group_metadata_list) == len(self.hidden_states)
+        if self.seq_group_metadata_list is not None:
+            assert len(self.seq_group_metadata_list) == len(self.hidden_states)
+            self._seq_ids = get_all_seq_ids(self.seq_group_metadata_list)
 
     @property
     def seq_ids(self) -> List[int]:
         return self._seq_ids
 
-    def update(self, seq_group_metadata_list: List[SequenceGroupMetadata],
-               hidden_states: torch.Tensor) -> None:
-        """Update hidden states from target model invocation."""
+    def update(self,
+               hidden_states: torch.Tensor,
+               seq_group_metadata_list: List[SequenceGroupMetadata],
+               second_last_token_hidden_states: Optional[torch.Tensor] = None):
+        """Update hidden states from target model invocation. Only used for
+        decode steps"""
         assert len(seq_group_metadata_list) == len(hidden_states)
         self._seq_ids.extend(get_all_seq_ids(seq_group_metadata_list))
         self.hidden_states = torch.cat([self.hidden_states, hidden_states])
 
+        if self.second_last_token_hidden_states is not None:
+            # Adding dummy hidden_states to this to maintain same shape
+            self.second_last_token_hidden_states = torch.cat([
+                self.second_last_token_hidden_states,
+                torch.zeros_like(hidden_states)
+                if second_last_token_hidden_states is None else
+                second_last_token_hidden_states
+            ])
+
     def prune(self,
               seq_group_metadata_list: List[SequenceGroupMetadata]) -> None:
-        """Prune to provided list of sequence ids."""
+        """Prune to provided list of sequence ids. Only used for decode steps.
+        """
+        # Currently this prunes all seq_ids not present in
+        # seq_group_metadata_list which might cause problems where a sequence
+        # may be "paused" then "resumed" later. This should only prune sequences
+        # which are confirmed to be aborted.
         seq_ids = get_all_seq_ids(seq_group_metadata_list)
         if seq_ids != self._seq_ids:
             # Batch contents changed - prune removed sequences.
             index = [self._seq_ids.index(seq_id) for seq_id in seq_ids]
             self.hidden_states = self.hidden_states[index]
+            if self.second_last_token_hidden_states is not None:
+                self.second_last_token_hidden_states = self\
+                    .second_last_token_hidden_states[index]
             self._seq_ids = seq_ids
+
+    def expand_with_bonus_tokens(
+            self, seq_with_bonus_token_in_last_step: set) -> None:
+        """Expand hidden states for sequences with bonus tokens. This is in
+        alignment with `MultiStepWorker._expand_execute_model_request`."""
+        if self.second_last_token_hidden_states is None \
+            or not seq_with_bonus_token_in_last_step:
+            return
+
+        index = []
+        for seq_id in self._seq_ids:
+            i = self._seq_ids.index(seq_id)
+            if seq_id in seq_with_bonus_token_in_last_step:
+                index.append(i + len(self._seq_ids))
+            index.append(i)
+
+        self.hidden_states = torch.cat(
+            [self.hidden_states, self.second_last_token_hidden_states])[index]
 
 
 class ExecuteModelRequest(
@@ -1243,6 +1237,8 @@ class ExecuteModelRequest(
     finished_requests_ids: List[str] = msgspec.field(default_factory=list)
     # The last sampled token ids for multi step decoding.
     last_sampled_token_ids: Optional[torch.Tensor] = None
+    # Async callback
+    async_callback: Optional[Callable] = None
 
     @property
     def is_first_multi_step(self) -> bool:
@@ -1260,9 +1256,7 @@ class ExecuteModelRequest(
         assert len(self.seq_group_metadata_list) > 0
         first_seq_group = self.seq_group_metadata_list[0]
         assert first_seq_group.state is not None
-        num_steps = first_seq_group.state.num_steps
-        current_step = first_seq_group.state.current_step
-        return num_steps - current_step == 1
+        return first_seq_group.state.remaining_steps == 1
 
     @property
     def current_step(self) -> int:
@@ -1290,4 +1284,5 @@ class ExecuteModelRequest(
             num_steps=self.num_steps,
             finished_requests_ids=self.finished_requests_ids,
             last_sampled_token_ids=self.last_sampled_token_ids.clone()
-            if self.last_sampled_token_ids is not None else None)
+            if self.last_sampled_token_ids is not None else None,
+            async_callback=self.async_callback)

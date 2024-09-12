@@ -7,6 +7,7 @@ import os
 
 import pytest
 from huggingface_hub import hf_hub_download
+from transformers import AutoTokenizer
 
 from tests.quantization.utils import is_quant_method_supported
 
@@ -20,7 +21,7 @@ MAX_MODEL_LEN = 1024
 MODELS = [
     ("TinyLlama/TinyLlama-1.1B-Chat-v1.0",
      hf_hub_download("TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
-                     filename="tinyllama-1.1b-chat-v1.0.Q4_0.gguf")),
+                     filename="tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf")),
     ("TinyLlama/TinyLlama-1.1B-Chat-v1.0",
      hf_hub_download("duyntnet/TinyLlama-1.1B-Chat-v1.0-imatrix-GGUF",
                      filename="TinyLlama-1.1B-Chat-v1.0-IQ4_XS.gguf")),
@@ -39,22 +40,36 @@ MODELS = [
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
+@pytest.mark.parametrize("tp_size", [1, 2])
 def test_models(
+    num_gpus_available,
     vllm_runner,
     example_prompts,
     model,
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
+    tp_size: int,
 ) -> None:
+    if num_gpus_available < tp_size:
+        pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
+
     original_model, gguf_model = model
+
+    tokenizer = AutoTokenizer.from_pretrained(original_model)
+    messages = [[{
+        'role': 'user',
+        'content': prompt
+    }] for prompt in example_prompts]
+    example_prompts = tokenizer.apply_chat_template(messages,
+                                                    tokenize=False,
+                                                    add_generation_prompt=True)
 
     # Run unquantized model.
     with vllm_runner(model_name=original_model,
                      dtype=dtype,
                      max_model_len=MAX_MODEL_LEN,
-                     enforce_eager=True,
-                     tensor_parallel_size=1) as original_model:
+                     tensor_parallel_size=tp_size) as original_model:
 
         original_outputs = original_model.generate_greedy_logprobs(
             example_prompts[:-1], max_tokens, num_logprobs)
@@ -63,8 +78,7 @@ def test_models(
     with vllm_runner(model_name=gguf_model,
                      dtype=dtype,
                      max_model_len=MAX_MODEL_LEN,
-                     enforce_eager=True,
-                     tensor_parallel_size=1) as gguf_model:
+                     tensor_parallel_size=tp_size) as gguf_model:
         gguf_outputs = gguf_model.generate_greedy_logprobs(
             example_prompts[:-1], max_tokens, num_logprobs)
 

@@ -1,5 +1,5 @@
 """This file is used for /tests and /benchmarks"""
-from typing import List
+from typing import List, Optional
 
 import numpy
 import torch
@@ -53,7 +53,10 @@ def get_pack_factor(num_bits):
     return 32 // num_bits
 
 
-def permute_rows(q_w: torch.Tensor, w_ref: torch.Tensor, group_size: int):
+def permute_rows(q_w: torch.Tensor,
+                 w_ref: torch.Tensor,
+                 group_size: int,
+                 test_perm: Optional[torch.Tensor] = None):
     assert q_w.shape == w_ref.shape
 
     orig_device = q_w.device
@@ -64,7 +67,7 @@ def permute_rows(q_w: torch.Tensor, w_ref: torch.Tensor, group_size: int):
         g_idx[i] = i // group_size
 
     # Simulate act_order by doing a random permutation on K
-    rand_perm = torch.randperm(k_size)
+    rand_perm = test_perm if test_perm is not None else torch.randperm(k_size)
 
     g_idx = g_idx[rand_perm].contiguous()
     q_w = q_w[rand_perm, :].contiguous()
@@ -81,7 +84,8 @@ def permute_rows(q_w: torch.Tensor, w_ref: torch.Tensor, group_size: int):
 def quantize_weights(w: torch.Tensor,
                      quant_type: ScalarType,
                      group_size: int,
-                     zero_points: bool = False):
+                     zero_points: bool = False,
+                     ref_zero_points_after_scales: bool = False):
     assert quant_type.is_integer(), \
         "Floating point quantization may work but has not been tested"
 
@@ -126,7 +130,13 @@ def quantize_weights(w: torch.Tensor,
     w_q = torch.clamp(w_q, min_q_val, max_q_val)
 
     # Compute ref (dequantized)
-    w_ref = (w_q - (maybe_w_zp if zero_points else 0)).to(orig_type) * w_s
+    # For some kernels (namely Machete) the zero-points are applied after the
+    # scales are applied, for this case computing the reference in similar way
+    # allows us to use tighter error tolerances in our unit tests.
+    if ref_zero_points_after_scales and zero_points:
+        w_ref = w_q.to(orig_type) * w_s - maybe_w_zp.to(orig_type) * w_s
+    else:
+        w_ref = (w_q - (maybe_w_zp if zero_points else 0)).to(orig_type) * w_s
 
     if quant_type.has_bias():
         w_q += quant_type.bias
@@ -157,8 +167,11 @@ def quantize_weights(w: torch.Tensor,
     )
 
 
-def gptq_quantize_weights(w: torch.Tensor, quant_type: ScalarType,
-                          group_size: int, act_order: bool):
+def gptq_quantize_weights(w: torch.Tensor,
+                          quant_type: ScalarType,
+                          group_size: int,
+                          act_order: bool,
+                          test_perm: Optional[torch.Tensor] = None):
     size_k, _ = w.shape
 
     assert w.is_floating_point(), "w must be float"
@@ -179,7 +192,8 @@ def gptq_quantize_weights(w: torch.Tensor, quant_type: ScalarType,
         ), "For act_order, groupsize = {} must be less than size_k = {}".format(
             group_size, size_k)
 
-        w_ref, w_q, g_idx, rand_perm = permute_rows(w_q, w_ref, group_size)
+        w_ref, w_q, g_idx, rand_perm = permute_rows(w_q, w_ref, group_size,
+                                                    test_perm)
 
     return w_ref, w_q, w_s, g_idx, rand_perm
 
