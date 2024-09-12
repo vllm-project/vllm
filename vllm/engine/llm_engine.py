@@ -1965,12 +1965,16 @@ class LLMEngine:
         self.model_executor.check_health()
 
     def start_profile(self) -> None:
+        # using type instead of isinstance to check to avoid capturing
+        # inherited classes (MultiprocessingGPUExecutor)
         if type(self.model_executor) == GPUExecutor:
             self.model_executor.start_profile()
         else:
             self.model_executor._run_workers("start_profile")
 
     def stop_profile(self) -> None:
+        # using type instead of isinstance to check to avoid capturing
+        # inherited classes (MultiprocessingGPUExecutor)
         if type(self.model_executor) == GPUExecutor:
             self.model_executor.stop_profile()
         else:

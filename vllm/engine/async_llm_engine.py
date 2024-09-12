@@ -1157,13 +1157,17 @@ class AsyncLLMEngine:
         self.engine.remove_logger(logger_name=logger_name)
 
     async def start_profile(self) -> None:
-        if isinstance(self.engine.model_executor, GPUExecutorAsync):
+        # using type instead of isinstance to check to avoid capturing
+        # inherited classes
+        if type(self.engine.model_executor) == GPUExecutorAsync:
             self.engine.model_executor.start_profile()
         else:
             self.engine.model_executor._run_workers("start_profile")
 
     async def stop_profile(self) -> None:
-        if isinstance(self.engine.model_executor, GPUExecutorAsync):
+        # using type instead of isinstance to check to avoid capturing
+        # inherited classes
+        if type(self.engine.model_executor) == GPUExecutorAsync:
             self.engine.model_executor.stop_profile()
         else:
             self.engine.model_executor._run_workers("stop_profile")
