@@ -6,7 +6,8 @@ from tqdm import tqdm
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
-                                         apply_chat_template,
+                                         apply_hf_chat_template,
+                                         apply_mistral_chat_template,
                                          parse_chat_messages)
 from vllm.inputs import PromptInputs, TextPrompt, TokensPrompt
 from vllm.inputs.parse import parse_and_batch_prompt
@@ -19,7 +20,7 @@ from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-from vllm.transformers_utils.tokenizer import (AnyTokenizer,
+from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.usage.usage_lib import UsageContext
@@ -55,7 +56,7 @@ class LLM:
             However, if the `torch_dtype` in the config is `float32`, we will
             use `float16` instead.
         quantization: The method used to quantize the model weights. Currently,
-            we support "awq", "gptq", "squeezellm", and "fp8" (experimental).
+            we support "awq", "gptq", and "fp8" (experimental).
             If None, we first check the `quantization_config` attribute in the
             model config file. If that is None, we assume the model weights are
             not quantized and use `dtype` to determine the data type of
@@ -393,12 +394,21 @@ class LLM:
         conversation, mm_data = parse_chat_messages(messages, model_config,
                                                     tokenizer)
 
-        prompt = apply_chat_template(
-            tokenizer,
-            conversation,
-            chat_template=chat_template,
-            add_generation_prompt=add_generation_prompt,
-        )
+        prompt: Union[str, List[int]]
+        if isinstance(tokenizer, MistralTokenizer):
+            prompt = apply_mistral_chat_template(
+                tokenizer,
+                messages=messages,
+                chat_template=chat_template,
+                add_generation_prompt=add_generation_prompt,
+            )
+        else:
+            prompt = apply_hf_chat_template(
+                tokenizer,
+                conversation=conversation,
+                chat_template=chat_template,
+                add_generation_prompt=add_generation_prompt,
+            )
 
         inputs: PromptInputs
         if is_list_of(prompt, int):
@@ -559,6 +569,12 @@ class LLM:
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return LLMEngine.validate_outputs(outputs, EmbeddingRequestOutput)
+
+    def start_profile(self) -> None:
+        self.llm_engine.start_profile()
+
+    def stop_profile(self) -> None:
+        self.llm_engine.stop_profile()
 
     # LEGACY
     def _convert_v1_inputs(

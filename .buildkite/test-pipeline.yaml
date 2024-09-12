@@ -217,7 +217,8 @@ steps:
   commands:
     # See https://github.com/vllm-project/vllm/issues/5152
     - export VLLM_ATTENTION_BACKEND=XFORMERS
-    - pytest -v -s spec_decode
+    - pytest -v -s spec_decode/e2e/test_multistep_correctness.py
+    - pytest -v -s spec_decode --ignore=spec_decode/e2e/test_multistep_correctness.py
 
 - label: LoRA Test %N # 30min each
   mirror_hardwares: [amd]
@@ -228,6 +229,7 @@ steps:
   parallelism: 4
 
 - label: Kernels Test %N # 30min each
+  mirror_hardwares: [amd]
   source_file_dependencies:
   - csrc/
   - vllm/attention
@@ -386,7 +388,18 @@ steps:
   - vllm/
   - tests/weight_loading
   commands:
-    - bash weight_loading/run_model_weight_loading_test.sh
+    - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models.txt
+
+- label: Weight Loading Multiple GPU Test - Large Models # optional
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 2
+  gpu: a100
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - tests/weight_loading
+  commands:
+    - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-large.txt 
 
 
 ##### multi gpus test #####
