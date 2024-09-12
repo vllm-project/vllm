@@ -1,5 +1,8 @@
 import dataclasses
+import pickle
 from abc import ABC, abstractmethod
+from datetime import datetime
+from functools import wraps
 from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Type,
                     TypeVar)
 
@@ -96,6 +99,37 @@ def _init_frozen_model_input_from_tensor_dict(
     frozen_model_input = frozen_model_input_cls(**valid_tensor_kwargs)
     tensor_dict["frozen_model_input"] = frozen_model_input
     return tensor_dict
+
+
+def dump_input_when_exception(exclude_args: Optional[List[int]] = None,
+                              exclude_kwargs: Optional[List[str]] = None):
+
+    def _inner(func):
+
+        @wraps(func)
+        def _wrapper(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            except Exception as err:
+                timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                filename = f"/tmp/err_{func.__name__}_input_{timestamp}.pkl"
+                with open(filename, "wb") as filep:
+                    dumped_inputs = {
+                        k: v
+                        for k, v in kwargs.items()
+                        if k not in (exclude_kwargs or [])
+                    }
+                    for i, arg in enumerate(args):
+                        if i not in (exclude_args or []):
+                            dumped_inputs[f"arg_{i}"] = arg
+                    pickle.dump(dumped_inputs, filep)
+                raise type(err)(
+                    f"Error in model execution (input dumped to {filename}): "
+                    f"{str(err)}") from err
+
+        return _wrapper
+
+    return _inner
 
 
 class BroadcastableModelInput(ABC):
