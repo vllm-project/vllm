@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from openai.types.chat import (ChatCompletionMessageParam,
                                ChatCompletionToolParam)
@@ -10,6 +10,7 @@ from tests.utils import VLLM_PATH
 class ServerConfig(TypedDict):
     model: str
     arguments: List[str]
+    skip_parallel: Optional[bool]
 
 
 # universal args for all models go here. also good if you need to test locally
@@ -23,7 +24,9 @@ CONFIGS: Dict[str, ServerConfig] = {
         "arguments": [
             "--tool-call-parser", "hermes", "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_hermes.jinja")
-        ]
+        ],
+        "skip_parallel":
+        False
     },
     "mistral": {
         "model":
@@ -32,7 +35,21 @@ CONFIGS: Dict[str, ServerConfig] = {
             "--tool-call-parser", "mistral", "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_mistral.jinja"),
             "--ignore-patterns=\"consolidated.safetensors\""
-        ]
+        ],
+        "skip_parallel":
+        False
+    },
+    "internlm2_5": {
+        "model":
+        "internlm/internlm2_5-7b-chat",
+        "arguments": [
+            "--tool-call-parser", "internlm2_5", "--chat-template",
+            str(VLLM_PATH /
+                "examples/tool_chat_template_internlm2_tool.jinja"),
+            "--trust_remote_code"
+        ],
+        "skip_parallel":
+        True
     }
 }
 

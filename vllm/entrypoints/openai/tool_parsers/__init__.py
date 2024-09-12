@@ -1,5 +1,9 @@
-from .abstract_tool_parser import ToolParser
+from .abstract_tool_parser import ToolParser, ToolParserManager
 from .hermes_tool_parser import Hermes2ProToolParser
+from .internlm2_tool_parser import Internlm2ToolParser
 from .mistral_tool_parser import MistralToolParser
 
-__all__ = ["ToolParser", "Hermes2ProToolParser", "MistralToolParser"]
+__all__ = [
+    "ToolParser", "ToolParserManager", "Hermes2ProToolParser",
+    "MistralToolParser", "Internlm2ToolParser"
+]

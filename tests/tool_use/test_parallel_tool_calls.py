@@ -6,7 +6,7 @@ import pytest
 
 from .utils import (MESSAGES_ASKING_FOR_PARALLEL_TOOLS,
                     MESSAGES_WITH_PARALLEL_TOOL_RESPONSE, SEARCH_TOOL,
-                    WEATHER_TOOL)
+                    WEATHER_TOOL, ServerConfig)
 
 
 # test: getting the model to generate parallel tool calls (streaming/not)
@@ -14,9 +14,12 @@ from .utils import (MESSAGES_ASKING_FOR_PARALLEL_TOOLS,
 # may be added in the future. e.g. llama 3.1 models are not designed to support
 # parallel tool calls.
 @pytest.mark.asyncio
-async def test_parallel_tool_calls(client: openai.AsyncOpenAI):
+async def test_parallel_tool_calls(client: openai.AsyncOpenAI,
+                                   server_config: ServerConfig):
     models = await client.models.list()
     model_name: str = models.data[0].id
+    if server_config.get("skip_parallel", False):
+        pytest.skip(f"skip parallel test for {model_name}")
     chat_completion = await client.chat.completions.create(
         messages=MESSAGES_ASKING_FOR_PARALLEL_TOOLS,
         temperature=0,
@@ -136,9 +139,12 @@ async def test_parallel_tool_calls(client: openai.AsyncOpenAI):
 # test: providing parallel tool calls back to the model to get a response
 # (streaming/not)
 @pytest.mark.asyncio
-async def test_parallel_tool_calls_with_results(client: openai.AsyncOpenAI):
+async def test_parallel_tool_calls_with_results(client: openai.AsyncOpenAI,
+                                                server_config: ServerConfig):
     models = await client.models.list()
     model_name: str = models.data[0].id
+    if server_config.get("skip_parallel", False):
+        pytest.skip(f"skip parallel test for {model_name}")
     chat_completion = await client.chat.completions.create(
         messages=MESSAGES_WITH_PARALLEL_TOOL_RESPONSE,
         temperature=0,

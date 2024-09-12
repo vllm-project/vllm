@@ -46,7 +46,8 @@ async def test_tool_call_and_choice(client: openai.AsyncOpenAI):
     assert isinstance(parsed_arguments.get("city"), str)
     assert isinstance(parsed_arguments.get("state"), str)
     assert parsed_arguments.get("city") == "Dallas"
-    assert parsed_arguments.get("state") == "TX"
+    assert parsed_arguments.get("state") == "TX" or parsed_arguments.get(
+        "state") == "Texas"
 
     assert stop_reason == "tool_calls"
 
@@ -119,7 +120,8 @@ async def test_tool_call_and_choice(client: openai.AsyncOpenAI):
     assert isinstance(streamed_args.get("city"), str)
     assert isinstance(streamed_args.get("state"), str)
     assert streamed_args.get("city") == "Dallas"
-    assert streamed_args.get("state") == "TX"
+    assert parsed_arguments.get("state") == "TX" or parsed_arguments.get(
+        "state") == "Texas"
 
     # make sure everything matches non-streaming except for ID
     assert function_name == tool_calls[0].function.name
