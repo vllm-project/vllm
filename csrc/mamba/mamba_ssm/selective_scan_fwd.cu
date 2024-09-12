@@ -1,6 +1,7 @@
 // clang-format off
 // adapted from https://github.com/state-spaces/mamba/blob/main/csrc/selective_scan/selective_scan_fwd_kernel.cuh
 #include <torch/all.h>
+#include <stdio.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include "selective_scan.h"
@@ -51,9 +52,6 @@ struct Selective_Scan_fwd_kernel_traits {
     using BlockLoadT = cub::BlockLoad<input_t, kNThreads, kNItems, cub::BLOCK_LOAD_WARP_TRANSPOSE>;
     using BlockLoadVecT = cub::BlockLoad<vec_t, kNThreads, kNLoads,
         !kDirectIO ? cub::BLOCK_LOAD_WARP_TRANSPOSE : cub::BLOCK_LOAD_DIRECT>;
-    using BlockLoadIndexT = cub::BlockLoad<int, kNThreads, kNItems, cub::BLOCK_LOAD_WARP_TRANSPOSE>;
-    using BlockLoadIndexVecT = cub::BlockLoad<uint4, kNThreads, kNLoadsIndex,
-        !(kIsEvenLen && kNLoadsIndex == 1) ? cub::BLOCK_LOAD_WARP_TRANSPOSE : cub::BLOCK_LOAD_DIRECT>;
     using BlockLoadWeightT = cub::BlockLoad<input_t, kNThreads, kNItems , cub::BLOCK_LOAD_WARP_TRANSPOSE>;
     using BlockLoadWeightVecT = cub::BlockLoad<vec_t, kNThreads, kNLoads ,
         !kDirectIO ? cub::BLOCK_LOAD_WARP_TRANSPOSE  : cub::BLOCK_LOAD_DIRECT>;
@@ -65,8 +63,6 @@ struct Selective_Scan_fwd_kernel_traits {
     using BlockScanT = cub::BlockScan<scan_t, kNThreads, cub::BLOCK_SCAN_WARP_SCANS>;
     static constexpr int kSmemIOSize = custom_max({sizeof(typename BlockLoadT::TempStorage),
                                                  sizeof(typename BlockLoadVecT::TempStorage),
-                                                 sizeof(typename BlockLoadIndexT::TempStorage),
-                                                 sizeof(typename BlockLoadIndexVecT::TempStorage),
                                                  (int(kIsVariableB) + int(kIsVariableC)) * sizeof(typename BlockLoadWeightT::TempStorage),
                                                  (int(kIsVariableB) + int(kIsVariableC)) * sizeof(typename BlockLoadWeightVecT::TempStorage),
                                                  sizeof(typename BlockStoreT::TempStorage),
@@ -96,12 +92,12 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     // auto& smem_load = reinterpret_cast<typename BlockLoadT::TempStorage&>(smem_loadstorescan);
     auto& smem_load = reinterpret_cast<typename Ktraits::BlockLoadT::TempStorage&>(smem_);
     auto& smem_load_weight = reinterpret_cast<typename Ktraits::BlockLoadWeightT::TempStorage&>(smem_);
-    auto& smem_load_index = reinterpret_cast<typename Ktraits::BlockLoadIndexT::TempStorage&>(smem_);
     auto& smem_load_weight1 = *reinterpret_cast<typename Ktraits::BlockLoadWeightT::TempStorage*>(smem_ + sizeof(typename Ktraits::BlockLoadWeightT::TempStorage));
     auto& smem_store = reinterpret_cast<typename Ktraits::BlockStoreT::TempStorage&>(smem_);
     auto& smem_scan = *reinterpret_cast<typename Ktraits::BlockScanT::TempStorage*>(smem_ + Ktraits::kSmemIOSize);
     // weight_t *smem_a = reinterpret_cast<weight_t *>(smem_ + smem_loadstorescan_size);
     // weight_t *smem_bc = reinterpret_cast<weight_t *>(smem_a + MAX_DSTATE);
+    scan_t *smem_running_prefix = reinterpret_cast<scan_t *>(smem_ + Ktraits::kSmemSize);
 
     const int batch_id = blockIdx.x;
     const int dim_id = blockIdx.y;
@@ -152,7 +148,8 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     // }
 
     constexpr int kChunkSize = kNThreads * kNItems;
-    for (int chunk = 0; chunk < params.n_chunks; ++chunk) {
+    const int n_chunks = (seqlen + 2048 - 1) / 2048;
+    for (int chunk = 0; chunk < n_chunks; ++chunk) {
         input_t u_vals[kNRows][kNItems], delta_vals_load[kNRows][kNItems];
 
         __syncthreads();
@@ -198,7 +195,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
             // If both B and C vary, this is unused.
             weight_t BC_val[kNRows];
             weight_t B_vals[kNItems], C_vals[kNItems];
-                        if constexpr (kIsVariableB) {
+            if constexpr (kIsVariableB) {
                 load_weight<Ktraits>(Bvar + state_idx * params.B_dstate_stride, B_vals,
                     smem_load_weight, (seqlen - chunk * kChunkSize) * (1));
                 if constexpr (!kIsVariableC) {
@@ -235,14 +232,14 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                     thread_data[i] = make_float2(exp2f(delta_vals[r][i] * A_val[r]),
                                                  !kIsVariableB ? delta_u_vals[r][i] : B_vals[i] * delta_u_vals[r][i]);
                     
-                    if constexpr (!Ktraits::kIsEvenLen) {  // So that the last state is correct
+                    if (seqlen % (kNItems * kNThreads) != 0) {  // So that the last state is correct
                         if (threadIdx.x * kNItems + i >= seqlen - chunk * kChunkSize) {
                             thread_data[i] = make_float2(1.f, 0.f);
                         }
                     }
                 }
                 // Initialize running total
-                scan_t running_prefix = make_float2(1.0,has_initial_state_bo ? x[state_idx] : 0.0);
+                scan_t running_prefix = make_float2(1.0, !has_initial_state_bo && chunk == 0 ? 0.0 : x[state_idx]);
 
                 SSMScanPrefixCallbackOp<weight_t> prefix_op(running_prefix);
                 typename Ktraits::BlockScanT(smem_scan).InclusiveScan(
@@ -309,7 +306,7 @@ void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
     constexpr bool kIsVariableC = true;
     constexpr bool kHasZ = true;
     //BOOL_SWITCH(params.seqlen % (kNThreads * kNItems) == 0, kIsEvenLen, [&] {
-    using Ktraits = Selective_Scan_fwd_kernel_traits<kNThreads, kNItems, kNRows, kIsVariableB, kIsVariableC, kHasZ,  input_t, weight_t>;
+    using Ktraits = Selective_Scan_fwd_kernel_traits<kNThreads, kNItems, kNRows, kIsVariableB, kIsVariableC, kHasZ, input_t, weight_t>;
     constexpr int kSmemSize = Ktraits::kSmemSize + kNRows * MAX_DSTATE * sizeof(typename Ktraits::scan_t);
     dim3 grid(params.batch, params.dim / kNRows);
     auto kernel = &selective_scan_fwd_kernel<Ktraits>;
@@ -434,32 +431,26 @@ void set_ssm_params_fwd(SSMParamsBase &params,
     // All stride are in elements, not bytes.
     params.A_d_stride = A.stride(0);
     params.A_dstate_stride = A.stride(1);
-    if (!is_variable_B) {
-        params.B_d_stride = B.stride(0);
-    } else {
-        params.B_batch_stride = B.stride(0);
-        params.B_group_stride = B.stride(1);
-    }
-    params.B_dstate_stride = !is_variable_B ? B.stride(1) : B.stride(2);
-    if (!is_variable_C) {
-        params.C_d_stride = C.stride(0);
-    } else {
-        params.C_batch_stride = C.stride(0);
-        params.C_group_stride = C.stride(1);
-    }
-    params.C_dstate_stride = !is_variable_C ? C.stride(1) : C.stride(2);
-    params.u_batch_stride = u.stride(0);
-    params.u_d_stride = u.stride(1);
-    params.delta_batch_stride = delta.stride(0);
-    params.delta_d_stride = delta.stride(1);
+
+    params.B_batch_stride = B.stride(2);
+    params.B_group_stride = B.stride(0);
+    params.B_dstate_stride = B.stride(1);
+    params.C_batch_stride = C.stride(2);
+    params.C_group_stride = C.stride(0);
+    params.C_dstate_stride = C.stride(1);
+
+    params.u_batch_stride = u.stride(1);
+    params.u_d_stride = u.stride(0);
+    params.delta_batch_stride = delta.stride(1);
+    params.delta_d_stride = delta.stride(0);
     if (has_z) {
-        params.z_batch_stride = z.stride(0);
-        params.z_d_stride = z.stride(1);
-        params.out_z_batch_stride = out_z.stride(0);
-        params.out_z_d_stride = out_z.stride(1);
+        params.z_batch_stride = z.stride(1);
+        params.z_d_stride = z.stride(0);
+        params.out_z_batch_stride = out_z.stride(1);
+        params.out_z_d_stride = out_z.stride(0);
     }
-    params.out_batch_stride = out.stride(0);
-    params.out_d_stride = out.stride(1);
+    params.out_batch_stride = out.stride(1);
+    params.out_d_stride = out.stride(0);
 }
 
 std::vector<torch::Tensor>
@@ -469,9 +460,9 @@ selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
                   const c10::optional<torch::Tensor> &z_,
                   const c10::optional<torch::Tensor> &delta_bias_,
                   bool delta_softplus,
-                  const c10::optional<at::Tensor> &cu_seq_len,
-                  const c10::optional<at::Tensor> &cache_indices,
-                  const c10::optional<at::Tensor> &has_initial_state,
+                  const c10::optional<torch::Tensor> &cu_seq_len,
+                  const c10::optional<torch::Tensor> &cache_indices,
+                  const c10::optional<torch::Tensor> &has_initial_state,
                   const c10::optional<torch::Tensor> &x) {
     auto input_type = u.scalar_type();
     auto weight_type = A.scalar_type();
@@ -496,6 +487,7 @@ selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
 
     const auto sizes = u.sizes();
     int batch_size,dim,seqlen;
+
     if (cu_seq_len.has_value()){
         batch_size = cu_seq_len.value().sizes()[0];
         dim = sizes[0];
@@ -506,9 +498,10 @@ selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
         dim = sizes[1];
         seqlen = sizes[2];
     }
+    printf("seqlen : %d",seqlen);
 
     const int dstate = A.size(1);
-    const int n_groups = is_variable_B ? B.size(1) : 1;
+    const int n_groups = is_variable_B ? B.size(0) : 1;
 
     TORCH_CHECK(dstate <= 256, "selective_scan only supports state dimension <= 256");
 
@@ -549,13 +542,13 @@ selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
     TORCH_CHECK(z.is_cuda());
     TORCH_CHECK(z.stride(-1) == 1 || z.size(-1) == 1);
     CHECK_SHAPE(z, dim, seqlen);
-    out_z = torch::empty_like(z);
+    out_z = (z);
 
     const int n_chunks = (seqlen + 2048 - 1) / 2048;
     // const int n_chunks = (seqlen + 1024 - 1) / 1024;
     // at::Tensor out = torch::empty_like(u);
     // Right now u has BHL layout and delta has HBL layout, and we want out to have HBL layout
-    at::Tensor out = torch::empty_like(delta);
+    at::Tensor out = (delta);
     if (x.has_value()){
         auto _x = x.value();
         TORCH_CHECK(_x.scalar_type() == weight_type);

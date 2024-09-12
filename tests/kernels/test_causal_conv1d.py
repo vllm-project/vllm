@@ -234,9 +234,6 @@ def test_causal_conv1d_varlen(dim, seqlen, width, has_bias, silu_activation, ity
                                            dtype=x.dtype)
     final_states_ref = final_states.clone()
     from vllm import _custom_ops as ops
-    print(max(seqlens[0]))
-    print(cumsum,cumsum.shape)
-    print(x.squeeze(0).shape)
     out = ops.causal_conv1d_fwd(x.squeeze(0), weight, bias, final_states,
                                 cumsum.cuda(),
                                 torch.arange(cumsum.shape[0],dtype=torch.int32,device=x.device),
@@ -246,7 +243,6 @@ def test_causal_conv1d_varlen(dim, seqlen, width, has_bias, silu_activation, ity
     # for b in range(batch):
     out_ref_b = []
     for i, x_s in enumerate(torch.split(x_ref[[0]], seqlens[0], dim=2)):
-        print(x_s.shape)
         out_ref_b.append(causal_conv1d_ref(x_s, weight_ref, bias_ref, activation=activation,return_final_states=True,initial_states=final_states_ref[i].unsqueeze(0)))
     out_ref.append(torch.cat([t[0] for t in out_ref_b], dim=2))
     out_ref = torch.cat(out_ref, dim=0)

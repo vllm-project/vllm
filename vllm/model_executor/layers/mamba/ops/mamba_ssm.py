@@ -300,10 +300,7 @@ def selective_scan_fn(u,
                       D=None,
                       z=None,
                       delta_bias=None,
-                      delta_softplus=False,
-                      return_last_state=False,
-                      position_indices=None,
-                      prev_state=None):
+                      delta_softplus=False):
     """if return_last_state is True, returns (out, last_state)
     last_state has shape (batch, dim, dstate). 
     """
@@ -324,15 +321,15 @@ def selective_scan_fn(u,
     if C.dim() == 3:
         C = C.unsqueeze(1)
 
-    if prev_state is None:
-        prev_state = torch.zeros((
-            u.shape[0],
-            u.shape[1],
-            int(A.shape[1]),
-        ),
-                        device=u.device,
-                        dtype=torch.float32,
-                        requires_grad=False)
+    # if prev_state is None:
+        # prev_state = torch.zeros((
+            # u.shape[0],
+            # u.shape[1],
+            # int(A.shape[1]),
+        # ),
+                        # device=u.device,
+                        # dtype=torch.float32,
+                        # requires_grad=False)
     out, last_state, *rest = ops.selective_scan_fwd(u, delta, A, B, C, D, z, delta_bias,
                                            delta_softplus, position_indices, prev_state)
 
