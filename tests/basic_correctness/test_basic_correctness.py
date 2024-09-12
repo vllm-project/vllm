@@ -3,12 +3,16 @@
 Run `pytest tests/basic_correctness/test_basic_correctness.py`.
 """
 import os
+import pickle
+import re
 import weakref
+from unittest.mock import patch
 
 import pytest
 
 from vllm import LLM
 from vllm.utils import is_hip
+from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
 from ..models.utils import check_outputs_equal
 
@@ -64,3 +68,29 @@ def test_models(
         name_0="hf",
         name_1="vllm",
     )
+
+
+def test_model_with_failure(vllm_runner) -> None:
+    try:
+        with patch("vllm.model_executor.models.opt.OPTForCausalLM.forward",
+                   side_effect=ValueError()):
+            with pytest.raises(ValueError) as exc_info:
+                vllm_runner("facebook/opt-125m",
+                            dtype="half",
+                            enforce_eager=False,
+                            gpu_memory_utilization=0.7)
+            matches = re.search(r"input dumped to (.+).pkl",
+                                str(exc_info.value))
+            assert matches is not None
+            filename = f"{matches.group(1)}.pkl"
+
+        with open(filename, "rb") as filep:
+            inputs = pickle.load(filep)
+
+        if any(key not in inputs for key in ("arg_1", "arg_2", "arg_3")):
+            raise AssertionError("Missing keys in dumped inputs. Dumped keys: "
+                                 f"{list(inputs.keys())}")
+        assert isinstance(inputs["arg_1"],
+                          ModelInputForGPUWithSamplingMetadata)
+    finally:
+        os.remove(filename)
