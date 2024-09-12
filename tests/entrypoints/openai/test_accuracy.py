@@ -24,12 +24,14 @@ MORE_ARGS_LIST = [["--enable-chunked-prefill"],
 
 @pytest.mark.parametrize("more_args", MORE_ARGS_LIST)
 def test_lm_eval_accuracy(more_args):
-    args = DEFAULT_ARGS
+    args = list(DEFAULT_ARGS)
     args.extend(more_args)
+
+    print(f"Running with: {args}")
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         url = f"{remote_server.url_for('v1')}/completions"
-        
+
         model_args = (f"model={MODEL_NAME},"
                       f"base_url={url},"
                       f"num_concurrent={NUM_CONCURRENT},tokenized_requests=False")
