@@ -340,7 +340,7 @@ def test_multi_images_models(hf_runner, vllm_runner, image_assets, model,
 def test_different_num_patches(hf_runner, vllm_runner, image_assets, model,
                                size_factors, dtype: str, max_tokens: int,
                                num_logprobs: int) -> None:
-    images = [asset.pil_image.resize((1000, 1000)) for asset in image_assets]
+    images = [asset.pil_image.resize((896, 896)) for asset in image_assets]
 
     inputs_batching = [(
         [prompt for _ in size_factors],
