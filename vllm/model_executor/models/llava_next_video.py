@@ -450,8 +450,7 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         # prepare weight iterators
-        vit_weights, mlp_weights, newline_weights, llm_weights = itertools.tee(
-            weights, 4)
+        vit_weights, mlp_weights, llm_weights = itertools.tee(weights, 3)
 
         # load vision encoder
         vit_weights = filter_weights(vit_weights, "vision_tower")

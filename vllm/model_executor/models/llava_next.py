@@ -35,11 +35,6 @@ from .utils import (filter_weights, flatten_bn, init_vllm_registered_model,
 
 logger = init_logger(__name__)
 
-_KEYS_TO_MODIFY_MAPPING = {
-    "language_model.lm_head": "lm_head",
-    "language_model.model": "language_model",
-}
-
 # Result in the max possible feature size (2x2 grid of 336x336px tiles)
 MAX_IMAGE_FEATURE_SIZE_HEIGHT = MAX_IMAGE_FEATURE_SIZE_WIDTH = 448
 
@@ -635,8 +630,12 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         # prepare weight iterators for components
-        vit_weights, mlp_weights, newline_weights, llm_weights = itertools.tee(
-            weights, 4)
+        (
+            vit_weights,
+            mlp_weights,
+            newline_weights,
+            llm_weights,
+        ) = itertools.tee(weights, 4)
 
         # load vision encoder
         vit_weights = filter_weights(vit_weights, "vision_tower")
