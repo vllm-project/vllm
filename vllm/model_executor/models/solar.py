@@ -199,7 +199,8 @@ class SolarDecoderLayer(nn.Module):
         if rope_scaling is not None and getattr(
                 config, "original_max_position_embeddings", None):
             rope_scaling[
-                "original_max_position_embeddings"] = config.original_max_position_embeddings
+                "original_max_position_embeddings"
+            ] = config.original_max_position_embeddings
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
         # Support abacusai/Smaug-72B-v0.1 with attention_bias
