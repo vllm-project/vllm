@@ -225,9 +225,6 @@ class LLMEngine:
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
-        # To improve performance, only final requests outputs may be required.
-        # If this set to true, then no intermediate outputs will be returned.
-        step_return_finished_only: bool = False,
     ) -> None:
         logger.info(
             "Initializing an LLM engine (v%s) with config: "
@@ -295,7 +292,6 @@ class LLMEngine:
         self.observability_config = observability_config or ObservabilityConfig(
         )
         self.log_stats = log_stats
-        self.step_return_finished_only = step_return_finished_only
 
         if not self.model_config.skip_tokenizer_init:
             self.tokenizer = self._init_tokenizer()

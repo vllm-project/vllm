@@ -707,9 +707,6 @@ class LLM:
                          f"output: {0:.2f} toks/s"),
             )
 
-        # In the loop below, only finished outputs are used
-        self.llm_engine.step_return_finished_only = True
-
         # Run the engine.
         outputs: List[Union[RequestOutput, EmbeddingRequestOutput]] = []
         total_in_toks = 0
@@ -733,9 +730,6 @@ class LLM:
                                 f"est. speed input: {in_spd:.2f} toks/s, "
                                 f"output: {out_spd:.2f} toks/s")
                         pbar.update(1)
-
-        # Restore original behavior
-        self.llm_engine.step_return_finished_only = False
 
         if use_tqdm:
             pbar.close()
