@@ -31,7 +31,8 @@ TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, ops) {
   ops.impl("gelu_new", &gelu_new);
   ops.impl("gelu_fast", &gelu_fast);
   ops.impl("gelu_quick", &gelu_quick);
-  ops.impl("advance_step", &advance_step);
+  ops.impl("advance_step_flashattn", &advance_step_flashattn);
+  ops.impl("advance_step_flashinfer", &advance_step_flashinfer);
   ops.impl("rms_norm", &rms_norm);
   ops.impl("fused_add_rms_norm", &fused_add_rms_norm);
   ops.impl("rotary_embedding", &rotary_embedding);

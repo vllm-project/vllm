@@ -74,10 +74,20 @@ TORCH_LIBRARY_EXPAND(_C, ops) {
 
   // prepare_inputs advance_step
   ops.def(
-      "advance_step(int num_seqs, int num_queries, int block_size, "
+      "advance_step_flashattn(int num_seqs, int num_queries, int block_size, "
       "Tensor! input_tokens, Tensor sampled_token_ids, "
       "Tensor! input_positions, Tensor! seq_lens, Tensor! slot_mapping, "
       "Tensor block_tables) -> ()");
+
+  ops.def(
+      "advance_step_flashinfer("
+      "    int num_seqs, int num_queries, int block_size,"
+      "    Tensor! input_tokens, Tensor sampled_token_ids,"
+      "    Tensor! input_positions, Tensor! seq_lens, Tensor! slot_mapping,"
+      "    Tensor block_tables, Tensor! paged_kv_indices,"
+      "    Tensor! paged_kv_indptr, Tensor! paged_kv_last_page_len,"
+      "    Tensor! block_table_bounds"
+      ") -> ()");
 
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
