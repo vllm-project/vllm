@@ -9,14 +9,14 @@ from partial_json_parser.core.options import Allow
 from vllm.entrypoints.openai.protocol import (DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
                                               ExtractedToolCallInformation,
-                                              FunctionCall,
-                                              InitialDeltaToolCall, ToolCall)
+                                              FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser)
 from vllm.entrypoints.openai.tool_parsers.utils import (
     extract_intermediate_diff)
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
@@ -51,11 +51,11 @@ class LlamaToolParser(ToolParser):
         self.prev_tool_call_arr: List[Dict] = []
         self.current_tool_id: int = -1
         self.current_tool_name_sent: bool = False
-        self.current_tool_initial_sent: bool = False
         self.streamed_args_for_tool: List[str] = [
         ]  # map what has been streamed for each tool so far to a list
         self.bot_token = "<|python_tag|>"
-        self.bot_token_id = self.model_tokenizer.vocab[self.bot_token]
+        self.bot_token_id = self.model_tokenizer.tokenizer.encode(
+            self.bot_token, add_special_tokens=False)[0]
         self.tool_call_regex = re.compile(r"\[{.*?}\]", re.DOTALL)
 
     def extract_tool_calls(self,
@@ -196,31 +196,20 @@ class LlamaToolParser(ToolParser):
                 # re-set stuff pertaining to progress in the current tool
                 self.current_tool_id = len(tool_call_arr) - 1
                 self.current_tool_name_sent = False
-                self.current_tool_initial_sent = False
                 self.streamed_args_for_tool.append("")
                 logger.debug("starting on new tool %d", self.current_tool_id)
                 return delta
 
-            # case: update an existing tool - this is handled below
-
-            # if the current tool initial data incl. the id, type=function
-            # and idx not sent, send that
-            if not self.current_tool_initial_sent:
-                self.current_tool_initial_sent = True
-                delta = DeltaMessage(tool_calls=[
-                    InitialDeltaToolCall(
-                        index=self.current_tool_id).model_dump(
-                            exclude_none=True)
-                ])
-
             # if the current tool name hasn't been sent, send if available
             # - otherwise send nothing
-            elif not self.current_tool_name_sent:
+            if not self.current_tool_name_sent:
                 function_name = current_tool_call.get("name")
                 if function_name:
 
                     delta = DeltaMessage(tool_calls=[
                         DeltaToolCall(index=self.current_tool_id,
+                                      type="function",
+                                      id=f"chatcmpl-tool-{random_uuid()}",
                                       function=DeltaFunctionCall(
                                           name=function_name).model_dump(
                                               exclude_none=True))
