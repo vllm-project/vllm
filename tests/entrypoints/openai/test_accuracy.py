@@ -18,39 +18,29 @@ TASK = "gsm8k"
 FILTER = "exact_match,strict-match"
 RTOL = 0.03
 EXPECTED_VALUE = 0.58
+DEFAULT_ARGS = ["--max-model-len", "4096", "--disable-log-requests"]
+MORE_ARGS_LIST = [["--enable-chunked-prefill"], 
+                  ["--num-scheduler-steps", "8"]]
 
-
-@pytest.fixture(scope="module")
-@pytest.mark.parametrize(
-    "more_args",
-    [["--enable-chunked-prefill"], ["--num-scheduler-steps", "8"]])
-def server(more_args):
-    args = ["--max-model-len", "4096", "--disable-log-requests"]
+@pytest.mark.parametrize("more_args", MORE_ARGS_LIST)
+def test_lm_eval_accuracy(more_args):
+    args = DEFAULT_ARGS
     args.extend(more_args)
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
-        yield remote_server
+        url = f"{remote_server.url_for('v1')}/completions"
+        
+        model_args = (f"model={MODEL_NAME},"
+                      f"base_url={url},"
+                      f"num_concurrent={NUM_CONCURRENT},tokenized_requests=False")
 
+        results = lm_eval.simple_evaluate(
+            model="local-completions",
+            model_args=model_args,
+            tasks=TASK,
+        )
 
-@pytest.fixture(scope="module")
-def server_data(server):
-    return {
-        "url": f"{server.url_for('v1')}/completions",
-    }
-
-
-def test_lm_eval_accuracy(server_data):
-    model_args = (f"model={MODEL_NAME},"
-                  f"base_url={server_data['url']},"
-                  f"num_concurrent={NUM_CONCURRENT},tokenized_requests=False")
-
-    results = lm_eval.simple_evaluate(
-        model="local-completions",
-        model_args=model_args,
-        tasks=TASK,
-    )
-
-    measured_value = results["results"][TASK][FILTER]
-    assert (measured_value - RTOL < EXPECTED_VALUE
-            and measured_value + RTOL > EXPECTED_VALUE
-            ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
+        measured_value = results["results"][TASK][FILTER]
+        assert (measured_value - RTOL < EXPECTED_VALUE
+                and measured_value + RTOL > EXPECTED_VALUE
+        ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
