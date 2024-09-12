@@ -3,8 +3,8 @@ import time
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, ClassVar, Deque, Dict, Iterable, List,
-                    Mapping, NamedTuple, Optional)
+from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Deque, Dict,
+                    Iterable, List, Mapping, NamedTuple, Optional)
 from typing import Sequence as GenericSequence
 from typing import Set, Tuple, Type, Union
 
@@ -42,7 +42,7 @@ from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
                           RequestOutputFactory)
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
                            Sequence, SequenceGroup, SequenceGroupMetadata,
                            SequenceStatus)
@@ -228,9 +228,6 @@ class LLMEngine:
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
-        # To improve performance, only final requests outputs may be required.
-        # If this set to true, then no intermediate outputs will be returned.
-        step_return_finished_only: bool = False,
     ) -> None:
         logger.info(
             "Initializing an LLM engine (v%s) with config: "
@@ -298,7 +295,6 @@ class LLMEngine:
         self.observability_config = observability_config or ObservabilityConfig(
         )
         self.log_stats = log_stats
-        self.step_return_finished_only = step_return_finished_only
 
         if not self.model_config.skip_tokenizer_init:
             self.tokenizer = self._init_tokenizer()
@@ -400,7 +396,7 @@ class LLMEngine:
 
         # Currently used by AsyncLLMEngine to ensure quick append
         # of request outputs to asyncio queues
-        self.process_request_outputs_callback = None
+        self.process_request_outputs_callback: Optional[Callable] = None
 
         # Create the scheduler.
         # NOTE: the cache_config here have been updated with the numbers of
@@ -1279,7 +1275,7 @@ class LLMEngine:
 
         ctx: The virtual engine context to work on
         request_id: If provided, then only this request is going to be processed
-        
+
         """
         now = time.time()
 
@@ -1384,7 +1380,8 @@ class LLMEngine:
             seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
             request_output = RequestOutputFactory.create(seq_group)
-            ctx.request_outputs.append(request_output)
+            if request_output:
+                ctx.request_outputs.append(request_output)
 
         # When we process a single request, we skip it for the next time,
         # and invoke the request output callback (if there was final output)
@@ -1421,14 +1418,19 @@ class LLMEngine:
 
             seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
-            if (seq_group.is_finished()
-                    if self.step_return_finished_only else True):
-                request_output = RequestOutputFactory.create(seq_group)
+            request_output = RequestOutputFactory.create(seq_group)
+            if request_output:
                 ctx.request_outputs.append(request_output)
 
         for seq_group in scheduler_outputs.ignored_seq_groups:
+            params = seq_group.sampling_params
+            if params is not None and params.output_kind == (
+                    RequestOutputKind.DELTA) and not seq_group.is_finished():
+                continue
+
             request_output = RequestOutputFactory.create(seq_group)
-            ctx.request_outputs.append(request_output)
+            if request_output:
+                ctx.request_outputs.append(request_output)
 
         # Immediately process request outputs here (if callback is given)
         if (ctx.request_outputs

@@ -11,7 +11,8 @@ from typing_extensions import Annotated, Required, TypedDict
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import GuidedDecodingParams, SamplingParams
+from vllm.sampling_params import (GuidedDecodingParams, RequestOutputKind,
+                                  SamplingParams)
 from vllm.sequence import Logprob
 from vllm.utils import random_uuid
 
@@ -315,6 +316,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
             include_stop_str_in_output=self.include_stop_str_in_output,
             length_penalty=self.length_penalty,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
+            output_kind=RequestOutputKind.DELTA if self.stream \
+                else RequestOutputKind.FINAL_ONLY,
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias)
 
@@ -579,6 +582,8 @@ class CompletionRequest(OpenAIBaseModel):
             include_stop_str_in_output=self.include_stop_str_in_output,
             length_penalty=self.length_penalty,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
+            output_kind=RequestOutputKind.DELTA if self.stream \
+                else RequestOutputKind.FINAL_ONLY,
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids)
