@@ -97,10 +97,9 @@ class SpecDecodeBaseSampler(nn.Module):
                                     -torch.ones_like(draft_token_ids))
 
         # Fill the recovered_token_ids
-        matched_len = accepted_mask.sum(dim=-1)
-        for i in range(matched_len.shape[0]):
-            output_with_bonus_tokens[i,
-                                     matched_len[i]] = recovered_token_ids[i]
+        match_len = accepted_mask.sum(dim=-1)
+        for i in range(match_len.shape[0]):
+            output_with_bonus_tokens[i, match_len[i]] = recovered_token_ids[i]
 
         # We disable bonus tokens because it causes corrupt KV cache for
         # proposal methods that require KV cache. We can fix it by "prefilling"

@@ -165,6 +165,7 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
     def _get_recovered_token_ids(self, accepted, target_probs, draft_probs,
                                  target_token_ids):
         unmatch_indices = (accepted == 0).max(1).indices
+        unmatch_indices[~(accepted == 0).any(1)] = accepted.shape[-1]
         recovered_token_ids = torch.zeros_like(unmatch_indices)
         recovered_probs = torch.clamp((target_probs - draft_probs), min=0)
         for i in range(unmatch_indices.shape[0]):
