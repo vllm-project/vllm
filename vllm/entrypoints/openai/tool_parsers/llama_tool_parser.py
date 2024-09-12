@@ -41,7 +41,7 @@ def is_complete_json(input_str):
         return False
 
 
-class LlamaToolParser(ToolParser):
+class Llama3JsonToolParser(ToolParser):
     """
     Tool call parser for Llama 3.1 models intended for use with the
     examples/tool_chat_template_llama.jinja template.
@@ -67,9 +67,7 @@ class LlamaToolParser(ToolParser):
     def extract_tool_calls(self,
                            model_output: str) -> ExtractedToolCallInformation:
         """
-        Extract the tool calls from a complete model response. Requires
-        find-and-replacing single quotes with double quotes for JSON parsing,
-        make sure your tool call arguments don't ever include quotes!
+        Extract the tool calls from a complete model response.
         """
         # case -- if a tool call token is not present, return a text response
         if not (model_output.startswith(self.bot_token)
