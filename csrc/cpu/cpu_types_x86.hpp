@@ -483,6 +483,7 @@ struct INT8Vec16: public Vec<INT8Vec16> {
 #if __GNU_CC >= 11
     _mm_storeu_epi8(ptr, reg);
 #else
+    typedef char __v16qi_u __attribute__ ((__vector_size__ (16), __may_alias__, __aligned__ (1)));
     *(__v16qi_u *) __P = (__v16qi_u) __A;
 #endif
   }
