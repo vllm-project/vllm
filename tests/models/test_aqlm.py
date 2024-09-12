@@ -7,26 +7,6 @@ import pytest
 
 from tests.quantization.utils import is_quant_method_supported
 
-# In this test we hardcode prompts and generations for the model so we don't
-# need to require the AQLM package as a dependency
-example_prompts = [
-    'vLLM is a high-throughput and memory-efficient inference and serving '
-    'engine for LLMs.\n',
-    'Briefly describe the major milestones in the development of artificial '
-    'intelligence from 1950 to 2020.\n',
-    'Compare and contrast artificial intelligence with human intelligence in '
-    'terms of processing information.\n',
-    'Describe the basic components of a neural network and how it can be '
-    'trained.\n',
-    'Write a short story about a robot that dreams for the first time.\n',
-    'Analyze the impact of the COVID-19 pandemic on global economic structures '
-    'and future business models.\n',
-    'Explain the cultural significance of the Mona Lisa painting, and how its '
-    'perception might vary in Western versus Eastern societies.\n',
-    "Translate the following English sentence into Japanese, French, and "
-    "Swahili: 'The early bird catches the worm.'\n"
-]
-
 # These ground truth generations were generated using `transformers==4.38.1
 # aqlm==1.1.0 torch==2.2.0`
 # and the below code:

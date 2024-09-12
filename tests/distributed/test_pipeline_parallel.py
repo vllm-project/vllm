@@ -32,7 +32,9 @@ VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
         (1, 4, 1, 0, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
         (2, 2, 1, 0, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
         (2, 2, 0, 1, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
-        (2, 2, 1, 1, 1, "internlm/internlm2_5-7b-chat", "ray"),
+        (1, 2, 1, 1, 1, "OpenGVLab/InternVL2-1B", "ray"),
+        (1, 2, 1, 1, 1, "OpenGVLab/InternVL2-2B", "ray"),
+        (1, 2, 1, 0, 1, "OpenGVLab/InternVL2-4B", "ray"),
     ],
 )
 @fork_new_process_for_each_test
@@ -46,6 +48,8 @@ def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL,
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         "float16",
+        "--max-model-len",
+        "8192",
         "--pipeline-parallel-size",
         str(PP_SIZE),
         "--tensor-parallel-size",
@@ -62,7 +66,9 @@ def test_compare_tp(TP_SIZE, PP_SIZE, EAGER_MODE, CHUNKED_PREFILL,
     tp_args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
-        "bfloat16",
+        "float16",
+        "--max-model-len",
+        "8192",
         "--tensor-parallel-size",
         str(max(TP_SIZE, 2)),  # We only use 2 GPUs in the CI.
         "--distributed-executor-backend",

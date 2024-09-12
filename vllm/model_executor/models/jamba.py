@@ -38,6 +38,8 @@ from vllm.sequence import IntermediateTensors
 from vllm.worker.model_runner import (_BATCH_SIZES_TO_CAPTURE,
                                       _get_graph_batch_size)
 
+from .interfaces import SupportsLoRA
+
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
@@ -539,7 +541,7 @@ class JambaModel(nn.Module):
         return hidden_states
 
 
-class JambaForCausalLM(nn.Module, HasInnerState):
+class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -731,7 +733,7 @@ class JambaForCausalLM(nn.Module, HasInnerState):
                                   indices_for_current_run: List[int]):
         # move out all of the occupied but currently not running blocks
         # outside of the first n blocks
-        destination_indices = set([range(batch_size)])
+        destination_indices = range(batch_size)
         max_possible_batch_size = self.mamba_cache[0].shape[1]
         for destination_index in destination_indices:
             if destination_index in self._get_all_occupied_indices() and  \

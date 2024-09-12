@@ -1,6 +1,7 @@
 import pytest
 
-from vllm.entrypoints.chat_utils import apply_chat_template, load_chat_template
+from vllm.entrypoints.chat_utils import (apply_hf_chat_template,
+                                         load_chat_template)
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
@@ -87,7 +88,7 @@ def test_get_gen_prompt(model, template, add_generation_prompt,
         add_generation_prompt=add_generation_prompt)
 
     # Call the function and get the result
-    result = apply_chat_template(
+    result = apply_hf_chat_template(
         tokenizer,
         conversation=mock_request.messages,
         chat_template=mock_request.chat_template or template_content,
