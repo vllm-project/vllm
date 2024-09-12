@@ -547,7 +547,7 @@ class HabanaModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         # to set particular generation threshold or use simpler
         # VLLM_GC_THR_MULTIPLIER to multiply default values.
         default_gc_thrs = list(gc.get_threshold())
-        requested_gc_thrs = [None] * len(default_gc_thrs)
+        requested_gc_thrs = [0] * len(default_gc_thrs)
         for i in range(len(default_gc_thrs)):
             requested_gc_thrs[i] = int(os.environ.get(f'VLLM_GC_THR_GEN{i}', default_gc_thrs[i]))
         if requested_gc_thrs == default_gc_thrs:
