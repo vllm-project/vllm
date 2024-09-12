@@ -101,6 +101,38 @@ class IpexAttnMetadata(AttentionMetadata, PagedAttentionMetadata):
 
         return self
 
+    def advance_step(self, num_seqs, num_queries):
+        assert num_seqs == num_queries
+        
+        assert self.num_prefills == 0
+        assert self.num_prefill_tokens == 0
+        assert self.num_decode_tokens == num_seqs
+        assert self.slot_mapping.shape == (num_seqs, )
+
+        assert self.seq_lens is not None
+        assert len(self.seq_lens) == num_seqs
+        assert self.seq_lens_tensor is not None
+        assert self.seq_lens_tensor.shape == (num_seqs, )
+        # assert self.max_query_len == 1
+        # assert self.max_prefill_seq_len == 0
+        assert self.max_decode_seq_len == max(self.seq_lens)
+
+        # assert self.query_start_loc is not None
+        # assert self.query_start_loc.shape == (num_queries + 1, )
+        # assert self.seq_start_loc is not None
+        # assert self.seq_start_loc.shape == (num_seqs + 1, )
+
+        # assert self.context_lens_tensor is not None
+        # assert self.context_lens_tensor.shape == (num_queries, )
+
+        assert self.block_tables is not None
+        assert self.block_tables.shape[0] == num_seqs
+
+        # Update query lengths. Note that we update only queries and not seqs,
+        # since tensors may be padded due to captured cuda graph batch size
+        for i in range(num_queries):
+            self.seq_lens[i] += 1
+        self.max_decode_seq_len = max(self.seq_lens)
 
 class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
 
