@@ -19,8 +19,8 @@ FILTER = "exact_match,strict-match"
 RTOL = 0.03
 EXPECTED_VALUE = 0.58
 DEFAULT_ARGS = ["--max-model-len", "4096", "--disable-log-requests"]
-MORE_ARGS_LIST = [["--enable-chunked-prefill"], 
-                  ["--num-scheduler-steps", "8"]]
+MORE_ARGS_LIST = [["--enable-chunked-prefill"], ["--num-scheduler-steps", "8"]]
+
 
 @pytest.mark.parametrize("more_args", MORE_ARGS_LIST)
 def test_lm_eval_accuracy(more_args):
@@ -32,9 +32,10 @@ def test_lm_eval_accuracy(more_args):
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         url = f"{remote_server.url_for('v1')}/completions"
 
-        model_args = (f"model={MODEL_NAME},"
-                      f"base_url={url},"
-                      f"num_concurrent={NUM_CONCURRENT},tokenized_requests=False")
+        model_args = (
+            f"model={MODEL_NAME},"
+            f"base_url={url},"
+            f"num_concurrent={NUM_CONCURRENT},tokenized_requests=False")
 
         results = lm_eval.simple_evaluate(
             model="local-completions",
@@ -45,4 +46,4 @@ def test_lm_eval_accuracy(more_args):
         measured_value = results["results"][TASK][FILTER]
         assert (measured_value - RTOL < EXPECTED_VALUE
                 and measured_value + RTOL > EXPECTED_VALUE
-        ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
+                ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
