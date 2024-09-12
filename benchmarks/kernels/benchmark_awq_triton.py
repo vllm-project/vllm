@@ -66,7 +66,7 @@ def get_line_names():
 def get_ylabel():
     if benchmark_unit == "gbps":
         return "GB/s"
-    return "ms"
+    return "gbps"
 
 
 def awq_dequantize_cuda(qweight: torch.Tensor, scales: torch.Tensor,
