@@ -151,7 +151,10 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             max_block_sliding_window=self.max_block_sliding_window,
         )
         if seq.get_token_ids():
-            contextual_hash = hash((seq.prompt_adapter_id, seq.lora_int_id))
+            # NOTE: If there are any factors affecting the block besides token_ids,
+            # they should be added as input arguments to contextual_hash.
+            contextual_hash = seq.hash_of_block_v2()
+
             # Add blocks to the block table only if the sequence is non empty.
             block_table.allocate(token_ids=seq.get_token_ids(),
                                  contextual_hash=contextual_hash)
@@ -240,6 +243,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             token_ids=block_table.get_unseen_token_ids(seq.get_token_ids()),
             num_lookahead_slots=num_lookahead_slots,
             num_computed_slots=seq.data.get_num_computed_tokens(),
+            contextual_hash=seq.hash_of_block_v2(),
         )
         # Return any new copy-on-writes.
         new_cows = self.block_allocator.clear_copy_on_writes()

@@ -114,7 +114,8 @@ class BlockTable:
     def append_token_ids(self,
                          token_ids: List[int],
                          num_lookahead_slots: int = 0,
-                         num_computed_slots: Optional[int] = None) -> None:
+                         num_computed_slots: Optional[int] = None,
+                         contextual_hash: Optional[int] = 0) -> None:
         """Appends a sequence of token IDs to the existing blocks in the
         BlockTable.
 
@@ -136,6 +137,8 @@ class BlockTable:
                 Without sliding window, None can be passed.
                 Without chunked prefill, it should be the same as
                 _num_full_slots.
+            contextual_hash (Optional[int]): The hash value of additional factors
+                such as adapters that influence the block, apart from the token_ids.
         """
         assert self._is_allocated, "no blocks have been allocated"
         assert len(self._blocks) > 0
@@ -155,7 +158,8 @@ class BlockTable:
         # Ensure there are enough empty slots for the new tokens plus
         # lookahead slots
         self.ensure_num_empty_slots(num_empty_slots=len(token_ids) +
-                                    num_lookahead_slots)
+                                    num_lookahead_slots,
+                                    contextual_hash=contextual_hash)
 
         # Update the blocks with the new tokens
         first_block_idx = self._num_full_slots // self._block_size
@@ -166,7 +170,7 @@ class BlockTable:
 
         self._num_full_slots += len(token_ids)
 
-    def ensure_num_empty_slots(self, num_empty_slots: int) -> None:
+    def ensure_num_empty_slots(self, num_empty_slots: int, contextual_hash: int) -> None:
         """Ensures that the BlockTable has at least the specified number of
         empty slots available.
 
@@ -177,6 +181,8 @@ class BlockTable:
 
         Args:
             num_empty_slots (int): The minimum number of empty slots required.
+            contextual_hash (Optional[int]): The hash value of additional factors
+                such as adapters that influence the block, apart from the token_ids.
         """
         # Currently the block table only supports
         # appending tokens to GPU blocks.
@@ -193,7 +199,7 @@ class BlockTable:
             assert len(self._blocks) > 0
             self._blocks.append(
                 self._allocator.allocate_mutable_block(
-                    prev_block=self._blocks[-1], device=device))
+                    prev_block=self._blocks[-1], device=device, contextual_hash=contextual_hash))
 
     def fork(self) -> "BlockTable":
         """Creates a new BlockTable instance with a copy of the blocks from the
