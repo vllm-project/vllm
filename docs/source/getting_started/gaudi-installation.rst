@@ -329,7 +329,7 @@ Environment variables
 -   ``VLLM_{phase}_{dim}_BUCKET_{param}`` - collection of 12 environment variables configuring ranges of bucketing mechanism
 
     - ``{phase}`` is either ``PROMPT`` or ``DECODE``
-    - ``{dim}`` is either ``BS`` or ``SEQ``
+    - ``{dim}`` is either ``BS``, ``SEQ`` or ``BLOCK``
     - ``{param}`` is either ``MIN``, ``STEP`` or ``MAX``
     - Default values:
 
@@ -345,9 +345,9 @@ Environment variables
          - batch size min (``VLLM_DECODE_BS_BUCKET_MIN``): ``min(max_num_seqs, 32)``
          - batch size step (``VLLM_DECODE_BS_BUCKET_STEP``): ``min(max_num_seqs, 32)``
          - batch size max (``VLLM_DECODE_BS_BUCKET_MAX``): ``max_num_seqs``
-         - sequence length min (``VLLM_DECODE_SEQ_BUCKET_MIN``): ``128``
-         - sequence length step (``VLLM_DECODE_SEQ_BUCKET_STEP``): ``128``
-         - sequence length max (``VLLM_DECODE_SEQ_BUCKET_MAX``): ``max(128, (max_num_seqs*max_model_len)/block_size)``
+         - sequence length min (``VLLM_DECODE_BLOCK_BUCKET_MIN``): ``128``
+         - sequence length step (``VLLM_DECODE_BLOCK_BUCKET_STEP``): ``128``
+         - sequence length max (``VLLM_DECODE_BLOCK_BUCKET_MAX``): ``max(128, (max_num_seqs*max_model_len)/block_size)``
 
 
 Additionally, there are HPU PyTorch Bridge environment variables impacting vLLM execution:  
