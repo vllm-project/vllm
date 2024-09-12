@@ -1,15 +1,13 @@
 ## Global Args #################################################################
 ARG BASE_UBI_IMAGE_TAG=9.4
-ARG PYTHON_VERSION=3.11
+ARG PYTHON_VERSION=3.12
 
 ARG TORCH_CUDA_ARCH_LIST="7.0 7.5 8.0 8.6 8.9 9.0+PTX"
 
 ## Base Layer ##################################################################
 FROM registry.access.redhat.com/ubi9/ubi-minimal:${BASE_UBI_IMAGE_TAG} as base
-ARG PYTHON_VERSION
-
-RUN microdnf -y update && \
-    microdnf install -y \
+ENV PYTHON_VERSION=$PYTHON_VERSION
+ARG PYTHON_VERSION RUN microdnf -y update && \ microdnf install -y \
     python${PYTHON_VERSION}-pip python${PYTHON_VERSION}-wheel \
     && microdnf clean all
 
@@ -26,13 +24,13 @@ RUN microdnf install -y \
 
 ## Python Installer ############################################################
 FROM base as python-install
-
 ARG PYTHON_VERSION
 
 ENV VIRTUAL_ENV=/opt/vllm
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+ENV PYTHON_VERSION=$PYTHON_VERSION
 RUN microdnf install -y \
-    python${PYTHON_VERSION}-devel python${PYTHON_VERSION}-pip python${PYTHON_VERSION}-wheel && \
+    python${PYTHON_VERSION}-devel  && \
     python${PYTHON_VERSION} -m venv $VIRTUAL_ENV && pip install --no-cache -U pip wheel uv && microdnf clean all
 
 
@@ -151,7 +149,6 @@ RUN CFLAGS="-O3 -Wall -Werror=format-security -Wno-unused-function -Wp,-D_GLIBCX
 
 ## Release #####################################################################
 FROM python-install AS vllm-openai
-ARG PYTHON_VERSION
 
 WORKDIR /workspace
 
@@ -180,7 +177,7 @@ RUN --mount=type=bind,from=libsodium-builder,src=/usr/src/libsodium,target=/usr/
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/uv \
-    uv pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.1.2/flashinfer-0.1.2+cu121torch2.4-cp311-cp311-linux_x86_64.whl
+    uv pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.1.2/flashinfer-0.1.2+cu121torch2.4-cp312-cp312-linux_x86_64.whl
 
 ENV HF_HUB_OFFLINE=1 \
     HOME=/home/vllm \
