@@ -1,7 +1,10 @@
 import asyncio
+import os
+import uuid
 from asyncio import CancelledError
+from copy import copy
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional
 
 import pytest
 import pytest_asyncio
@@ -11,6 +14,7 @@ from vllm import SamplingParams
 from vllm.config import ParallelConfig
 from vllm.engine.async_llm_engine import AsyncEngineArgs, AsyncLLMEngine
 from vllm.outputs import RequestOutput as RealRequestOutput
+from vllm.sampling_params import RequestOutputKind
 
 from ..conftest import cleanup
 from ..utils import wait_for_gpu_memory_to_clear
@@ -122,8 +126,17 @@ def start_engine():
         timeout_s=60,
     )
 
+    num_scheduler_steps = int(os.getenv("NUM_SCHEDULER_STEPS", "1"))
+    print(f"Starting engine with num_scheduler_steps={num_scheduler_steps}")
+
     return AsyncLLMEngine.from_engine_args(
-        AsyncEngineArgs(model="facebook/opt-125m", enforce_eager=True))
+        AsyncEngineArgs(model="facebook/opt-125m",
+                        enforce_eager=True,
+                        num_scheduler_steps=num_scheduler_steps))
+
+
+def uid() -> str:
+    return str(uuid.uuid4())
 
 
 @pytest_asyncio.fixture(scope="module")
@@ -148,57 +161,177 @@ def should_do_global_cleanup_after_test(request) -> bool:
 @pytest.mark.asyncio(scope="module")
 async def test_asyncio_run(async_engine):
 
+    scheduler_config = await async_engine.get_scheduler_config()
+    num_scheduler_steps = scheduler_config.num_scheduler_steps
+
     async def run(prompt: str):
         sampling_params = SamplingParams(
             temperature=0,
             max_tokens=32,
+            min_tokens=32,
         )
 
+        output_count = 0
+        final_output = None
         async for output in async_engine.generate(prompt,
                                                   sampling_params,
-                                                  request_id=prompt):
+                                                  request_id=uid()):
+            output_count += 1
             final_output = output
-        return final_output
+        return final_output, output_count
 
     results = await asyncio.gather(
         run("test0"),
-        run("test1"),
+        run("test0"),
     )
     assert len(results) == 2
+    first, second = results
+
+    # remove nondeterministic fields for comparison
+    first[0].metrics = None
+    second[0].metrics = None
+    first[0].request_id = None
+    second[0].request_id = None
+
+    assert str(first) == str(second)
+
+    output_count = results[0][1]
+    if num_scheduler_steps == 1:
+        assert output_count == 32
+    else:
+        assert 1 < output_count < 32
+
+
+@pytest.mark.asyncio(scope="module")
+async def test_output_kinds(async_engine):
+    """Test that output_kind works as expected and that
+    results are equivalent across different kinds."""
+
+    scheduler_config = await async_engine.get_scheduler_config()
+    num_scheduler_steps = scheduler_config.num_scheduler_steps
+
+    sampling_params = SamplingParams(
+        temperature=0,
+        max_tokens=32,
+        min_tokens=32,
+    )
+
+    async def run(prompt: str, kind: RequestOutputKind):
+        params = copy(sampling_params)
+        params.output_kind = kind
+
+        output_count = 0
+        final_output = None
+        async for output in async_engine.generate(prompt,
+                                                  params,
+                                                  request_id=uid()):
+            output_count += 1
+            final_output = output
+
+        assert final_output is not None
+        return (final_output.prompt_token_ids,
+                final_output.outputs[0].token_ids,
+                final_output.outputs[0].text, output_count)
+
+    async def run_deltas(prompt: str):
+        params = copy(sampling_params)
+        params.output_kind = RequestOutputKind.DELTA
+
+        prompt_tokens = None
+        output_tokens: List[int] = []
+        output_text = ""
+        output_count = 0
+        async for output in async_engine.generate(prompt,
+                                                  params,
+                                                  request_id=uid()):
+            token_ids = output.outputs[0].token_ids
+            text = output.outputs[0].text
+
+            # Ensure we get prompt ids iff we haven't yet received output tokens
+            if output_tokens:
+                assert 1 <= len(token_ids) <= num_scheduler_steps
+                assert text
+                assert not output.prompt_token_ids
+            else:
+                assert output.prompt_token_ids
+                prompt_tokens = output.prompt_token_ids
+
+            output_tokens.extend(token_ids)
+            output_text += text
+
+            output_count += 1
+        return prompt_tokens, output_tokens, output_text, output_count
+
+    results = await asyncio.gather(
+        run("common input prompt", RequestOutputKind.CUMULATIVE),
+        run("common input prompt", RequestOutputKind.FINAL_ONLY),
+        run_deltas("common input prompt"))
+
+    # Make sure outputs are the same
+    prompt_set = set(tuple(prompt_ids) for prompt_ids, _, _, _ in results)
+    assert len(prompt_set) == 1
+
+    text_set = set(text for _, _, text, _ in results)
+    assert len(text_set) == 1
+
+    tokens_set = set(tuple(ids) for _, ids, _, _ in results)
+    assert len(tokens_set) == 1
+
+    cumulative, final, deltas = results
+
+    # output message counts
+    assert cumulative[3] == deltas[3]
+
+    if num_scheduler_steps == 1:
+        assert cumulative[3] == 32
+    else:
+        assert 1 < cumulative[3] < 32
+
+    assert final[3] == 1
 
 
 @pytest.mark.asyncio(scope="module")
 async def test_cancellation(async_engine):
+    scheduler_config = await async_engine.get_scheduler_config()
+    num_scheduler_steps = scheduler_config.num_scheduler_steps
+
     sampling_params = SamplingParams(
         temperature=0,
-        min_tokens=10,
-        max_tokens=10,
+        min_tokens=13,
+        max_tokens=13,
     )
+
+    stop_at = 5 if num_scheduler_steps == 1 else 1
+
+    request_id = uid()
 
     i = 0
     with pytest.raises(CancelledError):
         async for output in async_engine.generate("test2",
                                                   sampling_params,
-                                                  request_id="test2"):
+                                                  request_id=request_id):
             assert not output.finished
             i += 1
-            if i == 5:
-                await async_engine.abort("test2")
+            if i == stop_at:
+                await async_engine.abort(request_id)
 
-    assert i == 5
+    assert i == stop_at
 
 
 @pytest.mark.asyncio(scope="module")
 async def test_delayed_generator(async_engine):
+    scheduler_config = await async_engine.get_scheduler_config()
+
+    if scheduler_config.num_scheduler_steps != 1:
+        pytest.skip("no need to test this one with multistep")
+
     sampling_params = SamplingParams(
         temperature=0,
         min_tokens=10,
         max_tokens=10,
     )
 
-    stream = async_engine.generate("test3",
-                                   sampling_params,
-                                   request_id="test3")
+    stream = async_engine.generate("test3", sampling_params, request_id=uid())
     i = 0
     final_output: Optional[RealRequestOutput] = None
     async for output in stream:
