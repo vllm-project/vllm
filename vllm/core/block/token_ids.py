@@ -18,6 +18,17 @@ class TokenRangeAnnotation(NamedTuple):
     def end_index(self) -> int:
         return self.token_index + self.token_count
 
+    @staticmethod
+    def are_adjacent(left: "TokenRangeAnnotation",
+                     right: "TokenRangeAnnotation") -> bool:
+        """
+        Indicates whether two annotations represent adjacent ranges in the
+        hashed content.
+        """
+
+        return (left.content_hash == right.content_hash and
+                left.content_offset + left.token_count == right.content_offset)
+
     def adjusted(self, tokens_start: int,
                  tokens_end: int) -> Optional["TokenRangeAnnotation"]:
         """
@@ -59,9 +70,14 @@ class TokenIds:
         for annotation in self.annotations:
             if (annotation.token_index < current_token_index
                     or annotation.token_count < 0):
-                raise ValueError(
-                    "annotations must be sorted and non-overlapping.")
+                raise ValueError("TokenRangeAnnotations must be sorted and "
+                                 "non-overlapping.")
+
             current_token_index = annotation.end_index
+
+        if current_token_index > len(self.token_ids):
+            raise ValueError("TokenRangeAnnotations must be entirely "
+                             "contained within the token IDs.")
 
     @staticmethod
     def from_sequence(sequence: Sequence, offset: int) -> "TokenIds":
@@ -82,43 +98,60 @@ class TokenIds:
                chunk_size: int,
                *,
                first_chunk_size: Optional[int] = None):
+        """
+        Yields successive chunks over the TokenIds, taking care to filter
+        or split TokenRangeAnnotations accordingly.
+        """
+
         current_annotation_index = 0
         i = 0
         current_chunk_size = (chunk_size if first_chunk_size is None else
                               first_chunk_size)
 
         while i < len(self.token_ids):
-            annotations: List[TokenRangeAnnotation] = []
-            while current_annotation_index < len(
-                    self.annotations
-            ) and self.annotations[
-                    current_annotation_index].token_index < i + current_chunk_size:
-                # Create new annotations remapped to the new token ids.
+            current_chunk_annotations: List[TokenRangeAnnotation] = []
+            while current_annotation_index < len(self.annotations):
                 existing_annotation = self.annotations[
                     current_annotation_index]
+                if existing_annotation.token_index >= i + current_chunk_size:
+                    # This annotation starts after the current chunk.
+                    break
+
+                # Create a new annotation.
                 new_annotation = existing_annotation.adjusted(
                     tokens_start=i, tokens_end=i + current_chunk_size)
-                assert new_annotation is not None, "The existing annotation should overlap with the new one."
-                annotations.append(new_annotation)
-                if i + new_annotation.end_index == existing_annotation.end_index:
+                assert new_annotation is not None, (
+                    "The existing annotation should overlap with the new one.")
+                current_chunk_annotations.append(new_annotation)
+                if (i + new_annotation.end_index ==
+                        existing_annotation.end_index):
                     # We've used up this annotation.
                     current_annotation_index += 1
                 else:
                     break
 
             yield TokenIds(self.token_ids[i:i + current_chunk_size],
-                           annotations)
+                           current_chunk_annotations)
 
             i += current_chunk_size
             current_chunk_size = chunk_size
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, TokenIds):
-            return self.token_ids == other.token_ids and self.annotations == other.annotations
+            return (self.token_ids == other.token_ids
+                    and self.annotations == other.annotations)
 
         return NotImplemented
 
     def __add__(self, other: "TokenIds") -> "TokenIds":
+        """
+        Combines two ``TokenIds``, possibly merging ``TokenRangeAnnotion``s.
+
+        ``TokenRangeAnnotation``s at the boundary will be coalesced into a
+        single annotation if they have the same content hash and they cover
+        adjacent portions of the hashed content.
+        """
+
         if not self.token_ids:
             return other
         elif not other.token_ids:
@@ -131,11 +164,13 @@ class TokenIds:
         else:
             combined_annotations = list(self.annotations)
             for annotation in other.annotations:
-                if self.annotations:
+                if combined_annotations:
+                    # Check if we can coalesce this annotation with the last.
                     last_annotation = combined_annotations[-1]
-                    if last_annotation.content_hash == annotation.content_hash and last_annotation.end_index == len(
-                            self.token_ids) and annotation.token_index == 0:
-                        # Combine with the last annotation.
+                    if (TokenRangeAnnotation.are_adjacent(
+                            last_annotation, annotation) and
+                            last_annotation.end_index == len(self.token_ids)
+                            and annotation.token_index == 0):
                         combined_annotations[-1] = TokenRangeAnnotation(
                             content_hash=last_annotation.content_hash,
                             content_offset=last_annotation.content_offset,
@@ -167,6 +202,9 @@ class TokenIds:
         ...
 
     def __getitem__(self, key):
+        """
+        Gets a single token at an index or a slice of ``TokenIds``.
+        """
         if isinstance(key, int):
             return self.token_ids[key]
 
@@ -175,12 +213,19 @@ class TokenIds:
                 raise IndexError("Step is not supported.")
 
             # Resolve negative indices.
-            start = 0 if key.start is None else key.start if key.start >= 0 else len(
-                self) + key.start
-            stop = len(
-                self
-            ) if key.stop is None else key.stop if key.stop >= 0 else len(
-                self) + key.stop
+            if key.start is None:
+                start = 0
+            elif key.start < 0:
+                start = len(self) + key.start
+            else:
+                start = key.start
+
+            if key.stop is None:
+                stop = len(self)
+            elif key.stop < 0:
+                stop = len(self) + key.stop
+            else:
+                stop = key.stop
 
             # Clamp the indices.
             start = max(0, min(len(self), start))
