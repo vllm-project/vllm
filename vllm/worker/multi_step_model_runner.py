@@ -230,11 +230,14 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         self._base_model_runner: GPUModelRunnerBase = base_model_runner
 
         self.is_multi_step = self.scheduler_config.is_multi_step
-        # used to copy tensors from GPU to CPU asynchronously
-        self._copy_stream = torch.cuda.Stream()
         self.pinned_sampled_token_ids: Optional[torch.Tensor] = None
 
         self.pythonization_cache = PythonizationCache()
+
+    @functools.cached_property
+    def _copy_stream(self):
+        # used to copy tensors from GPU to CPU asynchronously
+        return torch.cuda.Stream()
 
     def make_model_input_from_broadcasted_tensor_dict(
             self, tensor_dict: Dict[str, Any]) -> StatefulModelInput:
