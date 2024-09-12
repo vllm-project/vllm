@@ -90,12 +90,12 @@ _MULTIMODAL_MODELS = {
     "PaliGemmaForConditionalGeneration": ("paligemma",
                                           "PaliGemmaForConditionalGeneration"),
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
-    "UltravoxModel": ("ultravox", "UltravoxModel"),
-    "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
     "PixtralForConditionalGeneration": ("pixtral",
                                         "PixtralForConditionalGeneration"),
+    "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
     "Qwen2VLForConditionalGeneration": ("qwen2_vl",
                                         "Qwen2VLForConditionalGeneration"),
+    "UltravoxModel": ("ultravox", "UltravoxModel"),
 }
 _CONDITIONAL_GENERATION_MODELS = {
     "BartModel": ("bart", "BartForConditionalGeneration"),
