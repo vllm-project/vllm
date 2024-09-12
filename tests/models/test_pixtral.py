@@ -4,8 +4,11 @@ Run `pytest tests/models/test_mistral.py`.
 """
 import uuid
 from typing import Any, Dict, List
+import pickle
+
 
 import pytest
+from .utils import check_logprobs_close
 import torch
 from mistral_common.protocol.instruct.messages import ImageURLChunk
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
@@ -75,28 +78,19 @@ ENGINE_INPUTS = [
     _create_engine_inputs(IMG_URLS),
 ]
 
-EXPECTED = [
-    "The image shows a black dog sitting on a wooden surface.",  # noqa
-    "1. A black dog with floppy ears sits attentively on a wooden surface.\n2. A vast mountain range with rugged peaks stretches under a cloudy sky.",  # noqa
-    "1. A black dog sits attentively on a wooden floor.\n2. A vast mountain range stretches across the horizon under a cloudy sky.\n3. Surfers wait for waves in the ocean at sunset.\n4. A winding gravel path leads through a lush green park.",  # noqa
-]
 
-SAMPLING_PARAMS = SamplingParams(max_tokens=512, temperature=0.0)
+SAMPLING_PARAMS = SamplingParams(max_tokens=512, temperature=0.0, logprobs=5)
 LIMIT_MM_PER_PROMPT = dict(image=4)
 
 
-def is_h100_gpu() -> bool:
-    # Tests will long inputs give device-dependent output
-    # Let some test only run on H100
-    if torch.cuda.is_available():
-        device_name = torch.cuda.get_device_name(0)
-        print(f"Device name: {device_name}")
-        if "H100" in device_name:
-            return True
-    return False
+MAX_MODEL_LEN = [8192, 65536]
+FIXTURE_LOGPROBS_CHAT = "tests/models/fixtures/pixtral_chat.pickle"
+FIXTURE_LOGPROBS_ENGINE = "tests/models/fixtures/pixtral_chat_engine.pickle" 
 
+def load_logprobs(filename: str) -> Any:
+    with open(filename, 'rb') as f:
+        return pickle.load(f)
 
-MAX_MODEL_LEN = [8192, 65536] if is_h100_gpu() else [8192]
 
 
 @pytest.mark.skip(
@@ -112,6 +106,7 @@ def test_chat(
     model: str,
     dtype: str,
 ) -> None:
+    EXPECTED_CHAT_LOGPROBS = load_logprobs(FIXTURE_LOGPROBS_CHAT)
     with vllm_runner(
             model,
             dtype=dtype,
@@ -120,15 +115,16 @@ def test_chat(
             max_model_len=max_model_len,
             limit_mm_per_prompt=LIMIT_MM_PER_PROMPT,
     ) as vllm_model:
-        results = []
+        outputs = []
         num_test_samples = len(MSGS) if is_h100_gpu() else 1
         for msg in MSGS[:num_test_samples]:
-            outputs = vllm_model.model.chat(msg,
+            output = vllm_model.model.chat(msg,
                                             sampling_params=SAMPLING_PARAMS)
 
-            results.append(outputs[0].outputs[0].text)
+            outputs.extend(output)
 
-        assert results == EXPECTED[:num_test_samples]
+    logprobs = vllm_runner._final_steps_generate_w_logprobs(outputs)
+    check_logprobs_close(outputs_0_lst=logprobs, outputs_1_lst=EXPECTED_CHAT_LOGPROBS, name_0="output", name_1="h100_ref")
 
 
 @pytest.mark.skip(
@@ -137,7 +133,8 @@ def test_chat(
 )
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
-def test_model_engine(model: str, dtype: str) -> None:
+def test_model_engine(vllm_runner, model: str, dtype: str) -> None:
+    EXPECTED_ENGINE_LOGPROBS = load_logprobs(FIXTURE_LOGPROBS_ENGINE)
     args = EngineArgs(
         model=model,
         tokenizer_mode="mistral",
@@ -148,31 +145,22 @@ def test_model_engine(model: str, dtype: str) -> None:
     engine = LLMEngine.from_engine_args(args)
 
     engine.add_request(uuid.uuid4().hex, ENGINE_INPUTS[0], SAMPLING_PARAMS)
-    if is_h100_gpu():
-        engine.add_request(uuid.uuid4().hex, ENGINE_INPUTS[1], SAMPLING_PARAMS)
+    engine.add_request(uuid.uuid4().hex, ENGINE_INPUTS[1], SAMPLING_PARAMS)
 
-    results = []
+    outputs = []
     count = 0
     while True:
         out = engine.step()
         count += 1
         for request_output in out:
             if request_output.finished:
-                results.append(request_output.outputs[0].text)
+                outputs.append(request_output)
 
-        if count == 2 and is_h100_gpu():
+        if count == 2:
             engine.add_request(uuid.uuid4().hex, ENGINE_INPUTS[2],
                                SAMPLING_PARAMS)
         if not engine.has_unfinished_requests():
             break
 
-    assert results[0] == EXPECTED[0]
-    # the result is a tiny bit different but this is not unexpected given that
-    # different kernels are executed and given that flash attention is not
-    # deterministic
-    if is_h100_gpu():
-        assert (
-            results[1] ==
-            "1. A black dog with floppy ears sits attentively on a wooden surface.\n2. A vast mountain range stretches across the horizon under a cloudy sky."  # noqa
-        )
-        assert results[2] == EXPECTED[2]
+    logprobs = vllm_runner._final_steps_generate_w_logprobs(outputs)
+    check_logprobs_close(outputs_0_lst=logprobs, outputs_1_lst=EXPECTED_ENGINE_LOGPROBS, name_0="output", name_1="h100_ref")
