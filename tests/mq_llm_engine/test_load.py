@@ -18,7 +18,8 @@ PROMPT = "Hello my name is Robert and I love"
 NUM_REQUESTS = 10000
 
 # Scenarios to test for num generated token.
-ENGINE_ARGS = AsyncEngineArgs(model=MODEL, disable_log_requests=True)
+ENGINE_ARGS = AsyncEngineArgs(model=MODEL, disable_log_requests=True, 
+                              enable_chunked_prefill=True)
 
 @pytest.fixture(scope="function")
 def tmp_socket():
