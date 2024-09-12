@@ -177,7 +177,8 @@ RUN --mount=type=bind,from=libsodium-builder,src=/usr/src/libsodium,target=/usr/
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/uv \
-    uv pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.1.2/flashinfer-0.1.2+cu121torch2.4-cp312-cp312-linux_x86_64.whl
+    uv pip install \
+        "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.1.6/flashinfer-0.1.6+cu124torch2.4-cp312-cp312-linux_x86_64.whl"
 
 ENV HF_HUB_OFFLINE=1 \
     HOME=/home/vllm \
