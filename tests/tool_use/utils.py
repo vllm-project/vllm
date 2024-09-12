@@ -1,15 +1,64 @@
-from typing import Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from openai.types.chat import (ChatCompletionMessageParam,
                                ChatCompletionToolParam)
 from typing_extensions import TypedDict
 
 from tests.utils import VLLM_PATH
+import json
+from copy import deepcopy
 
 
-class ServerConfig(TypedDict):
+class ServerConfig(TypedDict, total=False):
     model: str
     arguments: List[str]
+    system_prompt: Optional[str]
+    supports_parallel: Optional[bool]
+    format_tool_output: Optional[Callable[[str], str]]
+
+
+def format_llama_tool_output(output: str) -> str:
+    return json.dumps({"output": output})
+
+
+def format_tool_output_id(output: str) -> str:
+    return output
+
+
+def patch_tool_output(messages: List[Dict[str, Any]],
+                      config: ServerConfig) -> List[Dict[str, Any]]:
+    fmt_fun = config.get("format_tool_output")
+    if not fmt_fun:
+        return messages
+    new_messages = deepcopy(messages)
+    for message in new_messages:
+        if message["role"] == "tool":
+            message["content"] = fmt_fun(message["content"])
+    return new_messages
+
+
+def patch_system_prompt(messages: List[Dict[str, Any]],
+                        system_prompt: str) -> List[Dict[str, Any]]:
+    new_messages = deepcopy(messages)
+    if new_messages[0]["role"] == "system":
+        new_messages[0]["content"] = system_prompt
+    else:
+        new_messages.insert(0, {"role": "system", "content": system_prompt})
+    return new_messages
+
+
+def ensure_system_prompt(messages: List[Dict[str, Any]],
+                         config: ServerConfig) -> List[Dict[str, Any]]:
+    prompt = config.get("system_prompt")
+    if prompt:
+        return patch_system_prompt(messages, prompt)
+    else:
+        return messages
+
+
+def adapt_prompt_to_model(messages: List[Dict[str, Any]],
+                          config: ServerConfig) -> List[Dict[str, Any]]:
+    return ensure_system_prompt(patch_tool_output(messages, config), config)
 
 
 # universal args for all models go here. also good if you need to test locally
@@ -24,6 +73,25 @@ CONFIGS: Dict[str, ServerConfig] = {
             "--tool-call-parser", "hermes", "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_hermes.jinja")
         ]
+    },
+    "llama": {
+        "model":
+        "meta-llama/Meta-Llama-3.1-8B-Instruct",
+        "arguments": [
+            "--tool-call-parser", "llama", "--chat-template",
+            str(VLLM_PATH / "examples/tool_chat_template_llama.jinja")
+        ],
+        "system_prompt":
+        "You are a helpful assistant with tool calling capabilities. "
+        "Only reply with a tool call if the function exists in the "
+        "library provided by the user. If it doesn't exist, just "
+        "reply directly in natural language. When you receive a tool "
+        "call response, use the output to format an answer to the "
+        "original user question.",
+        "supports_parallel":
+        False,
+        "format_tool_output":
+        format_llama_tool_output
     },
     "mistral": {
         "model":

@@ -5,17 +5,20 @@ import openai
 import pytest
 
 from .utils import (MESSAGES_ASKING_FOR_TOOLS, MESSAGES_WITH_TOOL_RESPONSE,
-                    SEARCH_TOOL, WEATHER_TOOL)
+                    SEARCH_TOOL, WEATHER_TOOL, ServerConfig,
+                    adapt_prompt_to_model)
 
 
 # test: request a chat completion that should return tool calls, so we know they
 # are parsable
 @pytest.mark.asyncio
-async def test_tool_call_and_choice(client: openai.AsyncOpenAI):
+async def test_tool_call_and_choice(client: openai.AsyncOpenAI,
+                                    server_config: ServerConfig):
     models = await client.models.list()
     model_name: str = models.data[0].id
     chat_completion = await client.chat.completions.create(
-        messages=MESSAGES_ASKING_FOR_TOOLS,
+        messages=adapt_prompt_to_model(MESSAGES_ASKING_FOR_TOOLS,
+                                       server_config),
         temperature=0,
         max_tokens=100,
         model=model_name,
@@ -59,7 +62,8 @@ async def test_tool_call_and_choice(client: openai.AsyncOpenAI):
     # make the same request, streaming
     stream = await client.chat.completions.create(
         model=model_name,
-        messages=MESSAGES_ASKING_FOR_TOOLS,
+        messages=adapt_prompt_to_model(MESSAGES_ASKING_FOR_TOOLS,
+                                       server_config),
         temperature=0,
         max_tokens=100,
         tools=[WEATHER_TOOL, SEARCH_TOOL],
@@ -136,11 +140,13 @@ async def test_tool_call_and_choice(client: openai.AsyncOpenAI):
 # test: providing tools and results back to model to get a non-tool response
 # (streaming/not)
 @pytest.mark.asyncio
-async def test_tool_call_with_results(client: openai.AsyncOpenAI):
+async def test_tool_call_with_results(client: openai.AsyncOpenAI,
+                                      server_config: ServerConfig):
     models = await client.models.list()
     model_name: str = models.data[0].id
     chat_completion = await client.chat.completions.create(
-        messages=MESSAGES_WITH_TOOL_RESPONSE,
+        messages=adapt_prompt_to_model(MESSAGES_WITH_TOOL_RESPONSE,
+                                       server_config),
         temperature=0,
         max_tokens=100,
         model=model_name,
@@ -157,7 +163,8 @@ async def test_tool_call_with_results(client: openai.AsyncOpenAI):
     assert "98" in choice.message.content  # the temperature from the response
 
     stream = await client.chat.completions.create(
-        messages=MESSAGES_WITH_TOOL_RESPONSE,
+        messages=adapt_prompt_to_model(MESSAGES_WITH_TOOL_RESPONSE,
+                                       server_config),
         temperature=0,
         max_tokens=100,
         model=model_name,

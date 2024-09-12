@@ -6,7 +6,7 @@ import pytest
 
 from .utils import (MESSAGES_ASKING_FOR_PARALLEL_TOOLS,
                     MESSAGES_WITH_PARALLEL_TOOL_RESPONSE, SEARCH_TOOL,
-                    WEATHER_TOOL)
+                    WEATHER_TOOL, ServerConfig, adapt_prompt_to_model)
 
 
 # test: getting the model to generate parallel tool calls (streaming/not)
@@ -14,11 +14,18 @@ from .utils import (MESSAGES_ASKING_FOR_PARALLEL_TOOLS,
 # may be added in the future. e.g. llama 3.1 models are not designed to support
 # parallel tool calls.
 @pytest.mark.asyncio
-async def test_parallel_tool_calls(client: openai.AsyncOpenAI):
+async def test_parallel_tool_calls(client: openai.AsyncOpenAI,
+                                   server_config: ServerConfig):
+
+    if not server_config.get("supports_parallel", True):
+        pytest.skip("The {} model doesn't support parallel tool calls".format(
+            server_config["model"]))
+
     models = await client.models.list()
     model_name: str = models.data[0].id
     chat_completion = await client.chat.completions.create(
-        messages=MESSAGES_ASKING_FOR_PARALLEL_TOOLS,
+        messages=adapt_prompt_to_model(MESSAGES_ASKING_FOR_PARALLEL_TOOLS,
+                                       server_config),
         temperature=0,
         max_tokens=200,
         model=model_name,
@@ -55,7 +62,8 @@ async def test_parallel_tool_calls(client: openai.AsyncOpenAI):
     # make the same request, streaming
     stream = await client.chat.completions.create(
         model=model_name,
-        messages=MESSAGES_ASKING_FOR_PARALLEL_TOOLS,
+        messages=adapt_prompt_to_model(MESSAGES_ASKING_FOR_PARALLEL_TOOLS,
+                                       server_config),
         temperature=0,
         max_tokens=200,
         tools=[WEATHER_TOOL, SEARCH_TOOL],
@@ -136,11 +144,18 @@ async def test_parallel_tool_calls(client: openai.AsyncOpenAI):
 # test: providing parallel tool calls back to the model to get a response
 # (streaming/not)
 @pytest.mark.asyncio
-async def test_parallel_tool_calls_with_results(client: openai.AsyncOpenAI):
+async def test_parallel_tool_calls_with_results(client: openai.AsyncOpenAI,
+                                                server_config: ServerConfig):
+
+    if not server_config.get("supports_parallel", True):
+        pytest.skip("The {} model doesn't support parallel tool calls".format(
+            server_config["model"]))
+
     models = await client.models.list()
     model_name: str = models.data[0].id
     chat_completion = await client.chat.completions.create(
-        messages=MESSAGES_WITH_PARALLEL_TOOL_RESPONSE,
+        messages=adapt_prompt_to_model(MESSAGES_WITH_PARALLEL_TOOL_RESPONSE,
+                                       server_config),
         temperature=0,
         max_tokens=200,
         model=model_name,
@@ -158,7 +173,8 @@ async def test_parallel_tool_calls_with_results(client: openai.AsyncOpenAI):
     assert "78" in choice.message.content  # Orlando temp in tool response
 
     stream = await client.chat.completions.create(
-        messages=MESSAGES_WITH_PARALLEL_TOOL_RESPONSE,
+        messages=adapt_prompt_to_model(MESSAGES_WITH_PARALLEL_TOOL_RESPONSE,
+                                       server_config),
         temperature=0,
         max_tokens=200,
         model=model_name,

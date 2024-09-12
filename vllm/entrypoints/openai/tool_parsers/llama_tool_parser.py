@@ -144,7 +144,7 @@ class LlamaToolParser(ToolParser):
                     (obj,
                      end_idx) = partial_json_loads(current_text[start_idx:])
                     start_idx += end_idx + len('; ')
-                    # depending on the promt Llama can use
+                    # depending on the prompt Llama can use
                     # either arguments or parameters
                     if "parameters" in obj:
                         assert "arguments" not in obj, "model generated both parameters and arguments"

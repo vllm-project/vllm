@@ -3,18 +3,19 @@ from typing import List
 import openai
 import pytest
 
-from .utils import MESSAGES_WITHOUT_TOOLS, WEATHER_TOOL
+from .utils import MESSAGES_WITHOUT_TOOLS, WEATHER_TOOL, ServerConfig, adapt_prompt_to_model
 
 
 # test: make sure chat completions without tools provided work even when tools
 # are enabled. This makes sure tool call chat templates work, AND that the tool
 # parser stream processing doesn't change the output of the model.
 @pytest.mark.asyncio
-async def test_chat_completion_without_tools(client: openai.AsyncOpenAI):
+async def test_chat_completion_without_tools(client: openai.AsyncOpenAI,
+                                             server_config: ServerConfig):
     models = await client.models.list()
     model_name: str = models.data[0].id
     chat_completion = await client.chat.completions.create(
-        messages=MESSAGES_WITHOUT_TOOLS,
+        messages=adapt_prompt_to_model(MESSAGES_WITHOUT_TOOLS, server_config),
         temperature=0,
         max_tokens=150,
         model=model_name,
@@ -34,7 +35,7 @@ async def test_chat_completion_without_tools(client: openai.AsyncOpenAI):
 
     # make the same request, streaming
     stream = await client.chat.completions.create(
-        messages=MESSAGES_WITHOUT_TOOLS,
+        messages=adapt_prompt_to_model(MESSAGES_WITHOUT_TOOLS, server_config),
         temperature=0,
         max_tokens=150,
         model=model_name,
@@ -77,11 +78,12 @@ async def test_chat_completion_without_tools(client: openai.AsyncOpenAI):
 # tools, to make sure we can still get normal chat completion responses
 # and that they won't be parsed as tools
 @pytest.mark.asyncio
-async def test_chat_completion_with_tools(client: openai.AsyncOpenAI):
+async def test_chat_completion_with_tools(client: openai.AsyncOpenAI,
+                                          server_config: ServerConfig):
     models = await client.models.list()
     model_name: str = models.data[0].id
     chat_completion = await client.chat.completions.create(
-        messages=MESSAGES_WITHOUT_TOOLS,
+        messages=adapt_prompt_to_model(MESSAGES_WITHOUT_TOOLS, server_config),
         temperature=0,
         max_tokens=150,
         model=model_name,
@@ -102,7 +104,7 @@ async def test_chat_completion_with_tools(client: openai.AsyncOpenAI):
 
     # make the same request, streaming
     stream = await client.chat.completions.create(
-        messages=MESSAGES_WITHOUT_TOOLS,
+        messages=adapt_prompt_to_model(MESSAGES_WITHOUT_TOOLS, server_config),
         temperature=0,
         max_tokens=150,
         model=model_name,
