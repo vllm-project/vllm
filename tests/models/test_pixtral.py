@@ -2,14 +2,11 @@
 
 Run `pytest tests/models/test_mistral.py`.
 """
+import pickle
 import uuid
 from typing import Any, Dict, List
-import pickle
-
 
 import pytest
-from .utils import check_logprobs_close
-import torch
 from mistral_common.protocol.instruct.messages import ImageURLChunk
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
@@ -17,6 +14,8 @@ from mistral_common.tokens.tokenizers.multimodal import image_from_chunk
 
 from vllm import EngineArgs, LLMEngine, SamplingParams, TokensPrompt
 from vllm.multimodal import MultiModalDataBuiltins
+
+from .utils import check_logprobs_close
 
 pytestmark = pytest.mark.vlm
 
@@ -78,19 +77,17 @@ ENGINE_INPUTS = [
     _create_engine_inputs(IMG_URLS),
 ]
 
-
 SAMPLING_PARAMS = SamplingParams(max_tokens=512, temperature=0.0, logprobs=5)
 LIMIT_MM_PER_PROMPT = dict(image=4)
 
-
 MAX_MODEL_LEN = [8192, 65536]
 FIXTURE_LOGPROBS_CHAT = "tests/models/fixtures/pixtral_chat.pickle"
-FIXTURE_LOGPROBS_ENGINE = "tests/models/fixtures/pixtral_chat_engine.pickle" 
+FIXTURE_LOGPROBS_ENGINE = "tests/models/fixtures/pixtral_chat_engine.pickle"
+
 
 def load_logprobs(filename: str) -> Any:
     with open(filename, 'rb') as f:
         return pickle.load(f)
-
 
 
 @pytest.mark.skip(
@@ -116,15 +113,17 @@ def test_chat(
             limit_mm_per_prompt=LIMIT_MM_PER_PROMPT,
     ) as vllm_model:
         outputs = []
-        num_test_samples = len(MSGS) if is_h100_gpu() else 1
-        for msg in MSGS[:num_test_samples]:
+        for msg in MSGS:
             output = vllm_model.model.chat(msg,
-                                            sampling_params=SAMPLING_PARAMS)
+                                           sampling_params=SAMPLING_PARAMS)
 
             outputs.extend(output)
 
     logprobs = vllm_runner._final_steps_generate_w_logprobs(outputs)
-    check_logprobs_close(outputs_0_lst=logprobs, outputs_1_lst=EXPECTED_CHAT_LOGPROBS, name_0="output", name_1="h100_ref")
+    check_logprobs_close(outputs_0_lst=logprobs,
+                         outputs_1_lst=EXPECTED_CHAT_LOGPROBS,
+                         name_0="output",
+                         name_1="h100_ref")
 
 
 @pytest.mark.skip(
@@ -163,4 +162,7 @@ def test_model_engine(vllm_runner, model: str, dtype: str) -> None:
             break
 
     logprobs = vllm_runner._final_steps_generate_w_logprobs(outputs)
-    check_logprobs_close(outputs_0_lst=logprobs, outputs_1_lst=EXPECTED_ENGINE_LOGPROBS, name_0="output", name_1="h100_ref")
+    check_logprobs_close(outputs_0_lst=logprobs,
+                         outputs_1_lst=EXPECTED_ENGINE_LOGPROBS,
+                         name_0="output",
+                         name_1="h100_ref")
