@@ -41,6 +41,15 @@ def run_llava_next_video(question):
     return llm, prompt, stop_token_ids
 
 
+# LLaVA-OneVision
+def run_llava_onevision(question):
+    prompt = f"<|im_start|>user <video>\n{question}<|im_end|><|im_start|>assistant\n"
+    llm = LLM(model="llava-hf/llava-onevision-qwen2-7b-ov-hf",
+              max_model_len=8192)
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
+
+
 # Fuyu
 def run_fuyu(question):
 
@@ -200,6 +209,7 @@ model_example_map = {
     "llava": run_llava,
     "llava-next": run_llava_next,
     "llava-next-video": run_llava_next_video,
+    "llava-onevision": run_llava_onevision,
     "fuyu": run_fuyu,
     "phi3_v": run_phi3v,
     "paligemma": run_paligemma,

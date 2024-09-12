@@ -232,6 +232,11 @@ Multimodal Language Models
     - Video
     - :code:`llava-hf/LLaVA-NeXT-Video-7B-hf`, etc. (see note)
     -
+  * - :code:`LlavaOnevisionForConditionalGeneration`
+    - LLaVA-Onevision
+    - Image\ :sup:`+` / Video\ :sup:`+`
+    - :code:`llava-hf/llava-onevision-qwen2-7b-ov-hf`, :code:`llava-hf/llava-onevision-qwen2-0.5b-ov-hf`, etc.
+    -
   * - :code:`MiniCPMV`
     - MiniCPM-V
     - Image\ :sup:`+`
