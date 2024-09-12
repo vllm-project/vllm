@@ -390,7 +390,7 @@ class BlipVisionModel(nn.Module):
         layer_count = len(self.encoder.layers)
 
         for name, loaded_weight in weights:
-            # post_layernorm is not needed in CLIPVisionModel
+            # post_layernorm is not needed in BlipVisionModel
             if (name.startswith("post_layernorm")
                     and self.post_layernorm is None):
                 continue
