@@ -49,7 +49,6 @@ def dummy_data_for_pixtral(ctx: InputContext, seq_len: int,
         ctx.model_config.tokenizer,
         tokenizer_mode=ctx.model_config.tokenizer_mode)
 
-    max_model_len = ctx.model_config.max_model_len
     mm_encoder = tokenizer.mistral.instruct_tokenizer.mm_encoder
     patch_size = mm_encoder.mm_config.image_patch_size
     image_token_id = mm_encoder.special_ids.img
