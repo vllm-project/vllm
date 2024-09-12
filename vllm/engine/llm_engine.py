@@ -1764,6 +1764,10 @@ class LLMEngine:
                 the scheduled batch,
             model_output: Optional, used to emit speculative decoding metrics
                 which are created by the workers.
+            finished_before: Optional, indices of sequences that were finished
+                already before. These sequences will be ignored.
+            skip: Optional, indices of sequences that were preempted. These
+                sequences will be ignored.
         """
         now = time.time()
 
