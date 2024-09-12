@@ -11,7 +11,7 @@ from vllm.sampling_params import SamplingParams
 # - Server:
 #
 # ```bash
-# vllm serve mistralai/Pixtral-12B-2409 --tokenizer_mode mistral --limit_mm_per_prompt 'image=4' --max_num_batched_tokens 16384
+# vllm serve mistralai/Pixtral-12B-2409 --tokenizer-mode mistral --limit-mm-per-prompt 'image=4' --max-model-len 16384
 # ```
 #
 # - Client:
