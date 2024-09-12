@@ -10,7 +10,7 @@ static constexpr int div_ceil(int a, int b) { return (a + b - 1) / b; }
 
 // For a given "a" of size [M,K] performs a permutation of the K columns based
 // on the given "perm" indices.
-// Currently only supports 16bit types (since we permute halfs)
+// Currently only supports 16bit types (since we permute half types)
 __global__ void permute_cols_kernel(int4 const* __restrict__ a_int4_ptr,
                                     int const* __restrict__ perm_int_ptr,
                                     int4* __restrict__ out_int4_ptr, int size_m,
