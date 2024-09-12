@@ -331,6 +331,41 @@ def test_multi_images_models(hf_runner, vllm_runner, image_assets, model,
     )
 
 
+@pytest.mark.parametrize("model", ["OpenGVLab/InternVL2-2B"])
+@pytest.mark.parametrize("size_factors", [[0.5, 1.0]])
+@pytest.mark.parametrize("dtype", [target_dtype])
+@pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("num_logprobs", [5])
+@torch.inference_mode()
+def test_different_num_patches(hf_runner, vllm_runner, image_assets, model,
+                               size_factors, dtype: str, max_tokens: int,
+                               num_logprobs: int) -> None:
+    images = [asset.pil_image.resize((896, 896)) for asset in image_assets]
+
+    inputs_batching = [(
+        [prompt for _ in size_factors],
+        [rescale_image_size(image, factor) for factor in size_factors],
+    ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
+
+    inputs_multi_images = [
+        ([HF_MULTIIMAGE_IMAGE_PROMPT for _ in size_factors],
+         [[rescale_image_size(image, factor) for image in images]
+          for factor in size_factors])
+    ]
+    for inputs in [inputs_batching, inputs_multi_images]:
+        run_test(
+            hf_runner,
+            vllm_runner,
+            inputs,
+            model,
+            dtype=dtype,
+            max_tokens=max_tokens,
+            num_logprobs=num_logprobs,
+            mm_limit=2,
+            tensor_parallel_size=1,
+        )
+
+
 @pytest.mark.parametrize(
     "models", [("OpenGVLab/InternVL2-2B", "OpenGVLab/InternVL2-2B-AWQ")])
 @pytest.mark.parametrize(
