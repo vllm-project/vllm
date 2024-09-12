@@ -390,7 +390,7 @@ def test_selective_scan_varlen(is_variable_B, is_variable_C, varBC_groups, has_D
     out = None
     out_ref = None
     from vllm import _custom_ops as ops
-    prev_state = torch.zeros((
+    prev_state = torch.randn((
             cumsum.shape[0],
             u.shape[0],
             int(A.shape[1]),
@@ -423,7 +423,7 @@ def test_selective_scan_varlen(is_variable_B, is_variable_C, varBC_groups, has_D
         delta_softplus,
         cumsum.cuda(),
         torch.arange(cumsum.shape[0],dtype=torch.int32,device=u.device), # cache indices
-        torch.zeros_like(cumsum,dtype=torch.int32,device=u.device), # has initial state
+        torch.ones_like(cumsum,dtype=torch.int32,device=u.device), # has initial state
         prev_state
     )
     # out, *rest = selective_scan_fn(u,
@@ -456,7 +456,8 @@ def test_selective_scan_varlen(is_variable_B, is_variable_C, varBC_groups, has_D
                                          z=z_s,
                                          delta_bias=delta_bias_ref,
                                          delta_softplus=delta_softplus,
-                                         return_last_state=return_last_state)
+                                         return_last_state=return_last_state,
+                                         prev_state=prev_state_ref[i].unsqueeze(0))
         # print("state",rest[0],last_state)
         outs.append(out_ref_s)
         last_state_refs.append(last_state_ref_s)
@@ -468,7 +469,7 @@ def test_selective_scan_varlen(is_variable_B, is_variable_C, varBC_groups, has_D
         last_state_ref = last_state_ref_s[0]
 
     assert out is not None and out_ref is not None
-    assert torch.allclose(prev_state, last_state_ref, rtol=rtol, atol=atol)
+    assert torch.allclose(last_state, last_state_ref, rtol=rtol, atol=atol)
     print((out_z- out_ref[0]).mean())
     print((out_z- out_ref[0]).max())
     assert torch.allclose(out_z, out_ref[0], rtol=rtol, atol=atol)
