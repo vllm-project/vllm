@@ -6,14 +6,14 @@ import uuid
 
 import pytest
 
-from tests.mq_llm_engine.utils import RemoteMQLLMEngine
-from vllm import SamplingParams
+from tests.mq_llm_engine.utils import RemoteMQLLMEngine, generate
 from vllm.engine.arg_utils import AsyncEngineArgs
 
 MODEL = "Qwen/Qwen2-0.5B-Instruct"
 ENGINE_ARGS = AsyncEngineArgs(model=MODEL)
 RAISED_ERROR = KeyError
 RAISED_VALUE = "foo"
+EXPECTED_TOKENS = 250
 
 
 @pytest.fixture(scope="function")
@@ -33,56 +33,32 @@ async def test_abort(tmp_socket):
         request_ids_a = [f"request-a-{idx}" for idx in range(10)]
         request_ids_b = [f"request-b-{idx}" for idx in range(10)]
 
-        async def run_to_completion(request_id) -> bool:
-            EXPECTED = 250
-            count = 0
-            async for _ in client.generate(inputs="Hello my name is",
-                                           sampling_params=SamplingParams(
-                                               max_tokens=EXPECTED,
-                                               temperature=0),
-                                           request_id=request_id):
-                count += 1
-                await asyncio.sleep(0.)
+        # Requests started before one to be aborted.
+        tasks = []
+        for request_id in request_ids_a:
+            tasks.append(
+                asyncio.create_task(
+                    generate(client, request_id, EXPECTED_TOKENS)))
 
-            # Confirm we generated all the tokens we expected.
-            return count == EXPECTED
-
-        async def run_to_be_aborted(request_id):
-            EXPECTED = 250
-            count = 0
-            try:
-                async for _ in client.generate(inputs="Hello my name is",
-                                               sampling_params=SamplingParams(
-                                                   max_tokens=EXPECTED,
-                                                   temperature=0),
-                                               request_id=request_id):
-                    count += 1
-                    await asyncio.sleep(0.)
-
-            # Confirm this was actually stopped.
-            except asyncio.CancelledError:
-                assert (count < EXPECTED)
-
-        # Create concurrent requests.
-        tasks_a = [
-            asyncio.create_task(run_to_completion(request_id))
-            for request_id in request_ids_a
-        ]
+        # Aborted.
         task_aborted = asyncio.create_task(
-            run_to_be_aborted(request_id_to_be_aborted))
-        tasks_b = [
-            asyncio.create_task(run_to_completion(request_id))
-            for request_id in request_ids_b
-        ]
+            generate(client, request_id_to_be_aborted, EXPECTED_TOKENS))
 
+        # Requests started after one to be aborted.
+        for request_id in request_ids_b:
+            tasks.append(
+                asyncio.create_task(
+                    generate(client, request_id, EXPECTED_TOKENS)))
+
+        # Actually abort.
         await asyncio.sleep(0.5)
         await client.abort(request_id_to_be_aborted)
 
         # Confirm that we got all the EXPECTED tokens from the requests.
-        for task in tasks_a:
-            assert (await task), "Expected this task to run to completion."
-        for task in tasks_b:
-            assert (await task), "Expected this task to run to completion."
+        for task in tasks:
+            count, request_id = await task
+            assert count == EXPECTED_TOKENS, (
+                f"{request_id} generated only {count} tokens")
 
         # Cancel task (this will hang indefinitely if not).
         task_aborted.cancel()

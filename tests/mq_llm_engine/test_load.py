@@ -6,41 +6,21 @@ import uuid
 
 import pytest
 
-from tests.mq_llm_engine.utils import RemoteMQLLMEngine
-from vllm import SamplingParams
+from tests.mq_llm_engine.utils import RemoteMQLLMEngine, generate
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.multiprocessing.client import MQLLMEngineClient
 
 MODEL = "Qwen/Qwen2-0.5B-Instruct"
 NUM_EXPECTED_TOKENS = 10
-PROMPT = "Hello my name is Robert and I love"
 NUM_REQUESTS = 10000
 
 # Scenarios to test for num generated token.
-ENGINE_ARGS = AsyncEngineArgs(model=MODEL, disable_log_requests=True, 
-                              enable_chunked_prefill=True)
+ENGINE_ARGS = AsyncEngineArgs(model=MODEL, disable_log_requests=True)
 
 
 @pytest.fixture(scope="function")
 def tmp_socket():
     with tempfile.TemporaryDirectory() as td:
         yield f"ipc://{td}/{uuid.uuid4()}"
-
-
-async def run_to_completion(client: MQLLMEngineClient, request_id: str):
-
-    count = 0
-    async for out in client.generate(inputs=PROMPT,
-                                     sampling_params=SamplingParams(
-                                         max_tokens=NUM_EXPECTED_TOKENS,
-                                         temperature=0),
-                                     request_id=request_id):
-
-        count += 1
-        await asyncio.sleep(0.)
-
-    # Confirm we generated all the tokens we expected.
-    return count, request_id
 
 
 @pytest.mark.asyncio
@@ -56,7 +36,8 @@ async def test_generation(tmp_socket):
         tasks = []
         for request_id in request_ids:
             tasks.append(
-                asyncio.create_task(run_to_completion(client, request_id)))
+                asyncio.create_task(
+                    generate(client, request_id, NUM_EXPECTED_TOKENS)))
 
         # Confirm that we got all the EXPECTED tokens from the requests.
         failed_request_id = None
