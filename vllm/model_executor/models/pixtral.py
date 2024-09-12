@@ -15,7 +15,7 @@ from xformers.ops.fmha.attn_bias import BlockDiagonalMask
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import INPUT_REGISTRY, InputContext
+from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -107,9 +107,32 @@ def input_mapper_for_pixtral(ctx: InputContext,
     return MultiModalInputs({"images": images})
 
 
+def input_processor_for_pixtral(ctx: InputContext, llm_inputs: LLMInputs):
+    multi_modal_data = llm_inputs.get("multi_modal_data")
+    if multi_modal_data is not None and "image" in multi_modal_data:
+        tokenizer = cached_get_tokenizer(
+            ctx.model_config.tokenizer,
+            tokenizer_mode=ctx.model_config.tokenizer_mode)
+
+        mm_encoder = tokenizer.mistral.instruct_tokenizer.mm_encoder
+        image_token_id = mm_encoder.special_ids.img
+
+        if image_token_id not in llm_inputs['prompt_token_ids']:
+            raise ValueError((
+                f"You've passed {llm_inputs=} without {image_token_id=}"
+                " Make sure to process your input via mistral_common's"
+                " tokenizer or pass a chat completion request. For more"
+                " For more info, see: "
+                "https://github.com/vllm-project/vllm/issues/8411."
+            ))
+
+    return llm_inputs
+
+
 @MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_pixtral)
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_pixtral_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_pixtral)
+@INPUT_REGISTRY.register_input_processor(input_processor_for_pixtral)
 class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def __init__(self,
