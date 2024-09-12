@@ -20,6 +20,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.utils import merge_multimodal_embeddings
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.base import MultiModalInputs
@@ -106,30 +107,6 @@ def input_mapper_for_pixtral(ctx: InputContext,
     return MultiModalInputs({"images": images})
 
 
-def merge_multimodal_embeddings(input_ids: torch.Tensor,
-                                inputs_embeds: torch.Tensor,
-                                image_features: Optional[List[torch.Tensor]],
-                                image_id: int) -> torch.Tensor:
-    text_locations = input_ids != image_id
-    image_locations = input_ids == image_id
-
-    seq_len = input_ids.shape[0]
-
-    N_txt = text_locations.sum().item()
-    _, D_txt = inputs_embeds.shape
-    N_img, D_img = image_features.shape
-
-    assert (D_txt == D_img), (f"Text features dim {D_txt} should be equal "
-                              "to image features dim {D_img}")
-    assert (seq_len == N_txt +
-            N_img), (f"seq_len should be equal to N_txt + N_img, "
-                     f" but got {seq_len=} != {N_txt=} + {N_img=}, "
-                     f" for {image_locations.sum().item()} img locs")
-
-    inputs_embeds[image_locations, :] = image_features
-    return inputs_embeds
-
-
 @MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_pixtral)
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_pixtral_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_pixtral)
@@ -214,8 +191,14 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal):
             images = images.reshape(N * B, C, W, H)
             images = [images[i] for i in range(images.size(0))]
         elif isinstance(images, list):
-            # if passed as list always take last images
-            images = [images[-1][i] for i in range(len(images[0]))]
+            # if passed as list flatten lists of tensors
+            flatten_images = []
+            for imgs_per_req in images:
+                imgs_per_req = [imgs_per_req[i] for i in range(imgs_per_req.size(0))] if isinstance(imgs_per_req, torch.Tensor) else imgs_per_req
+
+                flatten_images.extend(imgs_per_req)
+
+            images = flatten_images
 
         return images
 
