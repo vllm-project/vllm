@@ -120,8 +120,7 @@ class MQLLMEngineClient:
             seed=0,
             dtype="auto").embedding_mode
         is_pp = engine_args.pipeline_parallel_size > 1
-        is_engine_use_ray = engine_args.engine_use_ray
-        return is_embedding or is_pp or is_engine_use_ray
+        return is_embedding or is_pp
 
     @contextmanager
     def get_data_socket(self) -> Iterator[Socket]:

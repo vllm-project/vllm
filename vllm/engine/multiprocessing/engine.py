@@ -107,12 +107,6 @@ class MQLLMEngine:
 
         engine_config = engine_args.create_engine_config()
 
-        if engine_args.engine_use_ray:
-            raise NotImplementedError(
-                "--engine-use-ray is not supported for MQLLMEngine. "
-                "Launch with --disable-frontend-multiprocessing if you "
-                "need to deploy with this flag (not recommended).")
-
         executor_class = LLMEngine._get_executor_cls(engine_config)
 
         return cls(
@@ -199,6 +193,10 @@ class MQLLMEngine:
 
             # Engine step.
             request_outputs = self.engine_step()
+            for request_output in request_outputs:
+                if request_output.request_id == "request-211":
+                    print("\n\n\n")
+                    print(request_output)
 
             # Send request outputs (if async, done in engine_step callback).
             if not self.use_async_sockets:
