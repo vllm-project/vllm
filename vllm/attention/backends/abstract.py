@@ -83,7 +83,9 @@ class AttentionBackend(ABC):
     ) -> None:
         raise NotImplementedError
 
-    def advance_step(self, num_seqs: int, num_queries: int):
+    def advance_step(self, model_input: "ModelRunnerInputBase",
+                     sampled_token_ids: Optional[torch.Tensor],
+                     block_size: int, num_seqs: int, num_queries: int) -> None:
         raise NotImplementedError
 
 
