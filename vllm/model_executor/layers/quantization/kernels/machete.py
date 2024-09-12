@@ -1,4 +1,7 @@
 from functools import partial
+from typing import Optional, Tuple
+
+import torch
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.machete_utils import (
@@ -9,7 +12,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            permute_param_layout_)
 
-from .MPLinearKernel import *
+from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
 
 class MacheteLinearKernel(MPLinearKernel):

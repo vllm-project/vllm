@@ -335,6 +335,7 @@ def generate():
     )
 
     # For now we use the same heuristic for all types
+    # Heuristic is currently tuned for H100s
     default_heuristic = [
         #### M = 257+
         (

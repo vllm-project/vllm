@@ -10,6 +10,7 @@ static constexpr int div_ceil(int a, int b) { return (a + b - 1) / b; }
 
 // For a given "a" of size [M,K] performs a permutation of the K columns based
 // on the given "perm" indices.
+// Currently only supports 16bit types (since we permute halfs)
 __global__ void permute_cols_kernel(int4 const* __restrict__ a_int4_ptr,
                                     int const* __restrict__ perm_int_ptr,
                                     int4* __restrict__ out_int4_ptr, int size_m,
@@ -61,7 +62,7 @@ __global__ void permute_cols_kernel(int4 const* __restrict__ a_int4_ptr,
   }
 }
 
-// More efficient version of A[:, perm]
+// More efficient version of A[..., perm]
 //  taken from gptq_marlin.cu
 torch::Tensor permute_cols(torch::Tensor const& A, torch::Tensor const& perm) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(A));
@@ -69,18 +70,19 @@ torch::Tensor permute_cols(torch::Tensor const& A, torch::Tensor const& perm) {
   auto stream = at::cuda::getCurrentCUDAStream(dev);
 
   TORCH_CHECK(A.scalar_type() == at::kHalf || A.scalar_type() == at::kBFloat16,
-              "Only half and bfloat16 are supported");
+              "Currently only 16bit types are supported");
   TORCH_CHECK(A.is_contiguous(), "A must be contiguous");
-  TORCH_CHECK(A.size(1) % 8 == 0,
+  TORCH_CHECK(A.size(-1) % 8 == 0,
               "A columns must be a multiple of 8 (128bits)");
+  auto A_2d = A.view({-1, A.size(-1)});
 
   torch::Tensor D = torch::empty_like(A);
   int sms;
   cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
-  int block_rows = div_ceil(A.size(0), sms);
+  int block_rows = div_ceil(A_2d.size(0), sms);
   permute_cols_kernel<<<sms, default_threads, 0, stream>>>(
-      reinterpret_cast<int4 const*>(A.const_data_ptr()),
+      reinterpret_cast<int4 const*>(A_2d.const_data_ptr()),
       perm.const_data_ptr<int>(), reinterpret_cast<int4*>(D.mutable_data_ptr()),
-      A.size(0), A.size(1), block_rows);
+      A_2d.size(0), A_2d.size(1), block_rows);
   return D;
 }

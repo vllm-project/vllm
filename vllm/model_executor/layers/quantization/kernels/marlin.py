@@ -1,3 +1,7 @@
+from typing import Optional, Tuple
+
+import torch
+
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     MARLIN_SUPPORTED_GROUP_SIZES, apply_gptq_marlin_linear,
@@ -7,7 +11,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            permute_param_layout_)
 
-from .MPLinearKernel import *
+from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
 
 class MarlinLinearKernel(MPLinearKernel):
@@ -111,7 +115,7 @@ class MarlinLinearKernel(MPLinearKernel):
         c = self.config
         w_q, w_s, w_zp, w_gidx = self._get_weight_params(layer)
 
-        # `process_weights_after_loading`` will ensure w_zp and w_gidx are not
+        # `process_weights_after_loading` will ensure w_zp and w_gidx are not
         #  None for marlin
         return apply_gptq_marlin_linear(
             input=x,
