@@ -52,6 +52,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("silu_and_mul(Tensor! out, Tensor input) -> ()");
   ops.impl("silu_and_mul", torch::kCUDA, &silu_and_mul);
 
+  // Activation function used in SwiGLU.
+  ops.def("scaled_silu_and_mul(Tensor! out, Tensor input, Tensor scale) -> ()");
+  ops.impl("scaled_silu_and_mul", torch::kCUDA, &scaled_silu_and_mul);
+
   // Activation function used in GeGLU with `none` approximation.
   ops.def("gelu_and_mul(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_and_mul", torch::kCUDA, &gelu_and_mul);
@@ -88,6 +92,22 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor weight, "
       "float epsilon) -> ()");
   ops.impl("fused_add_rms_norm", torch::kCUDA, &fused_add_rms_norm);
+
+  // Apply Root Mean Square (RMS) Normalization to the input tensor with scaled
+  // output.
+  ops.def(
+      "scaled_rms_norm(Tensor! out, Tensor input, Tensor weight, Tensor scale, "
+      "float epsilon) -> "
+      "()");
+  ops.impl("scaled_rms_norm", torch::kCUDA, &scaled_rms_norm);
+
+  // Fused Add and RMS Normalization with scaled output.
+  ops.def(
+      "scaled_fused_add_rms_norm(Tensor! out, Tensor input, Tensor! residual, "
+      "Tensor weight, "
+      "Tensor scale, float epsilon) -> ()");
+  ops.impl("scaled_fused_add_rms_norm", torch::kCUDA,
+           &scaled_fused_add_rms_norm);
 
   // Rotary embedding
   // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.

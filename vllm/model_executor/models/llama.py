@@ -42,6 +42,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     get_compressed_tensors_cache_scale)
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -79,6 +80,7 @@ class LlamaMLP(nn.Module):
                                            bias=bias,
                                            quant_config=quant_config,
                                            prefix=f"{prefix}.down_proj")
+        self.use_fp8 = isinstance(quant_config, Fp8Config)
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -95,7 +97,8 @@ class LlamaMLP(nn.Module):
             x = out.view(x.shape[0], x.shape[1], out.shape[1])
         else:
             gate_up, _ = self.gate_up_proj(x)
-            x = self.act_fn(gate_up)
+            x = self.act_fn(
+                gate_up, self.down_proj.input_scale if self.use_fp8 else None)
         x, _ = self.down_proj(x)
         return x
 
@@ -204,6 +207,7 @@ class LlamaDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
+        self.use_fp8 = isinstance(quant_config, Fp8Config)
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
         if rope_scaling is not None and getattr(
@@ -252,12 +256,14 @@ class LlamaDecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
+        scale = None if not self.use_fp8 else \
+            self.self_attn.qkv_proj.input_scale
         if residual is None:
             residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
+            hidden_states = self.input_layernorm(hidden_states, None, scale)
         else:
             hidden_states, residual = self.input_layernorm(
-                hidden_states, residual)
+                hidden_states, residual, scale)
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
@@ -266,8 +272,9 @@ class LlamaDecoderLayer(nn.Module):
         )
 
         # Fully Connected
+        scale = None if not self.use_fp8 else self.mlp.gate_up_proj.input_scale
         hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual)
+            hidden_states, residual, scale)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 

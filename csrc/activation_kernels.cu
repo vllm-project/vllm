@@ -7,6 +7,10 @@
 #include "cuda_compat.h"
 #include "dispatch_utils.h"
 
+#ifdef USE_ROCM
+  #include "quantization/fp8/amd/hip_float8.h"
+#endif
+
 namespace vllm {
 
 // Activation and gating kernel template.
@@ -20,6 +24,22 @@ __global__ void act_and_mul_kernel(
     const scalar_t x = VLLM_LDG(&input[token_idx * 2 * d + idx]);
     const scalar_t y = VLLM_LDG(&input[token_idx * 2 * d + d + idx]);
     out[token_idx * d + idx] = ACT_FN(x) * y;
+  }
+}
+
+// Scaled activation and gating kernel template.
+template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&)>
+__global__ void scaled_act_and_mul_kernel(
+    c10::Float8_e4m3fnuz* __restrict__ out,  // [..., d]
+    const scalar_t* __restrict__ input,      // [..., 2, d]
+    const int d, const float scale) {
+  const int64_t token_idx = blockIdx.x;
+  for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
+    const scalar_t x = VLLM_LDG(&input[token_idx * 2 * d + idx]);
+    const scalar_t y = VLLM_LDG(&input[token_idx * 2 * d + d + idx]);
+    float r = ACT_FN(x) * y * scale;
+    out[token_idx * d + idx] = c10::Float8_e4m3fnuz(
+        hip_fp8(r).data, c10::Float8_e4m3fnuz::from_bits());
   }
 }
 
@@ -69,10 +89,32 @@ __device__ __forceinline__ T gelu_tanh_kernel(const T& x) {
                                          input.data_ptr<scalar_t>(), d); \
       });
 
+// Launch activation and gating kernel.
+#define LAUNCH_SCALED_ACTIVATION_GATE_KERNEL(KERNEL)                           \
+  int d = input.size(-1) / 2;                                                  \
+  int64_t num_tokens = input.numel() / input.size(-1);                         \
+  dim3 grid(num_tokens);                                                       \
+  dim3 block(std::min(d, 1024));                                               \
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));            \
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();                \
+  VLLM_DISPATCH_FLOATING_TYPES(                                                \
+      input.scalar_type(), "scaled_act_and_mul_kernel", [&] {                  \
+        vllm::scaled_act_and_mul_kernel<scalar_t, KERNEL<scalar_t>>            \
+            <<<grid, block, 0, stream>>>(out.data_ptr<c10::Float8_e4m3fnuz>(), \
+                                         input.data_ptr<scalar_t>(), d,        \
+                                         1.0 / (*scale.data_ptr<float>()));    \
+      });
+
 void silu_and_mul(torch::Tensor& out,    // [..., d]
                   torch::Tensor& input)  // [..., 2 * d]
 {
   LAUNCH_ACTIVATION_GATE_KERNEL(vllm::silu_kernel);
+}
+
+void scaled_silu_and_mul(torch::Tensor& out,    // [..., d]
+                         torch::Tensor& input,  // [..., 2 * d]
+                         torch::Tensor& scale) {
+  LAUNCH_SCALED_ACTIVATION_GATE_KERNEL(vllm::silu_kernel);
 }
 
 void gelu_and_mul(torch::Tensor& out,    // [..., d]

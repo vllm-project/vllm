@@ -76,6 +76,7 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
     def __init__(self, quant_config: FBGEMMFp8Config):
         self.quant_config = quant_config
         self.cutlass_fp8_supported = cutlass_fp8_supported()
+        self.out_dtype = torch.get_default_dtype()
 
     def create_weights(
         self,
@@ -164,6 +165,7 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
             input=x,
             weight=layer.weight,
             weight_scale=layer.weight_scale,
+            out_dtype=self.out_dtype,
             input_scale=None,
             input_scale_ub=layer.input_scale_ub,
             bias=bias,

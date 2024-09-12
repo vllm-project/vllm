@@ -87,6 +87,7 @@ def apply_fp8_linear(
     input: torch.Tensor,
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
+    out_dtype: torch.dtype,
     input_scale: Optional[torch.Tensor] = None,
     input_scale_ub: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
@@ -119,11 +120,14 @@ def apply_fp8_linear(
         # Note: we pad the input because torch._scaled_mm is more performant
         # for matrices with batch dimension > 16.
         # This could change in the future.
-        qinput, x_scale = ops.scaled_fp8_quant(
-            input,
-            input_scale,
-            num_token_padding=17,
-            use_per_token_if_dynamic=use_per_token_if_dynamic)
+        if input.dtype != torch.float8_e4m3fnuz:
+            qinput, x_scale = ops.scaled_fp8_quant(
+                input,
+                input_scale,
+                num_token_padding=17,
+                use_per_token_if_dynamic=use_per_token_if_dynamic)
+        else:
+            qinput, x_scale = input, input_scale
 
         per_tensor_weights = (weight_scale.numel() == 1)
         per_tensor_activations = (x_scale.numel() == 1)
@@ -137,7 +141,7 @@ def apply_fp8_linear(
             output = torch._scaled_mm(
                 qinput,
                 weight,
-                out_dtype=input.dtype,
+                out_dtype=out_dtype,
                 scale_a=x_scale,
                 scale_b=weight_scale,
                 scale_result=TORCH_SCALED_MM_SCALE_RESULT,

@@ -32,6 +32,14 @@ void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
 void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
                         torch::Tensor& weight, double epsilon);
 
+void scaled_rms_norm(torch::Tensor& out, torch::Tensor& input,
+                     torch::Tensor& weight, torch::Tensor& scale,
+                     double epsilon);
+
+void scaled_fused_add_rms_norm(torch::Tensor& out, torch::Tensor& input,
+                               torch::Tensor& residual, torch::Tensor& weight,
+                               torch::Tensor& scale, double epsilon);
+
 void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
                       torch::Tensor& key, int64_t head_size,
                       torch::Tensor& cos_sin_cache, bool is_neox);
@@ -43,6 +51,9 @@ void batched_rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
                               torch::Tensor& cos_sin_cache_offsets);
 
 void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
+
+void scaled_silu_and_mul(torch::Tensor& out, torch::Tensor& input,
+                         torch::Tensor& scale);
 
 void gelu_and_mul(torch::Tensor& out, torch::Tensor& input);
 

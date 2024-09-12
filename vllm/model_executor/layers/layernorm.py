@@ -47,8 +47,20 @@ class RMSNorm(CustomOp):
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
+        scale: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         from vllm import _custom_ops as ops
+
+        if scale is not None:
+            out = torch.empty_like(x, dtype=torch.float8_e4m3fnuz)
+            if residual is not None:
+                ops.scaled_fused_add_rms_norm(out, x, residual,
+                                              self.weight.data, scale,
+                                              self.variance_epsilon)
+                return out, residual
+            ops.scaled_rms_norm(out, x, self.weight.data, scale,
+                                self.variance_epsilon)
+            return out
 
         if residual is not None:
             ops.fused_add_rms_norm(

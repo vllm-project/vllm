@@ -467,6 +467,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Pad the weight for moe kernel or not
     "VLLM_MOE_PADDING":
     lambda: bool(int(os.getenv("VLLM_MOE_PADDING", "1"))),
+
+    # Pad the weight for moe kernel or not
+    "VLLM_FP8_PADDING":
+    lambda: bool(int(os.getenv("VLLM_FP8_PADDING", "0"))),
 }
 
 # end-env-vars-definition

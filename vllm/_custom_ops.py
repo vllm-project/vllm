@@ -49,6 +49,11 @@ def silu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
     torch.ops._C.silu_and_mul(out, x)
 
 
+def scaled_silu_and_mul(out: torch.Tensor, x: torch.Tensor,
+                        scale: torch.Tensor) -> None:
+    torch.ops._C.scaled_silu_and_mul(out, x, scale)
+
+
 def gelu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
     torch.ops._C.gelu_and_mul(out, x)
 
@@ -163,6 +168,19 @@ def rms_norm(out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
 def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
                        weight: torch.Tensor, epsilon: float) -> None:
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
+
+
+def scaled_rms_norm(out: torch.Tensor, input: torch.Tensor,
+                    weight: torch.Tensor, scale: torch.Tensor,
+                    epsilon: float) -> None:
+    torch.ops._C.scaled_rms_norm(out, input, weight, scale, epsilon)
+
+
+def scaled_fused_add_rms_norm(out: torch.Tensor, input: torch.Tensor,
+                              residual: torch.Tensor, weight: torch.Tensor,
+                              scale: torch.Tensor, epsilon: float) -> None:
+    torch.ops._C.scaled_fused_add_rms_norm(out, input, residual, weight, scale,
+                                           epsilon)
 
 
 def advance_step(num_seqs: int, num_queries: int, block_size: int,
