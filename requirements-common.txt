@@ -8,7 +8,7 @@ tqdm
 py-cpuinfo
 transformers >= 4.43.2  # Required for Chameleon and Llama 3.1 hotfox.
 tokenizers >= 0.19.1  # Required for Llama 3.
-fastapi
+fastapi == 0.112.2 # Hardcoding this to workaround issue with new fastapi.
 aiohttp
 openai
 uvicorn[standard]

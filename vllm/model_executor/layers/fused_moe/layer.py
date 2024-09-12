@@ -13,9 +13,6 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils import is_hpu
 
-if is_hpu():
-    from vllm.hpu.ops import static_fused_moe
-
 logger = init_logger(__name__)
 
 
@@ -78,7 +75,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     ) -> torch.Tensor:
         return self.forward(x, layer.w13_weight, layer.w2_weight,
                             router_logits, top_k, renormalize,
-                            use_grouped_topk, num_expert_group, topk_group)
+                            use_grouped_topk, num_expert_group, topk_group,
+                            layer)
 
     def forward_cuda(
         self,
@@ -91,6 +89,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         use_grouped_topk: bool,
         num_expert_group: Optional[int],
         topk_group: Optional[int],
+        layer: Optional[torch.nn.Module],
     ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe.fused_moe import fused_moe
         return fused_moe(x,
@@ -104,15 +103,25 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                          num_expert_group=num_expert_group,
                          topk_group=topk_group)
 
-    def forward_hpu(self, x: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor,
-                    router_logits: torch.Tensor, top_k: int, renormalize: bool,
-                    use_grouped_topk: bool, num_expert_group: Optional[int],
-                    topk_group: Optional[int]):
+    def forward_hpu(
+        self,
+        x: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        router_logits: torch.Tensor,
+        top_k: int,
+        renormalize: bool,
+        use_grouped_topk: bool,
+        num_expert_group: Optional[int],
+        topk_group: Optional[int],
+        layer: Optional[torch.nn.Module],
+    ):
         assert not use_grouped_topk, 'use_grouped_topk must be False on HPU'
         assert num_expert_group is None, ('num_expert_group is '
                                           'not supported on HPU')
         assert topk_group is None, 'topk_group is not supported on HPU'
-        return static_fused_moe(x, w1, w2, router_logits, top_k)
+        if layer is not None:
+            return layer.hpu_static_fused_moe(x, w1, w2, router_logits, top_k)
 
     def forward_cpu(self, *args, **kwargs):
         raise NotImplementedError(
@@ -129,6 +138,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         use_grouped_topk: bool,
         num_expert_group: Optional[int],
         topk_group: Optional[int],
+        layer: Optional[torch.nn.Module],
     ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe.moe_pallas import fused_moe
         assert not use_grouped_topk
@@ -140,7 +150,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 class FusedMoE(torch.nn.Module):
     """FusedMoE layer for MoE models.
 
-    This layer contains both MergedColumnParallel weights (gate_up_proj / 
+    This layer contains both MergedColumnParallel weights (gate_up_proj /
     w13) and RowParallelLinear weights (down_proj/ w2).
 
     Note: Mixtral uses w1, w2, and w3 for gate, up, and down_proj. We
@@ -191,6 +201,9 @@ class FusedMoE(torch.nn.Module):
             assert num_expert_group is not None and topk_group is not None
         self.num_expert_group = num_expert_group
         self.topk_group = topk_group
+        if is_hpu():
+            from vllm.hpu.ops import StaticFusedMOE
+            self.hpu_static_fused_moe = StaticFusedMOE(self.num_experts)
 
         if quant_config is None:
             self.quant_method: Optional[QuantizeMethodBase] = (
@@ -245,13 +258,22 @@ class FusedMoE(torch.nn.Module):
             if shard_id == 0:
                 param_data[expert_id,
                            0:shard_size, :] = loaded_weight[shard, :]
+                if is_hpu():
+                    self.hpu_static_fused_moe.w13_list[expert_id].set_weight(
+                        param_data[expert_id])
             # w3, up_proj case: Load into second shard of w13.
             elif shard_id == 2:
                 param_data[expert_id, shard_size:2 *
                            shard_size, :] = loaded_weight[shard, :]
+                if is_hpu():
+                    self.hpu_static_fused_moe.w13_list[expert_id].set_weight(
+                        param_data[expert_id])
             # w2, down_proj case: Load into only shard of w2.
             elif shard_id == 1:
                 param_data[expert_id, :, :] = loaded_weight[:, shard]
+                if is_hpu():
+                    self.hpu_static_fused_moe.w2_list[expert_id].set_weight(
+                        param_data[expert_id])
             else:
                 raise ValueError(
                     f"Shard id must be in [0,1,2] but got {shard_id}")

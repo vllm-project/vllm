@@ -57,8 +57,5 @@ class VLLMKVCache(torch.nn.Module):
                                block_offset)
         return cache
 
-    def fetch_from_cache(self, cache, blocks, permutations):
-        return [
-            cache.index_select(0, blocks[:, i]).permute(permutations)
-            for i in range(blocks.size(1))
-        ]
+    def fetch_from_cache(self, cache, blocks):
+        return cache.index_select(0, blocks)

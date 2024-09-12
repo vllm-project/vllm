@@ -327,6 +327,17 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         added_tokens_mask = x > self.base_layer.org_vocab_size - 1
         embedding_len = self.indices_len[3]
+        # NOTE(vgoel): These asserts can be skipped when upstreaming.
+        # Can be removed from vllm-fork also once lora functionality
+        # on Gaudi stabilizes.
+        if is_hpu():
+            emb_len = embedding_len
+            x_shape = x.shape
+            ind_shape = self.embeddings_indices[1].shape
+            assert embedding_len == x.shape[0] * x.shape[1], \
+                 f"Extra Info: {emb_len}, {x_shape}, {ind_shape}"
+            assert embedding_len <= self.embeddings_indices[1].shape[0], \
+                f"Extra Info: {emb_len}, {x.shape}, {ind_shape}"
         indices = self.embeddings_indices[1][:embedding_len].view_as(x)
         full_lora_a_embeddings = F.embedding(
             x + indices,
