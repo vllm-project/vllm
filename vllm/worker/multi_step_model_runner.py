@@ -361,8 +361,11 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         # if CPU is ahead.
         if self.is_driver_worker and get_pp_group().is_last_rank:
             if self.pinned_sampled_token_ids is None:
+                num_output_heads = 1
+                if hasattr(self.model_config.hf_config, "num_output_head"):
+                    num_output_heads = self.model_config.hf_config.num_output_head
                 self.pinned_sampled_token_ids = torch.zeros(
-                    (self.scheduler_config.max_num_seqs, 1),
+                    (self.scheduler_config.max_num_seqs, num_output_heads),
                     dtype=torch.long,
                     device="cpu",
                     pin_memory=True)

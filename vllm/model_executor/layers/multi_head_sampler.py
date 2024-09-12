@@ -110,11 +110,14 @@ class MultiheadSampler(nn.Module):
             sampling_metadata=sampling_metadata,
             sample_metadata=None,
             multinomial_samples=None,
-            greedy_samples=None,
+            greedy_samples=id_next_tensor,
             beam_search_logprobs=None,
             sample_results_dict={})
         
-        return id_next_tensor, id_next_tensor
+        if not sampling_metadata.skip_sampler_cpu_output:
+            return id_next_tensor, id_next_tensor
+        else:
+            return maybe_deferred_args, id_next_tensor
 
     def _init_sampling_tensors(self,
                                num_heads: int,
@@ -292,5 +295,5 @@ class MultiheadSampler(nn.Module):
             sampled_token_probs=sampled_token_probs,
             sampled_token_ids=sampled_token_ids,
             logprobs=logprobs_tensor,
-            deferred_sample_results=maybe_deferred_sample_results,
+            deferred_sample_results_args=maybe_deferred_sample_results,
         )
