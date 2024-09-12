@@ -713,13 +713,6 @@ class DeltaToolCall(OpenAIBaseModel):
     function: Optional[DeltaFunctionCall] = None
 
 
-# the initial delta that gets sent once a new tool call is started;
-class InitialDeltaToolCall(DeltaToolCall):
-    id: str = Field(default_factory=lambda: f"chatcmpl-tool-{random_uuid()}")
-    type: Literal["function"] = "function"
-    index: int
-
-
 class ExtractedToolCallInformation(BaseModel):
     # indicate if tools were called
     tools_called: bool
@@ -878,3 +871,13 @@ class DetokenizeRequest(OpenAIBaseModel):
 
 class DetokenizeResponse(OpenAIBaseModel):
     prompt: str
+
+
+class LoadLoraAdapterRequest(BaseModel):
+    lora_name: str
+    lora_path: str
+
+
+class UnloadLoraAdapterRequest(BaseModel):
+    lora_name: str
+    lora_int_id: Optional[int] = Field(default=None)
