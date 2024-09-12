@@ -90,6 +90,13 @@ def input_processor_for_llamavl(ctx: InputContext, llm_inputs: LLMInputs):
 
     return llm_inputs
 
+def dummy_data_for_llamavl(ctx: InputContext, seq_len: int, mm_counts: Mapping[str, int]):
+    # seq_len: 16
+    # mm_counts: {'image': 2, 'audio': 1}
+    hf_config = ctx.model_config.hf_config
+    token_per_chunk = (hf_config.vision_chunk_size // 14) ** 2 + 1
+    num_tokens = hf_config.max_num_image * hf_config.vision_max_num_chunks * token_per_chunk
+    import pdb; pdb.set_trace()
 
 def get_max_llama_image_tokens(ctx: InputContext) -> int:
     hf_config = ctx.model_config.hf_config
@@ -1964,7 +1971,6 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: object,
     ) -> torch.Tensor:
-        # import pdb; pdb.set_trace()
         image_inputs = self._parse_and_validate_image_input(**kwargs)
         if image_inputs is None:
             cross_attention_masks = None

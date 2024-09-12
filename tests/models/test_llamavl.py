@@ -74,12 +74,16 @@ if __name__ == "__main__":
             },
             "decoder_prompt": "<|image|><|begin_of_text|>If I had to write a haiku for this one",
         },
-        # {
-        #     "prompt": "he color of the sky is blue but sometimes it can also be",
-        # },
+        {
+            "encoder_prompt":{
+                "prompt": "",
+            },
+            "decoder_prompt": "The color of the sky is blue but sometimes it can also be",
+        },
     ]
-    outputs = llm.generate(inputs, SamplingParams(temperature=0.6, top_p=0.9, max_tokens=512))
+    outputs = llm.generate(inputs, SamplingParams(temperature=0, top_p=0.9, max_tokens=512))
     for o in outputs:
         generated_text = o.outputs[0].text
         print(generated_text)
+        print("==================================")
 

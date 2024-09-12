@@ -281,8 +281,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         max_mm_tokens = self.mm_registry.get_max_multimodal_tokens(
             self.model_config)
         if max_mm_tokens > 0:
-            raise NotImplementedError(
-                "Multi-modal encoder-decoder models are not supported yet")
+            logger.warning(
+                "profile run for multi-modal models")
 
         batch_size = 0
         for group_id in range(max_num_seqs):
@@ -290,7 +290,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                        (group_id < max_num_batched_tokens % max_num_seqs))
             batch_size += seq_len
 
-            seq_data, _ = self.input_registry \
+            seq_data, dummy_multi_modal_data = self.input_registry \
                 .dummy_data_for_profiling(self.model_config,
                                           seq_len,
                                           self.mm_registry)
@@ -308,6 +308,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 block_tables=None,
                 encoder_seq_data=seq_data,
                 cross_block_table=None,
+                multi_modal_data=dummy_multi_modal_data,
             )
             seqs.append(seq)
 
