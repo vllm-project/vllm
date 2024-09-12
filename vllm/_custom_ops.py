@@ -161,16 +161,36 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
-def advance_step(num_seqs: int, num_queries: int, block_size: int,
-                 input_tokens: torch.Tensor, sampled_token_ids: torch.Tensor,
-                 input_positions: torch.Tensor, seq_lens: torch.Tensor,
-                 slot_mapping: torch.Tensor,
-                 block_tables: torch.Tensor) -> None:
+def advance_step_flashattn(num_seqs: int, num_queries: int, block_size: int,
+                           input_tokens: torch.Tensor,
+                           sampled_token_ids: torch.Tensor,
+                           input_positions: torch.Tensor,
+                           seq_lens: torch.Tensor, slot_mapping: torch.Tensor,
+                           block_tables: torch.Tensor) -> None:
     """Advance a step on GPU for existing inputs for a multi-step runner"""
-    return torch.ops._C.advance_step(num_seqs, num_queries, block_size,
-                                     input_tokens, sampled_token_ids,
-                                     input_positions, seq_lens, slot_mapping,
-                                     block_tables)
+    return torch.ops._C.advance_step_flashattn(num_seqs, num_queries,
+                                               block_size, input_tokens,
+                                               sampled_token_ids,
+                                               input_positions, seq_lens,
+                                               slot_mapping, block_tables)
+
+
+def advance_step_flashinfer(num_seqs: int, num_queries: int, block_size: int,
+                            input_tokens: torch.Tensor,
+                            sampled_token_ids: torch.Tensor,
+                            input_positions: torch.Tensor,
+                            seq_lens: torch.Tensor, slot_mapping: torch.Tensor,
+                            block_tables: torch.Tensor,
+                            paged_kv_indices: torch.Tensor,
+                            paged_kv_indptr: torch.Tensor,
+                            paged_kv_last_page_len: torch.Tensor,
+                            block_table_bound: torch.Tensor) -> None:
+
+    return torch.ops._C.advance_step_flashinfer(
+        num_seqs, num_queries, block_size, input_tokens, sampled_token_ids,
+        input_positions, seq_lens, slot_mapping, block_tables,
+        paged_kv_indices, paged_kv_indptr, paged_kv_last_page_len,
+        block_table_bound)
 
 
 # quantization ops
