@@ -27,15 +27,16 @@ logger = logging.get_logger(__name__)
 
 class SolarConfig(PretrainedConfig):
     r"""
-    This is the configuration class to store the configuration of a [`SolarModel`]. It is used to instantiate an LLaMA
-    model according to the specified arguments, defining the model architecture. Instantiating a configuration with the
+    This is the configuration class to store the configuration of a [`SolarModel`].
+    It is used to instantiate an LLaMA model according to the specified arguments,
+    defining the model architecture. Instantiating a configuration with the
     defaults will yield a similar configuration to that of the LLaMA-7B.
-    Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
-    documentation from [`PretrainedConfig`] for more information.
+    Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs.
+    Read the documentation from [`PretrainedConfig`] for more information.
     Args:
         vocab_size (`int`, *optional*, defaults to 32000):
-            Vocabulary size of the LLaMA model. Defines the number of different tokens that can be represented by the
-            `inputs_ids` passed when calling [`SolarModel`]
+            Vocabulary size of the LLaMA model. Defines the number of different tokens
+            that can be represented by the `inputs_ids` passed when calling [`SolarModel`]
         hidden_size (`int`, *optional*, defaults to 4096):
             Dimension of the hidden representations.
         intermediate_size (`int`, *optional*, defaults to 11008):
@@ -184,23 +185,28 @@ class SolarConfig(PretrainedConfig):
         if self.rope_scaling is None:
             return
 
-        if (not isinstance(self.rope_scaling, dict)
-                or len(self.rope_scaling) != 2):
+        if (
+            not isinstance(self.rope_scaling, dict)
+            or len(self.rope_scaling) != 2
+        ):
             raise ValueError(
                 "`rope_scaling` must be a dictionary with two fields, `type` and `factor`, "
-                f"got {self.rope_scaling}")
+                f"got {self.rope_scaling}"
+            )
         rope_scaling_type = self.rope_scaling.get("type", None)
         rope_scaling_factor = self.rope_scaling.get("factor", None)
         if rope_scaling_type is None or rope_scaling_type not in [
-                "linear",
-                "dynamic",
+            "linear",
+            "dynamic",
         ]:
             raise ValueError(
                 f"`rope_scaling`'s type field must be one of ['linear', 'dynamic'], got {rope_scaling_type}"
             )
-        if (rope_scaling_factor is None
-                or not isinstance(rope_scaling_factor, float)
-                or rope_scaling_factor <= 1.0):
+        if (
+            rope_scaling_factor is None
+            or not isinstance(rope_scaling_factor, float)
+            or rope_scaling_factor <= 1.0
+        ):
             raise ValueError(
                 f"`rope_scaling`'s factor field must be a float > 1, got {rope_scaling_factor}"
             )
