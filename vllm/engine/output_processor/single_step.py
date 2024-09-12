@@ -6,7 +6,7 @@ from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
-from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.sampling_params import SamplingParams
 from vllm.sequence import (Sequence, SequenceGroup, SequenceGroupOutput,
                            SequenceOutput, SequenceStatus)
 from vllm.transformers_utils.detokenizer import Detokenizer
@@ -119,9 +119,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
             # only have one sequence
             seq = seq_group.seqs[0]
             if not is_async:
-                delta = sampling_params.output_kind == RequestOutputKind.DELTA
-                seq.append_token_id(sample.output_token, sample.logprobs,
-                                    delta)
+                seq.append_token_id(sample.output_token, sample.logprobs)
             if sampling_params.detokenize and self.detokenizer:
                 new_char_count = self.detokenizer.decode_sequence_inplace(
                     seq, sampling_params)

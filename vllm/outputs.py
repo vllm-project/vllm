@@ -145,34 +145,25 @@ class RequestOutput:
         # logprobs are not requested.
         include_logprobs = sampling_params.logprobs is not None
         text_buffer_length = sampling_params.output_text_buffer_length
+        delta = sampling_params.output_kind == RequestOutputKind.DELTA
 
         outputs = []
         include_prompt = True
         for seq in top_n_seqs:
-            output_text = seq.get_output_text_to_return(text_buffer_length)
+            output_text = seq.get_output_text_to_return(
+                text_buffer_length, delta)
+            output_token_ids = seq.get_output_token_ids_to_return(delta)
             output_logprobs = seq.output_logprobs if include_logprobs else None
 
-            all_output_token_ids = seq.data._output_token_ids
-            output_token_ids: GenericSequence[int]
-            if sampling_params.output_kind == RequestOutputKind.DELTA:
-                # Get and reset token id delta
-                output_token_ids = seq.data.last_appended_tokens
-                seq.data.last_appended_tokens = []
-                # Use last offset to make text delta, update last offset
-                last_text_offset = seq.data.last_output_text_offset
-                new_text_len = len(output_text)
-                output_text = output_text[last_text_offset:]
-                seq.data.last_output_text_offset = new_text_len
+            if delta:
                 # Slice logprobs delta if applicable
                 if output_logprobs:
                     output_logprobs = output_logprobs[-len(output_token_ids):]
                 # Don't include prompt if this is after the first output
                 # containing decode token ids
-                if include_prompt and len(all_output_token_ids) > len(
+                if include_prompt and seq.get_output_len() > len(
                         output_token_ids):
                     include_prompt = False
-            else:
-                output_token_ids = all_output_token_ids
 
             outputs.append(
                 CompletionOutput(
