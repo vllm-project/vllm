@@ -1,3 +1,5 @@
+"""Test that various errors are handled properly."""
+
 import asyncio
 import tempfile
 import time

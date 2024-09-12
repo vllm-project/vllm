@@ -1,3 +1,5 @@
+"""Test that aborting is handled properly."""
+
 import asyncio
 import tempfile
 import uuid
