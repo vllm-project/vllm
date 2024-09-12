@@ -528,12 +528,12 @@ class Sequence:
         return hash((hashed_tokens, self.lora_int_id))
 
     def hash_of_block_v2(self) -> int:
-    # This function is introduced for BlockSpaceManagerV2 and is used with prefix caching mode.
-    # The final block hash is determined by applying token_ids in PrefixCachingBlock
-    # under BlockSpaceManagerV2.
+        # This function is introduced for BlockSpaceManagerV2 and is used with
+        # prefix caching mode. The final block hash is determined by applying
+        # token_ids in PrefixCachingBlock under BlockSpaceManagerV2.
 
-    # NOTE: If there are additional factors influencing the block aside from token_ids,
-    # include them as input parameters to the hash.
+        # NOTE: If there are additional factors influencing the block aside from
+        # token_ids, include them as input parameters to the hash.
         return hash((self.prompt_adapter_id, self.lora_int_id))
 
     def num_hashed_tokens_of_block(self, logical_idx: int):

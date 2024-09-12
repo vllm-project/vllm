@@ -137,8 +137,9 @@ class BlockTable:
                 Without sliding window, None can be passed.
                 Without chunked prefill, it should be the same as
                 _num_full_slots.
-            contextual_hash (Optional[int]): The hash value of additional factors
-                such as adapters that influence the block, apart from the token_ids.
+            contextual_hash (Optional[int]): The hash value of additional
+                factors such as adapters that influence the block, apart
+                from the token_ids.
         """
         assert self._is_allocated, "no blocks have been allocated"
         assert len(self._blocks) > 0
@@ -170,7 +171,8 @@ class BlockTable:
 
         self._num_full_slots += len(token_ids)
 
-    def ensure_num_empty_slots(self, num_empty_slots: int, contextual_hash: int) -> None:
+    def ensure_num_empty_slots(self, num_empty_slots: int,
+                               contextual_hash: Optional[int]) -> None:
         """Ensures that the BlockTable has at least the specified number of
         empty slots available.
 
@@ -181,8 +183,9 @@ class BlockTable:
 
         Args:
             num_empty_slots (int): The minimum number of empty slots required.
-            contextual_hash (Optional[int]): The hash value of additional factors
-                such as adapters that influence the block, apart from the token_ids.
+            contextual_hash (Optional[int]): The hash value of additional
+                factors such as adapters that influence the block, apart
+                from the token_ids.
         """
         # Currently the block table only supports
         # appending tokens to GPU blocks.
@@ -199,7 +202,9 @@ class BlockTable:
             assert len(self._blocks) > 0
             self._blocks.append(
                 self._allocator.allocate_mutable_block(
-                    prev_block=self._blocks[-1], device=device, contextual_hash=contextual_hash))
+                    prev_block=self._blocks[-1],
+                    device=device,
+                    contextual_hash=contextual_hash))
 
     def fork(self) -> "BlockTable":
         """Creates a new BlockTable instance with a copy of the blocks from the
