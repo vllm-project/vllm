@@ -480,7 +480,11 @@ struct INT8Vec16: public Vec<INT8Vec16> {
   ) {}
 
   void save(int8_t* ptr) const {
+#if __GNU_CC >= 11
     _mm_storeu_epi8(ptr, reg);
+#else
+    *(__v16qi_u *) __P = (__v16qi_u) __A;
+#endif
   }
 
   void save(int8_t* ptr, const int elem_num) const {
