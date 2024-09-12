@@ -139,7 +139,7 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
             (input_tokens, input_positions,
              attn_metadata) = self._prepare_decode(
                  self.seq_group_metadata_list)
-            seq_lens = None
+            seq_lens = attn_metadata.seq_lens
             multi_modal_kwargs = None
 
         return self.model_input_cls(

@@ -357,7 +357,6 @@ class XPUMultiStepModelRunner(XPUModelRunnerBase[XPUStatefulModelInput]):
             # might clobber enqueued forwards. (prevents CPU from running too
             # far ahead if needed)
             model_input.wait_previous_step()
-            time.sleep(1)
             model_input = self._advance_step(
                 model_input, model_input.cached_outputs[-1].sampler_output)
 
