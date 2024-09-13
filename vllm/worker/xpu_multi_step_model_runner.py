@@ -161,7 +161,6 @@ class XPUStatefulModelInput(BroadcastableModelInput):
         # on it. We modulo by 2 to keep the events in a circular buffer and
         # support any attn backends that may be supported in the future. ie
         # Flashinfer would want two DecodeWrappers to overlap the CPU and GPU.
-        print("record step event")
         
         self.step_xpu_events[self.current_step & 1] = \
             torch.xpu.Event()
@@ -177,7 +176,6 @@ class XPUStatefulModelInput(BroadcastableModelInput):
         # further ahead, two events allow us to overlap the advance_step with
         # the previous forward (ie using two DecodeWrappers for flashinfer
         # backend)
-        print("wait previos step")
         self.step_xpu_events[(self.current_step + 1) & 1].wait()
 
     def add_sampler_output(self,
@@ -455,7 +453,6 @@ class XPUMultiStepModelRunner(XPUModelRunnerBase[XPUStatefulModelInput]):
 
     def _advance_step(self, model_input: XPUStatefulModelInput,
                       out: SamplerOutput) -> XPUStatefulModelInput:
-        print("===================_advance_step ==============")
         frozen_model_input = model_input.frozen_model_input
         assert frozen_model_input is not None
         assert frozen_model_input.attn_metadata is not None
@@ -470,17 +467,20 @@ class XPUMultiStepModelRunner(XPUModelRunnerBase[XPUStatefulModelInput]):
         assert isinstance(attn_metadata, IpexAttnMetadata)
         attn_metadata.advance_step(num_seqs, num_queries)
 
-        # Update GPU tensors
-        # ops.advance_step(
-        #     num_seqs=num_seqs,
-        #     num_queries=num_queries,
-        #     block_size=self.block_size,
-        #     input_tokens=frozen_model_input.input_tokens,
-        #     sampled_token_ids=model_input.cached_outputs[-1].sampled_token_ids,
-        #     input_positions=frozen_model_input.input_positions,
-        #     seq_lens=attn_metadata.seq_lens_tensor,
-        #     slot_mapping=attn_metadata.slot_mapping,
-        #     block_tables=attn_metadata.block_tables)
+        # refer ops.advance_step()
+        for i in range(num_queries) :
+            frozen_model_input.input_tokens[i] = model_input.cached_outputs[-1].sampled_token_ids[i]
+            seq_len = attn_metadata.seq_lens_tensor[i]
+            next_seq_len = seq_len + 1
+            next_input_pos = next_seq_len - 1
+            attn_metadata.seq_lens_tensor[i] = next_seq_len
+            frozen_model_input.input_positions[i] = next_input_pos
+            block_index = next_input_pos // self.block_size
+            block_offset = next_input_pos % self.block_size
+            slot = attn_metadata.block_tables[i]
+            slot_num = slot[block_index] * self.block_size + block_offset
+            attn_metadata.slot_mapping[i] = slot_num
+
 
         if frozen_model_input.seq_lens is not None:
             for i in range(num_queries):
