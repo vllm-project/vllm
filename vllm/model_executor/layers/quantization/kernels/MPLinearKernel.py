@@ -59,7 +59,14 @@ class MPLinearKernel(ABC):
     def _transform_param(self, layer: torch.nn.Module, name: Optional[str],
                          fn: Callable) -> None:
         if name is not None and getattr(layer, name, None) is not None:
-            replace_parameter(layer, name, fn(getattr(layer, name)))
+
+            old_param = getattr(layer, name)
+            new_param = fn(old_param)
+            # replace the parameter with torch.nn.Parameter for TorchDynamo
+            # compatibility
+            replace_parameter(
+                layer, name,
+                torch.nn.Parameter(new_param.data, requires_grad=False))
 
     def _get_weight_params(
             self, layer: torch.nn.Module
