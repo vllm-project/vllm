@@ -59,6 +59,23 @@ def test_load_8bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                              model_name)
 
 
+# @pytest.mark.skipif(torch.cuda.device_count() < 2,
+#                     reason='Test requires at least 2 GPUs.')
+# @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
+#                     reason='bitsandbytes is not supported on this GPU type.')
+# @pytest.mark.parametrize("model_name, description", models_4bit_to_test)
+# def test_load_tp_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
+#                                 model_name, description) -> None:
+
+#     hf_model_kwargs = {"load_in_4bit": True}
+#     validate_generated_texts(hf_runner,
+#                              vllm_runner,
+#                              example_prompts[:1],
+#                              model_name,
+#                              hf_model_kwargs,
+#                              vllm_tp_size=2)
+
+
 def log_generated_texts(prompts, outputs, runner_name):
     logged_texts = []
     for i, (_, generated_text) in enumerate(outputs):
@@ -75,7 +92,8 @@ def validate_generated_texts(hf_runner,
                              vllm_runner,
                              prompts,
                              model_name,
-                             hf_model_kwargs=None):
+                             hf_model_kwargs=None,
+                             vllm_tp_size=1):
 
     if hf_model_kwargs is None:
         hf_model_kwargs = {}
@@ -86,7 +104,7 @@ def validate_generated_texts(hf_runner,
         hf_logs = log_generated_texts(prompts, hf_outputs, "HfRunner")
 
     # Clean up the GPU memory for the next test
-    torch.cuda.synchronize()
+    # torch.cuda.synchronize()
     gc.collect()
     torch.cuda.empty_cache()
 
@@ -94,13 +112,14 @@ def validate_generated_texts(hf_runner,
     with vllm_runner(model_name,
                      quantization='bitsandbytes',
                      load_format='bitsandbytes',
+                     tensor_parallel_size=vllm_tp_size,
                      enforce_eager=True,
                      gpu_memory_utilization=0.8) as llm:
         vllm_outputs = llm.generate_greedy(prompts, 8)
         vllm_logs = log_generated_texts(prompts, vllm_outputs, "VllmRunner")
 
     # Clean up the GPU memory for the next test
-    torch.cuda.synchronize()
+    # torch.cuda.synchronize()
     gc.collect()
     torch.cuda.empty_cache()
 
