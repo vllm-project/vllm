@@ -13,6 +13,7 @@ from vllm.engine.async_timeout import asyncio_timeout
 from vllm.engine.llm_engine import LLMEngine, SchedulerOutputState
 from vllm.engine.metrics_types import StatLoggerBase
 from vllm.executor.executor_base import ExecutorAsyncBase
+from vllm.executor.gpu_executor import GPUExecutorAsync
 from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
@@ -1019,7 +1020,17 @@ class AsyncLLMEngine:
         self.engine.remove_logger(logger_name=logger_name)
 
     async def start_profile(self) -> None:
-        self.engine.model_executor._run_workers("start_profile")
+        # using type instead of isinstance to check to avoid capturing
+        # inherited classes
+        if type(self.engine.model_executor) == GPUExecutorAsync:
+            self.engine.model_executor.start_profile()
+        else:
+            self.engine.model_executor._run_workers("start_profile")
 
     async def stop_profile(self) -> None:
-        self.engine.model_executor._run_workers("stop_profile")
+        # using type instead of isinstance to check to avoid capturing
+        # inherited classes
+        if type(self.engine.model_executor) == GPUExecutorAsync:
+            self.engine.model_executor.stop_profile()
+        else:
+            self.engine.model_executor._run_workers("stop_profile")
