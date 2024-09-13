@@ -10,11 +10,8 @@ import pytest
 import torch
 
 from vllm.attention import AttentionBackend, AttentionMetadata, AttentionType
-from vllm.utils import (STR_BACKEND_ENV_VAR, STR_XFORMERS_ATTN_VAL, is_hip,
+from vllm.utils import (STR_BACKEND_ENV_VAR, STR_XFORMERS_ATTN_VAL,
                         make_tensor_with_pad)
-
-if not is_hip():
-    from vllm.attention.backends.xformers import XFormersBackend
 
 # For now, disable "test_aot_dispatch_dynamic" since there are some
 # bugs related to this test in PyTorch 2.4.
@@ -522,6 +519,11 @@ def make_backend(backend_name: str) -> AttentionBackend:
 
     * Backend instance
     '''
+    if backend_name == STR_XFORMERS_ATTN_VAL:
+        # NOTE: xFormers backend cannot be imported for AMD GPUs.
+        from vllm.attention.backends.xformers import XFormersBackend
+        return XFormersBackend()
+
     if backend_name == STR_XFORMERS_ATTN_VAL:
         return XFormersBackend()
     raise AssertionError(
