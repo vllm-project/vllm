@@ -14,7 +14,8 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     fused_marlin_moe, single_marlin_moe)
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    fused_topk, moe_align_block_size)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     marlin_quantize)
 from vllm.model_executor.models.mixtral import MixtralMoE
@@ -247,6 +248,26 @@ def test_fused_marlin_moe(
     )
 
     assert compute_max_diff(marlin_output, triton_output) < 4e-2
+
+    ##############
+    M, K = a.shape
+    E = qweight1.shape[0]
+    N = qweight2.shape[1] * 16
+    topk = topk_ids.shape[1]
+    block_size_m = 4
+
+    sorted_token_ids, _, _ = moe_align_block_size(topk_ids, block_size_m, E)
+
+    max_workspace_size = ((M + 255) // 256) * (max(2 * N, K) // 64) * 16
+    workspace = torch.zeros(max_workspace_size,
+                            dtype=torch.int,
+                            device="cuda",
+                            requires_grad=False)
+
+    opcheck(torch.ops._moe_C.marlin_gemm_moe,
+            (a, qweight1, sorted_token_ids, topk_weights, topk_ids, scales1,
+             g_idx1, sort_indices1, workspace, M, 2 * N, K, True, E, topk,
+             block_size_m, True, False))
 
 
 @pytest.mark.skip("This test is here for the sake of debugging, "
