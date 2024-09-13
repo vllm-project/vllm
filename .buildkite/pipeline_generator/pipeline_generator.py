@@ -15,9 +15,6 @@ from plugin import (
 )
 from utils import (
     AgentQueue,
-    HF_HOME,
-    DEFAULT_WORKING_DIR,
-    VLLM_ECR_REPO,
     AMD_REPO,
     TEST_PATH,
     EXTERNAL_HARDWARE_TEST_PATH,
