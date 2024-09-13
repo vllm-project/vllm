@@ -425,3 +425,10 @@ def test_cutlass_cuda_graph(per_act_token: bool, per_out_ch: bool):
     baseline = torch.mm(scale_a * a.to(dtype=torch.float32),
                         scale_b * b.to(dtype=torch.float32)).to(torch.bfloat16)
     torch.testing.assert_close(out, baseline, rtol=1e-1, atol=1e0)
+
+
+@pytest.mark.smoke
+def test_cutlass_support_opcheck():
+    capability = current_platform.get_device_capability()
+    capability = capability[0] * 10 + capability[1]
+    opcheck(torch.ops._C.cutlass_scaled_mm_supports_fp8, (capability, ))

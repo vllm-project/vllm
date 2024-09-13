@@ -9,6 +9,7 @@ import torch
 from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
+from tests.kernels.utils import opcheck
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
@@ -319,3 +320,30 @@ def test_single_marlin_moe_multiply(
     torch_output = torch_moe_single(a, w_ref.transpose(1, 2), score, topk)
 
     assert compute_max_diff(marlin_output, torch_output) < 1e-2
+
+
+@pytest.mark.smoke
+def test_moe_align_block_size_opcheck():
+    num_experts = 4
+    block_size = 4
+    topk_ids = torch.randint(0,
+                             num_experts, (3, 4),
+                             dtype=torch.int32,
+                             device='cuda')
+
+    max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
+    sorted_ids = torch.empty((max_num_tokens_padded, ),
+                             dtype=torch.int32,
+                             device=topk_ids.device)
+    sorted_ids.fill_(topk_ids.numel())
+    max_num_m_blocks = max_num_tokens_padded // block_size
+    expert_ids = torch.empty((max_num_m_blocks, ),
+                             dtype=torch.int32,
+                             device=topk_ids.device)
+    num_tokens_post_pad = torch.empty((1),
+                                      dtype=torch.int32,
+                                      device=topk_ids.device)
+
+    opcheck(torch.ops._C.moe_align_block_size,
+            (topk_ids, num_experts, block_size, sorted_ids, expert_ids,
+             num_tokens_post_pad))
