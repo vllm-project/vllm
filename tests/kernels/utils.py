@@ -520,7 +520,7 @@ def make_backend(backend_name: str) -> AttentionBackend:
     * Backend instance
     '''
     if backend_name == STR_XFORMERS_ATTN_VAL:
-        # Avoid import error during test collection on CPU
+        # NOTE: xFormers backend cannot be imported for CPU and AMD GPUs.
         from vllm.attention.backends.xformers import XFormersBackend
 
         return XFormersBackend()
