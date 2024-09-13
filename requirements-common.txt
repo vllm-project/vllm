@@ -7,11 +7,11 @@ py-cpuinfo
 transformers >= 4.43.2  # Required for Chameleon and Llama 3.1 hotfox.
 tokenizers >= 0.19.1  # Required for Llama 3.
 protobuf # Required by LlamaTokenizer.
-fastapi
+fastapi >= 0.114.1
 aiohttp
 openai >= 1.40.0 # Ensure modern openai package (ensure types module present)
 uvicorn[standard]
-pydantic >= 2.8  # Required for OpenAI server.
+pydantic >= 2.9  # Required for fastapi >= 0.113.0
 pillow  # Required for image processing
 prometheus_client >= 0.18.0
 prometheus-fastapi-instrumentator >= 7.0.0
