@@ -94,7 +94,6 @@ steps:
   - pytest -v -s entrypoints/test_chat_utils.py
   - pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
 
-
 - label: Distributed Tests (4 GPUs) # 10min
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
@@ -164,29 +163,12 @@ steps:
     - python3 tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
     - python3 offline_inference_encoder_decoder.py
 
-- label: Models Test # 1hr10min
-  source_file_dependencies:
-  - vllm/
-  - tests/models
-  commands:
-    - pip install -e ./plugins/vllm_add_dummy_model
-    - pytest -v -s models/test_oot_registration.py # it needs a clean process
-    - pytest -v -s models -m \"not vlm\" --ignore=models/test_oot_registration.py
-
 - label: torch compile integration test
   source_file_dependencies:
   - vllm/
   commands:
     - pytest -v -s ./compile/test_full_graph.py
     - pytest -v -s ./compile/test_wrapper.py
-
-
-- label: Vision Language Models Test # 42min
-  #mirror_hardwares: [amd]
-  source_file_dependencies:
-  - vllm/
-  commands:
-    - pytest -v -s models -m vlm
 
 - label: Prefix Caching Test # 7min
   #mirror_hardwares: [amd]
@@ -286,6 +268,45 @@ steps:
   commands:
     - pytest -v -s tool_use
 
+#####  models test  #####
+
+- label: Basic Models Test # 3min
+  source_file_dependencies:
+  - vllm/
+  - tests/models
+  commands:
+    - pip install -e ./plugins/vllm_add_dummy_model
+    - pytest -v -s models/test_oot_registration.py # it needs a clean process
+    - pytest -v -s models/*.py --ignore=models/test_oot_registration.py
+
+- label: Decoder-only Language Models Test # 1h3min
+  #mirror_hardwares: [amd]
+  source_file_dependencies:
+  - vllm/
+  - tests/models/decoder_only/language
+  commands:
+    - pytest -v -s models/decoder_only/language
+
+- label: Decoder-only Multi-Modal Models Test # 56min
+  #mirror_hardwares: [amd]
+  source_file_dependencies:
+  - vllm/
+  - tests/models/decoder_only/audio_language
+  - tests/models/decoder_only/vision_language
+  commands:
+    - pytest -v -s models/decoder_only/audio_language
+    - pytest -v -s models/decoder_only/vision_language
+
+- label: Other Models Test # 5min
+  #mirror_hardwares: [amd]
+  source_file_dependencies:
+  - vllm/
+  - tests/models/embedding/language
+  - tests/models/encoder_decoder/language
+  commands:
+    - pytest -v -s models/embedding/language
+    - pytest -v -s models/encoder_decoder/language
+
 #####  1 GPU test  #####
 #####  multi gpus test  #####
 
@@ -311,11 +332,11 @@ steps:
   - tests/distributed/
   commands:
   - # the following commands are for the first node, with ip 192.168.10.10 (ray environment already set up)
-    - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py
+    - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep -q 'Same node test passed'
     - VLLM_MULTI_NODE=1 pytest -v -s distributed/test_multi_node_assignment.py
     - VLLM_MULTI_NODE=1 pytest -v -s distributed/test_pipeline_parallel.py
   - # the following commands are for the second node, with ip 192.168.10.11 (ray environment already set up)
-    - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py
+    - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep -q 'Same node test passed'
 
 - label: Distributed Tests (2 GPUs) # 28min
   #mirror_hardwares: [amd]
@@ -328,11 +349,10 @@ steps:
   - vllm/model_executor/models/
   - tests/distributed/
   commands:
-  - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py
-  - TARGET_TEST_SUITE=L4 pytest -v -s distributed/test_basic_distributed_correctness.py
-  - pytest -v -s distributed/test_basic_distributed_correctness_enc_dec.py
-  - pytest -v -s distributed/test_chunked_prefill_distributed.py
-  - pytest -v -s distributed/test_multimodal_broadcast.py
+  - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep -q 'Same node test passed'
+  - TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m distributed_2_gpus
+  # Avoid importing model tests that cause CUDA reinitialization error
+  - pytest models/encoder_decoder/language/test_bart.py models/decoder_only/vision_language/test_broadcast.py -v -s -m distributed_2_gpus
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp2.py
   - pip install -e ./plugins/vllm_add_dummy_model
   - pytest -v -s distributed/test_distributed_oot.py

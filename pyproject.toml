@@ -85,5 +85,6 @@ skip_gitignore = true
 [tool.pytest.ini_options]
 markers = [
     "skip_global_cleanup",
-    "vlm: run tests for vision language models only",
+    "core_model: run this model test in each PR instead of just daily",
+    "distributed_2_gpus: run this test only in distributed tests for 2 GPUs",
 ]
