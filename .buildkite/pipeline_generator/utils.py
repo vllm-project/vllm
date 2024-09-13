@@ -43,7 +43,6 @@ def get_full_test_command(test_commands: List[str], step_working_dir: str) -> st
 def get_image_path(repo: Optional[str] = VLLM_ECR_REPO) -> str:
     """Get path to image of the current commit on ECR."""
     commit = os.getenv("BUILDKITE_COMMIT")
-    commit = "40184a07427f2a0b06094e98a9ad631e702225cd"
     return f"{repo}:{commit}"
 
 def get_multi_node_test_command(test_commands: List[str], working_dir: str, num_nodes: int, num_gpus: int, docker_image_path: str) -> str:

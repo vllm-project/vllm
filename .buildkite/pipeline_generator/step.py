@@ -2,7 +2,7 @@ from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional
 from utils import AgentQueue
 
-class Step(BaseModel):
+class TestStep(BaseModel):
     label: str
     fast_check: bool = False
     commands: List[str] = Field(default_factory=list)

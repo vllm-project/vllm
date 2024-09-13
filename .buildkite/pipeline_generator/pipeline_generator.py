@@ -28,10 +28,10 @@ from utils import (
     get_image_path,
     get_multi_node_test_command,
 )
-from step import Step, BuildkiteStep, BuildkiteBlockStep, get_block_step, get_step_key
+from step import TestStep, BuildkiteStep, BuildkiteBlockStep, get_block_step, get_step_key
 
 
-def _get_plugin_config(step: Step) -> Dict:
+def _get_plugin_config(step: TestStep) -> Dict:
     """
     Returns the plugin configuration for the step.
     If the step is run on A100 GPU, use k8s plugin since A100 node is on k8s.
@@ -44,13 +44,13 @@ def _get_plugin_config(step: Step) -> Dict:
         return get_kubernetes_plugin_config(docker_image_path, test_bash_command)
     return get_docker_plugin_config(docker_image_path, test_bash_command, step.no_gpu)
 
-def read_test_steps(file_path: str) -> List[Step]:
+def read_test_steps(file_path: str) -> List[TestStep]:
     """Read test steps from test pipeline yaml and parse them into Step objects."""
     with open(file_path, "r") as f:
         content = yaml.safe_load(f)
-    return [Step(**step) for step in content["steps"]]
+    return [TestStep(**step) for step in content["steps"]]
 
-def process_step(step: Step, run_all: str, list_file_diff: List[str]):
+def process_step(step: TestStep, run_all: str, list_file_diff: List[str]) -> List[Union[BuildkiteStep, BuildkiteBlockStep]]:
     """Process test step and return corresponding BuildkiteStep."""
     steps = []
     current_step = BuildkiteStep(label=step.label, key=get_step_key(step.label), parallelism=step.parallelism, soft_fail=step.soft_fail, plugins=[_get_plugin_config(step)])
@@ -104,14 +104,7 @@ def generate_build_step() -> BuildkiteStep:
     )
     return step
 
-def mock_build_step() -> BuildkiteStep:
-    docker_image = f"{VLLM_ECR_REPO}:40184a07427f2a0b06094e98a9ad631e702225cd"
-    command = ["echo 'mock build step'"]
-    step = BuildkiteStep(label=":docker: build image", key="build", agents={"queue": AgentQueue.AWS_CPU.value}, env={"DOCKER_BUILDKIT": "1"}, retry={"automatic": [{"exit_status": -1, "limit": 2}, {"exit_status": -10, "limit": 2}]}, commands=command)
-    step.depends_on = None
-    return step
-
-def get_external_hardware_tests(test_steps: List[Step]) -> List[Union[BuildkiteStep, BuildkiteBlockStep]]:
+def get_external_hardware_tests(test_steps: List[TestStep]) -> List[Union[BuildkiteStep, BuildkiteBlockStep]]:
     """Process the external hardware tests from the yaml file and convert to Buildkite steps."""
     with open(EXTERNAL_HARDWARE_TEST_PATH, "r") as f:
         content = yaml.safe_load(f)
@@ -160,7 +153,7 @@ def main(run_all: str = -1, list_file_diff: str = None):
 
     # Read test from yaml file and convert to Buildkite format steps
     test_steps = read_test_steps(TEST_PATH)
-    buildkite_steps = [mock_build_step()]
+    buildkite_steps = [generate_build_step()]
     for step in test_steps:
         buildkite_test_step = process_step(step, run_all, list_file_diff)
         buildkite_steps.extend(buildkite_test_step)
