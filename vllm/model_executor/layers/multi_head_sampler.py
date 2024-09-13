@@ -77,13 +77,14 @@ class MultiheadSampler(nn.Module):
             modify_greedy_probs=False
         )
         
-        id_next = maybe_sampled_tokens_tensor.reshape(-1, num_heads).tolist()
+        sampled_token_ids_tensor = maybe_sampled_tokens_tensor.reshape(-1, num_heads)
+        id_next = sampled_token_ids_tensor.tolist()
 
         if self.include_gpu_probs_tensor:
             # Since we will defer sampler result Pythonization,
             # preserve GPU-side tensors in support of later
             # deferred pythonization of logprobs
-            sampled_token_ids_tensor = maybe_sampled_tokens_tensor.to(dtype=torch.long, device=probs.device)
+            sampled_token_ids_tensor = sampled_token_ids_tensor.to(dtype=torch.long, device=probs.device)
             on_device_tensors = (probs, logprobs, sampled_token_ids_tensor)
         else:
             # Since Pythonization has already happened, don't preserve

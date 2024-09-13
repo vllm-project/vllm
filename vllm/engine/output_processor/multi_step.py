@@ -137,7 +137,13 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
     def _process_seq_outputs(self, seq: Sequence,
                              valid_samples: List[SequenceOutput],
                              sampling_params: SamplingParams) -> None:
-        output_token_ids = [sample.output_token for sample in valid_samples]
+        output_token_ids = []
+        for sample in valid_samples:
+            if len(sample.output_tokens) > 1:
+                output_token_ids.append(sample.output_tokens)
+            else:
+                output_token_ids.append(sample.output_token)
+
         output_logprobs = [sample.logprobs for sample in valid_samples]
 
         # Truncate to max_tokens if necessary.
