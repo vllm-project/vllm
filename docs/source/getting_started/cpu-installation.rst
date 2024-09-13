@@ -51,7 +51,21 @@ Build from source
     $ sudo apt-get install -y gcc-12 g++-12 libnuma-dev
     $ sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12
 
-- Second, install Python packages for vLLM CPU backend building:
+- Second, build and install oneDNN library from source:
+
+.. code-block:: console
+
+    $ git clone -b rls-v3.5 https://github.com/oneapi-src/oneDNN.git
+    $ cmake -B ./oneDNN/build -S ./oneDNN -G Ninja -DONEDNN_LIBRARY_TYPE=STATIC \ 
+        -DONEDNN_BUILD_DOC=OFF \ 
+        -DONEDNN_BUILD_EXAMPLES=OFF \ 
+        -DONEDNN_BUILD_TESTS=OFF \ 
+        -DONEDNN_BUILD_GRAPH=OFF \ 
+        -DONEDNN_ENABLE_WORKLOAD=INFERENCE \ 
+        -DONEDNN_ENABLE_PRIMITIVE=MATMUL
+    $ cmake --build ./oneDNN/build --target install --config Release
+
+- Third, install Python packages for vLLM CPU backend building:
 
 .. code-block:: console
 
