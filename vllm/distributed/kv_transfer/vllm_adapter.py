@@ -66,13 +66,19 @@ class KV_transfer_agent:
     ):
         
         # init pipe
-        self.pipe = TorchDistributedPipe(
+        self.device_pipe = TorchDistributedPipe(
             group_ranks,
             local_rank,
             torch_distributed_backend,
         )
+        self.cpu_pipe = TorchDistributedPipe(
+            group_ranks,
+            local_ranks,
+            "gloo"
+        )
         # init lookup buffer
-        self.buffer = SimpleKVLookupBuffer(self.pipe, 1000**3 * 10)
+        # TODO: replace this 1e9 with a configurable parameter or a constant
+        self.buffer = SimpleKVLookupBuffer(self.cpu_pipe, self.device_pipe, 1e9)
 
     def send_kv_caches_and_hidden_states(
         self,
