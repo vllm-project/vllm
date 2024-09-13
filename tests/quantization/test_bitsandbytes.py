@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from tests.quantization.utils import is_quant_method_supported
+from ..utils import fork_new_process_for_each_test
 
 models_4bit_to_test = [
     ('huggyllama/llama-7b', 'quantize model inflight'),
@@ -29,6 +30,7 @@ models_pre_quant_8bit_to_test = [
 @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
                     reason='bitsandbytes is not supported on this GPU type.')
 @pytest.mark.parametrize("model_name, description", models_4bit_to_test)
+@fork_new_process_for_each_test
 def test_load_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                              model_name, description) -> None:
 
@@ -41,6 +43,7 @@ def test_load_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                     reason='bitsandbytes is not supported on this GPU type.')
 @pytest.mark.parametrize("model_name, description",
                          models_pre_qaunt_4bit_to_test)
+@fork_new_process_for_each_test
 def test_load_pre_quant_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                                        model_name, description) -> None:
 
@@ -52,6 +55,7 @@ def test_load_pre_quant_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                     reason='bitsandbytes is not supported on this GPU type.')
 @pytest.mark.parametrize("model_name, description",
                          models_pre_quant_8bit_to_test)
+@fork_new_process_for_each_test
 def test_load_8bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                              model_name, description) -> None:
 
