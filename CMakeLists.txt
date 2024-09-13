@@ -105,7 +105,6 @@ add_dependencies(default _core_C)
 #
 # Forward the non-CUDA device extensions to external CMake scripts.
 #
-include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
 if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda" AND
     NOT VLLM_TARGET_DEVICE STREQUAL "rocm")
     if (VLLM_TARGET_DEVICE STREQUAL "cpu")
