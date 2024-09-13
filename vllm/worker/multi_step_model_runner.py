@@ -623,8 +623,21 @@ def _pythonize_sampler_output(
     # We are guaranteed output tensors are ready, so it is safe to
     # pythonize the sampler output & obtain CPU-side logprobs.
     #
-    # However this computation may be skipped entirely
-    # if no pythonization was deferred.
+    # However we should check whether logprobs pythonization may
+    # be skipped entirely, i.e. because no logprobs were requested
+    # or pythonization was not deferred. To that end,
+    #
+    # * `prompt_logprobs_are_requested_for_prefill` signals that
+    #   there are *any* prefill-phase `SequenceGroup`s for which
+    #   prompt logprobs were requested
+    #
+    # * `any_logprobs_are_requested` signals that there are any
+    #   `SequenceGroup`s requesting (1) sample logprobs or (2)
+    #   prompt logprobs in prefill phase.
+    #
+    # Later on, these flags cause adjustments to the pythonization
+    # process to accommodate logprobs.
+
     seq_groups = sampling_metadata.seq_groups
     prompt_logprobs_are_requested_for_prefill = any([
         ((sg.sampling_params.prompt_logprobs is not None) and sg.is_prompt)
@@ -635,7 +648,9 @@ def _pythonize_sampler_output(
          for sg in seq_groups]) or prompt_logprobs_are_requested_for_prefill
 
     if prompt_logprobs_are_requested_for_prefill:
-        # CPU GPU sync
+        # CPU GPU sync, after gathering *only* sampled tokens (since
+        # requesting prompt logprobs leads `sampled_token_ids` to
+        # include prompt token ids in addition to sampled token ids.)
         sample_idx_tensor = torch.tensor(
             [sdx for sg in seq_groups for sdx in sg.sample_indices])
         pinned_buffer = pinned_buffer.copy_(
@@ -651,6 +666,11 @@ def _pythonize_sampler_output(
     skip_sampler_cpu_output = (
         frozen_model_input.sampling_metadata.skip_sampler_cpu_output)
 
+    # *Don't* skip logprobs pythonization *if*:
+    # * Any requests require logprobs to be returned in this
+    # iteration AND
+    # * These requests are being scheduled in a fashion which
+    # defers pythonization (i.e. multi-step scheduling.)
     do_pythonize_logprobs = (skip_sampler_cpu_output
                              and any_logprobs_are_requested)
     (
