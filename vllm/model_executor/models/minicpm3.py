@@ -22,7 +22,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only MiniCPM3 model compatible with HuggingFace weights."""
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Optional
 
 import torch
 from torch import nn
@@ -36,16 +36,15 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.models.minicpm import (MiniCPMMLP, MiniCPMMoE,
-                                                MiniCPMDecoderLayer,
-                                                MiniCPMModel,
-                                                MiniCPMForCausalLM)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
+from vllm.model_executor.models.minicpm import (MiniCPMDecoderLayer,
+                                                MiniCPMForCausalLM, MiniCPMMLP,
+                                                MiniCPMModel, MiniCPMMoE)
 
 
 class MiniCPM3Attention(nn.Module):
