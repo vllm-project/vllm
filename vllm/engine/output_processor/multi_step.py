@@ -60,7 +60,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             single_step_process_prompt_logprob(self, seq_group, output)
 
     @staticmethod
-    @functools.lru_cache()
+    @functools.lru_cache
     def _log_prompt_logprob_unsupported_warning_once():
         logger.warning(
             "Prompt logprob is not supported by multi step workers. "

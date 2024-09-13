@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copied from
 # https://huggingface.co/LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct/blob/main/configuration_exaone.py
 # Copyright 2021 The LG AI Research EXAONE Lab. All rights reserved.

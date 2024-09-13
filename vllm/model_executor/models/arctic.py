@@ -44,7 +44,7 @@ class ArcticMLP(nn.Module):
                  is_residual_mlp: bool = False,
                  quant_config: Optional[QuantizationConfig] = None,
                  reduce_results: bool = True):
-        super(ArcticMLP, self).__init__()
+        super().__init__()
         self.hidden_size = config.hidden_size
         self.expert_id = expert_id
         self.layer_id = layer_id
@@ -85,7 +85,7 @@ class ArcticMoE(nn.Module):
                  params_dtype: Optional[torch.dtype] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  reduce_results: bool = True):
-        super(ArcticMoE, self).__init__()
+        super().__init__()
 
         self.tp_size = tp_size or get_tensor_model_parallel_world_size()
         self.hidden_size = config.hidden_size

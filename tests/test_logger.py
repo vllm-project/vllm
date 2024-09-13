@@ -29,7 +29,7 @@ def test_trace_function_call():
     cur_dir = os.path.dirname(__file__)
     enable_trace_function_call(path, cur_dir)
     f1(1)
-    with open(path, 'r') as f:
+    with open(path) as f:
         content = f.read()
 
     assert "f1" in content

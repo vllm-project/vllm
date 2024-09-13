@@ -26,7 +26,7 @@ select = [
     # Pyflakes
     "F",
     # pyupgrade
-    # "UP",
+    "UP",
     # flake8-bugbear
     "B",
     # flake8-simplify
@@ -42,10 +42,12 @@ ignore = [
     "E731",
     # Loop control variable not used within loop body
     "B007",
+    # f-string format
+    "UP032",
 ]
 
 [tool.mypy]
-python_version = "3.8"
+python_version = "3.9"
 
 ignore_missing_imports = true
 check_untyped_defs = true
