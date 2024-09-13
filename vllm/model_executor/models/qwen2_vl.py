@@ -1055,6 +1055,9 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -1078,6 +1081,9 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal):
                     loaded_weight = loaded_weight.transpose(0, 1)
                     loaded_weight = loaded_weight.reshape(-1)
                 try:
+                    # Skip loading extra bias for GPTQ models.
+                    if name.endswith(".bias") and name not in params_dict:
+                        continue
                     param = params_dict[name]
                 except KeyError:
                     print(params_dict.keys())
