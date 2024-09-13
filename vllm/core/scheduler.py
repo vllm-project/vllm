@@ -791,8 +791,7 @@ class Scheduler:
         running_queue = self.running
         waiting_queue = self.waiting
 
-        running_queue = deque(
-            sorted(running_queue, key=self._get_priority))
+        running_queue = deque(sorted(running_queue, key=self._get_priority))
 
         blocks_to_swap_out: List[Tuple[int, int]] = []
         force_preemption_count = 0
@@ -829,12 +828,11 @@ class Scheduler:
                 self._preempt(vseq_group, blocks_to_swap_out,
                               PreemptionMode.RECOMPUTE)
                 waiting_queue.appendleft(vseq_group)
-                force_preemption_cnt += 1
+                force_preemption_count += 1
             #Put the sequence back into the waiting queue
             waiting_queue.appendleft(seq_group)
 
-        waiting_queue = deque(
-            sorted(waiting_queue, key=self._get_priority))
+        waiting_queue = deque(sorted(waiting_queue, key=self._get_priority))
 
         self.waiting = waiting_queue
         self.running = running_queue
@@ -991,7 +989,8 @@ class Scheduler:
                                                curr_loras,
                                                enable_chunking=False)
 
-        if not prefills.seq_groups and self.scheduler_config.policy == "priority":
+        if len(prefills.seq_groups
+               ) == 0 and self.scheduler_config.policy == "priority":
             self._schedule_priority_preemption(budget)
 
         # Don't schedule decodes if prefills are scheduled.
