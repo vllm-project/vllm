@@ -614,21 +614,11 @@ def _pythonize_sampler_output(
 
     frozen_model_input = model_input.frozen_model_input
     assert frozen_model_input.sampling_metadata is not None
+    sampling_metadata = frozen_model_input.sampling_metadata
     # samples generation should have been skipped
     assert not output.outputs
 
     pinned_buffer = pinned_sampled_token_buffer[:model_input.num_queries]
-
-    # CPU GPU sync
-    pinned_buffer = pinned_buffer.copy_(sampled_token_ids, non_blocking=False)
-
-    # this will not block as the tensors are already on CPU
-    samples_list = pinned_buffer.tolist()
-
-    sampling_metadata = frozen_model_input.sampling_metadata
-
-    skip_sampler_cpu_output = (
-        frozen_model_input.sampling_metadata.skip_sampler_cpu_output)
 
     # We are guaranteed output tensors are ready, so it is safe to
     # pythonize the sampler output & obtain CPU-side logprobs.
@@ -636,12 +626,33 @@ def _pythonize_sampler_output(
     # However this computation may be skipped entirely
     # if no pythonization was deferred.
     seq_groups = sampling_metadata.seq_groups
-    logprobs_are_requested = any([
-        sg.sampling_params.logprobs is not None
-        or sg.sampling_params.prompt_logprobs is not None for sg in seq_groups
+    prompt_logprobs_are_requested_for_prefill = any([
+        ((sg.sampling_params.prompt_logprobs is not None) and sg.is_prompt)
+        for sg in seq_groups
     ])
+    any_logprobs_are_requested = any(
+        [sg.sampling_params.logprobs is not None
+         for sg in seq_groups]) or prompt_logprobs_are_requested_for_prefill
+
+    if prompt_logprobs_are_requested_for_prefill:
+        # CPU GPU sync
+        sample_idx_tensor = torch.tensor(
+            [sdx for sg in seq_groups for sdx in sg.sample_indices])
+        pinned_buffer = pinned_buffer.copy_(
+            sampled_token_ids[sample_idx_tensor, :], non_blocking=False)
+    else:
+        # CPU GPU sync
+        pinned_buffer = pinned_buffer.copy_(sampled_token_ids,
+                                            non_blocking=False)
+
+    # this will not block as the tensors are already on CPU
+    samples_list = pinned_buffer.tolist()
+
+    skip_sampler_cpu_output = (
+        frozen_model_input.sampling_metadata.skip_sampler_cpu_output)
+
     do_pythonize_logprobs = (skip_sampler_cpu_output
-                             and logprobs_are_requested)
+                             and any_logprobs_are_requested)
     (
         prompt_logprobs,
         sample_logprobs,
@@ -666,7 +677,7 @@ def _pythonize_sampler_output(
                 prompt_logprobs[sgdx],
                 sample_logprobs[sgdx],
             )
-        elif logprobs_are_requested:
+        elif any_logprobs_are_requested:
             (
                 group_prompt_logprobs,
                 group_sample_logprobs,
@@ -696,7 +707,7 @@ def _pythonize_sampler_output(
                 seq_output.parent_seq_id = seq_ids[parent_id]
                 seq_output.output_token = next_token_id
 
-                if logprobs_are_requested:
+                if any_logprobs_are_requested:
                     seq_output.logprobs = group_sample_logprobs[tdx]
                 else:
                     logprobs = next(iter(seq_output.logprobs.values()))
@@ -714,7 +725,7 @@ def _pythonize_sampler_output(
                 seq_outputs.append(
                     SequenceOutput(seq_ids[parent_id], next_token_id,
                                    (group_sample_logprobs[tdx]
-                                    if logprobs_are_requested else {
+                                    if any_logprobs_are_requested else {
                                         next_token_id:
                                         Logprob(logprob=float('inf'),
                                                 rank=None,
@@ -722,12 +733,12 @@ def _pythonize_sampler_output(
                                     })))
         if cache is not None:
             completion_seq_group_output.prompt_logprobs = \
-                group_prompt_logprobs if logprobs_are_requested else None
+                group_prompt_logprobs if any_logprobs_are_requested else None
             output.outputs.append(completion_seq_group_output)
         else:
             output.outputs.append(
                 CompletionSequenceGroupOutput(
                     seq_outputs, (group_prompt_logprobs
-                                  if logprobs_are_requested else None)))
+                                  if any_logprobs_are_requested else None)))
 
     assert len(output.outputs) > 0
