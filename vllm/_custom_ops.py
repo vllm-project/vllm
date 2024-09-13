@@ -465,17 +465,11 @@ try:
             delta_softplus: bool, index_: Optional[torch.Tensor],
             x: Optional[torch.Tensor]) -> List[torch.Tensor]:
         a = torch.empty_like(u)
-        if x is not None:
-            b = x
-        else:
-            b = torch.empty((u.size(0), u.size(1), A.size(1)),
-                            dtype=u.dtype,
-                            device=u.device)
         if z_ is not None:
             c = torch.empty_like(z_)
-            return [a, b, c]
+            return [a, c]
         else:
-            return [a, b]
+            return [a]
 
 except Exception:
     pass
