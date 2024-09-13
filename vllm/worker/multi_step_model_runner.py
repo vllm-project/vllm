@@ -628,12 +628,13 @@ def _pythonize_sampler_output(
     # or pythonization was not deferred. To that end,
     #
     # * `prompt_logprobs_are_requested_for_prefill` signals that
-    #   there are *any* prefill-phase `SequenceGroup`s for which
-    #   prompt logprobs were requested
+    #   there are *any* prefill-phase requests which specify that
+    #   prompt logprobs should be returned.
     #
     # * `any_logprobs_are_requested` signals that there are any
-    #   `SequenceGroup`s requesting (1) sample logprobs or (2)
-    #   prompt logprobs in prefill phase.
+    #   requests which (1) specify that sample logprobs should be
+    #   returned, or (2) are in the prefill phase AND specify that
+    #   prompt logprobs should be returned.
     #
     # Later on, these flags cause adjustments to the pythonization
     # process to accommodate logprobs.
