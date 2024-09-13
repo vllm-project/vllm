@@ -772,7 +772,7 @@ class Scheduler:
         Returns:
             The priority of the sequence group.
         """
-        return (seq_group.priority, seq_group.arrival_time)
+        return seq_group.priority, seq_group.arrival_time
 
     def _schedule_priority_preemption(
         self,
@@ -792,14 +792,13 @@ class Scheduler:
         waiting_queue = self.waiting
 
         running_queue = deque(
-            sorted(running_queue, key=lambda x: self._get_priority(x)))
+            sorted(running_queue, key=self._get_priority))
 
         blocks_to_swap_out: List[Tuple[int, int]] = []
-        force_preemption_cnt = 0
+        force_preemption_count = 0
 
         if waiting_queue:
-            seq_group = waiting_queue[0]
-            waiting_queue.popleft()
+            seq_group = waiting_queue.popleft()
             num_new_seqs = seq_group.get_max_num_running_seqs()
             num_new_tokens = self._get_num_new_tokens(seq_group,
                                                       SequenceStatus.WAITING,
@@ -808,9 +807,9 @@ class Scheduler:
             # Only preempt if priority inversion exists
             while running_queue and self._get_priority(
                     running_queue[-1]) > self._get_priority(seq_group):
-                #Only preempt if waiting sequence cannot be allocated
+                # Only preempt if waiting sequence cannot be allocated
                 can_allocate = self.block_manager.can_allocate(seq_group)
-                if (num_new_tokens > 0
+                if (num_new_tokens
                         and budget.can_schedule(num_new_tokens=num_new_tokens,
                                                 num_new_seqs=num_new_seqs)
                         and can_allocate == AllocStatus.OK):
@@ -835,11 +834,11 @@ class Scheduler:
             waiting_queue.appendleft(seq_group)
 
         waiting_queue = deque(
-            sorted(waiting_queue, key=lambda x: self._get_priority(x)))
+            sorted(waiting_queue, key=self._get_priority))
 
         self.waiting = waiting_queue
         self.running = running_queue
-        return force_preemption_cnt
+        return force_preemption_count
 
     def _schedule_prefills(
         self,
@@ -992,8 +991,7 @@ class Scheduler:
                                                curr_loras,
                                                enable_chunking=False)
 
-        if len(prefills.seq_groups
-               ) == 0 and self.scheduler_config.policy == "priority":
+        if not prefills.seq_groups and self.scheduler_config.policy == "priority":
             self._schedule_priority_preemption(budget)
 
         # Don't schedule decodes if prefills are scheduled.

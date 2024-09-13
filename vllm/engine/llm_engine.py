@@ -1069,6 +1069,8 @@ class LLMEngine:
             arrival_time: The arrival time of the request. If None, we use
                 the current monotonic time.
             trace_headers: OpenTelemetry trace headers.
+            priority: The priority of the request.
+                Only appicable with priority scheduling.
 
         Details:
             - Set arrival_time to the current time if it is None.
