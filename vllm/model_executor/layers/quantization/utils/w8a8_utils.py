@@ -164,11 +164,15 @@ def apply_fp8_linear(
             # GEMM
             # This computes C = (X * W).
             # Output in fp32 to allow subsequent ops to happen in-place
-            output, _ = torch._scaled_mm(qinput,
-                                         weight,
-                                         scale_a=TORCH_DEVICE_IDENTITY,
-                                         scale_b=TORCH_DEVICE_IDENTITY,
-                                         out_dtype=torch.float32)
+            output = torch._scaled_mm(qinput,
+                                      weight,
+                                      scale_a=TORCH_DEVICE_IDENTITY,
+                                      scale_b=TORCH_DEVICE_IDENTITY,
+                                      out_dtype=torch.float32)
+            # A fix for discrepancy in scaled_mm which returns tuple
+            # for torch < 2.5 and a single value in torch >= 2.5
+            if type(output) is tuple and len(output) == 2:
+                output = output[0]
             # Unpad (undo num_token_padding)
             output = torch.narrow(output, 0, 0, input.shape[0])
             x_scale = torch.narrow(x_scale, 0, 0, input.shape[0])
