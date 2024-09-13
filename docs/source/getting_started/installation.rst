@@ -28,13 +28,17 @@ You can install vLLM using pip:
 
 .. note::
 
+    Although we recommend using `conda` to create and manage Python environments, it is highly recommended to use `pip` to install vLLM. This is because `pip` can install `torch` with separate library packages like `NCCL`, while `conda` installs `torch` with statically linked `NCCL`. This can cause issues when vLLM tries to use `NCCL`. See `this issue <https://github.com/vllm-project/vllm/issues/8420>`_ for more details.
+
+.. note::
+
     As of now, vLLM's binaries are compiled with CUDA 12.1 and public PyTorch release versions by default.
     We also provide vLLM binaries compiled with CUDA 11.8 and public PyTorch release versions:
 
     .. code-block:: console
 
         $ # Install vLLM with CUDA 11.8.
-        $ export VLLM_VERSION=0.4.0
+        $ export VLLM_VERSION=0.6.0
         $ export PYTHON_VERSION=310
         $ pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu118-cp${PYTHON_VERSION}-cp${PYTHON_VERSION}-manylinux1_x86_64.whl --extra-index-url https://download.pytorch.org/whl/cu118
 
@@ -48,7 +52,7 @@ You can install vLLM using pip:
 
     .. code-block:: console
 
-        $ export VLLM_VERSION=0.5.4 # vLLM's main branch version is currently set to latest released tag
+        $ export VLLM_VERSION=0.6.1.post1 # vLLM's main branch version is currently set to latest released tag
         $ pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/nightly/vllm-${VLLM_VERSION}-cp38-abi3-manylinux1_x86_64.whl
         $ # You can also access a specific commit
         $ # export VLLM_COMMIT=...
