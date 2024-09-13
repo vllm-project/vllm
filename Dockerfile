@@ -164,7 +164,7 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 #    -DONEDNN_BUILD_EXAMPLES=OFF \
 #    -DONEDNN_BUILD_TESTS=OFF \
 #    -DONEDNN_BUILD_GRAPH=OFF \
-3    -DONEDNN_ENABLE_WORKLOAD=INFERENCE \
+#    -DONEDNN_ENABLE_WORKLOAD=INFERENCE \
 #    -DONEDNN_ENABLE_PRIMITIVE=MATMUL && \
 #    cmake --build ./oneDNN/build --target install --config Release
 
