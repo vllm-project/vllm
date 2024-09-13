@@ -388,7 +388,7 @@ def test_paged_attention_rocm(
     PARTITION_SIZE_ROCM = 256
     num_partitions = ((max_context_len + PARTITION_SIZE_ROCM - 1) //
                       PARTITION_SIZE_ROCM)
-    assert PARTITION_SIZE % block_size == 0
+    assert PARTITION_SIZE_ROCM % block_size == 0
     num_seqs, num_heads, head_size = output.shape
     tmp_output = torch.empty(
         size=(num_seqs, num_heads, num_partitions, head_size),

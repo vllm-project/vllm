@@ -42,7 +42,8 @@ def use_rocm_paged_attention(qtype: torch.dtype, head_size: int,
                              block_size: int, kv_cache_dtype: str,
                              gqa_ratio: int, max_seq_len: int) -> bool:
     # To use rocm custom paged attention kernel or not
-    rocm_paged_attention_available = (is_hip()
+    rocm_paged_attention_available = (
+        is_hip()
         and "gfx1" not in torch.cuda.get_device_properties("cuda").gcnArchName)
     return (rocm_paged_attention_available
             and (qtype == torch.half or qtype == torch.bfloat16)

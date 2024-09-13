@@ -18,8 +18,7 @@ if not current_platform.is_tpu():
         logger.warning("Failed to import from vllm._C with %r", e)
 
 if current_platform.is_rocm():
-    with contextlib.suppress(ImportError):
-        import vllm._rocm_C  # noqa: F401
+    import vllm._rocm_C  # noqa: F401
 
 with contextlib.suppress(ImportError):
     import vllm._moe_C  # noqa: F401
