@@ -10,9 +10,11 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-# if the tensor is only one-element and only contains this number
+# if the tensor is only one-element and only contains NONE_INT
 # this means that the sended object is None.
 NONE_INT = -150886311
+
+# Mapping tensor dtype to a int, used for tensor metadata transmission
 FLOAT16_INT = -543205003776624
 INT64_INT = -375623078607432
 BOOL_INT = -28035262008646
@@ -258,11 +260,9 @@ class TorchDistributedPipe:
         self.block_if_full()
 
         with self.buffer_size_lock:
-            # print("Remaining size:", self.buffer_size)
             self.buffer_size = self.buffer_size + tensor_size
 
 
-        #self.send_tensor_wrapper(tensor)
         self.transport_thread.submit(
             self.send_tensor_wrapper,
             tensor,
