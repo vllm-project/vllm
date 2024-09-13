@@ -125,11 +125,14 @@ elif is_rocm_pytorch:
                 extra_compile_args={
                     'cxx': [
                         '-O3',
+                        '-DLEGACY_HIPBLAS_DIRECT=ON',
                     ],
                     'nvcc': [
-                        '-O3', '-U__CUDA_NO_HALF_OPERATORS__',
+                        '-O3',
+                        '-U__CUDA_NO_HALF_OPERATORS__',
                         '-U__CUDA_NO_HALF_CONVERSIONS__',
-                        "-ftemplate-depth=1024"
+                        "-ftemplate-depth=1024",
+                        '-DLEGACY_HIPBLAS_DIRECT=ON',
                     ] + extra_args
                 }))
         ext_modules.append(
@@ -142,11 +145,14 @@ elif is_rocm_pytorch:
                 extra_compile_args={
                     'cxx': [
                         '-O3',
+                        '-DLEGACY_HIPBLAS_DIRECT=ON',
                     ],
                     'nvcc': [
-                        '-O3', '-U__CUDA_NO_HALF_OPERATORS__',
+                        '-O3',
+                        '-U__CUDA_NO_HALF_OPERATORS__',
                         '-U__CUDA_NO_HALF_CONVERSIONS__',
-                        "-ftemplate-depth=1024"
+                        "-ftemplate-depth=1024",
+                        '-DLEGACY_HIPBLAS_DIRECT=ON',
                     ] + extra_args
                 }))
 

@@ -1,13 +1,14 @@
 # default base image
-ARG BASE_IMAGE="rocm/pytorch:rocm6.1.2_ubuntu20.04_py3.9_pytorch_staging"
+ARG BASE_IMAGE="rocm/pytorch:rocm6.2_ubuntu20.04_py3.9_pytorch_release_2.3.0"
 
 ARG COMMON_WORKDIR=/app
 
 # The following ARGs should be "0" or "1". If "1", the respective component will be built and installed on top of the base image
-ARG BUILD_HIPBLASLT="1"
+ARG BUILD_HIPBLASLT="0"
 ARG BUILD_RCCL="1"
 ARG BUILD_FA="1"
 ARG BUILD_TRITON="1"
+ARG BUILD_PYTORCH="1"
 # This ARG should also be "0" or "1". If "1", the vLLM development directory is obtained via git clone.
 # If "0", it is copied in from the local working directory.
 ARG REMOTE_VLLM="0"
@@ -39,11 +40,12 @@ WORKDIR ${COMMON_WORKDIR}
 # -----------------------
 # hipBLASLt build stages
 FROM base AS build_hipblaslt
-ARG HIPBLASLT_BRANCH="6f65c6e"
-RUN git clone https://github.com/ROCm/hipBLASLt \
+ARG HIPBLASLT_BRANCH="e6da924"
+RUN apt-get purge -y hipblaslt \
+    && git clone https://github.com/ROCm/hipBLASLt.git \
     && cd hipBLASLt \
     && git checkout ${HIPBLASLT_BRANCH} \
-    && SCCACHE_IDLE_TIMEOUT=1800 ./install.sh --architecture ${PYTORCH_ROCM_ARCH} \
+    && SCCACHE_IDLE_TIMEOUT=1800 ./install.sh --architecture ${PYTORCH_ROCM_ARCH} --legacy_hipblas_direct \
     && cd build/release \
     && make package
 FROM scratch AS export_hipblaslt_1
@@ -55,7 +57,7 @@ FROM export_hipblaslt_${BUILD_HIPBLASLT} AS export_hipblaslt
 # -----------------------
 # RCCL build stages
 FROM base AS build_rccl
-ARG RCCL_BRANCH="73221b4"
+ARG RCCL_BRANCH="rocm-6.2.0"
 RUN git clone https://github.com/ROCm/rccl \
     && cd rccl \
     && git checkout ${RCCL_BRANCH} \
@@ -69,7 +71,7 @@ FROM export_rccl_${BUILD_RCCL} AS export_rccl
 # -----------------------
 # flash attn build stages
 FROM base AS build_flash_attn
-ARG FA_BRANCH="ae7928c"
+ARG FA_BRANCH="3cea2fb"
 ARG FA_REPO="https://github.com/ROCm/flash-attention.git"
 RUN git clone ${FA_REPO} \
     && cd flash-attention \
@@ -85,9 +87,9 @@ FROM export_flash_attn_${BUILD_FA} AS export_flash_attn
 # -----------------------
 # Triton build stages
 FROM base AS build_triton
-ARG TRITON_BRANCH="6ddb79b"
-ARG TRITON_REPO="https://github.com/OpenAI/triton.git"
-RUN git clone ${TRITON_REPO} \
+ARG TRITON_BRANCH="e192dba"
+ARG TRITON_REPO="https://github.com/triton-lang/triton.git"
+RUN python3 -m pip install ninja cmake wheel pybind11 && git clone ${TRITON_REPO} \
     && cd triton \
     && git checkout ${TRITON_BRANCH} \
     && cd python \
@@ -104,6 +106,36 @@ RUN cd /opt/rocm/share/amd_smi \
     && pip wheel . --wheel-dir=dist
 FROM scratch AS export_amdsmi
 COPY --from=build_amdsmi /opt/rocm/share/amd_smi/dist/*.whl /
+
+FROM base as build_pytorch
+# A commit to fix the output scaling factor issue in _scaled_mm
+# Not yet in 2.5.0-rc1
+ARG PYTORCH_BRANCH="cedc116"
+ARG PYTORCH_VISION_BRANCH="v0.19.1"
+ARG PYTORCH_REPO="https://github.com/ROCm/pytorch.git"
+ARG PYTORCH_VISION_REPO="https://github.com/pytorch/vision.git"
+#RUN --mount=type=bind,from=export_hipblaslt,src=/,target=/install \
+#if ls /install/*.deb; then \
+#    apt-get purge -y hipblaslt \
+#    && dpkg -i /install/*.deb \
+#    && sed -i 's/, hipblaslt-dev \(.*\), hipcub-dev/, hipcub-dev/g' /var/lib/dpkg/status \
+#    && sed -i 's/, hipblaslt \(.*\), hipfft/, hipfft/g' /var/lib/dpkg/status; \
+#fi
+RUN git clone ${PYTORCH_REPO} pytorch \
+    && cd pytorch && git checkout ${PYTORCH_BRANCH} && git submodule update --init --recursive \
+    && python tools/amd_build/build_amd.py \
+    && CMAKE_PREFIX_PATH=$(python3 -c 'import sys; print(sys.prefix)') python3 setup.py bdist_wheel --dist-dir=dist \
+    && pip install dist/*.whl \
+    && cd .. \
+    && git clone ${PYTORCH_VISION_REPO} vision \
+    && cd vision && git checkout ${PYTORCH_VISION_BRANCH} \
+    && python3 setup.py bdist_wheel --dist-dir=dist
+FROM scratch as export_pytorch_1
+ARG COMMON_WORKDIR
+COPY --from=build_pytorch ${COMMON_WORKDIR}/pytorch/dist/*.whl /
+COPY --from=build_pytorch ${COMMON_WORKDIR}/vision/dist/*.whl /
+FROM scratch as export_pytorch_0
+from export_pytorch_${BUILD_PYTORCH} as export_pytorch
 
 # -----------------------
 # vLLM (and gradlib) fetch stages
@@ -128,6 +160,11 @@ if ls /install/*.deb; then \
     && dpkg -i /install/*.deb \
     && sed -i 's/, hipblaslt-dev \(.*\), hipcub-dev/, hipcub-dev/g' /var/lib/dpkg/status \
     && sed -i 's/, hipblaslt \(.*\), hipfft/, hipfft/g' /var/lib/dpkg/status; \
+fi
+# Install pytorch
+RUN --mount=type=bind,from=export_pytorch,src=/,target=/install \
+if ls /install/*.whl; then \
+    pip install /install/*.whl; \
 fi
 # Build vLLM
 RUN cd vllm \
@@ -196,6 +233,13 @@ RUN --mount=type=bind,from=export_amdsmi,src=/,target=/install \
     # Preemptively uninstall to prevent pip same-version no-installs
     pip uninstall -y amdsmi \
     && pip install /install/*.whl;
+
+RUN --mount=type=bind,from=export_pytorch,src=/,target=/install \
+    if ls /install/*.whl; then \
+        # Preemptively uninstall to prevent pip same-version no-installs
+        pip uninstall -y torch torchvision \
+        && pip install /install/*.whl; \
+    fi
 
 RUN python3 -m pip install --upgrade numba scipy huggingface-hub[cli]
 

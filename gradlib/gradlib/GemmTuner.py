@@ -15,6 +15,7 @@ rtol = 1e-5
 atol = 1
 
 CACHE_INVALIDATE_BUFFERS = int(os.getenv("CACHE_INVALIDATE_BUFFERS", "37"))
+ONE = torch.ones(1, dtype=torch.float32, device='cuda')
 
 
 class Gemm:
@@ -68,6 +69,8 @@ class Gemm:
         if self.indtype == torch.float8_e4m3fnuz:
             ref, _ = torch._scaled_mm(self.inp,
                                       self.weights.t(),
+                                      scale_a=ONE,
+                                      scale_b=ONE,
                                       out_dtype=self.outdtype)
         else:
             ref = F.linear(self.inp, self.weights)
