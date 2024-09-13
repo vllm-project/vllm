@@ -30,7 +30,7 @@ from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from .interfaces import SupportsMultiModal
 from .llama import LlamaAttention, LlamaMLP
-from vllm.model_executor.layers.layernorm import RMSNorm
+# from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear,
@@ -46,10 +46,12 @@ pt_dir = ""
 def check(tensor, file_name): pass
     # with open(f"{pt_dir}{file_name}", "rb") as f:
     #     data = torch.load(f)
-
     # tensor_flat = tensor.cpu().reshape(-1)
     # data_flat = data.cpu().reshape(-1)
-    # print("check:", file_name, torch.allclose(tensor_flat, data_flat), torch.max(torch.abs(tensor_flat-data_flat)), tensor_flat.shape, data_flat.shape)
+    # if tensor_flat.shape != data_flat.shape:
+    #     print("check:", file_name, "shape missmatch", tensor_flat.shape, data_flat.shape)
+    #     return
+    # print("check:", file_name, torch.allclose(tensor_flat, data_flat), torch.max(torch.abs(tensor_flat-data_flat)), tensor.shape, data.shape)
 
 logger = init_logger(__name__)
 MP_SCALE = 8
@@ -327,6 +329,21 @@ def _get_full_row_masked_out_mask(
     contains negative infinity values, otherwise it's 1.
     """
     return (attn_bias != negative_inf_value).any(dim=-1).type_as(attn_bias)[..., None]
+
+# use float RMSNorm to make result closer to reference impl.
+class RMSNorm(torch.nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def _norm(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+    def forward(self, x):
+        output = self._norm(x.float()).type_as(x)
+        return output * self.weight
+
 
 # Image encoder for inference
 class LayerNorm(nn.LayerNorm):
@@ -1203,7 +1220,9 @@ class CrossAttention(torch.nn.Module):
             qkv_enc, _ = self.qkv_proj(encoder_hidden_states)
             _, k, v = qkv_enc.split([self.q_local_size, self.kv_local_size, self.kv_local_size],
                                     dim=-1)
-
+            k = k.view(-1, self.n_local_kv_heads, self.head_dim)
+            v = v.view(-1, self.n_local_kv_heads, self.head_dim)
+            k = self.k_norm(k)
         q = q.view(-1, self.n_local_heads, self.head_dim)
         q = self.q_norm(q)
 
