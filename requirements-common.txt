@@ -7,7 +7,8 @@ py-cpuinfo
 transformers >= 4.43.2  # Required for Chameleon and Llama 3.1 hotfox.
 tokenizers >= 0.19.1  # Required for Llama 3.
 protobuf # Required by LlamaTokenizer.
-fastapi >= 0.114.1
+fastapi < 0.113.0; python_version < '3.9'
+fastapi >= 0.114.1; python_version >= '3.9'
 aiohttp
 openai >= 1.40.0 # Ensure modern openai package (ensure types module present)
 uvicorn[standard]
