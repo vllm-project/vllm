@@ -7,10 +7,9 @@ import torch.nn as nn
 
 from vllm.distributed import (tensor_model_parallel_all_gather,
                               tensor_model_parallel_gather)
+from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
-from vllm.model_executor.layers.linear import (
-    LinearBase)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.platforms import current_platform
 
@@ -87,9 +86,10 @@ class LogitsProcessor(nn.Module):
             linear_method = lm_head.quant_method
         elif isinstance(lm_head, VocabParallelEmbedding):
             linear_method = lm_head.linear_method
+        assert linear_method is not None
         logits = linear_method.apply(lm_head,
-                                    hidden_states,
-                                    bias=embedding_bias)
+                                     hidden_states,
+                                     bias=embedding_bias)
         if self.use_gather:
             # None may be returned for rank > 0
             logits = tensor_model_parallel_gather(logits)
