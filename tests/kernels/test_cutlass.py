@@ -429,6 +429,4 @@ def test_cutlass_cuda_graph(per_act_token: bool, per_out_ch: bool):
 
 @pytest.mark.smoke
 def test_cutlass_support_opcheck():
-    capability = current_platform.get_device_capability()
-    capability = capability[0] * 10 + capability[1]
     opcheck(torch.ops._C.cutlass_scaled_mm_supports_fp8, (capability, ))
