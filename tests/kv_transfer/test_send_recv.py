@@ -12,12 +12,28 @@ def test_run(my_rank, pipe):
     x = torch.tensor([1]).to(pipe.device)
     y = torch.tensor([[2., 3., 4., 8.]]).to(pipe.device)
     if my_rank == 0:
-        
         pipe.send_tensor(x)
+        print("sent tensor x")
         pipe.send_tensor(y)
+        print("sent tensor y")
+        x2 = pipe.recv_tensor()
+        print("received x2 = ", x2)
+        y2 = pipe.recv_tensor()
+        print("received y2 = ", x2)
+
     else:
-        assert torch.allclose(x, pipe.recv_tensor())
-        assert torch.allclose(y, pipe.recv_tensor())
+        x2 = pipe.recv_tensor()
+        print("received x2 = ", x2)
+        y2 = pipe.recv_tensor()
+        print("received y2 = ", x2)
+        pipe.send_tensor(x)
+        print("sent tensor x")
+        pipe.send_tensor(y)
+        print("sent tensor y")
+
+    assert torch.allclose(x, x2)
+    assert torch.allclose(y, y2)
+
 
 
 def stress_test(my_rank, pipe):

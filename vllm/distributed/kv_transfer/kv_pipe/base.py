@@ -11,3 +11,7 @@ class KVPipeBase(ABC):
     @abstractmethod 
     def recv_tensor(self):
         raise NotImplementedError
+
+    @abstractmethod
+    def close(self):
+        raise NotImplementedError
