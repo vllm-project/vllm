@@ -96,12 +96,12 @@ for text in texts:
     token_ids.append(7003)
     llm_inputs.append(token_ids)
 
-llm = LLM(model='/home/zhn/fishtts', gpu_memory_utilization=0.5, dtype=torch.float32, skip_tokenizer_init=True, enforce_eager=True, num_scheduler_steps=8)
+llm = LLM(model='/home/zhn/fishtts', gpu_memory_utilization=0.5, dtype=torch.float32, skip_tokenizer_init=True)
 prompts = [
     {"prompt_token_ids": llm_input} for llm_input in llm_inputs
 ]
 
-sampling_params = SamplingParams(temperature=1, detokenize=False, stop_token_ids=[1025], max_tokens=2048, top_k=1, repetition_penalty=1.5, repetition_window=16)
+sampling_params = SamplingParams(temperature=1, detokenize=False, stop_token_ids=[1025], ignore_eos=True, max_tokens=2048, top_k=1, repetition_penalty=1.5, repetition_window=16)
 outputs = llm.generate(prompts, sampling_params)
 for output in outputs:
     print(output.prompt)

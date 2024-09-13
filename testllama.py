@@ -4,10 +4,10 @@ from vllm import LLM, SamplingParams
 
 torch.random.manual_seed(999)
 
-llm = LLM(model='/home/zhn/g/Meta-Llama-3-8B-Instruct', gpu_memory_utilization=0.5, enforce_eager=True, num_scheduler_steps=8)
+llm = LLM(model='/home/zhn/g/Meta-Llama-3-8B-Instruct', gpu_memory_utilization=0.5, enforce_eager=True)
 prompts = [
-    "Hi my name is",
-    "Tell me a joke",
+    "Hi my name is ",
+    "Tell me a joke ",
 ]
 
 texts = []
@@ -18,6 +18,7 @@ for i in range(10):
     for output in outputs:
         prompt = output.prompt
         generated_text = output.outputs[0].text
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
         texts.append(generated_text)
 end = time.time()
 print(f"Time taken: {end - start:.2f}s")
