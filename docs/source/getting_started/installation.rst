@@ -28,7 +28,7 @@ You can install vLLM using pip:
 
 .. note::
 
-    Although we recommend using `conda` to create and manage Python environments, it is highly recommended to use `pip` to install vLLM. This is because `pip` can install `torch` with separate library packages like `NCCL`, while `conda` installs `torch` with statically linked `NCCL`. This can cause issues when vLLM tries to use `NCCL`. See `this issue <https://github.com/vllm-project/vllm/issues/8420>`_ for more details.
+    Although we recommend using ``conda`` to create and manage Python environments, it is highly recommended to use ``pip`` to install vLLM. This is because ``pip`` can install ``torch`` with separate library packages like ``NCCL``, while ``conda`` installs ``torch`` with statically linked ``NCCL``. This can cause issues when vLLM tries to use ``NCCL``. See `this issue <https://github.com/vllm-project/vllm/issues/8420>`_ for more details.
 
 .. note::
 
@@ -84,11 +84,11 @@ You can also build and install vLLM from source:
 
 .. tip::
 
-    Building from source requires quite a lot compilation. If you are building from source for multiple times, it is beneficial to cache the compilation results. For example, you can install `ccache <https://github.com/ccache/ccache>`_ via either `conda install ccache` or `apt install ccache` . As long as `which ccache` command can find the `ccache` binary, it will be used automatically by the build system. After the first build, the subsequent builds will be much faster.
+    Building from source requires quite a lot compilation. If you are building from source for multiple times, it is beneficial to cache the compilation results. For example, you can install `ccache <https://github.com/ccache/ccache>`_ via either ``conda install ccache`` or ``apt install ccache`` . As long as ``which ccache`` command can find the ``ccache`` binary, it will be used automatically by the build system. After the first build, the subsequent builds will be much faster.
 
 .. tip::
     To avoid your system being overloaded, you can limit the number of compilation jobs
-    to be run simultaneously, via the environment variable `MAX_JOBS`. For example:
+    to be run simultaneously, via the environment variable ``MAX_JOBS``. For example:
 
     .. code-block:: console
 
@@ -103,7 +103,7 @@ You can also build and install vLLM from source:
         $ # Use `--ipc=host` to make sure the shared memory is large enough.
         $ docker run --gpus all -it --rm --ipc=host nvcr.io/nvidia/pytorch:23.10-py3
 
-    If you don't want to use docker, it is recommended to have a full installation of CUDA Toolkit. You can download and install it from `the official website <https://developer.nvidia.com/cuda-toolkit-archive>`_. After installation, set the environment variable `CUDA_HOME` to the installation path of CUDA Toolkit, and make sure that the `nvcc` compiler is in your `PATH`, e.g.:
+    If you don't want to use docker, it is recommended to have a full installation of CUDA Toolkit. You can download and install it from `the official website <https://developer.nvidia.com/cuda-toolkit-archive>`_. After installation, set the environment variable ``CUDA_HOME`` to the installation path of CUDA Toolkit, and make sure that the ``nvcc`` compiler is in your ``PATH``, e.g.:
 
     .. code-block:: console
 
