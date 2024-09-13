@@ -68,12 +68,15 @@ class KV_transfer_agent:
         torch_distributed_backend: Union[str, Backend],
     ):
         
+        # FIXME(Jiayi): we need two pipes
+        # one or send and one for recv
         # init pipe
         self.pipe = TorchDistributedPipe(
             group_ranks,
             local_rank,
             torch_distributed_backend,
         )
+        # FIXME(Jiayi): buffer initializtion should be updated accordingly
         # init lookup buffer
         self.buffer = SimpleKVLookupBuffer(self.pipe, 1000**3 * 10)
 
