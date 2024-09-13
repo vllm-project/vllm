@@ -10,9 +10,11 @@ import pytest
 import torch
 
 from vllm.attention import AttentionBackend, AttentionMetadata, AttentionType
-from vllm.attention.backends.xformers import XFormersBackend
-from vllm.utils import (STR_BACKEND_ENV_VAR, STR_XFORMERS_ATTN_VAL,
+from vllm.utils import (STR_BACKEND_ENV_VAR, STR_XFORMERS_ATTN_VAL, is_hip,
                         make_tensor_with_pad)
+
+if not is_hip():
+    from vllm.attention.backends.xformers import XFormersBackend
 
 # For now, disable "test_aot_dispatch_dynamic" since there are some
 # bugs related to this test in PyTorch 2.4.
