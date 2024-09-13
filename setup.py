@@ -429,6 +429,10 @@ def _no_device() -> bool:
     return VLLM_TARGET_DEVICE == "empty"
 
 
+def _is_tt() -> bool:
+    return VLLM_TARGET_DEVICE == "tt"
+
+
 def _is_cuda() -> bool:
     has_cuda = torch.version.cuda is not None
     return (VLLM_TARGET_DEVICE == "cuda" and has_cuda
@@ -544,6 +548,8 @@ def get_vllm_version() -> str:
     if _no_device():
         if envs.VLLM_TARGET_DEVICE == "empty":
             version += f"{sep}empty"
+    elif _is_tt():
+        version += f"{sep}tt"
     elif _is_cuda():
         if envs.VLLM_USE_PRECOMPILED:
             version += f"{sep}precompiled"
@@ -625,6 +631,8 @@ def get_requirements() -> list[str]:
         requirements = _read_requirements("cpu.txt")
     elif _is_xpu():
         requirements = _read_requirements("xpu.txt")
+    elif _is_tt():
+        requirements = _read_requirements("tt.txt")
     else:
         raise ValueError(
             "Unsupported platform, please use CUDA, ROCm, Neuron, HPU, "
@@ -664,6 +672,9 @@ package_data = {
 }
 
 if _no_device():
+    ext_modules = []
+    
+if _is_tt():
     ext_modules = []
 
 if not ext_modules:
