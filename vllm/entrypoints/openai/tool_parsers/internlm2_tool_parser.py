@@ -80,6 +80,7 @@ class Internlm2ToolParser(ToolParser):
                                  DeltaToolCall(
                                      index=self.current_tool_id,
                                      id=f"chatcmpl-tool-{random_uuid()}",
+                                     type="function",
                                      function=DeltaFunctionCall(
                                          name=name, arguments=parameters)),
                              ])

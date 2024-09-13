@@ -72,7 +72,7 @@ WEATHER_TOOL: ChatCompletionToolParam = {
                     "type":
                     "string",
                     "description":
-                    "the two-letter abbreviation for the state "
+                    "must the two-letter abbreviation for the state "
                     "that the city is in, e.g. 'CA' which would "
                     "mean 'California'"
                 },

@@ -37,7 +37,7 @@
             {%- set function=tool_call.function %}
             {{- "<|action_start|><|plugin|>\n" }}
             {{- '{"name": "' + function.name + '", '}}
-            {{- '"arguments": ' + function.arguments|string + '}' }}
+            {{- '"arguments": ' + function.arguments|tojson + '}' }}
             {{- "<|action_end|>" }}
         {%- endfor %}
         {{- "<|im_end|>\n" }}
