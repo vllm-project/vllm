@@ -51,7 +51,15 @@ Build from source
     $ sudo apt-get install -y gcc-12 g++-12 libnuma-dev
     $ sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12
 
-- Second, build and install oneDNN library from source:
+- Second, install Python packages for vLLM CPU backend building:
+
+.. code-block:: console
+
+    $ pip install --upgrade pip
+    $ pip install wheel packaging ninja "setuptools>=49.4.0" numpy
+    $ pip install -v -r requirements-cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
+
+- Third, build and install oneDNN library from source:
 
 .. code-block:: console
 
@@ -64,14 +72,6 @@ Build from source
         -DONEDNN_ENABLE_WORKLOAD=INFERENCE \ 
         -DONEDNN_ENABLE_PRIMITIVE=MATMUL
     $ cmake --build ./oneDNN/build --target install --config Release
-
-- Third, install Python packages for vLLM CPU backend building:
-
-.. code-block:: console
-
-    $ pip install --upgrade pip
-    $ pip install wheel packaging ninja "setuptools>=49.4.0" numpy
-    $ pip install -v -r requirements-cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
 - Finally, build and install vLLM CPU backend: 
 
