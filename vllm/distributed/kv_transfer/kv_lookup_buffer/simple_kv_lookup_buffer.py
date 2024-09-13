@@ -181,7 +181,7 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
     def insert(self, input_tokens, roi, key, value, hidden) -> None:
 
         while self.buffer_size > self.buffer_size_threshold:
-            logger.debug("KV transfer buffer is full. Handling...")
+            # logger.debug("KV transfer buffer is full. Handling...")
             self.full_handler()
         
         self._add_to_buffer(input_tokens, roi, key, value, hidden)
