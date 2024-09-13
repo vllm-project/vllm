@@ -427,6 +427,5 @@ def test_cutlass_cuda_graph(per_act_token: bool, per_out_ch: bool):
     torch.testing.assert_close(out, baseline, rtol=1e-1, atol=1e0)
 
 
-@pytest.mark.smoke
 def test_cutlass_support_opcheck():
     opcheck(torch.ops._C.cutlass_scaled_mm_supports_fp8, (capability, ))

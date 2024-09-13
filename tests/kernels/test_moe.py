@@ -358,7 +358,6 @@ def test_single_marlin_moe_multiply(
     assert compute_max_diff(marlin_output, torch_output) < 1e-2
 
 
-@pytest.mark.smoke
 def test_moe_align_block_size_opcheck():
     num_experts = 4
     block_size = 4
