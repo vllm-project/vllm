@@ -347,7 +347,7 @@ else()
   FetchContent_Declare(
           flash-attention
           GIT_REPOSITORY https://github.com/neuralmagic/flash-attention.git
-          GIT_TAG 311ec23ada693849637a79272350e4d126339258
+          GIT_TAG 52f4339a7889e9a9dfad080a05c63d9e4eeaa533
           GIT_PROGRESS TRUE
   )
 endif()
