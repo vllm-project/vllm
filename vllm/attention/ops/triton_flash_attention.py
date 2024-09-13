@@ -126,7 +126,7 @@ def _attn_fwd_inner(
         # We start from end of seqlen_k so only the first iteration would need
         # to be checked for padding if it is not a multiple of block_n
         # TODO: This can be optimized to only be true for the padded block.
-        if MASK_STEPS:  # noqa: SIM102
+        if MASK_STEPS:
             # If this is the last block / iteration, we want to
             # mask if the sequence length is not a multiple of block size
             # a solution is to always do BLOCK_M // BLOCK_N + 1 steps
@@ -621,7 +621,7 @@ def attn_fwd(
     start_m_idx = start_m * BLOCK_M
     causal_start_idx = seqlen_q - seqlen_k
     acc = acc.to(Out.type.element_ty)
-    if IS_CAUSAL:  # noqa: SIM102
+    if IS_CAUSAL:
         if causal_start_idx > start_m_idx and causal_start_idx < end_m_idx:
             out_mask_boundary = tl.full((BLOCK_DMODEL, ),
                                         causal_start_idx,
