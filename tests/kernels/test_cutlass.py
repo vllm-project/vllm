@@ -74,6 +74,9 @@ def cutlass_fp8_gemm_helper(m: int,
 
     torch.testing.assert_close(out, baseline, rtol=1e-2, atol=5e-2)
 
+    opcheck(torch.ops._C.cutlass_scaled_mm,
+            (out, a, b, scale_a, scale_b, bias))
+
 
 def cutlass_int8_gemm_helper(m: int,
                              n: int,

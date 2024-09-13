@@ -975,6 +975,8 @@ def fp8_allclose(
                           equal_nan=equal_nan)).item())
 
 
+# A special version of op check that has a restricted default set of test_utils
+# and a patched version of allclose that supports fp8 types.
 def opcheck(op: Union[torch._ops.OpOverload, torch._ops.OpOverloadPacket,
                       torch._library.custom_ops.CustomOpDef],
             args: Tuple[Any, ...],

@@ -292,7 +292,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? bias_,"
       "Tensor? seq_idx_,"
       "Tensor? initial_states_,"
-      "Tensor? final_states_out_,"
+      "Tensor!? final_states_out_,"
       "bool silu_activation) -> Tensor");
   ops.impl("causal_conv1d_fwd", torch::kCUDA, &causal_conv1d_fwd);
 #endif
