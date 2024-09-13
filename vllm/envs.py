@@ -426,3 +426,9 @@ def __getattr__(name: str):
 
 def __dir__():
     return list(environment_variables.keys())
+
+
+if environment_variables.get('VLLM_USE_MODELSCOPE', False):
+    from modelscope.utils.hf_util import patch_hub
+    # Patch hub to download models from modelscope to speed up.
+    patch_hub()
