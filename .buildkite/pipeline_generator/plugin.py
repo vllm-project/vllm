@@ -3,6 +3,7 @@ from typing import List, Dict, Any, Optional
 from utils import HF_HOME   
 
 DOCKER_PLUGIN_NAME = "docker#v5.2.0"
+KUBERNETES_PLUGIN_NAME = "kubernetes"
 
 class DockerPluginConfig(BaseModel):
     image: str = ""
@@ -21,3 +22,21 @@ class KubernetesPodSpec(BaseModel):
 
 class KubernetesPluginConfig(BaseModel):
     pod_spec: KubernetesPodSpec
+
+def get_kubernetes_plugin_config(docker_image_path: str, test_bash_command: List[str]) -> Dict:
+    pod_spec = KubernetesPodSpec(
+        containers=[{
+            "image": docker_image_path, 
+            "command": test_bash_command
+        }]
+    )
+    return {KUBERNETES_PLUGIN_NAME: KubernetesPluginConfig(pod_spec=pod_spec).dict(by_alias=True)}
+
+def get_docker_plugin_config(docker_image_path: str, test_bash_command: List[str], no_gpu: bool) -> Dict:
+    docker_plugin_config = DockerPluginConfig(
+        image=docker_image_path, 
+        command=test_bash_command
+    )
+    if no_gpu:
+        docker_plugin_config.gpus = None
+    return {DOCKER_PLUGIN_NAME: docker_plugin_config.dict(exclude_none=True, by_alias=True)}
