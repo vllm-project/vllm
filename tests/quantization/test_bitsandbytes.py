@@ -77,19 +77,6 @@ def validate_generated_texts(hf_runner,
                              model_name,
                              hf_model_kwargs=None):
 
-    if hf_model_kwargs is None:
-        hf_model_kwargs = {}
-
-    # Run with HF runner
-    with hf_runner(model_name, model_kwargs=hf_model_kwargs) as llm:
-        hf_outputs = llm.generate_greedy(prompts, 8)
-        hf_logs = log_generated_texts(prompts, hf_outputs, "HfRunner")
-
-    # Clean up the GPU memory for the next test
-    torch.cuda.synchronize()
-    gc.collect()
-    torch.cuda.empty_cache()
-
     #Run with vLLM runner
     with vllm_runner(model_name,
                      quantization='bitsandbytes',
@@ -98,6 +85,19 @@ def validate_generated_texts(hf_runner,
                      gpu_memory_utilization=0.8) as llm:
         vllm_outputs = llm.generate_greedy(prompts, 8)
         vllm_logs = log_generated_texts(prompts, vllm_outputs, "VllmRunner")
+
+    # Clean up the GPU memory for the next test
+    torch.cuda.synchronize()
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    if hf_model_kwargs is None:
+        hf_model_kwargs = {}
+
+    # Run with HF runner
+    with hf_runner(model_name, model_kwargs=hf_model_kwargs) as llm:
+        hf_outputs = llm.generate_greedy(prompts, 8)
+        hf_logs = log_generated_texts(prompts, hf_outputs, "HfRunner")
 
     # Clean up the GPU memory for the next test
     torch.cuda.synchronize()
