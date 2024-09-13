@@ -68,15 +68,33 @@ class KV_transfer_agent:
         torch_distributed_backend: Union[str, Backend],
     ):
         
-        # FIXME(Jiayi): we need two pipes
-        # one or send and one for recv
-        # init pipe
-        self.pipe = TorchDistributedPipe(
-            group_ranks,
-            local_rank,
-            torch_distributed_backend,
-        )
-        # FIXME(Jiayi): buffer initializtion should be updated accordingly
+        # init two pipes: one or send and one for recv
+        if IS_KV_PREFILL_INSTANCE or IS_LMCACHE_INSTANCE:
+            self.send_pipe = TorchDistributedPipe(
+                group_ranks,
+                local_rank,
+                torch_distributed_backend,
+            )
+            self.recv_pipe = TorchDistributedPipe(
+                group_ranks,
+                local_rank,
+                torch_distributed_backend,
+            )
+        elif IS_KV_DECODE_INSTANCE:
+            self.recv_pipe = TorchDistributedPipe(
+                group_ranks,
+                local_rank,
+                torch_distributed_backend,
+            )
+            self.send_pipe = TorchDistributedPipe(
+                group_ranks,
+                local_rank,
+                torch_distributed_backend,
+            )
+            
+        
+        # FIXME(Jiayi): buffer initializtion should be adapted accordingly
+        # Signal pipe needs to be initialized on both vllm and lmc side
         # init lookup buffer
         self.buffer = SimpleKVLookupBuffer(self.pipe, 1000**3 * 10)
 
