@@ -6,8 +6,8 @@ import sys
 import tempfile
 from collections import UserList
 from enum import Enum
-from typing import (Any, Callable, Dict, List, Optional, Tuple, TypedDict,
-                    TypeVar, Union)
+from typing import (Any, Callable, Dict, List, Optional, Tuple, Type,
+                    TypedDict, TypeVar, Union)
 
 import numpy as np
 import pytest
@@ -18,9 +18,11 @@ from huggingface_hub import snapshot_download
 from PIL import Image
 from transformers import (AutoModelForCausalLM, AutoTokenizer, BatchEncoding,
                           BatchFeature)
+from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
+from vllm.assets.video import VideoAsset
 from vllm.config import TokenizerPoolConfig
 from vllm.connections import global_http_connection
 from vllm.distributed import (destroy_distributed_environment,
@@ -44,6 +46,7 @@ _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
 PromptImageInput = Union[List[Image.Image], List[List[Image.Image]]]
 PromptAudioInput = Union[List[Tuple[np.ndarray, int]],
                          List[List[Tuple[np.ndarray, int]]]]
+PromptVideoInput = Union[List[np.ndarray], List[List[np.ndarray]]]
 
 
 def _read_prompts(filename: str) -> List[str]:
@@ -85,8 +88,35 @@ class _ImageAssets(_ImageAssetsBase):
         return [prompts["stop_sign"], prompts["cherry_blossom"]]
 
 
+class _VideoAssetPrompts(TypedDict):
+    sample_demo_1: str
+
+
+if sys.version_info < (3, 9):
+    # UserList cannot be subscripted
+    class _VideoAssetsBase(UserList):
+        pass
+else:
+
+    class _VideoAssetsBase(UserList[VideoAsset]):
+        pass
+
+
+class _VideoAssets(_VideoAssetsBase):
+
+    def __init__(self) -> None:
+        super().__init__([
+            VideoAsset("sample_demo_1.mp4"),
+        ])
+
+    def prompts(self, prompts: _VideoAssetPrompts) -> List[str]:
+        return [prompts["sample_demo_1"]]
+
+
 IMAGE_ASSETS = _ImageAssets()
 """Singleton instance of :class:`_ImageAssets`."""
+VIDEO_ASSETS = _VideoAssets()
+"""Singleton instance of :class:`_VideoAssets`."""
 
 
 @pytest.fixture(autouse=True)
@@ -202,6 +232,11 @@ def image_assets() -> _ImageAssets:
     return IMAGE_ASSETS
 
 
+@pytest.fixture(scope="session")
+def video_assets() -> _VideoAssets:
+    return VIDEO_ASSETS
+
+
 _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature)
 
 
@@ -226,7 +261,7 @@ class HfRunner:
         *,
         model_kwargs: Optional[Dict[str, Any]] = None,
         is_embedding_model: bool = False,
-        auto_cls=AutoModelForCausalLM,
+        auto_cls: Type[_BaseAutoModelClass] = AutoModelForCausalLM,
         postprocess_inputs: Callable[[BatchEncoding],
                                      BatchEncoding] = identity,
     ) -> None:
@@ -258,20 +293,14 @@ class HfRunner:
             trust_remote_code=True,
         )
 
-        try:
-            # don't put this import at the top level
-            # it will call torch.cuda.device_count()
-            from transformers import AutoProcessor  # noqa: F401
-            self.processor = AutoProcessor.from_pretrained(
-                model_name,
-                torch_dtype=torch_dtype,
-                trust_remote_code=True,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Unable to auto-load HuggingFace processor for model (%s). "
-                "Using tokenizer instead. Reason: %s", model_name, exc)
-            self.processor = self.tokenizer
+        # don't put this import at the top level
+        # it will call torch.cuda.device_count()
+        from transformers import AutoProcessor  # noqa: F401
+        self.processor = AutoProcessor.from_pretrained(
+            model_name,
+            torch_dtype=torch_dtype,
+            trust_remote_code=True,
+        )
 
         self.postprocess_inputs = postprocess_inputs
 
@@ -279,6 +308,7 @@ class HfRunner:
         self,
         prompts: List[str],
         images: Optional[PromptImageInput] = None,
+        videos: Optional[List[np.ndarray]] = None,
         **kwargs: Any,
     ) -> List[Tuple[List[List[int]], List[str]]]:
         if images:
@@ -292,6 +322,8 @@ class HfRunner:
             }
             if images is not None and images[i] is not None:
                 processor_kwargs["images"] = images[i]
+            if videos is not None and videos[i] is not None:
+                processor_kwargs["videos"] = videos[i]
 
             inputs = self.processor(**processor_kwargs)
             inputs = self.postprocess_inputs(inputs)
@@ -352,6 +384,7 @@ class HfRunner:
         prompts: List[str],
         max_tokens: int,
         images: Optional[PromptImageInput] = None,
+        videos: Optional[List[np.ndarray]] = None,
         **kwargs: Any,
     ) -> List[List[torch.Tensor]]:
         all_logprobs: List[List[torch.Tensor]] = []
@@ -362,6 +395,8 @@ class HfRunner:
             }
             if images is not None and images[i] is not None:
                 processor_kwargs["images"] = images[i]
+            if videos is not None and videos[i] is not None:
+                processor_kwargs["videos"] = videos[i]
 
             inputs = self.processor(**processor_kwargs)
             inputs = self.postprocess_inputs(inputs)
@@ -435,6 +470,7 @@ class HfRunner:
         num_logprobs: int,
         images: Optional[PromptImageInput] = None,
         audios: Optional[PromptAudioInput] = None,
+        videos: Optional[List[np.ndarray]] = None,
         **kwargs: Any,
     ) -> List[Tuple[List[int], str, List[Dict[int, float]]]]:
         all_logprobs: List[List[Dict[int, float]]] = []
@@ -454,6 +490,8 @@ class HfRunner:
                 processor_kwargs["audio"] = audio
                 processor_kwargs["sampling_rate"] = sr
 
+            if videos is not None:
+                processor_kwargs["videos"] = videos[i]
             inputs = self.processor(**processor_kwargs)
             inputs = self.postprocess_inputs(inputs)
 
@@ -615,8 +653,8 @@ class VllmRunner:
             outputs.append((req_sample_output_ids, req_sample_output_strs))
         return outputs
 
+    @staticmethod
     def _final_steps_generate_w_logprobs(
-        self,
         req_outputs: List[RequestOutput],
     ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
         outputs: List[Tuple[List[int], str, Optional[SampleLogprobs]]] = []
@@ -634,11 +672,15 @@ class VllmRunner:
         sampling_params: SamplingParams,
         images: Optional[PromptImageInput] = None,
         audios: Optional[PromptAudioInput] = None,
+        videos: Optional[PromptVideoInput] = None,
     ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
         assert sampling_params.logprobs is not None
 
         if images is not None:
             assert len(prompts) == len(images)
+
+        if videos is not None:
+            assert len(prompts) == len(videos)
 
         inputs = [TextPrompt(prompt=prompt) for prompt in prompts]
         if images is not None:
@@ -648,6 +690,11 @@ class VllmRunner:
         if audios is not None:
             for i, audio in enumerate(audios):
                 inputs[i]["multi_modal_data"] = {"audio": audio}
+
+        if videos is not None:
+            for i, video in enumerate(videos):
+                inputs[i]["multi_modal_data"] = {"video": video}
+        print(f"[INPUTS!!!!]: {inputs}, {sampling_params}")
 
         req_outputs = self.model.generate(inputs,
                                           sampling_params=sampling_params)
@@ -685,6 +732,7 @@ class VllmRunner:
         num_logprobs: int,
         images: Optional[PromptImageInput] = None,
         audios: Optional[PromptAudioInput] = None,
+        videos: Optional[PromptVideoInput] = None,
         stop_token_ids: Optional[List[int]] = None,
     ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
         greedy_logprobs_params = SamplingParams(temperature=0.0,
@@ -694,7 +742,8 @@ class VllmRunner:
         outputs = self.generate_w_logprobs(prompts,
                                            greedy_logprobs_params,
                                            images=images,
-                                           audios=audios)
+                                           audios=audios,
+                                           videos=videos)
 
         return [(output_ids, output_str, output_logprobs)
                 for output_ids, output_str, output_logprobs in outputs]
