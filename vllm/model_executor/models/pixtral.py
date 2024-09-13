@@ -117,11 +117,11 @@ def input_processor_for_pixtral(ctx: InputContext, llm_inputs: LLMInputs):
 
         if image_token_id not in llm_inputs['prompt_token_ids']:
             raise ValueError(
-                (f"You've passed {llm_inputs=} without {image_token_id=}"
-                 " Make sure to process your input via mistral_common's"
-                 " tokenizer or pass a chat completion request. For more"
-                 " For more info, see: "
-                 "https://github.com/vllm-project/vllm/issues/8411."))
+                f"You've passed {llm_inputs=} without {image_token_id=}"
+                " Make sure to process your input via mistral_common's"
+                " tokenizer or pass a chat completion request. For more"
+                " For more info, see: "
+                "https://github.com/vllm-project/vllm/issues/8411.")
 
     return llm_inputs
 

@@ -49,7 +49,7 @@ PromptVideoInput = Union[List[np.ndarray], List[List[np.ndarray]]]
 
 
 def _read_prompts(filename: str) -> List[str]:
-    with open(filename, "r") as f:
+    with open(filename) as f:
         prompts = f.readlines()
         return prompts
 
@@ -860,7 +860,7 @@ def dummy_opt_path():
                               "*.msgpack"
                           ])
         assert os.path.exists(json_path)
-        with open(json_path, "r") as f:
+        with open(json_path) as f:
             config = json.load(f)
         config["architectures"] = ["MyOPTForCausalLM"]
         with open(json_path, "w") as f:

@@ -1,4 +1,3 @@
-# coding=utf-8
 """Inference-only Jamba model."""
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
