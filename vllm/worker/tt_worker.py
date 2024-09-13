@@ -9,14 +9,162 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size, is_pin_memory_available
+from vllm.worker.worker import raise_if_cache_size_invalid
 from vllm.worker.tt_model_runner import TTModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
                                      LoraNotSupportedWorkerBase, WorkerInput)
 
 import ttnn
+from ttnn import ReplicateTensorToMesh
 
 logger = init_logger(__name__)
+
+
+class TTCacheEngine:
+    """Manages the KV cache.
+
+    This class is responsible for initializing and managing the TT and CPU KV
+    caches. It also provides methods for performing KV cache operations, such
+    as swapping and copying.
+    """
+
+    def __init__(
+        self,
+        cache_config: CacheConfig,
+        model_config: ModelConfig,
+        parallel_config: ParallelConfig,
+        device_config: DeviceConfig,
+    ) -> None:
+        self.cache_config = cache_config
+        self.model_config = model_config
+        self.parallel_config = parallel_config
+        self.device_config = device_config
+
+        self.head_size = model_config.get_head_size()
+        # Models like Jamba, have mixed typed layers, E.g Mamba
+        self.num_attention_layers = model_config.get_num_attention_layers(
+            parallel_config)
+        # TODO: should be 1 since TP=8
+        self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
+        # TODO: get num devices from device_config.device (device_mesh)
+        # TODO: add get_num_devices to worker
+        self.num_kv_heads //= 8 # TP=8, tries to use distributed worker if you give LLM 8 TP
+
+        self.block_size = cache_config.block_size
+        self.num_gpu_blocks = cache_config.num_gpu_blocks
+        if self.num_gpu_blocks:
+            self.num_gpu_blocks //= parallel_config.pipeline_parallel_size
+        self.num_cpu_blocks = cache_config.num_cpu_blocks
+        if self.num_cpu_blocks:
+            self.num_cpu_blocks //= parallel_config.pipeline_parallel_size
+
+        if cache_config.cache_dtype == "auto":
+            self.dtype = model_config.dtype
+        else:
+            self.dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
+
+        # Get attention backend.
+        # self.attn_backend = get_attn_backend(
+        #     model_config.get_num_attention_heads(parallel_config),
+        #     self.head_size,
+        #     self.num_kv_heads,
+        #     model_config.get_sliding_window(),
+        #     model_config.dtype,
+        #     cache_config.cache_dtype,
+        #     self.block_size,
+        # )
+
+        # Initialize the cache.
+        # List of KV caches. Entry is a list containing K and V tensors.
+        self.tt_cache = self._allocate_kv_cache(
+            self.num_gpu_blocks, self.device_config.device_type)
+        self.cpu_cache = self._allocate_kv_cache(self.num_cpu_blocks, "cpu")
+
+    def _allocate_kv_cache(
+        self,
+        num_blocks: int,
+        device: str,
+    ) -> List[torch.Tensor]:
+        """Allocates KV cache on the specified device.
+        The assumption is that KV cache for a layer is packed into one tensor. 
+        We will have a separate tensor for K and V.
+        """
+        # kv_cache_shape = self.attn_backend.get_kv_cache_shape(
+        #     num_blocks, self.block_size, self.num_kv_heads, self.head_size)
+        
+        # K and V each have the following shape: (num_blocks, num_kv_heads, block_size, head_size)
+        kv_cache_shape = (num_blocks, self.num_kv_heads, self.block_size, self.head_size)
+        kv_cache: List[torch.Tensor] = []
+        num_layers = self.num_attention_layers 
+        # num_layers = 1 # TODO: Debugging for 1 layer 
+        if device == "cpu":
+            for _ in range(num_layers):
+                # null block in CpuGpuBlockAllocator requires at least that
+                # block to be zeroed-out.
+                # Zero-initialize CPU cache
+                cache_k = torch.zeros(kv_cache_shape,
+                                      dtype=self.dtype,
+                                      device=device)
+                cache_v = torch.zeros(kv_cache_shape,
+                                      dtype=self.dtype,
+                                      device=device)
+                kv_cache.append([cache_k, cache_v])
+        else:
+            for _ in range(num_layers):
+                cache_k = torch.zeros(kv_cache_shape, dtype=self.dtype)
+                cache_v = torch.zeros(kv_cache_shape, dtype=self.dtype)
+                
+                kv_tt = [ttnn.as_tensor(
+                    lp,
+                    device=self.device_config.device,
+                    # TODO: this could be ShardTensorToMesh, removing need for init to know about TP=8. Could affect other calculations which use self.num_kv_heads, though.
+                    mesh_mapper=ReplicateTensorToMesh(self.device_config.device),
+                    layout=ttnn.TILE_LAYOUT,
+                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                    dtype=ttnn.bfloat8_b
+                ) for lp in (cache_k, cache_v)]
+                
+                kv_cache.append(kv_tt)
+        return kv_cache
+
+    def swap_in(self, src_to_dst: torch.Tensor) -> None:
+        raise NotImplementedError
+        # for i in range(self.num_attention_layers):
+        #     self.attn_backend.swap_blocks(self.cpu_cache[i], self.gpu_cache[i],
+        #                                   src_to_dst)
+
+    def swap_out(self, src_to_dst: torch.Tensor) -> None:
+        raise NotImplementedError
+        # for i in range(self.num_attention_layers):
+        #     self.attn_backend.swap_blocks(self.gpu_cache[i], self.cpu_cache[i],
+        #                                   src_to_dst)
+
+    def copy(self, src_to_dsts: torch.Tensor) -> None:
+        raise NotImplementedError
+        # self.attn_backend.copy_blocks(self.gpu_cache, src_to_dsts)
+
+    @staticmethod
+    def get_cache_block_size(
+        cache_config: CacheConfig,
+        model_config: ModelConfig,
+        parallel_config: ParallelConfig,
+    ) -> int:
+        head_size = model_config.get_head_size()
+        num_heads = model_config.get_num_kv_heads(parallel_config)
+        num_heads //= 8 # TODO: Make general without using TP=8?
+        num_attention_layers = model_config.get_num_attention_layers(
+            parallel_config)
+
+        key_cache_block = cache_config.block_size * num_heads * head_size
+        value_cache_block = key_cache_block
+        total = num_attention_layers * (key_cache_block + value_cache_block)
+        if cache_config.cache_dtype == "auto":
+            dtype = model_config.dtype
+        else:
+            dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
+        dtype_size = get_dtype_size(dtype)
+        return dtype_size * total
 
 
 class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
@@ -54,8 +202,11 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             load_config
         )
         
+        self.cache_engine: List[TTCacheEngine]
+        self.tt_cache: List[List]
+        
         self.mesh_device = None  # initialized by init_device
-        self.tt_kv_cache = None
+
         
     @property
     def do_metadata_broadcast(self) -> bool:
@@ -63,7 +214,7 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
     @property
     def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
-        return self.tt_kv_cache
+        return self.tt_cache
 
     def init_device(self) -> None:
         # TODO: Add support for devices other than T3K
@@ -93,7 +244,8 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         """
         # TODO: Add proper implementation, ignoring block allocation for now
         # Note: can use --max-num-batched-tokens to set max number of batched tokens per iteration in EngineArgs
-        num_tt_blocks = int(self.scheduler_config.max_model_len / self.cache_config.block_size)
+        # num_tt_blocks = int(self.scheduler_config.max_model_len / self.cache_config.block_size)
+        num_tt_blocks = 501 # TODO: debugging 
         num_cpu_blocks = 0
         return num_tt_blocks, num_cpu_blocks
 
@@ -103,8 +255,31 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         num_cpu_blocks: int,
     ) -> None:
         """Initialize the KV cache with the given size in blocks.
+        
+        - Checks cache size is valid
+        - Updates cache_config with num_gpu_blocks and num_cpu_blocks
+        - init cache engine
+        
+        Note that CPU, TPU, and openvino workers don't use standard CacheEngine
         """
-        pass  # TODO: Add proper implementation, ignoring block allocation for now
+        # SKip check, since we're setting num_gpu_blocks much lower than would fit max_model_len
+        # raise_if_cache_size_invalid(num_gpu_blocks, self.cache_config.block_size, self.model_config.max_model_len)
+        self.cache_config.num_gpu_blocks = num_gpu_blocks
+        self.cache_config.num_cpu_blocks = num_cpu_blocks
+        
+        self._init_cache_engine()
+        
+    def _init_cache_engine(self):
+        assert self.cache_config.num_gpu_blocks is not None
+        self.cache_engine = [
+            TTCacheEngine(self.cache_config, self.model_config,
+                        self.parallel_config, self.device_config)
+            for _ in range(self.parallel_config.pipeline_parallel_size)
+        ]
+        self.tt_cache = [
+            self.cache_engine[ve].tt_cache
+            for ve in range(self.parallel_config.pipeline_parallel_size)
+        ]
     
     def get_cache_block_size_bytes(self) -> int:
         """Return the size of a single cache block, in bytes. Used in
@@ -142,6 +317,8 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     def execute_worker(self, worker_input: WorkerInput) -> None:
         """
         Process an execution request.
+        
+        Appears to do swap_in, swap_out, copy for KV blocks, right before executing the model.
         """
         # TODO: Add proper implementation, ignoring block allocation for now
         pass
