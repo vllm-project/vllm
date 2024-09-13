@@ -428,7 +428,7 @@ def __dir__():
     return list(environment_variables.keys())
 
 
-if environment_variables.get('VLLM_USE_MODELSCOPE', False):
+if environment_variables.get('VLLM_USE_MODELSCOPE', lambda: False)():
     import modelscope
     from packaging import version
     if version.parse(modelscope.__version__) <= version.parse('1.18.0'):
