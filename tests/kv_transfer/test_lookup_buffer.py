@@ -7,8 +7,9 @@ import random
 from tqdm import tqdm
 import time
 
+# TODO: the test depends on a lot of fields in the current implementation. We should have standard interface instead direct field access
 
-def test_run(my_rank, buffer):
+def test_run(my_rank, buffer, device):
     
     # buffer should be empty in the beginning    
     if my_rank == 0:
@@ -17,15 +18,19 @@ def test_run(my_rank, buffer):
 
 
     # insert
-    tokens = torch.tensor([1,2,3]).to(buffer.pipe.device)
+    tokens = torch.tensor([1,2,3]).to(device)
     roi = (tokens > 0)
     if my_rank == 0:
-        key = 2.0 * torch.ones([5, 6]).to(buffer.pipe.device)
-        value = 3.0 * torch.ones([5, 6]).to(buffer.pipe.device)
+        key = 2.0 * torch.ones([5, 6]).to(device)
+        value = 3.0 * torch.ones([5, 6]).to(device)
 
-        placeholder = torch.tensor([1]).to(buffer.pipe.device)
+        placeholder = torch.tensor([1]).to(device)
 
         buffer.insert(tokens, roi, key, value, placeholder)
+
+        #for i in range(2000):
+        #    print("Here:", i)
+        #    time.sleep(0.01)
     torch.distributed.barrier()
         
     # drop_select
@@ -33,22 +38,21 @@ def test_run(my_rank, buffer):
         tok, roi_, key, value, hidden = buffer.drop_select(tokens, roi)
         assert torch.allclose(tokens, tok)
         assert torch.allclose(roi, roi_)
-        assert torch.allclose(key, 2.0 * torch.ones([5, 6]))
-        assert torch.allclose(value, 3.0 * torch.ones([5, 6]))
+        assert torch.allclose(key, 2.0 * torch.ones([5, 6], device = device))
+        assert torch.allclose(value, 3.0 * torch.ones([5, 6], device = device))
     torch.distributed.barrier()
     
     if my_rank == 0:
         assert buffer.buffer_size == 0
         assert len(buffer.buffer) == 0
+    
+    print("Test run passed!")
 
-
-def stress_test(my_rank, buf):
+def stress_test(my_rank, buf, device):
     
     torch.distributed.barrier()
     torch.manual_seed(100)
 
-    device = buf.pipe.device
-    
     reqs = [
         (
          torch.rand(100).to(device),   # tokens
@@ -56,7 +60,7 @@ def stress_test(my_rank, buf):
          torch.rand(100).to(device),   # key
          torch.rand(100).to(device),   # value
          torch.rand(100).to(device),   # hidden
-         ) for i in range(200)]
+         ) for i in tqdm(range(200))]
 
     random.seed(my_rank)
     random.shuffle(reqs)
@@ -86,7 +90,7 @@ def stress_test(my_rank, buf):
                 assert torch.allclose(k, k_)
                 assert torch.allclose(v, v_)
                 assert torch.allclose(h, h_)
-    print('Rand %d done' % my_rank)
+    print('Rank %d done' % my_rank)
     torch.distributed.barrier()
     
     
@@ -101,12 +105,8 @@ def stress_test(my_rank, buf):
     else:
         torch.distributed.send(torch.tensor([n]), 0)
 
+    print("Passed stress test!")
         
-    
-            
-            
-    
-    
     
 
 if __name__ == "__main__":
@@ -123,10 +123,14 @@ if __name__ == "__main__":
 
 
     pipe = tdp.TorchDistributedPipe([[0,1]], my_rank, "nccl")
-    buffer = sklb.SimpleKVLookupBuffer(pipe, 170000)
+    cpu_pipe = tdp.TorchDistributedPipe([[0,1]], my_rank, "gloo")
+    buffer = sklb.SimpleKVLookupBuffer(cpu_pipe, pipe, 170000)
 
-    test_run(my_rank, buffer)
+    test_run(my_rank, buffer, pipe.device)
     
-    stress_test(my_rank, buffer)
+    stress_test(my_rank, buffer, pipe.device)
     
+    buffer.close()
+    pipe.close()
+    cpu_pipe.close()
     print('Done')
