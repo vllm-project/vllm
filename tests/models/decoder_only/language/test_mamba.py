@@ -5,7 +5,7 @@ Run `pytest tests/models/test_mamba.py`.
 import pytest
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .utils import check_outputs_equal
+from ...utils import check_outputs_equal
 
 MODELS = [
     "state-spaces/mamba-370m-hf",
