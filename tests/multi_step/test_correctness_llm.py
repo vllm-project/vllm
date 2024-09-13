@@ -123,7 +123,7 @@ def test_multi_step_llm_w_prompt_logprobs(
     num_logprobs: Optional[int],
     num_prompt_logprobs: Optional[int],
 ) -> None:
-    """Test vLLM engine with multi-step scheduling via sync LLM Engine.
+    """Test prompt logprobs with multi-step scheduling via sync LLM Engine.
 
     Set up a vLLM engine instance w/ single-step scheduling as a ground-truth
     reference.
@@ -131,7 +131,7 @@ def test_multi_step_llm_w_prompt_logprobs(
     Prompt them with the same example prompts.
 
     Validate:
-    * Generated logprobs are all very close
+    * All generated logprobs are all very close
 
     Args:
       hf_runner: HF transformers model runner fixture
@@ -147,6 +147,9 @@ def test_multi_step_llm_w_prompt_logprobs(
       num_prompts: number of example prompts under test
       num_logprobs: corresponds to the `logprobs` argument to the OpenAI
                     completions endpoint; `None` -> no logprobs
+      num_prompt_logprobs: number of logprobs to return for each prompt token;
+                           note that this argument is not supported by the
+                           OpenAI completions endpoint.
     """
 
     prompts = example_prompts
