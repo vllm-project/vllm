@@ -223,6 +223,21 @@ def test_fused_marlin_moe(
 
     topk_weights, topk_ids = fused_topk(a, score, topk, False)
 
+    ##############
+    M, _ = a.shape
+    token_expert_indicies = torch.empty(M,
+                                        topk,
+                                        dtype=torch.int32,
+                                        device=a.device)
+
+    opcheck(torch._moe_C.topk_softmax, (
+        topk_weights,
+        topk_ids,
+        token_expert_indicies,
+        score.float(),
+    ))
+    ##############
+
     triton_output = fused_moe(
         a,
         w_ref1.transpose(1, 2).contiguous(),
