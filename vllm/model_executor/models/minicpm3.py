@@ -26,25 +26,20 @@ from typing import Any, Dict, Optional
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig, LoRAConfig
+from vllm.config import CacheConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.models.minicpm import (MiniCPMDecoderLayer,
-                                                MiniCPMForCausalLM, MiniCPMMLP,
-                                                MiniCPMModel, MiniCPMMoE)
+                                                MiniCPMForCausalLM,
+                                                MiniCPMModel)
 
 
 class MiniCPM3Attention(nn.Module):
@@ -182,117 +177,40 @@ class MiniCPM3Attention(nn.Module):
 
 class MiniCPM3DecoderLayer(MiniCPMDecoderLayer):
 
-    def __init__(
-        self,
-        config,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-    ) -> None:
-        nn.Module.__init__(self)
-        self.config = config
-        self.hidden_size = config.hidden_size
-        rope_theta = getattr(config, "rope_theta", 10000)
-        rope_scaling = getattr(config, "rope_scaling", None)
-        max_position_embeddings = getattr(config, "max_position_embeddings",
-                                          8192)
+    def _init_attn_block(self):
+        self.input_layernorm = RMSNorm(self.config.hidden_size,
+                                       eps=self.config.rms_norm_eps)
         self.self_attn = MiniCPM3Attention(
-            config=config,
+            config=self.config,
             hidden_size=self.hidden_size,
-            num_heads=config.num_attention_heads,
-            qk_nope_head_dim=config.qk_nope_head_dim,
-            qk_rope_head_dim=config.qk_rope_head_dim,
-            v_head_dim=config.v_head_dim,
-            q_lora_rank=config.q_lora_rank,
-            kv_lora_rank=config.kv_lora_rank,
-            rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
-            max_position_embeddings=max_position_embeddings,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            num_heads=self.config.num_attention_heads,
+            qk_nope_head_dim=self.config.qk_nope_head_dim,
+            qk_rope_head_dim=self.config.qk_rope_head_dim,
+            v_head_dim=self.config.v_head_dim,
+            q_lora_rank=self.config.q_lora_rank,
+            kv_lora_rank=self.config.kv_lora_rank,
+            rope_theta=self.rope_theta,
+            rope_scaling=self.rope_scaling,
+            max_position_embeddings=self.max_position_embeddings,
+            cache_config=self.cache_config,
+            quant_config=self.quant_config,
         )
-        self.num_experts = getattr(self.config, "num_experts", 0)
-        if self.num_experts == 0:
-            self.mlp = MiniCPMMLP(
-                hidden_size=self.hidden_size,
-                intermediate_size=config.intermediate_size,
-                hidden_act=config.hidden_act,
-                quant_config=quant_config,
-            )
-        else:
-            self.mlp = MiniCPMMoE(num_experts=config.num_experts,
-                                  top_k=config.num_experts_per_tok,
-                                  hidden_size=config.hidden_size,
-                                  intermediate_size=config.intermediate_size)
-        self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size,
-                                                eps=config.rms_norm_eps)
 
 
 class MiniCPM3Model(MiniCPMModel):
 
-    def __init__(
-        self,
-        config,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
-    ) -> None:
-        nn.Module.__init__(self)
-        self.config = config
-        self.padding_idx = config.pad_token_id
-        lora_vocab = (lora_config.lora_extra_vocab_size *
-                      (lora_config.max_loras or 1)) if lora_config else 0
-        self.vocab_size = config.vocab_size + lora_vocab
-        self.org_vocab_size = config.vocab_size
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-            org_num_embeddings=config.vocab_size,
-        )
+    def _init_layers(self):
         self.layers = nn.ModuleList([
-            MiniCPM3DecoderLayer(config, cache_config, quant_config)
-            for _ in range(config.num_hidden_layers)
+            MiniCPM3DecoderLayer(self.config, self.cache_config,
+                                 self.quant_config)
+            for _ in range(self.config.num_hidden_layers)
         ])
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
 
 class MiniCPM3ForCausalLM(MiniCPMForCausalLM):
 
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
-    ) -> None:
-        nn.Module.__init__(self)
-
-        self.config = config
-        self.lora_config = lora_config
-
-        self.num_experts = getattr(self.config, "num_experts", 0)
-        self.quant_config = quant_config
-        self.model = MiniCPM3Model(config,
-                                   cache_config,
-                                   quant_config,
-                                   lora_config=lora_config)
-        unpadded_vocab_size = config.vocab_size
-        if lora_config:
-            unpadded_vocab_size += lora_config.lora_extra_vocab_size
-        if not self.config.tie_word_embeddings:
-            self.lm_head = ParallelLMHead(
-                unpadded_vocab_size,
-                config.hidden_size,
-                org_num_embeddings=config.vocab_size,
-                padding_size=DEFAULT_VOCAB_PADDING_SIZE
-                # We need bigger padding if using lora for kernel
-                # compatibility
-                if not lora_config else lora_config.lora_vocab_padding_size,
-                quant_config=quant_config,
-            )
-        self.scale_width = self.config.hidden_size / self.config.dim_model_base
-
-        self.logits_processor = LogitsProcessor(unpadded_vocab_size,
-                                                config.vocab_size)
-        self.sampler = Sampler()
+    def _init_model(self):
+        self.model = MiniCPM3Model(config=self.config,
+                                   cache_config=self.cache_config,
+                                   quant_config=self.quant_config,
+                                   lora_config=self.lora_config)
