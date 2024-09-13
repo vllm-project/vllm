@@ -21,7 +21,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Grok1 model."""
-import os
 from typing import Iterable, List, Optional, Tuple
 
 import torch
@@ -38,6 +37,7 @@ from vllm.model_executor.layers.linear import (QKVParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -54,7 +54,6 @@ from .utils import is_pp_missing_parameter, make_layers
 attn_output_multiplier = 0.08838834764831845
 output_multiplier_scale = 0.5773502691896257
 max_attn_val = 30.0
-reduce_conversion_kernel: bool = os.getenv("VLLM_FP8_REDUCE_CONV", '0') == "1"
 
 
 class Grok1MoE(nn.Module):
@@ -199,6 +198,7 @@ class Grok1DecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
+        self.use_fp8 = isinstance(quant_config, Fp8Config)
         # Requires transformers > 4.32.0
         rope_theta = getattr(config, "rope_theta", 10000)
         self.attn = Grok1Attention(hidden_size=self.hidden_size,
@@ -233,18 +233,16 @@ class Grok1DecoderLayer(nn.Module):
         attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
+        scale = None if not self.use_fp8 else \
+            self.attn.qkv_proj.input_scale
         # Self Attention
         if residual is None:
             residual = hidden_states
-            hidden_states = self.pre_attn_norm(
-                hidden_states, self.attn.qkv_proj.activation_scaling_factor
-            ) if reduce_conversion_kernel else self.pre_attn_norm(
-                hidden_states)
+            hidden_states = self.pre_attn_norm(hidden_states, None, scale)
         else:
             hidden_states, residual = self.pre_attn_norm(
-                hidden_states, self.attn.qkv_proj.activation_scaling_factor,
-                residual) if reduce_conversion_kernel else self.pre_attn_norm(
-                    hidden_states, residual)
+                hidden_states, residual, scale)
+
         hidden_states = self.attn(
             positions=positions,
             hidden_states=hidden_states,
