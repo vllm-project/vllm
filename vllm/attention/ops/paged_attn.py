@@ -114,10 +114,8 @@ class PagedAttention:
         output = torch.empty_like(query)
         block_size = value_cache.shape[3]
         num_seqs, num_heads, head_size = query.shape
-
         max_num_partitions = ((max_seq_len + _PARTITION_SIZE - 1) //
                               _PARTITION_SIZE)
-
         # NOTE(woosuk): We use a simple heuristic to decide whether to use
         # PagedAttention V1 or V2. If the number of partitions is 1, we use
         # V1 to avoid the overhead of reduction. Also, if the number of
