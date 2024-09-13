@@ -808,10 +808,9 @@ class Scheduler:
                     running_queue[-1]) > self._get_priority(seq_group):
                 # Only preempt if waiting sequence cannot be allocated
                 can_allocate = self.block_manager.can_allocate(seq_group)
-                if (num_new_tokens
+                if (num_new_tokens and can_allocate == AllocStatus.OK
                         and budget.can_schedule(num_new_tokens=num_new_tokens,
-                                                num_new_seqs=num_new_seqs)
-                        and can_allocate == AllocStatus.OK):
+                                                num_new_seqs=num_new_seqs)):
                     break
 
                 #Adjust budget to remove the victim sequence group
