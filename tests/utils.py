@@ -356,12 +356,23 @@ def error_on_warning():
         yield
 
 
+def get_physical_device_indices(devices):
+    visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible_devices is None:
+        return devices
+
+    visible_indices = [int(x) for x in visible_devices.split(",")]
+    index_mapping = {i: physical for i, physical in enumerate(visible_indices)}
+    return [index_mapping[i] for i in devices if i in index_mapping]
+
+
 @_nvml()
 def wait_for_gpu_memory_to_clear(devices: List[int],
                                  threshold_bytes: int,
                                  timeout_s: float = 120) -> None:
     # Use nvml instead of pytorch to reduce measurement error from torch cuda
     # context.
+    devices = get_physical_device_indices(devices)
     start_time = time.time()
     while True:
         output: Dict[int, str] = {}

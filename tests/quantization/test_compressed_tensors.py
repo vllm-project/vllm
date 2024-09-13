@@ -56,7 +56,7 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner, model_args):
         assert qkv_proj.weight_scale.dtype is torch.float32
         assert qkv_proj.input_scale.dtype is torch.float32
 
-        output = llm.generate_greedy("Hello my name is", max_tokens=20)
+        output = llm.generate_greedy(["Hello my name is"], max_tokens=20)
         assert output
 
 
@@ -85,7 +85,7 @@ def test_compressed_tensors_w8a8_dynanmic_per_token(vllm_runner, model_args):
         assert qkv_proj.scheme.strategy == strategy
         assert qkv_proj.weight.dtype is torch.int8
 
-        output = llm.generate_greedy("Hello my name is", max_tokens=20)
+        output = llm.generate_greedy(["Hello my name is"], max_tokens=20)
         assert output
 
 

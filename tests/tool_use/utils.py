@@ -19,7 +19,7 @@ ARGS: List[str] = ["--enable-auto-tool-choice", "--max-model-len", "8096"]
 CONFIGS: Dict[str, ServerConfig] = {
     "hermes": {
         "model":
-        "NousResearch/Hermes-2-Pro-Llama-3-8B",
+        "NousResearch/Hermes-3-Llama-3.1-8B",
         "arguments": [
             "--tool-call-parser", "hermes", "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_hermes.jinja")

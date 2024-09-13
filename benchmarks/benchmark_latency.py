@@ -10,7 +10,7 @@ import torch
 from tqdm import tqdm
 
 from vllm import LLM, SamplingParams
-from vllm.engine.arg_utils import EngineArgs
+from vllm.engine.arg_utils import DEVICE_OPTIONS, EngineArgs
 from vllm.inputs import PromptInputs
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.utils import FlexibleArgumentParser
@@ -205,13 +205,11 @@ if __name__ == '__main__':
         default=None,
         help=('path to save the pytorch profiler output. Can be visualized '
               'with ui.perfetto.dev or Tensorboard.'))
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="auto",
-        choices=["auto", "cuda", "cpu", "openvino", "tpu", "xpu"],
-        help='device type for vLLM execution, supporting CUDA, OpenVINO and '
-        'CPU.')
+    parser.add_argument("--device",
+                        type=str,
+                        default="auto",
+                        choices=DEVICE_OPTIONS,
+                        help='device type for vLLM execution')
     parser.add_argument('--block-size',
                         type=int,
                         default=16,

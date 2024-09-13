@@ -443,27 +443,26 @@ class SiglipVisionTransformer(nn.Module):
         self.config = config
         embed_dim = config.hidden_size
 
-        if (num_hidden_layers_override is None
-                or num_hidden_layers_override == config.num_hidden_layers):
-            self.need_post_layernorm = True
-        elif num_hidden_layers_override > config.num_hidden_layers:
-            raise ValueError(
-                "num_hidden_layers_override cannot be greater than "
-                "num_hidden_layers")
-        else:
-            self.need_post_layernorm = False
-
         self.embeddings = SiglipVisionEmbeddings(config)
         self.encoder = SiglipEncoder(
             config,
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
         )
-        if self.need_post_layernorm:
+
+        if len(self.encoder.layers) > config.num_hidden_layers:
+            raise ValueError(
+                f"The original encoder only has {config.num_hidden_layers} "
+                f"layers, but you requested {len(self.encoder.layers)} layers."
+            )
+        elif len(self.encoder.layers) == config.num_hidden_layers:
             self.post_layernorm = nn.LayerNorm(embed_dim,
                                                eps=config.layer_norm_eps)
         else:
-            self.post_layernorm = nn.Identity()
+            # post_layernorm is unused when we extract intermediate features
+            # In this case, we can skip it to conserve memory
+            self.post_layernorm = None
+
         self.use_head = (True if not hasattr(config, "vision_use_head") else
                          config.vision_use_head)
         if self.use_head:
@@ -481,6 +480,9 @@ class SiglipVisionTransformer(nn.Module):
         )
 
         encoder_outputs = self.encoder(inputs_embeds=hidden_states)
+
+        if self.post_layernorm is None:
+            return encoder_outputs
 
         last_hidden_state = self.post_layernorm(encoder_outputs)
         # TODO: add this back when pooled_output is used in inference
@@ -512,8 +514,8 @@ class SiglipVisionModel(nn.Module):
         )
 
     @property
-    def need_post_layernorm(self):
-        return self.vision_model.need_post_layernorm
+    def _require_post_layernorm(self) -> bool:
+        return self.vision_model.post_layernorm is not None
 
     def get_input_embeddings(self) -> nn.Module:
         return self.vision_model.embeddings.patch_embedding
@@ -541,7 +543,7 @@ class SiglipVisionModel(nn.Module):
         for name, loaded_weight in weights:
             # post_layernorm is optional in SiglipVisionModel
             if ("vision_model.post_layernorm" in name
-                    and not self.need_post_layernorm):
+                    and not self._require_post_layernorm):
                 continue
 
             # omit layers when num_hidden_layers_override is set

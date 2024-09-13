@@ -4,6 +4,7 @@ from io import BytesIO
 from typing import Any, List, Optional, Tuple, TypeVar, Union
 
 import numpy as np
+import numpy.typing as npt
 from PIL import Image
 
 from vllm.connections import global_http_connection
@@ -185,6 +186,47 @@ def rescale_image_size(image: Image.Image,
     if transpose >= 0:
         image = image.transpose(Image.Transpose(transpose))
     return image
+
+
+def try_import_video_packages() -> Any:
+    try:
+        import cv2
+    except ImportError:
+        raise ImportError(
+            "Please install vllm[video] for video support.") from None
+    return cv2
+
+
+def resize_video(frames: npt.NDArray, size: Tuple[int, int]) -> npt.NDArray:
+    cv2 = try_import_video_packages()
+
+    num_frames, _, _, channels = frames.shape
+    new_height, new_width = size
+    resized_frames = np.empty((num_frames, new_height, new_width, channels),
+                              dtype=frames.dtype)
+    for i, frame in enumerate(frames):
+        resized_frame = cv2.resize(frame, (new_width, new_height))
+        resized_frames[i] = resized_frame
+    return resized_frames
+
+
+def rescale_video_size(frames: npt.NDArray, size_factor: float) -> npt.NDArray:
+    _, height, width, _ = frames.shape
+    new_height = int(height * size_factor)
+    new_width = int(width * size_factor)
+
+    return resize_video(frames, (new_height, new_width))
+
+
+def sample_frames_from_video(frames: npt.NDArray,
+                             num_frames: int) -> npt.NDArray:
+    total_frames = frames.shape[0]
+    if num_frames == -1:
+        return frames
+    else:
+        frame_indices = np.linspace(0, total_frames - 1, num_frames, dtype=int)
+        sampled_frames = frames[frame_indices, ...]
+        return sampled_frames
 
 
 # Utilities for input processors

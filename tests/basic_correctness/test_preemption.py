@@ -64,6 +64,7 @@ def test_chunked_prefill_recompute(
             enable_chunked_prefill=enable_chunked_prefill,
             max_num_seqs=max_num_seqs,
             worker_use_ray=worker_use_ray,
+            disable_log_stats=False,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
         assert (vllm_model.model.llm_engine.scheduler[0].artificial_preempt_cnt

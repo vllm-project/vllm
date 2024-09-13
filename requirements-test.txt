@@ -11,6 +11,7 @@ awscli
 einops # required for MPT, qwen-vl and Mamba
 httpx
 librosa # required for audio test
+opencv-python # required for video test
 peft
 requests
 ray[adag]>=2.35
