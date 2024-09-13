@@ -17,7 +17,7 @@ set(ignoreMe "${VLLM_PYTHON_PATH}")
 # Supported python versions.  These versions will be searched in order, the
 # first match will be selected.  These should be kept in sync with setup.py.
 #
-set(PYTHON_SUPPORTED_VERSIONS "3.8" "3.9" "3.10" "3.11" "3.12")
+set(PYTHON_SUPPORTED_VERSIONS "3.9" "3.10" "3.11" "3.12")
 
 # Supported NVIDIA architectures.
 set(CUDA_SUPPORTED_ARCHS "7.0;7.5;8.0;8.6;8.9;9.0")
@@ -242,12 +242,12 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # The machete kernels only work on hopper and require CUDA 12.0 or later.
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0)
     #
-    # For the Machete kernels we automatically generate sources for various 
+    # For the Machete kernels we automatically generate sources for various
     # preselected input type pairs and schedules.
     # Generate sources:
     execute_process(
-      COMMAND ${CMAKE_COMMAND} -E env 
-      PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/:${CUTLASS_DIR}/python/:${VLLM_PYTHON_PATH}:$PYTHONPATH 
+      COMMAND ${CMAKE_COMMAND} -E env
+      PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/:${CUTLASS_DIR}/python/:${VLLM_PYTHON_PATH}:$PYTHONPATH
         ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/machete/generate.py
       RESULT_VARIABLE machete_generation_result
       OUTPUT_VARIABLE machete_generation_output
@@ -257,7 +257,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
     if (NOT machete_generation_result EQUAL 0)
       message(FATAL_ERROR "Machete generation failed."
-                          " Result: \"${machete_generation_result}\"" 
+                          " Result: \"${machete_generation_result}\""
                           "\nCheck the log for details: "
                           "${CMAKE_CURRENT_BINARY_DIR}/machete_generation.log")
     else()
@@ -277,7 +277,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   endif()
 
   # Add pytorch binding for machete (add on even CUDA < 12.0 so that we can
-  #  raise an error if the user that this was built with an incompatible 
+  #  raise an error if the user that this was built with an incompatible
   #  CUDA version)
   list(APPEND VLLM_EXT_SRC
     csrc/quantization/machete/machete_pytorch.cu)
@@ -294,8 +294,8 @@ define_gpu_extension_target(
   USE_SABI 3
   WITH_SOABI)
 
-# If CUTLASS is compiled on NVCC >= 12.5, it by default uses 
-# cudaGetDriverEntryPointByVersion as a wrapper to avoid directly calling the 
+# If CUTLASS is compiled on NVCC >= 12.5, it by default uses
+# cudaGetDriverEntryPointByVersion as a wrapper to avoid directly calling the
 # driver API. This causes problems when linking with earlier versions of CUDA.
 # Setting this variable sidesteps the issue by calling the driver directly.
 target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
