@@ -32,10 +32,11 @@ VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
         (1, 4, 1, 0, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
         (2, 2, 1, 0, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
         (2, 2, 0, 1, 0, "meta-llama/Meta-Llama-3-8B", "ray"),
-        # TODO: Enable internVL2 in a separate test if needed
-        # (1, 2, 1, 1, 1, "OpenGVLab/InternVL2-1B", "ray"),
-        # (1, 2, 1, 1, 1, "OpenGVLab/InternVL2-2B", "ray"),
-        # (1, 2, 1, 0, 1, "OpenGVLab/InternVL2-4B", "ray"),
+        # NOTE: InternVL2 multi-node tests are flaky,
+        # use mp backend to skip the multi-node tests
+        (1, 2, 1, 1, 1, "OpenGVLab/InternVL2-1B", "mp"),
+        (1, 2, 1, 1, 1, "OpenGVLab/InternVL2-2B", "mp"),
+        (1, 2, 1, 0, 1, "OpenGVLab/InternVL2-4B", "mp"),
     ],
 )
 @fork_new_process_for_each_test
