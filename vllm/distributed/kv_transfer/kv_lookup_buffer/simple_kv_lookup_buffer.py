@@ -1,6 +1,7 @@
 
 from vllm.distributed.kv_transfer.kv_lookup_buffer.base import \
     KVLookupBufferBase
+from vllm.distributed.kv_transfer.kv_pipe.base import KVPipeBase
 from typing import Dict, Tuple, List, Optional
 import threading
 import torch
@@ -13,15 +14,23 @@ logger = init_logger(__name__)
 
 class SimpleKVLookupBuffer(KVLookupBufferBase):
     
-    def __init__(self, pipe, buffer_size_thresh):
+    def __init__(self, signal_pipe, data_pipe, buffer_size_thresh):
+        """
+        signal_pipe: on CPU -- avoid recv() stops the python intepreter
+        data_pipe: on GPU
+        """
         
         self.buffer = deque()
         
         self.buffer_size = 0
         self.buffer_size_threshold = buffer_size_thresh
         self.buffer_lock = threading.Lock()
-        self.pipe = pipe
+        self.signal_pipe = signal_pipe
+        self.data_pipe = data_pipe
         self.request_handling_thread = None
+
+        self.normal_signal = torch.tensor([0])
+        self.end_signal = None
 
         
     def _matches(self, tokens_roi_sender, tokens_roi_recver):
@@ -57,9 +66,9 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
             
     def _send_tensor_and_dec_size(self, tensor: Optional[torch.Tensor]) -> None:
 
-        assert tensor is not None, "Use self.pipe.send(None) instead"
+        assert tensor is not None, "Use self.data_pipe.send(None) instead"
         self.buffer_size -= tensor.element_size() * tensor.numel()
-        self.pipe.send_tensor(tensor)
+        self.data_pipe.send_tensor(tensor)
 
     def _get_element_size(self, data):
         
@@ -91,14 +100,22 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
                 self.buffer_size += self._get_element_size(data)
             self.buffer.append(buffer_item)
         
+    def _is_end_signal(self, signal):
+        return signal is None
         
     def drop_select_handler(self):
 
         try:
         
             while True:
-                input_tokens = self.pipe.recv_tensor()
-                roi = self.pipe.recv_tensor()
+                signal = self.signal_pipe.recv_tensor()
+                if self._is_end_signal(signal):
+                    logger.info("Received end signal!")
+                    break
+
+                input_tokens = self.data_pipe.recv_tensor()
+
+                roi = self.data_pipe.recv_tensor()
                 tokens_roi_recver = [input_tokens, roi]
                 
                 matched_length = 0
@@ -125,10 +142,13 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
                     else:
                         # no match, just send None
                         for _ in range(5):
-                            self.pipe.send_tensor(None)
+                            self.data_pipe.send_tensor(None)
+
         except RuntimeError as e:
             if 'Connection closed by peer' not in str(e):
                 raise e
+
+        logger.debug("closing drop_select_handler")
                         
         
     def drop_select(self, input_tokens, roi):
@@ -142,14 +162,15 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
         if isinstance(roi, torch.Tensor):
             roi = roi.clone()
         
-        self.pipe.send_tensor(input_tokens)
-        self.pipe.send_tensor(roi)
+        self.signal_pipe.send_tensor(self.normal_signal)
+        self.data_pipe.send_tensor(input_tokens)
+        self.data_pipe.send_tensor(roi)
         
-        input_tokens = self.pipe.recv_tensor()
-        roi = self.pipe.recv_tensor()
-        key = self.pipe.recv_tensor()
-        value = self.pipe.recv_tensor()
-        hidden = self.pipe.recv_tensor()
+        input_tokens = self.data_pipe.recv_tensor()
+        roi = self.data_pipe.recv_tensor()
+        key = self.data_pipe.recv_tensor()
+        value = self.data_pipe.recv_tensor()
+        hidden = self.data_pipe.recv_tensor()
         
         return [input_tokens, roi, key, value, hidden]
 
@@ -174,3 +195,11 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
             self.request_handling_thread.start()
             
             
+    def close(self):
+
+        if hasattr(self, "request_handling_thread") and self.request_handling_thread is not None:
+            self.request_handling_thread.join()
+
+        else:
+            # TODO: have a explicit close signal and have a explicit way to check if it's requester 
+            self.signal_pipe.send_tensor(self.end_signal)

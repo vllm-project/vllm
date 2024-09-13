@@ -16,3 +16,9 @@ class KVLookupBufferBase(ABC):
     def drop_select(self, input_tokens, roi) -> Optional[torch.Tensor]:
         raise NotImplementedError
     
+    @abstractmethod
+    def close(self):
+        """
+        Close the buffer, release resources.
+        """
+        raise NotImplementedError
