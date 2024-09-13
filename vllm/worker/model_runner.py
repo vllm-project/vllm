@@ -1064,10 +1064,12 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     "This may lead to less accurate results!")
 
         if envs.VLLM_TEST_DYNAMO_GRAPH_CAPTURE and supports_dynamo():
+            from vllm.plugins import get_torch_compile_backend
+            backend = get_torch_compile_backend() or "eager"
             self.model = torch.compile(
                 self.model,
                 fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
-                backend="eager")
+                backend=backend)
 
     def save_sharded_state(
         self,
