@@ -6,8 +6,8 @@ import sys
 import tempfile
 from collections import UserList
 from enum import Enum
-from typing import (Any, Callable, Dict, List, Optional, Tuple, TypedDict,
-                    TypeVar, Union)
+from typing import (Any, Callable, Dict, List, Optional, Tuple, Type,
+                    TypedDict, TypeVar, Union)
 
 import numpy as np
 import pytest
@@ -18,6 +18,7 @@ from huggingface_hub import snapshot_download
 from PIL import Image
 from transformers import (AutoModelForCausalLM, AutoTokenizer, BatchEncoding,
                           BatchFeature)
+from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
@@ -260,7 +261,7 @@ class HfRunner:
         *,
         model_kwargs: Optional[Dict[str, Any]] = None,
         is_embedding_model: bool = False,
-        auto_cls=AutoModelForCausalLM,
+        auto_cls: Type[_BaseAutoModelClass] = AutoModelForCausalLM,
         postprocess_inputs: Callable[[BatchEncoding],
                                      BatchEncoding] = identity,
     ) -> None:
@@ -292,20 +293,14 @@ class HfRunner:
             trust_remote_code=True,
         )
 
-        try:
-            # don't put this import at the top level
-            # it will call torch.cuda.device_count()
-            from transformers import AutoProcessor  # noqa: F401
-            self.processor = AutoProcessor.from_pretrained(
-                model_name,
-                torch_dtype=torch_dtype,
-                trust_remote_code=True,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Unable to auto-load HuggingFace processor for model (%s). "
-                "Using tokenizer instead. Reason: %s", model_name, exc)
-            self.processor = self.tokenizer
+        # don't put this import at the top level
+        # it will call torch.cuda.device_count()
+        from transformers import AutoProcessor  # noqa: F401
+        self.processor = AutoProcessor.from_pretrained(
+            model_name,
+            torch_dtype=torch_dtype,
+            trust_remote_code=True,
+        )
 
         self.postprocess_inputs = postprocess_inputs
 

@@ -19,10 +19,13 @@ MODELS = [
     "facebook/opt-125m",
 ]
 
-assert ENABLE_ARTIFICIAL_PREEMPT is True, (
-    "Use an env var VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1. "
-    "`VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest "
-    "tests/basic_correctness/test_preemption.py`")
+
+@pytest.fixture(scope="module", autouse=True)
+def check_settings():
+    assert ENABLE_ARTIFICIAL_PREEMPT is True, (
+        "Use an env var VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1. "
+        "`VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest "
+        "tests/basic_correctness/test_preemption.py`")
 
 
 @pytest.fixture
