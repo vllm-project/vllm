@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from vllm import LLM, SamplingParams
+from vllm.plugins import set_torch_compile_backend
 
 TEST_MODELS = [
     ("facebook/opt-125m", {}),
@@ -25,13 +26,21 @@ TEST_MODELS = [
 
 
 @pytest.mark.parametrize("model_info", TEST_MODELS)
-def test_full_graph(model_info):
+@pytest.mark.parametrize("backend", ["eager", "inductor"])
+def test_full_graph(model_info, backend):
     # make sure these models can be captured in full graph mode
     if "VLLM_TEST_DYNAMO_GRAPH_CAPTURE" not in os.environ:
         os.environ["VLLM_TEST_DYNAMO_GRAPH_CAPTURE"] = "1"
 
     model = model_info[0]
     model_kwargs = model_info[1]
+
+    # Inductor doesn't support fp8 yet.
+    if "quantization" in model_kwargs and model_kwargs[
+            "quantization"] == "fp8" and backend == "inductor":
+        return
+
+    set_torch_compile_backend(backend)
 
     prompts = [
         "Hello, my name is",

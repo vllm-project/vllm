@@ -15,9 +15,10 @@ def test_convert_fp8_opcheck():
     opcheck(torch.ops._C_cache_ops.convert_fp8, (result, data, 1.0, "fp8"))
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(),
+                    reason="Only supported for CUDA")
 def test_cuda_utils_opcheck():
-    if current_platform.is_cuda():
-        opcheck(torch.ops._C_cuda_utils.get_device_attribute, (0, 0))
-        opcheck(
-            torch.ops._C_cuda_utils.
-            get_max_shared_memory_per_block_device_attribute, (0, ))
+    opcheck(torch.ops._C_cuda_utils.get_device_attribute, (0, 0))
+    opcheck(
+        torch.ops._C_cuda_utils.
+        get_max_shared_memory_per_block_device_attribute, (0, ))
