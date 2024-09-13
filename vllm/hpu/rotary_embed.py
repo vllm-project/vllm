@@ -100,6 +100,11 @@ class HpuRotaryEmbedding(nn.Module):
              self.head_size))
         key = key.reshape((key.shape[0], key.shape[1],
                            key.shape[2] // self.head_size, self.head_size))
+        query_rot = query[..., :self.dim]
+        key_rot = key[..., :self.dim]
+        if self.dim < self.head_size:
+            query_pass = query[..., self.dim:]
+            key_pass = key[..., self.dim:]
 
         if len(positions[0]) == 1:
             cos = self.cos_cached[positions].unsqueeze(2).to(dtype=query.dtype)
@@ -107,8 +112,11 @@ class HpuRotaryEmbedding(nn.Module):
         else:
             cos = cos[positions].unsqueeze(2)
             sin = sin[positions].unsqueeze(2)
-        query, key = FusedRoPE.apply(query, cos, sin,
-                                     0), FusedRoPE.apply(key, cos, sin, 0)
+        query, key = FusedRoPE.apply(query_rot, cos, sin,
+                                     0), FusedRoPE.apply(key_rot, cos, sin, 0)
+        if self.dim < self.head_size:
+            query = torch.cat((query, query_pass), dim=-1)
+            key = torch.cat((key, key_pass), dim=-1)
         return query.reshape(
             (query.shape[0], query.shape[1],
              query.shape[2] * query.shape[3])), key.reshape(
