@@ -1,5 +1,4 @@
 import importlib.util
-import io
 import logging
 import os
 import re
@@ -318,7 +317,7 @@ def get_neuronxcc_version():
                                 "__init__.py")
 
     # Check if the command was executed successfully
-    with open(version_file, "rt") as fp:
+    with open(version_file) as fp:
         content = fp.read()
 
     # Extract the version using a regular expression
@@ -402,7 +401,8 @@ def read_readme() -> str:
     """Read the README file if present."""
     p = get_path("README.md")
     if os.path.isfile(p):
-        return io.open(get_path("README.md"), "r", encoding="utf-8").read()
+        with open(get_path("README.md"), encoding="utf-8") as f:
+            return f.read()
     else:
         return ""
 
