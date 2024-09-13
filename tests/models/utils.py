@@ -34,18 +34,37 @@ def check_outputs_equal(
         assert output_ids_0 == output_ids_1, fail_msg
 
 
+# Representation of generated sequence as a tuple of
+# * Token ID list
+# * String
+# * List of top sample logprobs for each sampled token
+#
+# Assumes prompt logprobs were not requested.
 TokensTextLogprobs = Tuple[List[int], str, Optional[Union[List[Dict[int,
                                                                     float]],
                                                           SampleLogprobs]]]
 
-TokensTextLogprobsPromptLogprobs = Tuple[
-    List[int], str, Optional[Union[List[Dict[int, float]], SampleLogprobs]],
-    Optional[Union[List[Optional[Dict[int, float]]], PromptLogprobs]]]
-
-# Allow for tokens to be represented as str's rather than IDs
+# Allow for tokens to be represented as str's rather than IDs;
+# tuple of
+# * Token string representations list
+# * String
+# * Optional list of top sample logprobs for each sampled token
+#
+# Assumes prompt logprobs were not requested.
 TextTextLogprobs = Tuple[List[str], str, Optional[Union[List[Dict[str, float]],
                                                         List[Dict[str,
                                                                   Logprob]]]]]
+
+# Representation of generated sequence as a tuple of
+# * Token ID list
+# * String
+# * Optional list of top sample logprobs for each sampled token
+# * Optional list of top prompt logprobs for each prompt token
+#
+# Allows prompt logprobs to be requested.
+TokensTextLogprobsPromptLogprobs = Tuple[
+    List[int], str, Optional[Union[List[Dict[int, float]], SampleLogprobs]],
+    Optional[Union[List[Optional[Dict[int, float]]], PromptLogprobs]]]
 
 
 def check_logprobs_close(
