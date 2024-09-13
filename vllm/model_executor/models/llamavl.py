@@ -29,7 +29,7 @@ from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from .interfaces import SupportsMultiModal
-from .llama import LlamaAttention
+from .llama import LlamaAttention, LlamaMLP
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
@@ -428,7 +428,8 @@ class ImageAttention(nn.Module):
         n_heads,
     ):
         super().__init__()
-        model_parallel_size = get_tensor_model_parallel_world_size()
+        model_parallel_size = 1 # skip TP for image now
+        # model_parallel_size = get_tensor_model_parallel_world_size()
         qkvo_replication = 1
         if model_parallel_size > 16:
             qkvo_replication = model_parallel_size // 8
@@ -493,7 +494,7 @@ class ImageAttention(nn.Module):
         ]
 
         bs, slen, _ = xq.shape
-
+        # print("xq.shape", xq.shape)
         xq = xq.view(bs, slen, self.n_local_heads, self.head_dim)
         xk = xk.view(bs, xk.shape[1], self.n_local_kv_heads, self.head_dim)
         xv = xv.view(bs, xv.shape[1], self.n_local_kv_heads, self.head_dim)
@@ -880,21 +881,21 @@ class LlamaVLAttention(LlamaAttention):
             rope_scaling=rope_scaling,
             is_neox_style=False, # force to use neox=False
         )
-        self._register_load_state_dict_pre_hook(self.load_hook)
+        # self._register_load_state_dict_pre_hook(self.load_hook)
 
 
-    def load_hook(
-        self,
-        state_dict: Dict[str, Any],
-        prefix: str,
-        local_metadata: Dict[str, Any],
-        strict: bool,
-        missing_keys: List[str],
-        unexpected_keys: List[str],
-        error_msgs: List[str],
-    ) -> None:
-        if prefix + "wo.weight" in state_dict:
-            state_dict[prefix + "o_proj.weight"] = state_dict.pop(prefix + "wo.weight")
+    # def load_hook(
+    #     self,
+    #     state_dict: Dict[str, Any],
+    #     prefix: str,
+    #     local_metadata: Dict[str, Any],
+    #     strict: bool,
+    #     missing_keys: List[str],
+    #     unexpected_keys: List[str],
+    #     error_msgs: List[str],
+    # ) -> None:
+    #     if prefix + "wo.weight" in state_dict:
+    #         state_dict[prefix + "o_proj.weight"] = state_dict.pop(prefix + "wo.weight")
 
 class TransformerBlock(nn.Module):
     def __init__(self, layer_id: int, args, cache_config: Optional[CacheConfig] = None):
@@ -932,11 +933,18 @@ class TransformerBlock(nn.Module):
             prefix=f"tb.{layer_id}.self_attn",
         )
         # logger.warning("skip attention")
-        self.feed_forward = FeedForward(
-            dim=args.dim,
-            hidden_dim=4 * args.dim,
-            multiple_of=args.multiple_of,
-            ffn_dim_multiplier=args.ffn_dim_multiplier,
+
+        hidden_dim = args.dim * 4
+        hidden_dim = int(2 * hidden_dim / 3)
+        # custom dim factor multiplier
+        if args.ffn_dim_multiplier is not None:
+            hidden_dim = int(args.ffn_dim_multiplier * hidden_dim)
+        hidden_dim = args.multiple_of * ((hidden_dim + args.multiple_of - 1) // args.multiple_of)
+
+        self.feed_forward = LlamaMLP(
+            hidden_size=args.dim,
+            intermediate_size=hidden_dim,
+            hidden_act="silu",
         )
         self.layer_id = layer_id
         self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
@@ -1089,40 +1097,39 @@ class CrossAttention(torch.nn.Module):
 
         assert n_heads % n_kv_heads == 0
 
+        # TODO: change to Q/KV seperate linear after #7448 is merged
+        self.qkv_proj = QKVParallelLinear(
+            dim,
+            head_dim,
+            n_heads,
+            n_kv_heads,
+            bias=False,
+        )
 
-        self.wq = nn.Linear(dim, n_heads * head_dim, bias=False)
-        self.wk = nn.Linear(dim, n_kv_heads * head_dim, bias=False)
-        self.wv = nn.Linear(dim, n_kv_heads * head_dim, bias=False)
-        self.wo = nn.Linear(n_heads * head_dim, dim, bias=False)
-        # self.wq = ColumnParallelLinear(
+        # self.wqkv = ColumnParallelLinear(
         #     dim,
         #     n_heads * head_dim,
         #     bias=False,
         #     gather_output=False,
-        #     init_method=_noinit,
         # )
-
         # self.wk = ColumnParallelLinear(
         #     dim,
         #     n_kv_heads * head_dim,
         #     bias=False,
         #     gather_output=False,
-        #     init_method=_noinit,
         # )
         # self.wv = ColumnParallelLinear(
         #     dim,
         #     n_kv_heads * head_dim,
         #     bias=False,
         #     gather_output=False,
-        #     init_method=_noinit,
         # )
-        # self.wo = RowParallelLinear(
-        #     n_heads * head_dim,
-        #     dim,
-        #     bias=False,
-        #     input_is_parallel=True,
-        #     init_method=_noinit,
-        # )
+        self.wo = RowParallelLinear(
+            n_heads * head_dim,
+            dim,
+            bias=False,
+            input_is_parallel=True,
+        )
 
         self.n_heads = n_heads
         self.head_dim = head_dim
@@ -1137,12 +1144,6 @@ class CrossAttention(torch.nn.Module):
             eps=norm_eps,
         )
         self.scaling = self.head_dim**-0.5
-        self.attn = Attention(
-            self.n_heads,
-            self.head_dim,
-            self.scaling,
-            self.n_kv_heads,
-        )
 
         # cross-attention heads are model parallel similar to
         # self-attention, and we also use the identical KV head
@@ -1155,66 +1156,59 @@ class CrossAttention(torch.nn.Module):
         self.n_local_heads = self.n_heads // self.model_parallel_size
         self.n_local_kv_heads = self.n_kv_heads // self.model_parallel_size
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
-        self._register_load_state_dict_pre_hook(self.load_hook)
+        self.q_local_size = self.n_local_heads * self.head_dim
+        self.kv_local_size = self.n_local_kv_heads * self.head_dim
 
-    def load_hook(
-        self,
-        state_dict: Dict[str, Any],
-        prefix: str,
-        local_metadata: Dict[str, Any],
-        strict: bool,
-        missing_keys: List[str],
-        unexpected_keys: List[str],
-        error_msgs: List[str],
-    ) -> None:
-        if prefix + "inner_attention.q_norm.weight" in state_dict:
-            q_weight = state_dict.pop(prefix + "inner_attention.q_norm.weight")
-            state_dict[prefix + "q_norm.weight"] = q_weight
-        if prefix + "inner_attention.k_norm.weight" in state_dict:
-            k_weight = state_dict.pop(prefix + "inner_attention.k_norm.weight")
-            state_dict[prefix + "k_norm.weight"] = k_weight
-        if prefix + "wkv.weight" in state_dict:
-            wk, wv = state_dict.pop(prefix + "wkv.weight").chunk(2)
-            state_dict[prefix + "wk.weight"] = wk
-            state_dict[prefix + "wv.weight"] = wv
+        self.attn = Attention(
+            self.n_local_heads,
+            self.head_dim,
+            self.scaling,
+            self.n_local_kv_heads,
+        )
 
-    def _compute_xattn_kv_cache(self, xattn_tokens: torch.Tensor) -> torch.Tensor:
-        bsz = xattn_tokens.shape[0]
-        xk = self.wk(xattn_tokens)
-        xv = self.wv(xattn_tokens)
+    # def _compute_xattn_kv_cache(self, xattn_tokens: torch.Tensor) -> torch.Tensor:
+    #     bsz = xattn_tokens.shape[0]
+    #     xk, _ = self.wk(xattn_tokens)
+    #     xv, _ = self.wv(xattn_tokens)
 
-        # _, seqlen_y, _ = xk.shape
+    #     # _, seqlen_y, _ = xk.shape
 
-        xk = xk.view(-1, self.n_local_kv_heads, self.head_dim)
-        xv = xv.view(-1, self.n_local_kv_heads, self.head_dim)
+    #     xk = xk.view(-1, self.n_local_kv_heads, self.head_dim)
+    #     xv = xv.view(-1, self.n_local_kv_heads, self.head_dim)
 
-        xk = self.k_norm(xk)
+    #     xk = self.k_norm(xk)
 
-        return torch.stack([xk, xv])
+    #     return torch.stack([xk, xv])
 
-    def compute_xattn_kv_cache(self, xattn_tokens: torch.Tensor) -> torch.Tensor:
-        return self._compute_xattn_kv_cache(xattn_tokens)
+    # def compute_xattn_kv_cache(self, xattn_tokens: torch.Tensor) -> torch.Tensor:
+    #     return self._compute_xattn_kv_cache(xattn_tokens)
 
     def forward(
         self,
-        x: torch.Tensor,
+        decoder_hidden_states: torch.Tensor,
         # xattn_mask: torch.Tensor,
         # full_text_row_masked_out_mask: torch.Tensor,
-        xattn_cache: torch.Tensor,
+        # xattn_cache: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        xq = F.linear(x, self.wq.weight)
-
-        xq = xq.view(-1, self.n_local_heads, self.head_dim)
-        xq = self.q_norm(xq)
-
-        if xattn_cache is not None:
-            xk, xv = xattn_cache
+        qkv_dec, _ = self.qkv_proj(decoder_hidden_states)
+        q, _, _ = qkv_dec.split([self.q_local_size, self.kv_local_size, self.kv_local_size],
+                                dim=-1)
+        if encoder_hidden_states is None:
+            k = None
+            v = None
         else:
-            xk, xv = None, None
-        output = self.attn(xq, xk, xv, kv_cache, attn_metadata, attn_type=AttentionType.ENCODER_DECODER)
-        out = F.linear(output, self.wo.weight)
+            qkv_enc, _ = self.qkv_proj(encoder_hidden_states)
+            _, k, v = qkv_enc.split([self.q_local_size, self.kv_local_size, self.kv_local_size],
+                                    dim=-1)
+
+        q = q.view(-1, self.n_local_heads, self.head_dim)
+        q = self.q_norm(q)
+
+        output = self.attn(q, k, v, kv_cache, attn_metadata, attn_type=AttentionType.ENCODER_DECODER)
+        out, _ = self.wo(output)
         return out
 
 
@@ -1247,12 +1241,19 @@ class CrossAttentionTransformerBlock(torch.nn.Module):
         )
         self.gate_attn = torch.nn.Parameter(torch.zeros(1))
 
-        self.feed_forward = FeedForward(
-            dim=args.dim,
-            hidden_dim=4 * args.dim,
-            ffn_dim_multiplier=args.ffn_dim_multiplier,
-            multiple_of=args.multiple_of,
+        hidden_dim = args.dim * 4
+        hidden_dim = int(2 * hidden_dim / 3)
+        # custom dim factor multiplier
+        if args.ffn_dim_multiplier is not None:
+            hidden_dim = int(args.ffn_dim_multiplier * hidden_dim)
+        hidden_dim = args.multiple_of * ((hidden_dim + args.multiple_of - 1) // args.multiple_of)
+
+        self.feed_forward = LlamaMLP(
+            hidden_size=args.dim,
+            intermediate_size=hidden_dim,
+            hidden_act="silu",
         )
+
         self.ffn_norm = RMSNorm(
             args.dim,
             eps=args.norm_eps,
@@ -1296,25 +1297,27 @@ class CrossAttentionTransformerBlock(torch.nn.Module):
                 prefix + "attention.wq.layer_norm_weight"
             )
 
-    def compute_xattn_kv_cache(self, xattn_tokens: torch.Tensor) -> torch.Tensor:
-        return self.attention.compute_xattn_kv_cache(xattn_tokens)
+    # def compute_xattn_kv_cache(self, xattn_tokens: torch.Tensor) -> torch.Tensor:
+    #     return self.attention.compute_xattn_kv_cache(xattn_tokens)
 
     def forward(
         self,
         x: torch.Tensor,
         # xattn_mask: torch.Tensor,
         # full_text_row_masked_out_mask: torch.Tensor,
-        xattn_cache: torch.Tensor,
+        # xattn_cache: torch.Tensor,
         kv_cache: torch.LongTensor,
         attn_metadata: AttentionMetadata,
+        vision_hidden_states: Optional[torch.Tensor],
     ) -> torch.Tensor:
         _attn_out = self.attention(
-            x=self.attention_norm(x),
+            decoder_hidden_states=self.attention_norm(x),
             # xattn_mask=xattn_mask,
             # full_text_row_masked_out_mask=full_text_row_masked_out_mask,
-            xattn_cache=xattn_cache,
+            # xattn_cache=xattn_cache,
             kv_cache=kv_cache,
-            attn_metadata=attn_metadata
+            attn_metadata=attn_metadata,
+            encoder_hidden_states=vision_hidden_states,
         )
         h = x + self.gate_attn.tanh() * _attn_out
         _ffn = self.feed_forward(self.ffn_norm(h))
@@ -1530,9 +1533,10 @@ class CrossAttentionTransformerText(torch.nn.Module):
         h: torch.Tensor,
         # xattn_mask: torch.Tensor,
         # full_text_row_masked_out_mask: torch.Tensor,
-        xattn_caches: torch.Tensor,
+        # xattn_caches: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        vision_hidden_states: Optional[torch.Tensor],
     ):
         # assert self.cache_is_setup, "Please set up cache before calling forward"
         # mask = self.mask_cache.index_select(2, positions)
@@ -1547,9 +1551,10 @@ class CrossAttentionTransformerText(torch.nn.Module):
                 x=h,
                 # xattn_mask=xattn_mask,
                 # full_text_row_masked_out_mask=full_text_row_masked_out_mask,
-                xattn_cache=xattn_caches[xattn_layer_idx] if xattn_caches is not None else None,
+                # xattn_cache=xattn_caches[xattn_layer_idx] if xattn_caches is not None else None,
                 kv_cache=kv_caches[idx],
                 attn_metadata=attn_metadata,
+                vision_hidden_states=vision_hidden_states,
             )
             # check(h, f"layer_{idx}_xh_{step_name}.pt")
             h = layer(
@@ -1874,16 +1879,122 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
         state_dict = {name: weight for name, weight in weights}
         state_dict.pop('text_model.rope.freqs')
         state_dict['lm_head.weight'] = state_dict.pop('text_model.output.weight')
-        param_dict = {k: v for k, v in self.named_parameters()}
-        for i in range(self.text_model.n_layers):
-            module = self.text_model.layers[i].attention.qkv_proj
-            param_name = f"text_model.layers.{i}.attention.qkv_proj.weight"
-            weight_name = f"text_model.layers.{i}.attention.wqkv.weight"
-            param = param_dict[param_name]
-            weight = state_dict.pop(weight_name)
-            module.weight_loader(param, weight)
-        self.load_state_dict(state_dict, strict=False)
-        
+        load_succ = True
+
+        def load_weight(param, weight):
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
+            weight_loader(param, weight)
+
+        for param_name, param in self.named_parameters():
+            # print("loading", param_name)
+            if param_name.startswith("text_model.layers"):
+                layer_id = int(param_name.split(".")[2])
+                if param_name.endswith("attention.qkv_proj.weight"):
+                    # "text_model.layers.{i}.attention.qkv_proj.weight"
+                    weight_name = f"text_model.layers.{layer_id}.attention.wqkv.weight"
+                    weight = state_dict.pop(weight_name)
+                    module = self.text_model.layers[layer_id].attention.qkv_proj
+                    module.weight_loader(param, weight)
+                    continue
+                elif param_name.endswith("attention.o_proj.weight"):
+                    # "text_model.layers.{i}.attention.o_proj.weight"
+                    weight_name = f"text_model.layers.{layer_id}.attention.wo.weight"
+                    weight = state_dict.pop(weight_name)
+                    module = self.text_model.layers[layer_id].attention.o_proj
+                    module.weight_loader(param, weight)
+                    continue
+                elif param_name.endswith("feed_forward.gate_up_proj.weight"):
+                    # "text_model.layers.{i}.feed_forward.mlp.fc1_weight"
+                    weight_name = f"text_model.layers.{layer_id}.feed_forward.mlp.fc1_weight"
+                    weight = state_dict.pop(weight_name)
+                    module = self.text_model.layers[layer_id].feed_forward.gate_up_proj
+                    module.weight_loader(param, weight)
+                    continue
+                elif param_name.endswith("feed_forward.down_proj.weight"):
+                    # "text_model.layers.{i}.feed_forward.mlp.fc2_weight"
+                    weight_name = f"text_model.layers.{layer_id}.feed_forward.mlp.fc2_weight"
+                    weight = state_dict.pop(weight_name)
+                    module = self.text_model.layers[layer_id].feed_forward.down_proj
+                    module.weight_loader(param, weight)
+                    continue
+                elif param_name.endswith("attention_norm.weight"):
+                    # "text_model.layers.{i}.attention_norm.weight"
+                    weight_name = f"text_model.layers.{layer_id}.attention.wqkv.layer_norm_weight"
+                    weight = state_dict.pop(weight_name)
+                    load_weight(param, weight)
+                    continue
+                elif param_name.endswith("ffn_norm.weight"):
+                    # "text_model.layers.{i}.ffn_norm.weight"
+                    weight_name = f"text_model.layers.{layer_id}.feed_forward.mlp.layer_norm_weight"
+                    weight = state_dict.pop(weight_name)
+                    load_weight(param, weight)
+                    continue
+            if param_name.startswith("text_model.cross_attention_layers"):
+                layer_id = int(param_name.split(".")[2])
+                if param_name.endswith('gate_attn'):
+                    attn_gate = state_dict.pop(param_name)
+                    if attn_gate.dim() == 1:
+                        attn_gate = attn_gate[0].view(1)
+                    if attn_gate.dim() == 3:
+                        attn_gate = attn_gate.view(1)
+                    load_weight(param, attn_gate)
+                    continue
+                if param_name.endswith('gate_ffwd'):
+                    ffn_gate = state_dict.pop(param_name)
+                    if ffn_gate.dim() == 1:
+                        ffn_gate = ffn_gate[0].view(1)
+                    if ffn_gate.dim() == 3:
+                        ffn_gate = ffn_gate.view(1)
+                    load_weight(param, ffn_gate)
+                    continue
+                if param_name.endswith('ffn_norm.weight'):
+                    load_weight(param, state_dict.pop(f"text_model.cross_attention_layers.{layer_id}.feed_forward.mlp.layer_norm_weight"))
+                    continue
+                if param_name.endswith('attention_norm.weight'):
+                    load_weight(param, state_dict.pop(f"text_model.cross_attention_layers.{layer_id}.attention.wq.layer_norm_weight"))
+                    continue
+                # if param_name.endswith('attention.wk.weight') or param_name.endswith('attention.wv.weight'):
+                #     if f"text_model.cross_attention_layers.{layer_id}.attention.wkv.weight" in state_dict:
+                #         weight = state_dict.pop(f"text_model.cross_attention_layers.{layer_id}.attention.wkv.weight")
+                #         state_dict[f"text_model.cross_attention_layers.{layer_id}.attention.wkv.weight.1"] = weight
+                #     else:
+                #         weight = state_dict.pop(f"text_model.cross_attention_layers.{layer_id}.attention.wkv.weight.1")
+                #     if param_name.endswith('attention.wk.weight'):
+                #         weight = weight.chunk(2)[0]
+                #     else:
+                #         weight = weight.chunk(2)[1]
+                #     load_weight(param, weight)
+                #     continue
+                if param_name.endswith('attention.qkv_proj.weight'):
+                    q_weight = state_dict.pop(f"text_model.cross_attention_layers.{layer_id}.attention.wq.weight")
+                    kv_weight = state_dict.pop(f"text_model.cross_attention_layers.{layer_id}.attention.wkv.weight")
+                    qkv_weight = torch.cat([q_weight, kv_weight], dim=0)
+                    module = self.text_model.cross_attention_layers[layer_id].attention.qkv_proj
+                    module.weight_loader(param, qkv_weight)
+                    continue
+                if param_name.endswith('attention.q_norm.weight'):
+                    load_weight(param, state_dict.pop(f"text_model.cross_attention_layers.{layer_id}.attention.inner_attention.q_norm.weight"))
+                    continue
+                if param_name.endswith('attention.k_norm.weight'):
+                    load_weight(param, state_dict.pop(f"text_model.cross_attention_layers.{layer_id}.attention.inner_attention.k_norm.weight"))
+                    continue
+                if param_name.endswith('feed_forward.gate_up_proj.weight'):
+                    load_weight(param, state_dict.pop(f"text_model.cross_attention_layers.{layer_id}.feed_forward.mlp.fc1_weight"))
+                    continue
+                if param_name.endswith('feed_forward.down_proj.weight'):
+                    load_weight(param, state_dict.pop(f"text_model.cross_attention_layers.{layer_id}.feed_forward.mlp.fc2_weight"))
+                    continue
+            if param_name in state_dict:
+                loaded_weight = state_dict.pop(param_name)
+                load_weight(param, loaded_weight)
+                continue
+            
+            raise ValueError(f"Unexpected parameter {param_name}")
+            
+        if len(state_dict) > 0:
+            raise ValueError(f"unused keys: {state_dict.keys()}")
+      
 
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[LlavaImageInputs]:
@@ -1976,6 +2087,7 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
             cross_attention_masks = None
             full_text_row_masked_out_mask = None
             xattn_caches = None
+            vision_tokens = None
         else:
             # llama's reference implementation runs the vision model on CPU
             cuda_images = image_inputs['data'].cuda()
@@ -1991,22 +2103,23 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
                 end_pos = start_pos + seq_len
                 vision_tokens_flat[start_pos:end_pos] = vision_token_in_batch[:seq_len]
                 start_pos = end_pos
+            vision_tokens = vision_tokens_flat
 
-            batch_masks = []
-            # TODO: get the sequence of each query without hack? 1) better attn metadata 2) better input processor to create vision mask during preprocess
-            # assert isinstance(attn_metadata, PagedAttentionMetadata)
-            start_pos = 0
-            for seq_len in attn_metadata.seq_lens_tensor:
-                end_pos = start_pos + seq_len
-                batch_masks.append(create_vision_mask(input_ids[start_pos:end_pos]))
-                start_pos = end_pos
+            # batch_masks = []
+            # # TODO: get the sequence of each query without hack? 1) better attn metadata 2) better input processor to create vision mask during preprocess
+            # # assert isinstance(attn_metadata, PagedAttentionMetadata)
+            # start_pos = 0
+            # for seq_len in attn_metadata.seq_lens_tensor:
+            #     end_pos = start_pos + seq_len
+            #     batch_masks.append(create_vision_mask(input_ids[start_pos:end_pos]))
+            #     start_pos = end_pos
 
-            xattn_caches = torch.stack(
-                [
-                    layer.compute_xattn_kv_cache(vision_tokens_flat)
-                    for layer in self.text_model.cross_attention_layers
-                ]
-            )
+            # xattn_caches = torch.stack(
+            #     [
+            #         layer.compute_xattn_kv_cache(vision_tokens_flat)
+            #         for layer in self.text_model.cross_attention_layers
+            #     ]
+            # )
             # TODO: remove this hardcode
             # total_len = 512
             # padded_masks = _pad_masks(
@@ -2033,10 +2146,10 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
             #     full_text_row_masked_out_mask_plain[start_pos:end_pos, 0] = full_text_row_masked_out_mask[i, 0, :seq_len, 0]
             #     start_pos = end_pos
             # full_text_row_masked_out_mask = full_text_row_masked_out_mask_plain.cuda()
-        # print("input_ids", input_ids)
-        if positions.numel() == 1:
-            global step_name
-            step_name = f"decode_{positions.item()}"
+        # print("input_ids", input_ids, vision_tokens is None)
+        # if positions.numel() == 1:
+        #     global step_name
+        #     step_name = f"decode_{positions.item()}"
         h = self.text_model.get_partially_trainable_embedding(input_ids)
         # check(h, f"h_{step_name}.pt")
         h = self.text_model.forward(
@@ -2044,7 +2157,7 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
             h=h,
             # xattn_mask=cross_attention_masks,
             # full_text_row_masked_out_mask=full_text_row_masked_out_mask,
-            xattn_caches=xattn_caches,
+            vision_hidden_states=vision_tokens,
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
         )

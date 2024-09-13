@@ -27,7 +27,10 @@ if __name__ == "__main__":
 
     size = model_size_map[args.model_type]
     checkpoint_dir = "/data/zhang-chen/llama/checkpoints" # update checkpoint path here
-    llm = LLM(model=f"{checkpoint_dir}/Meta-Llama-3.2-{size}-Vision-Early/", enforce_eager=True, limit_mm_per_prompt={"image": 2},
+    llm = LLM(model=f"{checkpoint_dir}/Meta-Llama-3.2-{size}-Vision-Early/",
+              enforce_eager=True,
+              limit_mm_per_prompt={"image": 2},
+              tensor_parallel_size=1
             #   load_format="dummy"
               )
 
