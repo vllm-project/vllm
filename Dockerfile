@@ -144,7 +144,7 @@ RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
     && apt-get update -y \
-    && apt-get install -y ccache software-properties-common git curl sudo vim python3-pip numactl libnuma-dev cmake ninja-build \
+    && apt-get install -y ccache software-properties-common git curl sudo vim python3-pip \
     && apt-get install -y ffmpeg libsm6 libxext6 libgl1 \
     && add-apt-repository ppa:deadsnakes/ppa \
     && apt-get update -y \
@@ -154,19 +154,6 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
     && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
-
-# install oneDNN
-#RUN git clone -b rls-v3.5 https://github.com/oneapi-src/oneDNN.git
-#
-#RUN --mount=type=cache,target=/root/.cache/ccache \
-#    cmake -B ./oneDNN/build -S ./oneDNN -G Ninja -DONEDNN_LIBRARY_TYPE=STATIC \
-#    -DONEDNN_BUILD_DOC=OFF \
-#    -DONEDNN_BUILD_EXAMPLES=OFF \
-#    -DONEDNN_BUILD_TESTS=OFF \
-#    -DONEDNN_BUILD_GRAPH=OFF \
-#    -DONEDNN_ENABLE_WORKLOAD=INFERENCE \
-#    -DONEDNN_ENABLE_PRIMITIVE=MATMUL && \
-#    cmake --build ./oneDNN/build --target install --config Release
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
