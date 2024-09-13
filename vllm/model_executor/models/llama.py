@@ -56,6 +56,28 @@ from .interfaces import SupportsLoRA
 from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
 
 
+class LlamaMLPNonFused(nn.Module):
+
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        quant_config: Optional[QuantizationConfig] = None,
+        bias: bool = False,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+        self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+        self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
+
+    def forward(self, x):
+        y1 = F.silu(self.gate_proj(x))
+        y2 = self.up_proj(x)
+        y = y1 * y2
+        return self.down_proj(y)
+
 class LlamaMLP(nn.Module):
 
     def __init__(
@@ -84,15 +106,11 @@ class LlamaMLP(nn.Module):
                              "Only silu is supported for now.")
         self.act_fn = SiluAndMul()
 
-        self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
-        self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
-        self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
-
     def forward(self, x):
-        y1 = F.silu(self.gate_proj(x))
-        y2 = self.up_proj(x)
-        y = y1 * y2
-        return self.down_proj(y)
+        gate_up, _ = self.gate_up_proj(x)
+        x = self.act_fn(gate_up)
+        x, _ = self.down_proj(x)
+        return x
 
 class LlamaAttention(nn.Module):
 
@@ -229,14 +247,24 @@ class LlamaDecoderLayer(nn.Module):
             cache_config=cache_config,
             prefix=f"{prefix}.self_attn",
         )
-        self.mlp = LlamaMLP(
-            hidden_size=self.hidden_size,
-            intermediate_size=config.intermediate_size,
-            hidden_act=config.hidden_act,
-            quant_config=quant_config,
-            bias=getattr(config, "mlp_bias", False),
-            prefix=f"{prefix}.mlp",
-        )
+        if getattr(config, "use_fused_mlp", True):
+            self.mlp = LlamaMLP(
+                hidden_size=self.hidden_size,
+                intermediate_size=config.intermediate_size,
+                hidden_act=config.hidden_act,
+                quant_config=quant_config,
+                bias=getattr(config, "mlp_bias", False),
+                prefix=f"{prefix}.mlp",
+            )
+        else:
+            self.mlp = LlamaMLPNonFused(
+                hidden_size=self.hidden_size,
+                intermediate_size=config.intermediate_size,
+                hidden_act=config.hidden_act,
+                quant_config=quant_config,
+                bias=getattr(config, "mlp_bias", False),
+                prefix=f"{prefix}.mlp",
+            )
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
