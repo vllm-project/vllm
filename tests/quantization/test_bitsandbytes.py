@@ -77,6 +77,9 @@ def validate_generated_texts(hf_runner,
                              model_name,
                              hf_model_kwargs=None):
 
+    # NOTE: run vLLM first, as it requires a clean process
+    # when using distributed inference
+
     #Run with vLLM runner
     with vllm_runner(model_name,
                      quantization='bitsandbytes',
