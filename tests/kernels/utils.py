@@ -520,11 +520,8 @@ def make_backend(backend_name: str) -> AttentionBackend:
     * Backend instance
     '''
     if backend_name == STR_XFORMERS_ATTN_VAL:
-        # NOTE: xFormers backend cannot be imported for AMD GPUs.
+        # NOTE: xFormers backend cannot be imported for CPU and AMD GPUs.
         from vllm.attention.backends.xformers import XFormersBackend
-        return XFormersBackend()
-
-    if backend_name == STR_XFORMERS_ATTN_VAL:
         return XFormersBackend()
     raise AssertionError(
         f"Unrecognized backend_name {backend_name} for unit test")
