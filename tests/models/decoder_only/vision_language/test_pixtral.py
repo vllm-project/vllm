@@ -5,7 +5,7 @@ Run `pytest tests/models/test_mistral.py`.
 import json
 import uuid
 from dataclasses import asdict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import pytest
 from mistral_common.protocol.instruct.messages import ImageURLChunk
@@ -17,7 +17,11 @@ from vllm import EngineArgs, LLMEngine, SamplingParams, TokensPrompt
 from vllm.multimodal import MultiModalDataBuiltins
 from vllm.sequence import Logprob, SampleLogprobs
 
-from .utils import check_logprobs_close
+from ....utils import VLLM_PATH
+from ...utils import check_logprobs_close
+
+if TYPE_CHECKING:
+    from _typeshed import StrPath
 
 MODELS = ["mistralai/Pixtral-12B-2409"]
 IMG_URLS = [
@@ -81,14 +85,21 @@ SAMPLING_PARAMS = SamplingParams(max_tokens=512, temperature=0.0, logprobs=5)
 LIMIT_MM_PER_PROMPT = dict(image=4)
 
 MAX_MODEL_LEN = [8192, 65536]
-FIXTURE_LOGPROBS_CHAT = "tests/models/fixtures/pixtral_chat.json"
-FIXTURE_LOGPROBS_ENGINE = "tests/models/fixtures/pixtral_chat_engine.json"
+
+FIXTURES_PATH = VLLM_PATH / "tests/models/fixtures"
+assert FIXTURES_PATH.exists()
+
+FIXTURE_LOGPROBS_CHAT = FIXTURES_PATH / "pixtral_chat.json"
+FIXTURE_LOGPROBS_ENGINE = FIXTURES_PATH / "pixtral_chat_engine.json"
 
 OutputsLogprobs = List[Tuple[List[int], str, Optional[SampleLogprobs]]]
 
 
 # For the test author to store golden output in JSON
-def _dump_outputs_w_logprobs(outputs: OutputsLogprobs, filename: str) -> None:
+def _dump_outputs_w_logprobs(
+    outputs: OutputsLogprobs,
+    filename: "StrPath",
+) -> None:
     json_data = [(tokens, text,
                   [{k: asdict(v)
                     for k, v in token_logprobs.items()}
@@ -99,7 +110,7 @@ def _dump_outputs_w_logprobs(outputs: OutputsLogprobs, filename: str) -> None:
         json.dump(json_data, f)
 
 
-def load_outputs_w_logprobs(filename: str) -> OutputsLogprobs:
+def load_outputs_w_logprobs(filename: "StrPath") -> OutputsLogprobs:
     with open(filename, "rb") as f:
         json_data = json.load(f)
 
