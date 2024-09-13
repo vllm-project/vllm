@@ -1070,7 +1070,7 @@ class LLMEngine:
                 the current monotonic time.
             trace_headers: OpenTelemetry trace headers.
             priority: The priority of the request.
-                Only appicable with priority scheduling.
+                Only applicable with priority scheduling.
 
         Details:
             - Set arrival_time to the current time if it is None.
@@ -1100,10 +1100,9 @@ class LLMEngine:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
 
-        if priority and not self.scheduler_config.scheduling_policy == "priority":
-            raise ValueError(
-                f"Got non-zero priority {priority} but Priority scheduling is not enabled."
-            )
+        if priority and not self.scheduler_config.policy == "priority":
+            raise ValueError(f"Got priority {priority} but "
+                             "Priority scheduling is not enabled.")
 
         if arrival_time is None:
             arrival_time = time.time()
