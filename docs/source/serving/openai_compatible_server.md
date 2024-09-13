@@ -259,10 +259,10 @@ class ExampleToolParser(ToolParser):
 
 ```
 
-and then you can the flags to specify the plugins:
+Then you can use this plugin in the command line like this.
 ```
---enable-auto-tool-choice \
---tool-parser-plugin <absolute path of the plugin file>
---tool-call-parser example \
---chat-template <your chat template> \
+    --enable-auto-tool-choice \
+    --tool-parser-plugin <absolute path of the plugin file>
+    --tool-call-parser example \
+    --chat-template <your chat template> \
 ``` 
