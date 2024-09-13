@@ -22,6 +22,7 @@ _GENERATION_MODELS = {
     "DeciLMForCausalLM": ("decilm", "DeciLMForCausalLM"),
     "DeepseekForCausalLM": ("deepseek", "DeepseekForCausalLM"),
     "DeepseekV2ForCausalLM": ("deepseek_v2", "DeepseekV2ForCausalLM"),
+    "ExaoneForCausalLM": ("exaone", "ExaoneForCausalLM"),
     "FalconForCausalLM": ("falcon", "FalconForCausalLM"),
     "GemmaForCausalLM": ("gemma", "GemmaForCausalLM"),
     "Gemma2ForCausalLM": ("gemma2", "Gemma2ForCausalLM"),
@@ -49,9 +50,11 @@ _GENERATION_MODELS = {
     "PersimmonForCausalLM": ("persimmon", "PersimmonForCausalLM"),
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
     "Phi3ForCausalLM": ("llama", "LlamaForCausalLM"),
-    "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
+    "PhiMoEForCausalLM": ("phimoe", "PhiMoEForCausalLM"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2MoeForCausalLM": ("qwen2_moe", "Qwen2MoeForCausalLM"),
+    "Qwen2VLForConditionalGeneration":
+    ("qwen2_vl", "Qwen2VLForConditionalGeneration"),
     "RWForCausalLM": ("falcon", "FalconForCausalLM"),
     "StableLMEpochForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "StableLmForCausalLM": ("stablelm", "StablelmForCausalLM"),
@@ -79,12 +82,19 @@ _MULTIMODAL_MODELS = {
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
     "LlavaForConditionalGeneration":
     ("llava", "LlavaForConditionalGeneration"),
-    "LlavaNextForConditionalGeneration":
-    ("llava_next", "LlavaNextForConditionalGeneration"),
+    "LlavaNextForConditionalGeneration": ("llava_next",
+                                          "LlavaNextForConditionalGeneration"),
+    "LlavaNextVideoForConditionalGeneration":
+    ("llava_next_video", "LlavaNextVideoForConditionalGeneration"),
     "MiniCPMV": ("minicpmv", "MiniCPMV"),
     "PaliGemmaForConditionalGeneration": ("paligemma",
                                           "PaliGemmaForConditionalGeneration"),
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
+    "PixtralForConditionalGeneration": ("pixtral",
+                                        "PixtralForConditionalGeneration"),
+    "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
+    "Qwen2VLForConditionalGeneration": ("qwen2_vl",
+                                        "Qwen2VLForConditionalGeneration"),
     "UltravoxModel": ("ultravox", "UltravoxModel"),
 }
 _CONDITIONAL_GENERATION_MODELS = {

@@ -1,6 +1,7 @@
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
+                    Type, Union)
 from unittest.mock import patch
 
 import numpy as np
@@ -10,15 +11,15 @@ import torch_xla.core.xla_model as xm
 import torch_xla.runtime as xr
 
 from vllm.attention import AttentionMetadata, get_attn_backend
-from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispacther
+from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.logger import init_logger
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
-                           Logprob, SamplerOutput, SequenceGroupMetadata,
-                           SequenceOutput)
+                           Logprob, SequenceGroupMetadata, SequenceOutput)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase,
     _add_attn_metadata_broadcastable_dict,
@@ -51,6 +52,7 @@ class ModelInputForTPU(ModelRunnerInputBase):
     best_of: List[int]
     seq_groups: List[List[int]]
     virtual_engine: int = 0
+    async_callback: Optional[Callable] = None
 
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:
@@ -561,6 +563,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                     model_input.attn_metadata, model_input.input_lens[i:i + 1],
                     model_input.t[i:i + 1], model_input.p[i:i + 1],
                     model_input.num_samples, kv_caches)
+                if i == 0 and model_input.async_callback is not None:
+                    model_input.async_callback()
                 # Retrieve the outputs to CPU.
                 next_token_ids += output_token_ids.cpu().tolist()
                 start_idx = end_idx
@@ -571,6 +575,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 model_input.attn_metadata, model_input.input_lens,
                 model_input.t, model_input.p, model_input.num_samples,
                 kv_caches)
+            if model_input.async_callback is not None:
+                model_input.async_callback()
             # Retrieve the outputs to CPU.
             next_token_ids = output_token_ids.cpu().tolist()
 
@@ -594,7 +600,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 batch_idx += 1
             else:
                 for seq_id in seq_ids:
-                    next_token_id = next_token_ids[batch_idx][0]
+                    next_token_id = next_token_ids[batch_idx]
                     seq_outputs.append(
                         SequenceOutput(seq_id, next_token_id,
                                        {next_token_id: zero_logprob}))
@@ -604,7 +610,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         return [SamplerOutput(sampler_outputs)]
 
 
-class ModelWrapper(TorchCompileWrapperWithCustomDispacther):
+class ModelWrapper(TorchCompileWrapperWithCustomDispatcher):
 
     def __init__(self, model: nn.Module):
         self.model = model
@@ -715,6 +721,9 @@ class ModelWrapper(TorchCompileWrapperWithCustomDispacther):
         sampled_token_ids = torch.multinomial(probs,
                                               num_samples,
                                               replacement=True)
+        if num_samples == 1:
+            argmax_token_ids = argmax_token_ids.squeeze(dim=-1)
+            sampled_token_ids = sampled_token_ids.squeeze(dim=-1)
         next_token_ids = torch.where(t != 0, sampled_token_ids,
                                      argmax_token_ids)
         return next_token_ids

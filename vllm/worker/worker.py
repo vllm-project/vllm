@@ -17,12 +17,12 @@ from vllm.distributed import (ensure_model_parallel_initialized,
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
-                           SamplerOutput, SequenceGroupMetadata,
-                           SequenceGroupMetadataDelta)
+                           SequenceGroupMetadata, SequenceGroupMetadataDelta)
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
@@ -166,6 +166,7 @@ class Worker(LocalOrDistributedWorkerBase):
             torch.cuda.set_device(self.device)
 
             _check_if_gpu_supports_dtype(self.model_config.dtype)
+            gc.collect()
             torch.cuda.empty_cache()
             self.init_gpu_memory = torch.cuda.mem_get_info()[0]
         else:
