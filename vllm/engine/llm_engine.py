@@ -1056,7 +1056,8 @@ class LLMEngine:
         # LLMEngine/AsyncLLMEngine directly
         if is_async:
             # Log stats.
-            self.do_log_stats(scheduler_outputs, outputs, finished_before)
+            self.do_log_stats(scheduler_outputs, outputs, finished_before,
+                              skip)
 
             # Tracing
             self.do_tracing(scheduler_outputs)
@@ -1363,18 +1364,20 @@ class LLMEngine:
     def do_log_stats(self,
                      scheduler_outputs: Optional[SchedulerOutputs] = None,
                      model_output: Optional[List[SamplerOutput]] = None,
-                     finished_before: Optional[List[int]] = None) -> None:
+                     finished_before: Optional[List[int]] = None,
+                     skip: Optional[List[int]] = None) -> None:
         """Forced log when no requests active."""
         if self.log_stats:
             stats = self._get_stats(scheduler_outputs, model_output,
-                                    finished_before)
+                                    finished_before, skip)
             for logger in self.stat_loggers.values():
                 logger.log(stats)
 
     def _get_stats(self,
                    scheduler_outputs: Optional[SchedulerOutputs],
                    model_output: Optional[List[SamplerOutput]] = None,
-                   finished_before: Optional[List[int]] = None) -> Stats:
+                   finished_before: Optional[List[int]] = None,
+                   skip: Optional[List[int]] = None) -> Stats:
         """Get Stats to be Logged to Prometheus.
 
         Args:
@@ -1382,6 +1385,10 @@ class LLMEngine:
                 the scheduled batch,
             model_output: Optional, used to emit speculative decoding metrics
                 which are created by the workers.
+            finished_before: Optional, indices of sequences that were finished
+                before. These sequences will be ignored.
+            skip: Optional, indices of sequences that were preempted. These
+                sequences will be ignored.
         """
         now = time.time()
 
@@ -1454,6 +1461,11 @@ class LLMEngine:
                 # Skip double logging when using async output proc
                 if finished_before and idx in finished_before:
                     actual_num_batched_tokens -= 1
+                    continue
+
+                # Currently, skip == preempted sequences, so we need to skip
+                # their log stats
+                if skip and idx in skip:
                     continue
 
                 group_was_prefill = idx < scheduler_outputs.num_prefill_groups
