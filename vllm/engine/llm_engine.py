@@ -1099,6 +1099,12 @@ class LLMEngine:
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
+
+        if priority and not self.scheduler_config.scheduling_policy == "priority":
+            raise ValueError(
+                f"Got non-zero priority {priority} but Priority scheduling is not enabled."
+            )
+
         if arrival_time is None:
             arrival_time = time.time()
 
