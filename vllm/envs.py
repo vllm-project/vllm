@@ -429,6 +429,12 @@ def __dir__():
 
 
 if environment_variables.get('VLLM_USE_MODELSCOPE', False):
+    from packaging import version
+    import modelscope
+    if version.parse(modelscope.__version__) <= version.parse('1.18.0'):
+        raise ImportError(f'Using vLLM with ModelScope needs modelscope>=1.18.1, please '
+                          f'install by `pip install modelscope>=1.18.1`')
+
     from modelscope.utils.hf_util import patch_hub
     # Patch hub to download models from modelscope to speed up.
     patch_hub()
