@@ -11,7 +11,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.tt_loader import TTModelLoader
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata, Logprob, SequenceOutput, CompletionSequenceGroupOutput
 from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
-
+from vllm.utils import make_tensor_with_pad
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
 
@@ -26,7 +26,8 @@ class TTModelInput(ModelRunnerInputBase):
     input_tokens: Optional[torch.Tensor] = None
     input_positions: Optional[torch.Tensor] = None
     prompt_lens: Optional[torch.Tensor] = None
-    seq_groups: Optional[List[List[int]]] = None
+    seq_groups: Optional[List[List[int]]] = None,
+    page_table: Optional[torch.Tensor] = None
 
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:
@@ -35,6 +36,7 @@ class TTModelInput(ModelRunnerInputBase):
             "input_positions": self.input_positions,
             "prompt_lens": self.prompt_lens,
             "seq_groups": self.seq_groups,
+            "page_table": self.page_table,
         }
         
         return tensor_dict
@@ -108,6 +110,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         input_tokens: List[int] = []
         input_positions: List[int] = []
         prompt_lens: List[int] = []
+        block_tables: List[List[int]] = []
 
         for seq_group_metadata in seq_group_metadata_list:
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -134,7 +137,20 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                 position = seq_data.get_len() - 1
                 input_positions.append(position)
                 
-            # TODO: Get block table using seq_group_metadata.block_tables[seq_id]
+            block_table = seq_group_metadata.block_tables[seq_id]
+            block_tables.append(block_table)
+                
+        block_tables = make_tensor_with_pad(
+            block_tables, 
+            dtype=torch.int32, 
+            device="cpu", 
+            pad=0
+        )
+        
+        # Pad block_tables with zeros
+        # TODO: How do we remove padding from the model so that this is unnecessary?
+        block_tables = torch.nn.functional.pad(block_tables, (0, 128//self.block_size - block_tables.shape[1]), value=0)
+        
                 
         input_tokens = torch.tensor(input_tokens, dtype=torch.int32, device="cpu")
         input_positions = torch.tensor(input_positions, dtype=torch.int32, device="cpu")
@@ -150,7 +166,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             for metadata in seq_group_metadata_list
         ]
         
-        return TTModelInput(input_tokens, input_positions, prompt_lens, seq_groups)
+        return TTModelInput(input_tokens, input_positions, prompt_lens, seq_groups, block_tables)
 
     @torch.no_grad()
     def execute_model(
@@ -167,23 +183,30 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         is_prompt = model_input.prompt_lens is not None  # prefill if True, otherwise decode
 
         if is_prompt:
-            input_position = 0
+            input_positions = 0
             # Currently only support same prompt length
-            assert torch.all(model_input.prompt_lens == model_input.prompt_lens[0]), "Currently only supporting same prompt lengths for prefill"
+            # assert torch.all(model_input.prompt_lens == model_input.prompt_lens[0]), "Currently only supporting same prompt lengths for prefill"
             batch_size = model_input.prompt_lens.shape[0]
         else:
+            input_positions = model_input.input_positions
             # Currently only support same decode positions
-            input_position = model_input.input_positions[0].item()
-            assert torch.all(model_input.input_positions == input_position), "Currently only supporting same input positions for decode"
+            # input_position = model_input.input_positions[0].item()
+            # assert torch.all(model_input.input_positions == input_position), "Currently only supporting same input positions for decode"
             batch_size = model_input.input_tokens.shape[0]
         
+        # Need better smarts to deconcat the input tokens
+        # TODO
         input_tokens = model_input.input_tokens.view(batch_size, -1)
         
         execute_model_kwargs = {
             "tokens": input_tokens,
-            "start_pos": input_position,
+            "start_pos": input_positions,
+            "page_table": model_input.page_table,
+            "kv_cache": kv_caches,
             # TODO: Add block table and maybe kv cache
         }
+        
+        page_table = model_input.page_table
         
         logits = self.model.forward(**execute_model_kwargs)  # [batch_size, seq_len, vocab_size]
 
