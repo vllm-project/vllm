@@ -330,7 +330,7 @@ class PreparePromptMetadata(NamedTuple):
     lora_index_mapping: List[List[int]]
     lora_prompt_mapping: List[List[int]]
     lora_requests: Set[LoRARequest]
-    multi_modal_kwargs: Dict[str, BatchedTensors]
+    multi_modal_kwargs: Optional[Dict[str, BatchedTensors]]
     slot_mapping: List[List[int]]
     lora_mask: Optional[torch.Tensor]
     lora_logits_mask: Optional[torch.Tensor]
