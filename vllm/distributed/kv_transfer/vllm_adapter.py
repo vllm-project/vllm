@@ -1,14 +1,14 @@
 """vLLM distributed KV cache transfer API.
 These APIs are used in `vllm/worker/model_runner.py`.
 
-Currently supporting TP and PP.
+Currently supporting TP and PP, but TP and PP must be the same.
 
 Workflow:
-- In prefill instance, KV cache sender *buffers* the KV cache send requests
+- In prefill instance, vLLM `insert` that buffers the KV cache into lookup buffer.
 - In decode instance
-    - KV cache receiver sends the hash of input tokens to sender
-    - KV cache sender executes send request
-    - KV cache receiver receives the KV cache
+    - vLLM first runs `drop_select` to send input tokens and a mask on input tokens to sender
+    - The prefill instance send back the matching KV caches
+    - vLLM then store the KV cache into paged memory.
 """
 from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 from collections import defaultdict, deque
