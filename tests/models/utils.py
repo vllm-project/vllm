@@ -87,7 +87,7 @@ def check_logprobs_close(
     How sample logprobs are compared:
     * `always_check_logprobs == True`: set of highest-logprob token ids
       must match between seq0 and seq1 at all sampled token offsets
-    * `not always_check_logprobs == True`: highest-logprob token ids are
+    * `always_check_logprobs == False`: highest-logprob token ids are
       only compared at sampled token offsets for which generated token
       ids don't match
 
