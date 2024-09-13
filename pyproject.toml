@@ -34,6 +34,7 @@ select = [
     # isort
     # "I",
     "G",
+    "UP"
 ]
 ignore = [
     # star imports
