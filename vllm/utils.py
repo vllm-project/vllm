@@ -368,6 +368,15 @@ def is_xpu() -> bool:
 
 
 @lru_cache(maxsize=None)
+def is_tt() -> bool:
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        return "tt" in version("vllm")
+    except PackageNotFoundError:
+        return False
+
+
+@lru_cache(maxsize=None)
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
     from vllm import _custom_ops as ops

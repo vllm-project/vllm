@@ -250,6 +250,10 @@ def _no_device() -> bool:
     return VLLM_TARGET_DEVICE == "empty"
 
 
+def _is_tt() -> bool:
+    return VLLM_TARGET_DEVICE == "tt"
+
+
 def _is_cuda() -> bool:
     has_cuda = torch.version.cuda is not None
     return (VLLM_TARGET_DEVICE == "cuda" and has_cuda
@@ -359,6 +363,8 @@ def get_vllm_version() -> str:
     if _no_device():
         if envs.VLLM_TARGET_DEVICE == "empty":
             version += f"{sep}empty"
+    elif _is_tt():
+        version += f"{sep}tt"
     elif _is_cuda():
         cuda_version = str(get_nvcc_cuda_version())
         if cuda_version != MAIN_CUDA_VERSION:
@@ -419,6 +425,8 @@ def get_requirements() -> List[str]:
 
     if _no_device():
         requirements = _read_requirements("requirements-cuda.txt")
+    elif _is_tt():
+        requirements = _read_requirements("requirements-tt.txt")
     elif _is_cuda():
         requirements = _read_requirements("requirements-cuda.txt")
         cuda_major, cuda_minor = torch.version.cuda.split(".")
@@ -473,6 +481,9 @@ if envs.VLLM_USE_PRECOMPILED:
     package_data["vllm"].append("*.so")
 
 if _no_device():
+    ext_modules = []
+
+if _is_tt():
     ext_modules = []
 
 setup(

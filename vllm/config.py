@@ -17,7 +17,7 @@ from vllm.transformers_utils.config import (ConfigFormat, get_config,
                                             get_hf_image_processor_config,
                                             get_hf_text_config)
 from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
-                        is_hip, is_neuron, is_openvino, is_xpu,
+                        is_hip, is_neuron, is_openvino, is_xpu, is_tt,
                         print_warning_once)
 
 if TYPE_CHECKING:
@@ -1087,6 +1087,8 @@ class DeviceConfig:
                 self.device_type = "cpu"
             elif is_xpu():
                 self.device_type = "xpu"
+            elif is_tt():
+                self.device_type = "tt"
             else:
                 raise RuntimeError("Failed to infer device type")
         else:
@@ -1096,7 +1098,7 @@ class DeviceConfig:
         # Some device types require processing inputs on CPU
         if self.device_type in ["neuron", "openvino"]:
             self.device = torch.device("cpu")
-        elif self.device_type in ["tpu"]:
+        elif self.device_type in ["tpu"] or self.device_type in ["tt"]:
             self.device = None
         else:
             # Set device with device type
@@ -1632,7 +1634,7 @@ def _get_and_verify_dtype(
         dtype = dtype.lower()
         if dtype == "auto":
             if config_dtype == torch.float32:
-                if config.model_type == "gemma2":
+                if hasattr(config, "model_type") and config.model_type == "gemma2":
                     logger.info(
                         "For Gemma 2, we downcast float32 to bfloat16 instead "
                         "of float16 by default. Please specify `dtype` if you "
