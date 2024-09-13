@@ -52,6 +52,8 @@ class ChatTtsLlm(nn.Module):
                  quant_config: Optional[QuantizationConfig] = None) -> None:
         super().__init__()
         
+        self.config = config
+        
         # static parameters, put them in config later
         self.num_audio_tokens = config.num_audio_tokens
         self.num_text_tokens = config.num_text_tokens
@@ -81,6 +83,15 @@ class ChatTtsLlm(nn.Module):
             # (".gate_up_proj", ".gate_proj", 0),
             # (".gate_up_proj", ".up_proj", 1),
         ]
+        
+        if getattr(self.config, "use_fused_mlp", True):
+            stacked_params_mapping.extend(
+                [
+                    (".gate_up_proj", ".gate_proj", 0),
+                    (".gate_up_proj", ".up_proj", 1)
+                ]
+            )
+        
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
             for (param_name, weight_name, shard_id) in stacked_params_mapping:

@@ -139,7 +139,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
                              sampling_params: SamplingParams) -> None:
         output_token_ids = []
         for sample in valid_samples:
-            if len(sample.output_tokens) > 1:
+            if sample.output_tokens and len(sample.output_tokens) > 1:
                 output_token_ids.append(sample.output_tokens)
             else:
                 output_token_ids.append(sample.output_token)

@@ -119,7 +119,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
             # only have one sequence
             seq = seq_group.seqs[0]
             if not is_async:
-                if len(sample.output_tokens) > 1:
+                if sample.output_tokens and len(sample.output_tokens) > 1:
                     seq.append_token_id(sample.output_tokens,
                                         sample.logprobs)
                 else:
