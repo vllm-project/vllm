@@ -576,6 +576,18 @@ def machete_prepack_B(b_q_weight: torch.Tensor,
     return torch.ops._C.machete_prepack_B(b_q_weight, b_type)
 
 
+# TODO: has to be a better way to do this
+try:
+    torch.ops._C.permute_cols  # noqa B018
+
+    @torch.library.register_fake("_C::permute_cols")
+    def _permute_cols_fake(a: torch.Tensor,
+                           perm: torch.Tensor) -> torch.Tensor:
+        return torch.empty_like(a)
+except Exception:
+    pass
+
+
 def permute_cols(a: torch.Tensor, perm: torch.Tensor) -> torch.Tensor:
     return torch.ops._C.permute_cols(a, perm)
 
