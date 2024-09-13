@@ -279,6 +279,16 @@ class SiglipVisionEmbeddings(nn.Module):
         return embeddings
 
 
+def attention_softmax(attn_weights: torch.Tensor, training: bool):
+    if attn_weights.is_contiguous() and attn_weights.device.type == "xpu" and not training:
+        import xe_addons
+        xe_addons.attn_softmax_inplaced(attn_weights)
+    else:
+        attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1,
+                                                   dtype=torch.float32).to(attn_weights.dtype)
+    return attn_weights
+
+
 class SiglipAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
@@ -313,16 +323,21 @@ class SiglipAttention(nn.Module):
 
         batch_size, q_len, _ = hidden_states.size()
 
-        query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
-        value_states = self.v_proj(hidden_states)
+        # query_states = self.q_proj(hidden_states)
+        # key_states = self.k_proj(hidden_states)
+        # value_states = self.v_proj(hidden_states)
 
-        query_states = query_states.view(batch_size, q_len, self.num_heads,
-                                         self.head_dim).transpose(1, 2)
-        key_states = key_states.view(batch_size, q_len, self.num_heads,
-                                     self.head_dim).transpose(1, 2)
-        value_states = value_states.view(batch_size, q_len, self.num_heads,
-                                         self.head_dim).transpose(1, 2)
+        # query_states = query_states.view(batch_size, q_len, self.num_heads,
+        #                                  self.head_dim).transpose(1, 2)
+        # key_states = key_states.view(batch_size, q_len, self.num_heads,
+        #                              self.head_dim).transpose(1, 2)
+        # value_states = value_states.view(batch_size, q_len, self.num_heads,
+        #                                  self.head_dim).transpose(1, 2)
+
+        qkv = self.qkv_proj(hidden_states)
+        qkv = qkv.view(batch_size, q_len, self.num_heads * 3, self.head_dim)
+        qkv = qkv.transpose(1, 2)
+        query_states, key_states, value_states = qkv.chunk(3, dim=1)
 
         k_v_seq_len = key_states.shape[-2]
         attn_weights = torch.matmul(query_states, key_states.transpose(
@@ -344,10 +359,11 @@ class SiglipAttention(nn.Module):
             attn_weights = attn_weights + attention_mask
 
         # upcast attention to fp32
-        attn_weights = nn.functional.softmax(attn_weights,
-                                             dim=-1,
-                                             dtype=torch.float32).to(
-                                                 query_states.dtype)
+        # attn_weights = nn.functional.softmax(attn_weights,
+        #                                      dim=-1,
+        #                                      dtype=torch.float32).to(
+        #                                          query_states.dtype)
+        attn_weights = attention_softmax(attn_weights, self.training)
         attn_weights = nn.functional.dropout(attn_weights,
                                              p=self.dropout,
                                              training=self.training)
