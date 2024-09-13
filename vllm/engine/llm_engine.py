@@ -1469,7 +1469,7 @@ class LLMEngine:
 
                 assert len(seq_group.seqs) == 1
                 seq = seq_group.seqs[0]
-                if len(sample.output_tokens) > 1:
+                if sample.output_tokens and len(sample.output_tokens) > 1:
                     seq.append_token_id(sample.output_tokens,
                                         sample.logprobs)
                 else:
