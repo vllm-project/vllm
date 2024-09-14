@@ -364,3 +364,108 @@ class XLMRobertaForMaskedLM(nn.Module):
     def tie_weights(self):
         self.lm_head.decoder.weight = self.roberta.embeddings.word_embeddings.weight
         self.lm_head.decoder.bias.zero_()
+
+
+class XLMRobertaClassificationHead(nn.Module):
+    def __init__(self,
+                 config: XLMRobertaConfig,
+                 quant_config: Optional[QuantizationConfig] = None):
+        super().__init__()
+        self.dense = ColumnParallelLinear(config.hidden_size, config.hidden_size, quant_config=quant_config)
+        self.out_proj = ColumnParallelLinear(config.hidden_size, config.num_labels, quant_config=quant_config)
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        x, _ = self.dense(features)
+        x = torch.tanh(x)
+        x, _ = self.out_proj(x)
+        return x
+
+
+class XLMRobertaForSequenceClassification(nn.Module):
+    _ignore_weights_keys = ["roberta.pooler.dense.weight",
+                            "roberta.pooler.dense.bias"]
+
+    def __init__(self,
+                 config: XLMRobertaConfig,
+                 attn_backend: EncodeOnlyAttentionBackend,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 *args, **kwargs):
+        super().__init__()
+        self.config = config
+        self.quant_config = quant_config
+        self.num_labels = config.num_labels
+
+        self.roberta = XLMRobertaModel(config, attn_backend, quant_config)
+        self.classifier = XLMRobertaClassificationHead(config)
+
+    def forward(
+            self,
+            input_ids: torch.Tensor,
+            positions: torch.Tensor,
+            attn_metadata: EncodeOnlyAttentionMetadata,
+    ) -> torch.Tensor:
+
+        sequence_output = self.roberta(
+            input_ids,
+            positions,
+            attn_metadata,
+        )
+
+        seq_start_loc = attn_metadata.seq_start_loc
+
+        # take <s> token (equiv. to [CLS])
+        cls_features = sequence_output[seq_start_loc[:-1]]
+
+        logits = self.classifier(cls_features)
+        return logits
+
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "query", "q"),
+            ("qkv_proj", "key", "k"),
+            ("qkv_proj", "value", "v")
+        ]
+
+        params_dict = dict(self.named_parameters(remove_duplicate=False))
+
+        for name, loaded_weight in weights:
+            if name in self._ignore_weights_keys:
+                continue
+
+            if name == "roberta.embeddings.token_type_embeddings.weight":
+                # token_type_ids is all zero, so we only need token_type_embeddings[0]
+                self.roberta.embeddings.init_token_type_embeddings0()
+                default_weight_loader(self.roberta.embeddings.token_type_embeddings0, loaded_weight[0])
+                continue
+
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+
+                name = name.replace(weight_name, param_name)
+
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                if is_pp_missing_parameter(name, self):
+                    continue
+
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                # Remapping the name of FP8 kv-scale.
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
+                if is_pp_missing_parameter(name, self):
+                    continue
+
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)

@@ -3,7 +3,7 @@ from contextlib import contextmanager
 from typing import (TYPE_CHECKING, Type, Union, ClassVar, Dict, Iterable, List, Optional)
 from typing import Sequence as GenericSequence
 from queue import Queue, Empty
-from vllm.wde.core.schema.engine_io import Params, Inputs, RequestOutput
+from vllm.wde.core.schema.engine_io import Params, Inputs, RequestOutput, ValidationError
 from vllm.wde.core.workflow import Workflow
 from vllm.wde.core.arg_utils import EngineArgs
 from vllm.wde.core.config import EngineConfig
@@ -144,7 +144,11 @@ class LLMEngine:
                     inputs: Optional[Union[str, Inputs]] = None,
                     params: Optional[Params] = None,
                     arrival_time: Optional[float] = None) -> None:
-        request = self.input_processor(request_id, inputs, params, arrival_time)
+        try:
+            request = self.input_processor(request_id, inputs, params, arrival_time)
+        except ValidationError:
+            logger.error(f"{request_id} validation error")
+            return
         self.scheduler.add_request(request)
 
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:

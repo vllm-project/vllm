@@ -58,3 +58,7 @@ class SchedulerOutput:
 
 class RequestOutput(Request):
     finished: bool
+
+
+class ValidationError(ValueError):
+    pass

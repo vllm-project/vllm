@@ -2,16 +2,14 @@
 from typing import List, Optional, Sequence, Union, cast
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
-
 from vllm.wde.core.llm_engine import LLMEngine
-from vllm.wde.core.schema.engine_io import TextOnlyInputs as PromptInputs
-from vllm.wde.core.schema.engine_io import RequestOutput
-from vllm.wde.core.inputs.tokenizer import get_cached_tokenizer
 
-from vllm.outputs import EmbeddingRequestOutput, RequestOutput
-from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import SamplingParams
+from vllm.wde.core.schema.engine_io import TextOnlyInputs as PromptInputs
+from vllm.wde.reranker.schema.engine_io import RerankerInputs
 from vllm.logger import init_logger
+
+from vllm.wde.core.schema.engine_io import RequestOutput, Params
+from vllm.wde.core.inputs.tokenizer import get_cached_tokenizer
 from vllm.utils import Counter
 
 logger = init_logger(__name__)
@@ -89,42 +87,19 @@ class LLM:
             self.llm_engine.tokenizer.tokenizer = get_cached_tokenizer(
                 tokenizer)
 
-    def generate(
-        self,
-        inputs: Union[Union[PromptInputs, Sequence[PromptInputs]],
-                       Optional[Union[str, List[str]]]] = None,
-        sampling_params: Optional[Union[SamplingParams,
-                                        Sequence[SamplingParams]]] = None,
-
-        use_tqdm: bool = True,
-    ) -> List[RequestOutput]:
-
-        inputs = cast(Union[PromptInputs, Sequence[PromptInputs]], inputs)
-
-        if sampling_params is None:
-            # Use default sampling params.
-            sampling_params = SamplingParams()
-
-        self._validate_and_add_requests(
-            inputs=inputs,
-            params=sampling_params)
-
-        outputs = self._run_engine(use_tqdm=use_tqdm)
-        return LLMEngine.validate_outputs(outputs, RequestOutput)
-
     def encode(
         self,
         inputs: Union[Union[PromptInputs, Sequence[PromptInputs]],
                        Optional[Union[str, List[str]]]] = None,
-        pooling_params: Optional[Union[PoolingParams,
-                                       Sequence[PoolingParams]]] = None,
+        pooling_params: Optional[Union[Params,
+                                       Sequence[Params]]] = None,
         use_tqdm: bool = True,
     ) -> List[RequestOutput]:
         inputs = cast(Union[PromptInputs, Sequence[PromptInputs]], inputs)
 
         if pooling_params is None:
             # Use default pooling params.
-            pooling_params = PoolingParams()
+            pooling_params = Params()
 
         self._validate_and_add_requests(
             inputs=inputs,
@@ -134,11 +109,26 @@ class LLM:
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return LLMEngine.validate_outputs(outputs, RequestOutput)
 
+    def reranker(
+        self,
+        inputs: RerankerInputs,
+        params: Optional[Union[Params, Sequence[Params]]] = None,
+        use_tqdm: bool = True,
+    ) -> List[RequestOutput]:
+        inputs = cast(Union[PromptInputs, Sequence[PromptInputs]], inputs)
+
+        for i, request_inputs in enumerate(inputs):
+            self._add_request(
+                request_inputs,
+                params[i] if isinstance(params, Sequence) else params)
+
+        outputs = self._run_engine(use_tqdm=use_tqdm)
+        return LLMEngine.validate_outputs(outputs, RequestOutput)
+
     def _validate_and_add_requests(
         self,
         inputs: Union[PromptInputs, Sequence[PromptInputs]],
-        params: Union[SamplingParams, Sequence[SamplingParams], PoolingParams,
-                      Sequence[PoolingParams]],
+        params: Optional[Union[Params, Sequence[Params]]] = None,
     ) -> None:
         if isinstance(inputs, (str, dict)):
             # Convert a single prompt to a list.
@@ -159,7 +149,7 @@ class LLM:
     def _add_request(
             self,
             inputs: PromptInputs,
-            params: Union[SamplingParams, PoolingParams],
+            params: Params,
     ) -> None:
         request_id = str(next(self.request_counter))
         self.llm_engine.add_request(
@@ -182,25 +172,12 @@ class LLM:
             )
         # Run the engine.
         outputs: List[RequestOutput] = []
-        total_in_toks = 0
-        total_out_toks = 0
         while self.llm_engine.has_unfinished_requests():
             step_outputs = self.llm_engine.step()
             for output in step_outputs:
                 if output.finished:
                     outputs.append(output)
                     if use_tqdm:
-                        if isinstance(output, EmbeddingRequestOutput):
-                            # Calculate tokens only for RequestOutput
-                            total_in_toks += len(output.prompt_token_ids)
-                            in_spd = total_in_toks / pbar.format_dict["elapsed"]
-                            total_out_toks += sum(
-                                len(stp.token_ids) for stp in output.outputs)
-                            out_spd = total_out_toks / pbar.format_dict[
-                                "elapsed"]
-                            pbar.postfix = (
-                                f"est. speed input: {in_spd:.2f} toks/s, "
-                                f"output: {out_spd:.2f} toks/s")
                         pbar.update(1)
         if use_tqdm:
             pbar.close()
