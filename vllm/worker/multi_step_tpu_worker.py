@@ -9,18 +9,16 @@ from vllm.worker.tpu_model_runner import ModelInputForTPU
 from vllm.worker.tpu_worker import TPUWorker
 from vllm.worker.worker_base import WorkerInput
 
-StatefulModelInput = ModelInputForTPU
-
 
 class MultiStepTPUWorker(TPUWorker):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.cached_model_input: Optional[StatefulModelInput] = None
+        self.cached_model_input: Optional[ModelInputForTPU] = None
 
     def _get_driver_input_and_broadcast(
         self, execute_model_req: ExecuteModelRequest
-    ) -> Tuple[StatefulModelInput, WorkerInput, Dict[str, torch.Tensor]]:
+    ) -> Tuple[ModelInputForTPU, WorkerInput, Dict[str, torch.Tensor]]:
         assert self.is_driver_worker
         assert execute_model_req.virtual_engine == 0
 
@@ -32,7 +30,7 @@ class MultiStepTPUWorker(TPUWorker):
             worker_input = dataclasses.replace(
                 worker_input,
                 num_steps=execute_model_req.num_lookahead_slots + 1)
-            model_input: StatefulModelInput = (
+            model_input: ModelInputForTPU = (
                 self.model_runner.prepare_model_input(
                     execute_model_req.seq_group_metadata_list,
                     execute_model_req.virtual_engine,
@@ -71,8 +69,8 @@ class MultiStepTPUWorker(TPUWorker):
     def prepare_input(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None,
-    ) -> Optional[Tuple[StatefulModelInput, WorkerInput, Dict[str,
-                                                              torch.Tensor]]]:
+    ) -> Optional[Tuple[ModelInputForTPU, WorkerInput, Dict[str,
+                                                            torch.Tensor]]]:
         if self.is_driver_worker:
             if execute_model_req is None:
                 if self.do_metadata_broadcast:
