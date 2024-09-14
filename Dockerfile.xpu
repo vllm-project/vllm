@@ -3,7 +3,6 @@ FROM intel/oneapi-basekit:2024.2.0-devel-ubuntu22.04 AS vllm-base
 RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/intel-oneapi-archive-keyring.gpg > /dev/null && \
     echo "deb [signed-by=/usr/share/keyrings/intel-oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main " | tee /etc/apt/sources.list.d/oneAPI.list && \
     chmod 644 /usr/share/keyrings/intel-oneapi-archive-keyring.gpg && \
-    rm /etc/apt/sources.list.d/intel-graphics.list && \
     wget -O- https://repositories.intel.com/graphics/intel-graphics.key | gpg --dearmor | tee /usr/share/keyrings/intel-graphics.gpg > /dev/null && \
     echo "deb [arch=amd64,i386 signed-by=/usr/share/keyrings/intel-graphics.gpg] https://repositories.intel.com/graphics/ubuntu jammy arc" | tee /etc/apt/sources.list.d/intel.gpu.jammy.list && \
     chmod 644 /usr/share/keyrings/intel-graphics.gpg
@@ -24,6 +23,14 @@ RUN apt-get update -y && \
     python3-pip \
     # vim \
     wget
+
+RUN git clone https://github.com/intel/pti-gpu && \
+    cd pti-gpu/sdk && \
+    mkdir build && \
+    cd build && \
+    cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=../cmake/toolchains/icpx_toolchain.cmake -DBUILD_TESTING=OFF .. && \
+    make -j && \
+    cmake --install . --config Release --prefix "/usr/local"
 
 WORKDIR /workspace/vllm
 COPY requirements-xpu.txt /workspace/vllm/requirements-xpu.txt
