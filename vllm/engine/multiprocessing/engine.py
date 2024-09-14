@@ -193,10 +193,6 @@ class MQLLMEngine:
 
             # Engine step.
             request_outputs = self.engine_step()
-            for request_output in request_outputs:
-                if request_output.request_id == "request-211":
-                    print("\n\n\n")
-                    print(request_output)
 
             # Send request outputs (if async, done in engine_step callback).
             if not self.use_async_sockets:
