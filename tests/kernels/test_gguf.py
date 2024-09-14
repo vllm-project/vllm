@@ -8,11 +8,13 @@ from huggingface_hub import snapshot_download
 
 import vllm._custom_ops as ops
 
+GGUF_SAMPLE = snapshot_download("Isotr0py/test-gguf-sample")
+
 
 def get_gguf_sample_tensors(
         hidden_size: int,
         quant_type: GGMLQuantizationType) -> List[ReaderTensor]:
-    sample_dir = snapshot_download("Isotr0py/test-gguf-sample")
+    sample_dir = GGUF_SAMPLE
     filename = f"Quant_{quant_type.name}_{hidden_size}.gguf"
     sample_file = Path(sample_dir) / filename
     return GGUFReader(sample_file).tensors
