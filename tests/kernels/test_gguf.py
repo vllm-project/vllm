@@ -1,10 +1,9 @@
-from typing import List
 from pathlib import Path
+from typing import List
 
 import pytest
 import torch
-
-from gguf import GGMLQuantizationType, dequantize, GGUFReader, ReaderTensor
+from gguf import GGMLQuantizationType, GGUFReader, ReaderTensor, dequantize
 from huggingface_hub import snapshot_download
 
 import vllm._custom_ops as ops
