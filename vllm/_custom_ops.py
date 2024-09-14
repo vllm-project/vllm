@@ -20,8 +20,10 @@ if not current_platform.is_tpu():
 if current_platform.is_rocm():
     import vllm._rocm_C  # noqa: F401
 
+supports_moe_ops = False
 with contextlib.suppress(ImportError):
     import vllm._moe_C  # noqa: F401
+    supports_moe_ops = True
 
 
 def hint_on_error(fn):
@@ -253,9 +255,7 @@ def gptq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                                   b_g_idx, use_exllama, bit)
 
 
-# TODO: has to be a better way to do this
-try:
-    torch.ops._C.gptq_gemm  # noqa B018
+if hasattr(torch.ops._C, 'gptq_gemm'):
 
     @torch.library.register_fake("_C::gptq_gemm")
     def _gptq_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
@@ -265,8 +265,6 @@ try:
         return torch.empty((a.size(0), b_q_weight.size(1)),
                            dtype=a.dtype,
                            device=a.device)
-except Exception:
-    pass
 
 
 def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor,
@@ -292,9 +290,7 @@ def gptq_marlin_24_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                                             size_n, size_k)
 
 
-# TODO: has to be a better way to do this
-try:
-    torch.ops._C.gptq_marlin_24_gemm  # noqa B018
+if hasattr(torch.ops._C, 'gptq_marlin_24_gemm'):
 
     @torch.library.register_fake("_C::gptq_marlin_24_gemm")
     def _gptq_marlin_24_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
@@ -470,9 +466,6 @@ try:
             return [a, c]
         else:
             return [a]
-
-except Exception:
-    pass
 
 
 # cutlass
@@ -820,6 +813,24 @@ def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                  gating_output: float) -> None:
     torch.ops._moe_C.topk_softmax(topk_weights, topk_ids,
                                   token_expert_indicies, gating_output)
+
+
+if supports_moe_ops:
+
+    @torch.library.register_fake("_moe_C::marlin_gemm_moe")
+    def marlin_gemm_moe_fake(a: torch.Tensor, b_q_weights: torch.Tensor,
+                             sorted_ids: torch.Tensor,
+                             topk_weights: torch.Tensor,
+                             topk_ids: torch.Tensor, b_scales: torch.Tensor,
+                             g_idx: torch.Tensor, perm: torch.Tensor,
+                             workspace: torch.Tensor, size_m: int, size_n: int,
+                             size_k: int, is_k_full: bool, num_experts: int,
+                             topk: int, moe_block_size: int,
+                             replicate_input: bool,
+                             apply_weights: bool) -> torch.Tensor:
+        return torch.empty((size_m, topk, size_n),
+                           dtype=a.dtype,
+                           device=a.device)
 
 
 def reshape_and_cache(

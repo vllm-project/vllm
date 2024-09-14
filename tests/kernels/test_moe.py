@@ -10,6 +10,7 @@ from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
 from tests.kernels.utils import opcheck
+from vllm import _custom_ops as ops
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
@@ -223,21 +224,6 @@ def test_fused_marlin_moe(
 
     topk_weights, topk_ids = fused_topk(a, score, topk, False)
 
-    ##############
-    M, _ = a.shape
-    token_expert_indicies = torch.empty(M,
-                                        topk,
-                                        dtype=torch.int32,
-                                        device=a.device)
-
-    opcheck(torch._moe_C.topk_softmax, (
-        topk_weights,
-        topk_ids,
-        token_expert_indicies,
-        score.float(),
-    ))
-    ##############
-
     triton_output = fused_moe(
         a,
         w_ref1.transpose(1, 2).contiguous(),
@@ -264,25 +250,34 @@ def test_fused_marlin_moe(
 
     assert compute_max_diff(marlin_output, triton_output) < 4e-2
 
-    ##############
-    M, K = a.shape
-    E = qweight1.shape[0]
-    N = qweight2.shape[1] * 16
-    topk = topk_ids.shape[1]
-    block_size_m = 4
+    if ops.supports_moe_ops:
+        token_expert_indicies = torch.empty(m,
+                                            topk,
+                                            dtype=torch.int32,
+                                            device=a.device)
 
-    sorted_token_ids, _, _ = moe_align_block_size(topk_ids, block_size_m, E)
+        opcheck(torch.ops._moe_C.topk_softmax, (
+            topk_weights,
+            topk_ids,
+            token_expert_indicies,
+            score.float(),
+        ))
 
-    max_workspace_size = ((M + 255) // 256) * (max(2 * N, K) // 64) * 16
-    workspace = torch.zeros(max_workspace_size,
-                            dtype=torch.int,
-                            device="cuda",
-                            requires_grad=False)
+        block_size_m = 4
 
-    opcheck(torch.ops._moe_C.marlin_gemm_moe,
-            (a, qweight1, sorted_token_ids, topk_weights, topk_ids, scales1,
-             g_idx1, sort_indices1, workspace, M, 2 * N, K, True, E, topk,
-             block_size_m, True, False))
+        sorted_token_ids, _, _ = moe_align_block_size(topk_ids, block_size_m,
+                                                      e)
+
+        max_workspace_size = ((m + 255) // 256) * (max(2 * n, k) // 64) * 16
+        workspace = torch.zeros(max_workspace_size,
+                                dtype=torch.int,
+                                device="cuda",
+                                requires_grad=False)
+
+        opcheck(torch.ops._moe_C.marlin_gemm_moe,
+                (a, qweight1, sorted_token_ids, topk_weights, topk_ids,
+                 scales1, g_idx1, sort_indices1, workspace, m, 2 * n, k, True,
+                 e, topk, block_size_m, True, False))
 
 
 @pytest.mark.skip("This test is here for the sake of debugging, "
