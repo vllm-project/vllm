@@ -202,6 +202,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     (os.environ.get("VLLM_DYNAMO_USE_CUSTOM_DISPATCHER", "True").lower() in
      ("true", "1")),
 
+    # Internal flag to control whether we use custom op,
+    # or use the native pytorch implementation
+    "VLLM_TEST_COMPILE_NO_CUSTOM_OPS":
+    lambda: int(os.environ.get("VLLM_TEST_COMPILE_NO_CUSTOM_OPS", "0")),
+
     # Internal flag to enable Dynamo fullgraph capture
     "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE":
     lambda: bool(

@@ -6,7 +6,8 @@ import pytest
 @pytest.mark.parametrize("model", ["meta-llama/Meta-Llama-3-8B"])
 def test_full_graph(model):
     # make sure these models can be captured in full graph mode
-    os.environ["VLLM_TEST_DYNAMO_GRAPH_CAPTURE"] = "1"
+    if "VLLM_TEST_DYNAMO_GRAPH_CAPTURE" not in os.environ:
+        os.environ["VLLM_TEST_DYNAMO_GRAPH_CAPTURE"] = "1"
 
     from vllm import LLM, SamplingParams
     prompts = [
