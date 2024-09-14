@@ -1064,8 +1064,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     "This may lead to less accurate results!")
 
         if envs.VLLM_TEST_DYNAMO_GRAPH_CAPTURE and supports_dynamo():
+            from vllm.compilation.backends import vllm_backend
             from vllm.plugins import get_torch_compile_backend
-            backend = get_torch_compile_backend() or "eager"
+            backend = get_torch_compile_backend() or vllm_backend
             self.model = torch.compile(
                 self.model,
                 fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
