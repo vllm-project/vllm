@@ -12,6 +12,7 @@ from typing import List, Optional, Sequence, Union
 from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     PromptAdapterPath)
+from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.utils import FlexibleArgumentParser
 
 
@@ -171,7 +172,7 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "Enable auto tool choice for supported models. Use --tool-call-parser"
         "to specify which parser to use")
 
-    valid_tool_parsers = ["mistral", "hermes", "internlm2", "internlm2_5"]
+    valid_tool_parsers = ToolParserManager.tool_parsers.keys()
     parser.add_argument(
         "--tool-call-parser",
         type=str,
