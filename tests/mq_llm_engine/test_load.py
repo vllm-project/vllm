@@ -24,7 +24,7 @@ def tmp_socket():
 
 
 @pytest.mark.asyncio
-async def test_generation(tmp_socket):
+async def test_load(tmp_socket):
     with RemoteMQLLMEngine(engine_args=ENGINE_ARGS,
                            ipc_path=tmp_socket) as engine:
 
