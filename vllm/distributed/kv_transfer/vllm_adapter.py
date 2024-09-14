@@ -68,7 +68,7 @@ class KV_transfer_agent:
         torch_distributed_backend: Union[str, Backend],
     ):
         
-
+        '''
         # init pipe
         self.device_pipe = TorchDistributedPipe(
             group_ranks,
@@ -80,18 +80,28 @@ class KV_transfer_agent:
             local_rank,
             "gloo"
         )
-
-        # init two pipes: one or send and one for recv
+        '''
+        # init 4 pipes: 2 * (one for send and one for recv)
         if IS_KV_PREFILL_INSTANCE or IS_LMCACHE_INSTANCE:
             self.send_pipe = TorchDistributedPipe(
                 group_ranks,
                 local_rank,
                 torch_distributed_backend,
             )
+            self.send_signal_pipe = TorchDistributedPipe(
+                group_ranks,
+                local_rank,
+                "gloo",
+            )
             self.recv_pipe = TorchDistributedPipe(
                 group_ranks,
                 local_rank,
                 torch_distributed_backend,
+            )
+            self.recv_signal_pipe = TorchDistributedPipe(
+                group_ranks,
+                local_rank,
+                "gloo",
             )
         elif IS_KV_DECODE_INSTANCE:
             self.recv_pipe = TorchDistributedPipe(
@@ -99,10 +109,20 @@ class KV_transfer_agent:
                 local_rank,
                 torch_distributed_backend,
             )
+            self.recv_signal_pipe = TorchDistributedPipe(
+                group_ranks,
+                local_rank,
+                "gloo",
+            )
             self.send_pipe = TorchDistributedPipe(
                 group_ranks,
                 local_rank,
                 torch_distributed_backend,
+            )
+            self.send_signal_pipe = TorchDistributedPipe(
+                group_ranks,
+                local_rank,
+                "gloo",
             )
             
         
@@ -111,7 +131,10 @@ class KV_transfer_agent:
 
         # init lookup buffer
         # TODO: replace this 1e9 with a configurable parameter or a constant
-        self.buffer = SimpleKVLookupBuffer(self.cpu_pipe, self.device_pipe, 1e9 * 10)
+        #self.buffer = SimpleKVLookupBuffer(self.cpu_pipe, self.device_pipe, 1e9 * 10)
+        
+        self.send_buffer = SimpleKVLookupBuffer(self.send_pipe, self.send_signal_pipe, 1e9 * 10)
+        self.recv_buffer = SimpleKVLookupBuffer(self.recv_pipe, self.recv_signal_pipe, 1e9 * 10)
 
     def send_kv_caches_and_hidden_states(
         self,
@@ -152,7 +175,7 @@ class KV_transfer_agent:
                 
             keys = torch.cat(keys, dim=0)
             values = torch.cat(values, dim=0)
-            self.buffer.insert(
+            self.send_buffer.insert(
                 current_tokens, 
                 torch.ones_like(current_tokens, dtype=bool),
                 keys, 
@@ -197,7 +220,7 @@ class KV_transfer_agent:
             input_tokens_list.append(current_tokens)
             start_pos_list.append(start_pos)
             
-            ret = self.buffer.drop_select(
+            ret = self.recv_buffer.drop_select(
                 current_tokens, 
                 torch.ones_like(current_tokens, dtype=bool))
             if ret[0] is None:
