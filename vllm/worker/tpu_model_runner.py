@@ -1,3 +1,4 @@
+import threading
 import time
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
@@ -7,6 +8,7 @@ from unittest.mock import patch
 import numpy as np
 import torch
 import torch.nn as nn
+import torch_xla
 import torch_xla.core.xla_model as xm
 import torch_xla.runtime as xr
 
@@ -38,19 +40,6 @@ _ENABLE_TOP_P = False
 # FIXME(woosuk): A temporary hack to support `n > 1`.
 # This can significantly affect the performance if too large.
 _MAX_NUM_SAMPLES = 128
-
-import torch_xla
-import threading
-
-
-def get_event(x: torch.Tensor) -> threading.Event:
-    event = threading.Event()
-
-    def _callback_wrapper():
-        event.set()
-
-    torch_xla._XLAC._on_ready_callback(x, _callback_wrapper)
-    return event
 
 
 @dataclass(frozen=True)
@@ -540,7 +529,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         assert intermediate_tensors is None
         if not model_input.is_first_multi_step:
             if model_input.async_callback is not None:
-                ctx = model_input.async_callback.keywords["ctx"]
+                ctx = model_input.async_callback.keywords[  # type: ignore
+                    "ctx"]
                 ctx.append_output(
                     outputs=[self.cached_sampler_outputs.pop(0)],
                     seq_group_metadata_list=ctx.seq_group_metadata_list,
@@ -550,6 +540,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 model_input.async_callback()
 
             event, next_token_ids = self.cached_step_outputs.pop(0)
+            if event is not None:
                 event.wait()
             next_token_ids = next_token_ids.cpu().tolist()
             sampler_output = _make_decode_output(next_token_ids,
@@ -640,10 +631,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                                               model_input.num_samples,
                                               kv_caches,
                                               is_prompt=False)
-                if num_steps > 1:
-                    event = get_event(output_token_ids)
-                else:
-                    event = None
+                event = _get_event(output_token_ids) if num_steps > 1 else None
                 self.cached_step_outputs.append((event, output_token_ids))
 
                 if i < num_steps - 1:
@@ -699,27 +687,6 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             if num_steps > 1:
                 self.cached_sampler_outputs.append(sampler_output)
             return [sampler_output]
-
-
-def _make_decode_output(
-    next_token_ids: List[int],
-    seq_groups: List[List[int]],
-) -> SamplerOutput:
-    zero_logprob = Logprob(0.0)
-    sampler_outputs = []
-    batch_idx = 0
-    for seq_group in seq_groups:
-        seq_ids = seq_group
-        seq_outputs = []
-        for seq_id in seq_ids:
-            next_token_id = next_token_ids[batch_idx]
-            seq_outputs.append(
-                SequenceOutput(seq_id, next_token_id,
-                               {next_token_id: zero_logprob}))
-            batch_idx += 1
-        sampler_outputs.append(CompletionSequenceGroupOutput(
-            seq_outputs, None))
-    return SamplerOutput(sampler_outputs)
 
 
 class ModelWrapper(TorchCompileWrapperWithCustomDispatcher):
@@ -867,3 +834,34 @@ def _apply_top_p(logits: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
     cutoff_logit = torch.gather(logits_sorted, -1, cutoff_index)
     logits = logits.masked_fill_(logits < cutoff_logit, -float("inf"))
     return logits
+
+
+def _get_event(x: torch.Tensor) -> threading.Event:
+    event = threading.Event()
+
+    def _callback_wrapper():
+        event.set()
+
+    torch_xla._XLAC._on_ready_callback(x, _callback_wrapper)
+    return event
+
+
+def _make_decode_output(
+    next_token_ids: List[int],
+    seq_groups: List[List[int]],
+) -> SamplerOutput:
+    zero_logprob = Logprob(0.0)
+    sampler_outputs = []
+    batch_idx = 0
+    for seq_group in seq_groups:
+        seq_ids = seq_group
+        seq_outputs = []
+        for seq_id in seq_ids:
+            next_token_id = next_token_ids[batch_idx]
+            seq_outputs.append(
+                SequenceOutput(seq_id, next_token_id,
+                               {next_token_id: zero_logprob}))
+            batch_idx += 1
+        sampler_outputs.append(CompletionSequenceGroupOutput(
+            seq_outputs, None))
+    return SamplerOutput(sampler_outputs)

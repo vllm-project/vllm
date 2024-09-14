@@ -6,8 +6,8 @@ import torch
 from vllm.distributed import broadcast_tensor_dict
 from vllm.sequence import ExecuteModelRequest
 from vllm.worker.tpu_model_runner import ModelInputForTPU
-from vllm.worker.worker_base import WorkerInput
 from vllm.worker.tpu_worker import TPUWorker
+from vllm.worker.worker_base import WorkerInput
 
 StatefulModelInput = ModelInputForTPU
 
