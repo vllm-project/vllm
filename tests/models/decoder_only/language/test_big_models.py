@@ -18,8 +18,11 @@ MODELS = [
     "EleutherAI/gpt-j-6b",
     # "mosaicml/mpt-7b",  # Broken
     # "Qwen/Qwen1.5-0.5B"  # Broken,
-    "openbmb/MiniCPM3-4B",
 ]
+
+if not current_platform.is_cpu():
+    # MiniCPM requires fused_moe which is not supported by CPU
+    MODELS.append("openbmb/MiniCPM3-4B")
 
 #TODO: remove this after CPU float16 support ready
 target_dtype = "float" if current_platform.is_cpu() else "half"
@@ -36,9 +39,6 @@ def test_models(
     dtype: str,
     max_tokens: int,
 ) -> None:
-    if model.startswith("openbmb/MiniCPM3") and current_platform.is_cpu():
-        pytest.skip("MiniCPM requires fused_moe which is not supported by CPU")
-
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
 
