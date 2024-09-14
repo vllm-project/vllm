@@ -376,7 +376,6 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                 execute_model_req.finished_requests_ids))
 
         self.execute_worker(worker_input)
-        num_steps = worker_input.num_steps
 
         # If there is no input, we don't need to execute the model.
         if worker_input.num_seq_groups == 0:

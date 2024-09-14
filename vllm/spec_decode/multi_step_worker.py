@@ -94,8 +94,8 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
             # and other restrictions that are part of DraftModelRunner's
             # supports_gpu_multi_step(..)
             for _ in range(sample_len):
-                model_output: List[SamplerOutput] = super(
-                )._execute_model_spmd(execute_model_req=expanded_request)
+                model_output: List[SamplerOutput] = super().execute_model(
+                    execute_model_req=expanded_request)
                 assert (len(model_output) == 1
                         ), "composing multistep workers not supported"
                 model_output = model_output[0]

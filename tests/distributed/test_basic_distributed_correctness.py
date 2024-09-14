@@ -47,7 +47,7 @@ def test_models(
     if test_suite != TARGET_TEST_SUITE:
         pytest.skip(f"Skip test for {test_suite}")
 
-    if model == "meta-llama/Llama-2-7b-hf" and distributed_executor_backend == "ray" and attention_backend == "" and test_suite == "L4":  # noqa:
+    if model == "meta-llama/Llama-2-7b-hf" and distributed_executor_backend == "ray" and attention_backend == "" and test_suite == "L4":  # noqa
         # test ray adag
         os.environ['VLLM_USE_RAY_SPMD_WORKER'] = "1"
         os.environ['VLLM_USE_RAY_COMPILED_DAG'] = "1"
