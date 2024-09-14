@@ -220,7 +220,6 @@ class OpenAIServingChat(OpenAIServing):
                     and contains_trace_headers(raw_request.headers)):
                 log_tracing_disabled_warning()
 
-            print("calling generate")
             result_generator = self.engine_client.generate(
                 engine_inputs,
                 sampling_params,
