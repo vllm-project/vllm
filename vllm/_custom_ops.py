@@ -17,6 +17,9 @@ if not current_platform.is_tpu():
     except ImportError as e:
         logger.warning("Failed to import from vllm._C with %r", e)
 
+if current_platform.is_rocm():
+    import vllm._rocm_C  # noqa: F401
+
 with contextlib.suppress(ImportError):
     import vllm._moe_C  # noqa: F401
 
@@ -127,6 +130,30 @@ def paged_attention_v2(
         blocksparse_block_size, blocksparse_head_sliding_step)
 
 
+def paged_attention_rocm(
+    out: torch.Tensor,
+    exp_sum: torch.Tensor,
+    max_logits: torch.Tensor,
+    tmp_out: torch.Tensor,
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    num_kv_heads: int,
+    scale: float,
+    block_tables: torch.Tensor,
+    seq_lens: torch.Tensor,
+    block_size: int,
+    max_seq_len: int,
+    alibi_slopes: Optional[torch.Tensor],
+    kv_cache_dtype: str,
+) -> None:
+    torch.ops._rocm_C.paged_attention(out, exp_sum, max_logits, tmp_out, query,
+                                      key_cache, value_cache, num_kv_heads,
+                                      scale, block_tables, seq_lens,
+                                      block_size, max_seq_len, alibi_slopes,
+                                      kv_cache_dtype)
+
+
 # pos encoding ops
 def rotary_embedding(
     positions: torch.Tensor,
@@ -161,16 +188,36 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
-def advance_step(num_seqs: int, num_queries: int, block_size: int,
-                 input_tokens: torch.Tensor, sampled_token_ids: torch.Tensor,
-                 input_positions: torch.Tensor, seq_lens: torch.Tensor,
-                 slot_mapping: torch.Tensor,
-                 block_tables: torch.Tensor) -> None:
+def advance_step_flashattn(num_seqs: int, num_queries: int, block_size: int,
+                           input_tokens: torch.Tensor,
+                           sampled_token_ids: torch.Tensor,
+                           input_positions: torch.Tensor,
+                           seq_lens: torch.Tensor, slot_mapping: torch.Tensor,
+                           block_tables: torch.Tensor) -> None:
     """Advance a step on GPU for existing inputs for a multi-step runner"""
-    return torch.ops._C.advance_step(num_seqs, num_queries, block_size,
-                                     input_tokens, sampled_token_ids,
-                                     input_positions, seq_lens, slot_mapping,
-                                     block_tables)
+    return torch.ops._C.advance_step_flashattn(num_seqs, num_queries,
+                                               block_size, input_tokens,
+                                               sampled_token_ids,
+                                               input_positions, seq_lens,
+                                               slot_mapping, block_tables)
+
+
+def advance_step_flashinfer(num_seqs: int, num_queries: int, block_size: int,
+                            input_tokens: torch.Tensor,
+                            sampled_token_ids: torch.Tensor,
+                            input_positions: torch.Tensor,
+                            seq_lens: torch.Tensor, slot_mapping: torch.Tensor,
+                            block_tables: torch.Tensor,
+                            paged_kv_indices: torch.Tensor,
+                            paged_kv_indptr: torch.Tensor,
+                            paged_kv_last_page_len: torch.Tensor,
+                            block_table_bound: torch.Tensor) -> None:
+
+    return torch.ops._C.advance_step_flashinfer(
+        num_seqs, num_queries, block_size, input_tokens, sampled_token_ids,
+        input_positions, seq_lens, slot_mapping, block_tables,
+        paged_kv_indices, paged_kv_indptr, paged_kv_last_page_len,
+        block_table_bound)
 
 
 # quantization ops
