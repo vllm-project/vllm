@@ -17,6 +17,9 @@ if not current_platform.is_tpu():
     except ImportError as e:
         logger.warning("Failed to import from vllm._C with %r", e)
 
+if current_platform.is_rocm():
+    import vllm._rocm_C  # noqa: F401
+
 with contextlib.suppress(ImportError):
     import vllm._moe_C  # noqa: F401
 
@@ -125,6 +128,30 @@ def paged_attention_v2(
         alibi_slopes, kv_cache_dtype, k_scale, v_scale, tp_rank,
         blocksparse_local_blocks, blocksparse_vert_stride,
         blocksparse_block_size, blocksparse_head_sliding_step)
+
+
+def paged_attention_rocm(
+    out: torch.Tensor,
+    exp_sum: torch.Tensor,
+    max_logits: torch.Tensor,
+    tmp_out: torch.Tensor,
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    num_kv_heads: int,
+    scale: float,
+    block_tables: torch.Tensor,
+    seq_lens: torch.Tensor,
+    block_size: int,
+    max_seq_len: int,
+    alibi_slopes: Optional[torch.Tensor],
+    kv_cache_dtype: str,
+) -> None:
+    torch.ops._rocm_C.paged_attention(out, exp_sum, max_logits, tmp_out, query,
+                                      key_cache, value_cache, num_kv_heads,
+                                      scale, block_tables, seq_lens,
+                                      block_size, max_seq_len, alibi_slopes,
+                                      kv_cache_dtype)
 
 
 # pos encoding ops
