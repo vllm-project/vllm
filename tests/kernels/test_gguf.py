@@ -27,6 +27,7 @@ HIDDEN_SIZES = [256, 1024]
 NUM_TOKENS = [7, 83, 128, 2048]  # Arbitrary values for testing
 SEEDS = [0]
 QUANT_TYPES = [
+    # i-matrix
     GGMLQuantizationType.IQ1_M,
     GGMLQuantizationType.IQ1_S,
     GGMLQuantizationType.IQ2_S,
@@ -35,12 +36,15 @@ QUANT_TYPES = [
     GGMLQuantizationType.IQ3_XXS,
     GGMLQuantizationType.IQ4_NL,
     GGMLQuantizationType.IQ4_XS,
+    # k-quants
     GGMLQuantizationType.Q2_K,
     GGMLQuantizationType.Q3_K,
-    GGMLQuantizationType.Q4_0,
     GGMLQuantizationType.Q4_K,
     GGMLQuantizationType.Q5_K,
     GGMLQuantizationType.Q6_K,
+    # standard quantization
+    GGMLQuantizationType.Q4_0,
+    GGMLQuantizationType.Q5_0,
     GGMLQuantizationType.Q8_0,
 ]
 
@@ -89,12 +93,20 @@ def test_mmvq(hidden_size: int, dtype: torch.dtype,
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("quant_type", [
-    GGMLQuantizationType.Q2_K, GGMLQuantizationType.Q3_K,
-    GGMLQuantizationType.Q4_0, GGMLQuantizationType.Q4_K,
-    GGMLQuantizationType.Q5_K, GGMLQuantizationType.Q6_K,
-    GGMLQuantizationType.Q8_0
-])
+@pytest.mark.parametrize(
+    "quant_type",
+    [
+        # k-quants
+        GGMLQuantizationType.Q2_K,
+        GGMLQuantizationType.Q3_K,
+        GGMLQuantizationType.Q4_K,
+        GGMLQuantizationType.Q5_K,
+        GGMLQuantizationType.Q6_K,
+        # standard quants
+        GGMLQuantizationType.Q4_0,
+        GGMLQuantizationType.Q5_0,
+        GGMLQuantizationType.Q8_0,
+    ])
 @torch.inference_mode()
 def test_mmq(num_tokens: int, hidden_size: int, dtype: torch.dtype,
              quant_type: GGMLQuantizationType):
