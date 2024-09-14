@@ -127,18 +127,18 @@ class MiniCPM3Attention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        q = self.q_a_proj(hidden_states)[0]
+        q, _ = self.q_a_proj(hidden_states)
         q = self.q_a_layernorm(q)
         q = self.q_b_proj(q)[0].view(-1, self.num_local_heads,
                                      self.qk_head_dim)
         _, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim],
                           dim=-1)
-        latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
+        latent_cache, _ = self.kv_a_proj_with_mqa(hidden_states)
         kv_a, _ = latent_cache.split(
             [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         latent_cache = latent_cache.unsqueeze(1)
         kv_a = self.kv_a_layernorm(kv_a.contiguous())
-        kv = self.kv_b_proj(kv_a)[0]
+        kv, _ = self.kv_b_proj(kv_a)
         kv = kv.view(-1, self.num_local_heads,
                      self.qk_nope_head_dim + self.v_head_dim)
         k_nope, v = kv.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
