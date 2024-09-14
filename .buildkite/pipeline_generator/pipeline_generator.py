@@ -123,7 +123,7 @@ def get_external_hardware_tests(test_steps: List[TestStep]) -> List[Union[Buildk
 
         # Convert step to BuildkiteStep object
         buildkite_step = BuildkiteStep(**step)
-        buildkite_step.depends_on = None
+        buildkite_step.depends_on = "~"
 
         # Add block step if step in block list
         # and have the current step depend on it
