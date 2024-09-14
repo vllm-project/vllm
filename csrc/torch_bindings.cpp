@@ -126,6 +126,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 #ifndef USE_ROCM
   // Quantized GEMM for AQLM.
   ops.def(
+    "awq_fused_moe(Tensor _in_feats, Tensor _kernel, Tensor _scaling_factors, "
+    "Tensor _zeros, Tensor _topk_weights, Tensor _sorted_token_ids_ptr, "
+    "Tensor _expert_ids_ptr, Tensor _num_tokens_post_padded, "
+    "bool mul_weights, int split_k_iters)"
+    "-> Tensor");
+  ops.impl("awq_fused_moe", torch::kCUDA, &awq_fused_moe);
+
+  ops.def(
       "aqlm_gemm(Tensor input, Tensor codes, Tensor codebooks, "
       "Tensor scales, int[] codebook_partition_sizes, Tensor? bias) "
       "-> Tensor");

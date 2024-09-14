@@ -192,7 +192,15 @@ def advance_step_flashinfer(num_seqs: int, num_queries: int, block_size: int,
         paged_kv_indices, paged_kv_indptr, paged_kv_last_page_len,
         block_table_bound)
 
-
+def awq_fused_moe(input: torch.Tensor, qweight: torch.Tensor,
+                  scales: torch.Tensor, qzeros: torch.Tensor,
+                  topk_weights: torch.Tensor, sorted_token_ids: torch.Tensor,
+                  expert_ids: torch.Tensor, num_tokens_post_padded: int,
+                  mul_weights: bool, pack_factor: int) -> torch.Tensor:
+    return torch.ops._C.awq_fused_moe(input, qweight, scales, qzeros,
+                                      topk_weights, sorted_token_ids,
+                                      expert_ids, num_tokens_post_padded,
+                                      mul_weights, pack_factor)
 # quantization ops
 # awq
 def awq_dequantize(qweight: torch.Tensor, scales: torch.Tensor,
