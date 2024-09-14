@@ -607,6 +607,25 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 output_token_ids.cpu().tolist()
                 for output_token_ids in next_token_ids
             ]
+
+            # NOTE(woosuk): Minimal code to construct the sampler outputs.
+            # The TPU backend does not reuse the sampler, since the TPU backend
+            # does not support advanced sampling parameters such as logprobs.
+            zero_logprob = Logprob(0.0)
+            sampler_outputs = []
+            for i, seq_group in enumerate(model_input.seq_groups):
+                seq_ids = seq_group
+                assert len(seq_ids) == 1
+                seq_id = seq_ids[0]
+                seq_outputs = []
+                for j in range(model_input.best_of[i]):
+                    next_token_id = next_token_ids[i][j]
+                    seq_outputs.append(
+                        SequenceOutput(seq_id, next_token_id,
+                                       {next_token_id: zero_logprob}))
+                sampler_outputs.append(
+                    CompletionSequenceGroupOutput(seq_outputs, None))
+            return [SamplerOutput(sampler_outputs)]
         else:
             token_ids = model_input.token_ids.to(self.device)
             position_ids = model_input.position_ids.to(self.device)
@@ -656,27 +675,6 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             if model_input.async_callback is not None:
                 model_input.async_callback()
 
-        # NOTE(woosuk): Minimal code to construct the sampler outputs.
-        # The TPU backend does not reuse the sampler, since the TPU backend
-        # does not support the advanced sampling parameters such as logprobs.
-        zero_logprob = Logprob(0.0)
-        if is_prompt:
-            assert num_steps == 1
-            sampler_outputs = []
-            for i, seq_group in enumerate(model_input.seq_groups):
-                seq_ids = seq_group
-                assert len(seq_ids) == 1
-                seq_id = seq_ids[0]
-                seq_outputs = []
-                for j in range(model_input.best_of[i]):
-                    next_token_id = next_token_ids[i][j]
-                    seq_outputs.append(
-                        SequenceOutput(seq_id, next_token_id,
-                                       {next_token_id: zero_logprob}))
-                sampler_outputs.append(
-                    CompletionSequenceGroupOutput(seq_outputs, None))
-            return [SamplerOutput(sampler_outputs)]
-        else:
             # Retrieve the outputs to CPU.
             event, next_token_ids = self.cached_step_outputs.pop(0)
             if event is not None:
