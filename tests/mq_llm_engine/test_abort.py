@@ -9,7 +9,7 @@ import pytest
 from tests.mq_llm_engine.utils import RemoteMQLLMEngine, generate
 from vllm.engine.arg_utils import AsyncEngineArgs
 
-MODEL = "Qwen/Qwen2-0.5B-Instruct"
+MODEL = "google/gemma-1.1-2b-it"
 ENGINE_ARGS = AsyncEngineArgs(model=MODEL)
 RAISED_ERROR = KeyError
 RAISED_VALUE = "foo"
