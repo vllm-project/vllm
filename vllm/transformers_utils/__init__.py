@@ -1,6 +1,5 @@
 from vllm.envs import VLLM_USE_MODELSCOPE
 
-
 if VLLM_USE_MODELSCOPE:
     import modelscope
     from packaging import version
