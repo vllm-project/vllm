@@ -6,7 +6,8 @@ from tqdm import tqdm
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
-                                         apply_chat_template,
+                                         apply_hf_chat_template,
+                                         apply_mistral_chat_template,
                                          parse_chat_messages)
 from vllm.inputs import PromptInputs, TextPrompt, TokensPrompt
 from vllm.inputs.parse import parse_and_batch_prompt
@@ -18,8 +19,8 @@ from vllm.model_executor.guided_decoding.guided_fields import LLMGuidedOptions
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import SamplingParams
-from vllm.transformers_utils.tokenizer import (AnyTokenizer,
+from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.usage.usage_lib import UsageContext
@@ -393,12 +394,21 @@ class LLM:
         conversation, mm_data = parse_chat_messages(messages, model_config,
                                                     tokenizer)
 
-        prompt = apply_chat_template(
-            tokenizer,
-            conversation,
-            chat_template=chat_template,
-            add_generation_prompt=add_generation_prompt,
-        )
+        prompt: Union[str, List[int]]
+        if isinstance(tokenizer, MistralTokenizer):
+            prompt = apply_mistral_chat_template(
+                tokenizer,
+                messages=messages,
+                chat_template=chat_template,
+                add_generation_prompt=add_generation_prompt,
+            )
+        else:
+            prompt = apply_hf_chat_template(
+                tokenizer,
+                conversation=conversation,
+                chat_template=chat_template,
+                add_generation_prompt=add_generation_prompt,
+            )
 
         inputs: PromptInputs
         if is_list_of(prompt, int):
@@ -632,14 +642,12 @@ class LLM:
             raise ValueError("The lengths of prompts and lora_request "
                              "must be the same.")
 
-        if isinstance(params, list):
-            params = [
-                self._add_guided_processor(param, guided_options)
-                if isinstance(param, SamplingParams) else param
-                for param in params
-            ]
-        elif isinstance(params, SamplingParams):
-            params = self._add_guided_processor(params, guided_options)
+        for sp in params if isinstance(params, list) else (params, ):
+            if isinstance(sp, SamplingParams):
+                self._add_guided_processor(sp, guided_options)
+
+                # We only care about the final output
+                sp.output_kind = RequestOutputKind.FINAL_ONLY
 
         # Add requests to the engine.
         for i, request_inputs in enumerate(inputs):
@@ -699,9 +707,6 @@ class LLM:
                          f"output: {0:.2f} toks/s"),
             )
 
-        # In the loop below, only finished outputs are used
-        self.llm_engine.step_return_finished_only = True
-
         # Run the engine.
         outputs: List[Union[RequestOutput, EmbeddingRequestOutput]] = []
         total_in_toks = 0
@@ -714,6 +719,7 @@ class LLM:
                     if use_tqdm:
                         if isinstance(output, RequestOutput):
                             # Calculate tokens only for RequestOutput
+                            assert output.prompt_token_ids is not None
                             total_in_toks += len(output.prompt_token_ids)
                             in_spd = total_in_toks / pbar.format_dict["elapsed"]
                             total_out_toks += sum(
@@ -724,9 +730,6 @@ class LLM:
                                 f"est. speed input: {in_spd:.2f} toks/s, "
                                 f"output: {out_spd:.2f} toks/s")
                         pbar.update(1)
-
-        # Restore original behavior
-        self.llm_engine.step_return_finished_only = False
 
         if use_tqdm:
             pbar.close()
