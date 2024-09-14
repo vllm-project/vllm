@@ -2,26 +2,18 @@
 import numpy as np
 import pytest
 import random
-from typing import (Any, Callable, Dict, List, Optional, Tuple, TypedDict,
-                    TypeVar, Union)
+from typing import  List, TypeVar
 
-import gc
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, is_cpu
+
 from transformers import BatchEncoding, BatchFeature
 import torch
 import torch.nn as nn
-from vllm.wde.entrypoints.llm import LLM
+from tests.wde.utils import VllmRunner, cleanup, is_cpu
 
 _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature)
 
 
-def cleanup():
-    gc.collect()
-    if not is_cpu():
-        torch.cuda.empty_cache()
-
-
-class HfRunner:
+class FlagEmbeddingRunner:
     def wrap_device(self, input: _T) -> _T:
         if not is_cpu():
             # Check if the input is already on the GPU
@@ -58,40 +50,9 @@ class HfRunner:
         cleanup()
 
 
-class VllmRunner:
-    def __init__(
-        self,
-        model_name: str,
-        max_num_seqs: int = 4,
-        tokenizer_name: Optional[str] = None,
-        dtype: str = "half",
-    ) -> None:
-        self.model = LLM(
-            model=model_name,
-            tokenizer=tokenizer_name,
-            trust_remote_code=True,
-            max_num_seqs=max_num_seqs,
-            dtype=dtype)
-
-    def encode(self, prompts: List[str]) -> List[List[float]]:
-        req_outputs = self.model.encode(prompts)
-        outputs = []
-        for req_output in req_outputs:
-            embedding = req_output.outputs
-            outputs.append(embedding)
-        return outputs
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        del self.model
-        cleanup()
-
-
 @pytest.fixture(scope="session")
 def hf_runner():
-    return HfRunner
+    return FlagEmbeddingRunner
 
 
 @pytest.fixture(scope="session")
@@ -141,7 +102,7 @@ def test_models(
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.encode(example_prompts)
 
-    with vllm_runner(model, dtype=dtype, max_num_seqs=max_num_seqs) as vllm_model:
+    with vllm_runner(model, dtype=dtype, max_num_seqs=max_num_seqs, scheduling=scheduling) as vllm_model:
         vllm_outputs = vllm_model.encode(example_prompts)
         vllm_outputs = [t.cpu().numpy() for t in vllm_outputs]
 
