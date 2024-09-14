@@ -21,7 +21,9 @@ def get_gguf_sample_tensors(
 
 
 DTYPES = [torch.half]
-HIDDEN_SIZES = [256, 1024]  # Arbitrary values for testing
+# Hidden_size for testing, must match the sample file in HF repo,
+# we have `hidden_size = 256, 1024` for test in HF repo currently.
+HIDDEN_SIZES = [256, 1024]
 NUM_TOKENS = [7, 83, 128, 2048]  # Arbitrary values for testing
 SEEDS = [0]
 QUANT_TYPES = [
