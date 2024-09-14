@@ -1,14 +1,14 @@
 """vLLM distributed KV cache transfer API.
 These APIs are used in `vllm/worker/model_runner.py`.
 
-Currently supporting TP and PP.
+Currently supporting TP and PP, but TP and PP must be the same.
 
 Workflow:
-- In prefill instance, KV cache sender *buffers* the KV cache send requests
+- In prefill instance, vLLM `insert` that buffers the KV cache into lookup buffer.
 - In decode instance
-    - KV cache receiver sends the hash of input tokens to sender
-    - KV cache sender executes send request
-    - KV cache receiver receives the KV cache
+    - vLLM first runs `drop_select` to send input tokens and a mask on input tokens to sender
+    - The prefill instance send back the matching KV caches
+    - vLLM then store the KV cache into paged memory.
 """
 from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 from collections import defaultdict, deque
@@ -68,6 +68,19 @@ class KV_transfer_agent:
         torch_distributed_backend: Union[str, Backend],
     ):
         
+
+        # init pipe
+        self.device_pipe = TorchDistributedPipe(
+            group_ranks,
+            local_rank,
+            torch_distributed_backend,
+        )
+        self.cpu_pipe = TorchDistributedPipe(
+            group_ranks,
+            local_rank,
+            "gloo"
+        )
+
         # init two pipes: one or send and one for recv
         if IS_KV_PREFILL_INSTANCE or IS_LMCACHE_INSTANCE:
             self.send_pipe = TorchDistributedPipe(
@@ -95,8 +108,10 @@ class KV_transfer_agent:
         
         # FIXME(Jiayi): buffer initializtion should be adapted accordingly
         # Signal pipe needs to be initialized on both vllm and lmc side
+
         # init lookup buffer
-        self.buffer = SimpleKVLookupBuffer(self.pipe, 1000**3 * 10)
+        # TODO: replace this 1e9 with a configurable parameter or a constant
+        self.buffer = SimpleKVLookupBuffer(self.cpu_pipe, self.device_pipe, 1e9 * 10)
 
     def send_kv_caches_and_hidden_states(
         self,

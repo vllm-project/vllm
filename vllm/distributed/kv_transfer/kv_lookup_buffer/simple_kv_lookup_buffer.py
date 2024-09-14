@@ -50,15 +50,14 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
             return True
 
             
-        # I am assuming that roi is a mask on tokens
+        # Assuming that roi is a mask on tokens
         tokens_sender = tokens_sender[roi_sender]
         tokens_recver = tokens_recver[roi_recver]
         
         
+        # simple common prefix matching
         min_length = min(len(tokens_sender), len(tokens_recver))
         if torch.allclose(tokens_sender[:min_length], tokens_recver[:min_length]):
-            # drastically simplified
-            # common prefix matching
             return min_length
         
         return 0
@@ -148,7 +147,7 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
             if 'Connection closed by peer' not in str(e):
                 raise e
 
-        logger.debug("closing drop_select_handler")
+        logger.debug("Closing drop_select_handler")
                         
         
     def drop_select(self, input_tokens, roi):
@@ -182,7 +181,7 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
     def insert(self, input_tokens, roi, key, value, hidden) -> None:
 
         while self.buffer_size > self.buffer_size_threshold:
-            logger.debug("KV transfer buffer is full. Handling...")
+            # logger.debug("KV transfer buffer is full. Handling...")
             self.full_handler()
         
         self._add_to_buffer(input_tokens, roi, key, value, hidden)

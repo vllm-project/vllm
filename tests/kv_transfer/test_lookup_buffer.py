@@ -70,7 +70,7 @@ def stress_test(my_rank, buf, device):
     n = 0
     
     # the buffer size can only store 100 reqs
-    # so the sender will occasionally block.needs to wait for the receiver.
+    # so the sender will occasionally block to wait for the receiver.
     for req in tqdm(reqs):
         if my_rank == 0:
             buf.insert(*req)
