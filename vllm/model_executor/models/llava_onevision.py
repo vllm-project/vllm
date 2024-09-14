@@ -216,7 +216,6 @@ def _get_max_llm_tokens(ctx: InputContext) -> int:
 
 def get_llava_onevision_video_tokens(ctx: InputContext, frames: int) -> int:
     hf_config = ctx.get_hf_config(LlavaOnevisionConfig)
-    vision_config = hf_config.vision_config
 
     # TODO: support configuring (not supported by HF right now)
     num_token_image_newline = 1
@@ -383,7 +382,7 @@ def input_processor_for_llava_onevision(ctx: InputContext,
     if "video" in multi_modal_data:
         return video_processor_for_llava_onevision(ctx, llm_inputs)
 
-    msg = f"Unsupported multi data type"
+    msg = "Unsupported multi data type"
     raise NotImplementedError(msg)
 
 
@@ -679,7 +678,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal):
                     other_patch_embeds = unpad_image(other_patch_embeds,
                                                      (orig_height, orig_width))
                     max_num_patches = int(
-                        vision_aspect_ratio.strip("anyres_max_"))
+                        vision_aspect_ratio.removesuffix("anyres_max_"))
                     channels, curr_height, curr_width = other_patch_embeds.shape
                     ratio = math.sqrt(curr_height * curr_width /
                                       (max_num_patches * height**2))
@@ -697,7 +696,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal):
                                 other_patch_embeds,
                                 image_newline[:, None, None] \
                                 .expand(*other_patch_embeds.shape[:-1], 1) \
-                                .to(other_patch_embeds.device, other_patch_embeds.dtype),
+                                .to(other_patch_embeds.device),
                             ),
                         dim=-1)
                     other_patch_embeds = other_patch_embeds \
@@ -786,10 +785,10 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
-        batch_size, num_videos, frames, channles, height, width = pixel_values.shape
+        b, num_videos, frames, c, h, w = pixel_values.shape
         assert (num_videos == 1)
-        pixel_values = pixel_values.reshape(batch_size * num_videos * frames,
-                                            channles, height, width)
+        pixel_values = pixel_values.reshape(b * num_videos * frames,
+                                            c, h, w)
         video_features = vision_tower(pixel_values)
         video_features = self._select_image_features(
             video_features,
@@ -798,9 +797,9 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal):
         video_features = self.multi_modal_projector(video_features)
         video_features = self.apply_pooling(video_features)
         video_features = video_features.reshape(
-            batch_size, frames * video_features.shape[1], -1)
+            b, frames * video_features.shape[1], -1)
         image_newline = self.image_newline[None, None, :].repeat(
-            batch_size, 1, 1).to(video_features.device)
+            b, 1, 1).to(video_features.device)
         video_features = torch.cat((video_features, image_newline), dim=1)
         video_features = video_features.flatten(0, 1)
 
@@ -829,7 +828,8 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal):
                 f"Unsupported type of video input {type(video_pixels)}")
 
     def apply_pooling(self, image_features, stride=2):
-        height = width = self.config.vision_config.image_size // self.config.vision_config.patch_size
+        vision_config = self.config.vision_config
+        height = width = vision_config.image_size // vision_config.patch_size
         batch_frames, _, dim = image_features.shape
         image_features = image_features.view(batch_frames, height, width, -1)
         image_features = image_features.permute(0, 3, 1, 2)

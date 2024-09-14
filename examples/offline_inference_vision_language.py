@@ -43,7 +43,8 @@ def run_llava_next_video(question):
 
 # LLaVA-OneVision
 def run_llava_onevision(question):
-    prompt = f"<|im_start|>user <video>\n{question}<|im_end|><|im_start|>assistant\n"
+    prompt = f"<|im_start|>user <video>\n{question}<|im_end|> \
+    <|im_start|>assistant\n"
     llm = LLM(model="llava-hf/llava-onevision-qwen2-7b-ov-hf",
               max_model_len=8192)
     stop_token_ids = None

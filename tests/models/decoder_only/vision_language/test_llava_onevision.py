@@ -13,7 +13,8 @@ from ...utils import check_logprobs_close
 
 HF_VIDEO_PROMPTS = VIDEO_ASSETS.prompts({
     "sample_demo_1":
-    "<|im_start|>user <video>\nwhy is this video funny?<|im_end|><|im_start|>assistant\n"
+    "“<|im_start|>user <video>\nwhy is this video funny? \
+    <|im_end|><|im_start|>assistant\n"
 })
 
 models = ["llava-hf/llava-onevision-qwen2-7b-ov-hf"]
