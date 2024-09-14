@@ -741,6 +741,9 @@ def marlin_qqq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
 # gguf
 def ggml_dequantize(W: torch.Tensor, quant_type: int, m: int,
                     n: int) -> torch.Tensor:
+    print(f"W={W.shape},{W.dtype}")
+    print(f"quant_type={quant_type}")
+    print(f"m,n={(m,n)}")
     return torch.ops._C.ggml_dequantize(W, quant_type, m, n)
 
 
