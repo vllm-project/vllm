@@ -13,8 +13,7 @@ import vllm._custom_ops as ops
 def get_gguf_sample_tensors(
         hidden_size: int,
         quant_type: GGMLQuantizationType) -> List[ReaderTensor]:
-    # sample_dir = snapshot_download("Isotr0py/test-gguf-sample")
-    sample_dir = "/mnt/g/libtorch_develop/ggml-scripts"
+    sample_dir = snapshot_download("Isotr0py/test-gguf-sample")
     filename = f"Quant_{quant_type.name}_{hidden_size}.gguf"
     sample_file = Path(sample_dir) / filename
     return GGUFReader(sample_file).tensors
@@ -62,6 +61,28 @@ def test_dequantize(hidden_size: int, dtype: torch.dtype,
         torch.testing.assert_close(output, ref_output, atol=1e-2, rtol=4e-2)
 
 
+@pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("quant_type", QUANT_TYPES)
+@torch.inference_mode()
+def test_mmvq(hidden_size: int, dtype: torch.dtype,
+              quant_type: GGMLQuantizationType):
+    torch.cuda.manual_seed_all(0)
+
+    tensors = get_gguf_sample_tensors(hidden_size, quant_type)
+    x = torch.rand((1, hidden_size), dtype=dtype, device="cuda")
+    for tensor in tensors:
+        weight = torch.tensor(dequantize(tensor.data, quant_type),
+                              device="cuda").to(dtype)
+        ref_output = x @ weight.T
+
+        qweight = torch.tensor(tensor.data, device="cuda")
+        output = ops.ggml_mul_mat_vec_a8(qweight, x, quant_type,
+                                         qweight.shape[0]).to(dtype)
+
+        torch.testing.assert_close(output, ref_output, atol=1, rtol=1e-1)
+
+
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
@@ -86,27 +107,5 @@ def test_mmq(num_tokens: int, hidden_size: int, dtype: torch.dtype,
         qweight = torch.tensor(tensor.data, device="cuda")
         output = ops.ggml_mul_mat_a8(qweight, x, quant_type,
                                      qweight.shape[0]).to(dtype)
-
-        torch.testing.assert_close(output, ref_output, atol=1, rtol=1e-1)
-
-
-@pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
-@pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("quant_type", QUANT_TYPES)
-@torch.inference_mode()
-def test_mmvq(hidden_size: int, dtype: torch.dtype,
-              quant_type: GGMLQuantizationType):
-    torch.cuda.manual_seed_all(0)
-
-    tensors = get_gguf_sample_tensors(hidden_size, quant_type)
-    x = torch.rand((1, hidden_size), dtype=dtype, device="cuda")
-    for tensor in tensors:
-        weight = torch.tensor(dequantize(tensor.data, quant_type),
-                              device="cuda").to(dtype)
-        ref_output = x @ weight.T
-
-        qweight = torch.tensor(tensor.data, device="cuda")
-        output = ops.ggml_mul_mat_vec_a8(qweight, x, quant_type,
-                                         qweight.shape[0]).to(dtype)
 
         torch.testing.assert_close(output, ref_output, atol=1, rtol=1e-1)
