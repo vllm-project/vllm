@@ -39,6 +39,7 @@ from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 
 from vllm.transformers_utils.multimodal_processors.llamavl import LlamaVLImageProcessor
+import vllm.distributed.parallel_state as ps
 
 step_name = "prefill"
 pt_dir = ""
@@ -379,12 +380,7 @@ class ColumnParallelConv2dPatch(torch.nn.Module):
         if isinstance(kernel_size, int):
             kernel_size = (kernel_size, kernel_size)
         self._unfold = torch.nn.Unfold(kernel_size=kernel_size, stride=stride)
-        # self._linear = ColumnParallelLinear(
-        #     in_channels * kernel_size[0] * kernel_size[1],
-        #     out_channels,
-        #     bias=bias,
-        # )
-        self._linear = nn.Linear(
+        self._linear = ColumnParallelLinear(
             in_channels * kernel_size[0] * kernel_size[1],
             out_channels,
             bias=bias,
@@ -393,9 +389,7 @@ class ColumnParallelConv2dPatch(torch.nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self._unfold(x)
         x = x.permute(0, 2, 1)
-        x = self._linear(x)
-        # x = F.linear(x, self._linear.weight)
-        # x = gather_from_tensor_model_parallel_region(x)
+        x, _ = self._linear(x)
         return x
 
 
@@ -409,31 +403,26 @@ class ImageFeedForward(torch.nn.Module):
     ):
         super().__init__()
         # layers
-        self.c_fc = nn.Linear(dim, hidden_dim, bias=True)
-        # self.c_fc = ColumnParallelLinear(
-        #     dim,
-        #     hidden_dim,
-        #     bias=True,
-        #     gather_output=False,
-        #     init_method=lambda x: x,
-        # )
-        self.c_proj = nn.Linear(hidden_dim, dim, bias=True)
-        # self.c_proj = RowParallelLinear(
-        #     hidden_dim,
-        #     dim,
-        #     bias=True,
-        #     input_is_parallel=True,
-        #     init_method=lambda x: x,
-        # )
+        self.c_fc = ColumnParallelLinear(
+            dim,
+            hidden_dim,
+            bias=True,
+        )
+        self.c_proj = RowParallelLinear(
+            hidden_dim,
+            dim,
+            bias=True,
+            input_is_parallel=True,
+            skip_bias_add=True, # add bias explicitly for precision concern
+        )
         self.non_linearity = act_layer()
         self.dropout = dropout
 
     def forward(self, x):
-        hidden = F.linear(x, self.c_fc.weight, self.c_fc.bias)
+        hidden, _ = self.c_fc(x)
         hidden = self.non_linearity(hidden)
-        hidden = F.linear(hidden, self.c_proj.weight)
-        # hidden = reduce_from_tensor_model_parallel_region(hidden)
-        hidden += self.c_proj.bias
+        hidden, bias = self.c_proj(hidden) # skip_bias_add=True
+        hidden += bias
         return hidden
 
 
@@ -441,96 +430,58 @@ class ImageAttention(nn.Module):
     def __init__(
         self,
         dim,
-        head_dim,
         n_heads,
     ):
         super().__init__()
-        model_parallel_size = 1 # skip TP for image now
-        # model_parallel_size = get_tensor_model_parallel_world_size()
-        qkvo_replication = 1
-        if model_parallel_size > 16:
-            qkvo_replication = model_parallel_size // 8
-
+        model_parallel_size = get_tensor_model_parallel_world_size()
+        self.n_heads = n_heads
         self.n_kv_heads = n_heads
-        self.n_local_heads = n_heads * qkvo_replication // model_parallel_size
+        self.n_local_heads = n_heads // model_parallel_size
         self.n_local_kv_heads = (
-            self.n_kv_heads * qkvo_replication // model_parallel_size
+            self.n_kv_heads // model_parallel_size
         )
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = dim // n_heads
+        self.q_size = self.n_local_heads * self.head_dim
+        self.kv_size = self.n_local_kv_heads * self.head_dim
+        assert self.n_heads % self.n_kv_heads == 0
+        assert self.n_heads % model_parallel_size == 0
+        assert self.n_kv_heads % model_parallel_size == 0
 
         # The model provided by llama is with bias=True, but the weight does not contain bias
         # During runtime, the llama executor set bias to zero. We use bias=False here to match the behavior
-        self.wq = nn.Linear(dim, n_heads * self.head_dim, bias=False)
-        self.wk = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.wv = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.wo = nn.Linear(n_heads * self.head_dim, dim, bias=False)
-        # self.wq = ColumnParallelLinear(
-        #     dim,
-        #     qkvo_replication * n_heads * self.head_dim,
-        #     bias=True,
-        #     gather_output=False,
-        #     init_method=lambda x: x,
-        # )
-        # self.wk = ColumnParallelLinear(
-        #     dim,
-        #     qkvo_replication * self.n_kv_heads * self.head_dim,
-        #     bias=True,
-        #     gather_output=False,
-        #     init_method=lambda x: x,
-        # )
-        # self.wv = ColumnParallelLinear(
-        #     dim,
-        #     qkvo_replication * self.n_kv_heads * self.head_dim,
-        #     bias=True,
-        #     gather_output=False,
-        #     init_method=lambda x: x,
-        # )
-        # self.wo = RowParallelLinear(
-        #     qkvo_replication * n_heads * self.head_dim,
-        #     dim,
-        #     bias=True,
-        #     input_is_parallel=True,
-        #     init_method=lambda x: x,
-        # )
-        self.qkvo_replication = qkvo_replication
+        self.qkv_proj = QKVParallelLinear(
+            dim,
+            self.head_dim,
+            n_heads,
+            bias=False,
+        )
+        self.wo = RowParallelLinear(
+            n_heads * self.head_dim,
+            dim,
+            bias=False,
+            input_is_parallel=True,
+        )
 
     def forward(
         self,
         x: torch.Tensor,
         mask: torch.Tensor = None,
     ):
+        qkv, _ = self.qkv_proj(x)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q = q.view(q.shape[0], q.shape[1], self.n_local_heads, self.head_dim).transpose(1, 2)
+        k = k.view(k.shape[0], k.shape[1], self.n_local_kv_heads, self.head_dim).transpose(1, 2)
+        v = v.view(v.shape[0], v.shape[1], self.n_local_kv_heads, self.head_dim).transpose(1, 2)
 
-        xq, xk, xv = [
-            F.linear(x, w, b)
-            for (w, b) in [
-                (self.wq.weight, self.wq.bias),
-                (self.wk.weight, self.wk.bias),
-                (self.wv.weight, self.wv.bias),
-            ]
-        ]
-
-        bs, slen, _ = xq.shape
-        # print("xq.shape", xq.shape)
-        xq = xq.view(bs, slen, self.n_local_heads, self.head_dim)
-        xk = xk.view(bs, xk.shape[1], self.n_local_kv_heads, self.head_dim)
-        xv = xv.view(bs, xv.shape[1], self.n_local_kv_heads, self.head_dim)
-
-        xq, xk, xv = [tensor.transpose(1, 2) for tensor in (xq, xk, xv)]
-
-        xk = xk.repeat_interleave(self.n_rep, dim=1)
-        xv = xv.repeat_interleave(self.n_rep, dim=1)
-
+        # TODO: remove padding in image encoder
         attn_output = F.scaled_dot_product_attention(
-            xq, xk, xv, attn_mask=mask, dropout_p=0.0
+            q, k, v, attn_mask=mask, dropout_p=0.0
         )
 
-        attn_output = attn_output.transpose(1, 2).contiguous().reshape(bs, slen, -1)
-
-        out = F.linear(attn_output, self.wo.weight)
-        # out = reduce_from_tensor_model_parallel_region(out)
-        out = out / self.qkvo_replication
-        # out += self.wo.bias
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.reshape(attn_output.shape[0], attn_output.shape[1], -1)
+        out, _ = self.wo(attn_output)
         return out
 
 
@@ -549,7 +500,6 @@ class ImageTransformerBlock(nn.Module):
         self.head_dim = d_model // self.n_heads
         self.attn = ImageAttention(
             dim=d_model,
-            head_dim=self.head_dim,
             n_heads=self.n_heads,
         )
         self.ln_1 = LayerNorm(d_model)
@@ -685,55 +635,6 @@ class VisionEncoder(nn.Module):
         )
         self.gated_positional_embedding_gate = nn.Parameter(torch.zeros(1))
 
-        self._register_load_state_dict_pre_hook(self.load_hook)
-
-    def load_hook(
-        self,
-        state_dict: Dict[str, Any],
-        prefix: str,
-        local_metadata: Dict[str, Any],
-        strict: bool = True,
-        missing_keys: List[str] = None,
-        unexpected_keys: List[str] = None,
-        error_msgs: List[str] = None,
-        return_state_dict: bool = False,
-    ) -> None:
-        orig_pos_embed = state_dict.get(prefix + "positional_embedding")
-        if orig_pos_embed is not None:
-            new_pos_embed = resize_local_position_embedding(
-                orig_pos_embed, self.grid_size
-            )
-            state_dict[prefix + "positional_embedding"] = new_pos_embed
-        if hasattr(self, "gated_positional_embedding"):
-            if prefix + "gated_positional_embedding" not in state_dict:
-                # resize positional_embedding to fit the new grid size
-                global_pos_embed = initialize_global_position_embedding_from_local(
-                    new_pos_embed,
-                    self.grid_size,
-                    self.max_num_tiles,
-                    self.max_num_tiles,
-                )
-                state_dict[prefix + "gated_positional_embedding"] = global_pos_embed
-                state_dict[prefix + "gated_positional_embedding_gate"] = torch.zeros(
-                    1, dtype=global_pos_embed.dtype
-                )
-                logger.info(
-                    f"Initialized global positional embedding with size {global_pos_embed.size()}"
-                )
-            else:
-                global_pos_embed = resize_global_position_embedding(
-                    state_dict[prefix + "gated_positional_embedding"],
-                    self.grid_size,
-                    self.max_num_tiles,
-                    self.max_num_tiles,
-                )
-                logger.debug(
-                    f"Resized global positional embedding from {state_dict[prefix + 'gated_positional_embedding'].size()} to {global_pos_embed.size()}"
-                )
-                state_dict[prefix + "gated_positional_embedding"] = global_pos_embed
-        if return_state_dict:
-            return state_dict
-
     def apply_positional_embedding(self, x, ar):
         out = []
         # apply regular position embedding
@@ -777,11 +678,12 @@ class VisionEncoder(nn.Module):
         # patch embedding
         x = images.reshape(bsz * num_concurrent_media * num_chunks, nch, w, h)
         x = self.conv1(x)
+        x = ps.get_tp_group().all_gather(x)
         _, ntok, dim = x.shape
         x = x.reshape(bsz * num_concurrent_media, num_chunks, ntok, dim)
 
         # tile embeddings
-        x = self.pre_tile_pos_embed(x, ar)
+        x = self.pre_tile_pos_embed(x, ar) # call all_gather here, dim will change
         x = x.reshape(bsz * num_concurrent_media * num_chunks, ntok, dim)
 
         # apply cls token
@@ -818,74 +720,6 @@ class VisionEncoder(nn.Module):
         return x
 
 
-class FeedForward(nn.Module):
-    def __init__(
-        self,
-        dim: int,
-        hidden_dim: int,
-        multiple_of: int,
-        ffn_dim_multiplier: Optional[float],
-    ):
-        """
-        Initialize the FeedForward module.
-        Args:
-            dim (int): Input dimension.
-            hidden_dim (int): Hidden dimension of the feedforward layer.
-            multiple_of (int): Value to ensure hidden dimension is a multiple of this value.
-            ffn_dim_multiplier (float, optional): Custom multiplier for hidden dimension. Defaults to None.
-        Attributes:
-            w1 (ColumnParallelLinear): Linear transformation for the first layer.
-            w2 (RowParallelLinear): Linear transformation for the second layer.
-            w3 (ColumnParallelLinear): Linear transformation for the third layer.
-        """
-        super().__init__()
-        hidden_dim = int(2 * hidden_dim / 3)
-        # custom dim factor multiplier
-        if ffn_dim_multiplier is not None:
-            hidden_dim = int(ffn_dim_multiplier * hidden_dim)
-        hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
-
-        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
-        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
-        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
-        # self.w1 = ColumnParallelLinear(
-        #     dim, hidden_dim, bias=False, gather_output=False, init_method=lambda x: x
-        # )
-        # self.w2 = RowParallelLinear(
-        #     hidden_dim, dim, bias=False, input_is_parallel=True, init_method=lambda x: x
-        # )
-        # self.w3 = ColumnParallelLinear(
-        #     dim, hidden_dim, bias=False, gather_output=False, init_method=lambda x: x
-        # )
-        self._register_load_state_dict_pre_hook(self.load_hook)
-
-    def forward(self, x):
-        x1, x3 = [F.linear(x, w) for w in [self.w1.weight, self.w3.weight]]
-        x1 = F.silu(x1)
-        x_in = x1 * x3
-        out = F.linear(x_in, self.w2.weight)
-        # out = reduce_from_tensor_model_parallel_region(out)
-        return out
-
-    def load_hook(
-        self,
-        state_dict,
-        prefix,
-        local_metadata,
-        strict,
-        missing_keys,
-        unexpected_keys,
-        error_msgs,
-    ):
-        if prefix + "mlp.fc1_weight" in state_dict:
-            fc1_weight, fc3_weight = state_dict.pop(prefix + "mlp.fc1_weight").chunk(2)
-            state_dict[prefix + "w1.weight"] = fc1_weight
-            state_dict[prefix + "w3.weight"] = fc3_weight
-
-        if prefix + "mlp.fc2_weight" in state_dict:
-            fc2_weight = state_dict.pop(prefix + "mlp.fc2_weight")
-            state_dict[prefix + "w2.weight"] = fc2_weight
-
 class LlamaVLAttention(LlamaAttention):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -898,21 +732,6 @@ class LlamaVLAttention(LlamaAttention):
             rope_scaling=rope_scaling,
             is_neox_style=False, # force to use neox=False
         )
-        # self._register_load_state_dict_pre_hook(self.load_hook)
-
-
-    # def load_hook(
-    #     self,
-    #     state_dict: Dict[str, Any],
-    #     prefix: str,
-    #     local_metadata: Dict[str, Any],
-    #     strict: bool,
-    #     missing_keys: List[str],
-    #     unexpected_keys: List[str],
-    #     error_msgs: List[str],
-    # ) -> None:
-    #     if prefix + "wo.weight" in state_dict:
-    #         state_dict[prefix + "o_proj.weight"] = state_dict.pop(prefix + "wo.weight")
 
 class TransformerBlock(nn.Module):
     def __init__(self, layer_id: int, args, cache_config: Optional[CacheConfig] = None):
@@ -966,26 +785,6 @@ class TransformerBlock(nn.Module):
         self.layer_id = layer_id
         self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
-        self._register_load_state_dict_pre_hook(self.load_hook)
-
-    def load_hook(
-        self,
-        state_dict: Dict[str, Any],
-        prefix: str,
-        local_metadata: Dict[str, Any],
-        strict: bool,
-        missing_keys: List[str],
-        unexpected_keys: List[str],
-        error_msgs: List[str],
-    ) -> None:
-        if prefix + "feed_forward.mlp.layer_norm_weight" in state_dict:
-            state_dict[prefix + "ffn_norm.weight"] = state_dict.pop(
-                prefix + "feed_forward.mlp.layer_norm_weight"
-            )
-        if prefix + "attention.wqkv.layer_norm_weight" in state_dict:
-            state_dict[prefix + "attention_norm.weight"] = state_dict.pop(
-                prefix + "attention.wqkv.layer_norm_weight"
-            )
 
     def forward(
         self,
@@ -1032,30 +831,6 @@ class TilePositionEmbedding(nn.Module):
         self.gated = gated
         if gated:
             self.gate = nn.Parameter(torch.zeros(1))
-
-        self._register_load_state_dict_pre_hook(self.load_hook)
-
-    def load_hook(
-        self,
-        state_dict,
-        prefix,
-        local_metadata,
-        strict,
-        missing_keys,
-        unexpected_keys,
-        error_msgs,
-    ):
-        # load the weights from the checkpoint
-        embed = state_dict.get(prefix + "embedding")
-        if embed is not None:
-            # reshape the weights to the correct shape
-            nt_old, nt_old, _, w = embed.shape
-            logger.info(
-                f"Resizing tile embedding from {nt_old}x{nt_old} to {self.num_tiles}x{self.num_tiles}"
-            )
-            embed_new = TilePositionEmbedding._dynamic_resize(embed, self.num_tiles)
-            # assign the weights to the module
-            state_dict[prefix + "embedding"] = embed_new
 
     @staticmethod
     def _dynamic_resize(embed: torch.Tensor, num_tiles: int):
@@ -1279,45 +1054,7 @@ class CrossAttentionTransformerBlock(torch.nn.Module):
         )
         self.gate_ffwd = torch.nn.Parameter(torch.zeros(1))
 
-        logger.warning("todo put hook in correct place")
-        self._register_load_state_dict_pre_hook(self.load_hook)
         self.no_ffn = no_ffn
-
-    def load_hook(
-        self,
-        state_dict: Dict[str, Any],
-        prefix: str,
-        local_metadata: Dict[str, Any],
-        strict: bool,
-        missing_keys: List[str],
-        unexpected_keys: List[str],
-        error_msgs: List[str],
-    ) -> None:
-        if prefix + "gate_attn" in state_dict:
-            attn_gate = state_dict.pop(prefix + "gate_attn")
-            if attn_gate.dim() == 1:
-                attn_gate = attn_gate[0].view(1)
-            if attn_gate.dim() == 3:
-                attn_gate = attn_gate.view(1)
-            state_dict[prefix + "gate_attn"] = attn_gate
-        if prefix + "gate_ffwd" in state_dict:
-            ffn_gate = state_dict.pop(prefix + "gate_ffwd")
-            if ffn_gate.dim() == 1:
-                ffn_gate = ffn_gate[0].view(1)
-            if ffn_gate.dim() == 3:
-                ffn_gate = ffn_gate.view(1)
-            state_dict[prefix + "gate_ffwd"] = ffn_gate
-        if prefix + "feed_forward.mlp.layer_norm_weight" in state_dict:
-            state_dict[prefix + "ffn_norm.weight"] = state_dict.pop(
-                prefix + "feed_forward.mlp.layer_norm_weight"
-            )
-        if prefix + "attention.wq.layer_norm_weight" in state_dict:
-            state_dict[prefix + "attention_norm.weight"] = state_dict.pop(
-                prefix + "attention.wq.layer_norm_weight"
-            )
-
-    # def compute_xattn_kv_cache(self, xattn_tokens: torch.Tensor) -> torch.Tensor:
-    #     return self.attention.compute_xattn_kv_cache(xattn_tokens)
 
     def forward(
         self,
@@ -1395,7 +1132,7 @@ class CrossAttentionTransformerVision(torch.nn.Module):
             self.vision_input_dim,
             args.dim,
             bias=True,
-        )
+        ) # ORZZZZZZZZZZ
         # self.vision_projection = ColumnParallelLinear(
         #     self.vision_input_dim,
         #     args.dim,
@@ -1501,8 +1238,6 @@ class CrossAttentionTransformerText(torch.nn.Module):
             args.use_scaled_rope,
         )
 
-        self._register_load_state_dict_pre_hook(self.load_hook)
-
         self.args = args
         self.cache_is_setup = False
         self.max_seq_len = args.max_seq_len
@@ -1532,19 +1267,6 @@ class CrossAttentionTransformerText(torch.nn.Module):
         x_orig = self.tok_embeddings(x_orig)
         x_new = self.learnable_embedding(x_new).type_as(x_orig)
         return x_orig * mask_orig.type_as(x_orig) + x_new * mask_new.type_as(x_new)
-
-    def load_hook(
-        self,
-        state_dict: Dict[str, Any],
-        prefix: str,
-        local_metadata: Dict[str, Any],
-        strict: bool,
-        missing_keys: List[str],
-        unexpected_keys: List[str],
-        error_msgs: List[str],
-    ) -> None:
-        if "rope.freqs" in state_dict:
-            del state_dict["rope.freqs"]
 
     def forward(
         self,
@@ -1895,10 +1617,15 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
         self.sampler = Sampler()
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        # my_rank = get_tensor_model_parallel_rank()
         state_dict = {name: weight for name, weight in weights}
+        # if my_rank == 0:
+        #     with open("weight_shape_map.log", "w") as f:
+        #         for name, weight in state_dict.items():
+        #             f.write(f"{name}-{tuple(weight.shape)}-{weight.dtype}\n")
+                    
         state_dict.pop('text_model.rope.freqs')
         state_dict['lm_head.weight'] = state_dict.pop('text_model.output.weight')
-        load_succ = True
 
         def load_weight(param, weight):
             weight_loader = getattr(param, "weight_loader",
@@ -2004,6 +1731,34 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
                 if param_name.endswith('feed_forward.down_proj.weight'):
                     load_weight(param, state_dict.pop(f"text_model.cross_attention_layers.{layer_id}.feed_forward.mlp.fc2_weight"))
                     continue
+            if param_name.startswith("vision_model.vision_encoder"):
+                if param_name == 'vision_model.vision_encoder.conv1._linear.weight':
+                    module = self.vision_model.vision_encoder.conv1._linear
+                    weight = state_dict.pop('vision_model.vision_encoder.conv1._linear.weight')
+                    module.weight_loader(param, weight)
+                    continue
+            if param_name.startswith("vision_model.vision_encoder.transformer.resblocks") or param_name.startswith("vision_model.vision_encoder.global_transformer.resblocks"):
+                layer_id = int(param_name.split(".")[4])
+                if param_name.startswith('vision_model.vision_encoder.transformer.resblocks'):
+                    prefix = 'vision_model.vision_encoder.transformer.resblocks'
+                    transformer_block: ImageTransformerBlock = self.vision_model.vision_encoder.transformer.resblocks[layer_id]
+                else:
+                    prefix = 'vision_model.vision_encoder.global_transformer.resblocks'
+                    transformer_block = self.vision_model.vision_encoder.global_transformer.resblocks[layer_id]
+                if param_name.endswith("mlp.c_fc.weight"):
+                    module = transformer_block.mlp.c_fc
+                    weight = state_dict.pop(f"{prefix}.{layer_id}.mlp.c_fc.weight")
+                    module.weight_loader(param, weight)
+                    continue
+                if param_name.endswith("attn.qkv_proj.weight"):
+                    module = transformer_block.attn.qkv_proj
+                    q_weight = state_dict.pop(f"{prefix}.{layer_id}.attn.wq.weight")
+                    k_weight = state_dict.pop(f"{prefix}.{layer_id}.attn.wk.weight")
+                    v_weight = state_dict.pop(f"{prefix}.{layer_id}.attn.wv.weight")
+                    # import pdb; pdb.set_trace()
+                    qkv_weight = torch.cat([q_weight, k_weight, v_weight], dim=0)
+                    module.weight_loader(param, qkv_weight)
+                    continue
             if param_name in state_dict:
                 loaded_weight = state_dict.pop(param_name)
                 load_weight(param, loaded_weight)
@@ -2013,7 +1768,6 @@ class LlamaVLForCausalLM(nn.Module, SupportsMultiModal):
             
         if len(state_dict) > 0:
             raise ValueError(f"unused keys: {state_dict.keys()}")
-      
 
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[LlavaImageInputs]:
