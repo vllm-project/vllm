@@ -1,15 +1,9 @@
 import yaml
 import click
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Union
 import os
-from pydantic import BaseModel, Field
 
 from plugin import (
-    DockerPluginConfig, 
-    KubernetesPodSpec, 
-    KubernetesPluginConfig, 
-    DOCKER_PLUGIN_NAME, 
-    KUBERNETES_PLUGIN_NAME,
     get_kubernetes_plugin_config,
     get_docker_plugin_config,
 )
@@ -25,7 +19,13 @@ from utils import (
     get_image_path,
     get_multi_node_test_command,
 )
-from step import TestStep, BuildkiteStep, BuildkiteBlockStep, get_block_step, get_step_key
+from step import (
+    TestStep, 
+    BuildkiteStep, 
+    BuildkiteBlockStep, 
+    get_block_step, 
+    get_step_key
+)
 
 
 def _get_plugin_config(step: TestStep) -> Dict:
@@ -34,12 +34,23 @@ def _get_plugin_config(step: TestStep) -> Dict:
     If the step is run on A100 GPU, use k8s plugin since A100 node is on k8s.
     Otherwise, use Docker plugin.
     """
-    test_bash_command = ["bash", "-c", get_full_test_command(step.commands, step.working_dir)]
+    test_bash_command = [
+        "bash", 
+        "-c", 
+        get_full_test_command(step.commands, step.working_dir)
+    ]
     docker_image_path = get_image_path()
 
     if step.gpu == "a100":
-        return get_kubernetes_plugin_config(docker_image_path, test_bash_command)
-    return get_docker_plugin_config(docker_image_path, test_bash_command, step.no_gpu)
+        return get_kubernetes_plugin_config(
+            docker_image_path, 
+            test_bash_command
+        )
+    return get_docker_plugin_config(
+        docker_image_path, 
+        test_bash_command, 
+        step.no_gpu
+    )
 
 def read_test_steps(file_path: str) -> List[TestStep]:
     """Read test steps from test pipeline yaml and parse them into Step objects."""
@@ -112,6 +123,7 @@ def get_external_hardware_tests(test_steps: List[TestStep]) -> List[Union[Buildk
 
         # Convert step to BuildkiteStep object
         buildkite_step = BuildkiteStep(**step)
+        buildkite_step.depends_on = None
 
         # Add block step if step in block list
         # and have the current step depend on it
