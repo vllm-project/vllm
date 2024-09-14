@@ -171,9 +171,12 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "Enable auto tool choice for supported models. Use --tool-call-parser"
         "to specify which parser to use")
 
+    valid_tool_parsers = ["mistral", "hermes", "internlm2", "internlm2_5"]
     parser.add_argument(
         "--tool-call-parser",
         type=str,
+        metavar="{" + ",".join(valid_tool_parsers) + "} or name registered in "
+        "--tool-parser-plugin",
         default=None,
         help=
         "Select the tool call parser depending on the model that you're using."

@@ -447,9 +447,6 @@ async def init_app(
     else:
         request_logger = RequestLogger(max_log_len=args.max_log_len)
 
-    if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
-        ToolParserManager.import_tool_parser(args.tool_parser_plugin)
-
     global openai_serving_chat
     global openai_serving_completion
     global openai_serving_embedding
@@ -498,6 +495,15 @@ async def init_app(
 async def run_server(args, **uvicorn_kwargs) -> None:
     logger.info("vLLM API server version %s", VLLM_VERSION)
     logger.info("args: %s", args)
+
+    if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
+        ToolParserManager.import_tool_parser(args.tool_parser_plugin)
+
+    valide_tool_parses = ToolParserManager.tool_parsers.keys()
+    if args.enable_auto_tool_choice \
+        and args.tool_call_parser not in valide_tool_parses:
+        raise KeyError(f"invalid tool call parser: {args.tool_call_parser} "
+                       f"(chose from {{ {','.join(valide_tool_parses)} }})")
 
     async with build_async_engine_client(args) as async_engine_client:
         # If None, creation of the client failed and we exit.
